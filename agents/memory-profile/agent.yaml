@@ -1,0 +1,17 @@
+name: memory-profile
+class: optimizer
+plane: [local]
+containment: t2-local
+triggers: [manual, schedule]
+blocking: false
+short_circuit_empty: true
+summary: Detect heap bloat and memory leak vectors (uncleaned listeners, unbounded caches, detached DOM nodes, timers) wrapping memory-leak-debugging + DevTools MCP.
+capabilities:
+  write: false
+  network: false
+  browser: true
+  requires: []
+budget:
+  max_minutes: 10
+output:
+  schema: report.schema.json

@@ -1,0 +1,17 @@
+name: perf-hillclimb
+class: optimizer
+plane: [local]
+containment: t2-local
+triggers: [manual, schedule]
+blocking: false
+short_circuit_empty: false
+summary: Goal-directed Class C optimizer that iteratively measures metrics, proposes bounded optimizations, verifies gains, and records dead ends in an experiment ledger.
+capabilities:
+  write: true
+  network: false
+  browser: false
+  requires: [git]
+budget:
+  max_minutes: 15
+output:
+  schema: report.schema.json

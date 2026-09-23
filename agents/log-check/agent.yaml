@@ -1,0 +1,12 @@
+name: log-check
+class: observer
+plane: [local, ci]
+containment: t0-readonly
+summary: Inspect runtime, test, and console logs, detect error signatures, correlate with source, and propose fixes.
+short_circuit_empty: true
+capabilities:
+  write: false
+  requires: []
+budget:
+  max_minutes: 5
+  max_usd: 0.50

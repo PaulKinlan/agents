@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ModernWebReport",
+  "type": "object",
+  "required": ["summary", "target", "scanned_files", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Executive summary of web platform modernization opportunities"
+    },
+    "target": {
+      "type": "string"
+    },
+    "scanned_files": {
+      "type": "integer"
+    },
+    "modernization_score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "0-100 score reflecting adoption of modern Baseline Web Platform features"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "path": { "type": "string" },
+          "line_number": { "type": "integer" },
+          "snippet": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": { "type": "string" },
+          "modern_api": { "type": "string" },
+          "baseline_status": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

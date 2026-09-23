@@ -1,0 +1,23 @@
+name: agents
+path: ~/agents
+sink: file
+visibility: public
+agents:
+  - secret-scan
+  - docs-drift
+  - docs-write
+  - threat-model
+  - issue-triage
+  - deps-supply-chain
+  - release-notes
+  - qa-station
+schedule:
+  secret-scan:
+    hour: 7
+    minute: 30
+  deps-supply-chain:
+    hour: 7
+    minute: 35
+  docs-drift:
+    hour: 7
+    minute: 40

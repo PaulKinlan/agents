@@ -1,0 +1,14 @@
+name: web-excellence
+summary: Comprehensive Web Platform, UI/UX, Accessibility, Resilience, Performance, and Memory audit line.
+andon_halt_on_critical: true
+andon_halt_on_failure: false
+
+stations:
+  - modern-web
+  - ui-ux-audit
+  - accessibility
+  - resilience
+  - perf-review
+  - memory-profile
+  - bundle-size
+  - qa-station

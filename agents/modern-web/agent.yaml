@@ -1,0 +1,17 @@
+name: modern-web
+class: proposer
+plane: [local, ci]
+containment: t0-readonly
+triggers: [manual, schedule, repo-event]
+blocking: false
+short_circuit_empty: true
+summary: Audit HTML, CSS, and JS against Modern Web Guidance to replace legacy workarounds with native Baseline Web APIs.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 10
+output:
+  schema: report.schema.json

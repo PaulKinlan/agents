@@ -1,0 +1,17 @@
+name: issue-triage
+class: proposer
+plane: [ci, local]
+containment: t0-readonly
+triggers: [repo-event, schedule, manual]
+blocking: false
+short_circuit_empty: true
+summary: Triage incoming issues, verify reproduction steps, detect duplicates, and propose labels and actions.
+capabilities:
+  write: false
+  network: true
+  browser: false
+  requires: [gh]
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

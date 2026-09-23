@@ -1,0 +1,36 @@
+name: voicebox
+path: ~/Code/voicebox
+repo: PaulKinlan/voicebox
+sink: beads
+visibility: public
+agents:
+  - secret-scan
+  - deps-supply-chain
+  - docs-drift
+  - threat-model
+  - vuln-discovery
+  - vuln-verify
+  - vuln-triage
+  - modern-web
+  - ui-ux-audit
+  - accessibility
+  - resilience
+  - perf-review
+  - perf-hillclimb
+  - memory-profile
+  - bundle-size
+  - test-gap
+  - qa-station
+  - issue-triage
+  - docs-write
+  - pr-fixer
+schedule:
+  secret-scan:
+    hour: 7
+    minute: 30
+  deps-supply-chain:
+    hour: 7
+    minute: 35
+  docs-drift:
+    hour: 7
+    minute: 40

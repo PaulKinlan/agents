@@ -1,0 +1,17 @@
+name: pr-fixer
+class: proposer
+plane: [ci, local]
+containment: t2-local
+triggers: [repo-event, manual]
+blocking: false
+short_circuit_empty: false
+summary: Synthesize minimal, verified code patches and PR diff proposals for failing CI checks or verified factory findings.
+capabilities:
+  write: true
+  network: false
+  browser: false
+  requires: [git]
+budget:
+  max_minutes: 10
+output:
+  schema: report.schema.json

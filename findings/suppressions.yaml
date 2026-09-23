@@ -1,0 +1,6 @@
+# Software Factory - Suppressions and Wontfix Register
+# Format:
+# <sha256_fingerprint>:
+#   reason: "Rationale for suppression"
+#   author: "developer"
+#   date: "YYYY-MM-DD"

@@ -1,0 +1,94 @@
+name: 'The Software Factory Runner'
+description: 'Runs portable Software Factory SDLC agents (secret-scan, issue-triage, deps-supply-chain, docs-drift, bundle-size, etc.) in GitHub Actions'
+author: 'Paul Kinlan'
+
+inputs:
+  agent:
+    description: 'Name of the factory agent to execute (e.g. secret-scan, issue-triage, deps-supply-chain, docs-drift, bundle-size)'
+    required: true
+  target:
+    description: 'Path to target repository directory (defaults to current workspace)'
+    required: false
+    default: '.'
+  engine:
+    description: 'Engine adapter to run (auto, pi, claude, antigravity)'
+    required: false
+    default: 'auto'
+  sink:
+    description: 'Findings sink override (file, github-issues, beads)'
+    required: false
+    default: 'file'
+  github_token:
+    description: 'GitHub token for issue/PR management or repo reading'
+    required: false
+    default: ''
+  model_api_key:
+    description: 'API key for model inference (GEMINI_API_KEY or ANTHROPIC_API_KEY)'
+    required: false
+    default: ''
+
+outputs:
+  status:
+    description: 'Run status (success, failure, or andon-halt)'
+    value: ${{ steps.run-agent.outputs.status }}
+  new_findings:
+    description: 'Count of net-new findings discovered'
+    value: ${{ steps.run-agent.outputs.new_findings }}
+  delta_report:
+    description: 'Path to generated markdown delta report'
+    value: ${{ steps.run-agent.outputs.delta_report }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Ensure Factory Repository Available
+      shell: bash
+      run: |
+        if [ ! -f "$GITHUB_ACTION_PATH/../../factory" ]; then
+          echo "Cloning Software Factory repository..."
+          git clone --depth 1 https://github.com/paulkinlan/agents.git "$RUNNER_TEMP/software-factory"
+          echo "FACTORY_DIR=$RUNNER_TEMP/software-factory" >> $GITHUB_ENV
+        else
+          echo "FACTORY_DIR=$(cd $GITHUB_ACTION_PATH/../.. && pwd)" >> $GITHUB_ENV
+        fi
+
+    - name: Execute Factory Agent
+      id: run-agent
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        GEMINI_API_KEY: ${{ inputs.model_api_key }}
+        ANTHROPIC_API_KEY: ${{ inputs.model_api_key }}
+      run: |
+        TARGET_PATH="${{ inputs.target }}"
+        AGENT_NAME="${{ inputs.agent }}"
+        ENGINE_ARG="${{ inputs.engine }}"
+        SINK_ARG="${{ inputs.sink }}"
+        
+        echo "::group::Executing Factory Agent: $AGENT_NAME"
+        echo "Target directory: $TARGET_PATH"
+        echo "Engine: $ENGINE_ARG"
+        echo "Sink: $SINK_ARG"
+
+        python3 "$FACTORY_DIR/factory" run "$AGENT_NAME" \
+          --target "$TARGET_PATH" \
+          --engine "$ENGINE_ARG" \
+          --sink "$SINK_ARG"
+        
+        TARGET_NAME=$(basename "$(cd "$TARGET_PATH" && pwd)")
+        REPORT_FILE="$FACTORY_DIR/findings/${TARGET_NAME}-latest.md"
+        
+        if [ -f "$REPORT_FILE" ]; then
+          echo "delta_report=$REPORT_FILE" >> $GITHUB_OUTPUT
+          echo "status=success" >> $GITHUB_OUTPUT
+          cat "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "status=success" >> $GITHUB_OUTPUT
+        fi
+        echo "::endgroup::"

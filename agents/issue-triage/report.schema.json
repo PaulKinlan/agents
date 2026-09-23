@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IssueTriageReport",
+  "type": "object",
+  "required": ["summary", "triaged_issues", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "High-level executive summary of the issue triage run."
+    },
+    "scanned_issues": {
+      "type": "integer",
+      "description": "Total count of candidate issues inspected."
+    },
+    "triaged_issues": {
+      "type": "array",
+      "description": "List of all triaged issues with proposed labels, duplicate status, and actions.",
+      "items": {
+        "type": "object",
+        "required": ["issue_id", "title", "category", "severity", "reproduction_status", "is_duplicate", "proposed_labels", "triage_action", "triage_comment"],
+        "properties": {
+          "issue_id": {
+            "type": "string",
+            "description": "Identifier of the issue (e.g. issue number or beads ID)."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title of the issue."
+          },
+          "category": {
+            "type": "string",
+            "enum": ["bug", "enhancement", "question", "flake", "invalid"],
+            "description": "Primary classification category."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"],
+            "description": "Estimated impact severity."
+          },
+          "reproduction_status": {
+            "type": "string",
+            "enum": ["verified", "unverified", "missing_steps", "not_applicable"],
+            "description": "Completeness and clarity of reproduction steps."
+          },
+          "is_duplicate": {
+            "type": "boolean",
+            "description": "Whether this issue duplicates an existing or known issue."
+          },
+          "duplicate_of": {
+            "type": ["string", "null"],
+            "description": "Target issue ID or URL if this issue is a duplicate."
+          },
+          "duplicate_confidence": {
+            "type": ["number", "null"],
+            "description": "Confidence score between 0.0 and 1.0."
+          },
+          "proposed_labels": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Labels proposed to be applied."
+          },
+          "triage_action": {
+            "type": "string",
+            "enum": ["needs_info", "ready_for_review", "close_as_duplicate", "escalate", "auto_label", "investigate"],
+            "description": "Recommended triage action for maintainers."
+          },
+          "triage_comment": {
+            "type": "string",
+            "description": "Draft response or triage comment to post back to the issue tracker."
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Findings formatted for the Software Factory findings store.",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description"],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Triage rule ID (e.g. triage-missing-repro, triage-duplicate, triage-critical-escalation, triage-flaky-test)."
+          },
+          "path": {
+            "type": "string",
+            "description": "Logical path identifier (e.g. issues/123 or beads/<id>)."
+          },
+          "line_number": {
+            "type": ["integer", "null"],
+            "description": "Optional line reference if applicable."
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Issue title or relevant snippet from issue body."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"],
+            "description": "Severity level."
+          },
+          "title": {
+            "type": "string",
+            "description": "Human-readable finding title."
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed explanation of the triage finding."
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Proposed action or remediation step."
+          }
+        }
+      }
+    }
+  }
+}

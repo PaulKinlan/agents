@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SecretScanReport",
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "High-level summary of the secret scan run."
+    },
+    "scanned_files": {
+      "type": "integer",
+      "description": "Total number of files inspected."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description"],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Identifier for the secret type, e.g. aws-secret-key, generic-api-key, private-key."
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative file path within the target repository."
+          },
+          "line_number": {
+            "type": "integer",
+            "description": "Line number where the secret was observed."
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Sanitized or masked snippet of the code containing the candidate secret."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": {
+            "type": "string",
+            "description": "Short human-readable summary of the finding."
+          },
+          "description": {
+            "type": "string",
+            "description": "Explanation of the finding and whether it appears live or dormant."
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Recommended remediation step (e.g. revoke, move to environment variable)."
+          }
+        }
+      }
+    }
+  }
+}

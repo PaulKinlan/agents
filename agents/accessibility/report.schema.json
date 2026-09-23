@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AccessibilityAuditReport",
+  "type": "object",
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Executive summary of accessibility audit results against WCAG 2.1 AA"
+    },
+    "target": {
+      "type": "string",
+      "description": "Target repository identifier"
+    },
+    "scanned_files": {
+      "type": "integer",
+      "description": "Total count of HTML and template files audited"
+    },
+    "wcag_level": {
+      "type": "string",
+      "description": "Target WCAG standard level (default WCAG 2.1 AA)"
+    },
+    "findings": {
+      "type": "array",
+      "description": "Triaged accessibility findings with actionable remediation snippets",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Accessibility rule ID, e.g. missing-alt-attribute, unlabelled-button, missing-form-label, missing-lang-attribute, positive-tabindex, non-semantic-click-handler"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative file path"
+          },
+          "line_number": {
+            "type": "integer",
+            "description": "Line number where the violation occurs"
+          },
+          "snippet": {
+            "type": "string",
+            "description": "HTML or template code snippet"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": {
+            "type": "string",
+            "description": "Short description of the accessibility violation"
+          },
+          "description": {
+            "type": "string",
+            "description": "Technical impact explanation for assistive technology and keyboard users"
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Actionable drop-in code snippet or remediation pattern"
+          },
+          "wcag_criterion": {
+            "type": "string",
+            "description": "WCAG 2.1 success criterion (e.g. 1.1.1 Non-text Content, 3.1.1 Language of Page)"
+          }
+        }
+      }
+    }
+  }
+}

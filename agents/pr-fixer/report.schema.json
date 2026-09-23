@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PrFixerReport",
+  "type": "object",
+  "required": ["summary", "target", "proposed_branch", "proposed_patches", "findings"],
+  "properties": {
+    "summary": { "type": "string" },
+    "target": { "type": "string" },
+    "proposed_branch": { "type": "string" },
+    "pr_title": { "type": "string" },
+    "proposed_patches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "finding_rule_id", "unified_diff"],
+        "properties": {
+          "path": { "type": "string" },
+          "finding_rule_id": { "type": "string" },
+          "requires_human_design": { "type": "boolean" },
+          "unified_diff": { "type": "string" },
+          "verification_cmd": { "type": "string" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "path": { "type": "string" },
+          "line_number": { "type": "integer" },
+          "snippet": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

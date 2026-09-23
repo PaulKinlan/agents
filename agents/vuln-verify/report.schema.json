@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VulnVerificationReport",
+  "type": "object",
+  "required": [
+    "summary",
+    "target",
+    "verifications",
+    "findings"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Executive summary of the adversarial verification pass and precision audit."
+    },
+    "target": {
+      "type": "string",
+      "description": "Target repository identifier."
+    },
+    "verifications": {
+      "type": "array",
+      "description": "Adversarial evaluation results for all inspected candidate findings.",
+      "items": {
+        "type": "object",
+        "required": [
+          "rule_id",
+          "path",
+          "line_number",
+          "verdict",
+          "confidence",
+          "reasoning"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Identifier of the evaluated vulnerability rule or hypothesis."
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative file path of the candidate finding."
+          },
+          "line_number": {
+            "type": "integer",
+            "description": "Line number where the candidate was flagged."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["verified", "disproved"],
+            "description": "Verification verdict: 'verified' (genuine risk) or 'disproved' (false positive / mitigated)."
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "Confidence level in the adversarial verdict."
+          },
+          "reasoning": {
+            "type": "string",
+            "description": "Adversarial justification citing specific source code evidence, sanitizers, auth gates, or lack thereof."
+          },
+          "disproving_factors": {
+            "type": "array",
+            "description": "Mitigating factors identified that disproved the finding, if applicable.",
+            "items": {
+              "type": "string",
+              "enum": [
+                "upstream_sanitizer",
+                "auth_gate",
+                "framework_protection",
+                "unreachable_code",
+                "explicitly_trusted",
+                "safe_context"
+              ]
+            }
+          },
+          "exploit_chain_viable": {
+            "type": "boolean",
+            "description": "Whether the proposed exploit chain is practically realizable."
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Verified findings that survived adversarial testing.",
+      "items": {
+        "type": "object",
+        "required": [
+          "rule_id",
+          "path",
+          "line_number",
+          "snippet",
+          "severity",
+          "title",
+          "description",
+          "remediation"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Identifier for the verified vulnerability."
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative file path within the target repository."
+          },
+          "line_number": {
+            "type": "integer",
+            "description": "Line number of the verified vulnerability."
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Exact code snippet corresponding to the vulnerability."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"],
+            "description": "Severity rating of the verified finding."
+          },
+          "title": {
+            "type": "string",
+            "description": "Human-readable title of the verified vulnerability."
+          },
+          "description": {
+            "type": "string",
+            "description": "Technical explanation of the confirmed exploitability and impact."
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Prescribed fix or mitigation."
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "Confidence rating for this verified finding."
+          },
+          "exploit_chain": {
+            "type": ["string", "null"],
+            "description": "Verified multi-hop exploit chain or execution narrative."
+          }
+        }
+      }
+    }
+  }
+}

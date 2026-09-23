@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BundleSizeReport",
+  "type": "object",
+  "required": ["summary", "target", "metrics", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Executive summary of the bundle size measurement and findings"
+    },
+    "target": {
+      "type": "string",
+      "description": "Target repository or project name"
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Countable bundle metrics",
+      "required": ["total_raw_bytes", "total_gzip_bytes", "asset_count"],
+      "properties": {
+        "total_raw_bytes": { "type": "integer" },
+        "total_gzip_bytes": { "type": "integer" },
+        "asset_count": { "type": "integer" },
+        "js_module_count": { "type": "integer" },
+        "largest_assets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "raw_bytes", "gzip_bytes"],
+            "properties": {
+              "path": { "type": "string" },
+              "raw_bytes": { "type": "integer" },
+              "gzip_bytes": { "type": "integer" },
+              "type": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "baseline_delta": {
+      "type": "object",
+      "description": "Comparison against baseline measurements if available",
+      "properties": {
+        "baseline_found": { "type": "boolean" },
+        "baseline_raw_bytes": { "type": "integer" },
+        "baseline_gzip_bytes": { "type": "integer" },
+        "delta_raw_bytes": { "type": "integer" },
+        "delta_gzip_bytes": { "type": "integer" },
+        "delta_percentage": { "type": "number" },
+        "regressed": { "type": "boolean" }
+      }
+    },
+    "budget_recommendations": {
+      "type": "array",
+      "description": "Proposed byte budgets and budget caps for CI enforcement",
+      "items": {
+        "type": "object",
+        "required": ["scope", "metric", "recommended_limit_bytes", "rationale"],
+        "properties": {
+          "scope": { "type": "string" },
+          "metric": { "type": "string", "enum": ["raw_bytes", "gzip_bytes"] },
+          "recommended_limit_bytes": { "type": "integer" },
+          "rationale": { "type": "string" }
+        }
+      }
+    },
+    "optimizations": {
+      "type": "array",
+      "description": "Actionable optimization opportunities (tree shaking, code splitting, dynamic imports)",
+      "items": {
+        "type": "object",
+        "required": ["type", "target_asset", "recommendation"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["tree-shaking", "dynamic-import", "minification", "asset-compression", "dependency-replacement"]
+          },
+          "target_asset": { "type": "string" },
+          "estimated_savings_bytes": { "type": "integer" },
+          "recommendation": { "type": "string" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Structured findings tracked in findings store",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Rule identifier (e.g. unminified-bundle-asset, oversized-bundle-asset, bundle-size-regression, tree-shaking-opportunity, dynamic-import-candidate)"
+          },
+          "path": { "type": "string" },
+          "line_number": { "type": "integer" },
+          "snippet": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

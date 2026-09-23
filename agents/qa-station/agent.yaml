@@ -1,0 +1,17 @@
+name: qa-station
+class: observer
+plane: [local, ci]
+containment: t0-readonly
+triggers: [schedule, manual]
+blocking: false
+short_circuit_empty: false
+summary: Meta-agent QA station that audits the precision, wontfix suppression rates, noise creep, and contract compliance of all other Factory agents.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

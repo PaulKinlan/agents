@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MemoryProfileReport",
+  "type": "object",
+  "required": ["summary", "target", "scanned_files", "findings"],
+  "properties": {
+    "summary": { "type": "string" },
+    "target": { "type": "string" },
+    "scanned_files": { "type": "integer" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "leak_class": { "type": "string" },
+          "path": { "type": "string" },
+          "line_number": { "type": "integer" },
+          "snippet": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

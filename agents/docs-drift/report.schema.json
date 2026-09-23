@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DocsDriftReport",
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "High-level summary of the documentation drift audit."
+    },
+    "scanned_files": {
+      "type": "integer",
+      "description": "Total number of documentation files inspected."
+    },
+    "drift_count": {
+      "type": "integer",
+      "description": "Total count of confirmed drift items."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description"],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Identifier for drift rule (e.g. doc-broken-link, doc-missing-file, doc-deleted-reference, doc-missing-symbol, doc-unknown-cli-flag, doc-spec-drift)."
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative path of the markdown document containing the drift."
+          },
+          "line_number": {
+            "type": "integer",
+            "description": "Line number where the drift was identified."
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Excerpt or line showing the outdated or broken reference."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": {
+            "type": "string",
+            "description": "Brief human-readable summary of the drift."
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed explanation of what drifted between spec and codebase."
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Actionable instructions to resolve the drift."
+          }
+        }
+      }
+    }
+  }
+}

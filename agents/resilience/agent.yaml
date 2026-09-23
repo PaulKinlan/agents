@@ -1,0 +1,17 @@
+name: resilience
+class: proposer
+plane: [local, ci]
+containment: t2-local
+triggers: [manual, schedule, webhook]
+blocking: false
+short_circuit_empty: false
+summary: Audit web applications against the 46 failure states (offline, timeout, storage quota, FOIT, 3P SPOFs, tab discard) wrapping web-resilience-plugin.
+capabilities:
+  write: false
+  network: false
+  browser: true
+  requires: []
+budget:
+  max_minutes: 10
+output:
+  schema: report.schema.json

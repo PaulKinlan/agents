@@ -1,0 +1,757 @@
+#!/usr/bin/env python3
+"""The Software Factory CLI (factory)
+
+Command-line dispatcher for running and scheduling SDLC agents across local
+and CI execution planes.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+FACTORY_ROOT = Path(__file__).resolve().parent
+
+def _parse_scalar(val: str) -> Any:
+    if val.lower() == "true":
+        return True
+    if val.lower() == "false":
+        return False
+    if val.isdigit():
+        return int(val)
+    try:
+        if "." in val and all(p.isdigit() for p in val.split(".", 1)):
+            return float(val)
+    except Exception:
+        pass
+    return val.strip("'\"")
+
+
+def load_yaml_simple(path: Path) -> Dict[str, Any]:
+    """Indentation-aware YAML parser for simple key-value, list, and nested map manifests."""
+    result: Dict[str, Any] = {}
+    stack: list = [(-1, result)]
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0]
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+
+        parent = stack[-1][1]
+
+        # List item
+        if line_clean.startswith("- "):
+            val = line_clean[2:].strip()
+            if isinstance(parent, dict) and len(parent) == 0 and len(stack) >= 2:
+                outer_dict = stack[-2][1]
+                if isinstance(outer_dict, dict):
+                    for k in reversed(list(outer_dict.keys())):
+                        if outer_dict[k] is parent:
+                            new_list = [_parse_scalar(val)]
+                            outer_dict[k] = new_list
+                            stack[-1] = (stack[-1][0], new_list)
+                            break
+            elif isinstance(parent, list):
+                parent.append(_parse_scalar(val))
+            continue
+
+        if ":" in line_clean:
+            key, val = [p.strip() for p in line_clean.split(":", 1)]
+            if not isinstance(parent, dict):
+                continue
+
+            if not val:
+                new_map: Dict[str, Any] = {}
+                parent[key] = new_map
+                stack.append((indent, new_map))
+            elif val.startswith("[") and val.endswith("]"):
+                items = [_parse_scalar(x.strip()) for x in val[1:-1].split(",") if x.strip()]
+                parent[key] = items
+            elif val.startswith("{") and val.endswith("}"):
+                inner_map: Dict[str, Any] = {}
+                for pair in val[1:-1].split(","):
+                    if ":" in pair:
+                        ik, iv = [x.strip() for x in pair.split(":", 1)]
+                        inner_map[ik] = _parse_scalar(iv)
+                parent[key] = inner_map
+            else:
+                parent[key] = _parse_scalar(val)
+    return result
+
+def list_agents():
+    agents_dir = FACTORY_ROOT / "agents"
+    print("\nAvailable Software Factory Agents:")
+    print("=" * 65)
+    print(f"{'NAME':<20} {'CLASS':<12} {'PLANE':<12} {'SUMMARY'}")
+    print("-" * 65)
+    for p in sorted(agents_dir.iterdir()):
+        if p.is_dir() and (p / "agent.yaml").exists():
+            cfg = load_yaml_simple(p / "agent.yaml")
+            name = cfg.get("name", p.name)
+            cls = cfg.get("class", "observer")
+            plane = ",".join(cfg.get("plane", ["local"])) if isinstance(cfg.get("plane"), list) else str(cfg.get("plane", "local"))
+            summary = cfg.get("summary", "")
+            print(f"{name:<20} {cls:<12} {plane:<12} {summary}")
+    print("=" * 65)
+
+def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
+    # Check targets/ directory first
+    target_yaml = FACTORY_ROOT / "targets" / f"{target_arg}.yaml"
+    if target_yaml.exists():
+        cfg = load_yaml_simple(target_yaml)
+        name = cfg.get("name", target_arg)
+        raw_path = os.path.expanduser(str(cfg.get("path", "")))
+        path = (FACTORY_ROOT / raw_path).resolve() if not os.path.isabs(raw_path) else Path(raw_path).resolve()
+        return name, path, cfg
+
+    # Otherwise treat as path
+    target_path = Path(os.path.expanduser(target_arg)).resolve()
+    if not target_path.exists():
+        raise FileNotFoundError(f"Target path or named target not found: {target_arg}")
+    name = target_path.name
+    return name, target_path, {"name": name, "path": str(target_path), "sink": "file"}
+
+def detect_sink(target_path: Path, target_cfg: Dict[str, Any], explicit_sink: Optional[str]) -> str:
+    if explicit_sink:
+        return explicit_sink
+
+    # 1. Target repository rules (AGENTS.md)
+    agents_md = target_path / "AGENTS.md"
+    if agents_md.exists():
+        content = agents_md.read_text(encoding="utf-8", errors="ignore")
+        content_lower = content.lower()
+        if (
+            "beads only" in content_lower
+            or "bd is the only" in content_lower
+            or "uses **bd**" in content_lower
+            or "use `bd` for all task tracking" in content_lower
+        ):
+            return "beads"
+
+    # 2. Target config in targets/*.yaml
+    if target_cfg.get("sink"):
+        return target_cfg["sink"]
+
+    # 3. Default to file
+    return "file"
+
+def choose_engine(requested_engine: str) -> str:
+    if requested_engine != "auto":
+        return requested_engine
+
+    # Check pi first (working session verified)
+    if shutil.which("pi"):
+        return "pi"
+    # Check antigravity
+    if shutil.which("agentapi"):
+        return "antigravity"
+    # Check claude
+    if shutil.which("claude"):
+        return "claude"
+
+    return "pi"
+
+def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
+    # 1. Direct parse
+    try:
+        return json.loads(text.strip())
+    except Exception:
+        pass
+
+    # 2. Extract from markdown code block
+    matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    for m in matches:
+        try:
+            return json.loads(m.strip())
+        except Exception:
+            continue
+
+    # 3. Search for first { to last }
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(text[first_brace:last_brace + 1])
+        except Exception:
+            pass
+
+    return None
+
+def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None):
+    agent_dir = FACTORY_ROOT / "agents" / agent_name
+    agent_yaml = agent_dir / "agent.yaml"
+    skill_dir = agent_dir
+    
+    if not agent_yaml.exists():
+        sys.stderr.write(f"Agent '{agent_name}' not found in {FACTORY_ROOT / 'agents'}\n")
+        sys.exit(1)
+
+    agent_cfg = load_yaml_simple(agent_yaml)
+    target_name, target_dir, target_cfg = resolve_target(target_arg)
+    sink = detect_sink(target_dir, target_cfg, explicit_sink)
+    engine = choose_engine(engine_arg)
+
+    print(f"\n[Software Factory] Run Initialized")
+    print(f"  Agent:       {agent_name} ({agent_cfg.get('class', 'observer')})")
+    print(f"  Containment: {agent_cfg.get('containment', 't0-readonly')}")
+    print(f"  Target:      {target_name} ({target_dir})")
+    print(f"  Engine:      {engine}")
+    print(f"  Sink:        {sink}")
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Deterministic pre-pass
+    candidates_file = run_dir / "candidates.json"
+    scripts_dir = agent_dir / "scripts"
+    prepass_scripts = sorted(scripts_dir.glob("*.py")) if scripts_dir.exists() else []
+    prepass_script = prepass_scripts[0] if prepass_scripts else None
+    candidates_data = []
+    model_parse_succeeded = True
+
+    if prepass_script and prepass_script.exists():
+        print(f"\n[Step 1/3] Running deterministic pre-pass ({prepass_script.name})...")
+        cmd = [sys.executable, str(prepass_script), "--target", str(target_dir), "--output", str(candidates_file)]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            print(f"Pre-pass error: {res.stderr}")
+        else:
+            cand_json = json.loads(candidates_file.read_text(encoding="utf-8"))
+            if isinstance(cand_json, dict) and "candidates" in cand_json:
+                candidates_data = cand_json["candidates"]
+                print(f"-> Deterministic scanner found {len(candidates_data)} candidate matches.")
+            else:
+                candidates_data = cand_json
+                print(f"-> Deterministic pre-pass produced context payload.")
+
+    # Short-circuit only if configured and 0 candidates found for an observer scan
+    should_short_circuit = agent_cfg.get("short_circuit_empty", False)
+    if should_short_circuit and len(candidates_data) == 0:
+        print(f"\n[Step 2/3] Zero candidates found by deterministic pre-pass. Short-circuiting model invocation.")
+        report = {
+            "summary": f"Clean scan. Deterministic pre-pass found 0 candidate issues in {target_name}.",
+            "scanned_files": 0,
+            "findings": []
+        }
+    else:
+        # 2. Model triage invocation via engine adapter
+        print(f"\n[Step 2/3] Invoking engine '{engine}' for triage and judgement...")
+        adapter_script = FACTORY_ROOT / "lib" / "adapters" / f"{engine}.sh"
+        if not adapter_script.exists():
+            sys.stderr.write(f"Engine adapter script not found: {adapter_script}\n")
+            sys.exit(1)
+
+        candidates_slice = candidates_data[:50] if isinstance(candidates_data, list) else candidates_data
+
+        prompt = (
+            f"You are the {agent_name} agent. Examine the following context and candidate issues discovered by the "
+            f"deterministic scanner in repository '{target_name}'. Follow your SKILL.md instructions, "
+            f"triage each item, and output your structured JSON findings.\n\n"
+            f"Scanner Data:\n{json.dumps(candidates_slice, indent=2)}\n"
+        )
+        (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+
+        adapter_cmd = [str(adapter_script), agent_name, str(target_dir), str(skill_dir), prompt, str(run_dir)]
+        adapter_res = subprocess.run(adapter_cmd, capture_output=True, text=True, check=False)
+        
+        output_file = run_dir / "model_output.txt"
+        if not output_file.exists():
+            sys.stderr.write(f"Model output not produced: {adapter_res.stderr}\n")
+            sys.exit(1)
+
+        raw_output = output_file.read_text(encoding="utf-8")
+        report = extract_json_from_output(raw_output)
+        if report is None:
+            model_parse_succeeded = False
+            print("Warning: Could not parse JSON from model output. Skipping findings store update to prevent false 'fixed' transitions.")
+            report = {
+                "summary": "Model output produced unformatted response.",
+                "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
+                "findings": []
+            }
+
+    report_path = run_dir / "report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    # If the agent produced THREAT_MODEL.md content, save it
+    if report.get("threat_model_markdown"):
+        tm_run_file = run_dir / "THREAT_MODEL.md"
+        tm_run_file.write_text(report["threat_model_markdown"], encoding="utf-8")
+        tm_findings_file = FACTORY_ROOT / "findings" / f"{target_name}-THREAT_MODEL.md"
+        tm_findings_file.write_text(report["threat_model_markdown"], encoding="utf-8")
+        print(f"\n[Threat Model] Generated document saved to:\n  {tm_findings_file}")
+
+    # 3. Findings Store & Sink Dispatch (only if model output parsed cleanly)
+    if model_parse_succeeded:
+        print(f"\n[Step 3/3] Processing findings through deduplication and sink adapter...")
+        findings_py = FACTORY_ROOT / "lib" / "findings.py"
+        findings_cmd = [
+            sys.executable, str(findings_py),
+            "--target", target_name,
+            "--agent", agent_name,
+            "--input", str(report_path),
+            "--sink", sink,
+            "--target-dir", str(target_dir)
+        ]
+        subprocess.run(findings_cmd, check=True)
+    print(f"\nRun complete. Artifacts saved to:\n  {run_dir}\n")
+    return {
+        "run_id": run_id,
+        "run_dir": run_dir,
+        "report": report,
+        "report_path": report_path
+    }
+
+def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None):
+    line_yaml = FACTORY_ROOT / "lines" / f"{line_name}.yaml"
+    if not line_yaml.exists():
+        sys.stderr.write(f"Factory line '{line_name}' not found in {FACTORY_ROOT / 'lines'}\n")
+        sys.exit(1)
+
+    line_cfg = load_yaml_simple(line_yaml)
+    stations = line_cfg.get("stations", [])
+    halt_on_critical = line_cfg.get("andon_halt_on_critical", True)
+    halt_on_failure = line_cfg.get("andon_halt_on_failure", True)
+    andon_stations = line_cfg.get("andon_stations", ["secret-scan", "vuln-triage"])
+
+    print("\n" + "=" * 70)
+    print(f"🏭 FACTORY LINE STARTED: {line_name.upper()}")
+    print(f"   Target:   {target_arg}")
+    print(f"   Stations: {len(stations)} stations queued")
+    print(f"   Andon:    Halt on critical = {halt_on_critical} (gates: {', '.join(andon_stations)})")
+    print("=" * 70 + "\n")
+
+    scorecard = []
+    line_halted = False
+
+    for idx, station in enumerate(stations, start=1):
+        st_agent = station if isinstance(station, str) else station.get("agent")
+        st_summary = station.get("summary", "") if isinstance(station, dict) else ""
+        print(f"\n▶ [Station {idx}/{len(stations)}] Commencing: {st_agent} -- {st_summary}")
+        try:
+            res = run_agent(st_agent, target_arg, engine_arg, explicit_sink)
+            report = res.get("report", {}) if res else {}
+            findings = report.get("findings", [])
+            criticals = [f for f in findings if f.get("severity") == "critical"]
+            
+            status = "PASS" if not criticals else "ALERT"
+            scorecard.append({
+                "station": st_agent,
+                "status": status,
+                "findings_count": len(findings),
+                "criticals": len(criticals)
+            })
+
+            # Check Andon Cord only at designated gate stations (or all if "*" in andon_stations)
+            station_gated = ("*" in andon_stations) or (st_agent in andon_stations)
+            if halt_on_critical and station_gated and len(criticals) > 0:
+                print(f"\n🚨 [ANDON CORD PULLED] Line halted at gate station '{st_agent}'!")
+                print(f"   Discovered {len(criticals)} critical finding(s). Downstream stations aborted.")
+                line_halted = True
+                break
+        except Exception as e:
+            print(f"\n🚨 [ANDON CORD PULLED] Station '{st_agent}' failed with error: {e}")
+            scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": 0, "criticals": 0})
+            if halt_on_failure:
+                line_halted = True
+                break
+
+    print("\n" + "=" * 70)
+    print(f"🏁 FACTORY LINE SCORECARD: {line_name.upper()} ({'HALTED' if line_halted else 'COMPLETE'})")
+    print("-" * 70)
+    print(f"{'STATION':<25} {'STATUS':<12} {'FINDINGS':<10} {'CRITICALS'}")
+    print("-" * 70)
+    for sc in scorecard:
+        print(f"{sc['station']:<25} {sc['status']:<12} {sc.get('findings_count', 0):<10} {sc.get('criticals', 0)}")
+    print("=" * 70 + "\n")
+
+def run_hillclimb(
+    target_arg: str,
+    goal_metric: str = "perf_hazard_score",
+    goal_value: Optional[float] = None,
+    iterations: int = 1,
+    apply_edits: bool = False,
+    engine_arg: str = "auto",
+    explicit_sink: Optional[str] = None
+):
+    from lib.bench.runner import measure_target, append_ledger, read_ledger
+
+    target_name, target_dir, _ = resolve_target(target_arg)
+    baseline = measure_target(target_dir)
+
+    if goal_metric == "perf_hazard_score" and baseline.get("perf_hazard_score", 0) == 0:
+        goal_metric = "total_gzip_bytes"
+
+    current_val = float(baseline.get(goal_metric, baseline["total_gzip_bytes"]))
+    target_goal = goal_value if goal_value is not None else (0.0 if goal_metric == "perf_hazard_score" else round(current_val * 0.90, 2))
+
+    print("\n" + "=" * 70)
+    print(f"⛰️  CLASS C HILL-CLIMB OPTIMIZER STARTED")
+    print(f"   Target:      {target_name} ({target_dir})")
+    print(f"   Metric:      {goal_metric}")
+    print(f"   Baseline:    {current_val}  -->  Goal: {target_goal}")
+    print(f"   Max Steps:   {iterations} (Apply & Verify in Worktree = {apply_edits})")
+    print("=" * 70)
+
+    for step_idx in range(1, iterations + 1):
+        if current_val <= target_goal:
+            print(f"\n🎯 Goal achieved! ({goal_metric} = {current_val} <= {target_goal})")
+            break
+
+        print(f"\n--- [Iteration {step_idx}/{iterations}] Running perf-hillclimb station ---")
+        res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink)
+        report = res.get("report", {}) if res else {}
+        steps = report.get("hillclimb_steps", [])
+
+        if not steps:
+            print("No further hill-climb steps proposed by model.")
+            break
+
+        top_step = steps[0]
+        hypothesis = top_step.get("hypothesis", "Unnamed optimization step")
+        rel_file = top_step.get("target_file", "")
+        search_snip = top_step.get("search_snippet", "")
+        replace_snip = top_step.get("replace_snippet", "")
+
+        if not apply_edits or not rel_file or not search_snip:
+            append_ledger(target_name, {
+                "step": step_idx,
+                "hypothesis": hypothesis,
+                "files_touched": [rel_file] if rel_file else [],
+                "metric": goal_metric,
+                "baseline_value": current_val,
+                "candidate_value": current_val,
+                "delta": top_step.get("expected_delta", 0),
+                "outcome": "PROPOSED",
+                "reason": "Proposal recorded (run with --apply to execute in-place verification)"
+            })
+            print(f"📝 Recorded proposal to ledger: {hypothesis}")
+            continue
+
+        target_file_path = (target_dir / rel_file).resolve()
+        if not target_file_path.is_relative_to(target_dir.resolve()) or not target_file_path.exists():
+            append_ledger(target_name, {
+                "step": step_idx,
+                "hypothesis": hypothesis,
+                "files_touched": [rel_file],
+                "metric": goal_metric,
+                "baseline_value": current_val,
+                "candidate_value": current_val,
+                "delta": 0,
+                "outcome": "REVERTED",
+                "reason": f"Target file {rel_file} is outside target boundary or does not exist"
+            })
+            continue
+
+        original_text = target_file_path.read_text(encoding="utf-8")
+        if search_snip not in original_text:
+            append_ledger(target_name, {
+                "step": step_idx,
+                "hypothesis": hypothesis,
+                "files_touched": [rel_file],
+                "metric": goal_metric,
+                "baseline_value": current_val,
+                "candidate_value": current_val,
+                "delta": 0,
+                "outcome": "REVERTED",
+                "reason": "search_snippet did not match exact file contents"
+            })
+            continue
+
+        # Apply candidate change and re-measure inside an isolated git worktree (if git repo) or atomic try/finally
+        updated_text = original_text.replace(search_snip, replace_snip, 1)
+        worktree_dir = FACTORY_ROOT / "runs" / "worktrees" / f"{target_name}-{step_idx}-{int(datetime.now().timestamp())}"
+        used_worktree = False
+
+        try:
+            if (target_dir / ".git").exists():
+                worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+                wt_res = subprocess.run(
+                    ["git", "worktree", "add", "--detach", str(worktree_dir)],
+                    cwd=str(target_dir), capture_output=True, text=True, check=False
+                )
+                if wt_res.returncode == 0:
+                    used_worktree = True
+                    wt_file = (worktree_dir / rel_file).resolve()
+                    wt_file.write_text(updated_text, encoding="utf-8")
+                    new_metrics = measure_target(worktree_dir)
+                else:
+                    target_file_path.write_text(updated_text, encoding="utf-8")
+                    new_metrics = measure_target(target_dir)
+            else:
+                target_file_path.write_text(updated_text, encoding="utf-8")
+                new_metrics = measure_target(target_dir)
+
+            new_val = float(new_metrics.get(goal_metric, current_val))
+            delta = round(new_val - current_val, 2)
+
+            if new_val < current_val:
+                print(f"✅ WIN VERIFIED! {goal_metric}: {current_val} -> {new_val} (delta: {delta})")
+                if used_worktree and res and res.get("run_dir"):
+                    diff_res = subprocess.run(["git", "diff"], cwd=str(worktree_dir), capture_output=True, text=True, check=False)
+                    patch_file = res["run_dir"] / f"winning-step-{step_idx}.patch"
+                    patch_file.write_text(diff_res.stdout, encoding="utf-8")
+                    print(f"   Saved verified patch to: {patch_file}")
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": new_val,
+                    "delta": delta,
+                    "outcome": "KEPT",
+                    "reason": f"Metric improved by {abs(delta)}"
+                })
+                current_val = new_val
+            else:
+                print(f"↩️  REVERTED! {goal_metric}: {current_val} -> {new_val} (did not improve).")
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": new_val,
+                    "delta": delta,
+                    "outcome": "REVERTED",
+                    "reason": f"Metric did not improve (delta {delta})"
+                })
+        finally:
+            if used_worktree:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(worktree_dir)],
+                    cwd=str(target_dir), capture_output=True, text=True, check=False
+                )
+            elif target_file_path.exists():
+                target_file_path.write_text(original_text, encoding="utf-8")
+
+
+def install_pre_commit_hook(target_arg: Optional[str] = None, all_targets: bool = False):
+    """Install a sub-second deterministic secret-scan git pre-commit hook (Rule 8 compliant)."""
+    targets_to_install: List[Tuple[str, Path]] = []
+    if all_targets:
+        targets_dir = FACTORY_ROOT / "targets"
+        for t_file in sorted(targets_dir.glob("*.yaml")):
+            name, path, _ = resolve_target(t_file.stem)
+            if path.exists():
+                targets_to_install.append((name, path))
+    elif target_arg:
+        name, path, _ = resolve_target(target_arg)
+        targets_to_install.append((name, path))
+    else:
+        raise ValueError("Specify --target <name|path> or --all")
+
+    scan_script = FACTORY_ROOT / "agents" / "secret-scan" / "scripts" / "scan.py"
+    marker_start = "# --- SOFTWARE FACTORY PRE-COMMIT START ---"
+    marker_end = "# --- SOFTWARE FACTORY PRE-COMMIT END ---"
+
+    for name, target_path in targets_to_install:
+        git_dir = target_path / ".git"
+        if not git_dir.exists():
+            print(f"[hook] Skipping {name} ({target_path}): no .git directory found.")
+            continue
+
+        hooks_dir = git_dir / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        hook_file = hooks_dir / "pre-commit"
+
+        hook_block = f"""{marker_start}
+# Deterministic sub-second secret scan gate (Rule 8: zero model calls)
+SF_OUT=$(python3 "{scan_script}" --target "{target_path}" 2>/dev/null)
+SF_COUNT=$(printf "%s" "$SF_OUT" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{{}}"); print(d.get("candidate_count", 0))' 2>/dev/null || echo 0)
+if [ "$SF_COUNT" -gt 0 ]; then
+  echo "❌ [Software Factory: secret-scan] Blocked commit in {name}: $SF_COUNT potential secret(s) detected."
+  printf "%s" "$SF_OUT" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{{}}"); [print(f"  - {{f.get(\\"rule_id\\")}}: {{f.get(\\"path\\")}}:{{f.get(\\"line_number\\", f.get(\\"start_line\\"))}}") for f in d.get("candidates", d.get("findings", []))]'
+  exit 1
+fi
+{marker_end}"""
+
+        if hook_file.exists():
+            existing = hook_file.read_text(encoding="utf-8", errors="ignore")
+            if marker_start in existing and marker_end in existing:
+                pattern = re.compile(re.escape(marker_start) + r".*?" + re.escape(marker_end), re.DOTALL)
+                updated = pattern.sub(hook_block, existing)
+                hook_file.write_text(updated, encoding="utf-8")
+            else:
+                hook_file.write_text(existing.rstrip() + "\n\n" + hook_block + "\n", encoding="utf-8")
+        else:
+            hook_file.write_text("#!/usr/bin/env bash\nset -e\n\n" + hook_block + "\n", encoding="utf-8")
+
+        hook_file.chmod(0o755)
+        print(f"✅ Installed deterministic pre-commit hook in {name} ({hook_file})")
+
+
+def install_skills():
+    """Symlink all Software Factory agents into local interactive CLI plugin/skill directories."""
+    agents_dir = FACTORY_ROOT / "agents"
+    home = Path.home()
+
+    # 1. Gemini / Antigravity plugin skills directory
+    gemini_plugin_dir = home / ".gemini" / "config" / "plugins" / "software-factory-plugin"
+    gemini_skills_link = gemini_plugin_dir / "skills"
+    gemini_plugin_dir.mkdir(parents=True, exist_ok=True)
+    if gemini_skills_link.is_symlink() or gemini_skills_link.exists():
+        if gemini_skills_link.is_symlink():
+            gemini_skills_link.unlink()
+    if not gemini_skills_link.exists():
+        gemini_skills_link.symlink_to(agents_dir)
+    print(f"✅ Linked Software Factory skills plugin -> {gemini_skills_link}")
+
+    # 2. Per-skill symlink targets: Claude Code (~/.claude/skills), pi (~/.pi/agent/skills), and shared (~/.agents/skills)
+    skill_hubs = [
+        ("pi", home / ".pi" / "agent" / "skills"),
+        ("Claude", home / ".claude" / "skills"),
+        ("Shared (.agents)", home / ".agents" / "skills"),
+    ]
+    for label, hub_dir in skill_hubs:
+        hub_dir.mkdir(parents=True, exist_ok=True)
+        linked_count = 0
+        for agent_folder in sorted(agents_dir.iterdir()):
+            if agent_folder.is_dir() and (agent_folder / "SKILL.md").exists():
+                dest = hub_dir / agent_folder.name
+                if dest.is_symlink():
+                    dest.unlink()
+                if not dest.exists():
+                    dest.symlink_to(agent_folder)
+                    linked_count += 1
+        print(f"✅ Linked {linked_count} Software Factory skills ({label}) -> {hub_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="The Software Factory (factory)")
+    subparsers = parser.add_subparsers(dest="command", help="Subcommand to run")
+
+    # list
+    subparsers.add_parser("list", help="List all available agents")
+
+    # run
+    run_parser = subparsers.add_parser("run", help="Run an agent against a target")
+    run_parser.add_argument("agent", help="Name of the agent to run (e.g. secret-scan)")
+    run_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
+    run_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity"], help="Engine to execute agent with")
+    run_parser.add_argument("--sink", choices=["file", "beads", "github-issues"], help="Override sink")
+
+    # line
+    line_parser = subparsers.add_parser("line", help="Execute an ordered Factory Line composed of multiple stations")
+    line_parser.add_argument("line", help="Name of the line to run (e.g. project-audit)")
+    line_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
+    line_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity"], help="Engine to execute agents with")
+    line_parser.add_argument("--sink", choices=["file", "beads", "github-issues"], help="Override sink")
+
+    # hillclimb
+    hc_parser = subparsers.add_parser("hillclimb", help="Run Class C goal-directed performance hill-climber with ledger")
+    hc_parser.add_argument("--target", required=True, help="Target project name or path")
+    hc_parser.add_argument("--metric", default="perf_hazard_score", help="Metric to optimize (perf_hazard_score, total_gzip_bytes, custom_bench_ms)")
+    hc_parser.add_argument("--goal", type=float, help="Target numeric goal value")
+    hc_parser.add_argument("--iterations", type=int, default=1, help="Number of hill-climb iterations")
+    hc_parser.add_argument("--apply", action="store_true", help="Apply candidate edits in worktree, re-measure, keep wins, revert losses")
+    hc_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity"], help="Engine to execute agent with")
+    hc_parser.add_argument("--sink", choices=["file", "beads", "github-issues"], help="Override sink")
+
+    # hook
+    hook_parser = subparsers.add_parser("hook", help="Manage deterministic git pre-commit hooks (Rule 8 compliant)")
+    hook_subs = hook_parser.add_subparsers(dest="hook_command", help="Hook action")
+    hook_inst = hook_subs.add_parser("install", help="Install sub-second secret-scan pre-commit hook")
+    hook_inst.add_argument("--target", help="Target project name or path")
+    hook_inst.add_argument("--all", action="store_true", help="Install across all configured targets in targets/")
+
+    # skills
+    skills_parser = subparsers.add_parser("skills", help="Manage interactive CLI skills symlinks")
+    skills_subs = skills_parser.add_subparsers(dest="skills_command", help="Skills action")
+    skills_subs.add_parser("install", help="Symlink all 22 factory skills into ~/.gemini and ~/.claude")
+
+    # schedule
+    sched_parser = subparsers.add_parser("schedule", help="Manage macOS launchd scheduled runs")
+    sched_subs = sched_parser.add_subparsers(dest="sched_command", help="Schedule action")
+    
+    sched_subs.add_parser("list", help="List all scheduled agents and launchd status")
+
+    gen_p = sched_subs.add_parser("generate", help="Generate launchd plists into schedules/")
+    gen_p.add_argument("--target", help="Target name")
+    gen_p.add_argument("--agent", help="Agent name")
+
+    inst_p = sched_subs.add_parser("install", help="Install and load launchd agent")
+    inst_p.add_argument("--target", help="Target name")
+    inst_p.add_argument("--agent", help="Agent name")
+    inst_p.add_argument("--all", action="store_true", help="Install all explicitly scheduled target-agent pairs")
+
+    uninst_p = sched_subs.add_parser("uninstall", help="Unload and remove launchd agent")
+    uninst_p.add_argument("--target", required=True, help="Target name")
+    uninst_p.add_argument("--agent", required=True, help="Agent name")
+
+    trig_p = sched_subs.add_parser("trigger", help="Trigger immediate launchd run")
+    trig_p.add_argument("--target", required=True, help="Target name")
+    trig_p.add_argument("--agent", required=True, help="Agent name")
+
+    args = parser.parse_args()
+    if args.command == "list":
+        list_agents()
+    elif args.command == "run":
+        run_agent(agent_name=args.agent, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink)
+    elif args.command == "line":
+        run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink)
+    elif args.command == "hillclimb":
+        run_hillclimb(
+            target_arg=args.target,
+            goal_metric=args.metric,
+            goal_value=args.goal,
+            iterations=args.iterations,
+            apply_edits=args.apply,
+            engine_arg=args.engine,
+            explicit_sink=args.sink
+        )
+    elif args.command == "hook":
+        install_pre_commit_hook(target_arg=getattr(args, "target", None), all_targets=getattr(args, "all", False))
+    elif args.command == "skills":
+        install_skills()
+    elif args.command == "schedule":
+        # Import scheduler functions
+        from lib.scheduler import (
+            list_schedules, generate_plist, install_schedule,
+            uninstall_schedule, trigger_schedule, get_scheduled_candidates,
+            load_yaml_simple as sched_load_yaml
+        )
+        action = getattr(args, "sched_command", None) or "list"
+        if action == "list":
+            list_schedules()
+        elif action == "generate":
+            candidates = get_scheduled_candidates(args.target, args.agent)
+            for c in candidates:
+                p = generate_plist(c["target"], c["agent"], c["cadence"])
+                print(f"Generated: {p}")
+        elif action == "install":
+            if getattr(args, "all", False):
+                for t_file in sorted((FACTORY_ROOT / "targets").glob("*.yaml")):
+                    t_cfg = sched_load_yaml(t_file)
+                    t_name = t_cfg.get("name", t_file.stem)
+                    sched_map = t_cfg.get("schedule", {})
+                    if isinstance(sched_map, dict):
+                        for ag_name in sched_map.keys():
+                            install_schedule(t_name, ag_name)
+            elif args.target and args.agent:
+                install_schedule(args.target, args.agent)
+            else:
+                print("Specify --target <name> --agent <name> or --all")
+        elif action == "uninstall":
+            uninstall_schedule(args.target, args.agent)
+        elif action == "trigger":
+            trigger_schedule(args.target, args.agent)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
+

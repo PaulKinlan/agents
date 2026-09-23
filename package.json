@@ -1,0 +1,34 @@
+{
+  "name": "software-factory",
+  "version": "1.0.0",
+  "private": false,
+  "description": "The Software Factory — 22 deterministic-first SDLC agents & skills for pi, Claude Code, and Antigravity",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "agent-skills",
+    "sdlc",
+    "security",
+    "modern-web",
+    "performance",
+    "resilience"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PaulKinlan/agents.git"
+  },
+  "pi": {
+    "skills": [
+      "./agents"
+    ]
+  },
+  "files": [
+    "agents",
+    "lines",
+    "lib",
+    "factory",
+    "README.md",
+    "AGENTS.md"
+  ]
+}

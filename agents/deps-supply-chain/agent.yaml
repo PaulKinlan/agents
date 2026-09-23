@@ -1,0 +1,17 @@
+name: deps-supply-chain
+class: observer
+plane: [both]
+containment: t1-fetch
+triggers: [schedule, manual, repo-event]
+blocking: false
+short_circuit_empty: true
+summary: Audit dependency vulnerabilities, assess exploitability and reachability, and detect supply chain risks.
+capabilities:
+  write: false
+  network: true
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

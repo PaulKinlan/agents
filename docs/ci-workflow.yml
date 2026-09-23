@@ -1,0 +1,55 @@
+name: Software Factory CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  self-audit:
+    name: Factory Self-Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify Factory CLI & List Agents
+        run: |
+          chmod +x ./factory
+          ./factory list
+
+      - name: Run Core Unit Tests
+        run: |
+          python3 -m unittest discover -s tests -v
+
+      - name: Run Secret Scan Pre-pass
+        run: |
+          python3 agents/secret-scan/scripts/scan.py --target . --output runs/ci-secrets.json
+          cat runs/ci-secrets.json
+
+      - name: Run Docs Drift Pre-pass
+        run: |
+          python3 agents/docs-drift/scripts/check_docs.py --target . --output runs/ci-docs-drift.json
+          cat runs/ci-docs-drift.json
+
+      - name: Run Dependency Audit Pre-pass
+        run: |
+          python3 agents/deps-supply-chain/scripts/audit_deps.py --target . --output runs/ci-deps.json
+          cat runs/ci-deps.json

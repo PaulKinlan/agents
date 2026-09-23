@@ -1,0 +1,27 @@
+name: aifocus
+path: ~/Code/aifocus
+repo: PaulKinlan/aifocus
+sink: file
+visibility: public
+agents:
+  - secret-scan
+  - docs-drift
+  - deps-supply-chain
+  - modern-web
+  - ui-ux-audit
+  - accessibility
+  - resilience
+  - perf-review
+  - bundle-size
+  - qa-station
+  - docs-write
+schedule:
+  secret-scan:
+    hour: 7
+    minute: 30
+  deps-supply-chain:
+    hour: 7
+    minute: 35
+  docs-drift:
+    hour: 7
+    minute: 40

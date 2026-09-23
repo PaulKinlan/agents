@@ -1,0 +1,34 @@
+name: fauxmium
+path: ~/Code/fauxmium
+sink: file
+visibility: public
+agents:
+  - secret-scan
+  - test-gap
+  - deps-supply-chain
+  - threat-model
+  - vuln-discovery
+  - vuln-verify
+  - vuln-triage
+  - bundle-size
+  - accessibility
+  - modern-web
+  - ui-ux-audit
+  - resilience
+  - perf-review
+  - perf-hillclimb
+  - memory-profile
+  - docs-drift
+  - docs-write
+  - pr-fixer
+  - issue-triage
+schedule:
+  secret-scan:
+    hour: 7
+    minute: 30
+  deps-supply-chain:
+    hour: 7
+    minute: 35
+  docs-drift:
+    hour: 7
+    minute: 40

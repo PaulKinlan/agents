@@ -1,0 +1,17 @@
+name: vuln-verify
+class: observer
+plane: [local]
+containment: t0-readonly
+triggers: [agent]
+blocking: false
+short_circuit_empty: false
+summary: Adversarial verifier that independently stress-tests vulnerability candidates to disprove false positives.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

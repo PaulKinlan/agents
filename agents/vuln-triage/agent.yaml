@@ -1,0 +1,11 @@
+name: vuln-triage
+class: observer
+plane: [local, ci]
+containment: t0-readonly
+summary: Deduplicate findings by root cause, calibrate against THREAT_MODEL.md, and rank reachability.
+capabilities:
+  write: false
+  requires: []
+budget:
+  max_minutes: 5
+  max_usd: 0.50

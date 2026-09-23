@@ -1,0 +1,11 @@
+name: test-gap
+class: proposer
+plane: [local, ci]
+containment: t0-readonly
+summary: Identify untested modules and functions, measure test deficit, and propose test suites.
+capabilities:
+  write: false
+  requires: []
+budget:
+  max_minutes: 5
+  max_usd: 0.50

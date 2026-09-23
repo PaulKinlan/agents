@@ -1,0 +1,17 @@
+name: bundle-size
+class: optimizer
+plane: [ci, local]
+containment: t2-local
+triggers: [repo-event, schedule, manual]
+blocking: false
+short_circuit_empty: false
+summary: Measure bundle size, track size deltas vs baselines, and propose tree-shaking, code splitting, and byte budgets.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

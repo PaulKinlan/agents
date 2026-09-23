@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PerfHillclimbReport",
+  "type": "object",
+  "required": ["summary", "target", "goal_status", "hillclimb_steps", "findings"],
+  "properties": {
+    "summary": { "type": "string" },
+    "target": { "type": "string" },
+    "goal_status": {
+      "type": "object",
+      "required": ["metric", "current_value", "goal_value", "goal_achieved"],
+      "properties": {
+        "metric": { "type": "string" },
+        "current_value": { "type": "number" },
+        "goal_value": { "type": "number" },
+        "goal_achieved": { "type": "boolean" }
+      }
+    },
+    "hillclimb_steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["step", "hypothesis", "target_file", "expected_delta"],
+        "properties": {
+          "step": { "type": "integer" },
+          "hypothesis": { "type": "string" },
+          "target_file": { "type": "string" },
+          "expected_delta": { "type": "number" },
+          "search_snippet": { "type": "string" },
+          "replace_snippet": { "type": "string" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "path": { "type": "string" },
+          "line_number": { "type": "integer" },
+          "snippet": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

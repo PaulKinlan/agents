@@ -1,0 +1,17 @@
+name: accessibility
+class: observer
+plane: [local]
+containment: t0-readonly
+triggers: [manual, schedule]
+blocking: false
+short_circuit_empty: false
+summary: Audit HTML and templates for WCAG 2.1 AA accessibility violations (labels, alt text, focus management, semantic structure).
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

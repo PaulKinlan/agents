@@ -1,0 +1,17 @@
+name: vuln-discovery
+class: observer
+plane: [local]
+containment: t0-readonly
+triggers: [manual, schedule]
+blocking: false
+short_circuit_empty: false
+summary: Surface vulnerability hypotheses and exploit chains across untrusted attack surfaces guided by repository threat models.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

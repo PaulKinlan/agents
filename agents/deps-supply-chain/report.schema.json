@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DepsSupplyChainReport",
+  "type": "object",
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "High-level summary of the dependency supply chain and security audit."
+    },
+    "scanned_manifests": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of manifest or lockfiles inspected."
+    },
+    "advisories_evaluated": {
+      "type": "integer",
+      "description": "Total count of security advisories and supply chain risks evaluated."
+    },
+    "reachability_summary": {
+      "type": "object",
+      "description": "Counts of vulnerabilities broken down by reachability.",
+      "properties": {
+        "reachable_production": { "type": "integer" },
+        "reachable_build": { "type": "integer" },
+        "unreachable_dormant": { "type": "integer" },
+        "dev_dependency_benign": { "type": "integer" }
+      }
+    },
+    "dependency_advisories": {
+      "type": "array",
+      "description": "Detailed assessment of each candidate dependency advisory.",
+      "items": {
+        "type": "object",
+        "required": ["package", "advisory_id", "severity", "reachability", "rationale", "recommended_action"],
+        "properties": {
+          "package": {
+            "type": "string",
+            "description": "Dependency package name."
+          },
+          "advisory_id": {
+            "type": "string",
+            "description": "Identifier for the advisory (GHSA, CVE, or audit ID)."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "is_direct": {
+            "type": "boolean",
+            "description": "Whether the dependency is directly declared in the root manifest."
+          },
+          "reachability": {
+            "type": "string",
+            "enum": ["reachable_production", "reachable_build", "unreachable_dormant", "dev_dependency_benign"],
+            "description": "Triage verdict on actual reachability."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Technical justification explaining why the vulnerability is or is not reachable in this codebase."
+          },
+          "recommended_action": {
+            "type": "string",
+            "description": "Recommended remediation or upgrade action."
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Findings formatted for the Software Factory findings store.",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description"],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Rule identifier (e.g. advisory ID or supply chain risk type)."
+          },
+          "path": {
+            "type": "string",
+            "description": "Path to the manifest or lockfile (e.g. package.json)."
+          },
+          "line_number": {
+            "type": ["integer", "null"],
+            "description": "Line number where dependency is declared if known."
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Dependency declaration snippet or path."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"],
+            "description": "Assessed severity level after reachability analysis."
+          },
+          "title": {
+            "type": "string",
+            "description": "Concise human-readable finding title."
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed explanation of the risk and reachability."
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Concrete remediation or upgrade instructions."
+          }
+        }
+      }
+    }
+  }
+}

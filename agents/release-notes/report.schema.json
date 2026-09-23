@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReleaseNotesReport",
+  "type": "object",
+  "required": ["summary", "release_notes_markdown", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Executive summary of the changes in this release."
+    },
+    "release_version": {
+      "type": "string",
+      "description": "Target release version tag or milestone identifier."
+    },
+    "release_notes_markdown": {
+      "type": "string",
+      "description": "Formatted GitHub-flavored markdown release notes."
+    },
+    "categories": {
+      "type": "object",
+      "properties": {
+        "breaking_changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title", "description"],
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "pr_number": { "type": ["integer", "null"] },
+              "commits": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title", "description"],
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "pr_number": { "type": ["integer", "null"] },
+              "commits": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "bug_fixes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title", "description"],
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "pr_number": { "type": ["integer", "null"] },
+              "commits": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "internal_improvements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title", "description"],
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "pr_number": { "type": ["integer", "null"] },
+              "commits": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Optional actionable findings or deprecation notices for findings store.",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "severity", "title", "description"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "path": { "type": "string" },
+          "line_number": { "type": "integer" },
+          "snippet": { "type": "string" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

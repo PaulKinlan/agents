@@ -1,0 +1,17 @@
+name: ui-ux-audit
+class: proposer
+plane: [local, ci]
+containment: t0-readonly
+triggers: [manual, schedule, repo-event]
+blocking: false
+short_circuit_empty: true
+summary: Analyze UI & UX quality—design token consistency, interactive focus/active/disabled states, loading/empty/error states, tap targets, dark mode, and visual hierarchy.
+capabilities:
+  write: false
+  network: false
+  browser: true
+  requires: []
+budget:
+  max_minutes: 10
+output:
+  schema: report.schema.json

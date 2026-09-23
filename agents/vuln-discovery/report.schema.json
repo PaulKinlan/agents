@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VulnDiscoveryReport",
+  "type": "object",
+  "required": [
+    "summary",
+    "target",
+    "findings"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Executive summary of the vulnerability discovery pass and attack surface analysis."
+    },
+    "target": {
+      "type": "string",
+      "description": "Target repository identifier."
+    },
+    "scanned_files": {
+      "type": "integer",
+      "description": "Total number of source files inspected."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Discovered vulnerability hypotheses and exploit chains.",
+      "items": {
+        "type": "object",
+        "required": [
+          "rule_id",
+          "path",
+          "line_number",
+          "snippet",
+          "severity",
+          "title",
+          "description",
+          "remediation"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "description": "Unique identifier for the vulnerability rule or pattern."
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative file path within the target repository."
+          },
+          "line_number": {
+            "type": "integer",
+            "description": "Line number where the candidate vulnerability is rooted."
+          },
+          "snippet": {
+            "type": "string",
+            "description": "Code snippet illustrating the vulnerable code construct."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"],
+            "description": "Assessed severity level of the vulnerability."
+          },
+          "title": {
+            "type": "string",
+            "description": "Concise descriptive title of the vulnerability."
+          },
+          "description": {
+            "type": "string",
+            "description": "Technical analysis of the flaw, reachability, and attack vector."
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Specific, actionable remediation instructions."
+          },
+          "exploit_chain": {
+            "type": ["string", "null"],
+            "description": "Step-by-step exploit chain demonstrating how this weakness connects with other boundaries or flaws."
+          }
+        }
+      }
+    }
+  }
+}

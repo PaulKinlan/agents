@@ -1,0 +1,17 @@
+name: secret-scan
+class: observer
+plane: [local, ci]
+containment: t0-readonly
+triggers: [manual, schedule, git-hook]
+blocking: false
+short_circuit_empty: true
+summary: Find committed credentials, high-entropy secrets, and sensitive tokens.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

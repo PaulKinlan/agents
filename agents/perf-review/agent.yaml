@@ -1,0 +1,17 @@
+name: perf-review
+class: proposer
+plane: [ci, local]
+containment: t2-local
+triggers: [repo-event, manual, schedule]
+blocking: false
+short_circuit_empty: false
+summary: Inspect recent git commits and diffs for performance anti-patterns (LCP, INP, CLS, layout thrashing, waterfalls) and propose concrete code fixes.
+capabilities:
+  write: true
+  network: false
+  browser: false
+  requires: [git]
+budget:
+  max_minutes: 10
+output:
+  schema: report.schema.json

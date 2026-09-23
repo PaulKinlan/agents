@@ -1,0 +1,17 @@
+name: release-notes
+class: proposer
+plane: [ci, local]
+containment: t0-readonly
+triggers: [repo-event, manual]
+blocking: false
+short_circuit_empty: false
+summary: Synthesize clean, high-impact release notes from git commits and PRs grouped by category.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json

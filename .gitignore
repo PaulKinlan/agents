@@ -1,0 +1,21 @@
+# Run artifacts — transcripts, raw scanner output, benchmark traces
+runs/
+schedules/*.plist
+
+# Sensitive findings data (vulnerabilities, candidate tokens, target threat models, run history)
+findings/*
+!findings/.gitkeep
+!findings/suppressions.yaml
+
+# Never commit credentials. The factory holds high-value secrets by design.
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# Local engine state
+.agent-state/
+node_modules/
+__pycache__/
+.DS_Store

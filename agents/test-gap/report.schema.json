@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TestGapReport",
+  "type": "object",
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": { "type": "string" },
+    "total_source_files": { "type": "integer" },
+    "total_test_files": { "type": "integer" },
+    "coverage_ratio": { "type": "number" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "path": { "type": "string" },
+          "line_number": { "type": ["integer", "null"] },
+          "snippet": { "type": "string" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

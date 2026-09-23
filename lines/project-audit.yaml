@@ -1,0 +1,18 @@
+name: project-audit
+summary: Full SDLC assurance line covering credentials, threat model, attack surface, verification, triage, dependencies, web/perf quality, documentation, and QA station.
+andon_halt_on_critical: true
+andon_halt_on_failure: true
+andon_stations: [secret-scan, vuln-triage]
+
+stations:
+  - secret-scan
+  - threat-model
+  - vuln-discovery
+  - vuln-verify
+  - vuln-triage
+  - deps-supply-chain
+  - modern-web
+  - ui-ux-audit
+  - perf-review
+  - docs-drift
+  - qa-station

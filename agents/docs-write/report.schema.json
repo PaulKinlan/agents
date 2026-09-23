@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DocsWriteReport",
+  "type": "object",
+  "required": ["summary", "target", "doc_patches", "findings"],
+  "properties": {
+    "summary": { "type": "string" },
+    "target": { "type": "string" },
+    "doc_patches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "reason", "proposed_markdown_patch"],
+        "properties": {
+          "file": { "type": "string" },
+          "section": { "type": "string" },
+          "reason": { "type": "string" },
+          "proposed_markdown_patch": { "type": "string" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "remediation"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "path": { "type": "string" },
+          "line_number": { "type": "integer" },
+          "snippet": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+name: docs-drift
+class: observer
+plane: [both]
+containment: t0-readonly
+triggers: [schedule, manual, repo-event]
+blocking: false
+short_circuit_empty: false
+summary: Detect drift between documentation and actual repository implementation.
+capabilities:
+  write: false
+  network: false
+  browser: false
+  requires: []
+budget:
+  max_minutes: 5
+output:
+  schema: report.schema.json
