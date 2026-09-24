@@ -65,12 +65,13 @@ class FindingsStore:
     def save(self):
         self.store_file.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
 
-    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
         """Ingests raw findings from an agent run, applies fingerprinting and state transitions.
         
         Returns:
             processed_findings: list of findings with fingerprints and updated states.
             delta_stats: counts of new, regressed, fixed, unchanged, and suppressed findings.
+            fixed_items: findings resolved by this run.
         """
         now = datetime.now(timezone.utc).isoformat()
         current_fps = set()
@@ -85,6 +86,8 @@ class FindingsStore:
                 path=item.get("path", ""),
                 snippet=item.get("snippet", "")
             )
+            if fp in current_fps:
+                continue
             current_fps.add(fp)
             
             existing = self.data["findings"].get(fp)
@@ -93,20 +96,21 @@ class FindingsStore:
             if fp in self.suppressions:
                 state = "wontfix"
                 suppression_reason = self.suppressions[fp].get("reason", "Suppressed")
-                delta_stats["suppressed"] += 1
+                change = "suppressed"
             elif existing is None:
                 state = "new"
-                delta_stats["new"] += 1
+                change = "new"
                 suppression_reason = None
             elif existing.get("state") == "fixed":
                 state = "regressed"
-                delta_stats["regressed"] += 1
+                change = "regressed"
                 suppression_reason = None
             else:
                 state = existing.get("state", "new")
-                delta_stats["unchanged"] += 1
+                change = "unchanged"
                 suppression_reason = existing.get("suppression_reason")
 
+            delta_stats[change] += 1
             finding_record = {
                 "fingerprint": fp,
                 "agent": agent,
@@ -119,6 +123,11 @@ class FindingsStore:
                 "description": item.get("description", ""),
                 "remediation": item.get("remediation", ""),
                 "state": state,
+                # Lifecycle and this run's delta are separate: 'new' can remain active.
+                "change": change,
+                # Retry failed deliveries, but only notify once per sink and recurrence.
+                "dispatched_sinks": list(existing.get("dispatched_sinks", []))
+                    if existing and change != "regressed" else [],
                 "first_seen": existing.get("first_seen", now) if existing else now,
                 "last_seen": now,
                 "suppression_reason": suppression_reason
@@ -150,7 +159,10 @@ class FindingsStore:
         return processed, delta_stats, fixed_items
 
 def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None):
-    """Dispatches the processed findings and delta summary to the designated sink."""
+    """Dispatch findings, mutating their successful-delivery receipts.
+
+    The caller must save its FindingsStore after dispatch to persist those receipts.
+    """
     print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed")
     
     # Always write the local factory delta report
@@ -162,9 +174,10 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
         _dispatch_github(target_name, target_dir, processed_findings)
 
 def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]]):
-    report_file = FACTORY_ROOT / "findings" / f"{target_name}-latest.md"
-    new_or_regressed = [f for f in findings if f["state"] in ("new", "regressed")]
-    unchanged = [f for f in findings if f["state"] in ("accepted", "info", "new") and f not in new_or_regressed]
+    report_file = FACTORY_ROOT / "findings" / f"{target_name}-delta.md"
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    new_or_regressed = [f for f in findings if f["change"] in ("new", "regressed")]
+    unchanged = [f for f in findings if f["change"] == "unchanged"]
     suppressed = [f for f in findings if f["state"] == "wontfix"]
 
     lines = [
@@ -218,7 +231,10 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
             lines.append(f"- **{f['title']}**: {f.get('suppression_reason') or 'Suppressed'}")
         lines.append("")
 
-    report_file.write_text("\n".join(lines), encoding="utf-8")
+    report = "\n".join(lines)
+    report_file.write_text(report, encoding="utf-8")
+    # Preserve the original path for existing consumers.
+    report_file.with_name(f"{target_name}-latest.md").write_text(report, encoding="utf-8")
     print(f"Delta report written to: {report_file}")
 
 def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
@@ -233,6 +249,8 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
         return
 
     for f in findings:
+        if "beads" in f.get("dispatched_sinks", []):
+            continue
         if f["state"] in ("new", "regressed") and f["severity"] in ("critical", "high", "medium"):
             title = f"[{f['agent']}] {f['title']}"
             desc = f"{f['description']}\n\nPath: {f['path']}:{f.get('line_number', '?')}\nFingerprint: {f['fingerprint']}\nSnippet:\n{f['snippet']}"
@@ -244,9 +262,12 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
                 "-C", str(target_dir)
             ]
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
                 if res.returncode == 0:
+                    f.setdefault("dispatched_sinks", []).append("beads")
                     print(f"Created bead for: {f['title']}")
+                else:
+                    print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
             except Exception as e:
                 print(f"Failed to create bead: {e}")
 
@@ -254,7 +275,7 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
     """Public disclosure guard and issue creation for GitHub Issues."""
     gh_bin = shutil.which("gh")
     for f in findings:
-        if f["state"] not in ("new", "regressed"):
+        if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
             continue
         if f["severity"] in ("critical", "high"):
             print(f"[SECURITY GUARD] Suppressing public GitHub issue for {f['severity']} finding: {f['title']}")
@@ -266,15 +287,18 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
                 f"**Rule**: `{f['rule_id']}`\n"
                 f"**Severity**: `{f['severity']}`\n"
                 f"**Location**: `{f['path']}:{f.get('line_number', '?')}`\n"
-                f"**Fingerprint**: `{f['fingerprint'][:16]}`\n\n"
+                f"**Fingerprint**: `{f['fingerprint']}`\n\n"
                 f"### Description\n{f['description']}\n\n"
                 f"### Remediation\n{f.get('remediation', 'N/A')}\n"
             )
             cmd = [gh_bin, "issue", "create", "--title", title, "--body", body]
             try:
-                res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False)
+                res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
                 if res.returncode == 0:
+                    f.setdefault("dispatched_sinks", []).append("github-issues")
                     print(f"Created GitHub issue: {res.stdout.strip()}")
+                else:
+                    print(f"Failed to create GitHub issue (exit {res.returncode}): {res.stderr.strip()}")
             except Exception as e:
                 print(f"Failed to create GitHub issue: {e}")
 
@@ -297,11 +321,14 @@ if __name__ == "__main__":
 
     store = FindingsStore(target_name=args.target)
     processed, stats, fixed_items = store.process_run(agent=args.agent, raw_findings=findings_list)
-    dispatch_to_sink(
-        sink=args.sink,
-        target_name=args.target,
-        target_dir=Path(args.target_dir).resolve(),
-        processed_findings=processed,
-        stats=stats,
-        fixed_items=fixed_items
-    )
+    try:
+        dispatch_to_sink(
+            sink=args.sink,
+            target_name=args.target,
+            target_dir=Path(args.target_dir).resolve(),
+            processed_findings=processed,
+            stats=stats,
+            fixed_items=fixed_items
+        )
+    finally:
+        store.save()
