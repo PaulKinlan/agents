@@ -29,6 +29,15 @@ PATTERNS = [
     ("slack-token", re.compile(r"xox[baprs]-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*")),
     ("generic-api-key", re.compile(r"""(?i)(?:api_key|apikey|secret|token|password)\s*[:=]\s*['"][a-zA-Z0-9_\-]{20,80}['"]""")),
     ("jwt-token", re.compile(r"ey[A-Za-z0-9_-]{10,}\.ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    # Vendor shapes the redactor already knows (lib/redaction.py). A rule that exists there but
+    # not here means the scanner never surfaces it; a rule here that is missing there means the
+    # matched value can be published. tests/test_secret_scanner.py enforces the match.
+    ("openai-key", re.compile(r"sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}")),
+    ("stripe-key", re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}")),
+    ("google-api-key", re.compile(r"AIza[0-9A-Za-z_-]{35}")),
+    ("google-oauth", re.compile(r"ya29\.[0-9A-Za-z_-]{20,}")),
+    ("gitlab-pat", re.compile(r"glpat-[A-Za-z0-9_-]{20,}")),
+    ("npm-token", re.compile(r"npm_[A-Za-z0-9]{36}")),
 ]
 
 IGNORE_DIRS = {
@@ -101,20 +110,34 @@ def scan_with_builtin(target_dir: Path) -> list:
                 # Avoid checking absurdly long minified lines
                 if len(line) > 1000:
                     continue
+                found = []
                 for rule_id, pattern in PATTERNS:
                     match = pattern.search(line)
                     if match:
-                        matched_str = match.group(0).lower()
-                        if rule_id == "generic-api-key" and any(p in matched_str for p in BENIGN_PLACEHOLDERS):
-                            continue
-                        snippet = line.strip()
-                        candidates.append({
-                            "rule_id": rule_id,
-                            "path": str(rel_path),
-                            "line_number": line_idx,
-                            "snippet": snippet[:200],
-                            "raw_match": match.group(0)[:100]
-                        })
+                        found.append((rule_id, match))
+
+                # One credential is one finding. A vendor rule and the generic catch-all both
+                # match `api_key = "sk-..."`; keep the most specific and the longest, then drop
+                # any match overlapping one already taken. Order-independent on purpose, so the
+                # list above does not have to carry a specificity contract.
+                found.sort(key=lambda item: (item[0] == "generic-api-key",
+                                             -(item[1].end() - item[1].start())))
+                claimed_spans = []
+                for rule_id, match in found:
+                    if any(start < match.end() and match.start() < end for start, end in claimed_spans):
+                        continue
+                    matched_str = match.group(0).lower()
+                    if rule_id == "generic-api-key" and any(p in matched_str for p in BENIGN_PLACEHOLDERS):
+                        continue
+                    claimed_spans.append(match.span())
+                    snippet = line.strip()
+                    candidates.append({
+                        "rule_id": rule_id,
+                        "path": str(rel_path),
+                        "line_number": line_idx,
+                        "snippet": snippet[:200],
+                        "raw_match": match.group(0)[:100]
+                    })
     return candidates
 
 def main():
