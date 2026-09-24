@@ -13,7 +13,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   self-audit:
@@ -38,6 +37,9 @@ jobs:
       - name: Run Core Unit Tests
         run: |
           python3 -m unittest discover -s tests -v
+
+      - name: Prepare run artifacts directory
+        run: mkdir -p runs
 
       - name: Run Secret Scan Pre-pass
         run: |

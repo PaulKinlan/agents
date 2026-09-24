@@ -247,10 +247,10 @@ The factory includes **22 implemented agents** across 7 SDLC lanes:
 
 | Agent | Class | Plane | Description |
 |---|---|---|---|
-| **`modern-web`** | Proposer (B) | Both | Audits HTML, CSS, and JS against [`modern-web-guidance`](~/.gemini/config/plugins/modern-web-guidance-plugin/skills/modern-web-guidance/SKILL.md) to replace legacy JS/CSS workarounds with native Baseline Web APIs (`<dialog>`, Popover, Anchor Positioning, Container Queries, `:has()`, `:user-valid`, View Transitions, Scroll-Driven Animations). |
+| **`modern-web`** | Proposer (B) | Both | Audits HTML, CSS, and JS against `modern-web-guidance` to replace legacy JS/CSS workarounds with native Baseline Web APIs (`<dialog>`, Popover, Anchor Positioning, Container Queries, `:has()`, `:user-valid`, View Transitions, Scroll-Driven Animations). |
 | **`ui-ux-audit`** | Proposer (B) | Both | Holistic UI & UX analyzer checking design token consistency, interactive states (`:focus-visible`, `:active`, `:disabled`), async loading/empty/error states, tap targets, dark mode (`light-dark()`), and typography. |
 | **`accessibility`** | Observer (A) | Local | Scans HTML files and templates for 6 core WCAG 2.1 AA violation types (missing alt text, unlabelled buttons, missing lang attributes, `tabindex > 0`). |
-| **`resilience`** | Proposer (B) | Both | Wraps [`web-resilience-audit`](~/.gemini/config/plugins/web-resilience-plugin/skills/web-resilience-audit/SKILL.md) and `web-resilience-fix` against 46 failure states (offline, `AbortSignal.timeout()`, storage quota errors, FOIT fonts, 3P script SPOFs, tab discard). |
+| **`resilience`** | Proposer (B) | Both | Wraps `web-resilience-audit` and `web-resilience-fix` against 46 failure states (offline, `AbortSignal.timeout()`, storage quota errors, FOIT fonts, 3P script SPOFs, tab discard). |
 
 ### 3. Performance & Memory Optimizers Lane (Class B & C)
 
@@ -258,7 +258,7 @@ The factory includes **22 implemented agents** across 7 SDLC lanes:
 |---|---|---|---|
 | **`perf-review`** | Proposer (B) | Both | Inspects recent git commits and diffs for performance regressions (layout thrashing, sequential `await` waterfalls, render-blocking head assets, LCP/CLS media hazards) and outputs ready-to-apply fix diffs. |
 | **`perf-hillclimb`** | Optimizer (C) | Local | Goal-directed optimizer paired with `lib/bench/runner.py`. Iteratively measures metrics, proposes single-step optimizations, verifies improvements, and records reverted dead ends in an append-only ledger. |
-| **`memory-profile`** | Optimizer (C) | Local | Wraps [`memory-leak-debugging`](~/.gemini/config/plugins/chrome-devtools-plugin/skills/memory-leak-debugging/SKILL.md) + DevTools MCP. Detects unbounded `Map`/`Set` caches, uncleaned event listeners, `setInterval` leaks, and undisconnected DOM observers. |
+| **`memory-profile`** | Optimizer (C) | Local | Wraps `memory-leak-debugging` + DevTools MCP. Detects unbounded `Map`/`Set` caches, uncleaned event listeners, `setInterval` leaks, and undisconnected DOM observers. |
 | **`bundle-size`** | Optimizer (C) | CI/Local | Measures countable raw/gzipped asset bytes against an append-only baseline. Recommends dynamic `import()` opportunities and budget caps. |
 
 ### 4. Inner-Loop Testing & Automated Patching Lane
