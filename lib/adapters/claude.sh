@@ -13,10 +13,25 @@ RUN_DIR="${5}"
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
 
-echo "[claude adapter] Checking authentication..."
-if claude -p "ping" 2>&1 | grep -q "OAuth access token has expired"; then
-  echo "[claude adapter] Error: Claude OAuth token has expired. Run 'claude login' to refresh." >&2
+# Deterministic auth check — presence of a credential, not a model round trip.
+# A `claude -p "ping"` probe cost a full inference per run and only recognised one
+# failure string, so every other auth error surfaced later as a generic failure.
+CREDENTIALS_FILE="${HOME}/.claude/.credentials.json"
+if [ -z "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}" ] && [ ! -f "$CREDENTIALS_FILE" ]; then
+  echo "[claude adapter] Error: no Claude credentials. Run 'claude login' for session auth (no API key required), or have the runner inject ANTHROPIC_API_KEY." >&2
   exit 1
+fi
+
+# Prefer the signed-in session over an ambient API key. Claude Code gives
+# ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN precedence over the claude.ai login, so a
+# stale key exported in the caller's shell hijacks the run (verified: it hangs rather
+# than failing) even though a valid session exists. Only scrub when a session
+# credential exists, so the CI plane — API key, no login — is unaffected.
+if [ -f "$CREDENTIALS_FILE" ]; then
+  unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+  echo "[claude adapter] Auth: developer session ($CREDENTIALS_FILE)"
+else
+  echo "[claude adapter] Auth: ANTHROPIC_API_KEY from environment"
 fi
 
 echo "[claude adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
