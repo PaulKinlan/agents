@@ -313,6 +313,40 @@ print('fixture-123')
         self.assertIn("src/config.js:?", report)
         self.assertNotIn("line 12", report)
 
+    def test_large_integer_line_number_cannot_carry_a_matched_value(self):
+        """A non-text field skips literal masking, so a big integer is a way around it entirely.
+
+        The fourth review's case: a generic-api-key match made of 30 digits, handed back as
+        `line_number=int(digits)`. As a *string* the digit cap stopped it; as an int the value
+        was returned unchanged and rendered in every location field.
+        """
+        digits = "3141592653" * 3
+        for sink, severity in (("file", "medium"), ("beads", "medium"), ("github-issues", "medium")):
+            with self.subTest(sink=sink):
+                finding = self.credential_finding()
+                finding.update({
+                    "rule_id": "generic-api-key",
+                    "snippet": f'token = "{digits}"',
+                    "line_number": int(digits),
+                })
+                self.assert_clean(sink, finding, digits, severity)
+                report = self.surfaces(subprocess.CompletedProcess([], 0, "", ""))["delta report"]
+                self.assertIn("src/config.js:?", report)
+
+    def test_line_number_policy_is_the_same_for_both_types(self):
+        """Bounds and matched-literal protection apply to ints exactly as to numeric strings."""
+        from lib.redaction import MAX_LINE_NUMBER, publishable_line_number
+
+        self.assertEqual(publishable_line_number(12), 12)
+        self.assertEqual(publishable_line_number("12"), 12)
+        self.assertEqual(publishable_line_number(" 12 "), 12)
+        self.assertEqual(publishable_line_number(0), 0)
+        for rejected in (MAX_LINE_NUMBER + 1, -1, "line 12", "", None, True, 12.5, {"line": 12}):
+            with self.subTest(value=rejected):
+                self.assertEqual(publishable_line_number(rejected), "?")
+        # A number that is itself a matched value does not get published for being small.
+        self.assertEqual(publishable_line_number(3141592, {"3141592"}), "?")
+
     def test_non_credential_finding_still_publishes_its_prose(self):
         """Withholding is scoped to credential findings: docs findings keep their notes."""
         finding = {

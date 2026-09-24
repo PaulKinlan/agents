@@ -131,15 +131,30 @@ def publishable_text(value: Any) -> Any:
     return PLACEHOLDER
 
 
-def publishable_line_number(value: Any) -> Any:
-    """A line number is an integer or the unknown marker, never anything that can carry text."""
+# A line number is a small positive integer. The bound applies to ints as well as to numeric
+# strings, because an integer carries a matched value just as happily as text does — and being
+# non-text it never reaches literal masking on its own (agents-tcd fourth review).
+MAX_LINE_NUMBER = 9_999_999
+
+
+def publishable_line_number(value: Any, literals: set = frozenset()) -> Any:
+    """A line number in range, or the unknown marker. Never a value that could carry a secret."""
     if isinstance(value, bool):
         return "?"
     if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit() and len(value) <= 7:
-        return int(value)
-    return "?"
+        number = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+    else:
+        return "?"
+    if not 0 <= number <= MAX_LINE_NUMBER:
+        return "?"
+    # Same protection every other rendered field gets: if the number *is* a value the scanner
+    # matched, it does not get published just because it happens to be small.
+    rendered = str(number)
+    if mask_literals(rendered, literals) != rendered:
+        return "?"
+    return number
 
 
 def mask_text(value: Any) -> Any:
@@ -235,7 +250,7 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
         if field not in published:
             continue
         if field == "line_number":
-            published[field] = publishable_line_number(published[field])
+            published[field] = publishable_line_number(published[field], literals)
             continue
         published[field] = mask_literals(mask_text(publishable_text(published[field])), literals)
 
