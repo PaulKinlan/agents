@@ -83,7 +83,7 @@ Discovery and verification agents must check for and respect the following invar
 2. **Sanitize Fingerprints**: The findings store must normalize path structures and text sequences to prevent directory traversals when storing reports.
 3. **Strict Embargo Checks**: High/critical findings must bypass public trackers and be written to private local stores or draft security advisories.
 4. **No Ambient Credentials**: Environment variables like `~/.aws/` or `~/.ssh/` must never be mounted inside any execution container or active agent session.
-5. **Published Findings Are Redacted**: Any change to `lib/findings.py`, the sink adapters, `agents/secret-scan/scripts/scan.py`, or the composite action must keep the redaction boundary intact. A new publish path must go through `lib/redaction.py`; `tests/test_redaction.py` asserts the value cannot reach a report, a tracker payload, or stdout.
+5. **Published Findings Are Redacted**: Any change to `lib/findings.py`, the sink adapters, `agents/secret-scan/scripts/scan.py`, or the composite action must keep the redaction boundary intact. A credential finding (by agent or by rule id) publishes **scanner-controlled facts only** — rule, location, severity, fingerprint — because prose cannot be checked for an echo of a value whose shape is unknown; its model-written title, description and remediation, plus the matched value, stay in the local run artifact. Every published surface counts, including log lines such as `Created bead for: …` and the security guard's own message. `tests/test_redaction.py` asserts the value cannot reach a report, a tracker field (title or body), a log line, or stdout.
 
 ---
 

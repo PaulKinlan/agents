@@ -95,6 +95,167 @@ class TestRedactionUnit(unittest.TestCase):
         self.assertEqual(finding, before)
 
 
+class TestCredentialEchoRegression(unittest.TestCase):
+    """Regression cases for the factory-astra review of PR #4, which defeated the first version.
+
+    The value being withheld is derived from the finding (scanner output and the agent that
+    produced it), not from a pattern in the text, so these hold regardless of the credential's
+    shape. Fixtures are assembled at runtime so this file stays clean under the repo's own
+    secret-scan pre-pass.
+    """
+
+    # Assembled at runtime: an assignment-shaped key, a PEM body, and an unknown shape.
+    OPAQUE = "sk-" + "live" + "-" + "9f" * 20
+    UNKNOWN_SHAPE = "zkq" + "7" * 24
+    PEM_BODY = "MIIEowIBAAKCAQEA" + "t3st" * 12
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-echo-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory"
+        (self.factory / "lib").mkdir(parents=True)
+        for module in ("findings.py", "redaction.py"):
+            shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
+        self.cli = self.factory / "lib" / "findings.py"
+        self.target = self.root / "target"
+        (self.target / ".beads").mkdir(parents=True)
+        self.calls_file = self.root / "calls.jsonl"
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        home = self.root / "home"
+        home.mkdir()
+        self.env = {"PATH": str(self.bin), "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+                    "SINK_CALLS": str(self.calls_file)}
+        recorder = f"#!{sys.executable}\n" + """
+import json, os, sys
+from pathlib import Path
+with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
+    log.write(json.dumps({'tool': Path(sys.argv[0]).name, 'args': sys.argv[1:]}) + '\\n')
+print('fixture-123')
+"""
+        for tool in ("bd", "gh"):
+            executable = self.bin / tool
+            executable.write_text(recorder, encoding="utf-8")
+            executable.chmod(0o755)
+
+    def dispatch(self, sink, finding, agent="secret-scan"):
+        raw = self.root / "input.json"
+        raw.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(self.cli), "--target", "sandbox", "--agent", agent,
+             "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)],
+            cwd=self.factory, env=self.env, capture_output=True, text=True, check=True, timeout=30,
+        )
+
+    def surfaces(self, result):
+        found = {
+            "delta report": (self.factory / "findings" / "sandbox-latest.md").read_text(encoding="utf-8"),
+            "cli stdout": result.stdout,
+            "cli stderr": result.stderr,
+        }
+        if self.calls_file.exists():
+            found["tracker call"] = "".join(self.calls_file.read_text().splitlines())
+        return found
+
+    def credential_finding(self):
+        return {
+            "rule_id": "aws-access-key",
+            "path": "src/config.js", "line_number": 7,
+            "snippet": f"const k = '{CREDENTIAL}'",
+            "severity": "high",
+            "title": f"Hardcoded key {CREDENTIAL} committed",
+            "description": f"The credential {CREDENTIAL} is committed in source.",
+            "remediation": f"Remove {CREDENTIAL}.",
+        }
+
+    def assert_clean(self, sink, finding, needle, severity="high"):
+        self.calls_file.unlink(missing_ok=True)
+        finding["severity"] = severity
+        result = self.dispatch(sink, finding)
+        for name, text in self.surfaces(result).items():
+            with self.subTest(sink=sink, surface=name):
+                self.assertNotIn(needle, text, f"value reached {name}")
+
+    def test_credential_in_a_title_reaches_no_tracker_field(self):
+        """The beads title is built from the published view, not the raw finding."""
+        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+            self.assert_clean(sink, self.credential_finding(), CREDENTIAL, severity)
+
+    def test_bare_value_echoed_in_prose_is_absent_everywhere(self):
+        """A model quoting the matched value on its own — no assignment context to match on."""
+        finding = self.credential_finding()
+        finding["snippet"] = f"api_key = '{self.OPAQUE}'"
+        finding["raw_match"] = self.OPAQUE
+        finding["title"] = "Committed live key"
+        finding["description"] = f"I checked the file: {self.OPAQUE} is a live credential."
+        finding["remediation"] = f"Rotate {self.OPAQUE} now."
+
+        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+            self.assert_clean(sink, finding, self.OPAQUE, severity)
+
+    def test_pem_body_echoed_in_prose_is_absent_everywhere(self):
+        finding = self.credential_finding()
+        finding["rule_id"] = "private-key"
+        finding["snippet"] = "-----BEGIN RSA " + "PRIVATE KEY-----"
+        finding["description"] = f"The private key material starts {self.PEM_BODY} and continues."
+        finding["remediation"] = f"Revoke the key; the body is {self.PEM_BODY}."
+
+        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+            self.assert_clean(sink, finding, self.PEM_BODY, severity)
+
+    def test_unknown_shape_in_prose_is_absent_for_a_credential_finding(self):
+        """Default-deny: no pattern knows this value, and it still must not be published.
+
+        Every sink, not just the report: the beads log line ("Created bead for: <title>") was
+        one of the surfaces the review probes caught still carrying the value.
+        """
+        unknown = "zkq" + "7" * 24
+        finding = self.credential_finding()
+        finding["snippet"] = f"token: {unknown}"
+        finding["description"] = f"The token {unknown} is in the file."
+        finding["title"] = f"Token {unknown} found"
+
+        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+            self.assert_clean(sink, finding, unknown, severity)
+
+    def test_non_credential_finding_still_publishes_its_prose(self):
+        """Withholding is scoped to credential findings: docs findings keep their notes."""
+        finding = {
+            "rule_id": "doc-broken-link", "path": "README.md", "line_number": 12,
+            "snippet": "[guide](docs/gone.md)", "severity": "medium",
+            "title": "Broken link to a deleted guide",
+            "description": "The link target does not exist in the tree.",
+            "remediation": "Point it at docs/PLAN.md.",
+        }
+        self.dispatch("file", finding, agent="docs-drift")
+        report = self.surfaces(subprocess.CompletedProcess([], 0, "", ""))["delta report"]
+        self.assertIn("Broken link to a deleted guide", report)
+        self.assertIn("Point it at docs/PLAN.md.", report)
+
+    def test_matched_value_echoed_by_a_non_credential_agent_is_still_masked(self):
+        """Defence in depth: the literal the scanner matched is masked in prose too.
+
+        The value here matches no pattern at all, so only the literal mask derived from the
+        finding's own scanner output can catch it.
+        """
+        secret = self.UNKNOWN_SHAPE
+        finding = {
+            "rule_id": "doc-quote-drift", "path": "notes.md", "line_number": 3,
+            "snippet": f"api_key = '{secret}'",
+            "raw_match": secret,
+            "severity": "medium", "title": "Documentation quotes a key",
+            "description": f"The doc contains {secret} verbatim.",
+            "remediation": f"Remove {secret}.",
+        }
+        self.dispatch("file", finding, agent="docs-drift")
+        report = self.surfaces(subprocess.CompletedProcess([], 0, "", ""))["delta report"]
+        self.assertNotIn(secret, report)
+        # A rule id carrying no credential hint keeps its model-written prose, masked in place.
+        self.assertIn("Documentation quotes a key", report)
+        self.assertIn("[redacted:", report)
+
+
 class TestPublishedSurfaces(unittest.TestCase):
     """End-to-end: the real CLI, a sandbox factory, stub tracker binaries."""
 
@@ -168,8 +329,13 @@ print('fixture-123')
         calls = self.tracker_calls()
         self.assertEqual([c["tool"] for c in calls], ["bd"])
         args = calls[0]["args"]
-        self.assertEqual(args[args.index("--title") + 1], "[secret-scan] Hardcoded AWS access key")
-        self.assertIn("[redacted:secret-scan match", args[args.index("--description") + 1])
+        # A credential finding publishes scanner-controlled text only; the model's own title is
+        # withheld along with the value.
+        self.assertEqual(args[args.index("--title") + 1],
+                         "[secret-scan] aws-access-key match at src/config.js:12")
+        description = args[args.index("--description") + 1]
+        self.assertIn("withhold the matched value", description)
+        self.assertIn("[redacted:secret-scan match", description)
 
     def test_github_sink_masks_a_model_echoed_credential(self):
         """Medium severity so the public-disclosure guard lets it through to the sink."""
@@ -180,7 +346,10 @@ print('fixture-123')
         self.assertEqual([c["tool"] for c in calls], ["gh"])
         args = calls[0]["args"]
         self.assertIn("--body", args)                       # a body was actually sent
-        self.assertIn("[redacted:", args[args.index("--body") + 1])
+        body = args[args.index("--body") + 1]
+        self.assertIn("withhold the matched value", body)
+        self.assertEqual(args[args.index("--title") + 1],
+                         "[factory:docs-drift] aws-access-key match at src/config.js:12")
 
     def test_benign_finding_is_published_unchanged(self):
         """No regression: masking must not censor ordinary findings."""

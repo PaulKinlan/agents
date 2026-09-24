@@ -44,6 +44,31 @@ PATTERNS = [
     ("jwt-token", re.compile(r"ey[A-Za-z0-9_-]{10,}\.ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
 ]
 
+# A value does not only leak through the assignment the scanner matched: a triage model that has
+# been shown a candidate can quote the value on its own in prose ('the key is sk-…'), which the
+# assignment-shaped patterns above do not see. These match vendor prefixes anywhere in a string,
+# and PEM blocks whole rather than only their header.
+BARE_PATTERNS = [
+    ("openai-key", re.compile(r"sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}")),
+    ("stripe-key", re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}")),
+    ("google-api-key", re.compile(r"AIza[0-9A-Za-z_-]{35}")),
+    ("google-oauth", re.compile(r"ya29\.[0-9A-Za-z_-]{20,}")),
+    ("gitlab-pat", re.compile(r"glpat-[A-Za-z0-9_-]{20,}")),
+    ("npm-token", re.compile(r"npm_[A-Za-z0-9]{36}")),
+    ("pem-block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")),
+]
+
+ALL_PATTERNS = PATTERNS + BARE_PATTERNS
+
+# Derived text for a credential finding: scanner-controlled facts only. The triage model's own
+# words are never published for these, because they cannot be checked for an echo of a value
+# whose shape is unknown. The local run artifact keeps the model's notes for the responder.
+WITHHELD_NOTE = (
+    "Published summaries withhold the matched value and the triage notes for credential "
+    "findings; both remain in the local run artifact and findings store."
+)
+GENERIC_REMEDIATION = "Rotate the credential, remove it from source, and re-run the scan."
+
 # Fields whose text is copied from model output or scanner output and can therefore carry
 # a credential. Identity and bookkeeping fields are deliberately absent.
 PUBLISHED_TEXT_FIELDS = ("title", "description", "remediation", "snippet", "path")
@@ -57,8 +82,59 @@ def mask_text(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     masked = value
-    for name, pattern in PATTERNS:
+    for name, pattern in ALL_PATTERNS:
         masked = pattern.sub(f"[redacted:{name}]", masked)
+    return masked
+
+
+def matched_literals(finding: Dict[str, Any]) -> set:
+    """The values this finding's scanner actually matched.
+
+    A model shown a candidate can quote the value on its own in prose ('the key is zkq…'), which
+    no pattern sees because the assignment context is gone. So collect the value the scanner
+    handed us, and — when a credential pattern matched somewhere in the same text — every
+    token-shaped run in it, which is what a bare echo of that value looks like.
+    """
+    literals = set()
+    texts = []
+    for field in ("snippet", "raw_match"):
+        value = finding.get(field)
+        if isinstance(value, str) and value.strip():
+            texts.append(value)
+            if field == "raw_match":
+                literals.add(value.strip())
+
+    pattern_matched = False
+    for value in texts:
+        for _, pattern in ALL_PATTERNS:
+            for match in pattern.findall(value):
+                pattern_matched = True
+                matched = match if isinstance(match, str) else "".join(match)
+                literals.add(matched)
+                # The value inside an assignment is a separate literal from the assignment.
+                literals.update(re.findall(r"""['"]([^\s'"]{8,})['"]""", matched))
+
+    if pattern_matched:
+        for value in texts:
+            literals.update(re.findall(r"[A-Za-z0-9_\-/+=]{16,}", value))
+    else:
+        # No known pattern matched, so this came from a scanner whose rules we do not share
+        # (gitleaks). Its candidates hand us the value itself, so a short whitespace-free
+        # snippet is the literal to mask wherever it is echoed.
+        snippet = (finding.get("snippet") or "").strip()
+        if 8 <= len(snippet) <= 200 and not re.search(r"\s", snippet):
+            literals.add(snippet)
+
+    return {literal for literal in literals if isinstance(literal, str) and len(literal) >= 8}
+
+
+def mask_literals(value: Any, literals: set) -> Any:
+    if not isinstance(value, str):
+        return value
+    masked = value
+    for literal in sorted(literals, key=len, reverse=True):
+        if literal in masked:
+            masked = masked.replace(literal, "[redacted:value]")
     return masked
 
 
@@ -77,24 +153,31 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     """
     published = dict(finding)
     agent = str(finding.get("agent") or "")
+    location = f"{mask_text(finding.get('path'))}:{finding.get('line_number', '?')}"
 
     if is_credential_finding(finding):
-        # Default-deny: the whole value goes, not just recognised patterns.
-        published["snippet"] = (
-            f"[redacted:{agent or 'credential'} match at {mask_text(finding.get('path'))}:"
-            f"{finding.get('line_number', '?')}]"
+        # Default-deny on the value *and* on every free-text field around it: a credential
+        # finding publishes scanner-controlled facts, never model prose.
+        published["snippet"] = f"[redacted:{agent or 'credential'} match at {location}]"
+        published["title"] = f"{finding.get('rule_id') or 'credential'} match at {location}"
+        published["description"] = (
+            f"The deterministic scanner matched `{finding.get('rule_id')}` at `{location}`. "
+            f"{WITHHELD_NOTE}"
         )
+        published["remediation"] = GENERIC_REMEDIATION
+        literals = set()
     else:
-        published["snippet"] = mask_text(finding.get("snippet"))
-
-    for field in PUBLISHED_TEXT_FIELDS:
-        if field == "snippet" or field not in published:
-            continue
-        published[field] = mask_text(published[field])
+        literals = matched_literals(finding)
+        published["snippet"] = mask_literals(mask_text(finding.get("snippet")), literals)
+        for field in PUBLISHED_TEXT_FIELDS:
+            if field == "snippet" or field not in published:
+                continue
+            published[field] = mask_literals(mask_text(published[field]), literals)
 
     if "raw_match" in published:
         published["raw_match"] = (
-            "[redacted]" if is_credential_finding(finding) else mask_text(published["raw_match"])
+            "[redacted]" if is_credential_finding(finding)
+            else mask_literals(published["raw_match"], literals)
         )
 
     return published

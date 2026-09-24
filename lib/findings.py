@@ -21,10 +21,10 @@ from typing import Any, Dict, List, Optional, Tuple
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 
 try:  # imported as lib.findings (root on sys.path), or run as a script (lib/ on it)
-    from lib.redaction import mask_text, redact_finding
+    from lib.redaction import redact_finding
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
-    from lib.redaction import mask_text, redact_finding
+    from lib.redaction import redact_finding
 
 def normalize_text(text: str) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting."""
@@ -262,8 +262,11 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
         if "beads" in f.get("dispatched_sinks", []):
             continue
         if f["state"] in ("new", "regressed") and f["severity"] in ("critical", "high", "medium"):
-            title = f"[{f['agent']}] {f['title']}"
+            # Both title and description come from the published view. Building the title from
+            # the raw finding let a credential the scanner had recognised reach `bd --title`
+            # unchanged even though the body was masked (agents-tcd review).
             published = redact_finding(f)
+            title = f"[{f['agent']}] {published['title']}"
             desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
                     f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
             cmd = [
@@ -277,7 +280,7 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
                 res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
                 if res.returncode == 0:
                     f.setdefault("dispatched_sinks", []).append("beads")
-                    print(f"Created bead for: {mask_text(f['title'])}")
+                    print(f"Created bead for: {published['title']}")
                 else:
                     print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
             except Exception as e:
@@ -290,7 +293,8 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
         if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
             continue
         if f["severity"] in ("critical", "high"):
-            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {f['severity']} finding: {mask_text(f['title'])}")
+            # The guard's own log line is published too: derive it like the issue body.
+            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {f['severity']} finding: {redact_finding(f)['title']}")
             print(f"-> Please review in private store or file private security advisory.")
             continue
         if gh_bin and f["severity"] in ("medium", "low"):
