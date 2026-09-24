@@ -276,6 +276,11 @@ class TestScheduleGeneration(unittest.TestCase):
 
     def test_manager_commands_handle_failure_nonzero_and_preserve_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir) / "home"
+            fake_home.mkdir()
+            fake_xdg = fake_home / ".config"
+            fake_xdg.mkdir()
+
             fake_bin = Path(tmpdir) / "bin"
             fake_bin.mkdir()
 
@@ -299,6 +304,8 @@ class TestScheduleGeneration(unittest.TestCase):
             fake_launchctl.chmod(0o755)
 
             env = dict(os.environ)
+            env["HOME"] = str(fake_home)
+            env["XDG_CONFIG_HOME"] = str(fake_xdg)
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
             factory_bin = FACTORY_ROOT / "factory"
 
@@ -324,50 +331,48 @@ class TestScheduleGeneration(unittest.TestCase):
             self.assertNotEqual(res_trig.returncode, 0, "Trigger should exit non-zero when systemctl fails")
 
             # 3. Systemd Uninstall failure exits non-zero AND PRESERVES unit files
-            user_systemd = Path.home() / ".config" / "systemd" / "user"
+            user_systemd = fake_xdg / "systemd" / "user"
             user_systemd.mkdir(parents=True, exist_ok=True)
             test_svc = user_systemd / "com.softwarefactory.voicebox.secret-scan.service"
             test_tmr = user_systemd / "com.softwarefactory.voicebox.secret-scan.timer"
             test_svc.write_text("[Unit]\nDescription=Test\n", encoding="utf-8")
             test_tmr.write_text("[Unit]\nDescription=Test\n", encoding="utf-8")
 
-            try:
-                res_uninst = subprocess.run(
-                    [str(factory_bin), "schedule", "--uninstall", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    check=False
-                )
-                self.assertNotEqual(res_uninst.returncode, 0, "Uninstall should exit non-zero when disable fails")
-                # Assert files were NOT destructively deleted
-                self.assertTrue(test_svc.exists(), "Service file must be preserved on disable failure")
-                self.assertTrue(test_tmr.exists(), "Timer file must be preserved on disable failure")
-            finally:
-                test_svc.unlink(missing_ok=True)
-                test_tmr.unlink(missing_ok=True)
+            res_uninst = subprocess.run(
+                [str(factory_bin), "schedule", "--uninstall", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res_uninst.returncode, 0, "Uninstall should exit non-zero when disable fails")
+            # Assert files were NOT destructively deleted
+            self.assertTrue(test_svc.exists(), "Service file must be preserved on disable failure")
+            self.assertTrue(test_tmr.exists(), "Timer file must be preserved on disable failure")
 
             # 4. Launchd Uninstall failure exits non-zero AND PRESERVES plist
-            user_launch = Path.home() / "Library" / "LaunchAgents"
+            user_launch = fake_home / "Library" / "LaunchAgents"
             user_launch.mkdir(parents=True, exist_ok=True)
             test_plist = user_launch / "com.softwarefactory.voicebox.secret-scan.plist"
             test_plist.write_text("<plist></plist>", encoding="utf-8")
 
-            try:
-                res_launch_uninst = subprocess.run(
-                    [str(factory_bin), "schedule", "--uninstall", "--target", "voicebox", "--agent", "secret-scan", "--platform", "darwin"],
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    check=False
-                )
-                self.assertNotEqual(res_launch_uninst.returncode, 0, "Uninstall should exit non-zero when launchctl fails")
-                self.assertTrue(test_plist.exists(), "Plist must be preserved on unload failure")
-            finally:
-                test_plist.unlink(missing_ok=True)
+            res_launch_uninst = subprocess.run(
+                [str(factory_bin), "schedule", "--uninstall", "--target", "voicebox", "--agent", "secret-scan", "--platform", "darwin"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res_launch_uninst.returncode, 0, "Uninstall should exit non-zero when launchctl fails")
+            self.assertTrue(test_plist.exists(), "Plist must be preserved on unload failure")
 
     def test_get_active_systemd_timers_inactive_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir) / "home"
+            fake_home.mkdir()
+            fake_xdg = fake_home / ".config"
+            fake_xdg.mkdir()
+
             fake_bin = Path(tmpdir) / "bin"
             fake_bin.mkdir()
 
@@ -390,6 +395,8 @@ class TestScheduleGeneration(unittest.TestCase):
             fake_systemctl.chmod(0o755)
 
             env = dict(os.environ)
+            env["HOME"] = str(fake_home)
+            env["XDG_CONFIG_HOME"] = str(fake_xdg)
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
             factory_bin = FACTORY_ROOT / "factory"
 

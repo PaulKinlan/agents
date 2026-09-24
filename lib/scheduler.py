@@ -17,7 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 SCHEDULES_DIR = FACTORY_ROOT / "schedules"
-LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+def get_launch_agents_dir() -> Path:
+    """Return standard user launchd agents directory (~/Library/LaunchAgents)."""
+    return Path.home() / "Library" / "LaunchAgents"
+
+
+LAUNCH_AGENTS_DIR = get_launch_agents_dir()
 
 
 def get_systemd_user_dir() -> Path:
@@ -460,9 +465,10 @@ def list_schedules(platform: Optional[str] = None):
         print(f"{'TARGET':<22} {'AGENT':<18} {'CADENCE':<16} {'INSTALLED':<11} {'LOADED':<10} {'PID/STATUS'}")
         print("-" * 85)
 
+        launch_dir = get_launch_agents_dir()
         for item in candidates:
             label = item["label"]
-            dest_plist = LAUNCH_AGENTS_DIR / f"{label}.plist"
+            dest_plist = launch_dir / f"{label}.plist"
             installed = "yes" if dest_plist.exists() else "no"
             is_loaded = "yes" if label in loaded else "no"
             status = "-"
@@ -551,7 +557,7 @@ def install_schedule(
 
     if plat == "darwin":
         plist_path = generate_plist(target, agent, candidate["cadence"])
-        target_dir = dest_dir or LAUNCH_AGENTS_DIR
+        target_dir = dest_dir or get_launch_agents_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
         dest_path = target_dir / f"{label}.plist"
         shutil.copyfile(plist_path, dest_path)
@@ -613,7 +619,7 @@ def uninstall_schedule(
     label = get_label(target, agent)
 
     if plat == "darwin":
-        target_dir = dest_dir or LAUNCH_AGENTS_DIR
+        target_dir = dest_dir or get_launch_agents_dir()
         dest_path = target_dir / f"{label}.plist"
         if not dest_path.exists():
             print(f"Schedule not found in LaunchAgents: {label}")
