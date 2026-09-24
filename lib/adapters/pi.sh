@@ -15,6 +15,12 @@ OUTPUT_FILE="$RUN_DIR/model_output.txt"
 
 echo "[pi adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
+# Auth comes from pi's own configuration (~/.pi) — a signed-in developer session needs
+# no provider API key in the environment (verified: this adapter completes with
+# ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY unset, and with invalid values
+# set, so nothing needs scrubbing here).
+echo "[pi adapter] Auth: pi session configuration"
+
 cd "$TARGET_DIR"
 
 # Run pi non-interactively with the specified skill loaded
