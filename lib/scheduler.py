@@ -590,7 +590,14 @@ def install_schedule(
         shutil.copyfile(timer_path, dest_timer)
 
         if dest_dir is None and shutil.which("systemctl"):
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+            res_reload = subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+            if res_reload.returncode != 0:
+                err_msg = res_reload.stderr.strip() or res_reload.stdout.strip()
+                print(f"✗ Failed to reload systemd daemon via systemctl: {err_msg}")
+                dest_service.unlink(missing_ok=True)
+                dest_timer.unlink(missing_ok=True)
+                return False
+
             res = subprocess.run(["systemctl", "--user", "enable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
             if res.returncode == 0:
                 print(f"✓ Installed and enabled systemd schedule: {label}.timer")
@@ -601,6 +608,8 @@ def install_schedule(
             else:
                 err_msg = res.stderr.strip() or res.stdout.strip()
                 print(f"✗ Failed to enable {label}.timer via systemctl: {err_msg}")
+                dest_service.unlink(missing_ok=True)
+                dest_timer.unlink(missing_ok=True)
                 return False
         else:
             print(f"✓ Installed systemd units: {dest_service} and {dest_timer}")
@@ -663,7 +672,11 @@ def uninstall_schedule(
             dest_service.unlink()
 
         if dest_dir is None and shutil.which("systemctl"):
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+            res_reload = subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+            if res_reload.returncode != 0:
+                err_msg = res_reload.stderr.strip() or res_reload.stdout.strip()
+                print(f"✗ Failed to reload systemd daemon via systemctl: {err_msg}")
+                return False
 
         print(f"✓ Uninstalled systemd schedule: {label}")
         return True

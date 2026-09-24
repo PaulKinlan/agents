@@ -318,7 +318,7 @@ class TestScheduleGeneration(unittest.TestCase):
                 check=False
             )
             self.assertNotEqual(res_inst.returncode, 0, "Install should exit non-zero when systemctl fails")
-            self.assertIn("Failed to enable", res_inst.stdout + res_inst.stderr)
+            self.assertIn("synthetic scheduler failure", res_inst.stdout + res_inst.stderr)
 
             # 2. Trigger failure exits non-zero
             res_trig = subprocess.run(
@@ -415,6 +415,69 @@ class TestScheduleGeneration(unittest.TestCase):
                     # e.g. ['voicebox', 'secret-scan', 'at', '07:30', 'no', 'no', '-']
                     self.assertEqual(parts[-2], "no", f"Inactive timer row must not be marked active: {line}")
                     self.assertEqual(parts[-1], "-", f"Inactive timer status should be '-': {line}")
+
+    def test_manager_commands_selective_daemon_reload_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir) / "home"
+            fake_home.mkdir()
+            fake_xdg = fake_home / ".config"
+            fake_xdg.mkdir()
+
+            fake_bin = Path(tmpdir) / "bin"
+            fake_bin.mkdir()
+
+            # Mock systemctl where ONLY daemon-reload fails (exit 7), others succeed
+            fake_systemctl = fake_bin / "systemctl"
+            fake_systemctl.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--version\" ]; then echo 'systemd 261'; exit 0; fi\n"
+                "if [ \"$1\" = \"--user\" ] && [ \"$2\" = \"daemon-reload\" ]; then\n"
+                "  echo 'selective reload failure' >&2\n"
+                "  exit 7\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8"
+            )
+            fake_systemctl.chmod(0o755)
+
+            env = dict(os.environ)
+            env["HOME"] = str(fake_home)
+            env["XDG_CONFIG_HOME"] = str(fake_xdg)
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            factory_bin = FACTORY_ROOT / "factory"
+
+            # 1. Install must exit non-zero when daemon-reload fails
+            res_inst = subprocess.run(
+                [str(factory_bin), "schedule", "--install", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res_inst.returncode, 0, "Install must exit non-zero when daemon-reload fails")
+            self.assertIn("Failed to reload systemd daemon via systemctl", res_inst.stdout + res_inst.stderr)
+
+            # Destination files must be cleaned up on failed install
+            user_systemd = fake_xdg / "systemd" / "user"
+            dest_svc = user_systemd / "com.softwarefactory.voicebox.secret-scan.service"
+            dest_tmr = user_systemd / "com.softwarefactory.voicebox.secret-scan.timer"
+            self.assertFalse(dest_svc.exists(), "Service file should be removed on failed install reload")
+            self.assertFalse(dest_tmr.exists(), "Timer file should be removed on failed install reload")
+
+            # 2. Uninstall must exit non-zero when daemon-reload fails
+            user_systemd.mkdir(parents=True, exist_ok=True)
+            dest_svc.write_text("[Unit]\nDescription=Test\n", encoding="utf-8")
+            dest_tmr.write_text("[Unit]\nDescription=Test\n", encoding="utf-8")
+
+            res_uninst = subprocess.run(
+                [str(factory_bin), "schedule", "--uninstall", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res_uninst.returncode, 0, "Uninstall must exit non-zero when daemon-reload fails")
+            self.assertIn("Failed to reload systemd daemon via systemctl", res_uninst.stdout + res_uninst.stderr)
 
 
 if __name__ == "__main__":
