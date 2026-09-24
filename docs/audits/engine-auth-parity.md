@@ -40,9 +40,18 @@ $ ANTHROPIC_API_KEY=sk-ant-invalid-000 claude -p 'Reply with exactly: ok'
 (no output; killed after 120 s)
 ```
 
-`claude.sh` now unsets those two variables **only when a session credential exists**
+`claude.sh` unsets those variables **only when a session credential exists**
 (`~/.claude/.credentials.json`), so the CI plane — API key, no login on the runner — is
 unaffected. Consistent with PLAN §"Local plane — session auth / CI plane — API key".
+
+> **Corrected 2026-09-24 (`agents-e3u`):** the first fix removed two variables and this
+document described the result as "session auth takes precedence over stale keys". That claim
+was wider than the code — the adapter's own log line said `Auth: developer session` while a
+run diverted by `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX`
+hung. The adapter now removes the nine known precedence-affecting variables it can be handed,
+and reports which ones it scrubbed. The precise invariant, and the only one claimed here, is:
+**when a session credential exists the child process does not receive any of those
+variables.**
 
 **F2 — the auth pre-check was a model call (Medium, fixed).**
 `claude.sh` ran `claude -p "ping"` as a health check: a full inference per run, and it matched a
@@ -105,11 +114,52 @@ Error: 'agentapi' not found on PATH`, dispatcher exit 1.
 $ python3 -m unittest discover -s tests -v     # 7 tests, OK
 ```
 
+## Does an override actually divert a signed-in run?
+
+`agents-e3u` noted this was asserted from documented precedence rather than measured. Measured
+now, against the real `claude` binary (2.1.265), with the ambient API key stripped so every probe
+starts from the same signed-in session:
+
+| probe | environment | outcome | reads as |
+|---|---|---|---|
+| A | session only | `ok`, exit 0, ≈15 s | the baseline answers quickly |
+| B | `ANTHROPIC_BASE_URL` → dead endpoint | no output, killed at 120 s | the endpoint was honoured |
+| C | `CLAUDE_CODE_USE_BEDROCK=1` | no output, killed at 45 s | the run left the session path |
+| D | `CLAUDE_CODE_USE_VERTEX=1` | `API Error: Could not load the default credentials` (Google), exit 1 | diverted to Vertex and failed on missing GCP credentials |
+
+Probes B and C hang rather than fail, so the evidence is the *differential* against A, not the
+absence of an error. End to end, with a session and five overrides exported:
+
+```
+BEFORE (main):  Auth: developer session (...)      -> killed at 90 s, no output
+AFTER  (this):  Scrubbed ambient auth overrides: ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+                CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX AWS_BEARER_TOKEN_BEDROCK
+                Auth: developer session (...)      -> exit 0, correct JSON
+```
+
+That is the honest statement of what was wrong: the old adapter logged `Auth: developer session`
+while the run used a different credential path.
+
+The same class of variable was confirmed present in the installed binary for
+`ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` and `CLAUDE_CODE_USE_GATEWAY`; those are
+scrubbed too, but only B, C and D were exercised end to end.
+
 ## Residual risk
 
 - The claude fix keys off `~/.claude/.credentials.json`; if a future Claude Code release moves or
   renames that file, the adapter stops preferring the session (it does not break — the key path
   still works, and the no-credential error message tells the operator to run `claude login`).
+- **Trade-off, deliberate:** a developer who needs `ANTHROPIC_BASE_URL`, custom headers or a
+gateway *and* has a login on disk will find those variables removed during a factory run, at
+which point the run takes the direct session path. The adapter prints what it scrubbed so this
+is visible rather than mysterious. Setting up the session-less (CI) environment is the
+escape hatch; there is deliberately no bypass flag, because a containment switch people flip is
+not a containment switch.
+- The override list is a blocklist. It is complete for the variables the installed CLI reads
+today (`strings` over 2.1.265), not for every variable a future release might add; a release
+that introduces another auth-override variable silently reopens this. An allowlisted child
+environment would close that class — suggested in `agents-e3u`, not done here because dropping
+the wrong variable breaks network egress for exactly the users hardest to debug.
 - `antigravity` remains unverifiable end-to-end on this machine until `agentapi` is installed and
   signed in. Its parity claim is therefore **unverified**, not passing. F4 is the open question.
 - Independent review by a different model family is still outstanding; the findings and the

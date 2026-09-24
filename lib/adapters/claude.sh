@@ -22,16 +22,43 @@ if [ -z "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}" ] && [ ! -f "$CREDENTI
   exit 1
 fi
 
-# Prefer the signed-in session over an ambient API key. Claude Code gives
-# ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN precedence over the claude.ai login, so a
-# stale key exported in the caller's shell hijacks the run (verified: it hangs rather
-# than failing) even though a valid session exists. Only scrub when a session
-# credential exists, so the CI plane — API key, no login — is unaffected.
+# Prefer the signed-in session over any ambient override. Claude Code resolves auth and the
+# endpoint from a precedence list, so a variable exported in the caller's shell decides
+# whether the run uses the developer's session (verified: a stale ANTHROPIC_API_KEY makes it
+# hang rather than fail). Removing only the two key variables left four more of the same
+# class reaching the child — four reported by agents-e3u and three more found by reading the
+# env-var names out of the installed CLI (2.1.265), not from documentation.
+SESSION_OVERRIDE_VARS=(
+  ANTHROPIC_API_KEY
+  ANTHROPIC_AUTH_TOKEN
+  ANTHROPIC_BASE_URL
+  ANTHROPIC_BEDROCK_BASE_URL
+  ANTHROPIC_CUSTOM_HEADERS
+  CLAUDE_CODE_USE_BEDROCK
+  CLAUDE_CODE_USE_VERTEX
+  CLAUDE_CODE_USE_GATEWAY
+  AWS_BEARER_TOKEN_BEDROCK
+)
+
+# Only scrub when a session credential exists, so the CI plane — API key or Bedrock, no login
+# — is unaffected. CLAUDE_CODE_OAUTH_TOKEN is deliberately not in the list: it *is* session
+# auth, just supplied through the environment.
 if [ -f "$CREDENTIALS_FILE" ]; then
-  unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+  scrubbed=()
+  for var in "${SESSION_OVERRIDE_VARS[@]}"; do
+    # printenv rather than indirect expansion: only *exported* variables reach the child,
+    # and it behaves the same on bash 3.2 (macOS) as on bash 5.
+    if printenv "$var" >/dev/null 2>&1; then
+      scrubbed+=("$var")
+      unset "$var"
+    fi
+  done
   echo "[claude adapter] Auth: developer session ($CREDENTIALS_FILE)"
+  if [ ${#scrubbed[@]} -gt 0 ]; then
+    echo "[claude adapter] Scrubbed ambient auth overrides: ${scrubbed[*]}"
+  fi
 else
-  echo "[claude adapter] Auth: ANTHROPIC_API_KEY from environment"
+  echo "[claude adapter] Auth: environment, no session credential at $CREDENTIALS_FILE"
 fi
 
 echo "[claude adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
