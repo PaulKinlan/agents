@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Software Factory — Schedulable Fleet of SDLC Agents</title>
+  <meta name="description" content="A schedulable fleet of software-development-lifecycle agents that run locally under your developer session auth and in CI on GitHub Actions.">
+  <meta name="theme-color" content="#0b1020">
+  <link rel="canonical" href="https://paulkinlan.github.io/agents/">
+  <link rel="icon" href="/favicon.png">
+  <link rel="stylesheet" href="css/projects.css">
+  <link rel="stylesheet" href="css/product.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="identity" href="/">Paul Kinlan</a>
+    <nav aria-label="Elsewhere">
+      <a href="/">All Projects</a>
+      <a href="/voicebox/">Voicebox</a>
+      <a href="/cap/">Chrome Agent Platform</a>
+      <a href="https://github.com/PaulKinlan/agents">GitHub Repo</a>
+    </nav>
+  </header>
+
+  <main id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="/">Projects</a> &rsaquo; <span>The Software Factory</span>
+    </nav>
+
+    <section class="product-hero">
+      <div class="product-badge-group">
+        <span class="badge">Local-First</span>
+        <span class="badge badge--blue">Zero Telemetry</span>
+        <span class="badge badge--purple">Multi-Engine Auth</span>
+        <span class="badge">CI Schedulable</span>
+      </div>
+      <h1 class="product-title">The Software <span>Factory</span></h1>
+      <p class="product-tagline">
+        A schedulable fleet of software-development-lifecycle (SDLC) agents that run <strong>locally</strong> under your existing developer session authentication (<code>pi</code>, <code>claude</code>, <code>antigravity</code>) and <strong>in CI</strong> on GitHub Actions.
+      </p>
+      <div class="cta-group">
+        <a href="#quickstart" class="btn btn-primary">Get Started</a>
+        <a href="https://github.com/PaulKinlan/agents" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
+        <a href="#architecture" class="btn btn-secondary">Architecture</a>
+      </div>
+    </section>
+
+    <section class="content-section">
+      <h2>Deterministic Scanners Enumerate.<br>AI Models Triage, Synthesize, and Judge.</h2>
+      <p class="section-intro">
+        Most agent systems either burn expensive token budgets reading thousands of irrelevant files, or run brittle heuristic scripts that produce noisy false positives. The Software Factory combines fast deterministic discovery with targeted AI verification.
+      </p>
+
+      <div class="features-grid">
+        <article class="feature-card">
+          <h3>⚡ Deterministic-First</h3>
+          <p>
+            Native tools (<code>gitleaks</code>, <code>npm audit</code>, AST parsers, custom regex harnesses) extract candidate locations in milliseconds. AI models never do work a static tool does faster, cheaper, and reliably.
+          </p>
+        </article>
+
+        <article class="feature-card">
+          <h3>🔑 Reuses Existing Session Auth</h3>
+          <p>
+            No new third-party API accounts or subscriptions needed. Runs locally using your active CLI session tokens (<code>pi</code>, <code>claude</code>, <code>antigravity</code>) and runs headlessly in CI with GitHub Secrets.
+          </p>
+        </article>
+
+        <article class="feature-card">
+          <h3>🛡️ Disprove-Only Verification</h3>
+          <p>
+            Discovery and verification operate in separate sessions. Discovery optimizes for recall; verification runs in a fresh, isolated session prompted strictly to <em>disprove</em> the finding before filing.
+          </p>
+        </article>
+
+        <article class="feature-card">
+          <h3>🎯 Stable Fingerprinting</h3>
+          <p>
+            Findings are keyed by <code>sha256(agent:rule:path:snippet)</code>, deliberately omitting line numbers. Refactoring code around a finding preserves its identity and avoids duplicate alerts.
+          </p>
+        </article>
+
+        <article class="feature-card">
+          <h3>📦 Pluggable Issue Sinks</h3>
+          <p>
+            Verified findings route directly to whatever issue tracking system your repository uses: local <strong>Beads</strong> (<code>.beads</code>), public <strong>GitHub Issues</strong>, or private markdown delta reports.
+          </p>
+        </article>
+
+        <article class="feature-card">
+          <h3>🔒 Public Disclosure Guard</h3>
+          <p>
+            High and critical security vulnerabilities are never posted directly to public issue trackers. They are safely isolated into encrypted local files or draft security advisories.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section id="architecture" class="content-section">
+      <h2>Architecture & Pipeline</h2>
+      <p class="section-intro">
+        Every agent run follows a clean, three-phase lifecycle executed by the factory dispatcher:
+      </p>
+
+      <div class="arch-diagram-wrapper">
+        <div class="pipeline-flow">
+          <div class="pipeline-row">
+            <span class="pipeline-label">1. Trigger</span>
+            <div class="pipeline-desc">
+              Manual CLI invocation, scheduled daemon (<code>launchd</code> / <code>cron</code>), or GitHub Actions workflow dispatch.
+            </div>
+          </div>
+          <div class="pipeline-row">
+            <span class="pipeline-label">2. Enumerate</span>
+            <div class="pipeline-desc">
+              Deterministic pre-pass scans target repository and inspects <code>THREAT_MODEL.md</code> to produce structured candidate JSON.
+              <small>Tools: gitleaks, npm audit, custom Python scanners</small>
+            </div>
+          </div>
+          <div class="pipeline-row">
+            <span class="pipeline-label">3. Triage & Judge</span>
+            <div class="pipeline-desc">
+              AI engine adapter (<code>pi</code>, <code>claude</code>, <code>antigravity</code>) executes the agent's <code>SKILL.md</code> against candidate findings.
+              <small>Fresh-context verification prompt tests for false positives</small>
+            </div>
+          </div>
+          <div class="pipeline-row">
+            <span class="pipeline-label">4. Dedupe</span>
+            <div class="pipeline-desc">
+              Findings store computes stable SHA-256 fingerprints, updates lifecycle states (OPEN, IN_PROGRESS, RESOLVED), and ignores known noise.
+            </div>
+          </div>
+          <div class="pipeline-row">
+            <span class="pipeline-label">5. Sink</span>
+            <div class="pipeline-desc">
+              Output lands in local Beads issue database (<code>bd</code>), GitHub Issues via <code>gh</code> CLI, or local markdown reports.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="content-section">
+      <h2>Available Agents & Lines</h2>
+      <p class="section-intro">
+        The factory includes pre-configured agents across security, code health, performance, and documentation:
+      </p>
+
+      <div class="docs-grid">
+        <div class="doc-card">
+          <h4>Security & Vulnerabilities</h4>
+          <p><code>secret-scan</code>, <code>threat-model</code>, <code>vuln-discovery</code>, <code>vuln-triage</code>, <code>vuln-verify</code>, <code>deps-supply-chain</code></p>
+        </div>
+        <div class="doc-card">
+          <h4>Performance & Memory</h4>
+          <p><code>bundle-size</code>, <code>memory-profile</code>, <code>perf-hillclimb</code>, <code>perf-review</code>, <code>resilience</code></p>
+        </div>
+        <div class="doc-card">
+          <h4>Quality & Engineering</h4>
+          <p><code>test-gap</code>, <code>pr-fixer</code>, <code>qa-station</code>, <code>issue-triage</code>, <code>modern-web</code>, <code>ui-ux-audit</code></p>
+        </div>
+        <div class="doc-card">
+          <h4>Documentation & Releases</h4>
+          <p><code>docs-drift</code>, <code>docs-write</code>, <code>release-notes</code>, <code>log-check</code></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="quickstart" class="content-section">
+      <h2>Quickstart & Setup</h2>
+      <p class="section-intro">
+        Set up the factory on macOS or Linux in less than two minutes.
+      </p>
+
+      <div class="steps-list">
+        <div class="step-item">
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <h3>Clone and install dependencies</h3>
+            <p>Ensure Python 3.9+ and at least one coding CLI (<code>pi</code>, <code>claude</code>, or <code>antigravity</code>) is available in your PATH.</p>
+            <pre><code>git clone https://github.com/PaulKinlan/agents.git
+cd agents
+./install.sh</code></pre>
+          </div>
+        </div>
+
+        <div class="step-item">
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <h3>List available agents</h3>
+            <p>Inspect all available agents, their required tools, and active configuration:</p>
+            <pre><code>./factory list</code></pre>
+          </div>
+        </div>
+
+        <div class="step-item">
+          <div class="step-number">3</div>
+          <div class="step-body">
+            <h3>Run an agent against a target</h3>
+            <p>Run against any registered target in <code>targets/</code> or against any local directory:</p>
+            <pre><code># Run secret scan on a project
+./factory run secret-scan --target /path/to/my-web-app
+
+# Run threat modeling using the pi engine
+./factory run threat-model --target /path/to/my-web-app --engine pi
+
+# Output findings to a local markdown report
+./factory run test-gap --target /path/to/my-web-app --sink file</code></pre>
+          </div>
+        </div>
+
+        <div class="step-item">
+          <div class="step-number">4</div>
+          <div class="step-body">
+            <h3>Schedule recurring fleet sweeps</h3>
+            <p>Install scheduled jobs with launchd (macOS) or systemd/cron (Linux) to keep repos continually audited:</p>
+            <pre><code># Generate schedule definitions
+./factory schedule --daily
+./factory schedule --install</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>&copy; 2026 Paul Kinlan &middot; <a href="/">All Projects</a> &middot; <a href="https://github.com/PaulKinlan/agents">GitHub Repository</a></p>
+  </footer>
+</body>
+</html>
