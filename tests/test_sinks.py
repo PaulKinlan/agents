@@ -59,6 +59,9 @@ class TestSinks(unittest.TestCase):
         (self.factory / "lib").mkdir(parents=True)
         self.cli = self.factory / "lib" / "findings.py"
         shutil.copyfile(ROOT / "lib" / "findings.py", self.cli)
+        # findings.py renders every published finding through lib.redaction, so the sandbox
+        # needs that module too (the import falls back to the package root on sys.path).
+        shutil.copyfile(ROOT / "lib" / "redaction.py", self.factory / "lib" / "redaction.py")
         self.target = self.root / "target with spaces"
         (self.target / ".beads").mkdir(parents=True)
         self.bin = self.root / "bin"
