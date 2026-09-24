@@ -560,6 +560,8 @@ def install_schedule(
         target_dir = dest_dir or get_launch_agents_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
         dest_path = target_dir / f"{label}.plist"
+
+        plist_orig = dest_path.read_bytes() if dest_path.exists() else None
         shutil.copyfile(plist_path, dest_path)
 
         if dest_dir is None and shutil.which("launchctl"):
@@ -573,6 +575,11 @@ def install_schedule(
             else:
                 err_msg = res.stderr.strip() or res.stdout.strip()
                 print(f"✗ Failed to load into launchctl: {err_msg}")
+                if plist_orig is not None:
+                    dest_path.write_bytes(plist_orig)
+                    subprocess.run(["launchctl", "load", "-w", str(dest_path)], capture_output=True, check=False)
+                else:
+                    dest_path.unlink(missing_ok=True)
                 return False
         else:
             print(f"✓ Installed launchd plist: {dest_path}")
@@ -586,6 +593,23 @@ def install_schedule(
         dest_service = target_dir / f"{label}.service"
         dest_timer = target_dir / f"{label}.timer"
 
+        service_orig = dest_service.read_bytes() if dest_service.exists() else None
+        timer_orig = dest_timer.read_bytes() if dest_timer.exists() else None
+
+        def _rollback():
+            if service_orig is not None:
+                dest_service.write_bytes(service_orig)
+            else:
+                dest_service.unlink(missing_ok=True)
+
+            if timer_orig is not None:
+                dest_timer.write_bytes(timer_orig)
+            else:
+                dest_timer.unlink(missing_ok=True)
+
+            if dest_dir is None and shutil.which("systemctl") and (service_orig is not None or timer_orig is not None):
+                subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+
         shutil.copyfile(service_path, dest_service)
         shutil.copyfile(timer_path, dest_timer)
 
@@ -594,8 +618,7 @@ def install_schedule(
             if res_reload.returncode != 0:
                 err_msg = res_reload.stderr.strip() or res_reload.stdout.strip()
                 print(f"✗ Failed to reload systemd daemon via systemctl: {err_msg}")
-                dest_service.unlink(missing_ok=True)
-                dest_timer.unlink(missing_ok=True)
+                _rollback()
                 return False
 
             res = subprocess.run(["systemctl", "--user", "enable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
@@ -608,8 +631,7 @@ def install_schedule(
             else:
                 err_msg = res.stderr.strip() or res.stdout.strip()
                 print(f"✗ Failed to enable {label}.timer via systemctl: {err_msg}")
-                dest_service.unlink(missing_ok=True)
-                dest_timer.unlink(missing_ok=True)
+                _rollback()
                 return False
         else:
             print(f"✓ Installed systemd units: {dest_service} and {dest_timer}")

@@ -479,6 +479,126 @@ class TestScheduleGeneration(unittest.TestCase):
             self.assertNotEqual(res_uninst.returncode, 0, "Uninstall must exit non-zero when daemon-reload fails")
             self.assertIn("Failed to reload systemd daemon via systemctl", res_uninst.stdout + res_uninst.stderr)
 
+    def test_install_rollback_preserves_existing_and_mixed_definitions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir) / "home"
+            fake_home.mkdir()
+            fake_xdg = fake_home / ".config"
+            fake_xdg.mkdir()
+            fake_bin = Path(tmpdir) / "bin"
+            fake_bin.mkdir()
+
+            # Mock systemctl where command can fail conditionally based on env FAIL_CMD
+            fake_systemctl = fake_bin / "systemctl"
+            fake_systemctl.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--version\" ]; then echo 'systemd 261'; exit 0; fi\n"
+                "if [ -n \"$FAIL_CMD\" ]; then\n"
+                "  for arg in \"$@\"; do\n"
+                "    if [ \"$arg\" = \"$FAIL_CMD\" ]; then\n"
+                "      echo \"synthetic $FAIL_CMD failure\" >&2\n"
+                "      exit 7\n"
+                "    fi\n"
+                "  done\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8"
+            )
+            fake_systemctl.chmod(0o755)
+
+            fake_launchctl = fake_bin / "launchctl"
+            fake_launchctl.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"load\" ]; then echo 'synthetic load failure' >&2; exit 7; fi\n"
+                "exit 0\n",
+                encoding="utf-8"
+            )
+            fake_launchctl.chmod(0o755)
+
+            env = dict(os.environ)
+            env["HOME"] = str(fake_home)
+            env["XDG_CONFIG_HOME"] = str(fake_xdg)
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            factory_bin = FACTORY_ROOT / "factory"
+
+            user_systemd = fake_xdg / "systemd" / "user"
+            user_systemd.mkdir(parents=True, exist_ok=True)
+            dest_svc = user_systemd / "com.softwarefactory.voicebox.secret-scan.service"
+            dest_tmr = user_systemd / "com.softwarefactory.voicebox.secret-scan.timer"
+
+            # Case 1: Both service and timer pre-exist; daemon-reload fails
+            dest_svc.write_text("PRE_EXISTING_SERVICE_CONTENT", encoding="utf-8")
+            dest_tmr.write_text("PRE_EXISTING_TIMER_CONTENT", encoding="utf-8")
+            env["FAIL_CMD"] = "daemon-reload"
+
+            res1 = subprocess.run(
+                [str(factory_bin), "schedule", "--install", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res1.returncode, 0)
+            self.assertEqual(dest_svc.read_text(encoding="utf-8"), "PRE_EXISTING_SERVICE_CONTENT")
+            self.assertEqual(dest_tmr.read_text(encoding="utf-8"), "PRE_EXISTING_TIMER_CONTENT")
+
+            # Case 2: Both service and timer pre-exist; enable fails
+            env["FAIL_CMD"] = "enable"
+            res2 = subprocess.run(
+                [str(factory_bin), "schedule", "--install", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res2.returncode, 0)
+            self.assertEqual(dest_svc.read_text(encoding="utf-8"), "PRE_EXISTING_SERVICE_CONTENT")
+            self.assertEqual(dest_tmr.read_text(encoding="utf-8"), "PRE_EXISTING_TIMER_CONTENT")
+
+            # Case 3: Mixed presence - only service pre-exists; enable fails
+            dest_tmr.unlink()
+            res3 = subprocess.run(
+                [str(factory_bin), "schedule", "--install", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res3.returncode, 0)
+            self.assertEqual(dest_svc.read_text(encoding="utf-8"), "PRE_EXISTING_SERVICE_CONTENT")
+            self.assertFalse(dest_tmr.exists(), "Newly created timer must be unlinked on failure")
+
+            # Case 4: Mixed presence - only timer pre-exists; daemon-reload fails
+            dest_svc.unlink()
+            dest_tmr.write_text("PRE_EXISTING_TIMER_ONLY", encoding="utf-8")
+            env["FAIL_CMD"] = "daemon-reload"
+            res4 = subprocess.run(
+                [str(factory_bin), "schedule", "--install", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res4.returncode, 0)
+            self.assertEqual(dest_tmr.read_text(encoding="utf-8"), "PRE_EXISTING_TIMER_ONLY")
+            self.assertFalse(dest_svc.exists(), "Newly created service must be unlinked on failure")
+
+            # Case 5: Launchd pre-existing plist preserved on load failure
+            user_launch = fake_home / "Library" / "LaunchAgents"
+            user_launch.mkdir(parents=True, exist_ok=True)
+            dest_plist = user_launch / "com.softwarefactory.voicebox.secret-scan.plist"
+            dest_plist.write_text("PRE_EXISTING_PLIST_CONTENT", encoding="utf-8")
+
+            res_launch = subprocess.run(
+                [str(factory_bin), "schedule", "--install", "--target", "voicebox", "--agent", "secret-scan", "--platform", "darwin"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res_launch.returncode, 0)
+            self.assertEqual(dest_plist.read_text(encoding="utf-8"), "PRE_EXISTING_PLIST_CONTENT")
+
 
 if __name__ == "__main__":
     unittest.main()
