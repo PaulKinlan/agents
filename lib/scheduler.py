@@ -46,6 +46,11 @@ def get_label(target: str, agent: str) -> str:
     return f"com.softwarefactory.{target}.{agent}"
 
 
+def _escape_systemd_specifiers(val: Any) -> str:
+    """Escape percent specifiers for systemd unit file values."""
+    return str(val).replace("%", "%%")
+
+
 def _parse_scalar(val: str) -> Any:
     if val.lower() == "true":
         return True
@@ -130,12 +135,10 @@ def get_scheduled_candidates(target_filter: Optional[str] = None, agent_filter: 
             ag_cfg = load_yaml_simple(ag_yaml)
             triggers = ag_cfg.get("triggers", [])
 
-            # Check if agent supports schedule trigger or target explicitly schedules it
             is_schedulable = "schedule" in triggers or ag in schedule_section
             if not is_schedulable:
                 continue
 
-            # Cadence: default to 86400 seconds (24h) if unspecified
             cadence_info = {"interval": 86400}
             if isinstance(schedule_section, dict) and ag in schedule_section:
                 sec = schedule_section[ag]
@@ -206,11 +209,18 @@ def validate_plist(plist_path: Path) -> Dict[str, Any]:
     return data
 
 
-def generate_plist(target: str, agent: str, cadence: Optional[Dict[str, Any]] = None, output_dir: Optional[Path] = None) -> Path:
+def generate_plist(
+    target: str,
+    agent: str,
+    cadence: Optional[Dict[str, Any]] = None,
+    output_dir: Optional[Path] = None,
+    factory_root: Optional[Path] = None
+) -> Path:
     """Generate launchd plist dictionary, write to schedules/ (or output_dir), and validate."""
+    root = factory_root or FACTORY_ROOT
     out_dir = output_dir or SCHEDULES_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    runs_dir = FACTORY_ROOT / "runs"
+    runs_dir = root / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     label = get_label(target, agent)
@@ -224,13 +234,13 @@ def generate_plist(target: str, agent: str, cadence: Optional[Dict[str, Any]] = 
     plist_data: Dict[str, Any] = {
         "Label": label,
         "ProgramArguments": [
-            str(FACTORY_ROOT / "factory"),
+            str(root / "factory"),
             "run",
             agent,
             "--target",
             target
         ],
-        "WorkingDirectory": str(FACTORY_ROOT),
+        "WorkingDirectory": str(root),
         "EnvironmentVariables": {
             "PATH": user_path,
             "HOME": user_home
@@ -308,12 +318,14 @@ def generate_systemd_units(
     target: str,
     agent: str,
     cadence: Optional[Dict[str, Any]] = None,
-    output_dir: Optional[Path] = None
+    output_dir: Optional[Path] = None,
+    factory_root: Optional[Path] = None
 ) -> Tuple[Path, Path]:
     """Generate systemd user service (.service) and timer (.timer) unit files, write to schedules/, and validate."""
+    root = factory_root or FACTORY_ROOT
     out_dir = output_dir or SCHEDULES_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    runs_dir = FACTORY_ROOT / "runs"
+    runs_dir = root / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     label = get_label(target, agent)
@@ -327,18 +339,28 @@ def generate_systemd_units(
     stdout_log = runs_dir / f"schedule-{target}-{agent}.stdout.log"
     stderr_log = runs_dir / f"schedule-{target}-{agent}.stderr.log"
 
+    factory_bin = root / "factory"
+    # Quote executable path in ExecStart and escape '%' specifiers
+    escaped_bin = _escape_systemd_specifiers(factory_bin)
+    exec_start = f'"{escaped_bin}" run {agent} --target {target}'
+    escaped_wd = _escape_systemd_specifiers(root)
+    escaped_stdout = _escape_systemd_specifiers(stdout_log)
+    escaped_stderr = _escape_systemd_specifiers(stderr_log)
+    escaped_path = _escape_systemd_specifiers(user_path)
+    escaped_home = _escape_systemd_specifiers(user_home)
+
     service_content = f"""[Unit]
 Description=Software Factory Agent: {agent} on target {target}
 After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory={FACTORY_ROOT}
-Environment="PATH={user_path}"
-Environment="HOME={user_home}"
-ExecStart={FACTORY_ROOT / "factory"} run {agent} --target {target}
-StandardOutput=append:{stdout_log}
-StandardError=append:{stderr_log}
+WorkingDirectory={escaped_wd}
+Environment="PATH={escaped_path}"
+Environment="HOME={escaped_home}"
+ExecStart={exec_start}
+StandardOutput=append:{escaped_stdout}
+StandardError=append:{escaped_stderr}
 """
 
     if "calendar" in cadence:
@@ -395,7 +417,7 @@ def get_loaded_launchd_services() -> Dict[str, Dict[str, str]]:
 
 
 def get_active_systemd_timers() -> Dict[str, Dict[str, Any]]:
-    """Query systemctl for active user timers."""
+    """Query systemctl for active user timers, correctly differentiating active from inactive rows."""
     if not shutil.which("systemctl"):
         return {}
     try:
@@ -415,11 +437,13 @@ def get_active_systemd_timers() -> Dict[str, Dict[str, Any]]:
             unit = parts[-2]
             activates = parts[-1]
             if unit.endswith(".timer"):
+                # If first column is '-' or 'n/a', there is no next scheduled trigger
+                has_next = parts[0] != "-" and parts[0].lower() != "n/a"
                 timers[unit] = {
                     "unit": unit,
                     "activates": activates,
-                    "active": True,
-                    "next": " ".join(parts[:3]) if parts[0] != "-" else "n/a"
+                    "active": has_next,
+                    "next": " ".join(parts[:3]) if has_next else "-"
                 }
     return timers
 
@@ -466,18 +490,43 @@ def list_schedules(platform: Optional[str] = None):
             installed = "yes" if (dest_service.exists() and dest_timer.exists()) else ("partial" if (dest_service.exists() or dest_timer.exists()) else "no")
 
             timer_unit = f"{label}.timer"
-            if timer_unit in active_timers:
-                active_str = "active"
-                status_str = active_timers[timer_unit].get("next", "active")
-            elif installed == "yes" and shutil.which("systemctl"):
-                res = subprocess.run(["systemctl", "--user", "is-active", timer_unit], capture_output=True, text=True, check=False)
-                act = res.stdout.strip()
-                active_str = act or "inactive"
-                status_str = active_str
-            else:
-                active_str = "no"
-                status_str = "-"
+            active_info = active_timers.get(timer_unit)
 
+            actual_active = False
+            status_str = "-"
+
+            if shutil.which("systemctl"):
+                try:
+                    res = subprocess.run(
+                        ["systemctl", "--user", "show", timer_unit, "--property=ActiveState,SubState"],
+                        capture_output=True,
+                        text=True,
+                        check=False
+                    )
+                    props = {}
+                    for p_line in res.stdout.splitlines():
+                        if "=" in p_line:
+                            k, v = p_line.split("=", 1)
+                            props[k.strip()] = v.strip()
+                    active_state = props.get("ActiveState", "inactive")
+                    sub_state = props.get("SubState", "dead")
+                    if active_state == "active" and sub_state in ("waiting", "running"):
+                        actual_active = True
+                        if active_info and active_info.get("active") and active_info.get("next") != "-":
+                            status_str = active_info.get("next")
+                        else:
+                            status_str = f"active ({sub_state})"
+                    else:
+                        actual_active = False
+                        status_str = "-" if installed == "no" else sub_state
+                except Exception:
+                    actual_active = False
+                    status_str = "-"
+            elif active_info and active_info.get("active"):
+                actual_active = True
+                status_str = active_info.get("next", "active")
+
+            active_str = "active" if actual_active else "no"
             cadence_str = _format_cadence(item["cadence"])
             print(f"{item['target']:<22} {item['agent']:<18} {cadence_str:<16} {installed:<11} {active_str:<10} {status_str}")
 
@@ -489,13 +538,13 @@ def install_schedule(
     agent: str,
     platform: Optional[str] = None,
     dest_dir: Optional[Path] = None
-):
+) -> bool:
     """Generate, install, and enable schedule for a target-agent pair."""
     plat = normalize_platform(platform)
     candidates = get_scheduled_candidates(target_filter=target, agent_filter=agent)
     if not candidates:
         print(f"Error: Target '{target}' and agent '{agent}' do not form a valid schedulable pair.")
-        sys.exit(1)
+        return False
 
     candidate = candidates[0]
     label = candidate["label"]
@@ -514,11 +563,15 @@ def install_schedule(
                 print(f"✓ Installed and loaded launchd schedule: {label}")
                 print(f"  Plist: {dest_path}")
                 print(f"  Cadence: {candidate['cadence']}")
+                return True
             else:
-                print(f"✗ Failed to load into launchctl: {res.stderr.strip()}")
+                err_msg = res.stderr.strip() or res.stdout.strip()
+                print(f"✗ Failed to load into launchctl: {err_msg}")
+                return False
         else:
             print(f"✓ Installed launchd plist: {dest_path}")
             print(f"  Cadence: {candidate['cadence']}")
+            return True
     else:
         service_path, timer_path = generate_systemd_units(target, agent, candidate["cadence"])
         target_dir = dest_dir or get_systemd_user_dir()
@@ -538,11 +591,15 @@ def install_schedule(
                 print(f"  Service: {dest_service}")
                 print(f"  Timer: {dest_timer}")
                 print(f"  Cadence: {candidate['cadence']}")
+                return True
             else:
-                print(f"✗ Failed to enable {label}.timer via systemctl: {res.stderr.strip()}")
+                err_msg = res.stderr.strip() or res.stdout.strip()
+                print(f"✗ Failed to enable {label}.timer via systemctl: {err_msg}")
+                return False
         else:
             print(f"✓ Installed systemd units: {dest_service} and {dest_timer}")
             print(f"  Cadence: {candidate['cadence']}")
+            return True
 
 
 def uninstall_schedule(
@@ -550,7 +607,7 @@ def uninstall_schedule(
     agent: str,
     platform: Optional[str] = None,
     dest_dir: Optional[Path] = None
-):
+) -> bool:
     """Disable, unload, and remove scheduled service definitions."""
     plat = normalize_platform(platform)
     label = get_label(target, agent)
@@ -558,39 +615,55 @@ def uninstall_schedule(
     if plat == "darwin":
         target_dir = dest_dir or LAUNCH_AGENTS_DIR
         dest_path = target_dir / f"{label}.plist"
-        if dest_path.exists():
-            if dest_dir is None and shutil.which("launchctl"):
-                subprocess.run(["launchctl", "unload", "-w", str(dest_path)], capture_output=True, check=False)
-            dest_path.unlink()
-            print(f"✓ Uninstalled launchd schedule: {label}")
-        else:
+        if not dest_path.exists():
             print(f"Schedule not found in LaunchAgents: {label}")
+            return True
+
+        if dest_dir is None and shutil.which("launchctl"):
+            res = subprocess.run(["launchctl", "unload", "-w", str(dest_path)], capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                err_msg = res.stderr.strip() or res.stdout.strip()
+                print(f"✗ Failed to unload {label} via launchctl: {err_msg}")
+                return False
+
+        dest_path.unlink()
+        print(f"✓ Uninstalled launchd schedule: {label}")
+        return True
     else:
         target_dir = dest_dir or get_systemd_user_dir()
         dest_service = target_dir / f"{label}.service"
         dest_timer = target_dir / f"{label}.timer"
 
-        existed = False
+        if not dest_timer.exists() and not dest_service.exists():
+            print(f"Schedule not found in systemd user directory: {label}")
+            return True
+
         if dest_dir is None and shutil.which("systemctl"):
-            subprocess.run(["systemctl", "--user", "disable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
-            subprocess.run(["systemctl", "--user", "stop", f"{label}.service"], capture_output=True, text=True, check=False)
+            res_dis = subprocess.run(["systemctl", "--user", "disable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
+            if res_dis.returncode != 0:
+                err_msg = res_dis.stderr.strip() or res_dis.stdout.strip()
+                print(f"✗ Failed to disable {label}.timer via systemctl: {err_msg}")
+                return False
+
+            res_stop = subprocess.run(["systemctl", "--user", "stop", f"{label}.service"], capture_output=True, text=True, check=False)
+            if res_stop.returncode != 0:
+                err_msg = res_stop.stderr.strip() or res_stop.stdout.strip()
+                print(f"✗ Failed to stop {label}.service via systemctl: {err_msg}")
+                return False
 
         if dest_timer.exists():
             dest_timer.unlink()
-            existed = True
         if dest_service.exists():
             dest_service.unlink()
-            existed = True
 
-        if existed:
-            if dest_dir is None and shutil.which("systemctl"):
-                subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
-            print(f"✓ Uninstalled systemd schedule: {label}")
-        else:
-            print(f"Schedule not found in systemd user directory: {label}")
+        if dest_dir is None and shutil.which("systemctl"):
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+
+        print(f"✓ Uninstalled systemd schedule: {label}")
+        return True
 
 
-def trigger_schedule(target: str, agent: str, platform: Optional[str] = None):
+def trigger_schedule(target: str, agent: str, platform: Optional[str] = None) -> bool:
     """Trigger an immediate run of a scheduled service."""
     plat = normalize_platform(platform)
     label = get_label(target, agent)
@@ -599,15 +672,21 @@ def trigger_schedule(target: str, agent: str, platform: Optional[str] = None):
         res = subprocess.run(["launchctl", "start", label], capture_output=True, text=True, check=False)
         if res.returncode == 0:
             print(f"✓ Triggered immediate launchd execution for: {label}")
+            return True
         else:
-            print(f"✗ Failed to trigger {label}: {res.stderr.strip()}")
+            err_msg = res.stderr.strip() or res.stdout.strip()
+            print(f"✗ Failed to trigger {label}: {err_msg}")
+            return False
     else:
         service_name = f"{label}.service"
         res = subprocess.run(["systemctl", "--user", "start", service_name], capture_output=True, text=True, check=False)
         if res.returncode == 0:
             print(f"✓ Triggered immediate systemd execution for: {service_name}")
+            return True
         else:
-            print(f"✗ Failed to trigger {service_name}: {res.stderr.strip()}")
+            err_msg = res.stderr.strip() or res.stdout.strip()
+            print(f"✗ Failed to trigger {service_name}: {err_msg}")
+            return False
 
 
 if __name__ == "__main__":
@@ -668,6 +747,7 @@ if __name__ == "__main__":
 
     plat = getattr(args, "platform", "auto")
 
+    success = True
     if action == "list":
         list_schedules(platform=plat)
     elif action == "generate":
@@ -688,18 +768,28 @@ if __name__ == "__main__":
     elif action == "install":
         if getattr(args, "all", False):
             for item in get_scheduled_candidates():
-                install_schedule(item["target"], item["agent"], platform=plat)
+                if not install_schedule(item["target"], item["agent"], platform=plat):
+                    success = False
         elif args.target and args.agent:
-            install_schedule(args.target, args.agent, platform=plat)
+            if not install_schedule(args.target, args.agent, platform=plat):
+                success = False
         else:
             print("Specify --target <name> --agent <name> or --all")
+            success = False
     elif action == "uninstall":
         if getattr(args, "all", False):
             for item in get_scheduled_candidates():
-                uninstall_schedule(item["target"], item["agent"], platform=plat)
+                if not uninstall_schedule(item["target"], item["agent"], platform=plat):
+                    success = False
         elif args.target and args.agent:
-            uninstall_schedule(args.target, args.agent, platform=plat)
+            if not uninstall_schedule(args.target, args.agent, platform=plat):
+                success = False
         else:
             print("Specify --target <name> --agent <name> or --all")
+            success = False
     elif action == "trigger":
-        trigger_schedule(args.target, args.agent, platform=plat)
+        if not trigger_schedule(args.target, args.agent, platform=plat):
+            success = False
+
+    if not success:
+        sys.exit(1)

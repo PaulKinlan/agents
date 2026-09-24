@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit and integration tests for Software Factory launchd and systemd schedule generation."""
 
+import os
 import plistlib
 import shutil
 import subprocess
@@ -122,7 +123,7 @@ class TestScheduleGeneration(unittest.TestCase):
             self.assertIn(f"WorkingDirectory={FACTORY_ROOT}", service_txt)
             self.assertIn('Environment="PATH=', service_txt)
             self.assertIn('Environment="HOME=', service_txt)
-            self.assertIn(f"ExecStart={FACTORY_ROOT / 'factory'} run deps-supply-chain --target voicebox", service_txt)
+            self.assertIn(f'ExecStart="{FACTORY_ROOT / "factory"}" run deps-supply-chain --target voicebox', service_txt)
             self.assertIn("StandardOutput=append:", service_txt)
             self.assertIn("StandardError=append:", service_txt)
 
@@ -241,6 +242,172 @@ class TestScheduleGeneration(unittest.TestCase):
         )
         self.assertEqual(res_list.returncode, 0)
         self.assertIn("Software Factory Schedules (Linux systemd user):", res_list.stdout)
+
+    def test_systemd_units_with_spaced_factory_root_and_percent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spaced_root = Path(tmpdir) / "repo with spaces % and signs"
+            spaced_root.mkdir()
+            dummy_factory = spaced_root / "factory"
+            dummy_factory.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            dummy_factory.chmod(0o755)
+
+            service_path, timer_path = generate_systemd_units(
+                "voicebox",
+                "secret-scan",
+                cadence={"hour": 7, "minute": 30},
+                output_dir=spaced_root,
+                factory_root=spaced_root
+            )
+
+            service_txt = service_path.read_text(encoding="utf-8")
+            escaped_root = str(spaced_root).replace("%", "%%")
+            self.assertIn(f'ExecStart="{escaped_root}/factory" run secret-scan --target voicebox', service_txt)
+            self.assertIn(f'WorkingDirectory={escaped_root}', service_txt)
+            self.assertIn(f'StandardOutput=append:{escaped_root}/runs/', service_txt)
+
+            if shutil.which("systemd-analyze"):
+                res = subprocess.run(
+                    ["systemd-analyze", "verify", str(service_path), str(timer_path)],
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                self.assertEqual(res.returncode, 0, f"systemd-analyze verify failed on spaced path: {res.stderr}")
+
+    def test_manager_commands_handle_failure_nonzero_and_preserve_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_bin = Path(tmpdir) / "bin"
+            fake_bin.mkdir()
+
+            fake_systemctl = fake_bin / "systemctl"
+            fake_systemctl.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--version\" ]; then echo 'systemd 261'; exit 0; fi\n"
+                "echo 'synthetic scheduler failure' >&2\n"
+                "exit 7\n",
+                encoding="utf-8"
+            )
+            fake_systemctl.chmod(0o755)
+
+            fake_launchctl = fake_bin / "launchctl"
+            fake_launchctl.write_text(
+                "#!/bin/sh\n"
+                "echo 'synthetic scheduler failure' >&2\n"
+                "exit 7\n",
+                encoding="utf-8"
+            )
+            fake_launchctl.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            factory_bin = FACTORY_ROOT / "factory"
+
+            # 1. Install failure exits non-zero
+            res_inst = subprocess.run(
+                [str(factory_bin), "schedule", "--install", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res_inst.returncode, 0, "Install should exit non-zero when systemctl fails")
+            self.assertIn("Failed to enable", res_inst.stdout + res_inst.stderr)
+
+            # 2. Trigger failure exits non-zero
+            res_trig = subprocess.run(
+                [str(factory_bin), "schedule", "--trigger", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertNotEqual(res_trig.returncode, 0, "Trigger should exit non-zero when systemctl fails")
+
+            # 3. Systemd Uninstall failure exits non-zero AND PRESERVES unit files
+            user_systemd = Path.home() / ".config" / "systemd" / "user"
+            user_systemd.mkdir(parents=True, exist_ok=True)
+            test_svc = user_systemd / "com.softwarefactory.voicebox.secret-scan.service"
+            test_tmr = user_systemd / "com.softwarefactory.voicebox.secret-scan.timer"
+            test_svc.write_text("[Unit]\nDescription=Test\n", encoding="utf-8")
+            test_tmr.write_text("[Unit]\nDescription=Test\n", encoding="utf-8")
+
+            try:
+                res_uninst = subprocess.run(
+                    [str(factory_bin), "schedule", "--uninstall", "--target", "voicebox", "--agent", "secret-scan", "--platform", "systemd"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False
+                )
+                self.assertNotEqual(res_uninst.returncode, 0, "Uninstall should exit non-zero when disable fails")
+                # Assert files were NOT destructively deleted
+                self.assertTrue(test_svc.exists(), "Service file must be preserved on disable failure")
+                self.assertTrue(test_tmr.exists(), "Timer file must be preserved on disable failure")
+            finally:
+                test_svc.unlink(missing_ok=True)
+                test_tmr.unlink(missing_ok=True)
+
+            # 4. Launchd Uninstall failure exits non-zero AND PRESERVES plist
+            user_launch = Path.home() / "Library" / "LaunchAgents"
+            user_launch.mkdir(parents=True, exist_ok=True)
+            test_plist = user_launch / "com.softwarefactory.voicebox.secret-scan.plist"
+            test_plist.write_text("<plist></plist>", encoding="utf-8")
+
+            try:
+                res_launch_uninst = subprocess.run(
+                    [str(factory_bin), "schedule", "--uninstall", "--target", "voicebox", "--agent", "secret-scan", "--platform", "darwin"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False
+                )
+                self.assertNotEqual(res_launch_uninst.returncode, 0, "Uninstall should exit non-zero when launchctl fails")
+                self.assertTrue(test_plist.exists(), "Plist must be preserved on unload failure")
+            finally:
+                test_plist.unlink(missing_ok=True)
+
+    def test_get_active_systemd_timers_inactive_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_bin = Path(tmpdir) / "bin"
+            fake_bin.mkdir()
+
+            # Mock systemctl where list-timers returns an inactive row with - - - -
+            fake_systemctl = fake_bin / "systemctl"
+            fake_systemctl.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--user\" ] && [ \"$2\" = \"list-timers\" ]; then\n"
+                "  echo '- - - - com.softwarefactory.voicebox.secret-scan.timer com.softwarefactory.voicebox.secret-scan.service'\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1\" = \"--user\" ] && [ \"$2\" = \"show\" ]; then\n"
+                "  echo 'ActiveState=inactive'\n"
+                "  echo 'SubState=dead'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8"
+            )
+            fake_systemctl.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            factory_bin = FACTORY_ROOT / "factory"
+
+            res_list = subprocess.run(
+                [str(factory_bin), "schedule", "--list", "--platform", "systemd"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False
+            )
+            self.assertEqual(res_list.returncode, 0)
+            for line in res_list.stdout.splitlines():
+                if "voicebox" in line and "secret-scan" in line:
+                    parts = line.split()
+                    # Line format: TARGET AGENT CADENCE_PART1 CADENCE_PART2 INSTALLED ACTIVE STATUS
+                    # e.g. ['voicebox', 'secret-scan', 'at', '07:30', 'no', 'no', '-']
+                    self.assertEqual(parts[-2], "no", f"Inactive timer row must not be marked active: {line}")
+                    self.assertEqual(parts[-1], "-", f"Inactive timer status should be '-': {line}")
 
 
 if __name__ == "__main__":

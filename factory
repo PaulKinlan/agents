@@ -776,6 +776,7 @@ def main():
                     s_path, t_path = generate_systemd_units(c["target"], c["agent"], c["cadence"])
                     print(f"Generated (systemd): {s_path}, {t_path}")
         elif action == "install":
+            success = True
             if getattr(args, "all", False):
                 for t_file in sorted((FACTORY_ROOT / "targets").glob("*.yaml")):
                     t_cfg = sched_load_yaml(t_file)
@@ -783,12 +784,18 @@ def main():
                     sched_map = t_cfg.get("schedule", {})
                     if isinstance(sched_map, dict):
                         for ag_name in sched_map.keys():
-                            install_schedule(t_name, ag_name, platform=plat)
+                            if not install_schedule(t_name, ag_name, platform=plat):
+                                success = False
             elif args.target and args.agent:
-                install_schedule(args.target, args.agent, platform=plat)
+                if not install_schedule(args.target, args.agent, platform=plat):
+                    success = False
             else:
                 print("Specify --target <name> --agent <name> or --all")
+                success = False
+            if not success:
+                sys.exit(1)
         elif action == "uninstall":
+            success = True
             if getattr(args, "all", False):
                 for t_file in sorted((FACTORY_ROOT / "targets").glob("*.yaml")):
                     t_cfg = sched_load_yaml(t_file)
@@ -796,16 +803,23 @@ def main():
                     sched_map = t_cfg.get("schedule", {})
                     if isinstance(sched_map, dict):
                         for ag_name in sched_map.keys():
-                            uninstall_schedule(t_name, ag_name, platform=plat)
+                            if not uninstall_schedule(t_name, ag_name, platform=plat):
+                                success = False
             elif args.target and args.agent:
-                uninstall_schedule(args.target, args.agent, platform=plat)
+                if not uninstall_schedule(args.target, args.agent, platform=plat):
+                    success = False
             else:
                 print("Specify --target <name> --agent <name> or --all")
+                success = False
+            if not success:
+                sys.exit(1)
         elif action == "trigger":
             if args.target and args.agent:
-                trigger_schedule(args.target, args.agent, platform=plat)
+                if not trigger_schedule(args.target, args.agent, platform=plat):
+                    sys.exit(1)
             else:
                 print("Specify --target <name> --agent <name>")
+                sys.exit(1)
     else:
         parser.print_help()
 
