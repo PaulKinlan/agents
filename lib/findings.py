@@ -20,6 +20,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 
+try:  # imported as lib.findings (root on sys.path), or run as a script (lib/ on it)
+    from lib.redaction import mask_text, redact_finding
+except ImportError:
+    sys.path.insert(0, str(FACTORY_ROOT))
+    from lib.redaction import mask_text, redact_finding
+
 def normalize_text(text: str) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting."""
     if not text:
@@ -176,6 +182,10 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
 def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]]):
     report_file = FACTORY_ROOT / "findings" / f"{target_name}-delta.md"
     report_file.parent.mkdir(parents=True, exist_ok=True)
+    # This report is the file the composite action appends to a public step summary, so the
+    # rendered copy is redacted. The raw values stay in the run artifacts and the store.
+    findings = [redact_finding(f) for f in findings]
+    fixed_items = [redact_finding(f) for f in fixed_items]
     new_or_regressed = [f for f in findings if f["change"] in ("new", "regressed")]
     unchanged = [f for f in findings if f["change"] == "unchanged"]
     suppressed = [f for f in findings if f["state"] == "wontfix"]
@@ -253,7 +263,9 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
             continue
         if f["state"] in ("new", "regressed") and f["severity"] in ("critical", "high", "medium"):
             title = f"[{f['agent']}] {f['title']}"
-            desc = f"{f['description']}\n\nPath: {f['path']}:{f.get('line_number', '?')}\nFingerprint: {f['fingerprint']}\nSnippet:\n{f['snippet']}"
+            published = redact_finding(f)
+            desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
+                    f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
             cmd = [
                 bd_bin, "create",
                 "--title", title,
@@ -265,7 +277,7 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
                 res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
                 if res.returncode == 0:
                     f.setdefault("dispatched_sinks", []).append("beads")
-                    print(f"Created bead for: {f['title']}")
+                    print(f"Created bead for: {mask_text(f['title'])}")
                 else:
                     print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
             except Exception as e:
@@ -278,18 +290,19 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
         if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
             continue
         if f["severity"] in ("critical", "high"):
-            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {f['severity']} finding: {f['title']}")
+            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {f['severity']} finding: {mask_text(f['title'])}")
             print(f"-> Please review in private store or file private security advisory.")
             continue
         if gh_bin and f["severity"] in ("medium", "low"):
-            title = f"[factory:{f['agent']}] {f['title']}"
+            published = redact_finding(f)
+            title = f"[factory:{f['agent']}] {published['title']}"
             body = (
                 f"**Rule**: `{f['rule_id']}`\n"
                 f"**Severity**: `{f['severity']}`\n"
-                f"**Location**: `{f['path']}:{f.get('line_number', '?')}`\n"
+                f"**Location**: `{published['path']}:{published.get('line_number', '?')}`\n"
                 f"**Fingerprint**: `{f['fingerprint']}`\n\n"
-                f"### Description\n{f['description']}\n\n"
-                f"### Remediation\n{f.get('remediation', 'N/A')}\n"
+                f"### Description\n{published['description']}\n\n"
+                f"### Remediation\n{published.get('remediation', 'N/A')}\n"
             )
             cmd = [gh_bin, "issue", "create", "--title", title, "--body", body]
             try:

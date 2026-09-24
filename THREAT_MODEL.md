@@ -71,6 +71,7 @@ To prevent model hallucination and alert fatigue, the following components are d
 
 - **Contamination of Scanned Scope (Feedback Loops)**: Historical fix `6c7fde4f95` indicates that deterministic scanners must strictly exclude their own output directories (`findings/`, `runs/`). Otherwise, they scan past findings, creating a cyclic feedback loop of false positive results.
 - **Unembargoed Public Disclosures**: Highly sensitive credentials or zero-day vulnerabilities must never be pushed to public trackers. Sinks must explicitly filter out critical/high findings from public channels.
+- **Credential Redaction at the Publish Boundary**: A finding's `snippet` is whatever the scanner matched, which for `secret-scan` is the credential itself. Every published render (delta report, step summary, tracker sink, scanner stdout) is masked by `lib/redaction.py`; raw values stay only in the gitignored run artifacts and findings store, because a human needs to see what leaked in order to rotate it. Masking is structural, never a prompt instruction — see non-negotiable #2.
 - **Stochastic Drift**: Unchanged target files may occasionally trigger new model findings due to LLM non-determinism. This is normal and must be handled gracefully by the findings store using stable fingerprints.
 
 ---
@@ -82,6 +83,7 @@ Discovery and verification agents must check for and respect the following invar
 2. **Sanitize Fingerprints**: The findings store must normalize path structures and text sequences to prevent directory traversals when storing reports.
 3. **Strict Embargo Checks**: High/critical findings must bypass public trackers and be written to private local stores or draft security advisories.
 4. **No Ambient Credentials**: Environment variables like `~/.aws/` or `~/.ssh/` must never be mounted inside any execution container or active agent session.
+5. **Published Findings Are Redacted**: Any change to `lib/findings.py`, the sink adapters, `agents/secret-scan/scripts/scan.py`, or the composite action must keep the redaction boundary intact. A new publish path must go through `lib/redaction.py`; `tests/test_redaction.py` asserts the value cannot reach a report, a tracker payload, or stdout.
 
 ---
 

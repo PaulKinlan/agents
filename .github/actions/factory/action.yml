@@ -84,6 +84,10 @@ runs:
         TARGET_NAME=$(basename "$(cd "$TARGET_PATH" && pwd)")
         REPORT_FILE="$FACTORY_DIR/findings/${TARGET_NAME}-latest.md"
         
+        # The report is safe to publish: lib/findings.py renders it through
+        # lib/redaction.py, which masks credential-shaped text and drops secret-scan
+        # snippets entirely. Never append a raw artifact (runs/*.json) to the step
+        # summary — those files hold the matched values on purpose.
         if [ -f "$REPORT_FILE" ]; then
           echo "delta_report=$REPORT_FILE" >> $GITHUB_OUTPUT
           echo "status=success" >> $GITHUB_OUTPUT

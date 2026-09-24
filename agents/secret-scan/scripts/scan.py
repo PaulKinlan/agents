@@ -16,6 +16,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(FACTORY_ROOT))
+
+from lib.redaction import stdout_safe_report  # noqa: E402
+
 # Built-in high-confidence regex patterns for when gitleaks is not installed
 PATTERNS = [
     ("private-key", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----")),
@@ -141,9 +146,17 @@ def main():
 
     output_json = json.dumps(result, indent=2)
     if args.output:
+        # The file is the local record of what matched — it is what a human needs in order
+        # to rotate a credential, and it is gitignored. Every published render of a finding
+        # is masked instead (see lib/redaction.py), so write the raw record here only.
         Path(args.output).write_text(output_json, encoding="utf-8")
     else:
-        print(output_json)
+        # stdout goes to a terminal or a CI log, which cannot be un-published: never emit
+        # match text there, whatever shape the credential turns out to be.
+        print(json.dumps(stdout_safe_report(result), indent=2))
+        sys.stderr.write(
+            "Note: stdout redacts matched values. Use --output <file> for the raw local record.\n"
+        )
 
 if __name__ == "__main__":
     main()
