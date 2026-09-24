@@ -76,12 +76,14 @@ GENERIC_REMEDIATION = "Rotate the credential, remove it from source, and re-run 
 
 # Every field that is *rendered* into a published surface. Identity fields are in here on purpose:
 # `path`, `rule_id` and `severity` reach this layer as model-returned strings — process_run does not
-# bind them to scanner output — so a value can be smuggled through any of them, and the re-review
-# proved it for `path` and `rule_id`. `state` and `change` are absent deliberately: they are
-# store-controlled enums that dispatch filters on, not text that arrives with a finding.
+# bind them to scanner output — so a value can be smuggled through any of them, and the reviews
+# proved it for `path`, `rule_id` and for non-string containers anywhere in the set. `state` and
+# `change` are store-controlled enums rather than model output, but they are rendered, so they are
+# coerced too; the dispatch filters that read them simply match nothing if one is malformed.
 RENDERED_TEXT_FIELDS = (
     "agent", "title", "description", "remediation", "snippet",
     "path", "rule_id", "severity", "suppression_reason", "line_number",
+    "state", "change",
 )
 
 # Fields on a scanner candidate that hold the matched value.
@@ -110,6 +112,34 @@ def sanitise_identity(value: Any, kind: str) -> Any:
     if pattern.fullmatch(value) and not OPAQUE_RUN.search(value):
         return value
     return placeholder
+
+
+# A rendered field that is not text still reaches an f-string, which serialises its repr — so a
+# dict or list carrying the matched value publishes the value. Only scalars may become text; a
+# container becomes a placeholder. (agents-tcd third review: the type boundary, not the text.)
+PLACEHOLDER = "[redacted:value]"
+
+
+def publishable_text(value: Any) -> Any:
+    """Coerce one rendered field to text, or to a placeholder if it is not a scalar."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    return PLACEHOLDER
+
+
+def publishable_line_number(value: Any) -> Any:
+    """A line number is an integer or the unknown marker, never anything that can carry text."""
+    if isinstance(value, bool):
+        return "?"
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit() and len(value) <= 7:
+        return int(value)
+    return "?"
 
 
 def mask_text(value: Any) -> Any:
@@ -156,9 +186,11 @@ def matched_literals(finding: Dict[str, Any]) -> set:
         # No known pattern matched, so this came from a scanner whose rules we do not share
         # (gitleaks). Its candidates hand us the value itself, so a short whitespace-free
         # snippet is the literal to mask wherever it is echoed.
-        snippet = (finding.get("snippet") or "").strip()
-        if 8 <= len(snippet) <= 200 and not re.search(r"\s", snippet):
-            literals.add(snippet)
+        snippet = finding.get("snippet")
+        if isinstance(snippet, str):
+            snippet = snippet.strip()
+            if 8 <= len(snippet) <= 200 and not re.search(r"\s", snippet):
+                literals.add(snippet)
 
     return {literal for literal in literals if isinstance(literal, str) and len(literal) >= 8}
 
@@ -200,8 +232,12 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     # Untrusted text goes through both layers: known shapes, and the literal the scanner
     # matched wherever a model has re-quoted it. Non-strings (line numbers) pass through.
     for field in RENDERED_TEXT_FIELDS:
-        if field in published:
-            published[field] = mask_literals(mask_text(published[field]), literals)
+        if field not in published:
+            continue
+        if field == "line_number":
+            published[field] = publishable_line_number(published[field])
+            continue
+        published[field] = mask_literals(mask_text(publishable_text(published[field])), literals)
 
     # Shape-check the fields whose legitimate form is known. After masking, so a recognised
     # shape is reported as masked rather than dropped.

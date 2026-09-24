@@ -276,6 +276,43 @@ print('fixture-123')
         self.assertNotIn(self.PEM_BODY, report)
         self.assertIn("[redacted:pem-block]", report)
 
+    def test_non_scalar_fields_cannot_carry_the_value(self):
+        """The type boundary: a dict or list reaches an f-string as its repr, which published
+        the value even though the field was 'masked'. Only scalars may become text.
+
+        `rule_id` and `line_number` are the fields the third review used; `description` and
+        `snippet` are included because nothing in the pipeline type-checks before dispatch.
+        """
+        payload = {"kind": "aws-access-key", "observed": CREDENTIAL}
+        cases = {
+            "rule_id": {"rule_id": payload},
+            "line_number": {"line_number": {"line": 12, "observed": CREDENTIAL}},
+            "description": {"description": ["seen", {"observed": CREDENTIAL}]},
+            "snippet": {"snippet": payload, "raw_match": CREDENTIAL},
+        }
+
+        for label, override in cases.items():
+            for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+                with self.subTest(field=label, sink=sink):
+                    finding = self.credential_finding()
+                    finding.update(override)
+                    self.assert_clean(sink, finding, CREDENTIAL, severity)
+
+    def test_scalar_coercion_keeps_useful_values(self):
+        """Fail-closed does not mean throwing away the line number or normalising nothing."""
+        finding = self.credential_finding()
+        finding["line_number"] = "12"                 # numeric string from the model
+        self.dispatch("file", finding)
+        report = self.surfaces(subprocess.CompletedProcess([], 0, "", ""))["delta report"]
+        self.assertIn("src/config.js:12", report)
+
+        finding = self.credential_finding()
+        finding["line_number"] = "line 12"            # not a line number: becomes unknown
+        self.dispatch("file", finding)
+        report = self.surfaces(subprocess.CompletedProcess([], 0, "", ""))["delta report"]
+        self.assertIn("src/config.js:?", report)
+        self.assertNotIn("line 12", report)
+
     def test_non_credential_finding_still_publishes_its_prose(self):
         """Withholding is scoped to credential findings: docs findings keep their notes."""
         finding = {

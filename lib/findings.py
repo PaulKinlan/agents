@@ -26,10 +26,18 @@ except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.redaction import redact_finding
 
-def normalize_text(text: str) -> str:
-    """Strip and collapse internal whitespace to make fingerprint resilient to reformatting."""
-    if not text:
+def normalize_text(text: Any) -> str:
+    """Strip and collapse internal whitespace to make fingerprint resilient to reformatting.
+
+    A malformed field (the model returned a dict or a number instead of text) is coerced rather
+    than allowed to raise: identity has to stay deterministic, and a crash here would abort the
+    whole run before the publish boundary can sanitise anything. Publishing is a separate gate —
+    see lib/redaction.py.
+    """
+    if text is None:
         return ""
+    if not isinstance(text, str):
+        text = str(text)
     return re.sub(r"\s+", " ", text.strip())
 
 def compute_fingerprint(agent: str, rule_id: str, path: str, snippet: str) -> str:
@@ -293,8 +301,9 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
         if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
             continue
         if f["severity"] in ("critical", "high"):
-            # The guard's own log line is published too: derive it like the issue body.
-            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {f['severity']} finding: {redact_finding(f)['title']}")
+            # The guard's own log line is published too: derive every value it renders.
+            guarded = redact_finding(f)
+            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {guarded['severity']} finding: {guarded['title']}")
             print(f"-> Please review in private store or file private security advisory.")
             continue
         if gh_bin and f["severity"] in ("medium", "low"):
