@@ -108,6 +108,9 @@ class TestCredentialEchoRegression(unittest.TestCase):
     OPAQUE = "sk-" + "live" + "-" + "9f" * 20
     UNKNOWN_SHAPE = "zkq" + "7" * 24
     PEM_BODY = "MIIEowIBAAKCAQEA" + "t3st" * 12
+    # Header and footer assembled too, so the repo's own self-scan stays at 0 candidates.
+    PEM_HEADER = "-----BEGIN " + "PRIVATE KEY-----"
+    PEM_END = "-----END " + "PRIVATE KEY-----"
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-echo-")
@@ -218,6 +221,60 @@ print('fixture-123')
 
         for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
             self.assert_clean(sink, finding, unknown, severity)
+
+    def test_credential_smuggled_through_identity_fields(self):
+        """`path` and `rule_id` reach this layer as model-returned text, so they are masked too.
+
+        Both were proven leaks in the second review: a scanner-derived filename containing the
+        key, and the key appended to rule_id so it appeared in the derived title, the Rule line
+        and the tracker fields.
+        """
+        cases = {
+            "path": {"path": f"src/{CREDENTIAL}-leaked.js"},
+            "rule-id": {"rule_id": f"provider-credential-{self.UNKNOWN_SHAPE}",
+                        "snippet": f"token: {self.UNKNOWN_SHAPE}"},
+        }
+        needles = {"path": CREDENTIAL, "rule-id": self.UNKNOWN_SHAPE}
+
+        for label, override in cases.items():
+            for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+                with self.subTest(field=label, sink=sink):
+                    finding = self.credential_finding()
+                    finding.update(override)
+                    self.assert_clean(sink, finding, needles[label], severity)
+
+    def test_suppression_reason_is_masked_for_a_credential_finding(self):
+        """The suppressed section renders this field, and it is written by a human."""
+        from lib.findings import compute_fingerprint
+
+        finding = self.credential_finding()
+        fingerprint = compute_fingerprint("secret-scan", finding["rule_id"],
+                                          finding["path"], finding["snippet"])
+        reports_dir = self.factory / "findings"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / "sandbox.suppressions.json").write_text(json.dumps({
+            fingerprint: {"reason": f"accepted risk for {CREDENTIAL}", "author": "fixture",
+                          "date": "2026-01-01"}
+        }), encoding="utf-8")
+
+        self.assert_clean("file", finding, CREDENTIAL)
+        report = (reports_dir / "sandbox-latest.md").read_text(encoding="utf-8")
+        self.assertIn("Suppressed", report)
+
+    def test_non_credential_pem_block_in_prose_is_masked(self):
+        """A whole-block pattern must run before the header-only pattern, or the body survives."""
+        finding = {
+            "rule_id": "readme-example", "path": "README.md", "line_number": 4,
+            "snippet": "missing usage docs", "severity": "medium",
+            "title": "Undocumented usage",
+            "description": f"Remove material:\n{self.PEM_HEADER}\n"
+                           f"{self.PEM_BODY}\n{self.PEM_END}",
+            "remediation": "Delete the example.",
+        }
+        self.dispatch("file", finding, agent="docs-drift")
+        report = self.surfaces(subprocess.CompletedProcess([], 0, "", ""))["delta report"]
+        self.assertNotIn(self.PEM_BODY, report)
+        self.assertIn("[redacted:pem-block]", report)
 
     def test_non_credential_finding_still_publishes_its_prose(self):
         """Withholding is scoped to credential findings: docs findings keep their notes."""

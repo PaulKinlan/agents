@@ -266,7 +266,7 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
             # the raw finding let a credential the scanner had recognised reach `bd --title`
             # unchanged even though the body was masked (agents-tcd review).
             published = redact_finding(f)
-            title = f"[{f['agent']}] {published['title']}"
+            title = f"[{published['agent']}] {published['title']}"
             desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
                     f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
             cmd = [
@@ -299,10 +299,10 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
             continue
         if gh_bin and f["severity"] in ("medium", "low"):
             published = redact_finding(f)
-            title = f"[factory:{f['agent']}] {published['title']}"
+            title = f"[factory:{published['agent']}] {published['title']}"
             body = (
-                f"**Rule**: `{f['rule_id']}`\n"
-                f"**Severity**: `{f['severity']}`\n"
+                f"**Rule**: `{published['rule_id']}`\n"
+                f"**Severity**: `{published['severity']}`\n"
                 f"**Location**: `{published['path']}:{published.get('line_number', '?')}`\n"
                 f"**Fingerprint**: `{f['fingerprint']}`\n\n"
                 f"### Description\n{published['description']}\n\n"
