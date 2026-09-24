@@ -1,6 +1,8 @@
 # Run artifacts — transcripts, raw scanner output, benchmark traces
 runs/
 schedules/*.plist
+schedules/*.service
+schedules/*.timer
 
 # Sensitive findings data (vulnerabilities, candidate tokens, target threat models, run history)
 findings/*

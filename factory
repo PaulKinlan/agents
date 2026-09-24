@@ -674,27 +674,43 @@ def main():
     skills_subs.add_parser("install", help="Symlink all 22 factory skills into ~/.gemini and ~/.claude")
 
     # schedule
-    sched_parser = subparsers.add_parser("schedule", help="Manage macOS launchd scheduled runs")
+    sched_parser = subparsers.add_parser("schedule", help="Manage launchd (macOS) and systemd (Linux) scheduled runs")
+    sched_parser.add_argument("--list", action="store_true", help="List all scheduled agents and status")
+    sched_parser.add_argument("--generate", action="store_true", help="Generate schedule unit files into schedules/")
+    sched_parser.add_argument("--install", action="store_true", help="Install and enable scheduled agent")
+    sched_parser.add_argument("--uninstall", action="store_true", help="Disable and remove scheduled agent")
+    sched_parser.add_argument("--trigger", action="store_true", help="Trigger immediate run of scheduled service")
+    sched_parser.add_argument("--target", help="Target name")
+    sched_parser.add_argument("--agent", help="Agent name")
+    sched_parser.add_argument("--all", action="store_true", help="Operate on all explicitly scheduled target-agent pairs")
+    sched_parser.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux", "all"], default="auto", help="Scheduler platform")
+
     sched_subs = sched_parser.add_subparsers(dest="sched_command", help="Schedule action")
     
-    sched_subs.add_parser("list", help="List all scheduled agents and launchd status")
+    list_p = sched_subs.add_parser("list", help="List all scheduled agents and launchd/systemd status")
+    list_p.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux"], default="auto")
 
-    gen_p = sched_subs.add_parser("generate", help="Generate launchd plists into schedules/")
+    gen_p = sched_subs.add_parser("generate", help="Generate schedule units into schedules/")
     gen_p.add_argument("--target", help="Target name")
     gen_p.add_argument("--agent", help="Agent name")
+    gen_p.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux", "all"], default="auto")
 
-    inst_p = sched_subs.add_parser("install", help="Install and load launchd agent")
+    inst_p = sched_subs.add_parser("install", help="Install and load scheduled agent")
     inst_p.add_argument("--target", help="Target name")
     inst_p.add_argument("--agent", help="Agent name")
     inst_p.add_argument("--all", action="store_true", help="Install all explicitly scheduled target-agent pairs")
+    inst_p.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux"], default="auto")
 
-    uninst_p = sched_subs.add_parser("uninstall", help="Unload and remove launchd agent")
-    uninst_p.add_argument("--target", required=True, help="Target name")
-    uninst_p.add_argument("--agent", required=True, help="Agent name")
+    uninst_p = sched_subs.add_parser("uninstall", help="Unload/disable and remove scheduled agent")
+    uninst_p.add_argument("--target", help="Target name")
+    uninst_p.add_argument("--agent", help="Agent name")
+    uninst_p.add_argument("--all", action="store_true", help="Uninstall all scheduled target-agent pairs")
+    uninst_p.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux"], default="auto")
 
-    trig_p = sched_subs.add_parser("trigger", help="Trigger immediate launchd run")
+    trig_p = sched_subs.add_parser("trigger", help="Trigger immediate run of scheduled agent")
     trig_p.add_argument("--target", required=True, help="Target name")
     trig_p.add_argument("--agent", required=True, help="Agent name")
+    trig_p.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux"], default="auto")
 
     args = parser.parse_args()
     if args.command == "list":
@@ -720,19 +736,47 @@ def main():
     elif args.command == "schedule":
         # Import scheduler functions
         from lib.scheduler import (
-            list_schedules, generate_plist, install_schedule,
-            uninstall_schedule, trigger_schedule, get_scheduled_candidates,
+            list_schedules, generate_plist, generate_systemd_units,
+            install_schedule, uninstall_schedule, trigger_schedule,
+            get_scheduled_candidates, normalize_platform,
             load_yaml_simple as sched_load_yaml
         )
-        action = getattr(args, "sched_command", None) or "list"
+        action = getattr(args, "sched_command", None)
+        if not action:
+            if getattr(args, "install", False):
+                action = "install"
+            elif getattr(args, "uninstall", False):
+                action = "uninstall"
+            elif getattr(args, "generate", False):
+                action = "generate"
+            elif getattr(args, "trigger", False):
+                action = "trigger"
+            elif getattr(args, "list", False):
+                action = "list"
+            else:
+                action = "list"
+
+        plat = getattr(args, "platform", "auto")
+
         if action == "list":
-            list_schedules()
+            list_schedules(platform=plat)
         elif action == "generate":
+            target_plat = normalize_platform(plat)
             candidates = get_scheduled_candidates(args.target, args.agent)
             for c in candidates:
-                p = generate_plist(c["target"], c["agent"], c["cadence"])
-                print(f"Generated: {p}")
+                if target_plat == "all":
+                    p1 = generate_plist(c["target"], c["agent"], c["cadence"])
+                    p2, p3 = generate_systemd_units(c["target"], c["agent"], c["cadence"])
+                    print(f"Generated (launchd): {p1}")
+                    print(f"Generated (systemd): {p2}, {p3}")
+                elif target_plat == "darwin":
+                    p = generate_plist(c["target"], c["agent"], c["cadence"])
+                    print(f"Generated (launchd): {p}")
+                else:
+                    s_path, t_path = generate_systemd_units(c["target"], c["agent"], c["cadence"])
+                    print(f"Generated (systemd): {s_path}, {t_path}")
         elif action == "install":
+            success = True
             if getattr(args, "all", False):
                 for t_file in sorted((FACTORY_ROOT / "targets").glob("*.yaml")):
                     t_cfg = sched_load_yaml(t_file)
@@ -740,15 +784,42 @@ def main():
                     sched_map = t_cfg.get("schedule", {})
                     if isinstance(sched_map, dict):
                         for ag_name in sched_map.keys():
-                            install_schedule(t_name, ag_name)
+                            if not install_schedule(t_name, ag_name, platform=plat):
+                                success = False
             elif args.target and args.agent:
-                install_schedule(args.target, args.agent)
+                if not install_schedule(args.target, args.agent, platform=plat):
+                    success = False
             else:
                 print("Specify --target <name> --agent <name> or --all")
+                success = False
+            if not success:
+                sys.exit(1)
         elif action == "uninstall":
-            uninstall_schedule(args.target, args.agent)
+            success = True
+            if getattr(args, "all", False):
+                for t_file in sorted((FACTORY_ROOT / "targets").glob("*.yaml")):
+                    t_cfg = sched_load_yaml(t_file)
+                    t_name = t_cfg.get("name", t_file.stem)
+                    sched_map = t_cfg.get("schedule", {})
+                    if isinstance(sched_map, dict):
+                        for ag_name in sched_map.keys():
+                            if not uninstall_schedule(t_name, ag_name, platform=plat):
+                                success = False
+            elif args.target and args.agent:
+                if not uninstall_schedule(args.target, args.agent, platform=plat):
+                    success = False
+            else:
+                print("Specify --target <name> --agent <name> or --all")
+                success = False
+            if not success:
+                sys.exit(1)
         elif action == "trigger":
-            trigger_schedule(args.target, args.agent)
+            if args.target and args.agent:
+                if not trigger_schedule(args.target, args.agent, platform=plat):
+                    sys.exit(1)
+            else:
+                print("Specify --target <name> --agent <name>")
+                sys.exit(1)
     else:
         parser.print_help()
 
