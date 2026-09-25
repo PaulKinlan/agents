@@ -26,6 +26,13 @@ inputs:
     description: 'API key for model inference (GEMINI_API_KEY or ANTHROPIC_API_KEY)'
     required: false
     default: ''
+  factory_ref:
+    description: >-
+      Full 40-character commit SHA of the Software Factory to fetch when this action runs
+      without the repository next to it (vendored use). Pinning is deliberate: bump it when
+      the factory payload should move.
+    required: false
+    default: '35ae9c5a428fbcab2c5bf3e1c2ced586db844f6c'
 
 outputs:
   status:
@@ -46,15 +53,24 @@ runs:
       with:
         python-version: '3.11'
 
-    - name: Ensure Factory Repository Available
+    - name: Fetch Pinned Factory Repository
       shell: bash
+      env:
+        # Fetching is not a credentialed operation. Step env overrides anything the caller's
+        # job set, so no token or model key is present while third-party code is fetched.
+        GH_TOKEN: ''
+        GITHUB_TOKEN: ''
+        GEMINI_API_KEY: ''
+        ANTHROPIC_API_KEY: ''
+        GIT_TERMINAL_PROMPT: '0'
+        FACTORY_REF: ${{ inputs.factory_ref }}
       run: |
-        if [ ! -f "$GITHUB_ACTION_PATH/../../factory" ]; then
-          echo "Cloning Software Factory repository..."
-          git clone --depth 1 https://github.com/paulkinlan/agents.git "$RUNNER_TEMP/software-factory"
-          echo "FACTORY_DIR=$RUNNER_TEMP/software-factory" >> $GITHUB_ENV
+        set -euo pipefail
+        if [ -f "$GITHUB_ACTION_PATH/../../factory" ]; then
+          echo "FACTORY_DIR=$(cd "$GITHUB_ACTION_PATH/../.." && pwd)" >> "$GITHUB_ENV"
         else
-          echo "FACTORY_DIR=$(cd $GITHUB_ACTION_PATH/../.. && pwd)" >> $GITHUB_ENV
+          bash "$GITHUB_ACTION_PATH/fetch_factory.sh" "$RUNNER_TEMP/software-factory"
+          echo "FACTORY_DIR=$RUNNER_TEMP/software-factory" >> "$GITHUB_ENV"
         fi
 
     - name: Execute Factory Agent
