@@ -23,6 +23,12 @@ from typing import Any, Dict, List, Optional
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
+try:  # imported as lib.bench.runner, or run as a script
+    from lib.child_env import child_environment
+except ImportError:
+    sys.path.insert(0, str(FACTORY_ROOT))
+    from lib.child_env import child_environment
+
 # A hung bench command must not hold the hill-climb station forever. Measurement is not an agent
 # station, so there is no budget.max_minutes in scope here: fixed cap, and a timed-out run simply
 # contributes no timing (SF-06).
@@ -130,7 +136,7 @@ def measure_target(target_dir: Path, bench_cmd: Optional[str] = None) -> Dict[st
             t0 = time.perf_counter()
             try:
                 res = subprocess.run(bench_cmd, shell=True, cwd=str(target_dir), capture_output=True,
-                                     text=True, timeout=BENCH_TIMEOUT_SECONDS)
+                                     text=True, timeout=BENCH_TIMEOUT_SECONDS, env=child_environment())
             except subprocess.TimeoutExpired:
                 continue
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
