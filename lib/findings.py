@@ -26,6 +26,10 @@ except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.redaction import redact_finding
 
+# Redaction removes the value from published text; the embargo decides whether a finding is
+# routed to a tracker at all. It is a separate module so the policy has one home and one test.
+from lib.embargo import effective_severity, embargo_reason
+
 def normalize_text(text: Any) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting.
 
@@ -132,7 +136,11 @@ class FindingsStore:
                 "path": item.get("path"),
                 "line_number": item.get("line_number"),
                 "snippet": item.get("snippet"),
-                "severity": item.get("severity", "medium"),
+                # Fail closed, and record the severity the publication boundary will enforce: a
+                # missing or unrecognised label is critical, and a credential-class agent's
+                # finding is critical on identity whatever the model called it (agents-94f). The
+                # old default was medium, the exact band the public sinks publish.
+                "severity": effective_severity({"agent": agent, "severity": item.get("severity")}),
                 "title": item.get("title", ""),
                 "description": item.get("description", ""),
                 "remediation": item.get("remediation", ""),
@@ -172,20 +180,45 @@ class FindingsStore:
 
         return processed, delta_stats, fixed_items
 
+def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter a run's findings down to what `sink` may receive.
+
+    The one choke point every sink goes through. Eligibility (state, delivery receipt) and the
+    publication embargo are both decided here, so a new dispatch branch cannot silently publish
+    an embargoed finding. `embargo_reason` fails closed for every sink except the local `file`
+    evidence trail (agents-681 / SF-01, agents-94f / SF-03).
+    """
+    publishable = []
+    for f in findings:
+        if f.get("state") not in ("new", "regressed") or sink in f.get("dispatched_sinks", []):
+            continue
+        reason = embargo_reason(f, sink)
+        if reason:
+            # The guard line is published too, so it derives every rendered value from the
+            # redacted copy; the severity is a deterministic enum member.
+            guarded = redact_finding(f)
+            print(f"[SECURITY GUARD] Suppressing {sink} publication of {effective_severity(f)} finding: {guarded['title']}")
+            continue
+        publishable.append(f)
+    return publishable
+
+
 def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None):
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
     """
     print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed")
-    
-    # Always write the local factory delta report
+
+    # Always write the local factory delta report. It is the complete evidence trail, so it
+    # deliberately includes findings the publication embargo withholds from a tracker sink.
     _dispatch_file(target_name, processed_findings, stats, fixed_items or [])
 
+    publishable = _publishable_for_sink(sink, processed_findings)
     if sink == "beads":
-        _dispatch_beads(target_dir, processed_findings)
+        _dispatch_beads(target_dir, publishable)
     elif sink == "github-issues":
-        _dispatch_github(target_name, target_dir, processed_findings)
+        _dispatch_github(target_name, target_dir, publishable)
 
 def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]]):
     report_file = FACTORY_ROOT / "findings" / f"{target_name}-delta.md"
@@ -269,7 +302,12 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
     for f in findings:
         if "beads" in f.get("dispatched_sinks", []):
             continue
-        if f["state"] in ("new", "regressed") and f["severity"] in ("critical", "high", "medium"):
+        # dispatch_to_sink already applied and logged the embargo; this keeps a direct call to
+        # the sink safe. Beads publishes medium only, as it did before: critical and high are
+        # exactly what the embargo withholds from a synced tracker (agents-681).
+        if embargo_reason(f, "beads"):
+            continue
+        if f["state"] in ("new", "regressed") and effective_severity(f) == "medium":
             # Both title and description come from the published view. Building the title from
             # the raw finding let a credential the scanner had recognised reach `bd --title`
             # unchanged even though the body was masked (agents-tcd review).
@@ -300,13 +338,15 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
     for f in findings:
         if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
             continue
-        if f["severity"] in ("critical", "high"):
+        # dispatch_to_sink already logged and filtered this; the check keeps a direct call to
+        # this sink safe. Fail-closed severity and credential-agent identity live in one place.
+        if embargo_reason(f, "github-issues"):
             # The guard's own log line is published too: derive every value it renders.
             guarded = redact_finding(f)
-            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {guarded['severity']} finding: {guarded['title']}")
+            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {effective_severity(f)} finding: {guarded['title']}")
             print(f"-> Please review in private store or file private security advisory.")
             continue
-        if gh_bin and f["severity"] in ("medium", "low"):
+        if gh_bin and effective_severity(f) in ("medium", "low"):
             published = redact_finding(f)
             title = f"[factory:{published['agent']}] {published['title']}"
             body = (
