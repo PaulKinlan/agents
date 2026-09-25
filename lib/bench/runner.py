@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -42,8 +43,16 @@ IGNORE_DIRS = {
 ASSET_EXTS = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".html", ".wasm"}
 
 
-def measure_target(target_dir: Path, bench_cmd: Optional[str] = None) -> Dict[str, Any]:
-    """Compute deterministic countable metrics and optional custom command timing."""
+def measure_target(target_dir: Path, bench_cmd: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Compute deterministic countable metrics and optional custom command timing.
+
+    bench_cmd is argv, not a shell string: it is executed directly (no shell=True), so
+    shell metacharacters reach the executable as literal arguments. The command is
+    operator-supplied today (--bench-cmd), but this is the component that edits files
+    and re-measures them — if a future change ever sources the command from a target
+    config or a model proposal, direct exec is what keeps that from becoming arbitrary
+    code execution (SF-05).
+    """
     total_raw_bytes = 0
     total_gzip_bytes = 0
     js_raw_bytes = 0
@@ -135,10 +144,13 @@ def measure_target(target_dir: Path, bench_cmd: Optional[str] = None) -> Dict[st
         for _ in range(3):
             t0 = time.perf_counter()
             try:
-                res = subprocess.run(bench_cmd, shell=True, cwd=str(target_dir), capture_output=True,
+                res = subprocess.run(bench_cmd, cwd=str(target_dir), capture_output=True,
                                      text=True, timeout=BENCH_TIMEOUT_SECONDS, env=child_environment())
             except subprocess.TimeoutExpired:
                 continue
+            except FileNotFoundError:
+                sys.stderr.write(f"bench command not found: {bench_cmd[0]}\n")
+                break  # a missing binary fails all three runs the same way
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             if res.returncode == 0:
                 timings.append(elapsed_ms)
@@ -202,7 +214,8 @@ def main():
     parser = argparse.ArgumentParser(description="Class C Benchmark & Ledger Utility")
     parser.add_argument("--target", required=True, help="Path to target repo")
     parser.add_argument("--target-name", help="Logical target name for ledger lookup")
-    parser.add_argument("--bench-cmd", help="Optional shell command to benchmark")
+    parser.add_argument("--bench-cmd",
+                        help="Optional command to benchmark, tokenised with shlex — no shell is invoked")
     parser.add_argument("--goal-metric", default="total_gzip_bytes", help="Metric to optimize")
     parser.add_argument("--goal-value", type=float, help="Target goal value ( default: 5% reduction )")
     parser.add_argument("--output", help="Output JSON file path")
@@ -211,7 +224,12 @@ def main():
     target_dir = Path(args.target).resolve()
     target_name = args.target_name or target_dir.name
 
-    metrics = measure_target(target_dir, args.bench_cmd)
+    try:
+        bench_cmd = shlex.split(args.bench_cmd) if args.bench_cmd else None
+    except ValueError as exc:  # unbalanced quotes in the operator's command
+        parser.error(f"--bench-cmd: {exc}")
+
+    metrics = measure_target(target_dir, bench_cmd)
     ledger = read_ledger(target_name)
 
     current_val = metrics.get(args.goal_metric, metrics["total_gzip_bytes"])
