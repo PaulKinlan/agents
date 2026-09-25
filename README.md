@@ -153,10 +153,10 @@ curl -fsSL https://raw.githubusercontent.com/PaulKinlan/agents/main/install.sh |
 # Option 2: Native pi package manager (auto-registers in ~/.pi/agent/settings.json)
 pi install git:github.com/PaulKinlan/agents
 
-# Option 3: skills.sh CLI (npx skills)
-npx skills add PaulKinlan/agents -g -y
+# Option 3: skills.sh CLI (pass -a to target pi/claude-code; omitting -a with -y tries PromptScript which lacks -g support)
+npx skills add PaulKinlan/agents -g -a pi claude-code -y
 # Or install a single station via skills.sh:
-npx skills add PaulKinlan/agents@modern-web -g -y
+npx skills add PaulKinlan/agents@modern-web -g -a pi -y
 ```
 
 ### 4. Run in CI (GitHub Actions Composite Action)
