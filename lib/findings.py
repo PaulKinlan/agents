@@ -44,15 +44,75 @@ def normalize_text(text: Any) -> str:
         text = str(text)
     return re.sub(r"\s+", " ", text.strip())
 
+def normalize_path(path: Any) -> str:
+    """The one path normalization used for fingerprints and candidate binding."""
+    if not isinstance(path, str):
+        return ""
+    return path.replace("\\", "/").strip().lstrip("./")
+
 def compute_fingerprint(agent: str, rule_id: str, path: str, snippet: str) -> str:
     """Compute stable fingerprint: sha256(agent:rule_id:normalized_path:normalized_snippet).
     
     Deliberately excludes line numbers to survive refactor churn.
     """
-    norm_path = path.replace("\\", "/").strip().lstrip("./")
+    norm_path = normalize_path(path)
     norm_snippet = normalize_text(snippet)
     key = f"{agent}:{rule_id}:{norm_path}:{norm_snippet}".encode("utf-8")
     return hashlib.sha256(key).hexdigest()
+
+def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
+    """The scanner's authoritative rule ids and paths, for binding model output (agents-nha).
+
+    Returns None when the payload carries no candidate list or neither field, so an agent with
+    no deterministic pre-pass — or one whose candidates are not location-shaped, like
+    issue-triage's issue records — keeps the model's values.
+    """
+    try:
+        data = json.loads(candidates_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        sys.stderr.write(f"Warning: could not read candidates {candidates_file}: {e}\n")
+        return None
+
+    candidates = data.get("candidates") if isinstance(data, dict) else data
+    if not isinstance(candidates, list):
+        return None
+
+    rule_ids = set()
+    paths = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        rule_id = candidate.get("rule_id")
+        if isinstance(rule_id, str) and rule_id.strip():
+            rule_ids.add(rule_id.strip())
+        path = normalize_path(candidate.get("path"))
+        if path:
+            paths.add(path)
+
+    if not rule_ids and not paths:
+        return None
+    return {"rule_ids": rule_ids, "paths": paths}
+
+def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, Any]]) -> Tuple[Any, Any]:
+    """Bind a finding's `rule_id` and `path` to the deterministic scanner's output.
+
+    The triage model returns these strings, so without a contract any string it invents is
+    stored, fingerprinted and rendered. A scanner rule id that is not in the candidate set is
+    replaced with `unclassified`; a path that is not among the candidate paths with `unknown`.
+    When no candidate set exists there is nothing to bind to, and the model's values pass
+    through to the redaction backstop exactly as before (agents-nha).
+    """
+    rule_id = item.get("rule_id") or "generic"
+    path = item.get("path") or ""
+    if not candidate_index:
+        return rule_id, path
+
+    if candidate_index["rule_ids"]:
+        if not (isinstance(rule_id, str) and rule_id.strip() in candidate_index["rule_ids"]):
+            rule_id = "unclassified"
+    if candidate_index["paths"] and normalize_path(path) not in candidate_index["paths"]:
+        path = "unknown"
+    return rule_id, path
 
 class FindingsStore:
     def __init__(self, target_name: str, findings_dir: Optional[Path] = None):
@@ -83,7 +143,7 @@ class FindingsStore:
     def save(self):
         self.store_file.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
 
-    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
+    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
         """Ingests raw findings from an agent run, applies fingerprinting and state transitions.
         
         Returns:
@@ -98,10 +158,11 @@ class FindingsStore:
 
         # 1. Process observed findings
         for item in raw_findings:
+            rule_id, path = bind_candidates(item, candidate_index)
             fp = compute_fingerprint(
                 agent=agent,
-                rule_id=item.get("rule_id", "generic"),
-                path=item.get("path", ""),
+                rule_id=rule_id,
+                path=path,
                 snippet=item.get("snippet", "")
             )
             if fp in current_fps:
@@ -132,8 +193,8 @@ class FindingsStore:
             finding_record = {
                 "fingerprint": fp,
                 "agent": agent,
-                "rule_id": item.get("rule_id"),
-                "path": item.get("path"),
+                "rule_id": rule_id,
+                "path": path,
                 "line_number": item.get("line_number"),
                 "snippet": item.get("snippet"),
                 # Fail closed, and record the severity the publication boundary will enforce: a
@@ -373,6 +434,7 @@ if __name__ == "__main__":
     parser.add_argument("--target", required=True, help="Target name")
     parser.add_argument("--agent", required=True, help="Agent name")
     parser.add_argument("--input", required=True, help="JSON file with raw findings")
+    parser.add_argument("--candidates", help="Scanner candidates JSON to bind rule_id/path against")
     parser.add_argument("--sink", default="file", help="Sink type (file, beads, github-issues)")
     parser.add_argument("--target-dir", default=".", help="Target repository directory")
     args = parser.parse_args()
@@ -386,7 +448,10 @@ if __name__ == "__main__":
     findings_list = raw_data.get("findings", []) if isinstance(raw_data, dict) else raw_data
 
     store = FindingsStore(target_name=args.target)
-    processed, stats, fixed_items = store.process_run(agent=args.agent, raw_findings=findings_list)
+    candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
+    processed, stats, fixed_items = store.process_run(
+        agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
+    )
     try:
         dispatch_to_sink(
             sink=args.sink,

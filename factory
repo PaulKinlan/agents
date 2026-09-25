@@ -340,6 +340,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             "--sink", sink,
             "--target-dir", str(target_dir)
         ]
+        # Bind the model's rule_id/path to the scanner's candidates when a pre-pass produced
+        # them: the model's strings are untrusted, the scanner's are not (agents-nha).
+        if candidates_file.exists():
+            findings_cmd += ["--candidates", str(candidates_file)]
         run_station_command(findings_cmd, budget, "findings dispatch", check=True,
                             env=child_environment(sink=sink))
     print(f"\nRun complete. Artifacts saved to:\n  {run_dir}\n")

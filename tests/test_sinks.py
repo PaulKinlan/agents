@@ -97,17 +97,21 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
             executable.write_text(recorder, encoding="utf-8")
             executable.chmod(0o755)
 
-    def scan(self, sink, items=None, agent="lint", fail_tool=None):
+    def scan(self, sink, items=None, agent="lint", fail_tool=None, candidates=None):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": [SAMPLE] if items is None else items}),
                        encoding="utf-8")
+        cmd = [sys.executable, str(self.cli), "--target", "fixture", "--agent", agent,
+               "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)]
+        if candidates is not None:
+            candidates_file = self.root / "candidates.json"
+            candidates_file.write_text(json.dumps(candidates), encoding="utf-8")
+            cmd += ["--candidates", str(candidates_file)]
         env = dict(self.env)
         if fail_tool:
             env["SINK_FAIL_TOOL"] = fail_tool
         return subprocess.run(
-            [sys.executable, str(self.cli), "--target", "fixture", "--agent", agent,
-             "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)],
-            cwd=self.factory, env=env, capture_output=True, text=True, check=True,
+            cmd, cwd=self.factory, env=env, capture_output=True, text=True, check=True,
             timeout=10,
         )
 
@@ -315,6 +319,36 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
                     result = self.scan(sink, [item], agent=agent)
                     self.assertEqual(self.calls(), [])
                     self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
+
+    def test_candidates_bind_an_invented_rule_id_and_path(self):
+        """The scanner's candidates are the contract: the model's strings are not (agents-nha)."""
+        candidates = {"candidates": [{"rule_id": "unused-export", "path": "src/example.py"}]}
+        self.scan("file", [dict(SAMPLE, rule_id="model-invented", path="elsewhere.js",
+                                title="Invented location")],
+                  candidates=candidates)
+        record, = self.store()["findings"].values()
+        self.assertEqual(record["rule_id"], "unclassified")
+        self.assertEqual(record["path"], "unknown")
+        report = self.report()
+        self.assertIn("unclassified", report)
+        self.assertIn("unknown", report)
+
+    def test_candidates_keep_a_matching_rule_id_and_path(self):
+        candidates = {"candidates": [{"rule_id": "unused-export", "path": "src/example.py"}]}
+        self.scan("file", [dict(SAMPLE, title="Kept")], candidates=candidates)
+        record, = self.store()["findings"].values()
+        self.assertEqual(record["rule_id"], "unused-export")
+        self.assertEqual(record["path"], "./src/example.py")
+
+    def test_issue_shaped_candidates_do_not_bind(self):
+        """issue-triage's candidates are issue records, not locations; nothing to bind to."""
+        candidates = {"candidates": [{"id": "42", "title": "an issue"}]}
+        self.scan("file", [dict(SAMPLE, rule_id="triage-missing-repro", path="issues/42",
+                                title="Issue triage")],
+                  agent="issue-triage", candidates=candidates)
+        record, = self.store()["findings"].values()
+        self.assertEqual(record["rule_id"], "triage-missing-repro")
+        self.assertEqual(record["path"], "issues/42")
 
     def test_suppressed_and_accepted_findings_do_not_dispatch(self):
         self.scan("file", [SAMPLE, dict(SAMPLE, rule_id="accepted-rule")])

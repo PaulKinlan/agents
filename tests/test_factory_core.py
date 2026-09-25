@@ -222,6 +222,74 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", engine)
 
 
+class TestDispatcherCandidateBinding(unittest.TestCase):
+    """The dispatcher hands the scanner's candidates to the store, which binds model strings to
+    them (agents-nha): an invented rule_id/path is stored as unclassified/unknown."""
+
+    def test_model_strings_are_bound_to_the_scanner_candidates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Path(tmpdir)
+            (sandbox / "agents" / "probe" / "scripts").mkdir(parents=True)
+            (sandbox / "agents" / "probe" / "agent.yaml").write_text(
+                "name: probe\n"
+                "class: observer\n"
+                "containment: t0-readonly\n"
+                "short_circuit_empty: false\n"
+                "budget: {max_minutes: 1}\n",
+                encoding="utf-8",
+            )
+
+            candidates_src = sandbox / "candidates-src.json"
+            candidates_src.write_text(json.dumps({"candidates": [{
+                "rule_id": "scanner-rule", "path": "src/a.js", "line_number": 1, "snippet": "x",
+            }]}), encoding="utf-8")
+            (sandbox / "agents" / "probe" / "scripts" / "prepass.py").write_text(
+                "import json, sys\n"
+                "args = sys.argv[1:]\n"
+                f"payload = json.load(open(r'{candidates_src}'))\n"
+                "json.dump(payload, open(args[args.index('--output') + 1], 'w'))\n",
+                encoding="utf-8",
+            )
+
+            report_src = sandbox / "report-src.json"
+            report_src.write_text(json.dumps({
+                "summary": "stub", "scanned_files": 1,
+                "findings": [{
+                    "rule_id": "model-invented", "path": "elsewhere.js", "line_number": 1,
+                    "snippet": "x", "severity": "low", "title": "Invented location",
+                    "description": "d", "remediation": "r",
+                }],
+            }), encoding="utf-8")
+
+            (sandbox / "lib" / "adapters").mkdir(parents=True)
+            adapter = sandbox / "lib" / "adapters" / "pi.sh"
+            shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
+            adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            for module in ("findings.py", "redaction.py", "embargo.py"):
+                shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
+
+            bindir = sandbox / "bin"
+            bindir.mkdir()
+            stub = bindir / "pi"
+            stub.write_text("#!/usr/bin/env bash\n" + f"cat '{report_src}'\n", encoding="utf-8")
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            target = sandbox / "target"
+            target.mkdir()
+
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.dict(os.environ,
+                                 {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}):
+                factory_cli.run_agent("probe", str(target), engine_arg="pi")
+
+            store = json.loads((sandbox / "findings" / "target.json").read_text(encoding="utf-8"))
+            record, = store["findings"].values()
+            self.assertEqual(record["rule_id"], "unclassified")
+            self.assertEqual(record["path"], "unknown")
+            report_text = (sandbox / "findings" / "target-latest.md").read_text(encoding="utf-8")
+            self.assertIn("unclassified", report_text)
+            self.assertIn("unknown", report_text)
+
+
 class TestEngineAdapterAuth(unittest.TestCase):
     """Engine adapters must dispatch on the caller's existing session auth, and must never
     report a run that did not happen. Adapters are exercised against a stub engine binary,
