@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Deterministic verification helper for vuln-verify agent.
 
-Receives candidate vulnerability findings (from findings store, recent discovery runs,
-or direct input) and loads the specific referenced source files with contextual code
-windows, upstream handler definitions, and threat model invariants to prepare a clean,
-isolated context for adversarial verification.
+Receives candidate vulnerability LOCATIONS (from the findings store, recent discovery runs, or
+direct input) and loads the specific referenced source files with contextual code windows,
+upstream handler definitions, and threat model invariants to prepare a clean, isolated context
+for adversarial verification.
+
+Non-negotiable #3: discovery and verification are separate agents with zero shared session
+state, so this pre-pass never forwards the discovery model's conclusions — no title,
+description, severity, remediation or exploit chain. Only the scanner's location data and raw
+snippet cross the boundary; a prompt is the weakest available control against anchoring (SF-08).
 """
 
 import argparse
@@ -17,9 +22,28 @@ from typing import Any, Dict, List, Optional
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
+# The only fields that cross from discovery to verification (SF-08). Everything the discovery
+# model wrote about a candidate — title, description, severity, remediation, exploit chain —
+# stays on the discovery side; the verifier re-derives its own judgement from the code.
+LOCATION_FIELDS = ("fingerprint", "rule_id", "path", "line_number", "snippet")
+
+# The store is shared by every agent, so select the records discovery actually produced.
+DISCOVERY_AGENTS = ("vuln-discovery", "threat-model")
+
+
+def location_candidate(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """One candidate reduced to its scanner location data, or None when it has no path."""
+    if not isinstance(item, dict) or not item.get("path"):
+        return None
+    return {field: item.get(field) for field in LOCATION_FIELDS if item.get(field) is not None}
+
 
 def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, Any]]:
-    """Locate candidate findings from the findings store or most recent discovery runs."""
+    """Locate candidate LOCATIONS from the findings store or the most recent discovery runs.
+
+    Both sources are reduced to `location_candidate`, and the store is filtered to the
+    discovery agents, so no other model's conclusions reach the verifier (SF-08).
+    """
     # 1. Check findings store for this target
     store_path = FACTORY_ROOT / "findings" / f"{target_name}.json"
     if store_path.exists():
@@ -27,17 +51,25 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
             store_data = json.loads(store_path.read_text(encoding="utf-8"))
             raw_findings = store_data.get("findings", {})
             if isinstance(raw_findings, dict) and raw_findings:
-                # Return unsuppressed, non-fixed findings
+                # Return unsuppressed, non-fixed discovery findings, locations only.
                 candidates = []
-                for fp, f in raw_findings.items():
-                    if f.get("state") in ("new", "regressed", "accepted", None):
-                        candidates.append(f)
+                for f in raw_findings.values():
+                    if not isinstance(f, dict):
+                        continue
+                    if f.get("agent") not in DISCOVERY_AGENTS:
+                        continue
+                    if f.get("state") not in ("new", "regressed", "accepted", None):
+                        continue
+                    candidate = location_candidate(f)
+                    if candidate:
+                        candidates.append(candidate)
                 if candidates:
                     return candidates
         except Exception as e:
             sys.stderr.write(f"Warning: Could not read findings store {store_path}: {e}\n")
 
-    # 2. Check recent run directories for vuln-discovery or threat-model
+    # 2. Check recent run directories for vuln-discovery or threat-model. Prefer the
+    #    deterministic scanner output; the model report is the fallback, reduced the same way.
     runs_dir = FACTORY_ROOT / "runs"
     if runs_dir.exists():
         pattern = re.compile(rf"^(?:vuln-discovery|threat-model)-{re.escape(target_name)}-\d{{8}}-\d{{6}}$")
@@ -47,15 +79,23 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
             reverse=True
         )
         for run_dir in matching_runs:
-            report_file = run_dir / "report.json"
-            if report_file.exists():
+            for source_name in ("candidates.json", "report.json"):
+                source_file = run_dir / source_name
+                if not source_file.exists():
+                    continue
                 try:
-                    data = json.loads(report_file.read_text(encoding="utf-8"))
-                    findings = data.get("findings", [])
-                    if findings:
-                        return findings
+                    data = json.loads(source_file.read_text(encoding="utf-8"))
                 except Exception:
                     continue
+                if isinstance(data, dict):
+                    raw = data.get("candidates" if source_name == "candidates.json" else "findings", [])
+                else:
+                    raw = data
+                if not isinstance(raw, list):
+                    continue
+                candidates = [c for c in (location_candidate(i) for i in raw) if c]
+                if candidates:
+                    return candidates
 
     return []
 
@@ -145,14 +185,15 @@ def main():
 
     target_name = target_dir.name
 
-    # 1. Load candidate findings
+    # 1. Load candidate findings, reduced to locations the moment they are read
     findings = []
     if args.findings:
         input_path = Path(args.findings)
         if input_path.exists():
             try:
                 data = json.loads(input_path.read_text(encoding="utf-8"))
-                findings = data.get("findings", data if isinstance(data, list) else [])
+                raw = data.get("findings", data if isinstance(data, list) else [])
+                findings = [c for c in (location_candidate(i) for i in raw) if c]
             except Exception as e:
                 sys.stderr.write(f"Error reading findings from {input_path}: {e}\n")
 
@@ -170,18 +211,16 @@ def main():
             continue
 
         file_ctx = load_file_context(target_dir, path, line_no)
-        verification_candidates.append({
+        candidate = {
             "rule_id": f.get("rule_id", "generic-vuln"),
             "path": path,
             "line_number": line_no,
-            "original_snippet": f.get("snippet", ""),
-            "original_severity": f.get("severity", "medium"),
-            "original_title": f.get("title", ""),
-            "original_description": f.get("description", ""),
-            "original_remediation": f.get("remediation", ""),
-            "original_exploit_chain": f.get("exploit_chain"),
-            "source_context": file_ctx
-        })
+            "snippet": f.get("snippet", ""),
+            "source_context": file_ctx,
+        }
+        if f.get("fingerprint"):
+            candidate["fingerprint"] = f["fingerprint"]
+        verification_candidates.append(candidate)
 
     tm_summary = load_threat_model_summary(target_dir)
 

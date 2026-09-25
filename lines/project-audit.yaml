@@ -16,3 +16,8 @@ stations:
   - perf-review
   - docs-drift
   - qa-station
+
+# Verification should not share discovery's model family where more than one engine is
+# available (non-negotiable #3). Pin per station when it is:
+# station_engines:
+#   vuln-verify: claude
