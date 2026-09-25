@@ -290,6 +290,78 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
             self.assertIn("unknown", report_text)
 
 
+class TestTargetVisibility(unittest.TestCase):
+    """The dispatcher passes the target's declared visibility to the findings store (agents-5rx).
+
+    Visibility is the primary input to the disclosure embargo: only a target that declares
+    `private` may publish the embargoed bands to its own tracker.
+    """
+
+    def _run(self, visibility: str) -> str:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Path(tmpdir)
+            (sandbox / "agents" / "probe").mkdir(parents=True)
+            (sandbox / "agents" / "probe" / "agent.yaml").write_text(
+                "name: probe\n"
+                "class: observer\n"
+                "containment: t0-readonly\n"
+                "short_circuit_empty: false\n"
+                "budget: {max_minutes: 1}\n",
+                encoding="utf-8",
+            )
+            target = sandbox / "target"
+            (target / ".beads").mkdir(parents=True)
+            (sandbox / "targets").mkdir()
+            (sandbox / "targets" / "sandbox.yaml").write_text(
+                f"name: sandbox\npath: {target}\nsink: beads\nvisibility: {visibility}\n",
+                encoding="utf-8",
+            )
+
+            report_src = sandbox / "report-src.json"
+            report_src.write_text(json.dumps({
+                "summary": "stub", "scanned_files": 1,
+                "findings": [{
+                    "rule_id": "critical-rule", "path": "src/a.js", "line_number": 1,
+                    "snippet": "x", "severity": "critical", "title": "Critical finding",
+                    "description": "d", "remediation": "r",
+                }],
+            }), encoding="utf-8")
+
+            (sandbox / "lib" / "adapters").mkdir(parents=True)
+            adapter = sandbox / "lib" / "adapters" / "pi.sh"
+            shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
+            adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            for module in ("findings.py", "redaction.py", "embargo.py"):
+                shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
+
+            bindir = sandbox / "bin"
+            bindir.mkdir()
+            stub = bindir / "pi"
+            stub.write_text("#!/usr/bin/env bash\n" + f"cat '{report_src}'\n", encoding="utf-8")
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            calls = sandbox / "calls.jsonl"
+            bd_stub = bindir / "bd"
+            bd_stub.write_text(
+                "#!/usr/bin/env bash\n"
+                f"printf '%s\\n' \"$*\" >> '{calls}'\n"
+                "echo 'fixture-123'\n",
+                encoding="utf-8",
+            )
+            bd_stub.chmod(bd_stub.stat().st_mode | stat.S_IEXEC)
+
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.dict(os.environ,
+                                 {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}):
+                factory_cli.run_agent("probe", "sandbox", engine_arg="pi")
+            return calls.read_text(encoding="utf-8") if calls.exists() else ""
+
+    def test_a_private_target_publishes_the_critical_band_to_beads(self):
+        self.assertIn("Critical finding", self._run("private"))
+
+    def test_a_public_target_keeps_the_critical_band_out_of_beads(self):
+        self.assertEqual(self._run("public"), "")
+
+
 class TestEngineAdapterAuth(unittest.TestCase):
     """Engine adapters must dispatch on the caller's existing session auth, and must never
     report a run that did not happen. Adapters are exercised against a stub engine binary,

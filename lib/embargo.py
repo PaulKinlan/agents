@@ -50,6 +50,19 @@ EMBARGOED_SEVERITIES = frozenset({"critical", "high"})
 # action's step summary). Any other sink, including one added later, is a publication.
 PRIVATE_SINKS = frozenset({"file"})
 
+# Targets declare their repository visibility in targets/*.yaml. The disclosure rule is about
+# *public* trackers, so visibility is the first input to the routing decision: a public target
+# gets the severity embargo, a private target's own tracker is not a public disclosure.
+# Anything else — missing, misspelled, unknown — fails closed to public (SF-09, agents-5rx).
+VALID_VISIBILITIES = ("public", "private")
+
+
+def normalize_visibility(value: Any) -> str:
+    """Coerce a target's declared visibility, failing closed to public."""
+    if isinstance(value, str) and value.strip().lower() in VALID_VISIBILITIES:
+        return value.strip().lower()
+    return "public"
+
 
 def normalize_severity(value: Any) -> str:
     """Coerce a model-supplied severity to the enum, failing closed.
@@ -75,15 +88,19 @@ def effective_severity(finding: Dict[str, Any]) -> str:
     return normalize_severity(finding.get("severity"))
 
 
-def embargo_reason(finding: Dict[str, Any], sink: str) -> Optional[str]:
+def embargo_reason(finding: Dict[str, Any], sink: str, visibility: Any = "public") -> Optional[str]:
     """Why this finding must not go to `sink`, or None when it may.
 
     Fail-closed by default: `file` is the local evidence trail and is never embargoed; every
-    other sink — known, or one added later — is treated as a publication boundary.
+    other sink — known, or one added later — is treated as a publication boundary. Visibility
+    is read first: only a target that explicitly declares `private` may publish the embargoed
+    bands to its own tracker. A missing or unrecognised value is treated as public (SF-09).
     """
     if sink in PRIVATE_SINKS:
         return None
+    if normalize_visibility(visibility) == "private":
+        return None
     severity = effective_severity(finding)
     if severity in EMBARGOED_SEVERITIES:
-        return f"{severity} severity is embargoed from the {sink} tracker"
+        return f"{severity} severity is embargoed from the {sink} tracker on a public target"
     return None

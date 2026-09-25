@@ -241,19 +241,21 @@ class FindingsStore:
 
         return processed, delta_stats, fixed_items
 
-def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: Any = "public") -> List[Dict[str, Any]]:
     """Filter a run's findings down to what `sink` may receive.
 
     The one choke point every sink goes through. Eligibility (state, delivery receipt) and the
     publication embargo are both decided here, so a new dispatch branch cannot silently publish
-    an embargoed finding. `embargo_reason` fails closed for every sink except the local `file`
-    evidence trail (agents-681 / SF-01, agents-94f / SF-03).
+    an embargoed finding. `visibility` comes from the target manifest and is the first input to
+    the decision; a missing or unknown value is treated as public and `embargo_reason` fails
+    closed for every sink except the local `file` evidence trail (agents-681, agents-94f,
+    agents-5rx).
     """
     publishable = []
     for f in findings:
         if f.get("state") not in ("new", "regressed") or sink in f.get("dispatched_sinks", []):
             continue
-        reason = embargo_reason(f, sink)
+        reason = embargo_reason(f, sink, visibility)
         if reason:
             # The guard line is published too, so it derives every rendered value from the
             # redacted copy; the severity is a deterministic enum member.
@@ -264,7 +266,7 @@ def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]]) -> List[Dic
     return publishable
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None):
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public"):
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
@@ -275,11 +277,11 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     # deliberately includes findings the publication embargo withholds from a tracker sink.
     _dispatch_file(target_name, processed_findings, stats, fixed_items or [])
 
-    publishable = _publishable_for_sink(sink, processed_findings)
+    publishable = _publishable_for_sink(sink, processed_findings, visibility)
     if sink == "beads":
-        _dispatch_beads(target_dir, publishable)
+        _dispatch_beads(target_dir, publishable, visibility)
     elif sink == "github-issues":
-        _dispatch_github(target_name, target_dir, publishable)
+        _dispatch_github(target_name, target_dir, publishable, visibility)
 
 def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]]):
     report_file = FACTORY_ROOT / "findings" / f"{target_name}-delta.md"
@@ -349,7 +351,7 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
     report_file.with_name(f"{target_name}-latest.md").write_text(report, encoding="utf-8")
     print(f"Delta report written to: {report_file}")
 
-def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
+def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public"):
     """Creates beads for active findings if bd is available."""
     if not (target_dir / ".beads").exists():
         print(f"Warning: .beads directory not found in {target_dir}. Falling back to file sink.")
@@ -366,9 +368,12 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
         # dispatch_to_sink already applied and logged the embargo; this keeps a direct call to
         # the sink safe. Beads publishes medium only, as it did before: critical and high are
         # exactly what the embargo withholds from a synced tracker (agents-681).
-        if embargo_reason(f, "beads"):
+        if embargo_reason(f, "beads", visibility):
             continue
-        if f["state"] in ("new", "regressed") and effective_severity(f) == "medium":
+        # Beads is a synced tracker and never takes low/info. On a public target the central
+        # filter has already withheld critical/high; on a private one the embargo lets them
+        # through, which is the point of reading visibility (agents-5rx).
+        if f["state"] in ("new", "regressed") and effective_severity(f) in ("critical", "high", "medium"):
             # Both title and description come from the published view. Building the title from
             # the raw finding let a credential the scanner had recognised reach `bd --title`
             # unchanged even though the body was masked (agents-tcd review).
@@ -393,7 +398,7 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]]):
             except Exception as e:
                 print(f"Failed to create bead: {e}")
 
-def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]]):
+def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public"):
     """Public disclosure guard and issue creation for GitHub Issues."""
     gh_bin = shutil.which("gh")
     for f in findings:
@@ -401,13 +406,13 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
             continue
         # dispatch_to_sink already logged and filtered this; the check keeps a direct call to
         # this sink safe. Fail-closed severity and credential-agent identity live in one place.
-        if embargo_reason(f, "github-issues"):
+        if embargo_reason(f, "github-issues", visibility):
             # The guard's own log line is published too: derive every value it renders.
             guarded = redact_finding(f)
             print(f"[SECURITY GUARD] Suppressing public GitHub issue for {effective_severity(f)} finding: {guarded['title']}")
             print(f"-> Please review in private store or file private security advisory.")
             continue
-        if gh_bin and effective_severity(f) in ("medium", "low"):
+        if gh_bin and effective_severity(f) in ("critical", "high", "medium", "low"):
             published = redact_finding(f)
             title = f"[factory:{published['agent']}] {published['title']}"
             body = (
@@ -436,6 +441,8 @@ if __name__ == "__main__":
     parser.add_argument("--input", required=True, help="JSON file with raw findings")
     parser.add_argument("--candidates", help="Scanner candidates JSON to bind rule_id/path against")
     parser.add_argument("--sink", default="file", help="Sink type (file, beads, github-issues)")
+    parser.add_argument("--visibility", choices=["public", "private"], default="public",
+                        help="Target repository visibility; private relaxes the public-disclosure embargo")
     parser.add_argument("--target-dir", default=".", help="Target repository directory")
     args = parser.parse_args()
 
@@ -459,7 +466,8 @@ if __name__ == "__main__":
             target_dir=Path(args.target_dir).resolve(),
             processed_findings=processed,
             stats=stats,
-            fixed_items=fixed_items
+            fixed_items=fixed_items,
+            visibility=args.visibility,
         )
     finally:
         store.save()
