@@ -362,6 +362,68 @@ class TestTargetVisibility(unittest.TestCase):
         self.assertEqual(self._run("public"), "")
 
 
+class TestPerStationEngine(unittest.TestCase):
+    """A line can pin a station's engine, so verification need not share discovery's family."""
+
+    def test_station_engines_override_the_line_engine(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Path(tmpdir)
+            (sandbox / "agents" / "probe").mkdir(parents=True)
+            (sandbox / "agents" / "probe" / "agent.yaml").write_text(
+                "name: probe\n"
+                "class: observer\n"
+                "containment: t0-readonly\n"
+                "short_circuit_empty: false\n"
+                "budget: {max_minutes: 1}\n",
+                encoding="utf-8",
+            )
+            report_src = sandbox / "report-src.json"
+            report_src.write_text(json.dumps({"summary": "stub", "scanned_files": 1,
+                                              "findings": []}), encoding="utf-8")
+            (sandbox / "lines").mkdir()
+            (sandbox / "lines" / "testline.yaml").write_text(
+                "name: testline\n"
+                "stations:\n"
+                "  - probe\n"
+                "station_engines:\n"
+                "  probe: pi\n",
+                encoding="utf-8",
+            )
+            (sandbox / "lib" / "adapters").mkdir(parents=True)
+            for engine in ("pi", "claude"):
+                adapter = sandbox / "lib" / "adapters" / f"{engine}.sh"
+                shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / f"{engine}.sh", adapter)
+                adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            for module in ("findings.py", "redaction.py", "embargo.py"):
+                shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
+
+            bindir = sandbox / "bin"
+            bindir.mkdir()
+            for engine in ("pi", "claude"):
+                stub = bindir / engine
+                stub.write_text(
+                    "#!/usr/bin/env bash\n"
+                    f"touch '{sandbox / (engine + '-ran')}'\n"
+                    f"cat '{report_src}'\n",
+                    encoding="utf-8",
+                )
+                stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            target = sandbox / "target"
+            target.mkdir()
+
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.dict(os.environ, {
+                     "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+                     "ANTHROPIC_API_KEY": "stub-key",
+                 }):
+                factory_cli.run_line("testline", str(target), engine_arg="claude")
+
+            self.assertTrue((sandbox / "pi-ran").exists(),
+                            "the station's pinned engine must run")
+            self.assertFalse((sandbox / "claude-ran").exists(),
+                             "the line engine must not run for a station that pins another")
+
+
 class TestEngineAdapterAuth(unittest.TestCase):
     """Engine adapters must dispatch on the caller's existing session auth, and must never
     report a run that did not happen. Adapters are exercised against a stub engine binary,

@@ -369,6 +369,7 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
 
     line_cfg = load_yaml_simple(line_yaml)
     stations = line_cfg.get("stations", [])
+    station_engines = line_cfg.get("station_engines", {})
     halt_on_critical = line_cfg.get("andon_halt_on_critical", True)
     halt_on_failure = line_cfg.get("andon_halt_on_failure", True)
     andon_stations = line_cfg.get("andon_stations", ["secret-scan", "vuln-triage"])
@@ -386,9 +387,12 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
     for idx, station in enumerate(stations, start=1):
         st_agent = station if isinstance(station, str) else station.get("agent")
         st_summary = station.get("summary", "") if isinstance(station, dict) else ""
-        print(f"\n▶ [Station {idx}/{len(stations)}] Commencing: {st_agent} -- {st_summary}")
+        # A line can pin a station's engine, so verification need not share discovery's model
+        # family (SF-08, non-negotiable #3). `station_engines: {<agent>: <engine>}`.
+        st_engine = station_engines.get(st_agent, engine_arg) if isinstance(station_engines, dict) else engine_arg
+        print(f"\n▶ [Station {idx}/{len(stations)}] Commencing: {st_agent} [{st_engine}] -- {st_summary}")
         try:
-            res = run_agent(st_agent, target_arg, engine_arg, explicit_sink)
+            res = run_agent(st_agent, target_arg, st_engine, explicit_sink)
             report = res.get("report", {}) if res else {}
             findings = report.get("findings", [])
             criticals = [f for f in findings if f.get("severity") == "critical"]
