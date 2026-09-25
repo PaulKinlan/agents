@@ -8,8 +8,10 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
 
@@ -84,6 +86,51 @@ class TestSoftwareFactoryCore(unittest.TestCase):
             self.assertEqual(parsed["schedule"]["secret-scan"]["hour"], 7)
         finally:
             tf_path.unlink(missing_ok=True)
+
+
+class TestDispatcherBudget(unittest.TestCase):
+    """budget.max_minutes is enforced by the dispatcher, not decorative (SF-06)."""
+
+    def test_hung_engine_is_killed_at_the_station_budget(self):
+        """A hung engine dies at the declared budget and the station fails.
+
+        Without enforcement this test would sit for the stub's full 60 s and then report a
+        clean zero-finding run — the failure mode the audit observed with a stale auth key.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Path(tmpdir)
+            (sandbox / "agents" / "hung").mkdir(parents=True)
+            (sandbox / "agents" / "hung" / "agent.yaml").write_text(
+                "name: hung\n"
+                "class: observer\n"
+                "containment: t0-readonly\n"
+                "short_circuit_empty: false\n"
+                "budget: {max_minutes: 0.05}\n",  # 3 s
+                encoding="utf-8",
+            )
+            (sandbox / "lib" / "adapters").mkdir(parents=True)
+            adapter = sandbox / "lib" / "adapters" / "pi.sh"
+            shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
+            adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            target = sandbox / "target"
+            target.mkdir()
+            bindir = sandbox / "bin"
+            bindir.mkdir()
+            stub = bindir / "pi"
+            stub.write_text("#!/usr/bin/env bash\nsleep 60\n", encoding="utf-8")
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+            started = time.monotonic()
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(factory_cli.StationTimeout) as ctx:
+                    factory_cli.run_agent("hung", str(target), engine_arg="pi")
+            elapsed = time.monotonic() - started
+            self.assertIn("engine 'pi'", str(ctx.exception))
+            self.assertIn("station budget", str(ctx.exception))
+            self.assertLess(elapsed, 15, "the hung engine was not stopped at its budget")
 
 
 class TestEngineAdapterAuth(unittest.TestCase):
