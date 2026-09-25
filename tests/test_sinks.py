@@ -97,7 +97,7 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
             executable.write_text(recorder, encoding="utf-8")
             executable.chmod(0o755)
 
-    def scan(self, sink, items=None, agent="lint", fail_tool=None, candidates=None):
+    def scan(self, sink, items=None, agent="lint", fail_tool=None, candidates=None, visibility=None):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": [SAMPLE] if items is None else items}),
                        encoding="utf-8")
@@ -107,6 +107,8 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
             candidates_file = self.root / "candidates.json"
             candidates_file.write_text(json.dumps(candidates), encoding="utf-8")
             cmd += ["--candidates", str(candidates_file)]
+        if visibility is not None:
+            cmd += ["--visibility", visibility]
         env = dict(self.env)
         if fail_tool:
             env["SINK_FAIL_TOOL"] = fail_tool
@@ -308,6 +310,40 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertEqual(self.calls(), [])
         self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
         self.assertIn("[CRITICAL] aws-access-key match at ./src/example.py:12", self.report())
+
+    def test_a_private_target_may_publish_critical_findings(self):
+        """Visibility is the primary input: a private tracker is not a public disclosure."""
+        items = [dict(SAMPLE, rule_id="critical-rule", severity="critical",
+                      title="Critical but private")]
+        result = self.scan("beads", items, visibility="private")
+        titles = [call["args"][call["args"].index("--title") + 1] for call in self.calls()]
+        self.assertEqual(titles, ["[lint] Critical but private"])
+        self.assertNotIn("[SECURITY GUARD]", result.stdout)
+
+    def test_a_private_target_may_publish_a_security_agent_finding(self):
+        item = dict(SAMPLE, rule_id="aws-access-key", severity="low",
+                    title="Credential on a private target")
+        result = self.scan("beads", [item], agent="secret-scan", visibility="private")
+        self.assertEqual(len(self.calls()), 1)
+        self.assertNotIn("[SECURITY GUARD]", result.stdout)
+
+    def test_a_private_target_publishes_github_issues_for_high(self):
+        item = dict(SAMPLE, rule_id="high-rule", severity="high", title="High but private")
+        result = self.scan("github-issues", [item], visibility="private")
+        self.assertEqual(len(self.calls()), 1)
+        self.assertNotIn("[SECURITY GUARD]", result.stdout)
+
+    def test_an_unknown_visibility_value_is_rejected(self):
+        raw = self.root / "input.json"
+        raw.write_text(json.dumps({"findings": [SAMPLE]}), encoding="utf-8")
+        res = subprocess.run(
+            [sys.executable, str(self.cli), "--target", "fixture", "--agent", "lint",
+             "--input", str(raw), "--sink", "file", "--target-dir", str(self.target),
+             "--visibility", "internal"],
+            cwd=self.factory, env=dict(self.env), capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("invalid choice", res.stderr)
 
     def test_security_agents_are_embargoed_whatever_the_label(self):
         """The vulnerability agents are critical on identity too, on both tracker sinks."""

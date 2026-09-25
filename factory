@@ -21,10 +21,12 @@ FACTORY_ROOT = Path(__file__).resolve().parent
 try:  # repo root on sys.path, or run as a script from another cwd
     from lib.budget import StationTimeout, budget_for, run_station_command
     from lib.child_env import child_environment, prepass_environment
+    from lib.embargo import normalize_visibility
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
     from lib.child_env import child_environment, prepass_environment
+    from lib.embargo import normalize_visibility
 
 # Local git plumbing in the hill-climb path is fast when healthy; a wedged git (lock contention,
 # a huge tree) must not hold the run. Fixed cap: these calls are not stations and have no agent
@@ -237,6 +239,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     print(f"  Containment: {agent_cfg.get('containment', 't0-readonly')}")
     print(f"  Budget:      {budget.minutes:g} min (enforced)")
     print(f"  Target:      {target_name} ({target_dir})")
+    print(f"  Visibility:  {normalize_visibility(target_cfg.get('visibility'))} (enforced)")
     print(f"  Engine:      {engine}")
     print(f"  Sink:        {sink}")
 
@@ -340,6 +343,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             "--sink", sink,
             "--target-dir", str(target_dir)
         ]
+        # The target manifest's visibility is the primary input to the disclosure embargo: a
+        # public target withholds the embargoed bands from tracker sinks, a private one does not
+        # (agents-5rx). Missing or unrecognised values are normalised to public here.
+        findings_cmd += ["--visibility", normalize_visibility(target_cfg.get("visibility"))]
         # Bind the model's rule_id/path to the scanner's candidates when a pre-pass produced
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
         if candidates_file.exists():

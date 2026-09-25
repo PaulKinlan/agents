@@ -19,6 +19,7 @@ from lib.embargo import (  # noqa: E402
     effective_severity,
     embargo_reason,
     normalize_severity,
+    normalize_visibility,
 )
 
 
@@ -51,6 +52,17 @@ class TestNormalizeSeverity(unittest.TestCase):
 
     def test_embargoed_bands_are_critical_and_high(self):
         self.assertEqual(EMBARGOED_SEVERITIES, frozenset({"critical", "high"}))
+
+
+class TestVisibility(unittest.TestCase):
+    def test_recognised_values_are_normalised(self):
+        self.assertEqual(normalize_visibility("public"), "public")
+        self.assertEqual(normalize_visibility(" PRIVATE "), "private")
+
+    def test_missing_or_unrecognised_values_fail_closed_to_public(self):
+        for bad in (None, "", "internal", "pubilc", 1, True, {"v": "private"}):
+            with self.subTest(value=bad):
+                self.assertEqual(normalize_visibility(bad), "public")
 
 
 class TestEffectiveSeverity(unittest.TestCase):
@@ -93,6 +105,37 @@ class TestEmbargoReason(unittest.TestCase):
         """The delta report and findings store are the operator's evidence trail."""
         self.assertIsNone(embargo_reason(finding(severity="critical"), "file"))
         self.assertIsNone(embargo_reason(finding(agent="secret-scan"), "file"))
+
+    def test_a_private_target_may_publish_the_embargoed_bands(self):
+        """A private tracker is not a public disclosure: visibility is the primary input."""
+        for severity in ("critical", "high"):
+            for sink in ("beads", "github-issues"):
+                with self.subTest(severity=severity, sink=sink):
+                    self.assertIsNone(
+                        embargo_reason(finding(severity=severity), sink, visibility="private")
+                    )
+
+    def test_a_private_target_may_publish_security_agents(self):
+        for agent in ("secret-scan", "vuln-discovery", "vuln-verify", "vuln-triage", "threat-model"):
+            with self.subTest(agent=agent):
+                self.assertIsNone(
+                    embargo_reason(finding(agent=agent, severity="low"), "beads",
+                                   visibility="private")
+                )
+
+    def test_missing_or_unrecognised_visibility_is_public(self):
+        for value in (None, "internal", ""):
+            with self.subTest(value=value):
+                self.assertIsNotNone(
+                    embargo_reason(finding(severity="critical"), "beads", visibility=value)
+                )
+
+    def test_the_local_file_sink_is_never_embargoed_either_way(self):
+        for visibility in ("public", "private", None):
+            with self.subTest(visibility=visibility):
+                self.assertIsNone(
+                    embargo_reason(finding(severity="critical"), "file", visibility=visibility)
+                )
 
     def test_unknown_sinks_fail_closed(self):
         self.assertIsNotNone(embargo_reason(finding(severity="critical"), "some-new-tracker"))
