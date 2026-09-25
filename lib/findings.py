@@ -20,6 +20,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 
+# The committed suppressions register. AGENTS.md's noise-control contract requires a written
+# reason in a *committed* file; the old per-target JSON was gitignored, so that contract could
+# not be satisfied by any path (agents-411).
+SUPPRESSIONS_FILENAME = "suppressions.yaml"
+
+
+class SuppressionFileError(ValueError):
+    """The suppressions register cannot be parsed. Loud, never a silent empty dict."""
+
 try:  # imported as lib.findings (root on sys.path), or run as a script (lib/ on it)
     from lib.redaction import redact_finding
 except ImportError:
@@ -114,13 +123,84 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
         path = "unknown"
     return rule_id, path
 
+def _strip_yaml_comment(line: str) -> str:
+    """Cut a YAML comment without touching a '#' inside a quoted scalar."""
+    quote = None
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+    return line
+
+
+def parse_suppressions_yaml(text: str, source: str = SUPPRESSIONS_FILENAME) -> Dict[str, Any]:
+    """Parse the committed register: `<fingerprint>:` plus indented scalar fields.
+
+    Deliberately the same small subset the agent manifests use — comments, blank lines, one
+    level of nesting — and no more: this file is committed and human-edited, so anything
+    unexpected raises rather than being ignored. An entry without a reason is rejected because
+    AGENTS.md requires one.
+    """
+    entries: Dict[str, Dict[str, str]] = {}
+    current: Optional[Dict[str, str]] = None
+
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = _strip_yaml_comment(raw).rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+
+        if indent == 0:
+            if not stripped.endswith(":"):
+                raise SuppressionFileError(
+                    f"{source}:{lineno}: expected a '<fingerprint>:' entry, found {stripped!r}"
+                )
+            fingerprint = stripped[:-1].strip().strip("'\"").lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+                raise SuppressionFileError(
+                    f"{source}:{lineno}: {stripped[:-1].strip()!r} is not a sha256 fingerprint"
+                )
+            if fingerprint in entries:
+                raise SuppressionFileError(f"{source}:{lineno}: duplicate entry {fingerprint}")
+            current = {}
+            entries[fingerprint] = current
+            continue
+
+        if current is None:
+            raise SuppressionFileError(
+                f"{source}:{lineno}: field {stripped!r} appears before any fingerprint"
+            )
+        if ":" not in stripped:
+            raise SuppressionFileError(
+                f"{source}:{lineno}: expected 'field: value', found {stripped!r}"
+            )
+        field, value = stripped.split(":", 1)
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        current[field.strip()] = value
+
+    for fingerprint, entry in entries.items():
+        if not str(entry.get("reason", "")).strip():
+            raise SuppressionFileError(
+                f"{source}: entry {fingerprint} has no reason; AGENTS.md requires one"
+            )
+    return entries
+
 class FindingsStore:
     def __init__(self, target_name: str, findings_dir: Optional[Path] = None):
         self.target_name = target_name
         self.findings_dir = findings_dir or (FACTORY_ROOT / "findings")
         self.findings_dir.mkdir(parents=True, exist_ok=True)
         self.store_file = self.findings_dir / f"{target_name}.json"
-        self.suppressions_file = self.findings_dir / f"{target_name}.suppressions.json"
+        self.suppressions_file = self.findings_dir / SUPPRESSIONS_FILENAME
+        self.legacy_suppressions_file = self.findings_dir / f"{target_name}.suppressions.json"
         self.data: Dict[str, Any] = self._load_store()
         self.suppressions: Dict[str, Any] = self._load_suppressions()
 
@@ -133,12 +213,21 @@ class FindingsStore:
         return {"target": self.target_name, "findings": {}}
 
     def _load_suppressions(self) -> Dict[str, Any]:
-        if self.suppressions_file.exists():
-            try:
-                return json.loads(self.suppressions_file.read_text(encoding="utf-8"))
-            except Exception as e:
-                sys.stderr.write(f"Warning: could not read {self.suppressions_file}: {e}\n")
-        return {}
+        """Read the committed suppressions register (agents-411).
+
+        A parse failure raises instead of returning {}: silently suppressing nothing would
+        un-wontfix the whole register without telling anyone.
+        """
+        if self.legacy_suppressions_file.exists():
+            sys.stderr.write(
+                f"Warning: {self.legacy_suppressions_file} is ignored (and gitignored); move its "
+                f"entries into {self.suppressions_file}\n"
+            )
+        if not self.suppressions_file.exists():
+            return {}
+        return parse_suppressions_yaml(
+            self.suppressions_file.read_text(encoding="utf-8"), str(self.suppressions_file)
+        )
 
     def save(self):
         self.store_file.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
@@ -447,7 +536,12 @@ if __name__ == "__main__":
     raw_data = json.loads(input_path.read_text(encoding="utf-8"))
     findings_list = raw_data.get("findings", []) if isinstance(raw_data, dict) else raw_data
 
-    store = FindingsStore(target_name=args.target)
+    try:
+        store = FindingsStore(target_name=args.target)
+    except SuppressionFileError as e:
+        # Loud and non-zero: a register that cannot be parsed must not silently suppress nothing.
+        sys.stderr.write(f"Error: {e}\n")
+        sys.exit(2)
     candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
     processed, stats, fixed_items = store.process_run(
         agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
