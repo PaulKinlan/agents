@@ -252,10 +252,13 @@ print('fixture-123')
                                           finding["path"], finding["snippet"])
         reports_dir = self.factory / "findings"
         reports_dir.mkdir(parents=True, exist_ok=True)
-        (reports_dir / "sandbox.suppressions.json").write_text(json.dumps({
-            fingerprint: {"reason": f"accepted risk for {CREDENTIAL}", "author": "fixture",
-                          "date": "2026-01-01"}
-        }), encoding="utf-8")
+        (reports_dir / "suppressions.yaml").write_text(
+            f"{fingerprint}:\n"
+            f'  reason: "accepted risk for {CREDENTIAL}"\n'
+            "  author: fixture\n"
+            '  date: "2026-01-01"\n',
+            encoding="utf-8",
+        )
 
         self.assert_clean("file", finding, CREDENTIAL)
         report = (reports_dir / "sandbox-latest.md").read_text(encoding="utf-8")

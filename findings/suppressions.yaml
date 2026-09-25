@@ -1,4 +1,9 @@
 # Software Factory - Suppressions and Wontfix Register
+#
+# This is the register lib/findings.py reads. Entries live here, are committed, and are
+# reviewable; a per-target JSON under findings/ is ignored and warned about. A malformed entry
+# fails the run with the file and line rather than silently suppressing nothing.
+#
 # Format:
 # <sha256_fingerprint>:
 #   reason: "Rationale for suppression"

@@ -357,8 +357,8 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         first, second = store["findings"]
         store["findings"][second]["state"] = "accepted"
         store_file.write_text(json.dumps(store), encoding="utf-8")
-        suppressions = self.factory / "findings" / "fixture.suppressions.json"
-        suppressions.write_text(json.dumps({first: {"reason": "Synthetic accepted risk"}}),
+        suppressions = self.factory / "findings" / "suppressions.yaml"
+        suppressions.write_text(f"{first}:\n  reason: Synthetic accepted risk\n",
                                 encoding="utf-8")
         items = [SAMPLE, dict(SAMPLE, rule_id="accepted-rule")]
         self.scan("beads", items)
@@ -367,6 +367,22 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertEqual(self.stats()["suppressed"], 1)
         self.assertEqual(self.stats()["unchanged"], 1)
         self.assertIn("Synthetic accepted risk", self.report())
+
+    def test_a_malformed_register_fails_loudly(self):
+        """A register that cannot be parsed must not silently suppress nothing (agents-411)."""
+        findings_dir = self.factory / "findings"
+        findings_dir.mkdir(parents=True, exist_ok=True)
+        (findings_dir / "suppressions.yaml").write_text(": broken\n", encoding="utf-8")
+        raw = self.root / "input.json"
+        raw.write_text(json.dumps({"findings": [SAMPLE]}), encoding="utf-8")
+        res = subprocess.run(
+            [sys.executable, str(self.cli), "--target", "fixture", "--agent", "lint",
+             "--input", str(raw), "--sink", "file", "--target-dir", str(self.target)],
+            cwd=self.factory, env=dict(self.env), capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("Error", res.stderr)
+        self.assertIn("suppressions", res.stderr)
 
 
 if __name__ == "__main__":
