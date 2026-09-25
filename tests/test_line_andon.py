@@ -30,7 +30,8 @@ spec = importlib.util.spec_from_loader("factory_cli_p2c", loader)
 factory_cli = importlib.util.module_from_spec(spec)
 loader.exec_module(factory_cli)
 
-LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py")
+LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
+               "report_schema.py")
 
 
 class LineSandbox:

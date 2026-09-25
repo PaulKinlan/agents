@@ -22,11 +22,13 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.budget import StationTimeout, budget_for, run_station_command
     from lib.child_env import child_environment, prepass_environment
     from lib.embargo import normalize_visibility
+    from lib.report_schema import validate_agent_report
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
     from lib.child_env import child_environment, prepass_environment
     from lib.embargo import normalize_visibility
+    from lib.report_schema import validate_agent_report
 
 # Local git plumbing in the hill-climb path is fast when healthy; a wedged git (lock contention,
 # a huge tree) must not hold the run. Fixed cap: these calls are not stations and have no agent
@@ -326,6 +328,21 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
                 "findings": []
             }
+        else:
+            # The output contract is the deterministic half of the agent (SF-07): a report
+            # that violates it is treated exactly like unparseable output — the store never
+            # sees it, so no finding transitions on half-formed data.
+            schema_errors = validate_agent_report(agent_dir, agent_cfg, report)
+            if schema_errors:
+                model_parse_succeeded = False
+                print(f"Warning: Model output violates the declared report schema "
+                      f"({len(schema_errors)} violation(s); first: {schema_errors[0]}). "
+                      f"Skipping findings store update to prevent false 'fixed' transitions.")
+                report = {
+                    "summary": "Model output failed the declared report schema.",
+                    "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
+                    "findings": []
+                }
 
     report_path = run_dir / "report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
