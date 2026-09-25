@@ -59,9 +59,11 @@ class TestSinks(unittest.TestCase):
         (self.factory / "lib").mkdir(parents=True)
         self.cli = self.factory / "lib" / "findings.py"
         shutil.copyfile(ROOT / "lib" / "findings.py", self.cli)
-        # findings.py renders every published finding through lib.redaction, so the sandbox
-        # needs that module too (the import falls back to the package root on sys.path).
-        shutil.copyfile(ROOT / "lib" / "redaction.py", self.factory / "lib" / "redaction.py")
+        # findings.py renders every published finding through lib.redaction and applies the
+        # publication embargo from lib.embargo, so the sandbox needs both modules too (the
+        # imports fall back to the package root on sys.path).
+        for module in ("redaction.py", "embargo.py"):
+            shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         self.target = self.root / "target with spaces"
         (self.target / ".beads").mkdir(parents=True)
         self.bin = self.root / "bin"
@@ -258,14 +260,50 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.scan("github-issues", items)
         self.assertEqual(len(self.calls()), 2)
 
-    def test_beads_severity_and_bug_type(self):
+    def test_beads_embargoes_critical_and_high_and_keeps_its_band(self):
+        """The beads sink is a synced tracker: the bands GitHub refuses must not reach it.
+
+        The security audit found this sink created a bead for all three bands (SF-01). Medium
+        stays the only publishing band, as it was before.
+        """
         items = [dict(SAMPLE, rule_id=severity, severity=severity)
                  for severity in ("critical", "high", "medium", "low", "info")]
-        self.scan("beads", items, agent="vuln-verify")
+        result = self.scan("beads", items, agent="vuln-verify")
         calls = self.calls()
-        self.assertEqual(len(calls), 3)
-        for call in calls:
-            self.assertEqual(call["args"][call["args"].index("--type") + 1], "bug")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["args"][calls[0]["args"].index("--type") + 1], "bug")
+        self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 2)
+        # The private delta report keeps every finding for the responder.
+        report = self.report()
+        self.assertIn("[CRITICAL] Unused export", report)
+        self.assertIn("[HIGH] Unused export", report)
+        self.assertIn("[MEDIUM] Unused export", report)
+
+    def test_beads_embargoes_absent_severity_fail_closed(self):
+        """An absent severity used to default to medium and publish (SF-03)."""
+        item = dict(SAMPLE, title="Severity omitted")
+        item.pop("severity")
+        result = self.scan("beads", [item])
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
+        self.assertIn("[CRITICAL] Severity omitted", self.report())
+
+    def test_github_embargoes_absent_severity_fail_closed(self):
+        """The GitHub guard branched on the raw field, so a deleted key published publicly."""
+        item = dict(SAMPLE, title="Severity omitted")
+        item.pop("severity")
+        result = self.scan("github-issues", [item])
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
+
+    def test_beads_embargoes_a_credential_agent_labelled_low(self):
+        """A credential finding is critical on identity, not on the model's word."""
+        item = dict(SAMPLE, rule_id="aws-access-key", severity="low",
+                    title="A key the model called low")
+        result = self.scan("beads", [item], agent="secret-scan")
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
+        self.assertIn("[CRITICAL] aws-access-key match at ./src/example.py:12", self.report())
 
     def test_suppressed_and_accepted_findings_do_not_dispatch(self):
         self.scan("file", [SAMPLE, dict(SAMPLE, rule_id="accepted-rule")])

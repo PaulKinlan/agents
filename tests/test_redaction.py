@@ -118,7 +118,7 @@ class TestCredentialEchoRegression(unittest.TestCase):
         self.root = Path(temporary.name)
         self.factory = self.root / "factory"
         (self.factory / "lib").mkdir(parents=True)
-        for module in ("findings.py", "redaction.py"):
+        for module in ("findings.py", "redaction.py", "embargo.py"):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         self.cli = self.factory / "lib" / "findings.py"
         self.target = self.root / "target"
@@ -394,7 +394,7 @@ class TestPublishedSurfaces(unittest.TestCase):
         self.factory = self.root / "factory"
         (self.factory / "lib").mkdir(parents=True)
         # A copy, so the report lands inside the sandbox: FACTORY_ROOT is module-level.
-        for module in ("findings.py", "redaction.py"):
+        for module in ("findings.py", "redaction.py", "embargo.py"):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         self.cli = self.factory / "lib" / "findings.py"
         self.target = self.root / "target"
@@ -451,8 +451,22 @@ print('fixture-123')
         self.assertIn("src/config.js:12", report)
         self.assertIn("[redacted:secret-scan match", report)
 
-    def test_beads_sink_masks_the_credential(self):
+    def test_beads_sink_embargoes_a_credential_agent(self):
+        """A credential finding is critical on identity, so it never reaches the synced tracker."""
         result = self.dispatch("beads", _secret_finding(agent="secret-scan"), "secret-scan")
+        self.assert_nothing_published(result)
+        self.assertEqual(self.tracker_calls(), [])
+        self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
+        # It is still in the private report, where the responder can act on it.
+        report = self.report()
+        self.assertIn("aws-access-key", report)
+        self.assertIn("src/config.js:12", report)
+        self.assertIn("[redacted:secret-scan match", report)
+
+    def test_beads_sink_masks_a_model_echoed_credential(self):
+        """Medium routes past the embargo, so the rendered fields must still be masked."""
+        result = self.dispatch("beads", _secret_finding(agent="docs-drift", severity="medium"),
+                               "docs-drift")
         self.assert_nothing_published(result)
         calls = self.tracker_calls()
         self.assertEqual([c["tool"] for c in calls], ["bd"])
@@ -460,10 +474,10 @@ print('fixture-123')
         # A credential finding publishes scanner-controlled text only; the model's own title is
         # withheld along with the value.
         self.assertEqual(args[args.index("--title") + 1],
-                         "[secret-scan] aws-access-key match at src/config.js:12")
+                         "[docs-drift] aws-access-key match at src/config.js:12")
         description = args[args.index("--description") + 1]
         self.assertIn("withhold the matched value", description)
-        self.assertIn("[redacted:secret-scan match", description)
+        self.assertIn("[redacted:docs-drift match", description)
 
     def test_github_sink_masks_a_model_echoed_credential(self):
         """Medium severity so the public-disclosure guard lets it through to the sink."""
