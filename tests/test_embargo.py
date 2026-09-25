@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from lib.embargo import (  # noqa: E402
     EMBARGOED_SEVERITIES,
+    IDENTITY_CRITICAL_AGENTS,
     VALID_SEVERITIES,
     effective_severity,
     embargo_reason,
@@ -53,17 +54,23 @@ class TestNormalizeSeverity(unittest.TestCase):
 
 
 class TestEffectiveSeverity(unittest.TestCase):
-    def test_credential_agent_is_critical_whatever_the_model_labelled_it(self):
+    def test_security_agents_are_critical_whatever_the_model_labelled_it(self):
         """Identity, a deterministic fact, outranks the model's self-report (SF-03)."""
-        for label in ("critical", "high", "medium", "low", "info", None, "urgent", {"x": 1}):
-            with self.subTest(label=label):
-                self.assertEqual(
-                    effective_severity(finding(agent="secret-scan", severity=label)),
-                    "critical",
-                )
+        for agent in ("secret-scan", "vuln-discovery", "vuln-verify", "vuln-triage", "threat-model"):
+            for label in ("critical", "high", "medium", "low", "info", None, "urgent", {"x": 1}):
+                with self.subTest(agent=agent, label=label):
+                    self.assertEqual(
+                        effective_severity(finding(agent=agent, severity=label)),
+                        "critical",
+                    )
+
+    def test_identity_set_covers_credentials_and_vulnerabilities(self):
+        for agent in ("secret-scan", "vuln-discovery", "vuln-verify", "vuln-triage", "threat-model"):
+            with self.subTest(agent=agent):
+                self.assertIn(agent, IDENTITY_CRITICAL_AGENTS)
 
     def test_ordinary_agent_keeps_a_valid_label(self):
-        self.assertEqual(effective_severity(finding(agent="vuln-verify", severity="low")), "low")
+        self.assertEqual(effective_severity(finding(agent="docs-drift", severity="low")), "low")
 
     def test_missing_label_on_an_ordinary_agent_is_critical(self):
         self.assertEqual(effective_severity(finding(severity=None)), "critical")
