@@ -12,6 +12,7 @@ Fixtures are assembled from parts so this file stays clean under the repository'
 import importlib.machinery
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,7 +46,18 @@ SHAPES = {
     "google-oauth": "ya29." + "A" * 25,
     "gitlab-pat": "glpat-" + "x" * 25,
     "npm-token": "npm_" + "b" * 36,
+    # Deliberately matches no vendor pattern and no benign-placeholder substring, so the
+    # generic catch-all is the only rule that can claim it.
+    "generic-api-key": "Zq9wEr7Tyu0iOpAs4dFg6Hj",
 }
+
+# Most shapes are recognised from the credential value alone, so they are planted as
+# `const x = "<value>";`. The generic catch-all only fires on an assignment line
+# (`api_key = "..."`), so its fixture needs the whole line.
+LINE_TEMPLATES = {
+    "generic-api-key": 'api_key = "{value}";\n',
+}
+DEFAULT_LINE_TEMPLATE = 'const x = "{value}";\n'
 
 
 def scanner_rule_ids():
@@ -62,20 +74,29 @@ class TestScannerCoverage(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.tree = Path(temporary.name)
         self.output = self.tree.parent / "candidates.json"
+        # These tests assert on the built-in regex suite: PATTERNS, span dedup, placeholder
+        # filtering. On a machine with gitleaks installed the CLI takes scan_with_gitleaks()
+        # instead and none of that code is exercised, so force the fallback with a PATH that
+        # cannot contain gitleaks. sys.executable is absolute, so an empty PATH still runs it.
+        empty_path = self.tree / "empty-path"
+        empty_path.mkdir()
+        self.env = {**os.environ, "PATH": str(empty_path)}
 
     def scan(self):
         subprocess.run(
             [sys.executable, str(FACTORY_ROOT / "agents" / "secret-scan" / "scripts" / "scan.py"),
              "--target", str(self.tree), "--output", str(self.output)],
-            capture_output=True, text=True, timeout=60, check=True,
+            capture_output=True, text=True, timeout=60, check=True, env=self.env,
         )
         return json.loads(self.output.read_text())["candidates"]
 
     def test_every_advertised_shape_is_detected(self):
         """One planted credential per shape: a shape that is advertised and undetectable is the
-        agents-btg bug — maskable in theory, invisible in practice."""
+        agents-btg bug — maskable in theory, invisible in practice. SHAPES must carry every
+        rule in scan.py's PATTERNS, generic-api-key included."""
         for rule_id, value in SHAPES.items():
-            (self.tree / f"{rule_id}.js").write_text(f'const x = "{value}";\n')
+            template = LINE_TEMPLATES.get(rule_id, DEFAULT_LINE_TEMPLATE)
+            (self.tree / f"{rule_id}.js").write_text(template.format(value=value))
 
         detected = {candidate["rule_id"] for candidate in self.scan()}
 
@@ -112,6 +133,19 @@ class TestScannerCoverage(unittest.TestCase):
         rule_ids = [candidate["rule_id"] for candidate in self.scan()]
 
         self.assertCountEqual(rule_ids, ["aws-access-key", "github-pat"])
+
+    def test_two_credentials_of_one_shape_on_a_line_are_both_reported(self):
+        """finditer, not search: two keys of the SAME vendor shape on one line must not
+        collapse into the first match — the span dedup never even saw the second."""
+        second_key = "sk-" + "live-" + "Qw7" * 11
+        (self.tree / "pair.js").write_text(
+            f'const a = "{SHAPES["openai-key"]}", b = "{second_key}";\n'
+        )
+
+        candidates = self.scan()
+
+        self.assertEqual(len(candidates), 2, candidates)
+        self.assertEqual([c["rule_id"] for c in candidates], ["openai-key", "openai-key"])
 
     def test_benign_placeholder_still_filtered(self):
         """Existing behaviour kept: an obvious placeholder is not worth a model round trip."""

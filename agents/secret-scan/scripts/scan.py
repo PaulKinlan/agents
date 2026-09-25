@@ -112,9 +112,9 @@ def scan_with_builtin(target_dir: Path) -> list:
                     continue
                 found = []
                 for rule_id, pattern in PATTERNS:
-                    match = pattern.search(line)
-                    if match:
-                        found.append((rule_id, match))
+                    # finditer, not search: one line can hold several credentials of the
+                    # SAME shape, and search() would silently keep only the first.
+                    found.extend((rule_id, match) for match in pattern.finditer(line))
 
                 # One credential is one finding. A vendor rule and the generic catch-all both
                 # match `api_key = "sk-..."`; keep the most specific and the longest, then drop
