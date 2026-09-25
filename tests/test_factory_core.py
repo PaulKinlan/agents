@@ -454,8 +454,8 @@ class TestEngineAdapterAuth(unittest.TestCase):
         env["FAKE_ENV_LOG"] = str(tmp / "child-env.log")
         env.update(env_overrides)
         return subprocess.run(
-            ["bash", str(adapter), "probe", str(target), str(tmp), "prompt", str(run_dir)],
-            capture_output=True, text=True, env=env, timeout=60,
+            ["bash", str(adapter), "probe", str(target), str(tmp), str(run_dir)],
+            input="prompt", capture_output=True, text=True, env=env, timeout=60,
         ), run_dir
 
     def test_claude_prefers_session_and_scrubs_ambient_api_key(self):
@@ -520,8 +520,8 @@ class TestEngineAdapterAuth(unittest.TestCase):
             env["PATH"] = "/usr/bin:/bin"
 
             res = subprocess.run(
-                ["bash", str(adapter), "probe", str(tmp), str(tmp), "prompt", str(run_dir)],
-                capture_output=True, text=True, env=env, timeout=60,
+                ["bash", str(adapter), "probe", str(tmp), str(tmp), str(run_dir)],
+                input="prompt", capture_output=True, text=True, env=env, timeout=60,
             )
 
             self.assertEqual(res.returncode, 1)
