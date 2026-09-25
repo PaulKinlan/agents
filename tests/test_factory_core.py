@@ -3,6 +3,7 @@
 
 import importlib.machinery
 import importlib.util
+import json
 import os
 import shutil
 import stat
@@ -131,6 +132,94 @@ class TestDispatcherBudget(unittest.TestCase):
             self.assertIn("engine 'pi'", str(ctx.exception))
             self.assertIn("station budget", str(ctx.exception))
             self.assertLess(elapsed, 15, "the hung engine was not stopped at its budget")
+
+
+class TestDispatcherChildEnvironment(unittest.TestCase):
+    """The engine and pre-pass children get an explicit, credential-free environment (SF-04)."""
+
+    def _run_probe(self, extra_agent_yaml: str = ""):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Path(tmpdir)
+            (sandbox / "agents" / "probe" / "scripts").mkdir(parents=True)
+            (sandbox / "agents" / "probe" / "agent.yaml").write_text(
+                "name: probe\n"
+                "class: observer\n"
+                "containment: t0-readonly\n"
+                "short_circuit_empty: false\n"
+                + extra_agent_yaml +
+                "budget: {max_minutes: 1}\n",
+                encoding="utf-8",
+            )
+            prepass_log = sandbox / "prepass-env.json"
+            engine_log = sandbox / "engine-env.json"
+            (sandbox / "agents" / "probe" / "scripts" / "prepass.py").write_text(
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                f"json.dump(dict(os.environ), open(r'{prepass_log}', 'w'))\n"
+                "json.dump({'candidates': []}, open(args[args.index('--output') + 1], 'w'))\n",
+                encoding="utf-8",
+            )
+
+            (sandbox / "lib" / "adapters").mkdir(parents=True)
+            adapter = sandbox / "lib" / "adapters" / "pi.sh"
+            shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
+            adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            for module in ("findings.py", "redaction.py", "embargo.py"):
+                shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
+
+            bindir = sandbox / "bin"
+            bindir.mkdir()
+            stub = bindir / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                f"env > '{engine_log}'\n"
+                "echo '{\"summary\":\"stub\",\"scanned_files\":0,\"findings\":[]}'\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            target = sandbox / "target"
+            target.mkdir()
+
+            overrides = {
+                "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+                "GITHUB_TOKEN": "ghs_ci_token",
+                "GH_TOKEN": "ghs_ci_token",
+                "AWS_SECRET_ACCESS_KEY": "aws-secret",
+                "SSH_AUTH_SOCK": "/tmp/does-not-matter.sock",
+                "ANTHROPIC_API_KEY": "sk-ant-ci",
+                "GEMINI_API_KEY": "gem-ci",
+                "PROJECT_UNRELATED_TOKEN": "unrelated",
+            }
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+                 mock.patch.dict(os.environ, overrides):
+                factory_cli.run_agent("probe", str(target), engine_arg="pi")
+
+            prepass = json.loads(prepass_log.read_text(encoding="utf-8"))
+            # The engine stub dumps `env` output, which is KEY=value lines, not JSON.
+            engine = {}
+            for line in engine_log.read_text(encoding="utf-8").splitlines():
+                if "=" in line:
+                    name, value = line.split("=", 1)
+                    engine[name] = value
+            return prepass, engine
+
+    def test_agent_children_never_inherit_operator_credentials(self):
+        prepass, engine = self._run_probe()
+        for child, env in (("pre-pass", prepass), ("engine", engine)):
+            for name in ("GITHUB_TOKEN", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY",
+                         "SSH_AUTH_SOCK", "PROJECT_UNRELATED_TOKEN"):
+                with self.subTest(child=child, name=name):
+                    self.assertNotIn(name, env)
+        self.assertNotIn("ANTHROPIC_API_KEY", prepass)
+        self.assertEqual(engine["GEMINI_API_KEY"], "gem-ci")
+        self.assertEqual(engine["ANTHROPIC_API_KEY"], "sk-ant-ci")
+        self.assertIn("PATH", engine)
+
+    def test_prepass_gets_github_only_when_the_agent_declares_gh(self):
+        """issue-triage's pre-pass calls gh and declares requires: [gh]; nothing else gets it."""
+        prepass, engine = self._run_probe("capabilities:\n  requires: [gh]\n")
+        self.assertEqual(prepass["GH_TOKEN"], "ghs_ci_token")
+        self.assertNotIn("GH_TOKEN", engine)
 
 
 class TestEngineAdapterAuth(unittest.TestCase):

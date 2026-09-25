@@ -26,7 +26,12 @@ CONTROL_TIMEOUT_SECONDS = 30
 
 
 def _run_control(cmd, **kwargs) -> subprocess.CompletedProcess:
-    """subprocess.run for control-plane commands, always with a hard timeout."""
+    """subprocess.run for control-plane commands, always with a hard timeout.
+
+    Deliberately inherits the operator's session environment: systemctl --user needs the
+    session bus and XDG_RUNTIME_DIR, and these commands run no target code. Agent children
+    instead get an explicit environment — see lib/child_env.py.
+    """
     kwargs.setdefault("capture_output", True)
     kwargs.setdefault("text", True)
     return subprocess.run(cmd, timeout=CONTROL_TIMEOUT_SECONDS, **kwargs)
