@@ -13,7 +13,9 @@ The decision never treats a model's self-report as authority (agents-94f):
   publication.
 - `CREDENTIAL_AGENTS` are credential-class by construction: a scanner candidate *is* a
   credential whatever the triage model called it, so they are critical on identity, a
-  deterministic fact.
+  deterministic fact. The same identity rule covers the vulnerability agents (vuln-discovery,
+  vuln-verify, vuln-triage, threat-model): their candidates are attack surfaces, and a model
+  that understates one does not authorise its publication.
 
 The embargo is a routing decision, not deletion. The raw value and the model's own notes stay
 in the local run artifact and findings store, where a human needs them to rotate the secret.
@@ -25,6 +27,17 @@ try:  # imported as lib.embargo, or run with lib/ on sys.path
     from lib.redaction import CREDENTIAL_AGENTS
 except ImportError:  # pragma: no cover - the CLI's sys.path fallback covers this layout
     from redaction import CREDENTIAL_AGENTS
+
+# Agents whose findings are security-sensitive by construction: a credential scanner's candidate
+# *is* a credential, and a vulnerability agent's candidate *is* an attack surface. The triage
+# model can mislabel, omit or understate a severity — identity cannot. Any finding from one of
+# these is critical for routing, whatever the model's label says (SF-03).
+IDENTITY_CRITICAL_AGENTS = CREDENTIAL_AGENTS | frozenset({
+    "vuln-discovery",
+    "vuln-verify",
+    "vuln-triage",
+    "threat-model",
+})
 
 # The accepted severity vocabulary. Anything outside it is not a severity.
 VALID_SEVERITIES = ("critical", "high", "medium", "low", "info")
@@ -53,11 +66,11 @@ def normalize_severity(value: Any) -> str:
 def effective_severity(finding: Dict[str, Any]) -> str:
     """The severity this finding is treated as having at a publication boundary.
 
-    Credential-class agents are critical on identity, so a model that labels a leaked key
-    `low` cannot authorise its publication.
+    Security-sensitive agents are critical on identity, so a model that labels a leaked key —
+    or an understated vulnerability — `low` cannot authorise its publication.
     """
     agent = finding.get("agent")
-    if isinstance(agent, str) and agent.strip() in CREDENTIAL_AGENTS:
+    if isinstance(agent, str) and agent.strip() in IDENTITY_CRITICAL_AGENTS:
         return "critical"
     return normalize_severity(finding.get("severity"))
 

@@ -268,10 +268,10 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         """
         items = [dict(SAMPLE, rule_id=severity, severity=severity)
                  for severity in ("critical", "high", "medium", "low", "info")]
-        result = self.scan("beads", items, agent="vuln-verify")
+        result = self.scan("beads", items)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["args"][calls[0]["args"].index("--type") + 1], "bug")
+        self.assertEqual(calls[0]["args"][calls[0]["args"].index("--type") + 1], "task")
         self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 2)
         # The private delta report keeps every finding for the responder.
         report = self.report()
@@ -304,6 +304,17 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertEqual(self.calls(), [])
         self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
         self.assertIn("[CRITICAL] aws-access-key match at ./src/example.py:12", self.report())
+
+    def test_security_agents_are_embargoed_whatever_the_label(self):
+        """The vulnerability agents are critical on identity too, on both tracker sinks."""
+        for agent in ("vuln-discovery", "vuln-verify", "vuln-triage", "threat-model"):
+            for sink in ("beads", "github-issues"):
+                with self.subTest(agent=agent, sink=sink):
+                    item = dict(SAMPLE, rule_id=f"{agent}-finding", severity="medium",
+                                title=f"{agent} medium finding")
+                    result = self.scan(sink, [item], agent=agent)
+                    self.assertEqual(self.calls(), [])
+                    self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
 
     def test_suppressed_and_accepted_findings_do_not_dispatch(self):
         self.scan("file", [SAMPLE, dict(SAMPLE, rule_id="accepted-rule")])
