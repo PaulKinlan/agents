@@ -600,5 +600,29 @@ class TestScheduleGeneration(unittest.TestCase):
             self.assertEqual(dest_plist.read_text(encoding="utf-8"), "PRE_EXISTING_PLIST_CONTENT")
 
 
+class TestControlPlaneTimeouts(unittest.TestCase):
+    """SF-06: control-plane commands are bounded, so a wedged service manager cannot hang
+    the factory CLI (these calls have no agent budget to derive a timeout from)."""
+
+    def test_control_plane_command_times_out(self):
+        from lib import scheduler
+
+        original = scheduler.CONTROL_TIMEOUT_SECONDS
+        scheduler.CONTROL_TIMEOUT_SECONDS = 0.5
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                scheduler._run_control(
+                    [sys.executable, "-c", "import time; time.sleep(10)"]
+                )
+        finally:
+            scheduler.CONTROL_TIMEOUT_SECONDS = original
+
+    def test_every_scheduler_call_goes_through_the_bounded_helper(self):
+        source = (FACTORY_ROOT / "lib" / "scheduler.py").read_text(encoding="utf-8")
+        # Only the helper itself may call subprocess.run; every call site uses the helper.
+        self.assertEqual(source.count("subprocess.run("), 1)
+        self.assertGreaterEqual(source.count("_run_control("), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

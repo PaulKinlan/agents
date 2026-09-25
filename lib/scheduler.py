@@ -17,6 +17,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 SCHEDULES_DIR = FACTORY_ROOT / "schedules"
+
+# Control-plane commands (launchctl, systemctl, plutil, systemd-analyze) answer in well under a
+# second when the service manager is healthy. A fixed cap stops a wedged manager from hanging the
+# factory CLI; these calls are not agent stations, so there is no budget.max_minutes to derive
+# from (SF-06).
+CONTROL_TIMEOUT_SECONDS = 30
+
+
+def _run_control(cmd, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run for control-plane commands, always with a hard timeout."""
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    return subprocess.run(cmd, timeout=CONTROL_TIMEOUT_SECONDS, **kwargs)
+
+
 def get_launch_agents_dir() -> Path:
     """Return standard user launchd agents directory (~/Library/LaunchAgents)."""
     return Path.home() / "Library" / "LaunchAgents"
@@ -207,7 +222,7 @@ def validate_plist(plist_path: Path) -> Dict[str, Any]:
         raise ValueError(f"Plist missing StartInterval or StartCalendarInterval: {plist_path}")
 
     if shutil.which("plutil"):
-        res = subprocess.run(["plutil", "-lint", str(plist_path)], capture_output=True, text=True, check=False)
+        res = _run_control(["plutil", "-lint", str(plist_path)], capture_output=True, text=True, check=False)
         if res.returncode != 0:
             raise ValueError(f"plutil lint failed for {plist_path}: {res.stderr.strip() or res.stdout.strip()}")
 
@@ -307,7 +322,7 @@ def validate_systemd_units(service_path: Path, timer_path: Path) -> Tuple[str, s
 
     # If systemd-analyze is present, perform system-level verification
     if shutil.which("systemd-analyze"):
-        res = subprocess.run(
+        res = _run_control(
             ["systemd-analyze", "verify", str(service_path), str(timer_path)],
             capture_output=True,
             text=True,
@@ -404,7 +419,7 @@ def get_loaded_launchd_services() -> Dict[str, Dict[str, str]]:
     if not shutil.which("launchctl"):
         return {}
     try:
-        res = subprocess.run(["launchctl", "list"], capture_output=True, text=True, check=True)
+        res = _run_control(["launchctl", "list"], capture_output=True, text=True, check=True)
     except Exception:
         return {}
 
@@ -426,7 +441,7 @@ def get_active_systemd_timers() -> Dict[str, Dict[str, Any]]:
     if not shutil.which("systemctl"):
         return {}
     try:
-        res = subprocess.run(
+        res = _run_control(
             ["systemctl", "--user", "list-timers", "--all", "--no-legend"],
             capture_output=True,
             text=True,
@@ -503,7 +518,7 @@ def list_schedules(platform: Optional[str] = None):
 
             if shutil.which("systemctl"):
                 try:
-                    res = subprocess.run(
+                    res = _run_control(
                         ["systemctl", "--user", "show", timer_unit, "--property=ActiveState,SubState"],
                         capture_output=True,
                         text=True,
@@ -565,8 +580,8 @@ def install_schedule(
         shutil.copyfile(plist_path, dest_path)
 
         if dest_dir is None and shutil.which("launchctl"):
-            subprocess.run(["launchctl", "unload", "-w", str(dest_path)], capture_output=True, check=False)
-            res = subprocess.run(["launchctl", "load", "-w", str(dest_path)], capture_output=True, text=True, check=False)
+            _run_control(["launchctl", "unload", "-w", str(dest_path)], capture_output=True, check=False)
+            res = _run_control(["launchctl", "load", "-w", str(dest_path)], capture_output=True, text=True, check=False)
             if res.returncode == 0:
                 print(f"✓ Installed and loaded launchd schedule: {label}")
                 print(f"  Plist: {dest_path}")
@@ -577,7 +592,7 @@ def install_schedule(
                 print(f"✗ Failed to load into launchctl: {err_msg}")
                 if plist_orig is not None:
                     dest_path.write_bytes(plist_orig)
-                    subprocess.run(["launchctl", "load", "-w", str(dest_path)], capture_output=True, check=False)
+                    _run_control(["launchctl", "load", "-w", str(dest_path)], capture_output=True, check=False)
                 else:
                     dest_path.unlink(missing_ok=True)
                 return False
@@ -608,20 +623,20 @@ def install_schedule(
                 dest_timer.unlink(missing_ok=True)
 
             if dest_dir is None and shutil.which("systemctl") and (service_orig is not None or timer_orig is not None):
-                subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+                _run_control(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
 
         shutil.copyfile(service_path, dest_service)
         shutil.copyfile(timer_path, dest_timer)
 
         if dest_dir is None and shutil.which("systemctl"):
-            res_reload = subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+            res_reload = _run_control(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
             if res_reload.returncode != 0:
                 err_msg = res_reload.stderr.strip() or res_reload.stdout.strip()
                 print(f"✗ Failed to reload systemd daemon via systemctl: {err_msg}")
                 _rollback()
                 return False
 
-            res = subprocess.run(["systemctl", "--user", "enable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
+            res = _run_control(["systemctl", "--user", "enable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
             if res.returncode == 0:
                 print(f"✓ Installed and enabled systemd schedule: {label}.timer")
                 print(f"  Service: {dest_service}")
@@ -657,7 +672,7 @@ def uninstall_schedule(
             return True
 
         if dest_dir is None and shutil.which("launchctl"):
-            res = subprocess.run(["launchctl", "unload", "-w", str(dest_path)], capture_output=True, text=True, check=False)
+            res = _run_control(["launchctl", "unload", "-w", str(dest_path)], capture_output=True, text=True, check=False)
             if res.returncode != 0:
                 err_msg = res.stderr.strip() or res.stdout.strip()
                 print(f"✗ Failed to unload {label} via launchctl: {err_msg}")
@@ -676,13 +691,13 @@ def uninstall_schedule(
             return True
 
         if dest_dir is None and shutil.which("systemctl"):
-            res_dis = subprocess.run(["systemctl", "--user", "disable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
+            res_dis = _run_control(["systemctl", "--user", "disable", "--now", f"{label}.timer"], capture_output=True, text=True, check=False)
             if res_dis.returncode != 0:
                 err_msg = res_dis.stderr.strip() or res_dis.stdout.strip()
                 print(f"✗ Failed to disable {label}.timer via systemctl: {err_msg}")
                 return False
 
-            res_stop = subprocess.run(["systemctl", "--user", "stop", f"{label}.service"], capture_output=True, text=True, check=False)
+            res_stop = _run_control(["systemctl", "--user", "stop", f"{label}.service"], capture_output=True, text=True, check=False)
             if res_stop.returncode != 0:
                 err_msg = res_stop.stderr.strip() or res_stop.stdout.strip()
                 print(f"✗ Failed to stop {label}.service via systemctl: {err_msg}")
@@ -694,7 +709,7 @@ def uninstall_schedule(
             dest_service.unlink()
 
         if dest_dir is None and shutil.which("systemctl"):
-            res_reload = subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+            res_reload = _run_control(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
             if res_reload.returncode != 0:
                 err_msg = res_reload.stderr.strip() or res_reload.stdout.strip()
                 print(f"✗ Failed to reload systemd daemon via systemctl: {err_msg}")
@@ -710,7 +725,7 @@ def trigger_schedule(target: str, agent: str, platform: Optional[str] = None) ->
     label = get_label(target, agent)
 
     if plat == "darwin":
-        res = subprocess.run(["launchctl", "start", label], capture_output=True, text=True, check=False)
+        res = _run_control(["launchctl", "start", label], capture_output=True, text=True, check=False)
         if res.returncode == 0:
             print(f"✓ Triggered immediate launchd execution for: {label}")
             return True
@@ -720,7 +735,7 @@ def trigger_schedule(target: str, agent: str, platform: Optional[str] = None) ->
             return False
     else:
         service_name = f"{label}.service"
-        res = subprocess.run(["systemctl", "--user", "start", service_name], capture_output=True, text=True, check=False)
+        res = _run_control(["systemctl", "--user", "start", service_name], capture_output=True, text=True, check=False)
         if res.returncode == 0:
             print(f"✓ Triggered immediate systemd execution for: {service_name}")
             return True
