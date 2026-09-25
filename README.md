@@ -173,7 +173,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: paulkinlan/agents/.github/actions/factory@main
+      # Pin the action itself too: `@main` moves under the consumer, and this action runs with
+      # your model key and GitHub token.
+      - uses: paulkinlan/agents/.github/actions/factory@35ae9c5a428fbcab2c5bf3e1c2ced586db844f6c
         with:
           agent: secret-scan
           target: .
