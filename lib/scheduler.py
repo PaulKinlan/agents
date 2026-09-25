@@ -735,7 +735,9 @@ def trigger_schedule(target: str, agent: str, platform: Optional[str] = None) ->
             return False
     else:
         service_name = f"{label}.service"
-        res = _run_control(["systemctl", "--user", "start", service_name], capture_output=True, text=True, check=False)
+        # Type=oneshot services are synchronous: a plain `systemctl start` blocks until the run
+        # finishes and would trip the control-plane cap. Enqueue the start and return.
+        res = _run_control(["systemctl", "--user", "start", "--no-block", service_name], capture_output=True, text=True, check=False)
         if res.returncode == 0:
             print(f"✓ Triggered immediate systemd execution for: {service_name}")
             return True

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
@@ -622,6 +623,37 @@ class TestControlPlaneTimeouts(unittest.TestCase):
         # Only the helper itself may call subprocess.run; every call site uses the helper.
         self.assertEqual(source.count("subprocess.run("), 1)
         self.assertGreaterEqual(source.count("_run_control("), 2)
+
+
+class TestTriggerScheduleDoesNotBlock(unittest.TestCase):
+    """Type=oneshot services are synchronous: the trigger must enqueue, not wait for the run."""
+
+    def test_systemd_trigger_passes_no_block(self):
+        from lib import scheduler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = Path(tmpdir) / "bin"
+            bin_dir.mkdir()
+            calls = Path(tmpdir) / "calls"
+            stub = bin_dir / "systemctl"
+            stub.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$*\" >> \"{calls}\"\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            with mock.patch.dict(os.environ, env):
+                self.assertTrue(
+                    scheduler.trigger_schedule("voicebox", "secret-scan", platform="systemd")
+                )
+
+            recorded = calls.read_text(encoding="utf-8")
+            self.assertIn("--no-block", recorded)
+            self.assertIn("com.softwarefactory.voicebox.secret-scan.service", recorded)
 
 
 if __name__ == "__main__":
