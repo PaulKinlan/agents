@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # claude adapter for Software Factory
-# Usage: claude.sh <agent_name> <target_dir> <skill_dir> <prompt> <run_dir>
+# Usage: claude.sh <agent_name> <target_dir> <skill_dir> <run_dir>
+# The prompt arrives on stdin, never in argv: it embeds raw scanner excerpts (agents-pgr).
 
 AGENT_NAME="${1}"
 TARGET_DIR="${2}"
 SKILL_DIR="${3}"
-PROMPT="${4}"
-RUN_DIR="${5}"
+RUN_DIR="${4}"
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
@@ -20,6 +20,18 @@ CREDENTIALS_FILE="${HOME}/.claude/.credentials.json"
 if [ -z "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}" ] && [ ! -f "$CREDENTIALS_FILE" ]; then
   echo "[claude adapter] Error: no Claude credentials. Run 'claude login' for session auth (no API key required), or have the runner inject ANTHROPIC_API_KEY." >&2
   exit 1
+fi
+
+# Fail fast on auth first, then read the prompt: an unauthenticated run should report the
+# credential problem even when stdin is empty.
+if [ -t 0 ]; then
+  echo "[claude adapter] Error: prompt expected on stdin." >&2
+  exit 2
+fi
+PROMPT="$(cat)"
+if [ -z "$PROMPT" ]; then
+  echo "[claude adapter] Error: empty prompt on stdin." >&2
+  exit 2
 fi
 
 # Prefer the signed-in session over any ambient override. Claude Code resolves auth and the
@@ -65,7 +77,8 @@ echo "[claude adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
 cd "$TARGET_DIR"
 
-claude --plugin-dir "$SKILL_DIR" -p "$PROMPT" > "$OUTPUT_FILE" 2>&1 || {
+# The engine reads the prompt on stdin too, so it is not in the engine's argv either.
+printf '%s' "$PROMPT" | claude --plugin-dir "$SKILL_DIR" -p > "$OUTPUT_FILE" 2>&1 || {
   echo "[claude adapter] Error executing claude" >&2
   cat "$OUTPUT_FILE" >&2
   exit 1

@@ -246,6 +246,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    # The run artifacts hold raw scanner matches (candidates.json, prompt.txt), so the
+    # directory is private to the operator (agents-pgr).
+    os.chmod(run_dir, 0o700)
 
     # 1. Deterministic pre-pass
     candidates_file = run_dir / "candidates.json"
@@ -297,11 +300,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             f"triage each item, and output your structured JSON findings.\n\n"
             f"Scanner Data:\n{json.dumps(candidates_slice, indent=2)}\n"
         )
-        (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        prompt_file = run_dir / "prompt.txt"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        os.chmod(prompt_file, 0o600)
 
-        adapter_cmd = [str(adapter_script), agent_name, str(target_dir), str(skill_dir), prompt, str(run_dir)]
+        # The prompt is stdin, never argv: it embeds up to 50 raw scanner records, and argv is
+        # visible to any local user (agents-pgr).
+        adapter_cmd = [str(adapter_script), agent_name, str(target_dir), str(skill_dir), str(run_dir)]
         adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
-                                          capture_output=True, text=True, check=False,
+                                          input=prompt, capture_output=True, text=True, check=False,
                                           env=child_environment(engine=engine))
         
         output_file = run_dir / "model_output.txt"

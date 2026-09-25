@@ -94,13 +94,16 @@ def run_station_command(
     adapter shell. Expiry raises StationTimeout: the caller treats it as a station failure.
     """
     timeout = budget.timeout_for(step)
-    # `capture_output` is a subprocess.run convenience, not a Popen argument.
+    # `capture_output` and `input` are subprocess.run conveniences, not Popen arguments.
+    stdin_data = kwargs.pop("input", None)
     if kwargs.pop("capture_output", False):
         kwargs.setdefault("stdout", subprocess.PIPE)
         kwargs.setdefault("stderr", subprocess.PIPE)
+    if stdin_data is not None:
+        kwargs.setdefault("stdin", subprocess.PIPE)
     proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_process_group(proc)
         try:

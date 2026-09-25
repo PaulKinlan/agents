@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # antigravity adapter for Software Factory
-# Usage: antigravity.sh <agent_name> <target_dir> <skill_dir> <prompt> <run_dir>
+# Usage: antigravity.sh <agent_name> <target_dir> <skill_dir> <run_dir>
+# The prompt arrives on stdin, never in argv: it embeds raw scanner excerpts (agents-pgr).
 
 AGENT_NAME="${1}"
 TARGET_DIR="${2}"
 SKILL_DIR="${3}"
-PROMPT="${4}"
-RUN_DIR="${5}"
+RUN_DIR="${4}"
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
@@ -23,10 +23,24 @@ if [ -z "$AGENTAPI_BIN" ]; then
   exit 1
 fi
 
+# Fail fast on the missing engine first, then read the prompt, so an empty stdin cannot mask
+# the real problem.
+if [ -t 0 ]; then
+  echo "[antigravity adapter] Error: prompt expected on stdin." >&2
+  exit 2
+fi
+PROMPT="$(cat)"
+if [ -z "$PROMPT" ]; then
+  echo "[antigravity adapter] Error: empty prompt on stdin." >&2
+  exit 2
+fi
+
 echo "[antigravity adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
 cd "$TARGET_DIR"
 
+# agentapi has no stdin mode, so the prompt is positional here and appears in that engine
+# process's argv for the duration of the run. The dispatcher no longer carries it (agents-pgr).
 "$AGENTAPI_BIN" new-conversation "$PROMPT" > "$OUTPUT_FILE" 2>&1 || {
   echo "[antigravity adapter] Error executing agentapi" >&2
   cat "$OUTPUT_FILE" >&2

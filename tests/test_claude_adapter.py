@@ -95,8 +95,8 @@ class ClaudeAdapterTestCase(unittest.TestCase):
             env.pop(name, None)
         env.update(extra_env)
         return subprocess.run(
-            ["bash", str(ADAPTER), "probe", str(self.target), str(self.tmp), "prompt", str(self.run_dir)],
-            capture_output=True, text=True, env=env, timeout=60,
+            ["bash", str(ADAPTER), "probe", str(self.target), str(self.tmp), str(self.run_dir)],
+            input="prompt", capture_output=True, text=True, env=env, timeout=60,
         )
 
     def child_env(self) -> str:
