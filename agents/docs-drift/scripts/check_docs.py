@@ -180,12 +180,18 @@ def parse_tree_diagrams(content: str) -> List[Tuple[int, str, str]]:
         if not in_block:
             continue
 
-        # Check for root directory of the tree diagram (e.g. agents/<name>/ or ~/agents/)
-        if not stack and not any(c in line for c in ["├──", "└──", "│"]):
+        # A line with no tree glyphs is a top-level node. Several diagrams in this repo
+        # list more than one root in a single block (`agents/`, `.github/`, `lib/`, …), so
+        # this must also fire while a subtree is still open — otherwise every following
+        # root is ignored, its parent prefix is lost, and the entry is checked against the
+        # wrong path (which is how `.github/workflows/` was reported missing while it
+        # existed, and why the rest only matched by fuzzy basename lookup).
+        if not any(c in line for c in ["├──", "└──", "│"]):
             root_m = re.match(r"^([a-zA-Z0-9_.~/{}<>-]+/[*]?)(?:\s+#.*)?$", stripped)
             if root_m:
                 root_name = root_m.group(1).strip()
                 has_root = True
+                stack = []
                 # Normalize ~/agents/ -> repo root
                 if root_name in ["~/agents/", "agents/", "./"]:
                     stack.append((0, ""))
