@@ -408,6 +408,18 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                 print(f"   Discovered {len(criticals)} critical finding(s). Downstream stations aborted.")
                 line_halted = True
                 break
+        except SystemExit as e:
+            # A station that fails closed calls sys.exit (run_agent does it when an adapter
+            # produces no model output). SystemExit is not an Exception, so without this branch
+            # the process aborted mid-line: no scorecard, no Andon, no halt_on_failure
+            # (agents-p2c).
+            code = e.code
+            detail = f"exited with code {code}" if code not in (None, 0) else "exited unexpectedly"
+            print(f"\n🚨 [ANDON CORD PULLED] Station '{st_agent}' {detail}.")
+            scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": 0, "criticals": 0})
+            if halt_on_failure:
+                line_halted = True
+                break
         except Exception as e:
             print(f"\n🚨 [ANDON CORD PULLED] Station '{st_agent}' failed with error: {e}")
             scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": 0, "criticals": 0})
@@ -423,6 +435,9 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
     for sc in scorecard:
         print(f"{sc['station']:<25} {sc['status']:<12} {sc.get('findings_count', 0):<10} {sc.get('criticals', 0)}")
     print("=" * 70 + "\n")
+    # A halted line is a failed line: without a non-zero exit the Andon cord has no signal for
+    # a caller (CI, a scheduled wrapper, an operator script).
+    return not line_halted
 
 def run_hillclimb(
     target_arg: str,
@@ -763,7 +778,8 @@ def main():
     elif args.command == "run":
         run_agent(agent_name=args.agent, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink)
     elif args.command == "line":
-        run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink)
+        if not run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink):
+            sys.exit(1)
     elif args.command == "hillclimb":
         run_hillclimb(
             target_arg=args.target,
