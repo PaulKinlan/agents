@@ -42,14 +42,16 @@ jobs:
       - name: Run Secret Scan Pre-pass
         run: |
           python3 agents/secret-scan/scripts/scan.py --target . --output runs/ci-secrets.json
-          cat runs/ci-secrets.json
+          # Never `cat` this report: secret-scan candidates carry the matched credential in
+          # `snippet` / `raw_match`, and workflow logs are public on a public repository.
+          python3 lib/candidate_summary.py runs/ci-secrets.json
 
       - name: Run Docs Drift Pre-pass
         run: |
           python3 agents/docs-drift/scripts/check_docs.py --target . --output runs/ci-docs-drift.json
-          cat runs/ci-docs-drift.json
+          python3 lib/candidate_summary.py runs/ci-docs-drift.json
 
       - name: Run Dependency Audit Pre-pass
         run: |
           python3 agents/deps-supply-chain/scripts/audit_deps.py --target . --output runs/ci-deps.json
-          cat runs/ci-deps.json
+          python3 lib/candidate_summary.py runs/ci-deps.json
