@@ -99,16 +99,29 @@ runs:
         
         TARGET_NAME=$(basename "$(cd "$TARGET_PATH" && pwd)")
         REPORT_FILE="$FACTORY_DIR/findings/${TARGET_NAME}-latest.md"
+        SUMMARY_FILE="$FACTORY_DIR/findings/${TARGET_NAME}-summary.md"
         
-        # The report is safe to publish: lib/findings.py renders it through
-        # lib/redaction.py, which masks credential-shaped text and drops secret-scan
-        # snippets entirely. Never append a raw artifact (runs/*.json) to the step
-        # summary — those files hold the matched values on purpose.
-        if [ -f "$REPORT_FILE" ]; then
+        # The step summary is public-adjacent on a public repo: any logged-in GitHub
+        # account can read it (anonymous readers get a 404 — verified in agents-pgj).
+        # Redaction masks credential VALUES, but a high/critical finding's prose (title,
+        # description, remediation — e.g. a PoC) is still a disclosure, so the summary
+        # gets the reduced variant lib/findings.py writes alongside: rule + location only
+        # for the top two bands. The full report is uploaded as a run artifact (auth-gated).
+        # Never append a raw artifact (runs/*.json) to the step summary — those files hold
+        # the matched values on purpose.
+        if [ -f "$SUMMARY_FILE" ]; then
           echo "delta_report=$REPORT_FILE" >> $GITHUB_OUTPUT
           echo "status=success" >> $GITHUB_OUTPUT
-          cat "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY
+          cat "$SUMMARY_FILE" >> $GITHUB_STEP_SUMMARY
         else
           echo "status=success" >> $GITHUB_OUTPUT
         fi
         echo "::endgroup::"
+
+    - name: Upload Full Delta Report Artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: factory-delta-report-${{ inputs.agent }}
+        path: ${{ env.FACTORY_DIR }}/findings/
+        if-no-files-found: ignore

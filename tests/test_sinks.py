@@ -135,6 +135,66 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertEqual(delta, (report_dir / "fixture-latest.md").read_text())
         return delta
 
+    def summary_report(self):
+        """The step-summary variant (agents-pgj): rule + location only for high/critical."""
+        return (self.factory / "findings" / "fixture-summary.md").read_text()
+
+    def test_step_summary_withholds_high_critical_prose(self):
+        """agents-pgj: the step summary is readable by any logged-in GitHub account on a
+        public repo, so a high/critical finding's prose (title, description, remediation —
+        a PoC) never reaches it. Rule + location only; the full report keeps everything."""
+        high = dict(SAMPLE, severity="high", rule_id="xss-injection",
+                    title="XSS via profile name", path="src/profile.js", line_number=42,
+                    description="PoC: <img src=x onerror=alert(1)> executes.",
+                    snippet="<img src=x onerror=alert(1)>",
+                    remediation="Escape the name before interpolation.")
+        medium = dict(SAMPLE, severity="medium", rule_id="unused-export",
+                      title="Unused export", path="src/example.py", line_number=12)
+        self.scan("file", [high, medium])
+
+        summary = self.summary_report()
+        # Counts survive (2 new), the high finding is present as rule + location…
+        self.assertIn("| **2** |", summary)
+        self.assertIn("xss-injection", summary)
+        self.assertIn("src/profile.js:42", summary)
+        self.assertIn("Withheld", summary)
+        # …but NONE of its prose is.
+        self.assertNotIn("XSS via profile name", summary)
+        self.assertNotIn("PoC: <img", summary)
+        self.assertNotIn("Escape the name", summary)
+        # The medium finding renders fully.
+        self.assertIn("Unused export", summary)
+        self.assertIn("Synthetic sink verification finding.", summary)
+        # The full report is untouched: the evidence trail keeps the prose.
+        full = self.report()
+        self.assertIn("XSS via profile name", full)
+        self.assertIn("Escape the name", full)
+
+    def test_step_summary_reduces_on_effective_severity_not_the_label(self):
+        """An understated severity cannot leak detail: identity-critical agents are
+        effectively critical, so a vuln-discovery finding labelled 'low' is still reduced."""
+        understated = dict(SAMPLE, severity="low",
+                           rule_id="sqli", title="SQL injection via sort parameter",
+                           path="src/query.js", line_number=7,
+                           description="PoC: ' OR 1=1--", remediation="Parameterise.")
+        # The agent comes from the run, not the finding's fields (the CLI stamps it).
+        self.scan("file", [understated], agent="vuln-discovery")
+        summary = self.summary_report()
+        self.assertIn("[CRITICAL]", summary)
+        self.assertIn("sqli", summary)
+        self.assertIn("src/query.js:7", summary)
+        self.assertNotIn("SQL injection via sort parameter", summary)
+        self.assertNotIn("PoC:", summary)
+        self.assertNotIn("Parameterise.", summary)
+
+    def test_step_summary_clean_delta_has_no_withheld_note(self):
+        """No high/critical findings -> no withholding boilerplate (a clean report reads clean)."""
+        self.scan("file")
+        self.scan("file", [self.shifted()])
+        summary = self.summary_report()
+        self.assertIn("Clean Delta", summary)
+        self.assertNotIn("Withheld", summary)
+
     def shifted(self):
         return dict(SAMPLE, line_number=700, path="src/example.py",
                     snippet="  unused  = True\n")
