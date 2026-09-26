@@ -84,6 +84,10 @@ WITHHELD_REASONS = {
 SANDBOX_GAP = ("NOT enforced: the engine process and the pre-pass run as the operator, with "
                "the operator's filesystem and network")
 
+# Adapters with a per-run cost flag. claude -p takes --max-budget-usd; pi (0.87.1) and
+# agentapi have no equivalent (agents-js7), so a declared cap there is reported, not enforced.
+USD_CAPABLE_ENGINES = frozenset({"claude"})
+
 
 class ContainmentError(RuntimeError):
     """The run is refused: a declaration the factory cannot honour, or an engine that cannot
@@ -223,11 +227,15 @@ def banner_lines(policy: Policy, engine: str) -> List[str]:
     return lines
 
 
-def budget_note(policy: Policy) -> str:
-    """Suffix for the Budget line. max_minutes is enforced by lib/budget.py; max_usd is not."""
+def budget_note(policy: Policy, engine: str) -> str:
+    """Suffix for the Budget line. max_minutes is enforced by lib/budget.py; max_usd only
+    where the engine adapter has a per-run cost flag (agents-js7)."""
     if policy.max_usd is None:
         return ""
-    return f"; ${policy.max_usd:.2f} declared, NOT enforced"
+    if engine in USD_CAPABLE_ENGINES:
+        return f"; ${policy.max_usd:.2f} enforced by the {engine} adapter (--max-budget-usd)"
+    return (f"; ${policy.max_usd:.2f} declared, NOT enforced "
+            f"(the {engine} adapter has no per-run budget flag)")
 
 
 def policy_record(policy: Policy, engine: str) -> Dict[str, Any]:
@@ -235,7 +243,7 @@ def policy_record(policy: Policy, engine: str) -> Dict[str, Any]:
     not_enforced = ["os-sandbox"]
     if engine == "pi":
         not_enforced.append("read-scope")
-    if policy.max_usd is not None:
+    if policy.max_usd is not None and engine not in USD_CAPABLE_ENGINES:
         not_enforced.append("budget.max_usd")
     return {
         "agent": policy.agent,

@@ -55,6 +55,10 @@ cd "$TARGET_DIR"
 # Run pi non-interactively with the specified skill loaded
 # The engine reads the prompt on stdin too, so it is not in the engine's argv either.
 echo "[pi adapter] Tool policy: $TOOL_POLICY (${POLICY_FLAGS[*]})"
+if [ -n "${FACTORY_MAX_BUDGET_USD:-}" ]; then
+  # agents-js7: pi has no per-run budget flag — say so where the run log can see it.
+  echo "[pi adapter] Note: budget.max_usd=\$$FACTORY_MAX_BUDGET_USD declared but NOT enforced by this adapter (no per-run budget flag; the claude engine enforces it via --max-budget-usd)."
+fi
 printf '%s' "$PROMPT" | pi --no-session "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" -p > "$OUTPUT_FILE" 2>&1 || {
   echo "[pi adapter] Error executing pi" >&2
   cat "$OUTPUT_FILE" >&2

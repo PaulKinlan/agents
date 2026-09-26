@@ -251,7 +251,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     print(f"  Agent:       {agent_name} ({agent_cfg.get('class', 'observer')})")
     for line in banner_lines(policy, engine):
         print(line)
-    print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy)}")
+    print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy, engine)}")
     print(f"  Target:      {target_name} ({target_dir})")
     print(f"  Visibility:  {normalize_visibility(target_cfg.get('visibility'))} (enforced)")
     print(f"  Engine:      {engine}")
@@ -333,6 +333,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # ambient FACTORY_TOOL_POLICY in the operator's shell never reaches the adapter.
         adapter_env = child_environment(engine=engine)
         adapter_env["FACTORY_TOOL_POLICY"] = policy.tool_policy
+        if policy.max_usd is not None:
+            # Same explicit-channel rule as the tool policy: the declared cost cap reaches the
+            # adapter only from here, and only an adapter with a per-run flag enforces it.
+            adapter_env["FACTORY_MAX_BUDGET_USD"] = str(policy.max_usd)
         adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
                                           input=prompt, capture_output=True, text=True, check=False,
                                           env=adapter_env)
