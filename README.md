@@ -306,7 +306,7 @@ agents/<name>/
 
 - **`agent.yaml`**: Declares agent behavior:
   - `class`: `observer` (read-only), `proposer` (opens PRs/issues), `optimizer` (measure-change-remeasure).
-  - `containment`: `t0-readonly`, `t1-fetch` (outbound network), `t2-local` (file modifications), `t3-sandbox`.
+  - `containment`: `t0-readonly`, `t1-fetch` (outbound network), `t2-local` (file modifications), or `t3-sandbox` (refused: no sandbox runner exists yet). The tier is a ceiling on the `capabilities` an agent may declare, and every run checks it. The model session itself always runs read-only. See [THREAT_MODEL.md](THREAT_MODEL.md) §6.1.
   - `short_circuit_empty`: `true` if model invocation should be bypassed when the pre-pass finds zero candidates.
 - **`SKILL.md`**: Contains **no engine-specific logic**. Engine-specific flags belong in `lib/adapters/`.
 - **`scripts/`**: Executable pre-pass script (`scan.py`, `mine_history.py`, etc.) that outputs candidate JSON to stdout or an `--output` path.
