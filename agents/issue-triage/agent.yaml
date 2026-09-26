@@ -1,7 +1,8 @@
 name: issue-triage
 class: proposer
 plane: [ci, local]
-containment: t0-readonly
+# t1-fetch: the pre-pass (scripts/fetch_issues.py) reads issues from the GitHub API through gh.
+containment: t1-fetch
 triggers: [repo-event, schedule, manual]
 blocking: false
 short_circuit_empty: true

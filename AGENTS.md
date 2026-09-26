@@ -54,7 +54,14 @@ agents/<name>/
 | `triggers` | `schedule` · `manual` · `git-hook` · `repo-event` · `webhook` · `agent` |
 | `blocking` | `true` only if deterministic and sub-5s (see rule 8) |
 
-Default to `t0-readonly`. Anything above `t2` requires manual approval per run.
+Default to `t0-readonly`. The tier is a ceiling on what an agent may declare, and
+`lib/containment.py` refuses a run whose `capabilities` exceed it (THREAT_MODEL.md §6.1).
+
+The tier is not a grant. Every model session runs with the `read-only` tool policy, whatever the
+tier. Declared `write`, `network` and `browser` are withheld until there is a mechanism to hold
+them to the tier.
+
+`t3-sandbox` needs a sandbox runner and manual approval per run. Neither exists, so it is refused.
 
 ## Sinks
 
@@ -99,11 +106,11 @@ a committed suppressions file.
 
 ## Engines
 
-| | invocation | skills |
-|---|---|---|
-| `antigravity` | headless conversation API | plugin dir / symlink into the engine config dir |
-| `claude` | `claude -p` | `--plugin-dir` |
-| `pi` | `pi -p` | `--skill` |
+| | invocation | skills | read-only tool policy (factory runs) |
+|---|---|---|---|
+| `antigravity` | headless conversation API | plugin dir / symlink into the engine config dir | refused: agentapi has no tool controls |
+| `claude` | `claude -p` | `--append-system-prompt-file` in factory runs, because the Skill tool is withheld; `factory skills install` links them into `~/.claude/skills` for interactive use | `--restricted --tools Read,Grep,Glob --strict-mcp-config` |
+| `pi` | `pi -p` | `--skill` | `--tools read,grep,find,ls --no-extensions --no-approve` |
 
 Install locally by symlinking this repo into the engine's plugin directory — the same pattern as
 `web-resilience-plugin`.

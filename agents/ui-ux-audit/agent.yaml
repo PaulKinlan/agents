@@ -1,7 +1,9 @@
 name: ui-ux-audit
 class: proposer
 plane: [local, ci]
-containment: t0-readonly
+# t2-local: the skill's optional live check drives a browser against a local preview server,
+# like memory-profile and resilience.
+containment: t2-local
 triggers: [manual, schedule, repo-event]
 blocking: false
 short_circuit_empty: true

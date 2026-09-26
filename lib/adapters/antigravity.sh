@@ -23,6 +23,19 @@ if [ -z "$AGENTAPI_BIN" ]; then
   exit 1
 fi
 
+# Tool policy (agents-pnu). `agentapi new-conversation` takes a prompt and nothing else: no
+# tool allowlist, no settings isolation. A prompt is not a containment boundary
+# (non-negotiable #2), so this adapter refuses every policy, read-only included, until agentapi
+# can enforce one. lib/containment.py's ENGINE_TOOL_POLICIES lists none for it, and
+# tests/test_containment.py holds the two in agreement.
+TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
+case "$TOOL_POLICY" in
+  *)
+    echo "[antigravity adapter] Refusing: agentapi has no tool controls, so tool policy '$TOOL_POLICY' cannot be enforced. Use --engine pi or --engine claude." >&2
+    exit 3
+    ;;
+esac
+
 # Fail fast on the missing engine first, then read the prompt, so an empty stdin cannot mask
 # the real problem.
 if [ -t 0 ]; then

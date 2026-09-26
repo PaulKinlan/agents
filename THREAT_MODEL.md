@@ -79,7 +79,12 @@ To prevent model hallucination and alert fatigue, the following components are d
 ## 6. Security Invariants for Auditors
 
 Discovery and verification agents must check for and respect the following invariants:
-1. **Isolate Execution Context (Containment)**: Agents running under `t0-readonly` must have zero filesystem write access, zero network access, and zero ambient shell command capabilities.
+1. **Isolate Execution Context (Containment)**: `lib/containment.py` reads each agent's `containment`, `capabilities` and `budget`, and fails closed.
+   - **Refusals.** Any of these refuses the run: an unknown tier, capability or budget key; a non-boolean capability; a malformed budget; or a capability above its tier's ceiling. `t3-sandbox` is refused because no sandbox runner exists.
+   - **The grant.** The tier is a ceiling on what an agent may declare, not a grant. Every model session gets only the `read-only` tool policy: no write, shell, network, browser or MCP tools. Each engine adapter enforces it with the engine's own flags, and an adapter that cannot enforce it refuses.
+   - **The dispatcher.** It sets the policy itself, never from the caller's environment, and records it in the run's `policy.json`.
+   - **Not enforced yet.** There is no OS sandbox: the engine process and the pre-pass run as the operator, with the operator's filesystem and network. pi's read tool reaches any file the operator can read. Declared `write`, `network` and `browser` stay withheld until a disposable worktree, an egress allowlist and a localhost-only browser exist.
+   - **Tests.** `tests/test_containment.py` asserts the validation, the adapter flags and the dispatcher's refusals.
 2. **Sanitize Fingerprints**: The findings store must normalize path structures and text sequences to prevent directory traversals when storing reports.
 3. **Strict Embargo Checks**: High/critical findings must bypass public trackers and be written to private local stores or draft security advisories.
 4. **No Ambient Credentials**: Environment variables like `~/.aws/` or `~/.ssh/` must never be mounted inside any execution container or active agent session.
