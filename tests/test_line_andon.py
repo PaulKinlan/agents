@@ -31,7 +31,7 @@ factory_cli = importlib.util.module_from_spec(spec)
 loader.exec_module(factory_cli)
 
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
-               "report_schema.py")
+               "report_schema.py", "containment.py")
 
 
 class LineSandbox:
@@ -146,14 +146,34 @@ class TestLineAndon(unittest.TestCase):
             self.assertTrue(sandbox.marker.exists(), "downstream stations must run when not halting")
 
     def test_a_fail_closed_adapter_is_a_station_failure_not_an_abort(self):
-        """The exact repro: antigravity with no agentapi exits 1 from the adapter."""
+        """The bead's repro: an adapter exits 1 without producing model output, so run_agent
+        calls sys.exit(1). This used antigravity with no agentapi; since agents-pnu the
+        dispatcher refuses antigravity before its adapter runs (next test), so a stub adapter
+        that fails closed the same way keeps the SystemExit path covered."""
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = self._sandbox(tmpdir, halt=True, stations=["failprobe"])
-            result, output = sandbox.run(engine="antigravity")
+            adapter = sandbox.root / "lib" / "adapters" / "pi.sh"
+            adapter.write_text("#!/usr/bin/env bash\necho 'adapter failed closed' >&2\nexit 1\n",
+                               encoding="utf-8")
+            result, output = sandbox.run(engine="pi")
 
             self.assertFalse(result)
             self.assertIn("FACTORY LINE SCORECARD", output)
             self.assertIn("failprobe", output)
+            self.assertIn("exited with code 1", output)
+            self.assertIn("ERROR", output)
+
+    def test_a_containment_refusal_is_a_station_failure_not_an_abort(self):
+        """An engine that cannot enforce the tool policy is refused (agents-pnu), and the line
+        still scores the station and halts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["failprobe", "okprobe"])
+            result, output = sandbox.run(engine="antigravity")
+
+            self.assertFalse(result)
+            self.assertIn("FACTORY LINE SCORECARD", output)
+            self.assertIn("HALTED", output)
+            self.assertIn("cannot enforce", output)
             self.assertIn("ERROR", output)
 
     def test_the_cli_exits_non_zero_when_the_line_halts(self):
