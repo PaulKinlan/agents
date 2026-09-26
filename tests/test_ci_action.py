@@ -63,7 +63,26 @@ class TestActionPinning(unittest.TestCase):
                 self.assertIn(var, block)
 
 
-class TestFetchFactoryScript(unittest.TestCase):
+class TestStepSummaryRouting(unittest.TestCase):
+    """agents-pgj: the step summary is public-adjacent on a public repo (any logged-in
+    GitHub account reads it), so it gets the reduced summary variant — never the full
+    delta report — and the full report ships as an auth-gated run artifact."""
+
+    def test_the_summary_appended_is_the_reduced_variant(self):
+        block = step_block("Execute Factory Agent")
+        self.assertIn('-summary.md', block)
+        self.assertIn('cat "$SUMMARY_FILE" >> $GITHUB_STEP_SUMMARY', block)
+        # The full report must NOT be the file appended.
+        self.assertNotIn('cat "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY', block)
+
+    def test_the_full_report_is_uploaded_as_a_run_artifact(self):
+        block = step_block("Upload Full Delta Report Artifact")
+        self.assertIn("actions/upload-artifact@v4", block)
+        self.assertIn("/findings/", block)
+
+    def test_the_comment_no_longer_claims_reports_are_publishable_whole(self):
+        block = step_block("Execute Factory Agent")
+        self.assertNotIn("The report is safe to publish", block)
     def _run(self, origin: Path, ref: str, dest: Path):
         env = dict(os.environ)
         env.update({"FACTORY_REPO_URL": str(origin), "FACTORY_REF": ref,

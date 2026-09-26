@@ -375,13 +375,38 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
 def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]]):
     report_file = FACTORY_ROOT / "findings" / f"{target_name}-delta.md"
     report_file.parent.mkdir(parents=True, exist_ok=True)
-    # This report is the file the composite action appends to a public step summary, so the
+    # This report is the file the composite action used to append to the step summary, so the
     # rendered copy is redacted. The raw values stay in the run artifacts and the store.
     findings = [redact_finding(f) for f in findings]
     fixed_items = [redact_finding(f) for f in fixed_items]
+
+    report = _render_delta_report(target_name, findings, stats, fixed_items)
+    report_file.write_text(report, encoding="utf-8")
+    # Preserve the original path for existing consumers.
+    report_file.with_name(f"{target_name}-latest.md").write_text(report, encoding="utf-8")
+    # The step-summary variant (agents-pgj): the summary is readable by ANY logged-in GitHub
+    # account on a public repo (anonymous readers get a 404, verified), so high/critical
+    # finding prose is withheld from it — rule and location only. The full report stays in
+    # the findings store and the auth-gated run artifact.
+    summary = _render_delta_report(target_name, findings, stats, fixed_items, step_summary=True)
+    report_file.with_name(f"{target_name}-summary.md").write_text(summary, encoding="utf-8")
+    print(f"Delta report written to: {report_file}")
+
+
+def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
+                         fixed_items: List[Dict[str, Any]], *, step_summary: bool = False) -> str:
+    """Render the delta report; with step_summary=True, high/critical finding prose is reduced.
+
+    effective_severity decides the band, matching the embargo: an understated or absent
+    severity cannot leak detail onto the step summary.
+    """
+    def reduced(f: Dict[str, Any]) -> bool:
+        return step_summary and effective_severity(f) in ("critical", "high")
+
     new_or_regressed = [f for f in findings if f["change"] in ("new", "regressed")]
     unchanged = [f for f in findings if f["change"] == "unchanged"]
     suppressed = [f for f in findings if f["state"] == "wontfix"]
+    withheld = [f for f in findings if reduced(f)]
 
     lines = [
         f"# Software Factory Delta Report: {target_name}",
@@ -397,11 +422,21 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
         lines.append("> **Clean Delta**: No new, regressed, or resolved findings in this run.")
         lines.append("")
 
+    if step_summary and withheld:
+        lines.append("> **Withheld**: high/critical finding details are not rendered in the step "
+                     "summary — see the run artifact (the full delta report) or the findings store.")
+        lines.append("")
+
     if new_or_regressed:
         lines.append("## Action Required: New & Regressed Findings")
         lines.append("")
         for f in new_or_regressed:
-            badge = f"[{f['severity'].upper()}]"
+            badge = f"[{effective_severity(f).upper()}]"
+            if reduced(f):
+                lines.append(f"### {badge} `{f['rule_id']}` (`{f['state']}`)")
+                lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`")
+                lines.append("")
+                continue
             lines.append(f"### {badge} {f['title']} (`{f['state']}`)")
             lines.append(f"- **Rule**: `{f['rule_id']}`")
             lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`")
@@ -416,6 +451,9 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
         lines.append("## Resolved in this Run (Fixed)")
         lines.append("")
         for f in fixed_items:
+            if reduced(f):
+                lines.append(f"- **`{f.get('rule_id')}`** (`{f.get('path')}:{f.get('line_number', '?')}`)")
+                continue
             lines.append(f"- **`{f.get('rule_id')}`**: {f.get('title')} (`{f.get('path')}:{f.get('line_number', '?')}`)")
         lines.append("")
 
@@ -423,7 +461,10 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
         lines.append("## Active Findings (Unchanged)")
         lines.append("")
         for f in unchanged:
-            badge = f"[{f['severity'].upper()}]"
+            badge = f"[{effective_severity(f).upper()}]"
+            if reduced(f):
+                lines.append(f"- {badge} `{f['rule_id']}` (`{f['path']}:{f.get('line_number', '?')}`)")
+                continue
             lines.append(f"- {badge} **{f['title']}** (`{f['path']}:{f.get('line_number', '?')}`)")
         lines.append("")
 
@@ -431,14 +472,13 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
         lines.append("## Suppressed Findings (Wontfix)")
         lines.append("")
         for f in suppressed:
+            if reduced(f):
+                lines.append(f"- `{f.get('rule_id')}` (`{f.get('path')}:{f.get('line_number', '?')}`)")
+                continue
             lines.append(f"- **{f['title']}**: {f.get('suppression_reason') or 'Suppressed'}")
         lines.append("")
 
-    report = "\n".join(lines)
-    report_file.write_text(report, encoding="utf-8")
-    # Preserve the original path for existing consumers.
-    report_file.with_name(f"{target_name}-latest.md").write_text(report, encoding="utf-8")
-    print(f"Delta report written to: {report_file}")
+    return "\n".join(lines)
 
 def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public"):
     """Creates beads for active findings if bd is available."""
