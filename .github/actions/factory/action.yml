@@ -32,7 +32,7 @@ inputs:
       without the repository next to it (vendored use). Pinning is deliberate: bump it when
       the factory payload should move.
     required: false
-    default: '35ae9c5a428fbcab2c5bf3e1c2ced586db844f6c'
+    default: '9740cbc21e2f5706b1ba3819df508ed29857a72b'
 
 outputs:
   status:
