@@ -137,14 +137,14 @@ class TestDispatcherBudget(unittest.TestCase):
 class TestDispatcherChildEnvironment(unittest.TestCase):
     """The engine and pre-pass children get an explicit, credential-free environment (SF-04)."""
 
-    def _run_probe(self, extra_agent_yaml: str = ""):
+    def _run_probe(self, extra_agent_yaml: str = "", containment: str = "t0-readonly"):
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = Path(tmpdir)
             (sandbox / "agents" / "probe" / "scripts").mkdir(parents=True)
             (sandbox / "agents" / "probe" / "agent.yaml").write_text(
                 "name: probe\n"
                 "class: observer\n"
-                "containment: t0-readonly\n"
+                f"containment: {containment}\n"
                 "short_circuit_empty: false\n"
                 + extra_agent_yaml +
                 "budget: {max_minutes: 1}\n",
@@ -216,8 +216,10 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         self.assertIn("PATH", engine)
 
     def test_prepass_gets_github_only_when_the_agent_declares_gh(self):
-        """issue-triage's pre-pass calls gh and declares requires: [gh]; nothing else gets it."""
-        prepass, engine = self._run_probe("capabilities:\n  requires: [gh]\n")
+        """issue-triage's pre-pass calls gh: it declares requires: [gh] at t1-fetch with network
+        (a manifest listing gh without network is refused, agents-05h); nothing else gets it."""
+        prepass, engine = self._run_probe("capabilities:\n  network: true\n  requires: [gh]\n",
+                                          containment="t1-fetch")
         self.assertEqual(prepass["GH_TOKEN"], "ghs_ci_token")
         self.assertNotIn("GH_TOKEN", engine)
 

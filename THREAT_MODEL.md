@@ -80,7 +80,7 @@ To prevent model hallucination and alert fatigue, the following components are d
 
 Discovery and verification agents must check for and respect the following invariants:
 1. **Isolate Execution Context (Containment)**: `lib/containment.py` reads each agent's `containment`, `capabilities` and `budget`, and fails closed.
-   - **Refusals.** Any of these refuses the run: an unknown tier, capability or budget key; a non-boolean capability; a malformed budget; or a capability above its tier's ceiling. `t3-sandbox` is refused because no sandbox runner exists.
+   - **Refusals.** Any of these refuses the run: an unknown tier, capability or budget key; a non-boolean capability; a malformed budget; a capability above its tier's ceiling; or a `requires` entry that brings the pre-pass a network credential (`gh`) without `capabilities.network`. `t3-sandbox` is refused because no sandbox runner exists.
    - **The grant.** The tier is a ceiling on what an agent may declare, not a grant. Every model session gets only the `read-only` tool policy: no write, shell, network, browser or MCP tools. Each engine adapter enforces it with the engine's own flags, and an adapter that cannot enforce it refuses.
    - **The dispatcher.** It sets the policy itself, never from the caller's environment, and records it in the run's `policy.json`.
    - **Not enforced yet.** There is no OS sandbox: the engine process and the pre-pass run as the operator, with the operator's filesystem and network. pi's read tool reaches any file the operator can read. Declared `write`, `network` and `browser` stay withheld until a disposable worktree, an egress allowlist and a localhost-only browser exist.

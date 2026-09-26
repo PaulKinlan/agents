@@ -56,6 +56,12 @@ ENGINE_CREDENTIALS = {
 # The findings dispatch is a child of the run, and the only one allowed to talk to GitHub.
 GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
+# Requirements that bring the pre-pass a network credential. lib/containment.py refuses any of
+# these unless the agent declares capabilities.network, so a credential never reaches a tier
+# whose ceiling forbids network (agents-05h). tests/test_containment.py holds this list and
+# prepass_environment() in agreement: add an entry here when a requirement starts to grant one.
+NETWORK_CREDENTIAL_REQUIREMENTS = ("gh",)
+
 
 def declares_requirement(agent_cfg: Mapping, tool: str) -> bool:
     """Whether agent.yaml's capabilities.requires names `tool`."""
