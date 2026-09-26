@@ -82,17 +82,20 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         credentials.parent.mkdir(parents=True, exist_ok=True)
         credentials.write_text('{"stub": true}', encoding="utf-8")
 
-    def run_adapter(self, extra_env):
+    def run_adapter(self, extra_env, unset_home=False):
         env = dict(os.environ)
         env.update({
             "HOME": str(self.home),
             "PATH": f"{self.bindir}:{os.environ['PATH']}",
             "FAKE_ENV_DUMP": str(self.env_dump),
         })
+        if unset_home:
+            env.pop("HOME", None)
         # Drop anything the developer's own shell is carrying, so the only overrides present
         # are the ones this test sets on purpose.
         for name in EXPECTED_OVERRIDES:
             env.pop(name, None)
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
         env.update(extra_env)
         return subprocess.run(
             ["bash", str(ADAPTER), "probe", str(self.target), str(self.tmp), str(self.run_dir)],
@@ -157,6 +160,45 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no Claude credentials", result.stderr)
         self.assertFalse(self.env_dump.exists(), "engine must not be invoked")
+
+    def test_bedrock_opt_in_is_accepted_as_a_credential_source(self):
+        """agents-d06: a Bedrock runner has none of the key vars and no session file —
+        the check must not reject it before the engine runs."""
+        result = self.run_adapter({
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "AWS_BEARER_TOKEN_BEDROCK": "stub-token",
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.env_dump.exists(), "the engine must be invoked")
+
+    def test_vertex_opt_in_is_accepted_as_a_credential_source(self):
+        result = self.run_adapter({"CLAUDE_CODE_USE_VERTEX": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.env_dump.exists(), "the engine must be invoked")
+
+    def test_oauth_token_in_the_environment_is_a_credential(self):
+        """The same false-negative class as d06: CLAUDE_CODE_OAUTH_TOKEN is session auth
+        supplied through the environment (the scrub comment says so) — the check must
+        accept it too."""
+        result = self.run_adapter({"CLAUDE_CODE_OAUTH_TOKEN": "stub-oauth"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.env_dump.exists(), "the engine must be invoked")
+
+    def test_no_home_fails_with_the_adapter_diagnostic_not_a_shell_error(self):
+        """agents-u5x: with HOME unset, set -u used to turn the credential path into
+        'HOME: unbound variable'. The adapter must produce its own diagnostic."""
+        result = self.run_adapter({}, unset_home=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no Claude credentials", result.stderr)
+        self.assertNotIn("unbound variable", result.stderr)
+        self.assertFalse(self.env_dump.exists(), "engine must not be invoked")
+
+    def test_no_home_with_an_api_key_still_runs(self):
+        """u5x's other half: HOME unset is only fatal to the session-file probe —
+        environment auth must work without it."""
+        result = self.run_adapter({"ANTHROPIC_API_KEY": "stub-key"}, unset_home=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.env_dump.exists(), "the engine must be invoked")
 
 
 if __name__ == "__main__":

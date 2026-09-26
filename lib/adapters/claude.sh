@@ -16,9 +16,29 @@ OUTPUT_FILE="$RUN_DIR/model_output.txt"
 # Deterministic auth check — presence of a credential, not a model round trip.
 # A `claude -p "ping"` probe cost a full inference per run and only recognised one
 # failure string, so every other auth error surfaced later as a generic failure.
-CREDENTIALS_FILE="${HOME}/.claude/.credentials.json"
-if [ -z "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}" ] && [ ! -f "$CREDENTIALS_FILE" ]; then
-  echo "[claude adapter] Error: no Claude credentials. Run 'claude login' for session auth (no API key required), or have the runner inject ANTHROPIC_API_KEY." >&2
+# HOME may be unset — under set -u a bare $HOME reference is fatal, which would
+# replace this adapter's own diagnostic with a shell error (agents-u5x).
+CREDENTIALS_FILE=""
+if [ -n "${HOME:-}" ]; then
+  CREDENTIALS_FILE="${HOME}/.claude/.credentials.json"
+fi
+has_key=0
+if [ -n "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  has_key=1
+fi
+has_session=0
+if [ -n "$CREDENTIALS_FILE" ] && [ -f "$CREDENTIALS_FILE" ]; then
+  has_session=1
+fi
+# Bedrock/Vertex are opt-in backend auth (agents-d06): the runner selected the backend,
+# and its SDK chain (AWS bearer/profile, Google application credentials) resolves the
+# credential — the engine's domain, not this gate's.
+has_backend=0
+if [ "${CLAUDE_CODE_USE_BEDROCK:-}" = "1" ] || [ "${CLAUDE_CODE_USE_VERTEX:-}" = "1" ]; then
+  has_backend=1
+fi
+if [ "$has_key" -eq 0 ] && [ "$has_session" -eq 0 ] && [ "$has_backend" -eq 0 ]; then
+  echo "[claude adapter] Error: no Claude credentials. Run 'claude login' for session auth (no API key required), have the runner inject ANTHROPIC_API_KEY, or opt into Bedrock/Vertex (CLAUDE_CODE_USE_BEDROCK=1 / CLAUDE_CODE_USE_VERTEX=1 with the backend's own credentials)." >&2
   exit 1
 fi
 
@@ -85,7 +105,7 @@ SESSION_OVERRIDE_VARS=(
 # Only scrub when a session credential exists, so the CI plane — API key or Bedrock, no login
 # — is unaffected. CLAUDE_CODE_OAUTH_TOKEN is deliberately not in the list: it *is* session
 # auth, just supplied through the environment.
-if [ -f "$CREDENTIALS_FILE" ]; then
+if [ "$has_session" -eq 1 ]; then
   scrubbed=()
   for var in "${SESSION_OVERRIDE_VARS[@]}"; do
     # printenv rather than indirect expansion: only *exported* variables reach the child,
@@ -100,7 +120,11 @@ if [ -f "$CREDENTIALS_FILE" ]; then
     echo "[claude adapter] Scrubbed ambient auth overrides: ${scrubbed[*]}"
   fi
 else
-  echo "[claude adapter] Auth: environment, no session credential at $CREDENTIALS_FILE"
+  if [ -n "$CREDENTIALS_FILE" ]; then
+    echo "[claude adapter] Auth: environment, no session credential at $CREDENTIALS_FILE"
+  else
+    echo "[claude adapter] Auth: environment (HOME unset — no session credential path)"
+  fi
 fi
 
 echo "[claude adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
