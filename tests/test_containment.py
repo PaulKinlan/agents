@@ -102,6 +102,11 @@ class TestDeclarationsFailClosed(unittest.TestCase):
         "capabilities not a mapping": manifest(capabilities=["write"]),
         "requires not a list": manifest(capabilities={"requires": "gh"}),
         "requires holds a non-string": manifest(capabilities={"requires": [1]}),
+        "gh at t0, which forbids network": manifest(capabilities={"requires": ["gh"]}),
+        "gh without declared network": manifest(containment="t1-fetch",
+                                                 capabilities={"requires": ["gh"]}),
+        "gh at t2, which forbids network": manifest(containment="t2-local",
+                                                    capabilities={"requires": ["gh"]}),
         "unknown budget key": manifest(budget={"max_minute": 5}),
         "budget not a mapping": manifest(budget=5),
         "zero minutes": manifest(budget={"max_minutes": 0}),
@@ -164,6 +169,29 @@ class TestDeclarationsFailClosed(unittest.TestCase):
             with self.subTest(engine=engine):
                 with self.assertRaises(ContainmentError):
                     check_engine(policy, engine)
+
+
+    def test_a_network_credential_needs_declared_network(self):
+        """requires [gh] brings the pre-pass a GitHub token, so it needs network: true at a
+        tier that allows it: issue-triage's shape (agents-05h)."""
+        policy = load_policy("probe", manifest(containment="t1-fetch",
+                                               capabilities={"network": True, "requires": ["gh"]}))
+        self.assertEqual(policy.requires, ("gh",))
+
+    def test_the_credential_list_matches_the_pre_pass_grant(self):
+        """Drift guard: the pre-pass receives a credential for exactly the requirements that
+        lib/child_env.py lists, so the validator and the grant cannot disagree."""
+        from lib.child_env import BASE_ALLOW, NETWORK_CREDENTIAL_REQUIREMENTS, prepass_environment
+        parent = {"PATH": "/bin", "GH_TOKEN": "t", "GITHUB_TOKEN": "t", "NPM_TOKEN": "t"}
+        tools = set(NETWORK_CREDENTIAL_REQUIREMENTS) | {"npm", "curl"}
+        for agent_yaml in (ROOT / "agents").glob("*/agent.yaml"):
+            caps = factory_cli.load_yaml_simple(agent_yaml).get("capabilities") or {}
+            tools.update(caps.get("requires") or [])
+        for tool in sorted(tools):
+            with self.subTest(requires=tool):
+                env = prepass_environment({"capabilities": {"requires": [tool]}}, parent=parent)
+                granted = set(env) - set(BASE_ALLOW)
+                self.assertEqual(bool(granted), tool in NETWORK_CREDENTIAL_REQUIREMENTS, granted)
 
 
 class TestBannerAndRecord(unittest.TestCase):

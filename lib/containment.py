@@ -28,6 +28,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from lib.child_env import NETWORK_CREDENTIAL_REQUIREMENTS
+
 # docs/PLAN.md section 5. The ceiling is what an agent at that tier may *declare*.
 #   t0-readonly  no network, read-only checkout
 #   t1-fetch     allowlisted network (registries, the tracker API), read-only
@@ -163,6 +165,14 @@ def load_policy(agent: str, agent_cfg: Mapping[str, Any]) -> Policy:
     requires = [] if requires is None else requires
     if not isinstance(requires, list) or not all(isinstance(r, str) and r for r in requires):
         raise ContainmentError(f"{agent}: capabilities.requires must be a list of tool names")
+    # A requirement that brings the pre-pass a network credential is network use, whatever the
+    # flag says (lib/child_env.py). Without this, a t0 manifest could list gh and its pre-pass
+    # would receive a GitHub token (agents-05h, found by review on PR #22).
+    for tool in requires:
+        if tool in NETWORK_CREDENTIAL_REQUIREMENTS and not declared["network"]:
+            raise ContainmentError(
+                f"{agent}: capabilities.requires [{tool}] brings the pre-pass a network "
+                f"credential, so it needs capabilities.network: true at a tier that allows it")
 
     budget = agent_cfg.get("budget")
     budget = {} if budget is None else budget
