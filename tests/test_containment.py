@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 from lib.containment import (  # noqa: E402
     ENGINE_TOOL_POLICIES, GRANTABLE_POLICIES, READ_ONLY, ContainmentError, banner_lines,
-    check_engine, load_policy, policy_record,
+    budget_note, check_engine, load_policy, policy_record,
 )
 
 _loader = importlib.machinery.SourceFileLoader("factory_cli_pnu", str(ROOT / "factory"))
@@ -212,8 +212,18 @@ class TestBannerAndRecord(unittest.TestCase):
         json.dumps(record)
         self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
         self.assertEqual(record["not_enforced"], ["os-sandbox", "read-scope", "budget.max_usd"])
+        # agents-js7: the claude adapter enforces a declared cap via --max-budget-usd.
         self.assertEqual(policy_record(policy, "claude")["not_enforced"],
-                         ["os-sandbox", "budget.max_usd"])
+                         ["os-sandbox"])
+
+    def test_the_budget_line_names_the_enforcement_state_per_engine(self):
+        policy = load_policy("probe", manifest(budget={"max_minutes": 5, "max_usd": 0.5}))
+        self.assertIn("$0.50 enforced by the claude adapter (--max-budget-usd)",
+                      budget_note(policy, "claude"))
+        self.assertIn("$0.50 declared, NOT enforced (the pi adapter has no per-run budget flag)",
+                      budget_note(policy, "pi"))
+        no_cap = load_policy("probe", manifest(budget={"max_minutes": 5}))
+        self.assertEqual(budget_note(no_cap, "claude"), "")
 
 
 class TestAdapters(unittest.TestCase):
@@ -243,13 +253,15 @@ class TestAdapters(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
 
-    def run_adapter(self, engine, policy=None, skill_dir=None):
+    def run_adapter(self, engine, policy=None, skill_dir=None, budget_usd=None):
         if self.argv_log.exists():
             self.argv_log.unlink()
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                "ANTHROPIC_API_KEY": "stub-key"}
         if policy is not None:
             env["FACTORY_TOOL_POLICY"] = policy
+        if budget_usd is not None:
+            env["FACTORY_MAX_BUDGET_USD"] = budget_usd
         res = subprocess.run(
             ["bash", str(ROOT / "lib" / "adapters" / f"{engine}.sh"), "probe", str(self.target),
              str(skill_dir or self.skill), str(self.tmp / "run")],
@@ -279,6 +291,32 @@ class TestAdapters(unittest.TestCase):
                 self.assertEqual(argv[argv.index("--append-system-prompt-file") + 1],
                                  str(self.skill / "SKILL.md"))
                 self.assertNotIn("--plugin-dir", argv)
+
+    def test_claude_enforces_a_declared_usd_cap(self):
+        """agents-js7: budget.max_usd reaches the engine as --max-budget-usd."""
+        res, argv = self.run_adapter("claude", budget_usd="0.50")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "0.50")
+        self.assertIn("Budget cap: $0.50", res.stdout)
+
+    def test_claude_without_a_cap_runs_uncapped_but_only_then(self):
+        res, argv = self.run_adapter("claude")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("--max-budget-usd", argv)
+
+    def test_claude_refuses_a_malformed_cap(self):
+        """A malformed cap would otherwise run uncapped while the record says enforced."""
+        res, argv = self.run_adapter("claude", budget_usd="abc")
+        self.assertEqual(res.returncode, 3, res.stderr)
+        self.assertIn("not a positive dollar amount", res.stderr)
+        self.assertIsNone(argv, "the engine must not run")
+
+    def test_pi_reports_a_declared_cap_as_not_enforced(self):
+        """pi has no per-run budget flag: the run proceeds, and the log says so."""
+        res, argv = self.run_adapter("pi", budget_usd="0.50")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("--max-budget-usd", argv or [])
+        self.assertIn("NOT enforced", res.stdout)
 
     def test_claude_without_a_skill_file_warns_and_still_runs_restricted(self):
         bare = self.tmp / "bare"
@@ -332,11 +370,13 @@ class TestDispatcher(unittest.TestCase):
         self.bin.mkdir()
         self.argv_log = self.root / "engine-argv.log"
         self.policy_log = self.root / "engine-policy.log"
+        self.budget_log = self.root / "engine-budget.log"
         stub = self.bin / "pi"
         stub.write_text(
             "#!/usr/bin/env bash\n"
             f"printf '%s\\n' \"$@\" > '{self.argv_log}'\n"
             f"printf '%s' \"${{FACTORY_TOOL_POLICY:-unset}}\" > '{self.policy_log}'\n"
+            f"printf '%s' \"${{FACTORY_MAX_BUDGET_USD:-unset}}\" > '{self.budget_log}'\n"
             "cat >/dev/null\n" + STUB_REPORT,
             encoding="utf-8",
         )
@@ -395,6 +435,18 @@ class TestDispatcher(unittest.TestCase):
         self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
         self.assertEqual(record["declared"]["containment"], "t2-local")
         self.assertEqual(set(record["withheld"]), {"write"})
+    def test_a_declared_usd_cap_reaches_the_adapter_only_from_the_dispatcher(self):
+        """agents-js7: the declared cap is set explicitly on the adapter environment; an
+        ambient FACTORY_MAX_BUDGET_USD in the operator's shell never reaches the adapter."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1, max_usd: 0.5}\n")
+        res = self.factory("pi", {"FACTORY_MAX_BUDGET_USD": "999"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.budget_log.read_text(encoding="utf-8"), "0.5",
+                         "the declared cap, not the ambient one")
+        self.assertIn("NOT enforced (the pi adapter has no per-run budget flag)", res.stdout)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertIn("budget.max_usd", record["not_enforced"])
 
 
 if __name__ == "__main__":

@@ -61,6 +61,18 @@ case "$TOOL_POLICY" in
     ;;
 esac
 
+# Station cost cap (agents-js7): the dispatcher sets FACTORY_MAX_BUDGET_USD from the agent's
+# declared budget.max_usd, and claude enforces it per run via --max-budget-usd. A malformed
+# value is a dispatcher bug — refuse rather than run uncapped under a false belief.
+BUDGET_FLAGS=()
+if [ -n "${FACTORY_MAX_BUDGET_USD:-}" ]; then
+  if ! printf '%s' "$FACTORY_MAX_BUDGET_USD" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+    echo "[claude adapter] Refusing: FACTORY_MAX_BUDGET_USD '$FACTORY_MAX_BUDGET_USD' is not a positive dollar amount." >&2
+    exit 3
+  fi
+  BUDGET_FLAGS=(--max-budget-usd "$FACTORY_MAX_BUDGET_USD")
+fi
+
 # The skill travels in the system prompt, not as a plugin. A plugin skill needs the Skill tool,
 # and the Skill tool can invoke any other skill. Measured on 2.1.282: `--restricted --tools
 # Read,Grep,Glob` lists no skills at all, and adding Skill restores the plugin's skill together
@@ -133,8 +145,11 @@ cd "$TARGET_DIR"
 
 # The engine reads the prompt on stdin too, so it is not in the engine's argv either.
 echo "[claude adapter] Tool policy: $TOOL_POLICY (${POLICY_FLAGS[*]})"
-# ${SKILL_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
-printf '%s' "$PROMPT" | claude "${POLICY_FLAGS[@]}" ${SKILL_FLAGS[@]+"${SKILL_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
+if [ ${#BUDGET_FLAGS[@]} -gt 0 ]; then
+  echo "[claude adapter] Budget cap: \$$FACTORY_MAX_BUDGET_USD (--max-budget-usd)"
+fi
+# ${SKILL_FLAGS[@]+...} / ${BUDGET_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
+printf '%s' "$PROMPT" | claude "${POLICY_FLAGS[@]}" ${SKILL_FLAGS[@]+"${SKILL_FLAGS[@]}"} ${BUDGET_FLAGS[@]+"${BUDGET_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
   echo "[claude adapter] Error executing claude" >&2
   cat "$OUTPUT_FILE" >&2
   exit 1
