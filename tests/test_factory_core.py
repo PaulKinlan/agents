@@ -531,5 +531,27 @@ class TestEngineAdapterAuth(unittest.TestCase):
             self.assertFalse((run_dir / "model_output.txt").exists())
 
 
+class TestModernWebGuidanceCoverage(unittest.TestCase):
+    """Ensure scan_modern_web.py covers 100% of the 146 official modern-web-guidance guides."""
+
+    def test_all_146_guides_are_mapped_to_rules(self):
+        scanner_path = FACTORY_ROOT / "agents" / "modern-web" / "scripts" / "scan_modern_web.py"
+        s_loader = importlib.machinery.SourceFileLoader("scan_modern_web", str(scanner_path))
+        s_spec = importlib.util.spec_from_loader("scan_modern_web", s_loader)
+        scanner = importlib.util.module_from_spec(s_spec)
+        s_loader.exec_module(scanner)
+
+        catalog = scanner.load_guides_catalog()
+        self.assertGreaterEqual(len(catalog), 146)
+
+        covered = set()
+        for rule in scanner.RULES:
+            covered.update(rule.get("guide_ids", []))
+
+        missing = set(catalog.keys()) - covered
+        self.assertEqual(missing, set(), f"Unmapped modern-web-guidance guides: {missing}")
+
+
 if __name__ == "__main__":
     unittest.main()
+

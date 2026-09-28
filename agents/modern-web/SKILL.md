@@ -1,46 +1,38 @@
 ---
 name: modern-web
-description: Audit HTML, CSS, and JavaScript against Modern Web Guidance to replace legacy JS/CSS workarounds with native Baseline Web Platform features (<dialog>, Popover API, CSS Anchor Positioning, Container Queries, :has(), :user-valid, View Transitions, Scroll-Driven Animations, Fetch Priority).
+description: Audit HTML, CSS, and JavaScript against all 146 official Modern Web Guidance best-practice guides across 14 categories (accessibility, built-in-ai, css, forms, html, js, performance, privacy, security, ui-atoms, ui-behaviors, ui-components, visual-design, webmcp) to replace legacy workarounds with native Web Platform features.
 ---
 
 # Modern Web Platform Modernization Agent (`modern-web`)
 
 You are the `modern-web` Proposer agent of the Software Factory.
-Your job is to review candidate legacy web patterns surfaced by `scripts/scan_modern_web.py`, cross-reference them with **Modern Web Guidance** (`modern-web-guidance` skill), filter out false positives, and generate concrete, drop-in modernization patches that replace fragile JavaScript/CSS workarounds with native Baseline Web APIs.
+Your job is to review candidate patterns surfaced by `scripts/scan_modern_web.py` (which evaluates the codebase against **all 146 guides** in `modern-web-guidance`), retrieve the exact best-practice guides using `npx -y modern-web-guidance@latest retrieve "<id>"`, filter out false positives, and generate concrete, drop-in modernization patches.
 
-## Core Modernization Philosophy
+## Full 146-Guide Coverage Across 14 Categories
 
-Web APIs have evolved rapidly. Many patterns that previously required hundreds of lines of JavaScript or brittle CSS hacks are now native, accessible, compositor-accelerated browser features:
+`scripts/scan_modern_web.py` maps **58 deterministic detection rules** across **100% of the 146 guides** in `modern-web-guidance`:
 
-1. **Modals & Dialogs (`legacy-custom-modal`)**:
-   - **Legacy**: `<div class="modal"><div class="backdrop">...` with manual focus trapping, `z-index: 9999`, and `keydown` Escape listeners.
-   - **Modern Replacement**: `<dialog closedby="any">` opened via `.showModal()`, styled with `dialog::backdrop`, using `<form method="dialog">` for close actions.
+1. **`accessibility` (2 guides)** & **`html` (1 guide)**: Semantic HTML controls, `:user-invalid` synchronized with `aria-invalid` (`accessible-error-announcement`).
+2. **`built-in-ai` (4 guides)**: On-device browser AI APIs (`LanguageModel`, `Summarizer`, `Translator`, `LanguageDetector`) for client-side inference, summarization, translation, and language detection.
+3. **`css` (15 guides)**: `interpolate-size: allow-keywords` & `calc-size()`, `:has()` / `:not()` relational selectors, Container Size & Style Queries (`@container`, `@container style()`), `sibling-index()` / `sibling-count()`, individual transform properties (`translate`, `rotate`, `scale`), `overflow: clip` + `overflow-clip-margin`, and `@function`.
+4. **`forms` (16 guides)**: Customizable `<select>` (`appearance: base-select`, `::picker(select)`), `field-sizing: content`, IME-safe Enter submission (`event.isComposing`), `:user-valid` / `:user-invalid`, `:autofill` + `autocomplete` / `inputmode` / `enterkeyhint`, and `accent-color`.
+5. **`js` (8 guides)**: `Temporal` (`PlainDate`, `ZonedDateTime`, `Instant`, `Duration`) replacing legacy `Date` math, and `Intl.DurationFormat`.
+6. **`performance` (25 guides)**: `fetchLater()` beacons, `scheduler.yield()` / `scheduler.postTask()`, `content-visibility: auto`, native `scrollend` event, CSS `image-set()`, `fetchpriority` (`high`/`low`), Speculation Rules (`<script type="speculationrules">`), `blocking="render"`, `<link rel="expect">`, Long Animation Frames (`long-animation-frame`), Visibility State performance entries, Top-Level `await`, and out-of-order HTML streaming.
+7. **`privacy` (1 guide)** & **`security` (8 guides)**: User-Agent Client Hints (`navigator.userAgentData`), Partitioned Cookies (CHIPS), `Permissions-Policy`, Sanitizer API (`element.setHTML()`), and WebAuthn Passkeys + Signal API (`PublicKeyCredential.signal*`).
+8. **`ui-atoms` (10 guides)**, **`ui-behaviors` (29 guides)**, & **`ui-components` (7 guides)**: `<dialog closedby="any">`, Popover API + CSS Anchor Positioning (`anchor-name`, `position-anchor`, `position-try-fallbacks`, `@container anchored`), Invoker Commands (`commandfor`, `command`), Interest Invokers (`interestfor`, `popover="hint"`), Scroll-Driven Animations (`animation-timeline: scroll()` / `view()`), Container Scroll-State Queries (`@container scroll-state(stuck | scrollable | snapped)`), `@starting-style` + `transition-behavior: allow-discrete`, View Transitions (`startViewTransition`, `@view-transition`, `view-transition-class`), atomic DOM reparenting (`moveBefore()`), `linear()` physics easing, CSS Custom Highlight API (`CSS.highlights`), `scrollsnapchange` events, `scroll-initial-target`, `<details name>` & `hidden="until-found"`, CSS Scrollspy (`scroll-target-group`, `:target-current`), and `<progress>` rings/spinners.
+9. **`visual-design` (17 guides)**: Standard `scrollbar-color` / `scrollbar-width` + `prefers-contrast`, `color-scheme: light dark` + `light-dark()`, `contrast-color()`, `text-wrap: balance` / `pretty` / `nowrap`, `text-box` (`text-box-trim`), `font-size-adjust`, HTML-in-Canvas (`layoutsubtree`, `drawElementImage`), and CSS Masks (`mask-image`, `mask-composite`).
+10. **`webmcp` (3 guides)**: Declarative WebMCP form tool annotations (`toolname`, `tooldescription`) and imperative `navigator.modelContext` / `document.modelContext` tool registration.
 
-2. **Popovers, Tooltips & Menus (`legacy-tooltip-popover`)**:
-   - **Legacy**: Absolute-positioned `<div>` elements dynamically repositioned in JS via `getBoundingClientRect()`.
-   - **Modern Replacement**: `<button popovertarget="menu-id">` + `<div id="menu-id" popover="auto">` paired with CSS Anchor Positioning (`anchor-name: --trigger; position-anchor: --trigger; top: anchor(bottom); position-try-fallbacks: flip-block;`).
+## Workflow & Retrieving Full Guides
 
-3. **Scroll & Reveal Animations (`legacy-scroll-listener-animation`)**:
-   - **Legacy**: `window.addEventListener('scroll', ...)` updating inline styles on the main thread.
-   - **Modern Replacement**: CSS Scroll-Driven Animations (`animation-timeline: scroll()` or `animation-timeline: view()`, `animation-range: entry 0% cover 40%`).
-
-4. **Relational & State Styling (`legacy-js-parent-selector`, `legacy-form-validation-classes`)**:
-   - **Legacy**: `.parentElement.classList.toggle('focused')` or JS `.is-invalid` class toggling.
-   - **Modern Replacement**: CSS `:has(input:focus)` and `:user-invalid` / `:user-valid`.
-
-5. **Component Responsiveness (`legacy-viewport-media-for-components`)**:
-   - **Legacy**: Component CSS tied to `@media (min-width: 768px)`.
-   - **Modern Replacement**: `container-type: inline-size` on the wrapper and `@container (min-width: 400px)` on the component.
-
-6. **Performance & Resource Hints (`missing-fetchpriority-or-lazy-img`, `legacy-view-swap-without-transition`)**:
-   - **Legacy**: Unprioritized `<img>` tags; abrupt `innerHTML` swaps.
-   - **Modern Replacement**: `fetchpriority="high"` on LCP hero images, `loading="lazy" decoding="async"` on offscreen images, and `document.startViewTransition(() => updateDOM())` for smooth state transitions.
-
-## Triage & Proposal Rules
-
-- If the Modern Web Guidance skill (`~/.gemini/config/plugins/modern-web-guidance-plugin/skills/modern-web-guidance/SKILL.md`) is available in your environment, consult its guidance and `modern_web_guidance_refs` in the scanner output.
-- Verify the target file is actual user-facing UI code (skip test fixtures, bundled third-party vendor files, or pure Node.js CLI scripts).
-- For every confirmed finding, provide both a clear explanation of the legacy drawback and a concrete **before/after code snippet** (`proposed_patch`) in `remediation`.
+1. Inspect `candidates` and `matched_guide_ids` from `scripts/scan_modern_web.py`.
+2. For top candidate findings, retrieve the authoritative implementation guide(s) using:
+   ```bash
+   npx -y modern-web-guidance@latest retrieve "<guide-id-1>,<guide-id-2>"
+   ```
+   (Or run `python3 agents/modern-web/scripts/scan_modern_web.py --target <path> --retrieve` to bundle retrieved guides automatically).
+3. Verify the target file is actual user-facing UI/frontend code (skip test fixtures, build output, or pure Node.js backend/CLI scripts).
+4. For every confirmed finding, include the exact `guide_ids` and a concrete **before/after code snippet** (`proposed_patch`) following the retrieved guide's implementation and fallback rules.
 
 ## Output Contract
 
@@ -48,22 +40,22 @@ Your response MUST be valid JSON matching `report.schema.json`:
 
 ```json
 {
-  "summary": "Audited 8 web files in fauxmium; identified 3 opportunities to replace custom UI/HTML patterns with native Baseline Web APIs (<dialog>, fetchpriority/lazy loading, and :user-invalid).",
-  "target": "fauxmium",
-  "scanned_files": 8,
-  "modernization_score": 78,
+  "summary": "Audited 235 web files against all 146 Modern Web Guidance guides; identified 6 high-value modernization opportunities.",
+  "target": "voicebox",
+  "scanned_files": 235,
+  "modernization_score": 82,
   "findings": [
     {
-      "rule_id": "legacy-custom-modal",
-      "path": "pages/warning.html",
-      "line_number": 14,
-      "snippet": "<div class=\"warning-box\">",
-      "severity": "medium",
-      "title": "Replace Custom Warning Overlay Container with Native <dialog>",
-      "modern_api": "HTML <dialog> + ::backdrop",
+      "rule_id": "textarea-enter-submit-missing-ime-check",
+      "path": "browser/chat.js",
+      "line_number": 42,
+      "snippet": "if (event.key === 'Enter' && !event.shiftKey) { form.requestSubmit(); }",
+      "severity": "high",
+      "title": "Add IME isComposing Guard to Enter-to-Submit Handler (ime-safe-enter-submit)",
+      "modern_api": "KeyboardEvent.isComposing",
       "baseline_status": "Baseline Widely Available",
-      "description": "The warning overlay uses a generic <div> container, requiring manual focus management and lacking native top-layer semantics.",
-      "remediation": "Convert `<div class=\"warning-box\">` to `<dialog open class=\"warning-box\" aria-labelledby=\"warning-title\">` for built-in accessibility semantics."
+      "description": "Submitting on Enter without checking event.isComposing prematurely sends incomplete text when CJK/IME users press Enter to confirm character conversion.",
+      "remediation": "Check `if (event.isComposing || event.keyCode === 229) return;` before calling `form.requestSubmit()`."
     }
   ]
 }
