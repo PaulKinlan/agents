@@ -26,6 +26,14 @@ inputs:
     description: 'API key for model inference (GEMINI_API_KEY or ANTHROPIC_API_KEY)'
     required: false
     default: ''
+  deepseek_api_key:
+    description: 'API key for DeepSeek API (deepseek-flash / deepseek-chat)'
+    required: false
+    default: ''
+  deepseek_model:
+    description: 'Model for DeepSeek API (default: deepseek-chat)'
+    required: false
+    default: 'deepseek-chat'
   factory_ref:
     description: >-
       Full 40-character commit SHA of the Software Factory to fetch when this action runs
@@ -81,6 +89,9 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github_token }}
         GEMINI_API_KEY: ${{ inputs.model_api_key }}
         ANTHROPIC_API_KEY: ${{ inputs.model_api_key }}
+        DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key || inputs.model_api_key }}
+        deepseek_api_key: ${{ inputs.deepseek_api_key || inputs.model_api_key }}
+        DEEPSEEK_MODEL: ${{ inputs.deepseek_model }}
       run: |
         TARGET_PATH="${{ inputs.target }}"
         AGENT_NAME="${{ inputs.agent }}"

@@ -764,14 +764,14 @@ def main():
     run_parser.add_argument("agent", help="Name of the agent to run (e.g. secret-scan)")
     run_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     run_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity"], help="Engine to execute agent with")
-    run_parser.add_argument("--sink", choices=["file", "beads", "github-issues"], help="Override sink")
+    run_parser.add_argument("--sink", help="Override sink (file, beads, github-issues, or comma-separated e.g. github-issues,beads)")
 
     # line
     line_parser = subparsers.add_parser("line", help="Execute an ordered Factory Line composed of multiple stations")
     line_parser.add_argument("line", help="Name of the line to run (e.g. project-audit)")
     line_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     line_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity"], help="Engine to execute agents with")
-    line_parser.add_argument("--sink", choices=["file", "beads", "github-issues"], help="Override sink")
+    line_parser.add_argument("--sink", help="Override sink (file, beads, github-issues, or comma-separated e.g. github-issues,beads)")
 
     # hillclimb
     hc_parser = subparsers.add_parser("hillclimb", help="Run Class C goal-directed performance hill-climber with ledger")
@@ -781,7 +781,7 @@ def main():
     hc_parser.add_argument("--iterations", type=int, default=1, help="Number of hill-climb iterations")
     hc_parser.add_argument("--apply", action="store_true", help="Apply candidate edits in worktree, re-measure, keep wins, revert losses")
     hc_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity"], help="Engine to execute agent with")
-    hc_parser.add_argument("--sink", choices=["file", "beads", "github-issues"], help="Override sink")
+    hc_parser.add_argument("--sink", help="Override sink (file, beads, github-issues, or comma-separated e.g. github-issues,beads)")
 
     # hook
     hook_parser = subparsers.add_parser("hook", help="Manage deterministic git pre-commit hooks (Rule 8 compliant)")

@@ -68,6 +68,11 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertNotIn("GEMINI_API_KEY", claude)
         self.assertNotIn("GITHUB_TOKEN", claude)
 
+        deepseek = child_environment(engine="deepseek", parent=parent_env(DEEPSEEK_API_KEY="ds-key"))
+        self.assertEqual(deepseek["DEEPSEEK_API_KEY"], "ds-key")
+        self.assertNotIn("ANTHROPIC_API_KEY", deepseek)
+        self.assertNotIn("GITHUB_TOKEN", deepseek)
+
     def test_unknown_engine_fails_closed(self):
         env = child_environment(engine="brand-new-engine", parent=parent_env())
         self.assertNotIn("ANTHROPIC_API_KEY", env)
@@ -75,11 +80,13 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertEqual(env["PATH"], "/usr/bin")
 
     def test_github_sink_gets_a_token_and_nothing_else(self):
-        env = child_environment(sink="github-issues", parent=parent_env())
-        self.assertEqual(env["GH_TOKEN"], "ghs_ci_token")
-        self.assertEqual(env["GITHUB_TOKEN"], "ghs_ci_token")
-        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
-        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        for sink in ("github-issues", "github-issues,beads", "both"):
+            with self.subTest(sink=sink):
+                env = child_environment(sink=sink, parent=parent_env())
+                self.assertEqual(env["GH_TOKEN"], "ghs_ci_token")
+                self.assertEqual(env["GITHUB_TOKEN"], "ghs_ci_token")
+                self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+                self.assertNotIn("ANTHROPIC_API_KEY", env)
 
     def test_other_sinks_get_no_github_token(self):
         for sink in ("file", "beads", None):

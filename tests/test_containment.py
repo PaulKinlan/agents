@@ -65,6 +65,7 @@ class TestShippedManifests(unittest.TestCase):
                 self.assertTrue(policy.tier_declared)
                 check_engine(policy, "pi")
                 check_engine(policy, "claude")
+                check_engine(policy, "deepseek")
                 with self.assertRaises(ContainmentError):
                     check_engine(policy, "antigravity")
 
@@ -227,7 +228,7 @@ class TestBannerAndRecord(unittest.TestCase):
 
 
 class TestAdapters(unittest.TestCase):
-    ENGINE_BINARY = {"pi": "pi", "claude": "claude", "antigravity": "agentapi"}
+    ENGINE_BINARY = {"pi": "pi", "claude": "claude", "antigravity": "agentapi", "deepseek": "deepseek"}
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-pnu-adapter-")

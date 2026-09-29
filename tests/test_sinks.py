@@ -464,6 +464,14 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertEqual(self.stats()["unchanged"], 1)
         self.assertIn("Synthetic accepted risk", self.report())
 
+    def test_multi_sink_dispatches_to_both_beads_and_github(self):
+        """When sink is comma-separated (e.g. github-issues,beads or both), dispatch to both."""
+        self.scan("github-issues,beads", [SAMPLE])
+        calls = self.calls()
+        tools = [c["tool"] for c in calls]
+        self.assertIn("gh", tools)
+        self.assertIn("bd", tools)
+
     def test_a_malformed_register_fails_loudly(self):
         """A register that cannot be parsed must not silently suppress nothing (agents-411)."""
         findings_dir = self.factory / "findings"

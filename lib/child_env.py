@@ -44,6 +44,9 @@ ENGINE_CREDENTIALS = {
     ),
     # Kept aligned with lib/adapters/claude.sh's SESSION_OVERRIDE_VARS plus the session token
     # the adapter deliberately preserves; tests/test_child_env.py asserts the relationship.
+    "deepseek": (
+        "DEEPSEEK_API_KEY", "deepseek_api_key", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
+    ),
     "claude": (
         "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
         "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
@@ -95,7 +98,7 @@ def child_environment(
     env = {name: source[name] for name in BASE_ALLOW if name in source}
 
     names = list(ENGINE_CREDENTIALS.get(engine or "", ()))
-    if github or sink == "github-issues":
+    if github or (sink and any(s.strip() in ("github-issues", "both", "all") for s in sink.split(","))):
         names.extend(GITHUB_TOKEN_VARS)
     for name in names:
         value = source.get(name)

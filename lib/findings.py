@@ -366,11 +366,16 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     # deliberately includes findings the publication embargo withholds from a tracker sink.
     _dispatch_file(target_name, processed_findings, stats, fixed_items or [])
 
-    publishable = _publishable_for_sink(sink, processed_findings, visibility)
-    if sink == "beads":
-        _dispatch_beads(target_dir, publishable, visibility)
-    elif sink == "github-issues":
-        _dispatch_github(target_name, target_dir, publishable, visibility)
+    sinks = [s.strip() for s in sink.split(",") if s.strip()]
+    if "both" in sinks or "all" in sinks:
+        sinks = ["beads", "github-issues"]
+
+    for s in sinks:
+        publishable = _publishable_for_sink(s, processed_findings, visibility)
+        if s == "beads":
+            _dispatch_beads(target_dir, publishable, visibility)
+        elif s == "github-issues":
+            _dispatch_github(target_name, target_dir, publishable, visibility)
 
 def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]]):
     report_file = FACTORY_ROOT / "findings" / f"{target_name}-delta.md"

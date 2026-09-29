@@ -60,6 +60,7 @@ GRANTABLE_POLICIES = (READ_ONLY,)
 ENGINE_TOOL_POLICIES: Dict[str, frozenset] = {
     "pi": frozenset({READ_ONLY}),
     "claude": frozenset({READ_ONLY}),
+    "deepseek": frozenset({READ_ONLY}),
     # `agentapi new-conversation` takes a prompt and nothing else: no tool controls.
     "antigravity": frozenset(),
 }
@@ -69,10 +70,12 @@ ENGINE_TOOL_POLICIES: Dict[str, frozenset] = {
 ENGINE_ENFORCEMENT = {
     "pi": "pi --tools read,grep,find,ls --no-extensions --no-approve",
     "claude": "claude --restricted --tools Read,Grep,Glob --strict-mcp-config",
+    "deepseek": "deepseek-api read-only payload triage",
 }
 ENGINE_READ_SCOPE = {
     "pi": "NOT confined: pi's read tool reaches any file the operator can read",
     "claude": "confined to the target directory (claude --restricted)",
+    "deepseek": "confined to scanner context and payload",
 }
 
 WITHHELD_REASONS = {
