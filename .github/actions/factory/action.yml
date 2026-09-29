@@ -90,7 +90,6 @@ runs:
         GEMINI_API_KEY: ${{ inputs.model_api_key }}
         ANTHROPIC_API_KEY: ${{ inputs.model_api_key }}
         DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key || inputs.model_api_key }}
-        deepseek_api_key: ${{ inputs.deepseek_api_key || inputs.model_api_key }}
         DEEPSEEK_MODEL: ${{ inputs.deepseek_model }}
       run: |
         set -euo pipefail
