@@ -93,6 +93,7 @@ runs:
         deepseek_api_key: ${{ inputs.deepseek_api_key || inputs.model_api_key }}
         DEEPSEEK_MODEL: ${{ inputs.deepseek_model }}
       run: |
+        set -euo pipefail
         TARGET_PATH="${{ inputs.target }}"
         AGENT_NAME="${{ inputs.agent }}"
         ENGINE_ARG="${{ inputs.engine }}"
