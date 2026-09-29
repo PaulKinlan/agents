@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -552,6 +553,31 @@ class TestModernWebGuidanceCoverage(unittest.TestCase):
         self.assertEqual(missing, set(), f"Unmapped modern-web-guidance guides: {missing}")
 
 
+class TestAgentIntegrationInstructions(unittest.TestCase):
+    """Ensure --agent flag and integrate command produce actionable agent instructions."""
+
+    def test_factory_agent_flag(self):
+        res = subprocess.run(
+            [sys.executable, str(FACTORY_ROOT / "factory"), "--agent"],
+            capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("# The Software Factory — Integration & Automation Guide", res.stdout)
+        self.assertIn("## 1. CI/CD Plane: GitHub Actions", res.stdout)
+        self.assertIn("paulkinlan/agents/.github/actions/factory", res.stdout)
+
+    def test_factory_integrate_subcommand(self):
+        res = subprocess.run(
+            [sys.executable, str(FACTORY_ROOT / "factory"), "integrate", "--section", "github-actions"],
+            capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("## 1. CI/CD Plane: GitHub Actions", res.stdout)
+        self.assertIn("permissions:", res.stdout)
+        self.assertNotIn("## 3. Target Enrolment Plane", res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

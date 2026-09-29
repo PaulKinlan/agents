@@ -77,6 +77,20 @@ flowchart TD
   - [`bd`](https://github.com/beads-project/beads) (if using the Beads issue tracker)
   - [`gh`](https://cli.github.com/) (if using the GitHub Issues sink)
 
+### 0. Agent Integration Guidance (`--agent` / `integrate`)
+
+AI coding agents (or developers) can print machine-actionable integration instructions and copy-pasteable workflow recipes directly from the CLI:
+
+```bash
+# Print full machine-actionable integration guide for AI agents
+./factory --agent
+
+# Or print specific integration recipes directly to stdout
+./factory integrate --section github-actions  # GitHub Actions workflows & composite action
+./factory integrate --section pre-commit      # Sub-150ms deterministic pre-commit gate
+./factory integrate --section target          # targets/<name>.yaml configuration
+```
+
 ### 1. List Available Agents
 
 ```bash
@@ -181,6 +195,8 @@ jobs:
           target: .
           model_api_key: ${{ secrets.GEMINI_API_KEY }}
 ```
+
+For complete workflow recipes (PR quality gates, scheduled deep audits, automated issue triage, and matrix runners), see [**`docs/INTEGRATION.md`**](docs/INTEGRATION.md).
 
 ---
 
@@ -407,6 +423,7 @@ findings/                          # Local findings store, latest delta reports,
 runs/                              # Detailed run transcripts and raw model logs (gitignored)
 schedules/                         # Generated launchd plists (gitignored)
 docs/
+├── INTEGRATION.md                 # Agent and CI/CD integration guide
 └── PLAN.md                        # Master architectural design and research notes
 AGENTS.md                          # Repository rules and agent conventions
 factory                            # Central CLI dispatcher
@@ -417,5 +434,6 @@ factory                            # Central CLI dispatcher
 ## Reading Order & Further Documentation
 
 1. [**`docs/PLAN.md`**](docs/PLAN.md): Complete architecture specification, threat model research, Mythos analysis, and 9-phase build plan.
-2. [**`AGENTS.md`**](AGENTS.md): Factory conventions, containment tiers, and non-negotiables.
-3. [**`THREAT_MODEL.md`**](THREAT_MODEL.md): Self-hosting threat model for the factory repository itself.
+2. [**`docs/INTEGRATION.md`**](docs/INTEGRATION.md): Machine-actionable integration guide for AI agents and CI/CD pipelines.
+3. [**`AGENTS.md`**](AGENTS.md): Factory conventions, containment tiers, and non-negotiables.
+4. [**`THREAT_MODEL.md`**](THREAT_MODEL.md): Self-hosting threat model for the factory repository itself.

@@ -2,6 +2,8 @@
 
 A fleet of SDLC agents that run locally (`antigravity` / `claude` / `pi`, session auth) and in
 GitHub Actions (API keys). See [docs/PLAN.md](docs/PLAN.md) for the full design and rationale.
+For automated or manual setup in target repositories (GitHub Actions, pre-commit hooks, local
+targets, or agent skills), see [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 > [!IMPORTANT]
 > **This repo is the highest-privilege component in the system.** It holds model API keys and

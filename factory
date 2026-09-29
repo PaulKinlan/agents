@@ -752,9 +752,48 @@ def install_skills():
         print(f"✅ Linked {linked_count} Software Factory skills ({label}) -> {hub_dir}")
 
 
+def print_agent_instructions(section: str = "all") -> None:
+    """Print machine-actionable integration guide for AI agents and automation scripts."""
+    doc_path = FACTORY_ROOT / "docs" / "INTEGRATION.md"
+    if not doc_path.exists():
+        print("# Software Factory Integration\n\nSee https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md")
+        return
+
+    content = doc_path.read_text(encoding="utf-8")
+    if section == "all":
+        print(content)
+        return
+
+    section_map = {
+        "github-actions": ("## 1. CI/CD Plane: GitHub Actions", "## 2. Pre-Commit Plane"),
+        "pre-commit": ("## 2. Pre-Commit Plane (Layer 1: Deterministic Gate)", "## 3. Target Enrolment Plane"),
+        "target": ("## 3. Target Enrolment Plane (Local Fleet & Scheduler)", "## 4. Interactive Skills Plane"),
+        "skills": ("## 4. Interactive Skills Plane (Local Agent Tools)", "## 5. Agent Fleet Reference & CI Compatibility"),
+        "agents": ("## 5. Agent Fleet Reference & CI Compatibility", "## 6. Autonomous Agent Execution Checklist"),
+    }
+    if section in section_map:
+        start_marker, end_marker = section_map[section]
+        start_idx = content.find(start_marker)
+        if start_idx != -1:
+            end_idx = content.find(end_marker, start_idx)
+            if end_idx != -1:
+                print(content[start_idx:end_idx].strip())
+            else:
+                print(content[start_idx:].strip())
+            return
+
+    print(content)
+
+
 def main():
     parser = argparse.ArgumentParser(description="The Software Factory (factory)")
+    parser.add_argument("--agent", action="store_true", dest="agent_guide", help="Print machine-actionable instructions and recipes for AI agents to integrate the factory")
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to run")
+
+    # integrate
+    integrate_parser = subparsers.add_parser("integrate", help="Print integration instructions and recipes for AI agents and CI/CD")
+    integrate_parser.add_argument("--agent", action="store_true", dest="agent_mode", help="Format specifically for AI agents (machine-actionable markdown)")
+    integrate_parser.add_argument("--section", choices=["all", "github-actions", "pre-commit", "target", "skills", "agents"], default="all", help="Specific integration section to output")
 
     # list
     subparsers.add_parser("list", help="List all available agents")
@@ -835,7 +874,14 @@ def main():
     trig_p.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux"], default="auto")
 
     args = parser.parse_args()
-    if args.command == "list":
+    if getattr(args, "agent_guide", False):
+        print_agent_instructions("all")
+        sys.exit(0)
+
+    if args.command == "integrate":
+        print_agent_instructions(getattr(args, "section", "all"))
+        sys.exit(0)
+    elif args.command == "list":
         list_agents()
     elif args.command == "run":
         run_agent(agent_name=args.agent, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink)
