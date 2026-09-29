@@ -54,7 +54,7 @@ class TestSinks(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-sinks-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.factory = self.root / "factory"
         (self.factory / "lib").mkdir(parents=True)
         self.cli = self.factory / "lib" / "findings.py"
@@ -219,9 +219,9 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         call, = self.calls()
         args = call["args"]
         self.assertEqual(call["tool"], "bd")
-        self.assertEqual(call["cwd"], str(self.target))
+        self.assertEqual(Path(call["cwd"]).resolve(), self.target.resolve())
         self.assertEqual(args[0], "create")
-        self.assertEqual(args[args.index("-C") + 1], str(self.target))
+        self.assertEqual(Path(args[args.index("-C") + 1]).resolve(), self.target.resolve())
         self.assertEqual(args[args.index("--title") + 1], "[lint] Unused export")
         self.assertEqual(args[args.index("--type") + 1], "task")
         fingerprint, = self.store()["findings"]
@@ -238,7 +238,7 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         call, = self.calls()
         args = call["args"]
         self.assertEqual(call["tool"], "gh")
-        self.assertEqual(call["cwd"], str(self.target))
+        self.assertEqual(Path(call["cwd"]).resolve(), self.target.resolve())
         self.assertEqual(args[:2], ["issue", "create"])
         self.assertEqual(args[args.index("--title") + 1], "[factory:lint] Unused export")
         fingerprint, = self.store()["findings"]

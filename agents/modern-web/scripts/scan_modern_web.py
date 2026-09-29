@@ -231,7 +231,7 @@ RULES: List[Dict[str, Any]] = [
         "modern_feature": "KeyboardEvent.isComposing guard before form.requestSubmit()",
         "guide_ids": ["ime-safe-enter-submit"],
         "severity": "high",
-        "rationale": "Intercepting Enter on a <textarea> without checking event.isComposing prematuring submits incomplete text for CJK/IME users confirming character composition."
+        "rationale": "Intercepting Enter on a <textarea> without checking event.isComposing prematurely submits incomplete text for CJK/IME users confirming character composition."
     },
     {
         "rule_id": "forms-missing-autofill-inputmode-hints",
