@@ -42,11 +42,8 @@ fi
 echo "[deepseek adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR' via DeepSeek API..."
 export PYTHONUNBUFFERED=1
 
-python3 - << 'EOF' > "$OUTPUT_FILE" 2>&1 || {
-  echo "[deepseek adapter] Error executing DeepSeek API call" >&2
-  cat "$OUTPUT_FILE" >&2
-  exit 1
-}
+STATUS=0
+python3 - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
 import json
 import os
 import sys
@@ -58,6 +55,13 @@ if not key:
     sys.stderr.write("[deepseek adapter] Error: DEEPSEEK_API_KEY is not configured.\n")
     sys.exit(1)
 
+skill_dir = sys.argv[1] if len(sys.argv) > 1 else ""
+skill_file = os.path.join(skill_dir, "SKILL.md") if skill_dir else ""
+skill_content = ""
+if skill_file and os.path.exists(skill_file):
+    with open(skill_file, "r", encoding="utf-8") as f:
+        skill_content = f.read()
+
 base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 if model in ("deepseek-flash", "deepseek-v3"):
@@ -66,18 +70,31 @@ if model in ("deepseek-flash", "deepseek-v3"):
 # Read prompt from stdin
 prompt = sys.stdin.read()
 
+system_msg = (
+    f"You are the {os.environ.get('AGENT_NAME', 'modern-web')} triage and analysis agent.\n"
+    f"{skill_content}\n\n"
+    "CRITICAL INSTRUCTIONS:\n"
+    "- The user prompt contains the Scanner Data with candidate issues found in the target codebase.\n"
+    "- Triage these candidates directly based on your knowledge of Modern Web Standards and Baseline.\n"
+    "- Do not ask for tool execution or additional files; evaluate the provided candidates and code snippets directly.\n"
+    "- Filter out test files and internal tooling where modernization does not apply.\n"
+    "- For genuine user-facing modernization opportunities, produce complete finding objects with rule_id, path, line_number, snippet, severity, title, modern_api, baseline_status, description, and remediation.\n"
+    "- Output MUST be strictly valid JSON matching the report schema. Do not return empty findings if valid candidates exist."
+)
+
 payload = {
     "model": model,
     "messages": [
         {
             "role": "system",
-            "content": "You are a software analysis and triage agent. You must output strictly valid JSON matching the report schema requested."
+            "content": system_msg
         },
         {
             "role": "user",
             "content": prompt
         }
     ],
+    "response_format": {"type": "json_object"},
     "temperature": 0.1
 }
 
@@ -102,5 +119,11 @@ except Exception as e:
     sys.stderr.write(f"DeepSeek API Request Error: {e}\n")
     sys.exit(1)
 EOF
+
+if [ $STATUS -ne 0 ]; then
+  echo "[deepseek adapter] Error executing DeepSeek API call" >&2
+  cat "$OUTPUT_FILE" >&2
+  exit 1
+fi
 
 echo "$OUTPUT_FILE"
