@@ -39,10 +39,15 @@ findings store. Commands and output are given verbatim so a reviewer can re-run 
 | SF-09 | `agents-5rx` | `visibility:` in `targets/*.yaml` is never read by any code | Disclosure rule | **Medium** | ✅ grep |
 | SF-10 | `agents-cfx` | CI action clones unpinned `main` into a step holding both tokens | Supply chain | **Medium** | ✅ static |
 | SF-11 | `agents-pgr` | Prompt text exposed via `argv` **and** a world-readable `prompt.txt` | #4 | **Medium** | ✅ argv from PR #1; disk mode verified here |
+| SF-12 | `agents-411` | The committed suppressions file is never read; the one the store reads is gitignored | Noise control | **Medium** | ✅ end-to-end |
 
 Four of these (SF-01, SF-03, SF-09, and the disclosure half of SF-02) are the same underlying
 problem seen from different angles: **the factory decides what is safe to publish using values it
 does not control and does not validate.**
+
+A second, smaller pattern runs through SF-02, SF-07, SF-09 and SF-12: **four separate configuration
+surfaces are declared, documented, and read by nothing.** Each looks like a control while being
+inert.
 
 ---
 
@@ -76,8 +81,8 @@ $ … --sink github-issues
 Created GitHub issue: …          # only the medium one
 ```
 
-**Why this matters more than a missing `if`.** The bead body is assembled at `lib/findings.py:256`
-and embeds the finding's `snippet` verbatim:
+**Why this matters more than a missing `if`.** The bead body is assembled in `lib/findings.py`
+(line 256) and embeds the finding's `snippet` verbatim:
 
 ```python
 desc = f"{f['description']}\n\nPath: …\nFingerprint: …\nSnippet:\n{f['snippet']}"
@@ -365,8 +370,14 @@ and a model key. `AGENTS.md` opens by calling this repository *"the highest-priv
 the system… a compromise here is a supply-chain compromise of every target it touches"* — and this
 is the line that makes that literally true for every consumer of the action.
 
-There is no `.github/workflows/` in the repository, so nothing runs this today; `docs/ci-workflow.yml`
-is a template, not an active workflow. That is why it is Medium.
+No active workflow directory exists under `.github` on this tree, so nothing runs this today;
+`docs/ci-workflow.yml` is a template, not an active workflow. That is why it is Medium.
+
+> [!IMPORTANT]
+> **This mitigation expires when PR #2 lands.** That PR moves the template into an active workflow
+> path, which makes the composite action live. SF-10 should be re-rated at that point, and
+> `agents-8vr` — filed during the PR #2 review, for the same activation printing `secret-scan`
+> output into public CI logs — is the immediate consequence.
 
 **Fix.** Pin the clone to a tag or commit SHA, and split the "fetch the factory" step from the
 "run with credentials" step so the token is not present while third-party code is being fetched.
@@ -394,12 +405,60 @@ dir  mode: 0o755
 file mode: 0o644
 ```
 
-World-readable, and unlike the `argv` exposure it is **persistent** — `runs/` is gitignored but not
-cleaned, so every prompt ever sent accumulates on disk readable by any local user. That makes the
-disk path the more durable of the two.
+World-readable, and unlike the `argv` exposure it is **persistent** — the run-artifact directory is
+gitignored but never cleaned, so every prompt ever sent accumulates on disk readable by any local
+user. That makes the disk path the more durable of the two.
 
 **Fix.** Pass the prompt on stdin, and create `run_dir` `0700` with `prompt.txt` `0600` so the
 retained copy is not world-readable.
+
+---
+
+## SF-12 — The committed suppressions file is never read (Medium)
+
+`AGENTS.md` states the noise-control contract plainly: *"`wontfix` requires a written reason in a
+committed suppressions file."* No path currently satisfies that sentence.
+
+**Wrong file.** The store builds its suppressions path in `lib/findings.py` (line 45) by
+interpolating the target name into a per-target JSON filename under the findings directory. The
+repository commits `findings/suppressions.yaml`. Different name, different extension, different
+per-target scoping — the committed file is read by nothing.
+
+**Wrong format.** `_load_suppressions` calls `json.loads` (`lib/findings.py`, line 60). The
+committed file is YAML with comments. Even with a matching name it would raise, and the `except`
+swallows that to a warning and returns `{}` — so a malformed or misnamed suppressions file **fails
+silently open**, suppressing nothing.
+
+**The working path cannot be committed.** `.gitignore:6` is `findings/*` with allowlist exceptions
+only for `.gitkeep` and `suppressions.yaml`. The single file the code honours is gitignored.
+
+**Verified** with a probe finding (fingerprint `da9a0757dc96c26a…`), both halves run through the real
+store:
+
+```
+A: suppression appended to the committed YAML register
+   -> Delta: 1 new, 0 suppressed        # ignored
+
+B: same suppression written to the per-target JSON path the store computes
+   -> Delta: 0 new, 1 suppressed        # honoured
+   -> git check-ignore: that file IS ignored
+```
+
+So an operator either edits the committed file and silently gets no suppression, or edits the
+effective file and cannot commit it. Either way every `wontfix` is invisible to review and recurring
+runs re-report suppressed findings forever — precisely the noise-control failure the fingerprint
+design exists to prevent.
+
+One further consequence worth noting: `agents/qa-station/scripts/audit_factory_quality.py` reads
+`findings/suppressions.yaml` to compute per-agent `wontfix` rates. The QA meta-agent is therefore
+measuring a file that has no effect on behaviour.
+
+**Fix.** Pick one path and make it consistent — cheapest is to have `_load_suppressions` read the
+already-allowlisted `findings/suppressions.yaml` and parse it as YAML. Separately, make a parse
+failure loud rather than an empty dict; a suppressions file that silently becomes `{}` is worse than
+one that refuses to load.
+
+*Found while checking whether this report itself introduced scanner noise — see below.*
 
 ---
 
@@ -427,16 +486,47 @@ Worth recording, so a later reader does not assume everything is broken:
 ## Self-contamination check
 
 THREAT_MODEL.md §5 records that scanners reading their own output create false-positive feedback
-loops. `reports/` is **not** in `secret-scan`'s `IGNORE_DIRS` and is not gitignored, so this
-document is inside the scan scope. Every identifier above is written to avoid matching the
-scanner's patterns. Verified before and after writing:
+loops. `reports/` is **not** in `IGNORE_DIRS` for either scanner and is not gitignored, so this
+document is inside the scan scope of the very agents it describes. Both were checked.
+
+**`secret-scan` — clean throughout.** Every identifier above is written to avoid matching its
+patterns, verified before and after each edit:
 
 ```
 $ python3 agents/secret-scan/scripts/scan.py --target .
 scanner: builtin-regex candidates: 0
 ```
 
-If a future edit to this file introduces a match, that is a bug in the file, not a finding.
+**`docs-drift` — this document failed its own standard twice before passing.** `check_docs.py`
+resolves backticked paths as file references and reports the unresolvable ones as drift.
+
+Round one, the original draft:
+
+```
+94 candidates on main  ->  97 with this report   (3 new, all from reports/)
+   doc-missing-file  lib/findings.py:256     # a file:line citation, not a path
+   doc-missing-file  .github/workflows/      # true when written; false once PR #2 lands
+   doc-missing-file  runs/                   # gitignored by design, absent on a clean tree
+```
+
+Round two — the SF-12 section written to document this very problem reintroduced it, citing the
+suppressions filename and two more `file.py:line` references, for 97 again. Rewritten a second time
+to describe those paths in prose.
+
+```
+final:  94 candidates   (0 from reports/)   — exactly the main baseline
+        secret-scan: 0 candidates
+```
+
+Recorded rather than quietly fixed, because the sequence is the point. An audit that adds false
+findings to the tracker it is auditing has failed the standard it holds others to — and the section
+about that failure failed the same way on its first draft. The rule is cheap to state and easy to
+violate: **in a document that lives inside the scan scope, describe paths, do not cite them.**
+
+It is also how SF-12 surfaced. Checking whether this noise could legitimately be suppressed revealed
+that the suppressions mechanism does not work at all.
+
+If a future edit to this file trips either scanner, that is a bug in the file, not a finding.
 
 ---
 
@@ -457,7 +547,7 @@ If a future edit to this file introduces a match, that is a bug in the file, not
 
 ## Beads filed
 
-All eleven findings are filed in this repository's beads database, each carrying its reproduction
+All twelve findings are filed in this repository's beads database, each carrying its reproduction
 commands and its verified/not-verified boundary.
 
 | Bead | Finding | Priority |
@@ -472,6 +562,7 @@ commands and its verified/not-verified boundary.
 | `agents-pr7` | SF-08 — verifier primed with discovery's conclusions | P2 |
 | `agents-5rx` | SF-09 — `visibility:` never read | P2 |
 | `agents-cfx` | SF-10 — unpinned clone in credentialed CI step | P2 |
+| `agents-411` | SF-12 — committed suppressions file never read | P2 |
 | `agents-pgr` | SF-11 — prompt in `argv` + world-readable `prompt.txt` | P3 |
 
 Existing related beads from the PR #1 review: `agents-e3u` (P2), `agents-p2c` (P2), `agents-d06`
