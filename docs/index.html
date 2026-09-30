@@ -8,8 +8,8 @@
   <meta name="theme-color" content="#0b1020">
   <link rel="canonical" href="https://paulkinlan.github.io/agents/">
   <link rel="icon" href="/favicon.png">
-  <link rel="stylesheet" href="css/projects.css">
-  <link rel="stylesheet" href="css/product.css">
+  <link rel="stylesheet" href="/css/projects.css">
+  <link rel="stylesheet" href="/css/product.css">
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
@@ -19,6 +19,7 @@
       <a href="/">All Projects</a>
       <a href="/voicebox/">Voicebox</a>
       <a href="/cap/">Chrome Agent Platform</a>
+      <a href="/learnings/">Learnings</a>
       <a href="https://github.com/PaulKinlan/agents">GitHub Repo</a>
     </nav>
   </header>
@@ -32,15 +33,16 @@
       <div class="product-badge-group">
         <span class="badge">Local-First</span>
         <span class="badge badge--blue">Zero Telemetry</span>
-        <span class="badge badge--purple">Multi-Engine Auth</span>
+        <span class="badge badge--purple">Multi-Engine (Pi / Claude / Antigravity / DeepSeek)</span>
         <span class="badge">CI Schedulable</span>
       </div>
       <h1 class="product-title">The Software <span>Factory</span></h1>
       <p class="product-tagline">
-        A schedulable fleet of software-development-lifecycle (SDLC) agents that run <strong>locally</strong> under your existing developer session authentication (<code>pi</code>, <code>claude</code>, <code>antigravity</code>) and <strong>in CI</strong> on GitHub Actions.
+        A schedulable fleet of software-development-lifecycle (SDLC) agents that run <strong>locally</strong> under your existing developer session authentication (<code>pi</code>, <code>claude</code>, <code>antigravity</code>, <code>deepseek</code>) and <strong>in CI</strong> on GitHub Actions.
       </p>
       <div class="cta-group">
         <a href="#quickstart" class="btn btn-primary">Get Started</a>
+        <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md" class="btn btn-secondary" target="_blank" rel="noopener">Integration Guide</a>
         <a href="https://github.com/PaulKinlan/agents" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
         <a href="#architecture" class="btn btn-secondary">Architecture</a>
       </div>
@@ -68,16 +70,30 @@
         </article>
 
         <article class="feature-card">
+          <h3>🤖 Agent-First CLI (<code>--agent</code>)</h3>
+          <p>
+            AI coding agents can run <code>./factory --agent</code> or <code>./factory integrate</code> to receive machine-actionable instructions and copy-pasteable workflow recipes directly on stdout.
+          </p>
+        </article>
+
+        <article class="feature-card">
           <h3>🔑 Reuses Existing Session Auth</h3>
           <p>
-            No new third-party API accounts or subscriptions needed. Runs locally using your active CLI session tokens (<code>pi</code>, <code>claude</code>, <code>antigravity</code>) and runs headlessly in CI with GitHub Secrets.
+            No new third-party accounts or subscriptions needed. Runs locally using your active CLI session tokens (<code>pi</code>, <code>claude</code>, <code>antigravity</code>, <code>deepseek</code>) and headlessly in CI with GitHub Secrets.
+          </p>
+        </article>
+
+        <article class="feature-card">
+          <h3>🚀 CI Composite Action</h3>
+          <p>
+            The official composite action (<code>paulkinlan/agents/.github/actions/factory</code>) runs in GitHub Actions with credential-blanking setup, step-summary redaction, and private delta artifacts.
           </p>
         </article>
 
         <article class="feature-card">
           <h3>🛡️ Disprove-Only Verification</h3>
           <p>
-            Discovery and verification operate in separate sessions. Discovery optimizes for recall; verification runs in a fresh, isolated session prompted strictly to <em>disprove</em> the finding before filing.
+            Discovery and verification operate in separate sessions. Discovery optimizes for recall; verification runs in a fresh, isolated session prompted strictly to <em>disprove</em> findings before filing.
           </p>
         </article>
 
@@ -107,7 +123,7 @@
     <section id="architecture" class="content-section">
       <h2>Architecture & Pipeline</h2>
       <p class="section-intro">
-        Every agent run follows a clean, three-phase lifecycle executed by the factory dispatcher:
+        Every agent run follows a clean, five-stage lifecycle executed by the factory dispatcher:
       </p>
 
       <div class="arch-diagram-wrapper">
@@ -115,33 +131,33 @@
           <div class="pipeline-row">
             <span class="pipeline-label">1. Trigger</span>
             <div class="pipeline-desc">
-              Manual CLI invocation, scheduled daemon (<code>launchd</code> / <code>cron</code>), or GitHub Actions workflow dispatch.
+              Manual CLI invocation (<code>./factory run</code>, <code>./factory line</code>, <code>./factory hillclimb</code>), scheduled daemon (<code>launchd</code> / <code>systemd</code>), or GitHub Actions CI workflow dispatch.
             </div>
           </div>
           <div class="pipeline-row">
             <span class="pipeline-label">2. Enumerate</span>
             <div class="pipeline-desc">
               Deterministic pre-pass scans target repository and inspects <code>THREAT_MODEL.md</code> to produce structured candidate JSON.
-              <small>Tools: gitleaks, npm audit, custom Python scanners</small>
+              <small>Tools: gitleaks, npm audit, custom Python AST scanners (<150ms pre-commit gate)</small>
             </div>
           </div>
           <div class="pipeline-row">
             <span class="pipeline-label">3. Triage & Judge</span>
             <div class="pipeline-desc">
-              AI engine adapter (<code>pi</code>, <code>claude</code>, <code>antigravity</code>) executes the agent's <code>SKILL.md</code> against candidate findings.
+              AI engine adapter (<code>pi</code>, <code>claude</code>, <code>antigravity</code>, <code>deepseek</code>) executes the agent's <code>SKILL.md</code> against candidate findings.
               <small>Fresh-context verification prompt tests for false positives</small>
             </div>
           </div>
           <div class="pipeline-row">
             <span class="pipeline-label">4. Dedupe</span>
             <div class="pipeline-desc">
-              Findings store computes stable SHA-256 fingerprints, updates lifecycle states (OPEN, IN_PROGRESS, RESOLVED), and ignores known noise.
+              Findings store computes stable SHA-256 fingerprints, updates lifecycle states (<code>new &rarr; accepted | wontfix &rarr; fixed &rarr; regressed</code>), and ignores known noise.
             </div>
           </div>
           <div class="pipeline-row">
             <span class="pipeline-label">5. Sink</span>
             <div class="pipeline-desc">
-              Output lands in local Beads issue database (<code>bd</code>), GitHub Issues via <code>gh</code> CLI, or local markdown reports.
+              Output lands in local Beads issue database (<code>bd</code>), GitHub Issues via <code>gh</code> CLI, or local markdown reports (guarded by public disclosure embargo).
             </div>
           </div>
         </div>
@@ -151,7 +167,7 @@
     <section class="content-section">
       <h2>Available Agents & Lines</h2>
       <p class="section-intro">
-        The factory includes pre-configured agents across security, code health, performance, and documentation:
+        The factory includes 22 pre-configured agents across security, code health, performance, and documentation:
       </p>
 
       <div class="docs-grid">
@@ -169,7 +185,7 @@
         </div>
         <div class="doc-card">
           <h4>Documentation & Releases</h4>
-          <p><code>docs-drift</code>, <code>docs-write</code>, <code>release-notes</code>, <code>log-check</code></p>
+          <p><code>docs-drift</code>, <code>docs-write</code>, <code>release-notes</code>, <code>log-check</code>, <code>accessibility</code></p>
         </div>
       </div>
     </section>
@@ -177,15 +193,15 @@
     <section id="quickstart" class="content-section">
       <h2>Quickstart & Setup</h2>
       <p class="section-intro">
-        Set up the factory on macOS or Linux in less than two minutes.
+        Set up the factory locally, in CI, or as an agent skill in less than two minutes.
       </p>
 
       <div class="steps-list">
         <div class="step-item">
           <div class="step-number">1</div>
           <div class="step-body">
-            <h3>Clone and install dependencies</h3>
-            <p>Ensure Python 3.9+ and at least one coding CLI (<code>pi</code>, <code>claude</code>, or <code>antigravity</code>) is available in your PATH.</p>
+            <h3>Clone and install</h3>
+            <p>Ensure Python 3.9+ and at least one coding CLI (<code>pi</code>, <code>claude</code>, <code>antigravity</code>, or <code>deepseek</code>) is available.</p>
             <pre><code>git clone https://github.com/PaulKinlan/agents.git
 cd agents
 ./install.sh</code></pre>
@@ -195,36 +211,56 @@ cd agents
         <div class="step-item">
           <div class="step-number">2</div>
           <div class="step-body">
-            <h3>List available agents</h3>
-            <p>Inspect all available agents, their required tools, and active configuration:</p>
-            <pre><code>./factory list</code></pre>
+            <h3>Query Agent Guidance (<code>--agent</code>)</h3>
+            <p>Inspect machine-actionable instructions and copy-pasteable CI/CD recipes:</p>
+            <pre><code># Print full agent integration guide
+./factory --agent
+
+# Or print specific GitHub Actions workflow templates
+./factory integrate --section github-actions</code></pre>
           </div>
         </div>
 
         <div class="step-item">
           <div class="step-number">3</div>
           <div class="step-body">
-            <h3>Run an agent against a target</h3>
+            <h3>Run an agent or factory line</h3>
             <p>Run against any registered target in <code>targets/</code> or against any local directory:</p>
             <pre><code># Run secret scan on a project
 ./factory run secret-scan --target /path/to/my-web-app
 
-# Run threat modeling using the pi engine
-./factory run threat-model --target /path/to/my-web-app --engine pi
+# Run a composed Factory Line with automatic Andon Cord halt
+./factory line project-audit --target /path/to/my-web-app
 
-# Output findings to a local markdown report
-./factory run test-gap --target /path/to/my-web-app --sink file</code></pre>
+# Run Class C performance hill-climbing
+./factory hillclimb --target /path/to/my-web-app --metric perf_hazard_score --goal 0</code></pre>
           </div>
         </div>
 
         <div class="step-item">
           <div class="step-number">4</div>
           <div class="step-body">
-            <h3>Schedule recurring fleet sweeps</h3>
-            <p>Install scheduled jobs with launchd (macOS) or systemd/cron (Linux) to keep repos continually audited:</p>
-            <pre><code># Generate schedule definitions
-./factory schedule --daily
-./factory schedule --install</code></pre>
+            <h3>Run in GitHub Actions CI</h3>
+            <p>Add the official composite action to any repository workflow (<code>.github/workflows/security.yml</code>):</p>
+            <pre><code>- uses: paulkinlan/agents/.github/actions/factory@main
+  with:
+    agent: secret-scan
+    target: .
+    model_api_key: ${{ secrets.GEMINI_API_KEY }}</code></pre>
+            <p>See <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md" target="_blank" rel="noopener"><strong>docs/INTEGRATION.md</strong></a> for complete PR gate, nightly audit, and issue triage recipes.</p>
+          </div>
+        </div>
+
+        <div class="step-item">
+          <div class="step-number">5</div>
+          <div class="step-body">
+            <h3>Schedule recurring sweeps & pre-commit hooks</h3>
+            <p>Install sub-second pre-commit hooks and daily macOS <code>launchd</code> / Linux <code>systemd</code> background audits:</p>
+            <pre><code># Install sub-150ms deterministic pre-commit hook (Rule 8 compliant)
+./factory hook install --all
+
+# Generate and install daily morning briefing schedules
+./factory schedule generate && ./factory schedule install --all</code></pre>
           </div>
         </div>
       </div>
@@ -232,7 +268,7 @@ cd agents
   </main>
 
   <footer>
-    <p>&copy; 2026 Paul Kinlan &middot; <a href="/">All Projects</a> &middot; <a href="https://github.com/PaulKinlan/agents">GitHub Repository</a></p>
+    <p>&copy; 2026 Paul Kinlan &middot; <a href="/">All Projects</a> &middot; <a href="https://github.com/PaulKinlan/agents">GitHub Repository</a> &middot; <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md">Integration Guide</a></p>
   </footer>
 </body>
 </html>
