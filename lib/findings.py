@@ -485,6 +485,54 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 
     return "\n".join(lines)
 
+# The canonical feature id a finding title carries: the trailing "(<guide-id>)" the
+# modern-web output contract appends, e.g. "Add IME Guard … (ime-safe-enter-submit)".
+# Bead titles keep it, so a lookup over their titles IS the dedupe key (audio-feed-9ara).
+CANONICAL_FEATURE_ID_RE = re.compile(r"\(([a-z0-9][a-z0-9-]*)\)\s*$")
+
+
+def canonical_feature_id(title: str) -> Optional[str]:
+    """The canonical id a title carries, or None when it carries no trailing parenthetical."""
+    match = CANONICAL_FEATURE_ID_RE.search(str(title or "").strip())
+    return match.group(1) if match else None
+
+
+def existing_canonical_ids(target_dir: Path, bd_bin: str) -> Dict[str, str]:
+    """canonical feature id -> the bead id already carrying it, in ANY state.
+
+    A CLOSED duplicate is still a decision (audio-feed-9ara): re-emitting it forces the next
+    lane to re-derive the premise that closed it. A lookup failure does NOT stop the audit —
+    it prints and returns {}, reproducing the previous behaviour rather than blocking every
+    emission on a bd hiccup.
+    """
+    try:
+        res = subprocess.run(
+            [bd_bin, "list", "--status", "open,in_progress,closed", "--limit", "0", "--json"],
+            cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30,
+        )
+    except Exception as e:
+        print(f"Warning: could not list beads for canonical-id dedupe: {e}")
+        return {}
+    if res.returncode != 0:
+        print(f"Warning: bd list failed for canonical-id dedupe ({res.returncode}); emitting without it")
+        return {}
+    try:
+        rows = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        print("Warning: bd list returned non-JSON; emitting without canonical-id dedupe")
+        return {}
+    if isinstance(rows, dict):
+        rows = rows.get("issues", [])
+    found: Dict[str, str] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        cid = canonical_feature_id(row.get("title", ""))
+        if cid and cid not in found:
+            found[cid] = str(row.get("id", ""))
+    return found
+
+
 def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public"):
     """Creates beads for active findings if bd is available."""
     if not (target_dir / ".beads").exists():
@@ -495,6 +543,13 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility
     if not os.path.exists(bd_bin):
         print("Warning: bd binary not available. Findings stored in JSON only.")
         return
+
+    # Every canonical feature id the target's beads already carry, in ANY state. Without this
+    # the daily audit re-emits a candidate whose bead was closed as a duplicate, and the next
+    # lane re-derives the premise that closed it (audio-feed-9ara). Fetched LAZILY, on the first
+    # finding that actually carries a canonical id: an agent whose titles have none (every other
+    # agent) must not pay for an extra bd invocation, and call-counting sink tests pin that.
+    existing_ids: Optional[Dict[str, str]] = None
 
     for f in findings:
         if "beads" in f.get("dispatched_sinks", []):
@@ -513,6 +568,16 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility
             # unchanged even though the body was masked (agents-tcd review).
             published = redact_finding(f)
             title = f"[{published['agent']}] {published['title']}"
+            cid = canonical_feature_id(published["title"])
+            if cid and existing_ids is None:
+                existing_ids = existing_canonical_ids(target_dir, bd_bin)
+            if cid and cid in (existing_ids or {}):
+                # A closed duplicate is the record of a premise verdict; emitting it again is
+                # what made lanes re-derive the same decision (audio-feed-9ara). The marker
+                # deliberately is not "beads", so a bead deleted later still gets re-emitted.
+                f.setdefault("dispatched_sinks", []).append("beads:duplicate")
+                print(f"Skipping duplicate bead: {title} — canonical id '{cid}' is already on {existing_ids[cid]}")
+                continue
             desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
                     f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
             cmd = [

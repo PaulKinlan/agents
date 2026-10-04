@@ -61,3 +61,28 @@ Your response MUST be valid JSON matching `report.schema.json`:
 }
 ```
 Output ONLY valid JSON or enclose it within a single ```json ``` block.
+
+## Duplicate closure contract (audio-feed-9ara)
+
+The canonical id in a finding title — the trailing `(<guide-id>)` — is the dedupe key. The beads
+sink skips a candidate whose id is already on a bead in ANY state (open, in_progress, closed), so
+the same modernization is never emitted twice.
+
+When you close a `[modern-web]` bead of this class, record a **one-line premise verdict** — as
+`bd close --reason "<line>"`, or as a comment if the bead is already closed — naming what the
+scanner matched and what the code actually has:
+
+```
+premise verdict: no producer of <thing> in <target>/; scanner artefact — canonical id <id>, already carried by <bead-id>
+```
+
+`bd close --reason` is the canonical placement (it is the field a reader sees first); a comment
+also counts. The per-target check accepts either.
+
+Measured examples from the 2026-10-04 retro-check: `no tooltip implementation in src/`
+(anchor-positioning) and `no scroll-driven animation machinery in src/` (scroll-driven-animations).
+The next lane inherits that sentence instead of re-deriving the premise; two lanes re-derived these
+in one week and one implemented a contract nothing produces (pzwe). Targets wire a check into their
+modern-web workflow (audio-feed: `scripts/check-modern-web-verdicts.ts`) that fails when a closed
+`[modern-web]` bead carries no comment, so a silent closure of this class is a red audit rather
+than an invisible decision.
