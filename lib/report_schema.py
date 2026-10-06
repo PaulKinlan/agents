@@ -151,7 +151,11 @@ SEVERITY_SYNONYMS = {
     "none": "info", "crit": "critical", "important": "high", "minor": "low",
 }
 
-_LOCATION = re.compile(r"^(?P<path>[^\s:]+):(?P<line>\d+)(?::\d+)?$")
+# `<path>:<line>[:<col>]`, parsed from the numeric suffix so the path may contain spaces and
+# a Windows drive-letter colon (`src/my file.ts:12`, `C:\\src\\x.ts:12:5`). The path part must
+# be non-empty and not itself end in a colon; the shortest such path wins, so `x.ts:12:5` is
+# line 12, column 5.
+_LOCATION = re.compile(r"^(?P<path>.*?[^:\s]):(?P<line>\d+)(?::(?P<col>\d+))?$")
 
 
 def _finding_item_schema(schema: Any) -> Dict[str, Any]:

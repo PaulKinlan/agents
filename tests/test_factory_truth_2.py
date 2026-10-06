@@ -60,6 +60,27 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual(report["findings"][0]["line_number"], 12)
         self.assertEqual(report["findings"][0]["severity"], "low")
 
+    def test_locations_with_spaces_drive_letters_and_columns(self):
+        """Review r4200726078: parse from the numeric suffix, not a colon-free path."""
+        cases = {
+            "src/my file.ts:12": ("src/my file.ts", 12),
+            "C:\\src\\x.ts:12": ("C:\\src\\x.ts", 12),
+            "C:\\src\\x.ts:12:5": ("C:\\src\\x.ts", 12),
+            "lib/a.py:7:3": ("lib/a.py", 7),
+        }
+        for location, (path, line) in cases.items():
+            with self.subTest(location=location):
+                report = {"findings": [{"id": "r", "file": location, "title": "t", "description": "d"}]}
+                normalize_report(report, THREAT_SCHEMA)
+                item = report["findings"][0]
+                self.assertEqual((item["path"], item["line_number"]), (path, line))
+        for location in ("src/no-line.ts", "C:\\x.ts", ":12"):
+            with self.subTest(location=location):
+                report = {"findings": [{"id": "r", "file": location}]}
+                normalize_report(report, THREAT_SCHEMA)
+                self.assertEqual(report["findings"][0]["path"], location)
+                self.assertNotIn("line_number", report["findings"][0])
+
     def test_declared_and_canonical_fields_are_never_overwritten(self):
         report = {"findings": [{"rule_id": "keep", "id": "other", "summary": "s", "title": "T"}]}
         normalize_report(report, THREAT_SCHEMA)

@@ -517,6 +517,32 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertIn("could not list existing beads", result.stdout)
         self.assertIn("failed 1", self.report())
 
+    def test_an_unreadable_tracker_counts_are_order_independent(self):
+        """Review r4200726050: only findings beads would file can fail; low/info are skipped,
+        whatever their position, and the totals never exceed what was eligible."""
+        items = [dict(SAMPLE, rule_id=f"r{i}", snippet=f"s{i}", severity=sev, title=f"T{i}")
+                 for i, sev in enumerate(("low", "medium", "info", "medium"))]
+        self.env["SINK_EXISTING"] = "not json"
+        lines = []
+        for ordered in (items, list(reversed(items))):
+            for name in ("fixture.json", "fixture-history.jsonl"):
+                path = self.factory / "findings" / name
+                if path.exists():
+                    path.unlink()
+            result = self.scan("beads", ordered)
+            line, = [l for l in result.stdout.splitlines() if l.startswith("[Sink beads]")]
+            lines.append(line)
+        self.assertEqual(lines[0], lines[1])
+        self.assertIn("published 0, failed 2, duplicate 0, embargoed 0, below band 2", lines[0])
+        self.assertEqual(self.calls(), [])
+
+    def test_a_missing_beads_dir_fails_only_what_it_would_file(self):
+        shutil.rmtree(self.target / ".beads")
+        items = [dict(SAMPLE, rule_id="a", snippet="a", severity="low", title="Low"),
+                 dict(SAMPLE, rule_id="b", snippet="b", severity="medium", title="Med")]
+        result = self.scan("beads", items)
+        self.assertIn("published 0, failed 1, duplicate 0, embargoed 0, below band 1", result.stdout)
+
     def test_multi_sink_dispatches_to_both_beads_and_github(self):
         """When sink is comma-separated (e.g. github-issues,beads or both), dispatch to both."""
         self.scan("github-issues,beads", [SAMPLE])
