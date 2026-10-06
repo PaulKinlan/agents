@@ -3,8 +3,8 @@ name: Software Factory CI
 on:
   push:
     branches: [main]
+  # every PR, including stacked PRs whose base is another branch (they got no checks before)
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -17,15 +17,15 @@ permissions:
 jobs:
   self-audit:
     name: Factory Self-Audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # pinned: ubuntu-latest moves to 26.04 from 2026-10-19
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
