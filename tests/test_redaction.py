@@ -122,6 +122,7 @@ class TestCredentialEchoRegression(unittest.TestCase):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
         shutil.copytree(ROOT / "lib" / "sinks", self.factory / "lib" / "sinks", dirs_exist_ok=True)
+        shutil.copyfile(ROOT / "lib" / "budget.py", self.factory / "lib" / "budget.py")  # command sink
         self.cli = self.factory / "lib" / "findings.py"
         self.target = self.root / "target"
         (self.target / ".beads").mkdir(parents=True)
@@ -407,6 +408,7 @@ class TestPublishedSurfaces(unittest.TestCase):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
         shutil.copytree(ROOT / "lib" / "sinks", self.factory / "lib" / "sinks", dirs_exist_ok=True)
+        shutil.copyfile(ROOT / "lib" / "budget.py", self.factory / "lib" / "budget.py")  # command sink
         self.cli = self.factory / "lib" / "findings.py"
         self.target = self.root / "target"
         (self.target / ".beads").mkdir(parents=True)

@@ -440,7 +440,7 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     return publishable, held
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public", agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, sink_options: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public", agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, sink_options: Optional[Dict[str, str]] = None, run_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
@@ -461,7 +461,12 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
 
     context = sinks.SinkContext(target_name=target_name, target_dir=target_dir,
                                 visibility=normalize_visibility(visibility), agent=agent,
-                                stats=dict(stats), options=dict(sink_options or {}))
+                                stats=dict(stats), options=dict(sink_options or {}),
+                                # Adapter diagnostics stay private: the station's run directory
+                                # (0700), or a fresh private one under runs/ for a direct call.
+                                diagnostics_dir=run_dir or (
+                                    FACTORY_ROOT / "runs" / f"sink-{target_name}-"
+                                    f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"))
     sink_results: Dict[str, Dict[str, Any]] = {}
     for s in sinks.expand(sink):
         adapter = sinks.get(s)
@@ -745,6 +750,7 @@ if __name__ == "__main__":
                         help="One station of a factory line: write <target>-<agent>-delta.md, "
                              "not the run's <target>-delta.md (the line writes that)")
     parser.add_argument("--fragment", help="Write this station's delta as JSON here (for the line report)")
+    parser.add_argument("--run-dir", help="The station's private run directory (sink diagnostics go here)")
     parser.add_argument("--sink-option", action="append", default=[], metavar="KEY=VALUE",
                         help="A sink_* setting from the target manifest (e.g. sink_command=...)")
     args = parser.parse_args()
@@ -785,6 +791,7 @@ if __name__ == "__main__":
             station_only=args.station_only,
             fragment=Path(args.fragment) if args.fragment else None,
             sink_options=sink_options,
+            run_dir=Path(args.run_dir) if args.run_dir else None,
         )
     finally:
         store.save()

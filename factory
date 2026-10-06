@@ -488,7 +488,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             "--agent", agent_name,
             "--input", str(report_path),
             "--sink", sink,
-            "--target-dir", str(target_dir)
+            "--target-dir", str(target_dir),
+            "--run-dir", str(run_dir),
         ]
         fragment_path = run_dir / "delta.json"
         if station_only:

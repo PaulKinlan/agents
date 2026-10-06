@@ -21,6 +21,9 @@ class SinkContext:
     stats: Dict[str, int] = field(default_factory=dict)
     # `sink_*` settings from the target manifest (targets/<name>.yaml), e.g. sink_command.
     options: Dict[str, str] = field(default_factory=dict)
+    # Private (0700) directory for adapter diagnostics, normally the station's run directory.
+    # Anything written here may hold tracker output and is never rendered into a report.
+    diagnostics_dir: Optional[Path] = None
 
 
 def new_result() -> Dict[str, Any]:

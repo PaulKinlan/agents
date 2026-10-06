@@ -130,6 +130,27 @@ class TestRunStationCommand(unittest.TestCase):
                              "the grandchild outlived the process-group kill")
 
 
+class TestKillGroupOnExit(unittest.TestCase):
+    """PR #29 review r4200705643: a command that returns must not leave its group running."""
+
+    def test_descendants_die_when_the_command_returns(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "pid"
+            cmd = ["sh", "-c", f"sleep 60 >/dev/null 2>&1 & echo $! > {pidfile}; exit 0"]
+            budget = StationBudget(1, label="t")
+            run_station_command(cmd, budget, "step", capture_output=True, text=True,
+                                kill_group_on_exit=True)
+            pid = int(pidfile.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+            # Without the flag, the existing behaviour is unchanged.
+            run_station_command(cmd, budget, "step", capture_output=True, text=True)
+            pid = int(pidfile.read_text())
+            os.kill(pid, 0)  # still alive
+            os.kill(pid, 9)
+
+
 class TestNoUnboundedSubprocess(unittest.TestCase):
     """Guard rail for SF-06: a subprocess call must carry a timeout or use a wrapper."""
 

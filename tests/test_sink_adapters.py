@@ -13,6 +13,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -113,7 +114,7 @@ class CommandSinkCase(unittest.TestCase):
         (self.target / "receiver.py").write_text(RECEIVER)
         self.log = self.target / "receiver.log"
 
-    def scan(self, items, mode="ok", visibility="public", command=None, extra=()):
+    def scan(self, items, mode="ok", visibility="public", command=None, extra=(), env_extra=None):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": items}))
         command = command if command is not None else f"{sys.executable} receiver.py {mode}"
@@ -122,6 +123,7 @@ class CommandSinkCase(unittest.TestCase):
                "--target-dir", str(self.target), "--visibility", visibility,
                "--sink-option", f"sink_command={command}", *extra]
         env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "TRACKER_TOKEN": "tok"}
+        env.update(env_extra or {})
         return subprocess.run(cmd, cwd=self.factory, env=env, capture_output=True, text=True,
                               check=True, timeout=60)
 
@@ -206,6 +208,72 @@ class TestCommandSink(CommandSinkCase):
         self.assertFalse(marker.exists())
 
 
+def _gone(pid: int, wait: float = 3.0) -> bool:
+    import time
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+class TestCommandSinkReview(CommandSinkCase):
+    """PR #29 review: stderr is never published (r4200705589); the command's whole process
+    group is killed and waited for on timeout and on return (r4200705643)."""
+
+    def write_script(self, name, body):
+        path = self.target / name
+        path.write_text(body)
+        return f"{sys.executable} {name}"
+
+    def test_stderr_never_reaches_the_note_and_is_kept_privately_redacted(self):
+        command = self.write_script("leaky.py",
+            "import os, sys\nsys.stdin.read()\n"
+            "sys.stderr.write('401 for token ' + os.environ.get('TRACKER_TOKEN', '') +"
+            " ' and sk-proj-abcdefghijklmnopqrstuvwx\\n')\nsys.exit(3)\n")
+        run_dir = self.root / "run"
+        result = self.scan([SAMPLE], command=command,
+                           extra=["--run-dir", str(run_dir), "--sink-option", "sink_env=TRACKER_TOKEN"],
+                           env_extra={"TRACKER_TOKEN": "tok-SECRET-1234"})
+        published = result.stdout + self.report() + (self.factory / "findings" / "fx-summary.md").read_text()
+        for leaked in ("tok-SECRET-1234", "sk-proj-abcdefghijklmnopqrstuvwx", "401 for token"):
+            self.assertNotIn(leaked, published)
+        self.assertIn("sink_command exited 3: nothing delivered", result.stdout)
+        log = run_dir / "sink-command-stderr.log"
+        self.assertIn(str(log), result.stdout)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        text = log.read_text()
+        self.assertIn("401 for token", text)
+        self.assertNotIn("tok-SECRET-1234", text)
+        self.assertNotIn("sk-proj-abcdefghijklmnopqrstuvwx", text)
+
+    def test_a_timeout_kills_the_whole_group(self):
+        pidfile = self.target / "child.pid"
+        command = (f"sh -c 'sleep 60 >/dev/null 2>&1 & echo $! > {pidfile}; sleep 60'")
+        result = self.scan([SAMPLE], command=command, extra=["--sink-option", "sink_timeout=1"])
+        self.assertIn("timed out", result.stdout)
+        self.assertTrue(_gone(int(pidfile.read_text())), "a descendant outlived the timeout")
+        record, = self.store().values()
+        self.assertNotIn("command", record["dispatched_sinks"])
+
+    def test_descendants_are_killed_when_the_command_returns(self):
+        pidfile = self.target / "late.pid"
+        late = self.target / "late-delivery"
+        for exit_code in (0, 4):
+            with self.subTest(exit_code=exit_code):
+                command = (f"sh -c 'cat >/dev/null; (sleep 2; touch {late}) >/dev/null 2>&1 & "
+                           f"echo $! > {pidfile}; exit {exit_code}'")
+                self.scan([dict(SAMPLE, rule_id=f"x{exit_code}", snippet=f"x{exit_code}")],
+                          command=command)
+                self.assertTrue(_gone(int(pidfile.read_text()), wait=1.0))
+        import time
+        time.sleep(2.5)
+        self.assertFalse(late.exists(), "a background child delivered after the run returned")
+
+
 class TestCommandSinkFromManifest(unittest.TestCase):
     """targets/<name>.yaml -> factory run -> command, with only sink_env added to the env."""
 
@@ -213,6 +281,7 @@ class TestCommandSinkFromManifest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="factory-cmd-manifest-") as tmp:
             box = Sandbox(Path(tmp).resolve())
             shutil.copytree(ROOT / "lib" / "sinks", box.root / "lib" / "sinks", dirs_exist_ok=True)
+            shutil.copyfile(ROOT / "lib" / "budget.py", box.root / "lib" / "budget.py")  # command sink
             (box.target / "receiver.py").write_text(RECEIVER)
             (box.root / "targets").mkdir()
             (box.root / "targets" / "proj.yaml").write_text(

@@ -169,6 +169,7 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
             # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
             shutil.copytree(FACTORY_ROOT / "lib" / "sinks", sandbox / "lib" / "sinks", dirs_exist_ok=True)
+            shutil.copyfile(FACTORY_ROOT / "lib" / "budget.py", sandbox / "lib" / "budget.py")  # command sink
 
             bindir = sandbox / "bin"
             bindir.mkdir()
@@ -274,6 +275,7 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
             # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
             shutil.copytree(FACTORY_ROOT / "lib" / "sinks", sandbox / "lib" / "sinks", dirs_exist_ok=True)
+            shutil.copyfile(FACTORY_ROOT / "lib" / "budget.py", sandbox / "lib" / "budget.py")  # command sink
 
             bindir = sandbox / "bin"
             bindir.mkdir()
@@ -342,6 +344,7 @@ class TestTargetVisibility(unittest.TestCase):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
             # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
             shutil.copytree(FACTORY_ROOT / "lib" / "sinks", sandbox / "lib" / "sinks", dirs_exist_ok=True)
+            shutil.copyfile(FACTORY_ROOT / "lib" / "budget.py", sandbox / "lib" / "budget.py")  # command sink
 
             bindir = sandbox / "bin"
             bindir.mkdir()
@@ -408,6 +411,7 @@ class TestPerStationEngine(unittest.TestCase):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
             # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
             shutil.copytree(FACTORY_ROOT / "lib" / "sinks", sandbox / "lib" / "sinks", dirs_exist_ok=True)
+            shutil.copyfile(FACTORY_ROOT / "lib" / "budget.py", sandbox / "lib" / "budget.py")  # command sink
 
             bindir = sandbox / "bin"
             bindir.mkdir()
