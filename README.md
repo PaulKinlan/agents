@@ -335,7 +335,8 @@ agents/<name>/
 ### Sinks
 
 When a run completes, findings are dispatched based on target configuration:
-- **`file`** (Default): Writes formatted markdown delta reports to `findings/<target>-latest.md` and appends metrics to `findings/<target>-history.jsonl`.
+- **`file`** (Default): Writes formatted markdown delta reports to `findings/<target>-latest.md` and appends metrics to `findings/<target>-history.jsonl`. In a `factory line`, each station writes `findings/<target>-<agent>-delta.md` and the line writes the run's `findings/<target>-delta.md` (plus machine-readable `findings/<target>-line.json`) once, from every station. A station that produced no verdict (pre-pass/engine failure, timeout, unparseable or schema-violating output) is `ERROR`, the run is `INCOMPLETE`, never "Clean Delta", and the command exits non-zero.
+- **Severity**: reports, the store and the andon count the *triaged* severity (`unclassified` when missing; triaged false positives are listed separately and never counted or published). The fail-closed routing value (`routing_severity`) only decides what the embargo withholds from a tracker; every tracker sink reports published / embargoed / below-band / failed counts.
 - **`beads`**: For projects using [Beads](https://github.com/beads-project/beads). Active findings automatically create or update issues via `bd create`.
 - **`github-issues`**: For GitHub repositories. Creates labeled issues via `gh issue create`.
 

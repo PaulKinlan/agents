@@ -32,13 +32,29 @@ PATTERNS = [
     # Vendor shapes the redactor already knows (lib/redaction.py). A rule that exists there but
     # not here means the scanner never surfaces it; a rule here that is missing there means the
     # matched value can be published. tests/test_secret_scanner.py enforces the match.
-    ("openai-key", re.compile(r"sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}")),
-    ("stripe-key", re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}")),
+    # Anchored: `sk-` must start a token. Unanchored, it matched inside ordinary words — the
+    # `disk-quota-...` URL fragment (journal-aaj) and `ask-...` feature slugs (fleet-ctu).
+    ("openai-key", re.compile(r"(?<![A-Za-z0-9_-])sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}")),
+    ("stripe-key", re.compile(r"(?<![A-Za-z0-9_-])(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}")),
     ("google-api-key", re.compile(r"AIza[0-9A-Za-z_-]{35}")),
     ("google-oauth", re.compile(r"ya29\.[0-9A-Za-z_-]{20,}")),
     ("gitlab-pat", re.compile(r"glpat-[A-Za-z0-9_-]{20,}")),
     ("npm-token", re.compile(r"npm_[A-Za-z0-9]{36}")),
 ]
+
+def _scoped(pattern: "re.Pattern[str]") -> str:
+    """A pattern's source with a leading global flag turned into a scoped group."""
+    source = pattern.pattern
+    match = re.match(r"\(\?([aiLmsux]+)\)", source)
+    if match:
+        return f"(?{match.group(1)}:{source[match.end():]})"
+    return f"(?:{source})"
+
+
+# Every rule at once. A file (and then a line) none of the rules can match is skipped before
+# the per-rule pass: running 15 patterns over every line of a large repository overran the
+# station's 5-minute budget, the process group was killed and no scanner ran (fleet-wa8).
+ANY_PATTERN = re.compile("|".join(_scoped(pattern) for _, pattern in PATTERNS))
 
 IGNORE_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
@@ -49,6 +65,9 @@ IGNORE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2",
     ".ttf", ".eot", ".mp4", ".webm", ".zip", ".tar", ".gz", ".wasm", ".lock"
 }
+
+GITLEAKS_TIMEOUT_SECONDS = 150
+
 
 def scan_with_gitleaks(target_dir: Path) -> list:
     if not shutil.which("gitleaks"):
@@ -63,7 +82,10 @@ def scan_with_gitleaks(target_dir: Path) -> list:
         "--exit-code", "0"
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        # Bounded: the station budget kills the whole pre-pass otherwise, and then nothing
+        # ran at all. On expiry fall back to the built-in scan (fleet-wa8).
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                             timeout=GITLEAKS_TIMEOUT_SECONDS)
         if res.stdout.strip():
             raw_data = json.loads(res.stdout)
             candidates = []
@@ -105,10 +127,14 @@ def scan_with_builtin(target_dir: Path) -> list:
             except Exception:
                 continue
 
+            if not ANY_PATTERN.search(content):
+                continue
             lines = content.splitlines()
             for line_idx, line in enumerate(lines, start=1):
                 # Avoid checking absurdly long minified lines
                 if len(line) > 1000:
+                    continue
+                if not ANY_PATTERN.search(line):
                     continue
                 found = []
                 for rule_id, pattern in PATTERNS:

@@ -204,12 +204,15 @@ class TestDispatcherSchemaGate(unittest.TestCase):
                 }],
             })
 
-            self._run(sandbox, target)
+            # No verdict is a station failure, never a clean PASS/0 (fleet-ddd).
+            with self.assertRaises(factory_cli.StationError):
+                self._run(sandbox, target)
 
             self.assertFalse((sandbox / "findings" / "target.json").exists(),
                              "the store must never see a schema-violating report")
             report = json.loads(next((sandbox / "runs").glob("*/report.json")).read_text())
-            self.assertEqual(report["summary"], "Model output failed the declared report schema.")
+            self.assertEqual(report["summary"], "NO VERDICT: model output failed the declared report schema.")
+            self.assertEqual(report["verdict"], "error")
             self.assertEqual(report["findings"], [])
 
     def test_conformant_report_reaches_the_store(self):
