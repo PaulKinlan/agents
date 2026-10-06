@@ -18,8 +18,13 @@ RUN_DIR="${4}"
 #   --no-approve     a target's .pi/ (settings, extensions, skills, SYSTEM.md) is never trusted,
 #                    whatever the operator's defaultProjectTrust says
 # Consequence: model providers that ship as extensions are unavailable to factory runs; pi's
-# built-in providers are not. pi's read tool is not confined to the target (see
-# lib/containment.py ENGINE_READ_SCOPE).
+# built-in providers are not. pi's read tool is not path-confined by these flags; where the
+# host has bubblewrap the dispatcher runs this adapter inside an OS sandbox that confines it
+# to the target (lib/sandbox.py, agents-9n7). Inside the sandbox $HOME is an empty tmpfs, so
+# pi authenticates only from env keys (ANTHROPIC_API_KEY etc., allowlisted by
+# lib/child_env.py) — session auth from the operator's ~/.pi is deliberately unreachable.
+# Those env keys are visible to pi's own /proc/self/environ (bun needs a real procfs), so
+# nothing else secret may ever enter the adapter environment.
 TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
 case "$TOOL_POLICY" in
   read-only) POLICY_FLAGS=(--tools read,grep,find,ls --no-extensions --no-approve) ;;

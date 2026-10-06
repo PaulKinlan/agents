@@ -26,6 +26,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib.sandbox import (SandboxError, engine_sandboxed, sandbox_available, sandbox_command,
+                             sandbox_record)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -35,6 +37,8 @@ except ImportError:
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib.sandbox import (SandboxError, engine_sandboxed, sandbox_available, sandbox_command,
+                             sandbox_record)
 
 
 class StationError(RuntimeError):
@@ -273,9 +277,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     agent_cfg = load_yaml_simple(agent_yaml)
     # containment, capabilities and budget are validated here, not only printed (SF-02,
     # agents-pnu). A declaration the factory cannot honour, or an engine that cannot enforce
-    # the granted tool policy, refuses the run before any pre-pass or run directory. The tool
-    # policy binds the model session only: the pre-pass runs as the operator, with no OS
-    # sandbox (the banner's Sandbox line; THREAT_MODEL.md section 6.1; agents-9n7).
+    # the granted tool policy, refuses the run before any pre-pass or run directory.
     policy = load_policy(agent_name, agent_cfg)
     # budget.max_minutes is a hard station deadline (SF-06): the pre-pass, engine and findings
     # dispatch share it, and expiry is a station failure rather than a clean scan.
@@ -284,10 +286,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     sink = detect_sink(target_dir, target_cfg, explicit_sink)
     engine = choose_engine(engine_arg)
     check_engine(policy, engine)
+    # The OS sandbox (agents-9n7): on hosts with bubblewrap the pre-pass and (for verified
+    # engines) the model session run inside it — target read-only, $HOME hidden, no /proc
+    # for the model. The banner and policy.json state what is actually covered; on hosts
+    # without it they keep saying NOT confined (THREAT_MODEL.md sections 6.1 and 7).
+    sandbox = sandbox_record(engine)
 
     print(f"\n[Software Factory] Run Initialized")
     print(f"  Agent:       {agent_name} ({agent_cfg.get('class', 'observer')})")
-    for line in banner_lines(policy, engine):
+    for line in banner_lines(policy, engine, sandbox=sandbox):
         print(line)
     print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy, engine)}")
     print(f"  Target:      {target_name} ({target_dir})")
@@ -303,8 +310,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     os.chmod(run_dir, 0o700)
     # What was declared, what the session was granted, and what is not enforced — the run's
     # own record, so a finding can be read against the containment it was produced under.
-    (run_dir / "policy.json").write_text(json.dumps(policy_record(policy, engine), indent=2),
-                                         encoding="utf-8")
+    (run_dir / "policy.json").write_text(
+        json.dumps(policy_record(policy, engine, sandbox=sandbox), indent=2),
+        encoding="utf-8")
 
     # 1. Deterministic pre-pass
     candidates_file = run_dir / "candidates.json"
@@ -316,14 +324,23 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     if prepass_script and prepass_script.exists():
         print(f"\n[Step 1/3] Running deterministic pre-pass ({prepass_script.name})...")
-        # The pre-pass is trusted factory code and runs as the operator: the tool policy binds
-        # the model session, not this. Its environment is still an allowlist, and it gets a
-        # network credential only when the validated capabilities declare network
-        # (lib/containment.py, agents-05h).
+        # The pre-pass is trusted factory code, but it still runs inside the OS sandbox
+        # where one exists (agents-9n7, Copilot's point on PR #22): a scanner bug or a
+        # malicious package pulled in by a `requires` tool must not gain the operator's
+        # filesystem. Its environment remains an allowlist, and it gets a network credential
+        # only when the validated capabilities declare network (lib/containment.py,
+        # agents-05h). The pre-pass gets procfs; the model session does not.
+        prepass_env = prepass_environment(agent_cfg)
         cmd = [sys.executable, str(prepass_script), "--target", str(target_dir), "--output", str(candidates_file)]
+        if sandbox_available():
+            try:
+                cmd = sandbox_command(cmd, target_dir=target_dir, factory_root=FACTORY_ROOT,
+                                      run_dir=run_dir, env=prepass_env)
+            except SandboxError as e:
+                raise StationError(f"{agent_name}: cannot sandbox the pre-pass: {e}") from e
         res = run_station_command(cmd, budget, f"{prepass_script.name} pre-pass",
                                   capture_output=True, text=True, check=False,
-                                  env=prepass_environment(agent_cfg))
+                                  env=prepass_env)
         if res.returncode != 0:
             # A pre-pass that failed scanned nothing. Carrying on with zero candidates let a
             # short-circuiting station report "Clean scan" (journal-idy, journal-wog).
@@ -392,6 +409,18 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # Same explicit-channel rule as the tool policy: the declared cost cap reaches the
             # adapter only from here, and only an adapter with a per-run flag enforces it.
             adapter_env["FACTORY_MAX_BUDGET_USD"] = str(policy.max_usd)
+        if engine_sandboxed(engine):
+            # The engine session runs inside the OS sandbox (agents-9n7): the target is
+            # read-only, everything else on the host is invisible, $HOME is an empty tmpfs
+            # (auth reaches the engine only as environment variables, per lib/child_env.py),
+            # and a private PID namespace keeps every host process and its environ out of
+            # reach. This is the kernel's boundary, not the model's (non-negotiable #2).
+            try:
+                adapter_cmd = sandbox_command(adapter_cmd, target_dir=target_dir,
+                                              factory_root=FACTORY_ROOT, run_dir=run_dir,
+                                              env=adapter_env)
+            except SandboxError as e:
+                raise StationError(f"{agent_name}: cannot sandbox engine '{engine}': {e}") from e
         adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
                                           input=prompt, capture_output=True, text=True, check=False,
                                           env=adapter_env)
