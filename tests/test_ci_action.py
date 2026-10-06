@@ -60,6 +60,8 @@ class TestActionPinning(unittest.TestCase):
             "def normalize_report",            # fleet-9wyi: field-name synonyms
             "--external-ref",                  # fleet-xkf: beads dedupe by fingerprint
             "def write_line_report",           # fleet-810: run-level delta report
+            "class CommandSink",               # fleet-km8: sink adapters + command sink
+            "kill_group_on_exit",              # PR #29 review: command sink reaps its group
         ):
             with self.subTest(marker=marker):
                 found = subprocess.run(["git", "-C", str(ROOT), "grep", "-q", "-F", "-e", marker,
