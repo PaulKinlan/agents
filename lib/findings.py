@@ -37,7 +37,12 @@ except ImportError:
 
 # Redaction removes the value from published text; the embargo decides whether a finding is
 # routed to a tracker at all. It is a separate module so the policy has one home and one test.
-from lib.embargo import effective_severity, embargo_reason
+from lib.embargo import (effective_severity, embargo_reason, is_false_positive,
+                         normalize_visibility, reported_severity)
+
+# Keys of a per-run delta. `false_positive` counts findings the triage itself declared false
+# positives: they are recorded, never counted as new/unchanged work (journal-35w).
+DELTA_KEYS = ("new", "regressed", "fixed", "unchanged", "suppressed", "false_positive")
 
 def normalize_text(text: Any) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting.
@@ -88,6 +93,10 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
 
     rule_ids = set()
     paths = set()
+    # The scanner's own snippet per location, so a finding's identity does not depend on how
+    # the triage model chose to quote the line this time (fleet-oed).
+    snippets_at: Dict[Tuple[str, str, Any], str] = {}
+    snippets_in: Dict[Tuple[str, str], List[str]] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
@@ -97,10 +106,47 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
         path = normalize_path(candidate.get("path"))
         if path:
             paths.add(path)
+        snippet = candidate.get("snippet")
+        if isinstance(rule_id, str) and path and isinstance(snippet, str) and snippet.strip():
+            key = (rule_id.strip(), path)
+            snippets_at[key + (candidate.get("line_number"),)] = snippet
+            snippets_in.setdefault(key, [])
+            if snippet not in snippets_in[key]:
+                snippets_in[key].append(snippet)
 
     if not rule_ids and not paths:
         return None
-    return {"rule_ids": rule_ids, "paths": paths}
+    return {"rule_ids": rule_ids, "paths": paths,
+            "snippets_at": snippets_at, "snippets_in": snippets_in}
+
+
+def identity_snippet(item: Dict[str, Any], rule_id: Any, path: Any,
+                     candidate_index: Optional[Dict[str, Any]]) -> Any:
+    """The snippet a finding is fingerprinted on: the scanner's, when it can be identified.
+
+    The model re-quotes a candidate's line differently from run to run (masked, truncated,
+    the bare match, the whole line), so fingerprinting on its text booked a new+fixed pair on
+    a byte-identical file (fleet-oed). The deterministic pre-pass emits the same snippet for
+    the same unchanged line every time, so it is used when the finding binds to exactly one
+    candidate location; otherwise the model's snippet is kept, as before.
+    """
+    model_snippet = item.get("snippet", "")
+    if not candidate_index or not isinstance(rule_id, str):
+        return model_snippet
+    key = (rule_id.strip(), normalize_path(path))
+    at = candidate_index.get("snippets_at", {})
+    line = item.get("line_number")
+    if key + (line,) in at:
+        return at[key + (line,)]
+    options = candidate_index.get("snippets_in", {}).get(key, [])
+    if len(options) == 1:
+        return options[0]
+    wanted = normalize_text(model_snippet)
+    if wanted:
+        matching = [o for o in options if wanted in normalize_text(o) or normalize_text(o) in wanted]
+        if len(matching) == 1:
+            return matching[0]
+    return model_snippet
 
 def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, Any]]) -> Tuple[Any, Any]:
     """Bind a finding's `rule_id` and `path` to the deterministic scanner's output.
@@ -242,23 +288,39 @@ class FindingsStore:
         """
         now = datetime.now(timezone.utc).isoformat()
         current_fps = set()
-        delta_stats = {"new": 0, "regressed": 0, "fixed": 0, "unchanged": 0, "suppressed": 0}
+        delta_stats = {key: 0 for key in DELTA_KEYS}
         processed = []
 
         # 1. Process observed findings
         for item in raw_findings:
+            if not isinstance(item, dict):
+                continue
             rule_id, path = bind_candidates(item, candidate_index)
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
                 path=path,
-                snippet=item.get("snippet", "")
+                snippet=identity_snippet(item, rule_id, path, candidate_index)
             )
+            # A store or register written before the scanner snippet was the identity holds
+            # the model-snippet fingerprint. Honour it once, instead of booking every finding
+            # new and its old record fixed on the upgrade run (fleet-oed).
+            legacy_fp = compute_fingerprint(agent=agent, rule_id=rule_id, path=path,
+                                            snippet=item.get("snippet", ""))
+            if legacy_fp != fp and fp not in self.data["findings"] and fp not in self.suppressions:
+                if legacy_fp in self.suppressions:
+                    fp = legacy_fp
+                elif legacy_fp in self.data["findings"] and legacy_fp not in current_fps:
+                    migrated = self.data["findings"].pop(legacy_fp)
+                    migrated["fingerprint"] = fp
+                    migrated["legacy_fingerprint"] = legacy_fp
+                    self.data["findings"][fp] = migrated
             if fp in current_fps:
                 continue
             current_fps.add(fp)
-            
+
             existing = self.data["findings"].get(fp)
+            false_positive = is_false_positive(item)
             
             # Check for committed suppression
             if fp in self.suppressions:
@@ -278,7 +340,7 @@ class FindingsStore:
                 change = "unchanged"
                 suppression_reason = existing.get("suppression_reason")
 
-            delta_stats[change] += 1
+            delta_stats["false_positive" if false_positive else change] += 1
             finding_record = {
                 "fingerprint": fp,
                 "agent": agent,
@@ -286,11 +348,17 @@ class FindingsStore:
                 "path": path,
                 "line_number": item.get("line_number"),
                 "snippet": item.get("snippet"),
-                # Fail closed, and record the severity the publication boundary will enforce: a
-                # missing or unrecognised label is critical, and a credential-class agent's
-                # finding is critical on identity whatever the model called it (agents-94f). The
-                # old default was medium, the exact band the public sinks publish.
-                "severity": effective_severity({"agent": agent, "severity": item.get("severity")}),
+                # Two severities, never conflated (journal-1kg, journal-y5m):
+                # `severity` is what the triage said — the one value the report, the store
+                # and the line's andon count; a missing/unknown label is `unclassified`, a
+                # declared false positive is `info`. `routing_severity` is the fail-closed
+                # value the publication embargo enforces: unknown labels and credential- or
+                # vulnerability-class agents route as critical whatever the model said
+                # (agents-94f). Displaying the routing value made every unlabelled or
+                # false-positive finding read CRITICAL.
+                "severity": reported_severity(item),
+                "routing_severity": effective_severity({"agent": agent, "severity": item.get("severity")}),
+                "false_positive": false_positive,
                 "title": item.get("title", ""),
                 "description": item.get("description", ""),
                 "remediation": item.get("remediation", ""),
@@ -340,9 +408,27 @@ def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]], visibility:
     closed for every sink except the local `file` evidence trail (agents-681, agents-94f,
     agents-5rx).
     """
+    return _partition_for_sink(sink, findings, visibility)[0]
+
+
+def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: Any = "public") -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """`_publishable_for_sink`, plus a count of why the rest was not published.
+
+    The counts are reported, so `--sink beads` filing nothing is never silent (fleet-eqv,
+    journal-np8): an operator can tell "embargoed on a public target" from "nothing new".
+    """
     publishable = []
+    held = {"embargoed": 0, "false_positive": 0, "already_delivered": 0, "not_active": 0}
     for f in findings:
-        if f.get("state") not in ("new", "regressed") or sink in f.get("dispatched_sinks", []):
+        if f.get("state") not in ("new", "regressed"):
+            held["not_active"] += 1
+            continue
+        if sink in f.get("dispatched_sinks", []):
+            held["already_delivered"] += 1
+            continue
+        # A finding the triage declared a false positive is evidence, not work (journal-35w).
+        if f.get("false_positive") or is_false_positive(f):
+            held["false_positive"] += 1
             continue
         reason = embargo_reason(f, sink, visibility)
         if reason:
@@ -350,81 +436,230 @@ def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]], visibility:
             # redacted copy; the severity is a deterministic enum member.
             guarded = redact_finding(f)
             print(f"[SECURITY GUARD] Suppressing {sink} publication of {effective_severity(f)} finding: {guarded['title']}")
+            held["embargoed"] += 1
             continue
         publishable.append(f)
-    return publishable
+    return publishable, held
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public"):
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public", agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None) -> Dict[str, Any]:
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
-    """
-    print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed")
 
-    # Always write the local factory delta report. It is the complete evidence trail, so it
-    # deliberately includes findings the publication embargo withholds from a tracker sink.
-    _dispatch_file(target_name, processed_findings, stats, fixed_items or [])
+    `station_only` is set when the dispatch is one station of a factory line: the station
+    writes `<target>-<agent>-delta.md` and the line writes the run's `<target>-delta.md` once
+    every station has reported. Before, every station overwrote `<target>-delta.md`, so the
+    file described only the last station and one empty station printed "Clean Delta" for the
+    whole run (fleet-810). `fragment` receives this station's delta as JSON for the line.
+
+    Returns the per-sink delivery accounting.
+    """
+    print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed, {stats.get('false_positive', 0)} triaged false positive")
 
     sinks = [s.strip() for s in sink.split(",") if s.strip()]
     if "both" in sinks or "all" in sinks:
         sinks = ["beads", "github-issues"]
 
+    sink_results: Dict[str, Dict[str, Any]] = {}
     for s in sinks:
-        publishable = _publishable_for_sink(s, processed_findings, visibility)
+        if s == "file":
+            continue
+        publishable, held = _partition_for_sink(s, processed_findings, visibility)
+        result = dict(held, eligible=len(publishable), published=0, failed=0, skipped=0, note="")
         if s == "beads":
-            _dispatch_beads(target_dir, publishable, visibility)
+            result.update(_dispatch_beads(target_dir, publishable, visibility))
         elif s == "github-issues":
-            _dispatch_github(target_name, target_dir, publishable, visibility)
+            result.update(_dispatch_github(target_name, target_dir, publishable, visibility))
+        else:
+            result["note"] = f"unknown sink {s!r}: nothing published"
+        sink_results[s] = result
+        print(f"[Sink {s}] published {result['published']}, failed {result['failed']}, "
+              f"embargoed {result['embargoed']}, below band {result['skipped']}, "
+              f"false positive {result['false_positive']}"
+              + (f" ({result['note']})" if result.get("note") else ""))
+        if result["embargoed"] and normalize_visibility(visibility) == "public":
+            print(f"[Sink {s}] {result['embargoed']} finding(s) held in the local store: the target "
+                  f"is treated as PUBLIC. Only a committed targets/<name>.yaml declaring "
+                  f"`visibility: private` changes that, and only if the tracker really is private.")
 
-def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]]):
-    report_file = FACTORY_ROOT / "findings" / f"{target_name}-delta.md"
+    # Always write the local factory delta report. It is the complete evidence trail, so it
+    # deliberately includes findings the publication embargo withholds from a tracker sink.
+    _dispatch_file(target_name, processed_findings, stats, fixed_items or [],
+                   agent=agent if station_only else None, sink_results=sink_results)
+
+    if fragment is not None:
+        fragment.write_text(json.dumps({
+            "agent": agent,
+            "stats": stats,
+            "findings": processed_findings,
+            "fixed": fixed_items or [],
+            "sinks": sink_results,
+        }, indent=2), encoding="utf-8")
+    return sink_results
+
+def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]], agent: Optional[str] = None, sink_results: Optional[Dict[str, Any]] = None, stations: Optional[List[Dict[str, Any]]] = None, line_name: Optional[str] = None, findings_dir: Optional[Path] = None):
+    """Write the delta report trio (full, `-latest` alias, step-summary variant).
+
+    With `agent` set, the trio is the station's own (`<target>-<agent>-delta.md` ...), never
+    the run's: only the line, which has seen every station, writes `<target>-delta.md`
+    (fleet-810).
+    """
+    stem = f"{target_name}-{agent}" if agent else target_name
+    report_file = (findings_dir or FACTORY_ROOT / "findings") / f"{stem}-delta.md"
     report_file.parent.mkdir(parents=True, exist_ok=True)
     # This report is the file the composite action used to append to the step summary, so the
     # rendered copy is redacted. The raw values stay in the run artifacts and the store.
     findings = [redact_finding(f) for f in findings]
     fixed_items = [redact_finding(f) for f in fixed_items]
 
-    report = _render_delta_report(target_name, findings, stats, fixed_items)
+    title = f"{target_name} / {agent}" if agent else target_name
+    kwargs = dict(sink_results=sink_results, stations=stations, line_name=line_name)
+    report = _render_delta_report(title, findings, stats, fixed_items, **kwargs)
     report_file.write_text(report, encoding="utf-8")
     # Preserve the original path for existing consumers.
-    report_file.with_name(f"{target_name}-latest.md").write_text(report, encoding="utf-8")
+    report_file.with_name(f"{stem}-latest.md").write_text(report, encoding="utf-8")
     # The step-summary variant (agents-pgj): the summary is readable by ANY logged-in GitHub
     # account on a public repo (anonymous readers get a 404, verified), so high/critical
     # finding prose is withheld from it — rule and location only. The full report stays in
     # the findings store and the auth-gated run artifact.
-    summary = _render_delta_report(target_name, findings, stats, fixed_items, step_summary=True)
-    report_file.with_name(f"{target_name}-summary.md").write_text(summary, encoding="utf-8")
+    summary = _render_delta_report(title, findings, stats, fixed_items, step_summary=True, **kwargs)
+    report_file.with_name(f"{stem}-summary.md").write_text(summary, encoding="utf-8")
     print(f"Delta report written to: {report_file}")
+    return report_file
+
+
+# Station statuses that carry a verdict. Anything else (ERROR, SKIPPED, a status added later)
+# means the station did not tell us anything, and the run is not clean (fleet-810, fleet-ddd).
+VERDICT_STATUSES = frozenset({"PASS", "ALERT"})
+
+
+def write_line_report(target_name: str, line_name: str, stations: List[Dict[str, Any]],
+                      findings_dir: Optional[Path] = None) -> Path:
+    """Write the run's delta report from every station of one factory line (fleet-810).
+
+    `stations` is the line's scorecard, in order; a station that produced a findings delta
+    carries its fragment path under `fragment`. Findings, fixed items and stats are the union
+    over stations, and the station table says which stations produced no verdict, so the
+    report can never call a run clean on the strength of one station's empty slice.
+    """
+    findings: List[Dict[str, Any]] = []
+    fixed: List[Dict[str, Any]] = []
+    stats = {key: 0 for key in DELTA_KEYS}
+    sinks: Dict[str, Dict[str, Any]] = {}
+    for station in stations:
+        fragment = station.get("fragment")
+        if not fragment or not Path(fragment).exists():
+            continue
+        data = json.loads(Path(fragment).read_text(encoding="utf-8"))
+        findings.extend(data.get("findings", []))
+        fixed.extend(data.get("fixed", []))
+        for key in DELTA_KEYS:
+            stats[key] += int(data.get("stats", {}).get(key, 0) or 0)
+        for sink, result in (data.get("sinks") or {}).items():
+            total = sinks.setdefault(sink, {})
+            for key, value in result.items():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    total[key] = total.get(key, 0) + value
+                elif value and key == "note":
+                    total["note"] = "; ".join(filter(None, [total.get("note"), str(value)]))
+    report = _dispatch_file(target_name, findings, stats, fixed, sink_results=sinks,
+                            stations=stations, line_name=line_name, findings_dir=findings_dir)
+    machine = report.with_name(f"{target_name}-line.json")
+    machine.write_text(json.dumps({
+        "target": target_name,
+        "line": line_name,
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "complete": all(s.get("status") in VERDICT_STATUSES for s in stations),
+        "stats": stats,
+        "sinks": sinks,
+        "stations": [{k: v for k, v in s.items() if k != "fragment"} for s in stations],
+    }, indent=2), encoding="utf-8")
+    return report
+
+
+def _badge(f: Dict[str, Any]) -> str:
+    """The triaged severity, plus the routing band when the embargo treats it differently."""
+    if f.get("false_positive"):
+        return "[FALSE POSITIVE]"
+    shown = reported_severity(f)
+    routed = effective_severity(f)
+    if routed != shown:
+        return f"[{shown.upper()} · routed {routed}]"
+    return f"[{shown.upper()}]"
 
 
 def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
-                         fixed_items: List[Dict[str, Any]], *, step_summary: bool = False) -> str:
+                         fixed_items: List[Dict[str, Any]], *, step_summary: bool = False,
+                         sink_results: Optional[Dict[str, Any]] = None,
+                         stations: Optional[List[Dict[str, Any]]] = None,
+                         line_name: Optional[str] = None) -> str:
     """Render the delta report; with step_summary=True, high/critical finding prose is reduced.
 
     effective_severity decides the band, matching the embargo: an understated or absent
-    severity cannot leak detail onto the step summary.
+    severity cannot leak detail onto the step summary. The badge a reader sees is the triaged
+    severity (journal-1kg); when routing differs it is shown alongside, never instead.
+
+    `stations` (a factory line's scorecard) makes the report a run report: "Clean Delta" is
+    printed only when every station produced a verdict (fleet-810).
     """
     def reduced(f: Dict[str, Any]) -> bool:
         return step_summary and effective_severity(f) in ("critical", "high")
 
-    new_or_regressed = [f for f in findings if f["change"] in ("new", "regressed")]
-    unchanged = [f for f in findings if f["change"] == "unchanged"]
-    suppressed = [f for f in findings if f["state"] == "wontfix"]
+    false_positives = [f for f in findings if f.get("false_positive")]
+    live = [f for f in findings if not f.get("false_positive")]
+    new_or_regressed = [f for f in live if f["change"] in ("new", "regressed")]
+    unchanged = [f for f in live if f["change"] == "unchanged"]
+    suppressed = [f for f in live if f["state"] == "wontfix"]
     withheld = [f for f in findings if reduced(f)]
+    no_verdict = [s for s in (stations or []) if s.get("status") not in VERDICT_STATUSES]
 
     lines = [
         f"# Software Factory Delta Report: {target_name}",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         f"",
-        f"| New | Regressed | Fixed | Unchanged | Suppressed |",
-        f"|:---:|:---:|:---:|:---:|:---:|",
-        f"| **{stats['new']}** | **{stats['regressed']}** | **{stats['fixed']}** | {stats['unchanged']} | {stats['suppressed']} |",
+    ]
+    if stations is not None:
+        lines.append(f"Line: `{line_name or '?'}` — {len(stations)} station(s), "
+                     f"{len(stations) - len(no_verdict)} with a verdict.")
+        lines.append("")
+    lines += [
+        f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
+        f"|:---:|:---:|:---:|:---:|:---:|:---:|",
+        f"| **{stats['new']}** | **{stats['regressed']}** | **{stats['fixed']}** | {stats['unchanged']} | {stats['suppressed']} | {stats.get('false_positive', 0)} |",
         f""
     ]
 
-    if stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
+    if no_verdict:
+        names = ", ".join(f"`{s.get('station')}` ({s.get('status')})" for s in no_verdict)
+        lines.append(f"> **INCOMPLETE**: {len(no_verdict)} station(s) produced no verdict: {names}. "
+                     "Their zero is not a clean result; this run is not clean.")
+        lines.append("")
+    elif stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
         lines.append("> **Clean Delta**: No new, regressed, or resolved findings in this run.")
+        lines.append("")
+
+    if stations is not None:
+        lines.append("## Stations")
+        lines.append("")
+        lines.append("| Station | Status | Findings | Criticals | Note |")
+        lines.append("|:---|:---:|:---:|:---:|:---|")
+        for s in stations:
+            has_verdict = s.get("status") in VERDICT_STATUSES
+            count = s.get("findings_count") if has_verdict else "—"
+            crit = s.get("criticals") if has_verdict else "—"
+            note = str(s.get("error") or "").replace("|", "/").replace("\n", " ")[:200]
+            lines.append(f"| `{s.get('station')}` | {s.get('status')} | {count} | {crit} | {note} |")
+        lines.append("")
+
+    if sink_results:
+        lines.append("## Tracker Sinks")
+        lines.append("")
+        for sink, r in sink_results.items():
+            lines.append(f"- **{sink}**: published {r.get('published', 0)}, failed {r.get('failed', 0)}, "
+                         f"embargoed {r.get('embargoed', 0)}, below band {r.get('skipped', 0)}, "
+                         f"false positive {r.get('false_positive', 0)}"
+                         + (f" — {r['note']}" if r.get("note") else ""))
         lines.append("")
 
     if step_summary and withheld:
@@ -436,7 +671,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append("## Action Required: New & Regressed Findings")
         lines.append("")
         for f in new_or_regressed:
-            badge = f"[{effective_severity(f).upper()}]"
+            badge = _badge(f)
             if reduced(f):
                 lines.append(f"### {badge} `{f['rule_id']}` (`{f['state']}`)")
                 lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`")
@@ -466,11 +701,21 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append("## Active Findings (Unchanged)")
         lines.append("")
         for f in unchanged:
-            badge = f"[{effective_severity(f).upper()}]"
+            badge = _badge(f)
             if reduced(f):
                 lines.append(f"- {badge} `{f['rule_id']}` (`{f['path']}:{f.get('line_number', '?')}`)")
                 continue
             lines.append(f"- {badge} **{f['title']}** (`{f['path']}:{f.get('line_number', '?')}`)")
+        lines.append("")
+
+    if false_positives:
+        lines.append("## Triaged False Positives (not counted, never published)")
+        lines.append("")
+        for f in false_positives:
+            if reduced(f):
+                lines.append(f"- `{f.get('rule_id')}` (`{f.get('path')}:{f.get('line_number', '?')}`)")
+                continue
+            lines.append(f"- **{f.get('title')}** (`{f.get('rule_id')}` at `{f.get('path')}:{f.get('line_number', '?')}`)")
         lines.append("")
 
     if suppressed:
@@ -485,16 +730,21 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 
     return "\n".join(lines)
 
-def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public"):
-    """Creates beads for active findings if bd is available."""
+def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
+    """Creates beads for active findings if bd is available. Returns delivery counts."""
+    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "note": ""}
     if not (target_dir / ".beads").exists():
         print(f"Warning: .beads directory not found in {target_dir}. Falling back to file sink.")
-        return
+        result["failed"] = len(findings)
+        result["note"] = f"no .beads directory in {target_dir}: nothing filed"
+        return result
 
     bd_bin = shutil.which("bd") or str(Path.home() / ".local" / "bin" / "bd")
     if not os.path.exists(bd_bin):
         print("Warning: bd binary not available. Findings stored in JSON only.")
-        return
+        result["failed"] = len(findings)
+        result["note"] = "bd binary not available: nothing filed"
+        return result
 
     for f in findings:
         if "beads" in f.get("dispatched_sinks", []):
@@ -503,6 +753,7 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility
         # the sink safe. Beads publishes medium only, as it did before: critical and high are
         # exactly what the embargo withholds from a synced tracker (agents-681).
         if embargo_reason(f, "beads", visibility):
+            result["skipped"] += 1
             continue
         # Beads is a synced tracker and never takes low/info. On a public target the central
         # filter has already withheld critical/high; on a private one the embargo lets them
@@ -526,15 +777,27 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility
                 res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
                 if res.returncode == 0:
                     f.setdefault("dispatched_sinks", []).append("beads")
+                    result["published"] += 1
                     print(f"Created bead for: {published['title']}")
                 else:
+                    result["failed"] += 1
                     print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
             except Exception as e:
+                result["failed"] += 1
                 print(f"Failed to create bead: {e}")
+        else:
+            # low/info never go to a synced tracker; counted, so a zero is explained.
+            result["skipped"] += 1
+    return result
 
-def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public"):
-    """Public disclosure guard and issue creation for GitHub Issues."""
+def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
+    """Public disclosure guard and issue creation for GitHub Issues. Returns delivery counts."""
+    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "note": ""}
     gh_bin = shutil.which("gh")
+    if not gh_bin and findings:
+        result["failed"] = len(findings)
+        result["note"] = "gh binary not available: nothing filed"
+        return result
     for f in findings:
         if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
             continue
@@ -545,6 +808,7 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
             guarded = redact_finding(f)
             print(f"[SECURITY GUARD] Suppressing public GitHub issue for {effective_severity(f)} finding: {guarded['title']}")
             print(f"-> Please review in private store or file private security advisory.")
+            result["skipped"] += 1
             continue
         if gh_bin and effective_severity(f) in ("critical", "high", "medium", "low"):
             published = redact_finding(f)
@@ -562,11 +826,17 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
                 res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
                 if res.returncode == 0:
                     f.setdefault("dispatched_sinks", []).append("github-issues")
+                    result["published"] += 1
                     print(f"Created GitHub issue: {res.stdout.strip()}")
                 else:
+                    result["failed"] += 1
                     print(f"Failed to create GitHub issue (exit {res.returncode}): {res.stderr.strip()}")
             except Exception as e:
+                result["failed"] += 1
                 print(f"Failed to create GitHub issue: {e}")
+        else:
+            result["skipped"] += 1
+    return result
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process findings into findings store")
@@ -578,6 +848,10 @@ if __name__ == "__main__":
     parser.add_argument("--visibility", choices=["public", "private"], default="public",
                         help="Target repository visibility; private relaxes the public-disclosure embargo")
     parser.add_argument("--target-dir", default=".", help="Target repository directory")
+    parser.add_argument("--station-only", action="store_true",
+                        help="One station of a factory line: write <target>-<agent>-delta.md, "
+                             "not the run's <target>-delta.md (the line writes that)")
+    parser.add_argument("--fragment", help="Write this station's delta as JSON here (for the line report)")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -607,6 +881,9 @@ if __name__ == "__main__":
             stats=stats,
             fixed_items=fixed_items,
             visibility=args.visibility,
+            agent=args.agent,
+            station_only=args.station_only,
+            fragment=Path(args.fragment) if args.fragment else None,
         )
     finally:
         store.save()

@@ -180,7 +180,8 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         # The agent comes from the run, not the finding's fields (the CLI stamps it).
         self.scan("file", [understated], agent="vuln-discovery")
         summary = self.summary_report()
-        self.assertIn("[CRITICAL]", summary)
+        # The badge is the triaged label; the routing band is shown next to it (journal-1kg).
+        self.assertIn("[LOW · routed critical]", summary)
         self.assertIn("sqli", summary)
         self.assertIn("src/query.js:7", summary)
         self.assertNotIn("SQL injection via sort parameter", summary)
@@ -211,6 +212,7 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.stats(), {
             "new": 0, "regressed": 0, "fixed": 0, "unchanged": 1, "suppressed": 0,
+            "false_positive": 0,
         })
         self.assertEqual(len(self.store()["findings"]), 1)
 
@@ -352,7 +354,9 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         result = self.scan("beads", [item])
         self.assertEqual(self.calls(), [])
         self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
-        self.assertIn("[CRITICAL] Severity omitted", self.report())
+        # Routed as critical (fail closed) but never *reported* as critical (journal-1kg).
+        self.assertIn("[UNCLASSIFIED · routed critical] Severity omitted", self.report())
+        self.assertEqual(next(iter(self.store()["findings"].values()))["severity"], "unclassified")
 
     def test_github_embargoes_absent_severity_fail_closed(self):
         """The GitHub guard branched on the raw field, so a deleted key published publicly."""
@@ -369,7 +373,7 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         result = self.scan("beads", [item], agent="secret-scan")
         self.assertEqual(self.calls(), [])
         self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
-        self.assertIn("[CRITICAL] aws-access-key match at ./src/example.py:12", self.report())
+        self.assertIn("[LOW · routed critical] aws-access-key match at ./src/example.py:12", self.report())
 
     def test_a_private_target_may_publish_critical_findings(self):
         """Visibility is the primary input: a private tracker is not a public disclosure."""

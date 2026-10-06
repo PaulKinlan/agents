@@ -139,9 +139,11 @@ class TestLineAndon(unittest.TestCase):
             sandbox = self._sandbox(tmpdir, halt=False, stations=["missing-agent", "okprobe"])
             result, output = sandbox.run()
 
-            self.assertTrue(result, "a completed line must report success")
+            # Every station after the failure ran, but one produced no verdict: the line is
+            # INCOMPLETE and reports failure rather than success (fleet-ddd, journal-idy).
+            self.assertFalse(result, "a line with a no-verdict station must not report success")
             self.assertIn("FACTORY LINE SCORECARD", output)
-            self.assertIn("COMPLETE", output)
+            self.assertIn("INCOMPLETE", output)
             self.assertIn("ERROR", output)
             self.assertTrue(sandbox.marker.exists(), "downstream stations must run when not halting")
 

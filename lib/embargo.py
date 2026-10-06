@@ -21,6 +21,7 @@ The embargo is a routing decision, not deletion. The raw value and the model's o
 in the local run artifact and findings store, where a human needs them to rotate the secret.
 """
 
+import re
 from typing import Any, Dict, Optional
 
 try:  # imported as lib.embargo, or run with lib/ on sys.path
@@ -76,8 +77,65 @@ def normalize_severity(value: Any) -> str:
     return "critical"
 
 
+# A severity label that is missing or outside the vocabulary is *reported* as this. It is not a
+# routing value: the embargo below still treats it as critical (fail closed). Reporting it as
+# critical made every unlabelled finding read CRITICAL in the store and the delta report while
+# the line's andon counted only the model's genuine criticals (journal-1kg, journal-y5m).
+UNCLASSIFIED = "unclassified"
+
+# Triage verdicts that mean "this candidate is not a real issue". A finding the triage itself
+# declares a false positive must never be counted, badged or published as a live finding
+# (journal-35w, journal-aaj).
+_FALSE_POSITIVE_VERDICTS = frozenset({
+    "false_positive", "false-positive", "false positive", "fp", "not_an_issue",
+    "not-an-issue", "benign", "not_exploitable", "not-exploitable",
+})
+_VERDICT_FIELDS = ("verdict", "triage_verdict", "triage", "disposition", "classification", "status")
+_FP_TITLE = re.compile(r"(?<!not a )(?<!not )(?<!no )\bfalse[- ]positive\b", re.IGNORECASE)
+
+
+def is_false_positive(finding: Dict[str, Any]) -> bool:
+    """Whether the triage that produced `finding` declared it a false positive.
+
+    Explicit fields win (`false_positive: true`, or a verdict-like field naming one); failing
+    that, a title that says the item *is* a false positive ("... is a false positive (comment,
+    not a network call)") counts, while "not a false positive" does not.
+    """
+    if not isinstance(finding, dict):
+        return False
+    flag = finding.get("false_positive")
+    if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes")):
+        return True
+    for field in _VERDICT_FIELDS:
+        value = finding.get(field)
+        if isinstance(value, str) and value.strip().lower() in _FALSE_POSITIVE_VERDICTS:
+            return True
+    title = finding.get("title")
+    return isinstance(title, str) and bool(_FP_TITLE.search(title))
+
+
+def reported_severity(finding: Dict[str, Any]) -> str:
+    """The severity a human reads and every count uses: the triaged label, never inflated.
+
+    One source for the findings store, the delta report and the line's andon/scorecard
+    (journal-y5m). A missing or unrecognised label is `unclassified` — not critical, because
+    an unanalysed finding is not evidence of a critical one — and a triaged false positive is
+    `info`. Publication routing does NOT use this: see `effective_severity`.
+    """
+    if is_false_positive(finding):
+        return "info"
+    value = finding.get("severity") if isinstance(finding, dict) else None
+    if isinstance(value, str) and value.strip().lower() in VALID_SEVERITIES:
+        return value.strip().lower()
+    return UNCLASSIFIED
+
+
 def effective_severity(finding: Dict[str, Any]) -> str:
-    """The severity this finding is treated as having at a publication boundary.
+    """The severity this finding is treated as having at a publication boundary (routing only).
+
+    This is deliberately NOT what the store, the report badge or the andon count: it is the
+    fail-closed routing value. Displaying it made identity-critical agents' info-level and
+    false-positive verdicts read CRITICAL (journal-1kg, journal-aaj).
 
     Security-sensitive agents are critical on identity, so a model that labels a leaked key —
     or an understated vulnerability — `low` cannot authorise its publication.

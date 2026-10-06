@@ -23,7 +23,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.containment import (ContainmentError, banner_lines, budget_note, check_engine,
                                  load_policy, policy_record)
     from lib.child_env import child_environment, prepass_environment
-    from lib.embargo import normalize_visibility
+    from lib.embargo import is_false_positive, normalize_visibility, reported_severity
+    from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import validate_agent_report
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
@@ -31,8 +32,17 @@ except ImportError:
     from lib.containment import (ContainmentError, banner_lines, budget_note, check_engine,
                                  load_policy, policy_record)
     from lib.child_env import child_environment, prepass_environment
-    from lib.embargo import normalize_visibility
+    from lib.embargo import is_false_positive, normalize_visibility, reported_severity
+    from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import validate_agent_report
+
+
+class StationError(RuntimeError):
+    """A station ran but produced no verdict. Never a clean scan (fleet-ddd, journal-idy).
+
+    Raised for a failed pre-pass, a failed engine, and model output that cannot be parsed or
+    violates the report schema. `factory run` exits non-zero and a line records ERROR.
+    """
 
 # Local git plumbing in the hill-climb path is fast when healthy; a wedged git (lock contention,
 # a huge tree) must not hold the run. Fixed cap: these calls are not stations and have no agent
@@ -148,11 +158,16 @@ def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
         name = cfg.get("name", target_arg)
         raw_path = os.path.expanduser(str(cfg.get("path", "")))
         path = (FACTORY_ROOT / raw_path).resolve() if not os.path.isabs(raw_path) else Path(raw_path).resolve()
+        # A named target whose checkout is missing must fail loudly: every pre-pass would
+        # otherwise "scan" nothing and the station would report a clean zero (journal-wog).
+        if not cfg.get("path") or not path.is_dir():
+            raise FileNotFoundError(
+                f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which is not a directory")
         return name, path, cfg
 
     # Otherwise treat as path
     target_path = Path(os.path.expanduser(target_arg)).resolve()
-    if not target_path.exists():
+    if not target_path.is_dir():
         raise FileNotFoundError(f"Target path or named target not found: {target_arg}")
     name = target_path.name
     return name, target_path, {"name": name, "path": str(target_path), "sink": "file"}
@@ -197,33 +212,56 @@ def choose_engine(requested_engine: str) -> str:
 
     return "pi"
 
+# Bounds the scan of a pathological output (a truncated report with thousands of braces).
+MAX_JSON_DECODE_ATTEMPTS = 20000
+
+
 def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
-    # 1. Direct parse
+    """Find the report object in a model's output, tolerating the ways models wrap it.
+
+    The old extractor tried a whole-text parse, then each ```fence``` with a non-greedy
+    regex, then first-`{`-to-last-`}`. A report whose strings themselves contain a fence (a
+    test-gap skeleton, a THREAT_MODEL.md body), or leading prose plus a trailing note with a
+    brace in it, defeated all three, and the station lost its work (fleet-ddd, journal-mid).
+
+    Now every top-level JSON object in the text is decoded with the real JSON decoder (which
+    knows where strings end, so fences and braces inside them are harmless), and the report
+    is the object that carries `findings` — the largest if several do — else the largest
+    object. Returns None only when no JSON object is present at all.
+    """
+    if not isinstance(text, str):
+        return None
+    text = text.lstrip("\ufeff")
     try:
-        return json.loads(text.strip())
+        whole = json.loads(text.strip())
+        if isinstance(whole, dict):
+            return whole
     except Exception:
         pass
 
-    # 2. Extract from markdown code block
-    matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-    for m in matches:
+    decoder = json.JSONDecoder()
+    objects = []
+    index = text.find("{")
+    attempts = 0
+    while index != -1 and attempts < MAX_JSON_DECODE_ATTEMPTS:
+        attempts += 1
         try:
-            return json.loads(m.strip())
-        except Exception:
+            value, end = decoder.raw_decode(text, index)
+        except ValueError:
+            index = text.find("{", index + 1)
             continue
+        if isinstance(value, dict):
+            objects.append((end - index, value))
+        # Skip past a decoded object: its inner objects are not reports.
+        index = text.find("{", end)
+    if not objects:
+        return None
+    with_findings = [o for o in objects if isinstance(o[1].get("findings"), list)]
+    pool = with_findings or objects
+    return max(pool, key=lambda o: o[0])[1]
 
-    # 3. Search for first { to last }
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        try:
-            return json.loads(text[first_brace:last_brace + 1])
-        except Exception:
-            pass
-
-    return None
-
-def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None):
+def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
+              station_only: bool = False):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
     agent_yaml = agent_dir / "agent.yaml"
     skill_dir = agent_dir
@@ -287,7 +325,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                   capture_output=True, text=True, check=False,
                                   env=prepass_environment(agent_cfg))
         if res.returncode != 0:
+            # A pre-pass that failed scanned nothing. Carrying on with zero candidates let a
+            # short-circuiting station report "Clean scan" (journal-idy, journal-wog).
             print(f"Pre-pass error: {res.stderr}")
+            raise StationError(f"{agent_name}: {prepass_script.name} pre-pass exited "
+                               f"{res.returncode}; no scan was performed")
         else:
             cand_json = json.loads(candidates_file.read_text(encoding="utf-8"))
             if isinstance(cand_json, dict) and "candidates" in cand_json:
@@ -351,14 +393,28 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         if not output_file.exists():
             sys.stderr.write(f"Model output not produced: {adapter_res.stderr}\n")
             sys.exit(1)
+        if adapter_res.returncode != 0:
+            # The engine failed; whatever it left in model_output.txt is an error transcript,
+            # not a verdict.
+            sys.stderr.write(f"Engine adapter failed (exit {adapter_res.returncode}): "
+                             f"{(adapter_res.stderr or '').strip()[-2000:]}\n")
+            raise StationError(f"{agent_name}: engine '{engine}' exited {adapter_res.returncode}; "
+                               f"no verdict (see {output_file})")
 
-        raw_output = output_file.read_text(encoding="utf-8")
+        raw_output = output_file.read_text(encoding="utf-8", errors="replace")
         report = extract_json_from_output(raw_output)
+        if report is not None and not isinstance(report.get("findings"), list):
+            # Every report contract requires a findings list. An object without one (a
+            # fragment of truncated output, an echoed tool call) is not a verdict; reading
+            # its missing findings as [] was a clean PASS/0 nobody earned.
+            report = None
         if report is None:
             model_parse_succeeded = False
-            print("Warning: Could not parse JSON from model output. Skipping findings store update to prevent false 'fixed' transitions.")
+            no_verdict = "Could not parse a JSON report (with a findings list) from model output"
+            print(f"Warning: {no_verdict}. Skipping findings store update to prevent false 'fixed' transitions.")
             report = {
-                "summary": "Model output produced unformatted response.",
+                "summary": "NO VERDICT: model output contained no JSON report.",
+                "verdict": "error",
                 "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
                 "findings": []
             }
@@ -369,17 +425,24 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             schema_errors = validate_agent_report(agent_dir, agent_cfg, report)
             if schema_errors:
                 model_parse_succeeded = False
-                print(f"Warning: Model output violates the declared report schema "
-                      f"({len(schema_errors)} violation(s); first: {schema_errors[0]}). "
+                no_verdict = (f"Model output violates the declared report schema "
+                              f"({len(schema_errors)} violation(s); first: {schema_errors[0]})")
+                print(f"Warning: {no_verdict}. "
                       f"Skipping findings store update to prevent false 'fixed' transitions.")
                 report = {
-                    "summary": "Model output failed the declared report schema.",
+                    "summary": "NO VERDICT: model output failed the declared report schema.",
+                    "verdict": "error",
                     "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
                     "findings": []
                 }
 
     report_path = run_dir / "report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if not model_parse_succeeded:
+        # No verdict is a station failure, never PASS/0 (fleet-ddd, journal-mid). The raw
+        # output stays in the run directory for a human (or a re-import) to recover.
+        raise StationError(f"{agent_name}: {no_verdict}; no verdict (raw output kept in "
+                           f"{run_dir / 'model_output.txt'})")
 
     # If the agent produced THREAT_MODEL.md content, save it
     if report.get("threat_model_markdown"):
@@ -401,6 +464,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             "--sink", sink,
             "--target-dir", str(target_dir)
         ]
+        fragment_path = run_dir / "delta.json"
+        if station_only:
+            # One station of a line: the line writes the run's delta report (fleet-810).
+            findings_cmd += ["--station-only", "--fragment", str(fragment_path)]
         # The target manifest's visibility is the primary input to the disclosure embargo: a
         # public target withholds the embargoed bands from tracker sinks, a private one does not
         # (agents-5rx). Missing or unrecognised values are normalised to public here.
@@ -412,12 +479,28 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         run_station_command(findings_cmd, budget, "findings dispatch", check=True,
                             env=child_environment(sink=sink))
     print(f"\nRun complete. Artifacts saved to:\n  {run_dir}\n")
+    fragment = run_dir / "delta.json"
     return {
         "run_id": run_id,
         "run_dir": run_dir,
         "report": report,
-        "report_path": report_path
+        "report_path": report_path,
+        "target_name": target_name,
+        "fragment": str(fragment) if fragment.exists() else None,
     }
+
+def count_criticals(findings: Any) -> int:
+    """The line's critical count, from the same severity source as the findings store.
+
+    The andon used to compare the raw label (`== "critical"`, case-sensitive) while the store
+    recorded the fail-closed routing value, so one run said 4 criticals and the store said 14
+    (journal-y5m). Both now use `reported_severity`, which never counts a triaged false
+    positive or an unlabelled finding as critical.
+    """
+    if not isinstance(findings, list):
+        return 0
+    return sum(1 for f in findings if isinstance(f, dict) and reported_severity(f) == "critical")
+
 
 def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None):
     line_yaml = FACTORY_ROOT / "lines" / f"{line_name}.yaml"
@@ -441,33 +524,44 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
 
     scorecard = []
     line_halted = False
+    target_name = None
+    try:
+        target_name = resolve_target(target_arg)[0]
+    except Exception as e:
+        # Reported per station below (each fails the same way); the line report needs a name.
+        print(f"🚨 Target unavailable: {e}")
+
+    def station_name(station: Any) -> Any:
+        return station if isinstance(station, str) else station.get("agent")
 
     for idx, station in enumerate(stations, start=1):
-        st_agent = station if isinstance(station, str) else station.get("agent")
+        st_agent = station_name(station)
         st_summary = station.get("summary", "") if isinstance(station, dict) else ""
         # A line can pin a station's engine, so verification need not share discovery's model
         # family (SF-08, non-negotiable #3). `station_engines: {<agent>: <engine>}`.
         st_engine = station_engines.get(st_agent, engine_arg) if isinstance(station_engines, dict) else engine_arg
         print(f"\n▶ [Station {idx}/{len(stations)}] Commencing: {st_agent} [{st_engine}] -- {st_summary}")
         try:
-            res = run_agent(st_agent, target_arg, st_engine, explicit_sink)
+            res = run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True)
             report = res.get("report", {}) if res else {}
-            findings = report.get("findings", [])
-            criticals = [f for f in findings if f.get("severity") == "critical"]
-            
+            findings = [f for f in report.get("findings", []) if isinstance(f, dict) and not is_false_positive(f)]
+            criticals = count_criticals(findings)
+
             status = "PASS" if not criticals else "ALERT"
             scorecard.append({
                 "station": st_agent,
                 "status": status,
                 "findings_count": len(findings),
-                "criticals": len(criticals)
+                "criticals": criticals,
+                "fragment": res.get("fragment") if res else None,
+                "run_dir": str(res.get("run_dir")) if res else None,
             })
 
             # Check Andon Cord only at designated gate stations (or all if "*" in andon_stations)
             station_gated = ("*" in andon_stations) or (st_agent in andon_stations)
-            if halt_on_critical and station_gated and len(criticals) > 0:
+            if halt_on_critical and station_gated and criticals > 0:
                 print(f"\n🚨 [ANDON CORD PULLED] Line halted at gate station '{st_agent}'!")
-                print(f"   Discovered {len(criticals)} critical finding(s). Downstream stations aborted.")
+                print(f"   Discovered {criticals} critical finding(s). Downstream stations aborted.")
                 line_halted = True
                 break
         except SystemExit as e:
@@ -478,28 +572,57 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
             code = e.code
             detail = f"exited with code {code}" if code not in (None, 0) else "exited unexpectedly"
             print(f"\n🚨 [ANDON CORD PULLED] Station '{st_agent}' {detail}.")
-            scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": 0, "criticals": 0})
+            # No verdict: the counts are unknown, not zero (journal-idy).
+            scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": None,
+                              "criticals": None, "error": detail})
             if halt_on_failure:
                 line_halted = True
                 break
         except Exception as e:
             print(f"\n🚨 [ANDON CORD PULLED] Station '{st_agent}' failed with error: {e}")
-            scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": 0, "criticals": 0})
+            scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": None,
+                              "criticals": None, "error": str(e)})
             if halt_on_failure:
                 line_halted = True
                 break
 
+    # Stations the halt prevented are listed, so the report cannot read as covering them.
+    for station in stations[len(scorecard):]:
+        scorecard.append({"station": station_name(station), "status": "SKIPPED",
+                          "findings_count": None, "criticals": None,
+                          "error": "not run: line halted"})
+
+    errored = [sc for sc in scorecard if sc["status"] not in VERDICT_STATUSES]
     print("\n" + "=" * 70)
-    print(f"🏁 FACTORY LINE SCORECARD: {line_name.upper()} ({'HALTED' if line_halted else 'COMPLETE'})")
+    state = "HALTED" if line_halted else ("INCOMPLETE" if errored else "COMPLETE")
+    print(f"🏁 FACTORY LINE SCORECARD: {line_name.upper()} ({state})")
     print("-" * 70)
     print(f"{'STATION':<25} {'STATUS':<12} {'FINDINGS':<10} {'CRITICALS'}")
     print("-" * 70)
     for sc in scorecard:
-        print(f"{sc['station']:<25} {sc['status']:<12} {sc.get('findings_count', 0):<10} {sc.get('criticals', 0)}")
+        # A station with no verdict has unknown counts: print "-", never a reassuring 0.
+        count = sc.get("findings_count")
+        crit = sc.get("criticals")
+        print(f"{sc['station']:<25} {sc['status']:<12} {'-' if count is None else count:<10} "
+              f"{'-' if crit is None else crit}")
     print("=" * 70 + "\n")
+    if errored:
+        print(f"⚠️  {len(errored)} station(s) produced no verdict: "
+              f"{', '.join(sc['station'] for sc in errored)}. This run is not clean.\n")
+
+    # The run's delta report is written once, from every station (fleet-810).
+    if target_name:
+        try:
+            report_file = write_line_report(target_name, line_name, scorecard,
+                                            findings_dir=FACTORY_ROOT / "findings")
+            print(f"Line delta report written to: {report_file}")
+        except Exception as e:
+            print(f"🚨 Could not write the line delta report: {e}")
+            return False
     # A halted line is a failed line: without a non-zero exit the Andon cord has no signal for
-    # a caller (CI, a scheduled wrapper, an operator script).
-    return not line_halted
+    # a caller (CI, a scheduled wrapper, an operator script). So is a line where a station
+    # produced no verdict, even when halt_on_failure let it continue.
+    return not line_halted and not errored
 
 def run_hillclimb(
     target_arg: str,
@@ -995,7 +1118,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except StationTimeout as e:
+    except (StationTimeout, StationError) as e:
         sys.stderr.write(f"\n[station failure] {e}\n")
         sys.exit(2)
     except ContainmentError as e:
