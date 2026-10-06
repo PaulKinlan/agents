@@ -42,6 +42,30 @@ class TestActionPinning(unittest.TestCase):
     def test_factory_ref_default_is_a_full_commit_sha(self):
         self.assertRegex(pinned_sha(), r"^[0-9a-f]{40}$")
 
+    def test_the_pin_carries_the_landed_factory_fixes(self):
+        """Review r4200726007: vendored users run the pinned factory, not this checkout, so
+        the pin must move with the payload. It must be in this history (so a merge commit
+        keeps it reachable) and contain the fixes this repo says have landed."""
+        if not (ROOT / ".git").exists():
+            self.skipTest("not a git checkout")
+        sha = pinned_sha()
+        present = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{sha}^{{commit}}"],
+                                 capture_output=True, timeout=30)
+        if present.returncode != 0:
+            self.skipTest("pinned commit not in this (shallow?) clone")
+        ancestor = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", sha, "HEAD"],
+                                  capture_output=True, timeout=30)
+        self.assertEqual(ancestor.returncode, 0, "the pinned factory must be an ancestor of HEAD")
+        for marker in (
+            "def normalize_report",            # fleet-9wyi: field-name synonyms
+            "--external-ref",                  # fleet-xkf: beads dedupe by fingerprint
+            "def write_line_report",           # fleet-810: run-level delta report
+        ):
+            with self.subTest(marker=marker):
+                found = subprocess.run(["git", "-C", str(ROOT), "grep", "-q", "-F", "-e", marker,
+                                        sha, "--", "lib"], capture_output=True, timeout=30)
+                self.assertEqual(found.returncode, 0, f"pinned factory {sha[:12]} lacks {marker!r}")
+
     def test_the_action_never_clones_a_branch(self):
         text = action_text()
         self.assertNotIn("git clone", text)
