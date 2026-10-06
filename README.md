@@ -339,6 +339,9 @@ When a run completes, findings are dispatched based on target configuration:
 - **Severity**: reports, the store and the andon count the *triaged* severity (`unclassified` when missing; triaged false positives are listed separately and never counted or published). The fail-closed routing value (`routing_severity`) only decides what the embargo withholds from a tracker; every tracker sink reports published / embargoed / below-band / failed counts.
 - **`beads`**: For projects using [Beads](https://github.com/beads-project/beads). Active findings automatically create or update issues via `bd create`.
 - **`github-issues`**: For GitHub repositories. Creates labeled issues via `gh issue create`.
+- **`command`**: Any other tracker (Jira, Linear, a webhook) without a factory change. Set `sink: command` and `sink_command: "<argv>"` (no shell; optional `sink_timeout`, and `sink_env: [NAMES]` for the only extra env vars it may see) in `targets/<name>.yaml`. The command reads JSON Lines on stdin — a `run` header then one `finding` per line (protocol `factory-sink/1`, the redacted published view, embargo already applied) — and may answer per finding with `{"fingerprint", "status": "published|duplicate|failed|skipped", "ref"}`. Non-zero exit or timeout = nothing delivered. See `lib/sinks/command.py`.
+
+Sinks are adapters in `lib/sinks/` behind one interface (`lib/sinks/base.py`); core decides what may be published (state, receipts, embargo) and never names a tracker.
 
 ### Public Disclosure Protection
 

@@ -87,19 +87,26 @@ def child_environment(
     sink: Optional[str] = None,
     github: bool = False,
     parent: Optional[Mapping[str, str]] = None,
+    sink_options: Optional[Mapping[str, object]] = None,
 ) -> Dict[str, str]:
     """Build the environment for one child process by addition.
 
-    `engine` selects the model-auth class; `sink`/`github` add a GitHub token for the children
-    that legitimately talk to GitHub. `parent` defaults to os.environ and is only read, never
+    `engine` selects the model-auth class; `github` adds a GitHub token (a pre-pass that
+    declares `gh`); `sink` adds what the configured sink adapters declare they need. `parent` defaults to os.environ and is only read, never
     mutated.
     """
     source = os.environ if parent is None else parent
     env = {name: source[name] for name in BASE_ALLOW if name in source}
 
     names = list(ENGINE_CREDENTIALS.get(engine or "", ()))
-    if github or (sink and any(s.strip() in ("github-issues", "both", "all") for s in sink.split(","))):
+    if github:
         names.extend(GITHUB_TOKEN_VARS)
+    if sink:
+        # Each sink adapter names what its delivery needs (github-issues: a GitHub token;
+        # command: the manifest's `sink_env` list). This module never names a tracker
+        # (fleet-km8); the set for the built-in sinks is unchanged.
+        from lib.sinks import credential_env
+        names.extend(credential_env(sink, sink_options))
     for name in names:
         value = source.get(name)
         if value:

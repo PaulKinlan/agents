@@ -9,7 +9,7 @@ targets, or agent skills), see [docs/INTEGRATION.md](docs/INTEGRATION.md).
 > **This repo is the highest-privilege component in the system.** It holds model API keys and
 > GitHub tokens, runs unattended on a schedule, and has write access to other repositories.
 > A compromise here is a supply-chain compromise of every target it touches. Treat changes to
-> `lib/adapters/`, `.github/`, and any agent with `write: true` as security-sensitive.
+> `lib/adapters/`, `lib/sinks/`, `.github/`, and any agent with `write: true` as security-sensitive.
 
 ## Non-negotiables
 
@@ -80,6 +80,7 @@ Discovery order for sink selection:
 | `fauxmium` | `github-issues` | Label machine findings so they're filterable. |
 | `aifocus` | `file` | Hugo + Cloudflare Workers blog/demos (`findings/aifocus-latest.md`). |
 | *default* | `file` | Local JSON, for targets with no tracker. |
+| *any other tracker* | `command` | `sink_command` in `targets/<name>.yaml` receives findings as JSON Lines (`lib/sinks/command.py`); same embargo as every tracker. |
 
 ### Severity & Public Disclosure Rules
 

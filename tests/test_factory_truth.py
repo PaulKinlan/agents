@@ -70,6 +70,8 @@ class Sandbox:
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
         for module in LIB_MODULES:
             shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)
+        # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
+        shutil.copytree(ROOT / "lib" / "sinks", root / "lib" / "sinks", dirs_exist_ok=True)
         (root / "outputs").mkdir()
         (root / "lines").mkdir()
         self.bin = root / "bin"
