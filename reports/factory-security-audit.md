@@ -39,6 +39,7 @@ findings store. Commands and output are given verbatim so a reviewer can re-run 
 | SF-09 | `agents-5rx` | `visibility:` in `targets/*.yaml` is never read by any code | Disclosure rule | **Medium** | ✅ grep |
 | SF-10 | `agents-cfx` | CI action clones unpinned `main` into a step holding both tokens | Supply chain | **Medium** | ✅ static |
 | SF-11 | `agents-pgr` | Prompt text exposed via `argv` **and** a world-readable `prompt.txt` | #4 | **Medium** | ✅ argv from PR #1; disk mode verified here |
+| SF-12 | `agents-411` | The committed suppressions file is never read; the one the store reads is gitignored | Noise control | **Medium** (FIXED: commit 29e9449 / agents-411) | ✅ end-to-end |
 
 Four of these (SF-01, SF-03, SF-09, and the disclosure half of SF-02) are the same underlying
 problem seen from different angles: **the factory decides what is safe to publish using values it
@@ -403,6 +404,50 @@ retained copy is not world-readable.
 
 ---
 
+## SF-12 — The committed suppressions file is never read (Medium, fixed)
+
+`AGENTS.md` states the noise-control contract plainly: *"`wontfix` requires a written reason in a
+committed suppressions file."* At audit time, no path satisfied that sentence.
+
+**Wrong file.** The store built its suppressions path in `lib/findings.py` (line 45) by
+interpolating the target name into a per-target JSON filename under the findings directory. The
+repository committed `findings/suppressions.yaml`. Different name, different extension, different
+per-target scoping — the committed file was read by nothing.
+
+**Wrong format.** `_load_suppressions` called `json.loads` (`lib/findings.py`, line 60). The
+committed file was YAML with comments. Even with a matching name it would raise, and the `except`
+swallowed that to a warning and returns `{}` — so a malformed or misnamed suppressions file
+failed silently open, suppressing nothing.
+
+**The working path could not be committed.** `.gitignore` had `findings/*` with allowlist
+exceptions only for `.gitkeep` and `suppressions.yaml`. The single file the code honoured was
+gitignored.
+
+**Verified** with a probe finding (fingerprint `da9a0757dc96c26a…`), both halves run through the real
+store:
+
+```
+A: suppression appended to the committed YAML register
+   -> Delta: 1 new, 0 suppressed        # ignored
+
+B: same suppression written to the per-target JSON path the store computes
+   -> Delta: 0 new, 1 suppressed        # honoured
+   -> git check-ignore: that file IS ignored
+```
+
+So an operator either edited the committed file and silently got no suppression, or edited the
+effective file and could not commit it. Either way every `wontfix` was invisible to review and
+recurring runs re-report suppressed findings forever — precisely the noise-control failure the
+fingerprint design exists to prevent.
+
+**Fixed in commit 29e9449 (`agents-411`).** `lib/findings.py` now reads the committed
+`findings/suppressions.yaml` register. It is parsed as the documented YAML subset, requires a reason
+for every entry, and malformed files raise `SuppressionFileError` loudly (exit code 2) rather than
+silently returning an empty dict. The legacy per-target JSON file is ignored with a loud warning, and
+`tests/test_suppressions.py` covers the parser and loud failure modes.
+
+---
+
 ## What is working
 
 Worth recording, so a later reader does not assume everything is broken:
@@ -457,7 +502,7 @@ If a future edit to this file introduces a match, that is a bug in the file, not
 
 ## Beads filed
 
-All eleven findings are filed in this repository's beads database, each carrying its reproduction
+All twelve findings are filed in this repository's beads database, each carrying its reproduction
 commands and its verified/not-verified boundary.
 
 | Bead | Finding | Priority |
@@ -472,6 +517,7 @@ commands and its verified/not-verified boundary.
 | `agents-pr7` | SF-08 — verifier primed with discovery's conclusions | P2 |
 | `agents-5rx` | SF-09 — `visibility:` never read | P2 |
 | `agents-cfx` | SF-10 — unpinned clone in credentialed CI step | P2 |
+| `agents-411` | SF-12 — committed suppressions file never read | P2 |
 | `agents-pgr` | SF-11 — prompt in `argv` + world-readable `prompt.txt` | P3 |
 
 Existing related beads from the PR #1 review: `agents-e3u` (P2), `agents-p2c` (P2), `agents-d06`
