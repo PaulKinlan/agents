@@ -77,29 +77,73 @@ def get_markdown_headings(file_path: Path) -> Set[str]:
                 slugs.add(slug)
     return slugs
 
+# The pre-pass used to spawn `git ls-files <path>` and `git log -1 --all -- <path>` for every
+# missing reference (a full history walk each), and to `rglob` the whole tree — node_modules
+# included — for every bare filename. On a large repository that overran the station's
+# 5-minute budget, the process group was killed and the station produced no verdict
+# (journal-idy). Each index below is now built once per target and queried in memory.
+GIT_INDEX_TIMEOUT_SECONDS = 120
+_GIT_INDEX_CACHE: Dict[Tuple[str, str], List[str]] = {}
+_NAME_INDEX_CACHE: Dict[str, Set[str]] = {}
+
+
+def _git_paths(target_dir: Path, kind: str) -> List[str]:
+    """Sorted repo-relative paths: currently tracked (`tracked`) or ever in history (`history`)."""
+    key = (str(target_dir), kind)
+    if key not in _GIT_INDEX_CACHE:
+        if kind == "tracked":
+            cmd = ["git", "-C", str(target_dir), "ls-files", "-z"]
+        else:
+            cmd = ["git", "-C", str(target_dir), "log", "--all", "--name-only", "--format=", "-z"]
+        paths: Set[str] = set()
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                                 timeout=GIT_INDEX_TIMEOUT_SECONDS)
+            if res.returncode == 0:
+                paths = {p.strip() for p in res.stdout.replace("\n", "\0").split("\0") if p.strip()}
+        except Exception:
+            pass
+        _GIT_INDEX_CACHE[key] = sorted(paths)
+    return _GIT_INDEX_CACHE[key]
+
+
+def _indexed(paths: List[str], clean_path: str) -> bool:
+    """`clean_path` is in `paths`, as a file or as a directory prefix (git pathspec semantics)."""
+    import bisect
+    if not clean_path:
+        return False
+    i = bisect.bisect_left(paths, clean_path)
+    if i < len(paths) and paths[i] == clean_path:
+        return True
+    prefix = clean_path.rstrip("/") + "/"
+    j = bisect.bisect_left(paths, prefix)
+    return j < len(paths) and paths[j].startswith(prefix)
+
+
 def git_tracked_or_deleted(target_dir: Path, rel_path: str) -> Tuple[bool, bool]:
     """Check if git tracks or previously tracked/deleted this file.
-    
+
     Returns (currently_tracked, previously_tracked).
     """
     clean_path = rel_path.strip().lstrip("./")
-    cmd_ls = ["git", "-C", str(target_dir), "ls-files", clean_path]
-    try:
-        res = subprocess.run(cmd_ls, capture_output=True, text=True, check=False)
-        if res.stdout.strip():
-            return True, True
-    except Exception:
-        pass
-
-    cmd_log = ["git", "-C", str(target_dir), "log", "-1", "--all", "--", clean_path]
-    try:
-        res = subprocess.run(cmd_log, capture_output=True, text=True, check=False)
-        if res.stdout.strip():
-            return False, True
-    except Exception:
-        pass
-
+    if _indexed(_git_paths(target_dir, "tracked"), clean_path):
+        return True, True
+    if _indexed(_git_paths(target_dir, "history"), clean_path):
+        return False, True
     return False, False
+
+
+def _file_names(target_dir: Path) -> Set[str]:
+    """Every file and directory name under the target (outside .git), walked once."""
+    key = str(target_dir)
+    if key not in _NAME_INDEX_CACHE:
+        names: Set[str] = set()
+        for _root, dirs, files in os.walk(target_dir):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            names.update(dirs)
+            names.update(files)
+        _NAME_INDEX_CACHE[key] = names
+    return _NAME_INDEX_CACHE[key]
 
 def expand_path_braces(path_str: str) -> List[str]:
     """Expands brace expressions like lib/adapters/{antigravity,claude,pi}.sh"""
@@ -149,13 +193,8 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
 
     # Bare filename search across target repo
     if "/" not in clean_p and "." in clean_p:
-        try:
-            matches = list(target_dir.rglob(clean_p))
-            valid_matches = [m for m in matches if ".git" not in m.parts]
-            if valid_matches:
-                return True, False
-        except Exception:
-            pass
+        if clean_p in _file_names(target_dir):
+            return True, False
 
     return False, False
 

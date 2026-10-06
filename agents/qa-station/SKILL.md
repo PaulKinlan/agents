@@ -25,7 +25,7 @@ Respond ONLY with valid JSON matching `report.schema.json`:
 ```json
 {
   "summary": "Audited 22 Factory agents and findings store; 100% of agents satisfy anatomy contracts (agent.yaml, SKILL.md, scripts/, report.schema.json) with 96.4% fleet precision.",
-  "target": "agents",
+  "target": "<the target name from the scanner data>",
   "fleet_size": 22,
   "fleet_precision": 0.964,
   "agent_scorecards": [

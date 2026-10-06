@@ -56,20 +56,27 @@ def audit_findings_precision() -> Dict[str, Any]:
         "missing_remediation": 0
     })
     noisy_candidates: List[Dict[str, Any]] = []
+    stores_read: List[str] = []
 
+    # The store is `findings/<target>.json` = {"target", "findings": {fingerprint: record}},
+    # and a record's lifecycle is `state`. This used to glob `*-findings.json` (a name the
+    # store never had) and read `status`, so it audited nothing and reported a clean fleet
+    # (journal-wog). Any JSON file of the store's shape is read; anything else is skipped.
     if FINDINGS_DIR.exists():
-        for fpath in sorted(FINDINGS_DIR.glob("*-findings.json")):
+        for fpath in sorted(FINDINGS_DIR.glob("*.json")):
             try:
                 store = json.loads(fpath.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            if not (isinstance(store, dict) and isinstance(store.get("findings"), dict)):
+                continue
+            stores_read.append(fpath.name)
 
-            items = list(store.values()) if isinstance(store, dict) else store
-            for item in items:
+            for item in store["findings"].values():
                 if not isinstance(item, dict):
                     continue
                 ag = item.get("agent", "unknown")
-                status = item.get("status", "new")
+                status = item.get("state") or item.get("status") or "new"
                 st = agent_stats[ag]
                 st["total_findings"] += 1
                 st[status] = st.get(status, 0) + 1
@@ -97,9 +104,22 @@ def audit_findings_precision() -> Dict[str, Any]:
                 "rationale": "High wontfix ratio indicates false-positive creep; tighten deterministic pre-pass filters or SKILL.md triage rules."
             })
 
+    if not stores_read:
+        # No data is not a precision of 100%: say so, so the station cannot report clean.
+        noisy_candidates.append({
+            "rule_id": "qa-no-findings-store",
+            "agent": "qa-station",
+            "path": "findings/",
+            "severity": "info",
+            "title": "No findings store found: agent precision was not measured",
+            "rationale": f"No findings/<target>.json store exists under {FINDINGS_DIR}; run a line "
+                         "before trusting a qa-station precision verdict.",
+        })
+
     return {
         "agent_scorecards": scorecards,
-        "noisy_candidates": noisy_candidates
+        "noisy_candidates": noisy_candidates,
+        "stores_read": stores_read,
     }
 
 
@@ -108,6 +128,13 @@ def main():
     parser.add_argument("--target", required=True, help="Target repository directory")
     parser.add_argument("--output", help="Output JSON path")
     args = parser.parse_args()
+
+    # A missing target is an error, never a clean audit (journal-wog).
+    target = Path(args.target).resolve()
+    if not target.is_dir():
+        import sys
+        sys.stderr.write(f"Target does not exist or is not a directory: {target}\n")
+        sys.exit(1)
 
     contract_issues = audit_agent_contracts()
     precision_data = audit_findings_precision()
@@ -118,7 +145,8 @@ def main():
     ])
 
     payload = {
-        "target": Path(args.target).resolve().name,
+        "target": target.name,
+        "stores_read": precision_data["stores_read"],
         "fleet_size": len(fleet_names),
         "fleet_agents": fleet_names,
         "contract_issues": contract_issues,
