@@ -26,6 +26,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib import sinks
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -35,6 +36,7 @@ except ImportError:
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib import sinks
 
 
 class StationError(RuntimeError):
@@ -176,18 +178,10 @@ def detect_sink(target_path: Path, target_cfg: Dict[str, Any], explicit_sink: Op
     if explicit_sink:
         return explicit_sink
 
-    # 1. Target repository rules (AGENTS.md)
-    agents_md = target_path / "AGENTS.md"
-    if agents_md.exists():
-        content = agents_md.read_text(encoding="utf-8", errors="ignore")
-        content_lower = content.lower()
-        if (
-            "beads only" in content_lower
-            or "bd is the only" in content_lower
-            or "uses **bd**" in content_lower
-            or "use `bd` for all task tracking" in content_lower
-        ):
-            return "beads"
+    # 1. Target repository rules (AGENTS.md): each sink adapter recognises its own guidance.
+    detected = sinks.detect(target_path)
+    if detected:
+        return detected
 
     # 2. Target config in targets/*.yaml
     if target_cfg.get("sink"):
@@ -494,7 +488,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             "--agent", agent_name,
             "--input", str(report_path),
             "--sink", sink,
-            "--target-dir", str(target_dir)
+            "--target-dir", str(target_dir),
+            "--run-dir", str(run_dir),
         ]
         fragment_path = run_dir / "delta.json"
         if station_only:
@@ -508,8 +503,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
         if candidates_file.exists():
             findings_cmd += ["--candidates", str(candidates_file)]
+        # The manifest's sink_* settings reach the sink adapters (e.g. the command sink's
+        # sink_command); `sink_env` names are added to the dispatch environment only.
+        sink_options = {k: v for k, v in target_cfg.items()
+                        if isinstance(k, str) and k.startswith("sink_")}
+        for key, value in sink_options.items():
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                findings_cmd += ["--sink-option", f"{key}={value}"]
         run_station_command(findings_cmd, budget, "findings dispatch", check=True,
-                            env=child_environment(sink=sink))
+                            env=child_environment(sink=sink, sink_options=sink_options))
     print(f"\nRun complete. Artifacts saved to:\n  {run_dir}\n")
     fragment = run_dir / "delta.json"
     return {
@@ -963,14 +965,14 @@ def main():
     run_parser.add_argument("agent", help="Name of the agent to run (e.g. secret-scan)")
     run_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     run_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
-    run_parser.add_argument("--sink", help="Override sink (file, beads, github-issues, or comma-separated e.g. github-issues,beads)")
+    run_parser.add_argument("--sink", help="Override sink (one of lib/sinks: file, beads, github-issues, command; comma-separated for several)")
 
     # line
     line_parser = subparsers.add_parser("line", help="Execute an ordered Factory Line composed of multiple stations")
     line_parser.add_argument("line", help="Name of the line to run (e.g. project-audit)")
     line_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     line_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agents with")
-    line_parser.add_argument("--sink", help="Override sink (file, beads, github-issues, or comma-separated e.g. github-issues,beads)")
+    line_parser.add_argument("--sink", help="Override sink (one of lib/sinks: file, beads, github-issues, command; comma-separated for several)")
 
     # hillclimb
     hc_parser = subparsers.add_parser("hillclimb", help="Run Class C goal-directed performance hill-climber with ledger")
@@ -980,7 +982,7 @@ def main():
     hc_parser.add_argument("--iterations", type=int, default=1, help="Number of hill-climb iterations")
     hc_parser.add_argument("--apply", action="store_true", help="Apply candidate edits in worktree, re-measure, keep wins, revert losses")
     hc_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
-    hc_parser.add_argument("--sink", help="Override sink (file, beads, github-issues, or comma-separated e.g. github-issues,beads)")
+    hc_parser.add_argument("--sink", help="Override sink (one of lib/sinks: file, beads, github-issues, command; comma-separated for several)")
 
     # hook
     hook_parser = subparsers.add_parser("hook", help="Manage deterministic git pre-commit hooks (Rule 8 compliant)")

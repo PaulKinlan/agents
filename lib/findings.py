@@ -9,10 +9,7 @@ sink dispatch (file, beads, github-issues).
 import argparse
 import hashlib
 import json
-import os
 import re
-import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +34,7 @@ except ImportError:
 
 # Redaction removes the value from published text; the embargo decides whether a finding is
 # routed to a tracker at all. It is a separate module so the policy has one home and one test.
+from lib import sinks
 from lib.embargo import (effective_severity, embargo_reason, is_false_positive,
                          normalize_visibility, reported_severity)
 
@@ -442,7 +440,7 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     return publishable, held
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public", agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None) -> Dict[str, Any]:
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public", agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, sink_options: Optional[Dict[str, str]] = None, run_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
@@ -453,27 +451,33 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     file described only the last station and one empty station printed "Clean Delta" for the
     whole run (fleet-810). `fragment` receives this station's delta as JSON for the line.
 
+    Delivery is delegated to the adapters in lib/sinks (fleet-km8): this function owns
+    only *what* may be published (state, receipts, false positives, the embargo) and the
+    accounting. `sink_options` are the target manifest's `sink_*` settings.
+
     Returns the per-sink delivery accounting.
     """
     print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed, {stats.get('false_positive', 0)} triaged false positive")
 
-    sinks = [s.strip() for s in sink.split(",") if s.strip()]
-    if "both" in sinks or "all" in sinks:
-        sinks = ["beads", "github-issues"]
-
+    context = sinks.SinkContext(target_name=target_name, target_dir=target_dir,
+                                visibility=normalize_visibility(visibility), agent=agent,
+                                stats=dict(stats), options=dict(sink_options or {}),
+                                # Adapter diagnostics stay private: the station's run directory
+                                # (0700), or a fresh private one under runs/ for a direct call.
+                                diagnostics_dir=run_dir or (
+                                    FACTORY_ROOT / "runs" / f"sink-{target_name}-"
+                                    f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"))
     sink_results: Dict[str, Dict[str, Any]] = {}
-    for s in sinks:
-        if s == "file":
+    for s in sinks.expand(sink):
+        adapter = sinks.get(s)
+        if adapter is not None and adapter.private:
             continue
         publishable, held = _partition_for_sink(s, processed_findings, visibility)
-        result = dict(held, eligible=len(publishable), published=0, failed=0, skipped=0,
-                      duplicate=0, note="")
-        if s == "beads":
-            result.update(_dispatch_beads(target_dir, publishable, visibility))
-        elif s == "github-issues":
-            result.update(_dispatch_github(target_name, target_dir, publishable, visibility))
-        else:
+        result = dict(held, eligible=len(publishable), **sinks.new_result())
+        if adapter is None:
             result["note"] = f"unknown sink {s!r}: nothing published"
+        else:
+            result.update(adapter.publish(context, publishable))
         sink_results[s] = result
         print(f"[Sink {s}] published {result['published']}, failed {result['failed']}, "
               f"duplicate {result['duplicate']}, "
@@ -732,191 +736,13 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 
     return "\n".join(lines)
 
-BEAD_EXTERNAL_REF_PREFIX = "factory:"
-_BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
-
-
-def _existing_bead_fingerprints(bd_bin: str, target_dir: Path) -> Optional[Dict[str, List[Dict[str, str]]]]:
-    """fingerprint -> [{id, status}] for every bead (any status) the factory filed before.
-
-    A bead is matched by its `external_ref` (`factory:<fingerprint>`), or, for beads filed
-    before that existed, by the `Fingerprint: <sha256>` line the description always carried.
-    Returns None when the tracker cannot be listed.
-    """
-    cmd = [bd_bin, "list", "--all", "--json", "-n", "0", "-C", str(target_dir)]
-    try:
-        res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True,
-                             check=False, timeout=60)
-        if res.returncode != 0:
-            return None
-        beads = json.loads(res.stdout or "[]")
-    except Exception:
-        return None
-    if not isinstance(beads, list):
-        return None
-    index: Dict[str, List[Dict[str, str]]] = {}
-    for bead in beads:
-        if not isinstance(bead, dict):
-            continue
-        fingerprints = set()
-        ref = bead.get("external_ref")
-        if isinstance(ref, str) and ref.startswith(BEAD_EXTERNAL_REF_PREFIX):
-            fingerprints.add(ref[len(BEAD_EXTERNAL_REF_PREFIX):].strip())
-        description = bead.get("description")
-        if isinstance(description, str):
-            fingerprints.update(_BEAD_FINGERPRINT_LINE.findall(description))
-        for fp in fingerprints:
-            index.setdefault(fp, []).append({"id": str(bead.get("id", "?")),
-                                             "status": str(bead.get("status", ""))})
-    return index
-
-
-def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
-    """Creates beads for active findings if bd is available. Returns delivery counts."""
-    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "duplicate": 0, "note": ""}
-    # Classify first, so the totals do not depend on finding order and never exceed what
-    # was eligible: embargoed or below-band findings are `skipped` whatever happens next;
-    # only the ones this sink would actually file can be `failed` (fleet-xkf review).
-    to_file: List[Dict[str, Any]] = []
-    for f in findings:
-        if "beads" in f.get("dispatched_sinks", []):
-            continue
-        # dispatch_to_sink already applied and logged the embargo; this keeps a direct call to
-        # the sink safe. Beads publishes medium only, as it did before: critical and high are
-        # exactly what the embargo withholds from a synced tracker (agents-681).
-        if embargo_reason(f, "beads", visibility):
-            result["skipped"] += 1
-            continue
-        # Beads is a synced tracker and never takes low/info. On a public target the central
-        # filter has already withheld critical/high; on a private one the embargo lets them
-        # through, which is the point of reading visibility (agents-5rx).
-        if f["state"] in ("new", "regressed") and effective_severity(f) in ("critical", "high", "medium"):
-            to_file.append(f)
-        else:
-            # low/info never go to a synced tracker; counted, so a zero is explained.
-            result["skipped"] += 1
-    if not to_file:
-        return result
-
-    if not (target_dir / ".beads").exists():
-        print(f"Warning: .beads directory not found in {target_dir}. Falling back to file sink.")
-        result["failed"] += len(to_file)
-        result["note"] = f"no .beads directory in {target_dir}: nothing filed"
-        return result
-
-    bd_bin = shutil.which("bd") or str(Path.home() / ".local" / "bin" / "bd")
-    if not os.path.exists(bd_bin):
-        print("Warning: bd binary not available. Findings stored in JSON only.")
-        result["failed"] += len(to_file)
-        result["note"] = "bd binary not available: nothing filed"
-        return result
-
-    # Dedupe against the beads that already exist (fleet-xkf). The store's receipts only
-    # cover this store; a fresh worktree, a renamed target or a reset store re-filed every
-    # finding. Read once; if the tracker cannot be read, file nothing rather than risk
-    # duplicates, and say so.
-    existing = _existing_bead_fingerprints(bd_bin, target_dir)
-    if existing is None:
-        result["failed"] += len(to_file)
-        result["note"] = "could not list existing beads to dedupe against: nothing filed"
-        print(f"Warning: {result['note']}")
-        return result
-
-    for f in to_file:
-        matches = existing.get(f["fingerprint"], [])
-        open_matches = [m for m in matches if m.get("status") != "closed"]
-        if open_matches or (matches and f["state"] != "regressed"):
-            # An open bead already tracks it; or a closed one does and nothing regressed.
-            result["duplicate"] = result.get("duplicate", 0) + 1
-            ids = ", ".join(m.get("id", "?") for m in (open_matches or matches))
-            print(f"Skipped duplicate: {f['fingerprint'][:16]} already tracked by {ids}")
-            continue
-        # Both title and description come from the published view. Building the title from
-        # the raw finding let a credential the scanner had recognised reach `bd --title`
-        # unchanged even though the body was masked (agents-tcd review).
-        published = redact_finding(f)
-        title = f"[{published['agent']}] {published['title']}"
-        desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
-                f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
-        cmd = [
-            bd_bin, "create",
-            "--title", title,
-            "--description", desc,
-            "--type", "bug" if "vuln" in f['agent'] or "secret" in f['agent'] else "task",
-            # The finding's identity, queryable, so the next run can dedupe (fleet-xkf).
-            "--external-ref", f"{BEAD_EXTERNAL_REF_PREFIX}{f['fingerprint']}",
-            "-C", str(target_dir)
-        ]
-        try:
-            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
-            if res.returncode == 0:
-                f.setdefault("dispatched_sinks", []).append("beads")
-                existing.setdefault(f["fingerprint"], []).append({"id": res.stdout.strip(), "status": "open"})
-                result["published"] += 1
-                print(f"Created bead for: {published['title']}")
-            else:
-                result["failed"] += 1
-                print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
-        except Exception as e:
-            result["failed"] += 1
-            print(f"Failed to create bead: {e}")
-    return result
-
-def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
-    """Public disclosure guard and issue creation for GitHub Issues. Returns delivery counts."""
-    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "note": ""}
-    gh_bin = shutil.which("gh")
-    if not gh_bin and findings:
-        result["failed"] = len(findings)
-        result["note"] = "gh binary not available: nothing filed"
-        return result
-    for f in findings:
-        if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
-            continue
-        # dispatch_to_sink already logged and filtered this; the check keeps a direct call to
-        # this sink safe. Fail-closed severity and credential-agent identity live in one place.
-        if embargo_reason(f, "github-issues", visibility):
-            # The guard's own log line is published too: derive every value it renders.
-            guarded = redact_finding(f)
-            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {effective_severity(f)} finding: {guarded['title']}")
-            print(f"-> Please review in private store or file private security advisory.")
-            result["skipped"] += 1
-            continue
-        if gh_bin and effective_severity(f) in ("critical", "high", "medium", "low"):
-            published = redact_finding(f)
-            title = f"[factory:{published['agent']}] {published['title']}"
-            body = (
-                f"**Rule**: `{published['rule_id']}`\n"
-                f"**Severity**: `{published['severity']}`\n"
-                f"**Location**: `{published['path']}:{published.get('line_number', '?')}`\n"
-                f"**Fingerprint**: `{f['fingerprint']}`\n\n"
-                f"### Description\n{published['description']}\n\n"
-                f"### Remediation\n{published.get('remediation', 'N/A')}\n"
-            )
-            cmd = [gh_bin, "issue", "create", "--title", title, "--body", body]
-            try:
-                res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
-                if res.returncode == 0:
-                    f.setdefault("dispatched_sinks", []).append("github-issues")
-                    result["published"] += 1
-                    print(f"Created GitHub issue: {res.stdout.strip()}")
-                else:
-                    result["failed"] += 1
-                    print(f"Failed to create GitHub issue (exit {res.returncode}): {res.stderr.strip()}")
-            except Exception as e:
-                result["failed"] += 1
-                print(f"Failed to create GitHub issue: {e}")
-        else:
-            result["skipped"] += 1
-    return result
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process findings into findings store")
     parser.add_argument("--target", required=True, help="Target name")
     parser.add_argument("--agent", required=True, help="Agent name")
     parser.add_argument("--input", required=True, help="JSON file with raw findings")
     parser.add_argument("--candidates", help="Scanner candidates JSON to bind rule_id/path against")
-    parser.add_argument("--sink", default="file", help="Sink type (file, beads, github-issues)")
+    parser.add_argument("--sink", default="file", help="Sink name(s), comma-separated (see lib/sinks)")
     parser.add_argument("--visibility", choices=["public", "private"], default="public",
                         help="Target repository visibility; private relaxes the public-disclosure embargo")
     parser.add_argument("--target-dir", default=".", help="Target repository directory")
@@ -924,7 +750,15 @@ if __name__ == "__main__":
                         help="One station of a factory line: write <target>-<agent>-delta.md, "
                              "not the run's <target>-delta.md (the line writes that)")
     parser.add_argument("--fragment", help="Write this station's delta as JSON here (for the line report)")
+    parser.add_argument("--run-dir", help="The station's private run directory (sink diagnostics go here)")
+    parser.add_argument("--sink-option", action="append", default=[], metavar="KEY=VALUE",
+                        help="A sink_* setting from the target manifest (e.g. sink_command=...)")
     args = parser.parse_args()
+    sink_options = {}
+    for option in args.sink_option:
+        key, _, value = option.partition("=")
+        if key.strip():
+            sink_options[key.strip()] = value
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -956,6 +790,8 @@ if __name__ == "__main__":
             agent=args.agent,
             station_only=args.station_only,
             fragment=Path(args.fragment) if args.fragment else None,
+            sink_options=sink_options,
+            run_dir=Path(args.run_dir) if args.run_dir else None,
         )
     finally:
         store.save()

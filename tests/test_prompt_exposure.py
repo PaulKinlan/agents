@@ -72,6 +72,9 @@ class PromptSandbox:
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
         for module in ("findings.py", "redaction.py", "embargo.py"):
             shutil.copyfile(ROOT / "lib" / module, self.root / "lib" / module)
+        # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
+        shutil.copytree(ROOT / "lib" / "sinks", self.root / "lib" / "sinks", dirs_exist_ok=True)
+        shutil.copyfile(ROOT / "lib" / "budget.py", self.root / "lib" / "budget.py")  # command sink
 
         report = self.root / "report-src.json"
         report.write_text(json.dumps({"summary": "stub", "scanned_files": 1, "findings": []}),
