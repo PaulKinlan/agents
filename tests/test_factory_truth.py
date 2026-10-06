@@ -326,7 +326,8 @@ class TestSinkAccounting(SandboxCase):
     def test_embargoed_findings_are_counted_and_reported(self):
         (self.box.target / ".beads").mkdir()
         bd = self.box.bin / "bd"
-        bd.write_text(f"#!/usr/bin/env bash\necho \"$@\" >> '{self.box.root}/bd.log'\n")
+        bd.write_text("#!/usr/bin/env bash\nif [ \"$1\" = list ]; then echo '[]'; exit 0; fi\n"
+                      f"echo \"$@\" >> '{self.box.root}/bd.log'\n")
         bd.chmod(0o755)
         items = [finding(rule_id="a", severity="high", snippet="1", title="High one"),
                  finding(rule_id="b", severity="medium", snippet="2", title="Medium one"),
@@ -340,7 +341,7 @@ class TestSinkAccounting(SandboxCase):
                                      explicit_sink="beads")
         self.assertEqual((self.box.root / "bd.log").read_text().count("create --title"), 1)
         delta = self.box.findings("target-delta.md")
-        self.assertIn("**beads**: published 1, failed 0, embargoed 1, below band 1", delta)
+        self.assertIn("**beads**: published 1, failed 0, duplicate 0, embargoed 1, below band 1", delta)
         machine = json.loads(self.box.findings("target-line.json"))
         self.assertEqual(machine["sinks"]["beads"]["published"], 1)
         self.assertEqual(machine["sinks"]["beads"]["embargoed"], 1)

@@ -346,6 +346,7 @@ class TestTargetVisibility(unittest.TestCase):
             bd_stub = bindir / "bd"
             bd_stub.write_text(
                 "#!/usr/bin/env bash\n"
+                "if [ \"$1\" = list ]; then echo '[]'; exit 0; fi\n"
                 f"printf '%s\\n' \"$*\" >> '{calls}'\n"
                 "echo 'fixture-123'\n",
                 encoding="utf-8",

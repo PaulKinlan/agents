@@ -85,6 +85,11 @@ import sys
 from pathlib import Path
 
 tool = Path(sys.argv[0]).name
+# The beads sink's read-only dedupe query (fleet-xkf) is not a publication: answer it from
+# SINK_EXISTING (a JSON list of beads, default none) and do not record it.
+if tool == 'bd' and sys.argv[1:2] == ['list']:
+    print(os.environ.get('SINK_EXISTING', '[]'))
+    sys.exit(0)
 with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
     log.write(json.dumps({'tool': tool, 'args': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')
 if os.environ.get('SINK_FAIL_TOOL') == tool:
@@ -467,6 +472,50 @@ print('fixture-123' if tool == 'bd' else 'https://example.invalid/issues/123')
         self.assertEqual(self.stats()["suppressed"], 1)
         self.assertEqual(self.stats()["unchanged"], 1)
         self.assertIn("Synthetic accepted risk", self.report())
+
+    def test_beads_carry_the_fingerprint_as_external_ref(self):
+        """fleet-xkf: the identity is stored in the bead so the next run can find it."""
+        self.scan("beads")
+        call, = self.calls()
+        fingerprint, = self.store()["findings"]
+        self.assertEqual(call["args"][call["args"].index("--external-ref") + 1],
+                         f"factory:{fingerprint}")
+
+    def test_beads_dedupe_against_an_existing_open_bead(self):
+        """fleet-xkf: a reset store (fresh worktree, renamed target) used to re-file everything."""
+        fingerprint = compute_fingerprint("lint", SAMPLE["rule_id"], SAMPLE["path"], SAMPLE["snippet"])
+        self.env["SINK_EXISTING"] = json.dumps([
+            {"id": "proj-1", "status": "open", "external_ref": f"factory:{fingerprint}"}])
+        result = self.scan("beads")
+        self.assertEqual(self.calls(), [])
+        self.assertIn("duplicate 1", result.stdout)
+        self.assertIn("proj-1", result.stdout)
+        self.assertIn("duplicate 1", self.report())
+
+    def test_beads_dedupe_matches_legacy_beads_by_description(self):
+        fingerprint = compute_fingerprint("lint", SAMPLE["rule_id"], SAMPLE["path"], SAMPLE["snippet"])
+        self.env["SINK_EXISTING"] = json.dumps([
+            {"id": "proj-2", "status": "in_progress", "external_ref": None,
+             "description": f"old body\nFingerprint: {fingerprint}\nSnippet:"}])
+        self.scan("beads")
+        self.assertEqual(self.calls(), [])
+
+    def test_a_closed_bead_blocks_a_new_finding_but_not_a_regression(self):
+        fingerprint = compute_fingerprint("lint", SAMPLE["rule_id"], SAMPLE["path"], SAMPLE["snippet"])
+        self.env["SINK_EXISTING"] = json.dumps([
+            {"id": "proj-3", "status": "closed", "external_ref": f"factory:{fingerprint}"}])
+        self.scan("beads")
+        self.assertEqual(self.calls(), [], "closed and not regressed: already handled")
+        self.scan("beads", [])          # fixed
+        self.scan("beads")              # regressed: the closed bead does not cover it
+        self.assertEqual([c["args"][0] for c in self.calls()], ["create"])
+
+    def test_an_unreadable_tracker_files_nothing_and_says_so(self):
+        self.env["SINK_EXISTING"] = "not json"
+        result = self.scan("beads")
+        self.assertEqual(self.calls(), [])
+        self.assertIn("could not list existing beads", result.stdout)
+        self.assertIn("failed 1", self.report())
 
     def test_multi_sink_dispatches_to_both_beads_and_github(self):
         """When sink is comma-separated (e.g. github-issues,beads or both), dispatch to both."""
