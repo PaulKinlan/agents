@@ -30,9 +30,23 @@ You must return a valid JSON object matching `report.schema.json`:
   "summary": "High-level summary of the threat model and attack surface.",
   "target": "<target_name>",
   "threat_model_markdown": "# THREAT MODEL: ...",
-  "findings": []
+  "findings": [
+    {
+      "rule_id": "tm-missing-auth-boundary",
+      "path": "src/server.ts",
+      "line_number": 42,
+      "snippet": "app.post('/ingest', handler)",
+      "severity": "high",
+      "title": "Ingestion endpoint accepts unauthenticated writes",
+      "description": "Why this is a gap in the defences, citing the code.",
+      "remediation": "What to change."
+    }
+  ]
 }
 ```
+
+Each finding's identifier goes in `rule_id` (not `id`); `rule_id`, `severity`, `title` and
+`description` are required. `findings` may be empty when there are no gaps.
 
 The `threat_model_markdown` must be a high-quality, professional markdown document with the following sections:
 

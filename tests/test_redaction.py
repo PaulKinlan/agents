@@ -133,6 +133,10 @@ class TestCredentialEchoRegression(unittest.TestCase):
         recorder = f"#!{sys.executable}\n" + """
 import json, os, sys
 from pathlib import Path
+# The beads sink's read-only dedupe query (fleet-xkf) is not a publication: answer, don't record.
+if Path(sys.argv[0]).name == 'bd' and sys.argv[1:2] == ['list']:
+    print('[]')
+    sys.exit(0)
 with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
     log.write(json.dumps({'tool': Path(sys.argv[0]).name, 'args': sys.argv[1:]}) + '\\n')
 print('fixture-123')
@@ -412,6 +416,10 @@ class TestPublishedSurfaces(unittest.TestCase):
         recorder = f"#!{sys.executable}\n" + """
 import json, os, sys
 from pathlib import Path
+# The beads sink's read-only dedupe query (fleet-xkf) is not a publication: answer, don't record.
+if Path(sys.argv[0]).name == 'bd' and sys.argv[1:2] == ['list']:
+    print('[]')
+    sys.exit(0)
 with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
     log.write(json.dumps({'tool': Path(sys.argv[0]).name, 'args': sys.argv[1:]}) + '\\n')
 print('fixture-123')

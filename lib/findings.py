@@ -466,7 +466,8 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
         if s == "file":
             continue
         publishable, held = _partition_for_sink(s, processed_findings, visibility)
-        result = dict(held, eligible=len(publishable), published=0, failed=0, skipped=0, note="")
+        result = dict(held, eligible=len(publishable), published=0, failed=0, skipped=0,
+                      duplicate=0, note="")
         if s == "beads":
             result.update(_dispatch_beads(target_dir, publishable, visibility))
         elif s == "github-issues":
@@ -475,6 +476,7 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
             result["note"] = f"unknown sink {s!r}: nothing published"
         sink_results[s] = result
         print(f"[Sink {s}] published {result['published']}, failed {result['failed']}, "
+              f"duplicate {result['duplicate']}, "
               f"embargoed {result['embargoed']}, below band {result['skipped']}, "
               f"false positive {result['false_positive']}"
               + (f" ({result['note']})" if result.get("note") else ""))
@@ -657,7 +659,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append("")
         for sink, r in sink_results.items():
             lines.append(f"- **{sink}**: published {r.get('published', 0)}, failed {r.get('failed', 0)}, "
-                         f"embargoed {r.get('embargoed', 0)}, below band {r.get('skipped', 0)}, "
+                         f"duplicate {r.get('duplicate', 0)}, embargoed {r.get('embargoed', 0)}, below band {r.get('skipped', 0)}, "
                          f"false positive {r.get('false_positive', 0)}"
                          + (f" — {r['note']}" if r.get("note") else ""))
         lines.append("")
@@ -730,22 +732,52 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 
     return "\n".join(lines)
 
+BEAD_EXTERNAL_REF_PREFIX = "factory:"
+_BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
+
+
+def _existing_bead_fingerprints(bd_bin: str, target_dir: Path) -> Optional[Dict[str, List[Dict[str, str]]]]:
+    """fingerprint -> [{id, status}] for every bead (any status) the factory filed before.
+
+    A bead is matched by its `external_ref` (`factory:<fingerprint>`), or, for beads filed
+    before that existed, by the `Fingerprint: <sha256>` line the description always carried.
+    Returns None when the tracker cannot be listed.
+    """
+    cmd = [bd_bin, "list", "--all", "--json", "-n", "0", "-C", str(target_dir)]
+    try:
+        res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True,
+                             check=False, timeout=60)
+        if res.returncode != 0:
+            return None
+        beads = json.loads(res.stdout or "[]")
+    except Exception:
+        return None
+    if not isinstance(beads, list):
+        return None
+    index: Dict[str, List[Dict[str, str]]] = {}
+    for bead in beads:
+        if not isinstance(bead, dict):
+            continue
+        fingerprints = set()
+        ref = bead.get("external_ref")
+        if isinstance(ref, str) and ref.startswith(BEAD_EXTERNAL_REF_PREFIX):
+            fingerprints.add(ref[len(BEAD_EXTERNAL_REF_PREFIX):].strip())
+        description = bead.get("description")
+        if isinstance(description, str):
+            fingerprints.update(_BEAD_FINGERPRINT_LINE.findall(description))
+        for fp in fingerprints:
+            index.setdefault(fp, []).append({"id": str(bead.get("id", "?")),
+                                             "status": str(bead.get("status", ""))})
+    return index
+
+
 def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
     """Creates beads for active findings if bd is available. Returns delivery counts."""
-    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "note": ""}
-    if not (target_dir / ".beads").exists():
-        print(f"Warning: .beads directory not found in {target_dir}. Falling back to file sink.")
-        result["failed"] = len(findings)
-        result["note"] = f"no .beads directory in {target_dir}: nothing filed"
-        return result
-
-    bd_bin = shutil.which("bd") or str(Path.home() / ".local" / "bin" / "bd")
-    if not os.path.exists(bd_bin):
-        print("Warning: bd binary not available. Findings stored in JSON only.")
-        result["failed"] = len(findings)
-        result["note"] = "bd binary not available: nothing filed"
-        return result
-
+    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "duplicate": 0, "note": ""}
+    # Classify first, so the totals do not depend on finding order and never exceed what
+    # was eligible: embargoed or below-band findings are `skipped` whatever happens next;
+    # only the ones this sink would actually file can be `failed` (fleet-xkf review).
+    to_file: List[Dict[str, Any]] = []
     for f in findings:
         if "beads" in f.get("dispatched_sinks", []):
             continue
@@ -759,35 +791,75 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility
         # filter has already withheld critical/high; on a private one the embargo lets them
         # through, which is the point of reading visibility (agents-5rx).
         if f["state"] in ("new", "regressed") and effective_severity(f) in ("critical", "high", "medium"):
-            # Both title and description come from the published view. Building the title from
-            # the raw finding let a credential the scanner had recognised reach `bd --title`
-            # unchanged even though the body was masked (agents-tcd review).
-            published = redact_finding(f)
-            title = f"[{published['agent']}] {published['title']}"
-            desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
-                    f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
-            cmd = [
-                bd_bin, "create",
-                "--title", title,
-                "--description", desc,
-                "--type", "bug" if "vuln" in f['agent'] or "secret" in f['agent'] else "task",
-                "-C", str(target_dir)
-            ]
-            try:
-                res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
-                if res.returncode == 0:
-                    f.setdefault("dispatched_sinks", []).append("beads")
-                    result["published"] += 1
-                    print(f"Created bead for: {published['title']}")
-                else:
-                    result["failed"] += 1
-                    print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
-            except Exception as e:
-                result["failed"] += 1
-                print(f"Failed to create bead: {e}")
+            to_file.append(f)
         else:
             # low/info never go to a synced tracker; counted, so a zero is explained.
             result["skipped"] += 1
+    if not to_file:
+        return result
+
+    if not (target_dir / ".beads").exists():
+        print(f"Warning: .beads directory not found in {target_dir}. Falling back to file sink.")
+        result["failed"] += len(to_file)
+        result["note"] = f"no .beads directory in {target_dir}: nothing filed"
+        return result
+
+    bd_bin = shutil.which("bd") or str(Path.home() / ".local" / "bin" / "bd")
+    if not os.path.exists(bd_bin):
+        print("Warning: bd binary not available. Findings stored in JSON only.")
+        result["failed"] += len(to_file)
+        result["note"] = "bd binary not available: nothing filed"
+        return result
+
+    # Dedupe against the beads that already exist (fleet-xkf). The store's receipts only
+    # cover this store; a fresh worktree, a renamed target or a reset store re-filed every
+    # finding. Read once; if the tracker cannot be read, file nothing rather than risk
+    # duplicates, and say so.
+    existing = _existing_bead_fingerprints(bd_bin, target_dir)
+    if existing is None:
+        result["failed"] += len(to_file)
+        result["note"] = "could not list existing beads to dedupe against: nothing filed"
+        print(f"Warning: {result['note']}")
+        return result
+
+    for f in to_file:
+        matches = existing.get(f["fingerprint"], [])
+        open_matches = [m for m in matches if m.get("status") != "closed"]
+        if open_matches or (matches and f["state"] != "regressed"):
+            # An open bead already tracks it; or a closed one does and nothing regressed.
+            result["duplicate"] = result.get("duplicate", 0) + 1
+            ids = ", ".join(m.get("id", "?") for m in (open_matches or matches))
+            print(f"Skipped duplicate: {f['fingerprint'][:16]} already tracked by {ids}")
+            continue
+        # Both title and description come from the published view. Building the title from
+        # the raw finding let a credential the scanner had recognised reach `bd --title`
+        # unchanged even though the body was masked (agents-tcd review).
+        published = redact_finding(f)
+        title = f"[{published['agent']}] {published['title']}"
+        desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
+                f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
+        cmd = [
+            bd_bin, "create",
+            "--title", title,
+            "--description", desc,
+            "--type", "bug" if "vuln" in f['agent'] or "secret" in f['agent'] else "task",
+            # The finding's identity, queryable, so the next run can dedupe (fleet-xkf).
+            "--external-ref", f"{BEAD_EXTERNAL_REF_PREFIX}{f['fingerprint']}",
+            "-C", str(target_dir)
+        ]
+        try:
+            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
+            if res.returncode == 0:
+                f.setdefault("dispatched_sinks", []).append("beads")
+                existing.setdefault(f["fingerprint"], []).append({"id": res.stdout.strip(), "status": "open"})
+                result["published"] += 1
+                print(f"Created bead for: {published['title']}")
+            else:
+                result["failed"] += 1
+                print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
+        except Exception as e:
+            result["failed"] += 1
+            print(f"Failed to create bead: {e}")
     return result
 
 def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:

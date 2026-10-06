@@ -16,6 +16,7 @@ surveyed and covered, and qa-station checks that every agent ships the file.
 """
 
 import json
+import re
 from collections.abc import Mapping as MappingABC
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -120,3 +121,99 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any) -
     if schema is None:
         return None
     return validate(report, schema)
+
+
+# ---------------------------------------------------------------------------------------------
+# Field-name normalisation (fleet-9wyi)
+#
+# A model that returns a complete analysis under `"id": "TM-1"` instead of `"rule_id"` has not
+# produced unusable output; it has used a synonym. Rejecting the whole report for that turned a
+# 23KB threat model into "no verdict" and halted the line. Before validation, each finding's
+# well-known synonyms are mapped onto the canonical names the findings store reads. Only a
+# canonical field that is *absent* is filled, only from an alias that is not itself a declared
+# property, and every mapping is reported. The schema still decides: a report that is still
+# non-conformant after this is rejected exactly as before.
+# ---------------------------------------------------------------------------------------------
+
+FINDING_FIELD_ALIASES = {
+    "rule_id": ("id", "rule", "ruleId", "rule_name", "check_id", "finding_id", "threat_id", "type"),
+    "path": ("file", "file_path", "filepath", "filename", "location", "affected_file"),
+    "line_number": ("line", "lineNumber", "line_no", "lineno", "start_line"),
+    "title": ("name", "headline", "summary"),
+    "description": ("details", "detail", "explanation", "rationale", "impact", "body"),
+    "remediation": ("recommendation", "mitigation", "fix", "suggested_fix", "remedy"),
+    "snippet": ("code", "evidence", "excerpt", "code_snippet"),
+    "severity": ("risk", "level", "risk_level"),
+}
+
+SEVERITY_SYNONYMS = {
+    "moderate": "medium", "med": "medium", "informational": "info", "information": "info",
+    "none": "info", "crit": "critical", "important": "high", "minor": "low",
+}
+
+# `<path>:<line>[:<col>]`, parsed from the numeric suffix so the path may contain spaces and
+# a Windows drive-letter colon (`src/my file.ts:12`, `C:\\src\\x.ts:12:5`). The path part must
+# be non-empty and not itself end in a colon; the shortest such path wins, so `x.ts:12:5` is
+# line 12, column 5.
+_LOCATION = re.compile(r"^(?P<path>.*?[^:\s]):(?P<line>\d+)(?::(?P<col>\d+))?$")
+
+
+def _finding_item_schema(schema: Any) -> Dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {}
+    findings = schema.get("properties", {}).get("findings", {})
+    items = findings.get("items", {}) if isinstance(findings, dict) else {}
+    return items if isinstance(items, dict) else {}
+
+
+def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Map known field-name synonyms in `report["findings"]` onto canonical names, in place.
+
+    Returns human-readable notes ("findings[0]: id -> rule_id"). Also: a `path:line` location
+    is split, a digit-string line becomes an integer, and a severity is lower-cased and mapped
+    from common synonyms (moderate -> medium). Anything else is left for the schema to judge.
+    """
+    notes: List[str] = []
+    if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
+        return notes
+    item_schema = _finding_item_schema(schema)
+    declared = set(item_schema.get("properties", {}) or {})
+    enum = (item_schema.get("properties", {}).get("severity", {}) or {}).get("enum")
+
+    for index, item in enumerate(report["findings"]):
+        if not isinstance(item, dict):
+            continue
+        for canonical, aliases in FINDING_FIELD_ALIASES.items():
+            if canonical in item:
+                continue
+            for alias in aliases:
+                if alias in item and alias not in declared and item[alias] not in (None, ""):
+                    value = item[alias]
+                    if canonical == "path" and isinstance(value, str):
+                        match = _LOCATION.match(value.strip())
+                        if match:
+                            value = match.group("path")
+                            item.setdefault("line_number", int(match.group("line")))
+                    item[canonical] = value
+                    notes.append(f"findings[{index}]: {alias} -> {canonical}")
+                    break
+        line = item.get("line_number")
+        if isinstance(line, str) and line.strip().isdigit():
+            item["line_number"] = int(line.strip())
+        severity = item.get("severity")
+        if isinstance(severity, str):
+            lowered = severity.strip().lower()
+            lowered = SEVERITY_SYNONYMS.get(lowered, lowered)
+            if lowered != severity and (not isinstance(enum, list) or lowered in enum):
+                item["severity"] = lowered
+                notes.append(f"findings[{index}]: severity {severity!r} -> {lowered!r}")
+    return notes
+
+
+def normalize_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any) -> List[str]:
+    """`normalize_report` against the agent's declared schema (or none). Never raises."""
+    try:
+        schema = declared_schema(agent_dir, agent_cfg)
+    except (FileNotFoundError, ValueError):
+        schema = None
+    return normalize_report(report, schema)

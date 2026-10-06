@@ -25,7 +25,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.child_env import child_environment, prepass_environment
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
-    from lib.report_schema import validate_agent_report
+    from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -34,7 +34,7 @@ except ImportError:
     from lib.child_env import child_environment, prepass_environment
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
-    from lib.report_schema import validate_agent_report
+    from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
 
 
 class StationError(RuntimeError):
@@ -364,6 +364,19 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             f"triage each item, and output your structured JSON findings.\n\n"
             f"Scanner Data:\n{json.dumps(candidates_slice, indent=2)}\n"
         )
+        # Carry the exact output contract in the prompt: a SKILL.md example with `"findings": []`
+        # left the model to invent finding field names, and `"id"` for `rule_id` cost a whole
+        # threat model (fleet-9wyi).
+        try:
+            output_schema = declared_schema(agent_dir, agent_cfg)
+        except (FileNotFoundError, ValueError):
+            output_schema = None
+        if output_schema:
+            prompt += (
+                "\nYour final answer MUST be one JSON object that validates against this JSON "
+                "Schema. Use these exact property names (e.g. `rule_id`, not `id`):\n"
+                f"{json.dumps(output_schema, indent=2)}\n"
+            )
         prompt_file = run_dir / "prompt.txt"
         prompt_file.write_text(prompt, encoding="utf-8")
         os.chmod(prompt_file, 0o600)
@@ -419,14 +432,32 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 "findings": []
             }
         else:
+            # Known field-name synonyms are mapped first (fleet-9wyi): `"id"` for `rule_id`
+            # is a usable report, not a missing one. Every mapping is printed and recorded.
+            normalised = normalize_agent_report(agent_dir, agent_cfg, report)
+            if normalised:
+                print(f"Note: normalised {len(normalised)} field name(s)/value(s) in the model "
+                      f"report (first: {normalised[0]}); see normalised_fields.json.")
+                (run_dir / "normalised_fields.json").write_text(json.dumps(normalised, indent=2),
+                                                                encoding="utf-8")
             # The output contract is the deterministic half of the agent (SF-07): a report
             # that violates it is treated exactly like unparseable output — the store never
             # sees it, so no finding transitions on half-formed data.
             schema_errors = validate_agent_report(agent_dir, agent_cfg, report)
             if schema_errors:
                 model_parse_succeeded = False
+                rejected = report.get("findings") if isinstance(report.get("findings"), list) else []
+                # Say what was lost and where it is, so a rejection never reads as an empty
+                # response (fleet-9wyi): the full violation list and the parsed report are kept.
+                (run_dir / "schema_errors.json").write_text(json.dumps(schema_errors, indent=2),
+                                                            encoding="utf-8")
+                (run_dir / "rejected_report.json").write_text(json.dumps(report, indent=2),
+                                                              encoding="utf-8")
                 no_verdict = (f"Model output violates the declared report schema "
-                              f"({len(schema_errors)} violation(s); first: {schema_errors[0]})")
+                              f"({len(schema_errors)} violation(s); first: {schema_errors[0]}); "
+                              f"{len(rejected)} finding(s) were in the rejected report "
+                              f"(kept in {run_dir / 'rejected_report.json'}, violations in "
+                              f"schema_errors.json)")
                 print(f"Warning: {no_verdict}. "
                       f"Skipping findings store update to prevent false 'fixed' transitions.")
                 report = {
@@ -449,6 +480,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         tm_run_file = run_dir / "THREAT_MODEL.md"
         tm_run_file.write_text(report["threat_model_markdown"], encoding="utf-8")
         tm_findings_file = FACTORY_ROOT / "findings" / f"{target_name}-THREAT_MODEL.md"
+        tm_findings_file.parent.mkdir(parents=True, exist_ok=True)
         tm_findings_file.write_text(report["threat_model_markdown"], encoding="utf-8")
         print(f"\n[Threat Model] Generated document saved to:\n  {tm_findings_file}")
 
@@ -587,10 +619,15 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                 break
 
     # Stations the halt prevented are listed, so the report cannot read as covering them.
-    for station in stations[len(scorecard):]:
-        scorecard.append({"station": station_name(station), "status": "SKIPPED",
+    halted_at = scorecard[-1]["station"] if line_halted and scorecard else None
+    skipped = [station_name(station) for station in stations[len(scorecard):]]
+    for name in skipped:
+        scorecard.append({"station": name, "status": "SKIPPED",
                           "findings_count": None, "criticals": None,
-                          "error": "not run: line halted"})
+                          "error": f"not run: line halted at {halted_at}"})
+    if skipped:
+        # The failure names what it cost, not just the failing station (fleet-9wyi).
+        print(f"\n⏭️  Halt at '{halted_at}' SKIPPED {len(skipped)} station(s): {', '.join(skipped)}")
 
     errored = [sc for sc in scorecard if sc["status"] not in VERDICT_STATUSES]
     print("\n" + "=" * 70)
