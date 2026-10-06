@@ -36,9 +36,6 @@ class PromptSandbox:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.target = root / "target"
-        self.engine_args = root / "engine-args.log"
-        self.engine_prompt = root / "engine-prompt.log"
-        self.adapter_argv = root / "adapter-argv.log"
         self._build()
 
     def _build(self) -> None:
@@ -81,9 +78,14 @@ class PromptSandbox:
         stub = bindir / "pi"
         stub.write_text(
             "#!/usr/bin/env bash\n"
-            f"printf '%s' \"$*\" > '{self.engine_args}'\n"
-            f"cat > '{self.engine_prompt}'\n"
-            f"if [ -r /proc/$PPID/cmdline ]; then tr '\\0' ' ' < /proc/$PPID/cmdline > '{self.adapter_argv}'; fi\n"
+            # Everything the test needs goes to stdout (captured into the run directory's
+            # model_output.txt): the OS sandbox (agents-9n7) makes the factory root
+            # read-only for the engine.
+            "echo \"STUB-ARGS:$*\"\n"
+            "echo STUB-PROMPT-BEGIN\n"
+            "cat\n"
+            "echo STUB-PROMPT-END\n"
+            "if [ -r /proc/$PPID/cmdline ]; then echo \"STUB-ADAPTER-ARGV:$(tr '\\0' ' ' < /proc/$PPID/cmdline)\"; fi\n"
             f"cat '{report}'\n",
             encoding="utf-8",
         )
@@ -121,11 +123,20 @@ class TestPromptExposure(unittest.TestCase):
                              "the retained prompt must not be world-readable")
 
             # The prompt reached the engine, which proves the stdin hop works end to end.
-            self.assertIn(KEY, sandbox.engine_prompt.read_text(encoding="utf-8"))
+            # The stub reports through model_output.txt (the factory root is read-only
+            # inside the OS sandbox, agents-9n7).
+            model_output = (run_dir / "model_output.txt").read_text(encoding="utf-8")
+            engine_prompt = model_output.split("STUB-PROMPT-BEGIN\n", 1)[1]
+            engine_prompt = engine_prompt.split("STUB-PROMPT-END", 1)[0]
+            self.assertIn(KEY, engine_prompt)
+            args_line = next(line for line in model_output.splitlines()
+                             if line.startswith("STUB-ARGS:"))
             # ...and it is not in the engine's argv, nor in the adapter's.
-            self.assertNotIn(KEY, sandbox.engine_args.read_text(encoding="utf-8"))
-            if sandbox.adapter_argv.exists() and sandbox.adapter_argv.stat().st_size:
-                self.assertNotIn(KEY, sandbox.adapter_argv.read_text(encoding="utf-8"),
+            self.assertNotIn(KEY, args_line)
+            adapter_argv = [line for line in model_output.splitlines()
+                            if line.startswith("STUB-ADAPTER-ARGV:")]
+            for line in adapter_argv:
+                self.assertNotIn(KEY, line,
                                  "the dispatcher must not put the prompt in argv")
 
     def test_an_empty_stdin_is_rejected_loudly(self):

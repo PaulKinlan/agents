@@ -356,7 +356,13 @@ class TestAdapters(unittest.TestCase):
 
 
 class TestDispatcher(unittest.TestCase):
-    """The real `factory run` CLI, from a sandbox copy, against a stub `pi`."""
+    """The real `factory run` CLI, from a sandbox copy, against a stub `pi`.
+
+    The stub reports through its stdout, which the adapter captures into the run
+    directory's model_output.txt — the only place an engine can write, because the OS
+    sandbox (agents-9n7) makes the factory root read-only and the run directory writable.
+    extract_json_from_output tolerates the marker lines around the JSON report.
+    """
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-pnu-dispatch-")
@@ -369,19 +375,33 @@ class TestDispatcher(unittest.TestCase):
         self.target.mkdir()
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.argv_log = self.root / "engine-argv.log"
-        self.policy_log = self.root / "engine-policy.log"
-        self.budget_log = self.root / "engine-budget.log"
         stub = self.bin / "pi"
         stub.write_text(
             "#!/usr/bin/env bash\n"
-            f"printf '%s\\n' \"$@\" > '{self.argv_log}'\n"
-            f"printf '%s' \"${{FACTORY_TOOL_POLICY:-unset}}\" > '{self.policy_log}'\n"
-            f"printf '%s' \"${{FACTORY_MAX_BUDGET_USD:-unset}}\" > '{self.budget_log}'\n"
+            "echo \"ARGV:$*\"\n"
+            "echo \"POLICY:${FACTORY_TOOL_POLICY:-unset}\"\n"
+            "echo \"BUDGET:${FACTORY_MAX_BUDGET_USD:-unset}\"\n"
+            # The canary's *path* arrives through a file inside the target (the adapter
+            # cds there); env would not reach the engine — child_environment is an
+            # allowlist, which is exactly the point.
+            "CANARY_PATH=$(cat canary-path.txt 2>/dev/null || echo /nonexistent)\n"
+            "echo \"CANARY:$(cat \"$CANARY_PATH\" 2>&1 | head -1)\"\n"
             "cat >/dev/null\n" + STUB_REPORT,
             encoding="utf-8",
         )
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+    def stub_lines(self):
+        runs = self.run_dirs()
+        self.assertEqual(len(runs), 1, "expected exactly one run directory")
+        output = (runs[0] / "model_output.txt").read_text(encoding="utf-8")
+        return output.splitlines()
+
+    def stub_line(self, prefix):
+        for line in self.stub_lines():
+            if line.startswith(prefix):
+                return line[len(prefix):]
+        self.fail(f"no {prefix} line in the stub's output")
 
     def agent(self, yaml_text):
         directory = self.root / "agents" / "probe"
@@ -416,8 +436,7 @@ class TestDispatcher(unittest.TestCase):
         res = self.factory("pi")
         self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
         self.assertIn("exceeds the t0-readonly ceiling", res.stderr)
-        self.assertFalse(self.argv_log.exists(), "the engine must not start")
-        self.assertEqual(self.run_dirs(), [])
+        self.assertEqual(self.run_dirs(), [], "the engine must not start")
 
     def test_the_policy_is_set_explicitly_enforced_and_recorded(self):
         """A FACTORY_TOOL_POLICY in the caller's environment never reaches the adapter."""
@@ -425,8 +444,8 @@ class TestDispatcher(unittest.TestCase):
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
         res = self.factory("pi", {"FACTORY_TOOL_POLICY": "unrestricted"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertEqual(self.policy_log.read_text(encoding="utf-8"), READ_ONLY)
-        argv = self.argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
+        argv = self.stub_line("ARGV:").split()
         self.assertEqual(argv[argv.index("--tools") + 1], "read,grep,find,ls")
         self.assertIn("Withheld:    write", res.stdout)
         self.assertIn("[pi adapter] Tool policy: read-only", res.stdout)
@@ -436,6 +455,7 @@ class TestDispatcher(unittest.TestCase):
         self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
         self.assertEqual(record["declared"]["containment"], "t2-local")
         self.assertEqual(set(record["withheld"]), {"write"})
+
     def test_a_declared_usd_cap_reaches_the_adapter_only_from_the_dispatcher(self):
         """agents-js7: the declared cap is set explicitly on the adapter environment; an
         ambient FACTORY_MAX_BUDGET_USD in the operator's shell never reaches the adapter."""
@@ -443,11 +463,42 @@ class TestDispatcher(unittest.TestCase):
                    "budget: {max_minutes: 1, max_usd: 0.5}\n")
         res = self.factory("pi", {"FACTORY_MAX_BUDGET_USD": "999"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertEqual(self.budget_log.read_text(encoding="utf-8"), "0.5",
-                         "the declared cap, not the ambient one")
+        self.assertEqual(self.stub_line("BUDGET:"), "0.5", "the declared cap, not the ambient one")
         self.assertIn("NOT enforced (the pi adapter has no per-run budget flag)", res.stdout)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertIn("budget.max_usd", record["not_enforced"])
+
+    def test_the_engine_cannot_read_outside_the_target(self):
+        """agents-9n7 acceptance, end to end: the agents-pnu probe. A canary sits outside
+        the target; a pi factory run must not be able to read it. Without a sandbox on the
+        host the old gap applies and the run honestly reports NOT confined — this test
+        asserts the sandboxed behaviour where a sandbox exists, and the honest banner
+        where it does not."""
+        outside = tempfile.TemporaryDirectory(prefix="factory-9n7-outside-")
+        self.addCleanup(outside.cleanup)
+        canary = Path(outside.name) / "canary.txt"
+        canary.write_text("CANARY-SECRET-9N7", encoding="utf-8")
+        (self.target / "canary-path.txt").write_text(str(canary), encoding="utf-8")
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        sandboxed = "os_sandbox" in record["granted"] and record["granted"]["os_sandbox"]["engine_sandboxed"]
+        if sandboxed:
+            line = self.stub_line("CANARY:")
+            self.assertNotIn("CANARY-SECRET-9N7", line)
+            self.assertIn("No such file", line)
+            self.assertNotIn("CANARY-SECRET-9N7", res.stdout + res.stderr)
+            self.assertIn("confined to the target", record["granted"]["read_scope"])
+            self.assertNotIn("read-scope", record["not_enforced"])
+            self.assertNotIn("os-sandbox", record["not_enforced"])
+            self.assertIn("network-egress", record["not_enforced"])
+            self.assertIn("Sandbox:     enforced", res.stdout)
+        else:
+            self.assertIn("NOT confined", res.stdout)
+            self.assertIn("os-sandbox", record["not_enforced"])
+            self.assertIn("read-scope", record["not_enforced"])
 
 
 if __name__ == "__main__":

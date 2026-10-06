@@ -151,13 +151,15 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                 "budget: {max_minutes: 1}\n",
                 encoding="utf-8",
             )
-            prepass_log = sandbox / "prepass-env.json"
-            engine_log = sandbox / "engine-env.json"
+            prepass_log_name = "prepass-env.json"
             (sandbox / "agents" / "probe" / "scripts" / "prepass.py").write_text(
                 "import json, os, sys\n"
                 "args = sys.argv[1:]\n"
-                f"json.dump(dict(os.environ), open(r'{prepass_log}', 'w'))\n"
-                "json.dump({'candidates': []}, open(args[args.index('--output') + 1], 'w'))\n",
+                "out = args[args.index('--output') + 1]\n"
+                # The env log goes next to --output (the run directory): the OS sandbox
+                # (agents-9n7) makes the factory root read-only for children.
+                f"json.dump(dict(os.environ), open(os.path.join(os.path.dirname(out), '{prepass_log_name}'), 'w'))\n"
+                "json.dump({'candidates': []}, open(out, 'w'))\n",
                 encoding="utf-8",
             )
 
@@ -173,7 +175,11 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
             stub = bindir / "pi"
             stub.write_text(
                 "#!/usr/bin/env bash\n"
-                f"env > '{engine_log}'\n"
+                # The env dump goes to stdout (captured into the run directory's
+                # model_output.txt): the sandbox leaves the engine nothing else writable.
+                "echo ENGINE-ENV-BEGIN\n"
+                "env\n"
+                "echo ENGINE-ENV-END\n"
                 "echo '{\"summary\":\"stub\",\"scanned_files\":0,\"findings\":[]}'\n",
                 encoding="utf-8",
             )
@@ -195,10 +201,16 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                  mock.patch.dict(os.environ, overrides):
                 factory_cli.run_agent("probe", str(target), engine_arg="pi")
 
-            prepass = json.loads(prepass_log.read_text(encoding="utf-8"))
-            # The engine stub dumps `env` output, which is KEY=value lines, not JSON.
+            runs = sorted((sandbox / "runs").glob("probe-*"))
+            self.assertEqual(len(runs), 1, "expected exactly one run directory")
+            prepass = json.loads((runs[0] / prepass_log_name).read_text(encoding="utf-8"))
+            # The engine stub dumps `env` between markers in model_output.txt (KEY=value
+            # lines, not JSON).
+            model_output = (runs[0] / "model_output.txt").read_text(encoding="utf-8")
+            env_block = model_output.split("ENGINE-ENV-BEGIN\n", 1)[1]
+            env_block = env_block.split("ENGINE-ENV-END", 1)[0]
             engine = {}
-            for line in engine_log.read_text(encoding="utf-8").splitlines():
+            for line in env_block.splitlines():
                 if "=" in line:
                     name, value = line.split("=", 1)
                     engine[name] = value
@@ -407,7 +419,10 @@ class TestPerStationEngine(unittest.TestCase):
                 stub = bindir / engine
                 stub.write_text(
                     "#!/usr/bin/env bash\n"
-                    f"touch '{sandbox / (engine + '-ran')}'\n"
+                    # The marker goes to stdout (captured into the run directory's
+                    # model_output.txt): the OS sandbox (agents-9n7) makes the factory
+                    # root read-only for the engine.
+                    f"echo {engine.upper()}-RAN\n"
                     f"cat '{report_src}'\n",
                     encoding="utf-8",
                 )
@@ -422,9 +437,11 @@ class TestPerStationEngine(unittest.TestCase):
                  }):
                 factory_cli.run_line("testline", str(target), engine_arg="claude")
 
-            self.assertTrue((sandbox / "pi-ran").exists(),
-                            "the station's pinned engine must run")
-            self.assertFalse((sandbox / "claude-ran").exists(),
+            outputs = "\n".join(
+                (run / "model_output.txt").read_text(encoding="utf-8")
+                for run in sorted((sandbox / "runs").glob("probe-*")))
+            self.assertIn("PI-RAN", outputs, "the station's pinned engine must run")
+            self.assertNotIn("CLAUDE-RAN", outputs,
                              "the line engine must not run for a station that pins another")
 
 

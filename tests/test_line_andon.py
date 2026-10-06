@@ -31,7 +31,24 @@ factory_cli = importlib.util.module_from_spec(spec)
 loader.exec_module(factory_cli)
 
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
-               "report_schema.py", "containment.py")
+               "report_schema.py", "containment.py", "sandbox.py")
+
+
+class _Marker:
+    """Proof the okprobe station's engine ran. The stub echoes the marker into its stdout,
+    which the adapter captures into the run directory's model_output.txt — the OS sandbox
+    (agents-9n7) leaves the engine nothing else writable."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def exists(self) -> bool:
+        runs = self.root / "runs"
+        if not runs.exists():
+            return False
+        return any("OKPROBE-RAN" in (run / "model_output.txt").read_text(encoding="utf-8")
+                   for run in runs.glob("okprobe-*")
+                   if (run / "model_output.txt").exists())
 
 
 class LineSandbox:
@@ -39,8 +56,11 @@ class LineSandbox:
         self.root = root
         self.target = root / "target"
         self.bin = root / "bin"
-        self.marker = root / "okprobe-ran"
         self._build(halt, stations)
+
+    @property
+    def marker(self):
+        return _Marker(self.root)
 
     def _agent(self, name: str) -> None:
         directory = self.root / "agents" / name
@@ -82,7 +102,7 @@ class LineSandbox:
         stub = self.bin / "pi"
         stub.write_text(
             "#!/usr/bin/env bash\n"
-            f"touch '{self.marker}'\n"
+            "echo OKPROBE-RAN\n"
             f"cat '{report}'\n",
             encoding="utf-8",
         )

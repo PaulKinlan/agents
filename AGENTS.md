@@ -63,7 +63,13 @@ The tier is not a grant. Every model session runs with the `read-only` tool poli
 tier. Declared `write`, `network` and `browser` are withheld until there is a mechanism to hold
 them to the tier.
 
-`t3-sandbox` needs a sandbox runner and manual approval per run. Neither exists, so it is refused.
+On Linux hosts with bubblewrap, the engine session and the pre-pass additionally run inside an
+OS sandbox (`lib/sandbox.py`, agents-9n7): the target read-only, everything else invisible,
+`$HOME` hidden. The banner and `policy.json` say which of the two boundaries was actually up.
+
+`t3-sandbox` needs a gVisor-class runner and manual approval per run for *executing* untrusted
+code. Neither exists, so it is refused; the bubblewrap wrapper is a filesystem/credential
+boundary for read-only sessions, not that runner.
 
 ## Sinks
 
