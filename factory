@@ -20,7 +20,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent
 
 try:  # repo root on sys.path, or run as a script from another cwd
     from lib.budget import StationTimeout, budget_for, run_station_command
-    from lib.containment import (ContainmentError, banner_lines, budget_note, check_engine,
+    from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
+                                 budget_note, check_engine, downgrade_write_to_read_only,
                                  load_policy, policy_record)
     from lib.child_env import child_environment, prepass_environment
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
@@ -32,7 +33,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
-    from lib.containment import (ContainmentError, banner_lines, budget_note, check_engine,
+    from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
+                                 budget_note, check_engine, downgrade_write_to_read_only,
                                  load_policy, policy_record)
     from lib.child_env import child_environment, prepass_environment
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
@@ -68,6 +70,130 @@ def _run_git(cmd, cwd):
             cmd, 124, stdout,
             f"{stderr}\n[factory] git command timed out after {GIT_TIMEOUT_SECONDS}s",
         )
+
+
+def _create_session_worktree(target_dir: Path, worktree_dir: Path) -> Path:
+    """Create the disposable detached git worktree of the target's HEAD (agents-6ce) and return
+    the admin gitdir git assigned it. Raises StationError on failure: a granted write must never
+    silently fall back to editing the target's own checkout, so if the writable workspace cannot
+    be provided, the station fails rather than running the write policy against the operator's
+    tree.
+
+    The returned gitdir (<target>/.git/worktrees/<name>) is captured HERE, before the engine
+    runs, so it is trusted. The worktree's own .git marker is a FILE under the writable run_dir,
+    so a write-enabled model could repoint it at the target's real .git; host-side git
+    (_collect_session_diff) pins --git-dir to this captured value and validates the marker
+    against it, so a tampered marker can never redirect git at the operator's repo/index
+    (review P1-1, agents-6ce round 2)."""
+    worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+    res = _run_git(["git", "worktree", "add", "--detach", str(worktree_dir)], target_dir)
+    if res.returncode != 0:
+        raise StationError(
+            f"cannot create the disposable session worktree at {worktree_dir}: git worktree "
+            f"add exited {res.returncode}: {(res.stderr or '').strip()}")
+    gitdir = _run_git(["git", "rev-parse", "--absolute-git-dir"], worktree_dir)
+    if gitdir.returncode != 0 or not gitdir.stdout.strip():
+        raise StationError(
+            f"cannot resolve the session worktree's admin gitdir at {worktree_dir}: git "
+            f"rev-parse exited {gitdir.returncode}: {(gitdir.stderr or '').strip()}")
+    return Path(gitdir.stdout.strip())
+
+
+def _validate_worktree_marker(worktree_dir: Path, expected_gitdir: Path) -> None:
+    """Refuse host-side git unless the worktree's .git marker still points at the admin gitdir
+    git assigned at creation. The marker is a file under the writable run_dir, so a
+    write-enabled model could replace it with `gitdir: <target>/.git` and redirect an unpinned
+    `git add -A` at the operator's real index (review P1-1, agents-6ce round 2). Pinning in
+    _collect_session_diff already makes the redirect ineffective; this validation additionally
+    fails the run loudly so the attempt is visible rather than silently ignored."""
+    marker = worktree_dir / ".git"
+    try:
+        content = marker.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise StationError(
+            f"cannot read the session worktree's .git marker at {marker}: {e}") from e
+    if not content.startswith("gitdir:"):
+        raise StationError(
+            f"the session worktree's .git marker at {marker} is not a gitdir pointer (got "
+            f"{content!r}); refusing to run host-side git against it")
+    pointed = Path(content.split("gitdir:", 1)[1].strip())
+    if not pointed.is_absolute():
+        pointed = worktree_dir / pointed
+    try:
+        resolved = pointed.resolve()
+    except OSError as e:
+        raise StationError(
+            f"cannot resolve the session worktree's .git marker target {pointed}: {e}") from e
+    if resolved != expected_gitdir.resolve():
+        raise StationError(
+            f"the session worktree's .git marker at {marker} points at {resolved}, not the "
+            f"admin gitdir git assigned at creation ({expected_gitdir.resolve()}); a "
+            f"write-enabled model may have redirected it at the target's real repo — "
+            f"refusing host-side git")
+
+
+def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Optional[Path]:
+    """Collect the engine's edits inside the worktree as run_dir/session.patch (agents-6ce):
+    stage everything (so new/untracked files are included, respecting the target's .gitignore)
+    and diff against the worktree's detached HEAD. Returns the patch path, or None when the
+    engine changed nothing. This patch IS the proposal — the target checkout was never touched.
+
+    `gitdir` is the admin gitdir captured at worktree creation (trusted). The marker is
+    validated against it and every git call is PINNED with --git-dir/--work-tree, so a model
+    that repointed the worktree's .git marker (it lives in the writable run_dir) cannot
+    redirect host-side git at the operator's real repo/index (review P1-1 round 2). Both calls
+    also check the returncode (review P1-1 round 1): a staging failure — e.g. a stale
+    index.lock, which makes `git add -A` exit 128 while `git diff --cached` returns an empty
+    rc0 diff — must RAISE, not be reported as "no edits" and silently drop the proposal."""
+    _validate_worktree_marker(worktree_dir, gitdir)
+    pinned = ["git", f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
+    add = _run_git(pinned + ["add", "-A"], worktree_dir)
+    if add.returncode != 0:
+        raise StationError(
+            f"cannot stage the session worktree edits at {worktree_dir}: git add exited "
+            f"{add.returncode}: {(add.stderr or '').strip()}")
+    diff = _run_git(pinned + ["diff", "--cached", "--binary"], worktree_dir)
+    if diff.returncode != 0:
+        raise StationError(
+            f"cannot diff the session worktree edits at {worktree_dir}: git diff exited "
+            f"{diff.returncode}: {(diff.stderr or '').strip()}")
+    patch = diff.stdout or ""
+    if not patch.strip():
+        return None
+    patch_file = run_dir / "session.patch"
+    patch_file.write_text(patch, encoding="utf-8")
+    os.chmod(patch_file, 0o600)
+    return patch_file
+
+
+def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
+    """Discard the disposable worktree (agents-6ce). Best-effort and idempotent: prune any
+    bookkeeping a crashed run left under the target's .git/worktrees. Cleanup never raises, so
+    it cannot mask the run's real outcome — but a failure IS reported (review P1-1 round 2):
+    a leaked worktree under the operator's .git is a real mess to leave silent. Git runs from
+    target_dir, so it uses the target's own .git, never the worktree's (possibly model-tampered)
+    .git marker; if the git remove still fails, the directory is deleted directly (it is under
+    the run dir) and pruned, so no leak survives."""
+    try:
+        res = _run_git(["git", "worktree", "remove", "--force", str(worktree_dir)], target_dir)
+        if res.returncode != 0:
+            sys.stderr.write(
+                f"[factory] worktree cleanup 'remove' exited {res.returncode}: "
+                f"{(res.stderr or '').strip()}\n")
+    except Exception as e:  # noqa: BLE001 - cleanup is best-effort, never masks the verdict
+        sys.stderr.write(f"[factory] worktree cleanup 'remove' raised: {e}\n")
+    if worktree_dir.exists():
+        # The git remove did not take (e.g. a tampered marker confused it). The directory is
+        # under the run dir, so removing it directly is safe; prune then clears the admin entry.
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+    try:
+        prune = _run_git(["git", "worktree", "prune"], target_dir)
+        if prune.returncode != 0:
+            sys.stderr.write(
+                f"[factory] worktree cleanup 'prune' exited {prune.returncode}: "
+                f"{(prune.stderr or '').strip()}\n")
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"[factory] worktree cleanup 'prune' raised: {e}\n")
 
 def _parse_scalar(val: str) -> Any:
     if val.lower() == "true":
@@ -315,6 +441,38 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # directory is private to the operator (agents-pgr).
     os.chmod(run_dir, 0o700)
 
+    # Disposable per-session worktree (agents-6ce). A granted write runs the engine in a
+    # throwaway git worktree under the run directory — which the OS sandbox already binds
+    # read-write — so the model can edit files but only there: the target checkout stays
+    # read-only and is never modified, and the session diff collected afterwards IS the
+    # proposal. The grant is conditional on the target being a git repo; when it is not,
+    # downgrade to read-only and re-withhold write with the specific reason, so the banner and
+    # policy.json stay honest and non-git targets keep today's patch-in-report behaviour.
+    worktree_dir: Optional[Path] = None
+    worktree_gitdir: Optional[Path] = None
+    engine_cwd = target_dir
+    if policy.tool_policy == WORKTREE_WRITE:
+        if not (target_dir / ".git").exists():
+            policy = downgrade_write_to_read_only(policy, (
+                "the target is not a git repository, so no disposable worktree can be "
+                "created; the engine runs read-only and returns patches in its report"))
+        elif not engine_sandboxed(engine):
+            # Review P1-2 (agents-6ce): the OS sandbox is the ONLY boundary that ro-binds the
+            # target. pi's tools are not path-confined by its flags, and claude is not
+            # sandbox-verified (not in SANDBOXED_ENGINES), so when the run will not be
+            # engine_sandboxed — a bwrap-less host under FACTORY_ALLOW_UNSANDBOXED, or claude
+            # anywhere — a granted write is an unconfined write primitive and the adapter's
+            # "target bound read-only" claim would be false. Downgrade to read-only (the
+            # pre-6ce behaviour for this mode) instead of handing the engine edit/write.
+            policy = downgrade_write_to_read_only(policy, (
+                "the engine session will not run inside the OS sandbox on this host "
+                "(no bubblewrap, or an engine whose adapter is not sandbox-verified), so "
+                "nothing kernel-enforces the target staying read-only; the engine runs "
+                "read-only and returns patches in its report"))
+        else:
+            worktree_dir = run_dir / "worktree"
+            engine_cwd = worktree_dir
+
     # Build the sandbox wraps BEFORE the banner, so "Sandbox: enforced" is printed only for
     # a wrapper that actually constructed; a build failure is a station error, never a
     # silent unsandboxed run and never an over-claimed banner (review nit, agents-9n7).
@@ -337,7 +495,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 raise StationError(f"{agent_name}: cannot sandbox the pre-pass: {e}") from e
 
     adapter_script = FACTORY_ROOT / "lib" / "adapters" / f"{engine}.sh"
-    adapter_cmd = [str(adapter_script), agent_name, str(target_dir), str(skill_dir), str(run_dir)]
+    # In worktree-write mode the engine's working directory is the disposable worktree, not
+    # the target checkout (agents-6ce); the adapter cds there, so every relative path in the
+    # report and the collected diff matches the target while edits land only in the worktree.
+    adapter_cmd = [str(adapter_script), agent_name, str(engine_cwd), str(skill_dir), str(run_dir)]
     # The tool policy is set here, explicitly. child_environment is an allowlist, so an
     # ambient FACTORY_TOOL_POLICY in the operator's shell never reaches the adapter.
     adapter_env = child_environment(engine=engine)
@@ -454,15 +615,32 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # above, before the banner, so "Sandbox: enforced" reflects a wrapper that actually
         # constructed. The prompt is stdin, never argv: it embeds up to 50 raw scanner
         # records, and argv is visible to any local user (agents-pgr).
-        adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
-                                          input=prompt, capture_output=True, text=True, check=False,
-                                          env=adapter_env)
-        # The adapter states what it enforced ("Tool policy: ..."): show the operator the
-        # enforcement point's own words, not only the dispatcher's. Adapter stdout is status
-        # lines only; the model's output goes to model_output.txt.
-        for line in (adapter_res.stdout or "").splitlines():
-            if line.startswith("["):
-                print(f"  {line}")
+        # Disposable worktree lifecycle (agents-6ce): in worktree-write mode create the
+        # throwaway worktree just before the session (so the sandbox's read-write bind of
+        # run_dir picks it up), collect the session diff right after — the engine's edits live
+        # only there and the target checkout was never touched — and always discard it.
+        try:
+            if worktree_dir is not None:
+                worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
+            adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
+                                              input=prompt, capture_output=True, text=True,
+                                              check=False, env=adapter_env)
+            # The adapter states what it enforced ("Tool policy: ..."): show the operator the
+            # enforcement point's own words, not only the dispatcher's. Adapter stdout is
+            # status lines only; the model's output goes to model_output.txt.
+            for line in (adapter_res.stdout or "").splitlines():
+                if line.startswith("["):
+                    print(f"  {line}")
+            if worktree_dir is not None:
+                patch_file = _collect_session_diff(worktree_dir, run_dir, worktree_gitdir)
+                if patch_file is not None:
+                    print(f"  [worktree] Collected the session's edits as {patch_file.name}; "
+                          f"the target checkout was not modified.")
+                else:
+                    print("  [worktree] The session made no file edits (empty proposal).")
+        finally:
+            if worktree_dir is not None:
+                _remove_session_worktree(target_dir, worktree_dir)
         
         output_file = run_dir / "model_output.txt"
         if not output_file.exists():

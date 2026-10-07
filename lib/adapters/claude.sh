@@ -55,6 +55,15 @@ fi
 TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
 case "$TOOL_POLICY" in
   read-only) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob" --strict-mcp-config) ;;
+  # worktree-write (agents-6ce): Edit,Write are added and --restricted confines the file tools
+  # to the working directory — which the dispatcher sets to a disposable git worktree — so
+  # edits land there, not in the target. NOTE: claude gets NO OS sandbox (its adapter is not in
+  # lib/sandbox.py SANDBOXED_ENGINES), so --restricted (claude's own confinement, not a kernel
+  # boundary) would be the only thing keeping the target read-only. run_agent therefore
+  # downgrades a claude worktree-write grant to read-only unless the run is engine_sandboxed
+  # (review P1-2, agents-6ce); this arm is reached only once claude is sandbox-verified. Bash
+  # stays off; the worktree is discarded after the session.
+  worktree-write) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob,Edit,Write" --strict-mcp-config) ;;
   *)
     echo "[claude adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
     exit 3
