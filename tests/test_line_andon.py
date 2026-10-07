@@ -106,6 +106,7 @@ class LineSandbox:
         stub = self.bin / "pi"
         stub.write_text(
             "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"  # the adapter uses pipefail; a non-reading stub can SIGPIPE printf
             "echo OKPROBE-RAN\n"
             f"cat '{report}'\n",
             encoding="utf-8",
@@ -240,6 +241,7 @@ class TestLineAndon(unittest.TestCase):
             stub = sandbox.bin / "pi"
             stub.write_text(
                 "#!/usr/bin/env bash\n"
+                "cat >/dev/null\n"
                 "agent=''\n"
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
@@ -252,6 +254,15 @@ class TestLineAndon(unittest.TestCase):
                 "esac\n",
                 encoding="utf-8")
             stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            # A large prompt makes a non-reading canned-output stub SIGPIPE the
+            # adapter's writer under pipefail; this direct process-boundary guard
+            # fails reliably if the stdin drain above is removed (agents-lx4/ub9).
+            drain = subprocess.run(
+                ["bash", "-o", "pipefail", "-c",
+                 'python3 -c \'import sys; sys.stdout.write("x"*200000)\' | "$1" --skill "$2"',
+                 "bash", str(stub), str(sandbox.root / "agents" / "garbage")],
+                capture_output=True, text=True, timeout=10, check=False)
+            self.assertEqual(drain.returncode, 0, drain.stderr)
             result, output = sandbox.run()
 
             self.assertFalse(result, "a line with a no-verdict station must report failure (INCOMPLETE)")
@@ -340,6 +351,9 @@ class TestLineAndon(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 # Only flaky is prompt-dependent. The shared stub also serves okprobe;
                 # that downstream station must return its report on the FIRST attempt.
+                # Read ALL stdin first: grep -q on a pipe can return early and SIGPIPE
+                # the adapter's printf under pipefail even when the engine exits zero.
+                "prompt=$(cat)\n"
                 "agent=''\n"
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
@@ -348,7 +362,7 @@ class TestLineAndon(unittest.TestCase):
                 "if [ \"$agent\" = okprobe ]; then\n"
                 "  echo OKPROBE-RAN\n"
                 f"  cat '{report}'\n"
-                "elif [ \"$agent\" = flaky ] && grep -q 'NO VERDICT'; then\n"
+                "elif [ \"$agent\" = flaky ] && grep -q 'NO VERDICT' <<<\"$prompt\"; then\n"
                 "  echo FLAKY-RETRY-RECOVERED\n"
                 f"  cat '{report}'\n"
                 "elif [ \"$agent\" = flaky ]; then\n"
@@ -387,6 +401,7 @@ class TestLineAndon(unittest.TestCase):
             stub = sandbox.bin / "pi"
             stub.write_text(
                 "#!/usr/bin/env bash\n"
+                "cat >/dev/null\n"
                 "echo 'engine exploded' >&2\n"
                 "exit 7\n",
                 encoding="utf-8",
@@ -419,6 +434,7 @@ class TestLineAndon(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "echo \"KEY:${ANTHROPIC_API_KEY}\"\n"
                 "echo \"BASE:${ANTHROPIC_BASE_URL:-unset}\"\n"
+                "prompt=$(cat)\n"
                 "agent=''\n"
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
@@ -426,7 +442,7 @@ class TestLineAndon(unittest.TestCase):
                 "done\n"
                 "if [ \"$agent\" = okprobe ]; then\n"
                 f"  cat '{report}'\n"
-                "elif [ \"$agent\" = flaky ] && grep -q 'NO VERDICT'; then\n"
+                "elif [ \"$agent\" = flaky ] && grep -q 'NO VERDICT' <<<\"$prompt\"; then\n"
                 f"  cat '{report}'\n"
                 "elif [ \"$agent\" = flaky ]; then\n"
                 "  echo 'FIRST ATTEMPT GARBAGE - no JSON here'\n"

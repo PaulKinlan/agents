@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -184,7 +185,11 @@ class TestDispatcherSchemaGate(unittest.TestCase):
         bindir = sandbox / "bin"
         bindir.mkdir()
         stub = bindir / "pi"
-        stub.write_text("#!/usr/bin/env bash\n" + f"cat '{report_src}'\n", encoding="utf-8")
+        # pi.sh pipes the prompt through `set -o pipefail`: a canned-output stub that
+        # exits without draining stdin can SIGPIPE the adapter's printf and falsely
+        # report an engine failure instead of the fixture's schema verdict (agents-ub9).
+        stub.write_text("#!/usr/bin/env bash\ncat >/dev/null\n" + f"cat '{report_src}'\n",
+                        encoding="utf-8")
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
         target = sandbox / "target"
         target.mkdir()
@@ -195,6 +200,19 @@ class TestDispatcherSchemaGate(unittest.TestCase):
              mock.patch.dict(os.environ,
                              {"PATH": f"{sandbox / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"}):
             return factory_cli.run_agent("probe", str(target), engine_arg="pi")
+
+    def test_stub_drains_a_large_prompt_before_emitting_its_fixture(self):
+        """Fail-on-revert: pipefail must not turn canned output into adapter exit 1."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Path(tmpdir)
+            self._sandbox(sandbox, {"summary": "stub", "findings": []})
+            res = subprocess.run(
+                ["bash", "-o", "pipefail", "-c",
+                 'python3 -c \'import sys; sys.stdout.write("x"*200000)\' | "$1"',
+                 "bash", str(sandbox / "bin" / "pi")],
+                capture_output=True, text=True, timeout=10, check=False)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(json.loads(res.stdout)["summary"], "stub")
 
     def test_schema_violation_skips_the_store(self):
         with tempfile.TemporaryDirectory() as tmpdir:
