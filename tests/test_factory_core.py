@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+import typing
 from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
@@ -140,7 +141,7 @@ class TestDispatcherBudget(unittest.TestCase):
 class TestDispatcherChildEnvironment(unittest.TestCase):
     """The engine and pre-pass children get an explicit, credential-free environment (SF-04)."""
 
-    def _run_probe(self, extra_agent_yaml: str = "", containment: str = "t0-readonly"):
+    def _run_probe(self, extra_agent_yaml: str = "", containment: str = "t0-readonly", env_overrides: "typing.Optional[typing.Dict[str, str]]" = None):
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = Path(tmpdir)
             (sandbox / "agents" / "probe" / "scripts").mkdir(parents=True)
@@ -199,6 +200,8 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                 "GEMINI_API_KEY": "gem-ci",
                 "PROJECT_UNRELATED_TOKEN": "unrelated",
             }
+            if env_overrides:
+                overrides.update(env_overrides)
             with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
                  mock.patch.dict(os.environ, overrides):
                 factory_cli.run_agent("probe", str(target), engine_arg="pi")
@@ -218,17 +221,28 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                     engine[name] = value
             return prepass, engine
 
-    @unittest.skipUnless(sandbox_available(),
-                         "the pi run is refused without bubblewrap, and brokering (agents-8h4) "
-                         "applies only to a sandboxed engine")
-    def test_agent_children_never_inherit_operator_credentials(self):
-        prepass, engine = self._run_probe()
+    @mock.patch("lib.sandbox._probe_result", False)
+    def test_agent_children_never_inherit_operator_credentials_unbrokered(self):
+        # By setting FACTORY_ALLOW_UNSANDBOXED, we force the pi run even without bubblewrap.
+        # This allows us to prove SF-04 (no unrelated credentials leak) on any host, keeping
+        # the non-brokered assertions meaningful everywhere.
+        prepass, engine = self._run_probe(env_overrides={"FACTORY_ALLOW_UNSANDBOXED": "1"})
         for child, env in (("pre-pass", prepass), ("engine", engine)):
             for name in ("GITHUB_TOKEN", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY",
                          "SSH_AUTH_SOCK", "PROJECT_UNRELATED_TOKEN"):
                 with self.subTest(child=child, name=name):
                     self.assertNotIn(name, env)
         self.assertNotIn("ANTHROPIC_API_KEY", prepass)
+        
+        # When unsandboxed, the engine gets the real key directly (no broker),
+        # so we ensure it gets the model key but NOT the unrelated ones.
+        self.assertEqual(engine["ANTHROPIC_API_KEY"], "sk-ant-ci")
+
+    @unittest.skipUnless(sandbox_available(),
+                         "the pi run is refused without bubblewrap, and brokering (agents-8h4) "
+                         "applies only to a sandboxed engine")
+    def test_agent_children_never_inherit_operator_credentials_brokered(self):
+        prepass, engine = self._run_probe()
         # agents-8h4: a SANDBOXED engine never carries the operator's real model key. The
         # dispatcher brokers it — the engine's environ (and so its /proc/self/environ, the leak
         # vector THREAT_MODEL §6.1 names) holds a non-secret placeholder + the localhost broker

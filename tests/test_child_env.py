@@ -17,14 +17,14 @@ sys.path.insert(0, str(ROOT))
 
 from lib.child_env import (  # noqa: E402
     BASE_ALLOW,
-    BROKER_PROVIDERS,
     ENGINE_CREDENTIALS,
     GITHUB_TOKEN_VARS,
     child_environment,
     declares_requirement,
     prepass_environment,
 )
-from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
+from lib.credential_broker import PLACEHOLDER_KEY, BROKER_ENV_CONFIGS  # noqa: E402
+from lib.containment import ContainmentError
 
 SECRETS = {
     "GITHUB_TOKEN": "ghs_ci_token",
@@ -191,12 +191,12 @@ class TestCredentialBrokering(unittest.TestCase):
         self.assertEqual(with_broker["ANTHROPIC_API_KEY"], "sk-ant")  # real key, as today
         self.assertNotIn("ANTHROPIC_BASE_URL", with_broker)
 
-    def test_an_unmapped_provider_is_ignored(self):
-        # deepseek is not in BROKER_PROVIDERS yet, so its key is left exactly as today.
-        env = child_environment(engine="pi", parent=parent_env(DEEPSEEK_API_KEY="ds-key"),
-                                broker_urls={"deepseek": "http://127.0.0.1:1/proxy/deepseek"})
-        self.assertEqual(env["DEEPSEEK_API_KEY"], "ds-key")
-        self.assertNotIn("DEEPSEEK_BASE_URL", env)
+    def test_an_unmapped_provider_fails_closed(self):
+        # A provider the broker advertised but child_env doesn't map must FAIL CLOSED,
+        # otherwise its real key would survive in the sandboxed environment.
+        with self.assertRaisesRegex(ContainmentError, "fail closed: broker provided URL for unmapped provider 'unmapped'"):
+            child_environment(engine="pi", parent=parent_env(UNMAPPED_API_KEY="key"),
+                              broker_urls={"unmapped": "http://127.0.0.1:1/proxy/unmapped"})
 
     def test_the_placeholder_is_not_credential_shaped(self):
         # The whole point: the value in the sandboxed environ must not look like a key, so a
@@ -205,10 +205,10 @@ class TestCredentialBrokering(unittest.TestCase):
         self.assertNotIn("KEY", PLACEHOLDER_KEY.upper().replace("-", "").replace("_", ""))
 
     def test_broker_provider_table_is_consistent_with_the_broker(self):
-        # child_env's BROKER_PROVIDERS and credential_broker's PROVIDERS must name the same
+        # child_env's BROKER_ENV_CONFIGS and credential_broker's PROVIDERS must name the same
         # providers, or a base URL would be set for a provider the broker cannot route.
         from lib.credential_broker import PROVIDERS as BROKER_SIDE
-        self.assertEqual(set(BROKER_PROVIDERS), set(BROKER_SIDE))
+        self.assertEqual(set(BROKER_ENV_CONFIGS), set(BROKER_SIDE))
 
 
 if __name__ == "__main__":
