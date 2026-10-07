@@ -55,6 +55,10 @@ __all__ = [
     "PLACEHOLDER_KEY",
 ]
 
+
+class BrokerError(RuntimeError):
+    """The broker could not be started or configured."""
+
 # provider -> (upstream base URL, auth style, env vars that may hold the real key).
 # The upstream base carries whatever the SDK does NOT append: Anthropic's SDK
 # appends /v1/messages to a bare origin, whereas OpenAI's SDK appends /chat/...
@@ -92,7 +96,10 @@ BROKER_ENV_CONFIGS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
 
 # Ensure the tables match exactly
 if set(PROVIDERS) != set(BROKER_ENV_CONFIGS):
-    raise BrokerError("broker mapping mismatch: PROVIDERS and BROKER_ENV_CONFIGS must define the same providers")
+    diff = sorted(set(PROVIDERS) ^ set(BROKER_ENV_CONFIGS))
+    raise BrokerError(
+        f"broker mapping mismatch: PROVIDERS and BROKER_ENV_CONFIGS must define the same providers (differ on: {', '.join(diff)})"
+    )
 
 # RFC 7230 6.1 hop-by-hop headers: never forwarded in either direction.
 _HOP_BY_HOP = frozenset({
@@ -119,10 +126,6 @@ PLACEHOLDER_KEY = "factory-broker-placeholder"
 # engine's own budget (lib/budget.py) bounds the whole run; this only stops a wedged
 # socket from leaking a broker thread forever.
 _UPSTREAM_TIMEOUT_SECONDS = 900.0
-
-
-class BrokerError(RuntimeError):
-    """The broker could not be started or configured."""
 
 
 def credentials_from_env(providers: Iterable[str] = tuple(PROVIDERS),
@@ -180,12 +183,15 @@ class _Handler(BaseHTTPRequestHandler):
                 finally:
                     self.connection.settimeout(old_timeout)
             except ValueError:
+                self.close_connection = True
                 return None
             except OSError as e:
+                self.close_connection = True
                 raise BrokerError(f"failed to read request body: {e}") from e
         # A chunked request body from the engine is not expected (SDKs send
         # Content-Length); refuse rather than guess.
         if (self.headers.get("Transfer-Encoding") or "").lower() == "chunked":
+            self.close_connection = True
             raise BrokerError("chunked request body from the engine is not supported")
         return None
 
