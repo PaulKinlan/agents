@@ -73,9 +73,16 @@ cd "$TARGET_DIR"
 
 # agents-m2n: the pre-pass's system-channel directive (e.g. the threat-model nonce
 # directive) rides pi's system prompt — `--append-system-prompt` accepts a file's contents
-# and may repeat alongside --skill — never as user-channel Scanner Data. Unset = unchanged.
+# and may repeat alongside --skill — never as user-channel Scanner Data. When the variable
+# is set the file is REQUIRED (review P1-1): the dispatcher already removed the directive
+# from the user payload, so silently running without it would drop the untrusted-content
+# rule — the adapter fails closed instead.
 SYSTEM_DIRECTIVE_FLAGS=()
-if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ] && [ -f "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
+  if [ ! -r "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ] || [ ! -s "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+    echo "[pi adapter] Error: FACTORY_SYSTEM_DIRECTIVE_FILE is set but '${FACTORY_SYSTEM_DIRECTIVE_FILE}' is missing, unreadable, or empty; refusing to run without the system directive." >&2
+    exit 2
+  fi
   SYSTEM_DIRECTIVE_FLAGS=(--append-system-prompt "${FACTORY_SYSTEM_DIRECTIVE_FILE}")
 fi
 

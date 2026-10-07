@@ -14,6 +14,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from secrets import token_hex
 from typing import Any, Dict, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent
@@ -522,7 +523,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        # agents-m2n review P2 (same class as agents-30q): the name resolves to the
+        # second, and two runs in one second must not share a run dir — the egress
+        # sockets, prompt, policy.json and session.patch all live there. Disambiguate
+        # with a random suffix and take that directory exclusively.
+        run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}-{token_hex(4)}"
+        run_dir.mkdir(parents=True, exist_ok=False)
     # The run artifacts hold raw scanner matches (candidates.json, prompt.txt), so the
     # directory is private to the operator (agents-pgr).
     os.chmod(run_dir, 0o700)

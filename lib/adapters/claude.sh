@@ -86,12 +86,22 @@ fi
 # and the Skill tool can invoke any other skill. Measured on 2.1.282: `--restricted --tools
 # Read,Grep,Glob` lists no skills at all, and adding Skill restores the plugin's skill together
 # with every bundled one. A file, so SKILL.md stays out of the engine's argv.
+# agents-m2n (review P1-1): when the dispatcher set a system directive, the file is
+# REQUIRED (readable and nonempty) — the directive no longer rides the user payload, so
+# silently running without it would drop the untrusted-content rule. Fail closed.
+if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
+  if [ ! -r "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ] || [ ! -s "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+    echo "[claude adapter] Error: FACTORY_SYSTEM_DIRECTIVE_FILE is set but '${FACTORY_SYSTEM_DIRECTIVE_FILE}' is missing, unreadable, or empty; refusing to run without the system directive." >&2
+    exit 2
+  fi
+fi
+
 SKILL_FLAGS=()
 if [ -f "$SKILL_DIR/SKILL.md" ]; then
-  # agents-m2n: when the pre-pass declared a system-channel directive, it joins the
-  # skill in the SAME appended file (the flag is passed once): system prompt = SKILL.md
-  # + directive, never user-channel Scanner Data. Unset = unchanged behaviour.
-  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ] && [ -f "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+  # agents-m2n: when a system directive exists, it joins the skill in the SAME appended
+  # file (the flag is passed once): system prompt = SKILL.md + directive, never
+  # user-channel Scanner Data.
+  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
     COMBINED_SYSTEM_PROMPT="$RUN_DIR/system_prompt_combined.txt"
     cat "$SKILL_DIR/SKILL.md" "$FACTORY_SYSTEM_DIRECTIVE_FILE" > "$COMBINED_SYSTEM_PROMPT"
     SKILL_FLAGS=(--append-system-prompt-file "$COMBINED_SYSTEM_PROMPT")
@@ -100,7 +110,7 @@ if [ -f "$SKILL_DIR/SKILL.md" ]; then
   fi
 else
   echo "[claude adapter] Warning: no SKILL.md in $SKILL_DIR; running without skill instructions." >&2
-  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ] && [ -f "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
     SKILL_FLAGS=(--append-system-prompt-file "$FACTORY_SYSTEM_DIRECTIVE_FILE")
   fi
 fi
