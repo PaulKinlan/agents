@@ -32,6 +32,42 @@ _RUNNABLE_BWRAP = sandbox_available()
 _NEEDS_BWRAP = "needs a host where bubblewrap actually runs"
 
 
+def _write_draining_report_stub(stub: Path, report_src: Path, marker: str = "") -> None:
+    """Canned engine output must consume the real adapter's entire piped prompt first.
+
+    pi.sh/claude.sh use pipefail: exiting with unread stdin can SIGPIPE their printf,
+    turning a valid canned report into a spurious adapter failure (agents-ub9/61t).
+    """
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "cat >/dev/null\n"
+        + (f"echo {marker}\n" if marker else "")
+        + f"cat '{report_src}'\n",
+        encoding="utf-8",
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+
+class TestDrainingReportStub(unittest.TestCase):
+    def test_large_prompt_cannot_sigpipe_a_canned_report(self):
+        """Runs without bwrap; reverting the drain fails deterministically under pipefail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_src = Path(tmpdir) / "report.json"
+            report_src.write_text('{"summary":"stub","findings":[]}')
+            for engine in ("pi", "claude"):
+                with self.subTest(engine=engine):
+                    stub = Path(tmpdir) / engine
+                    _write_draining_report_stub(stub, report_src, marker=f"{engine.upper()}-RAN")
+                    res = subprocess.run(
+                        ["bash", "-o", "pipefail", "-c",
+                         '"$1" -c \'import sys; sys.stdout.write("x"*200000)\' | "$2"',
+                         "bash", sys.executable, str(stub)],
+                        capture_output=True, text=True, timeout=10, check=False)
+                    self.assertEqual(res.returncode, 0, res.stderr)
+                    self.assertIn(f"{engine.upper()}-RAN", res.stdout)
+                    self.assertEqual(json.loads(res.stdout.splitlines()[-1])["summary"], "stub")
+
+
 class TestSoftwareFactoryCore(unittest.TestCase):
     def test_fingerprint_line_number_independence(self):
         """Fingerprints must be identical across line shifts and whitespace reformatting."""
@@ -335,8 +371,7 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
             bindir = sandbox / "bin"
             bindir.mkdir()
             stub = bindir / "pi"
-            stub.write_text("#!/usr/bin/env bash\n" + f"cat '{report_src}'\n", encoding="utf-8")
-            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            _write_draining_report_stub(stub, report_src)
             target = sandbox / "target"
             target.mkdir()
 
@@ -423,16 +458,9 @@ class TestPerStationEngine(unittest.TestCase):
             bindir.mkdir()
             for engine in ("pi", "claude"):
                 stub = bindir / engine
-                stub.write_text(
-                    "#!/usr/bin/env bash\n"
-                    # The marker goes to stdout (captured into the run directory's
-                    # model_output.txt): the OS sandbox (agents-9n7) makes the factory
-                    # root read-only for the engine.
-                    f"echo {engine.upper()}-RAN\n"
-                    f"cat '{report_src}'\n",
-                    encoding="utf-8",
-                )
-                stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+                # Marker reaches model_output.txt; sandboxed engine cannot write
+                # elsewhere in the factory root. Shared helper also drains stdin.
+                _write_draining_report_stub(stub, report_src, marker=f"{engine.upper()}-RAN")
             target = sandbox / "target"
             target.mkdir()
 
