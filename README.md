@@ -400,6 +400,35 @@ Scheduled jobs log their output to `runs/schedule-<target>-<agent>.stdout.log` a
 
 ---
 
+## Run Artifact Retention
+
+Every `factory run` writes a run directory under `runs/<agent>-<target>-<timestamp>/`
+holding the run record (`policy.json`), raw scanner matches (`candidates.json`,
+`prompt.txt`) and model output (`model_output.txt`, `rejected_report.json`). Those
+artifacts can embed matched secret values and raw model output, so the factory applies
+a bounded retention policy **whenever a new run directory is created**:
+
+- **Count bound** — keep the `FACTORY_RUN_RETENTION` most-recent run directories
+  (default `20`). This is the hard guarantee: however fast runs are produced, at most
+  this many run directories survive.
+- **Age bound (TTL)** — prune any run directory older than
+  `FACTORY_RUN_RETENTION_AGE_DAYS` whole days (default `30`), even if it is within the
+  count bound.
+
+```bash
+# Keep 50 runs instead of 20, and expire anything older than 7 days
+FACTORY_RUN_RETENTION=50 FACTORY_RUN_RETENTION_AGE_DAYS=7 ./factory run secret-scan --target voicebox
+```
+
+Pruning is explicit and safe: the run directory being written is never removed;
+symlinks are never followed (and are left in place); non-directory files such as the
+scheduler's `schedule-*.stdout.log` and the hill-climb `runs/worktrees/` staging
+directory are never swept. If a run crashes mid-way, its partial directory is still the
+newest entry and survives that pass; it is pruned on a later run once it is old enough
+or falls past the count bound. See `lib/retention.py` for the exact policy.
+
+---
+
 ## Repository Structure
 
 ```text

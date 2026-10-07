@@ -32,6 +32,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib.retention import prune_run_dirs, retention_config
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -49,6 +50,7 @@ except ImportError:
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib.retention import prune_run_dirs, retention_config
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -538,6 +540,13 @@ def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
         run_dir.mkdir(parents=True, exist_ok=False)
     # Raw scanner matches and prompts stay private to the operator (agents-pgr).
     os.chmod(run_dir, 0o700)
+    # Bounded retention (agents-ped): run artifacts embed raw scanner matches and model
+    # output, so prune old run directories now that this run's directory is in place. The
+    # just-allocated directory is excluded, so a mid-run crash never loses the live run.
+    retain_count, max_age_seconds = retention_config()
+    for pruned in prune_run_dirs(FACTORY_ROOT / "runs", retain=retain_count,
+                                 max_age_seconds=max_age_seconds, exclude={run_dir}):
+        print(f"[retention] pruned old run directory: {pruned}")
     return run_dir
 
 
