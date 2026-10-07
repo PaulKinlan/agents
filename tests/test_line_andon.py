@@ -106,6 +106,7 @@ class LineSandbox:
         stub = self.bin / "pi"
         stub.write_text(
             "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"  # the adapter uses pipefail; a non-reading stub can SIGPIPE printf
             "echo OKPROBE-RAN\n"
             f"cat '{report}'\n",
             encoding="utf-8",
@@ -232,15 +233,36 @@ class TestLineAndon(unittest.TestCase):
             (sandbox.root / "agents" / "garbage" / "agent.yaml").write_text(
                 "name: garbage\nclass: observer\ncontainment: t0-readonly\n"
                 "short_circuit_empty: false\nbudget: {max_minutes: 1}\n", encoding="utf-8")
-            # Prose, not a JSON report. The OKPROBE-RAN line keeps _Marker's proof that the
-            # downstream station actually ran (the line continued past the no-verdict).
+            # The same pi stub serves BOTH stations. Match the actual --skill agent path:
+            # garbage is always unparseable, while the downstream okprobe must produce a
+            # VALID report. Previously both emitted prose; okprobe then repair-retried and
+            # could turn this test into a genuine adapter failure/HALTED flake.
+            report = sandbox.root / "report-src.json"
             stub = sandbox.bin / "pi"
             stub.write_text(
                 "#!/usr/bin/env bash\n"
-                "echo OKPROBE-RAN\n"
-                "echo 'This station produced prose only. There is no JSON object here at all.'\n",
+                "cat >/dev/null\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "case \"$agent\" in\n"
+                "  garbage) echo 'This station produced prose only. There is no JSON object here at all.' ;;\n"
+                f"  okprobe) echo OKPROBE-RAN; cat '{report}' ;;\n"
+                "  *) echo 'unexpected test agent' >&2; exit 97 ;;\n"
+                "esac\n",
                 encoding="utf-8")
             stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            # A large prompt makes a non-reading canned-output stub SIGPIPE the
+            # adapter's writer under pipefail; this direct process-boundary guard
+            # fails reliably if the stdin drain above is removed (agents-lx4/ub9).
+            drain = subprocess.run(
+                ["bash", "-o", "pipefail", "-c",
+                 'python3 -c \'import sys; sys.stdout.write("x"*200000)\' | "$1" --skill "$2"',
+                 "bash", str(stub), str(sandbox.root / "agents" / "garbage")],
+                capture_output=True, text=True, timeout=10, check=False)
+            self.assertEqual(drain.returncode, 0, drain.stderr)
             result, output = sandbox.run()
 
             self.assertFalse(result, "a line with a no-verdict station must report failure (INCOMPLETE)")
@@ -252,6 +274,11 @@ class TestLineAndon(unittest.TestCase):
             self.assertIn("repair-retry", output)
             self.assertTrue(sandbox.marker.exists(),
                             "the downstream station must RUN: the line continued past the no-verdict")
+            downstream = list((sandbox.root / "runs").glob("okprobe-*/report.json"))
+            self.assertEqual(len(downstream), 1, "okprobe must succeed on its FIRST attempt")
+            self.assertEqual(json.loads(downstream[0].read_text())["summary"], "stub")
+            garbage_runs = list((sandbox.root / "runs").glob("garbage-*"))
+            self.assertEqual(len(garbage_runs), 2, "only garbage gets the bounded repair-retry")
 
     def test_a_genuine_engine_failure_still_halts_the_line(self):
         """agents-noo guard: NoVerdictError degrades, but a GENUINE StationError (a failed engine,
@@ -322,15 +349,26 @@ class TestLineAndon(unittest.TestCase):
             stub = sandbox.bin / "pi"
             stub.write_text(
                 "#!/usr/bin/env bash\n"
-                # Statelessly keyed on the retry contract itself: the repair-retry's prompt
-                # (stdin) carries the NO VERDICT hint, the first attempt's does not. The
-                # engine runs sandboxed and cannot write a counter file anywhere but its
-                # own run dir - stdin is the only cross-attempt signal it legitimately gets.
-                "if grep -q 'NO VERDICT'; then\n"
+                # Only flaky is prompt-dependent. The shared stub also serves okprobe;
+                # that downstream station must return its report on the FIRST attempt.
+                # Read ALL stdin first: grep -q on a pipe can return early and SIGPIPE
+                # the adapter's printf under pipefail even when the engine exits zero.
+                "prompt=$(cat)\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ \"$agent\" = okprobe ]; then\n"
                 "  echo OKPROBE-RAN\n"
                 f"  cat '{report}'\n"
-                "else\n"
+                "elif [ \"$agent\" = flaky ] && grep -q 'NO VERDICT' <<<\"$prompt\"; then\n"
+                "  echo FLAKY-RETRY-RECOVERED\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = flaky ]; then\n"
                 "  echo 'FIRST ATTEMPT GARBAGE - no JSON here'\n"
+                "else\n"
+                "  echo 'unexpected test agent' >&2; exit 97\n"
                 "fi\n",
                 encoding="utf-8",
             )
@@ -347,8 +385,10 @@ class TestLineAndon(unittest.TestCase):
             self.assertIn("FIRST ATTEMPT GARBAGE", (first / "model_output.txt").read_text(encoding="utf-8"),
                           "the rejected first output must be preserved for human recovery")
             second_output = (second / "model_output.txt").read_text(encoding="utf-8")
-            self.assertIn("OKPROBE-RAN", second_output)
+            self.assertIn("FLAKY-RETRY-RECOVERED", second_output)
             self.assertIn("\"summary\"", second_output, "the retry's output is the valid report")
+            self.assertEqual(len(list((sandbox.root / "runs").glob("okprobe-*"))), 1,
+                             "the downstream station must not need a repair-retry")
 
     @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_a_genuine_engine_failure_halts_via_a_real_adapter_with_one_invocation(self):
@@ -361,6 +401,7 @@ class TestLineAndon(unittest.TestCase):
             stub = sandbox.bin / "pi"
             stub.write_text(
                 "#!/usr/bin/env bash\n"
+                "cat >/dev/null\n"
                 "echo 'engine exploded' >&2\n"
                 "exit 7\n",
                 encoding="utf-8",
@@ -393,10 +434,20 @@ class TestLineAndon(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "echo \"KEY:${ANTHROPIC_API_KEY}\"\n"
                 "echo \"BASE:${ANTHROPIC_BASE_URL:-unset}\"\n"
-                "if grep -q 'NO VERDICT'; then\n"
+                "prompt=$(cat)\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ \"$agent\" = okprobe ]; then\n"
                 f"  cat '{report}'\n"
-                "else\n"
+                "elif [ \"$agent\" = flaky ] && grep -q 'NO VERDICT' <<<\"$prompt\"; then\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = flaky ]; then\n"
                 "  echo 'FIRST ATTEMPT GARBAGE - no JSON here'\n"
+                "else\n"
+                "  echo 'unexpected test agent' >&2; exit 97\n"
                 "fi\n",
                 encoding="utf-8",
             )
@@ -406,6 +457,8 @@ class TestLineAndon(unittest.TestCase):
             self.assertTrue(result, "sanity: the retry must recover the line")
             runs = sorted((sandbox.root / "runs").glob("flaky-*"))
             self.assertEqual(len(runs), 2)
+            self.assertEqual(len(list((sandbox.root / "runs").glob("okprobe-*"))), 1,
+                             "only the flaky station should retry")
             for run in runs:
                 text = (run / "model_output.txt").read_text(encoding="utf-8")
                 self.assertIn(f"KEY:{PLACEHOLDER_KEY}", text,
