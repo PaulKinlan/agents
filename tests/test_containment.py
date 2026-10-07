@@ -687,6 +687,64 @@ process.stdin.on('end', () => {
         self.assertNotIn("CANARY-SECRET-NODE", canary_line)
         self.assertTrue("ENOENT" in canary_line or "No such file" in canary_line, canary_line)
 
+    def test_an_exec_time_wrap_failure_leaves_no_enforced_record(self):
+        """agents-kwi (agents-9n7 probe #2 A2): a bwrap that passes the availability probe but
+        cannot start the child must not leave the run recorded as sandboxed. The wrap is
+        exercised before the banner is printed and before policy.json is written, so the
+        station fails with nothing that claims `Sandbox: enforced` / engine_sandboxed: true,
+        and the engine never starts (so it can never run unsandboxed either)."""
+        outside = tempfile.TemporaryDirectory(prefix="factory-kwi-outside-")
+        self.addCleanup(outside.cleanup)
+        canary = Path(outside.name) / "canary.txt"
+        canary.write_text("CANARY-SECRET-KWI", encoding="utf-8")
+        (self.target / "canary-path.txt").write_text(str(canary), encoding="utf-8")
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        broken = self.root / "execfailbin"
+        broken.mkdir()
+        stub = broken / "bwrap"
+        # Green for the bare availability probe (a plan ending in /bin/true), dead for every
+        # real wrap: exactly the situation agents-kwi is about.
+        stub.write_text("#!/bin/sh\n"
+                        "for a in \"$@\"; do [ \"$a\" = \"/bin/true\" ] && exit 0; done\n"
+                        "exit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}"
+                                          "/usr/bin:/bin"})
+        self.assertNotEqual(res.returncode, 0,
+                            "a wrap that cannot start its child must fail the run")
+        self.assertIn("could not start a child inside the sandbox", res.stderr + res.stdout)
+        self.assertNotIn("Sandbox:     enforced", res.stdout,
+                         "no surface may claim the sandbox was enforced for a wrap that never "
+                         "executed the child")
+        self.assertNotIn("CANARY-SECRET-KWI", res.stdout + res.stderr,
+                         "the engine must not run at all")
+        # The dispatcher creates the run directory before it builds the wraps, so the honest
+        # outcome here is a run directory that carries no record at all — never an
+        # "enforced" policy.json for a wrap that did not start its child.
+        runs = self.run_dirs()
+        self.assertTrue(runs, "the dispatcher creates the run directory before the wraps")
+        for run_dir in runs:
+            self.assertFalse((run_dir / "policy.json").exists(),
+                             f"{run_dir.name}: no policy.json may be written for an "
+                             f"unexercised wrap")
+            self.assertFalse((run_dir / "model_output.txt").exists(),
+                             f"{run_dir.name}: the engine never started")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_wrap_that_starts_the_child_still_reports_enforced(self):
+        """agents-kwi, positive half: exercising the wrap must not turn a working sandbox
+        into a refusal — a wrap that does start its child still reports `Sandbox: enforced`
+        and records engine_sandboxed: true."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     enforced", res.stdout)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
+        self.assertNotIn("os-sandbox", record["not_enforced"])
+
     def test_a_pi_run_is_refused_when_the_sandbox_cannot_run(self):
         """review P0 (agents-9n7): pi's read scope is confined ONLY by the OS sandbox. If
         bubblewrap cannot run on the host, the dispatcher must REFUSE — never silently fall

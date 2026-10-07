@@ -343,7 +343,9 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
     """The run banner's containment block: declared, enforced, withheld, not enforced.
 
     `sandbox` is lib/sandbox.py's sandbox_record(): None on hosts without a sandbox (the
-    gap text stays, honestly), or the record of what the OS sandbox actually covers.
+    gap text stays, honestly), or the record of what the OS sandbox actually covers. That
+    record is only ever produced for a wrap sandbox_command() has already exercised (agents-kwi),
+    so "Sandbox: enforced" is never printed for a wrap that could not start its child.
     `unsandboxed_note` (agents-bp0) names the explicit FACTORY_ALLOW_UNSANDBOXED opt-in on
     a trusted target — a deliberate exception the operator attested to, so it is printed
     prominently instead of the generic gap text.
@@ -391,7 +393,8 @@ def policy_record(policy: Policy, engine: str,
                   unsandboxed_note: Optional[str] = None) -> Dict[str, Any]:
     """The machine-readable account written to the run directory as policy.json.
 
-    `sandbox` is lib/sandbox.py's sandbox_record(); the not_enforced list only drops an
+    `sandbox` is lib/sandbox.py's sandbox_record(), produced only for a wrap that was
+    exercised before the record is written (agents-kwi); the not_enforced list only drops an
     entry when the sandbox actually covers it, and gains `network-egress` because the
     sandbox does not filter egress (agents-9n7).
     """

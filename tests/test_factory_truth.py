@@ -81,6 +81,10 @@ class Sandbox:
             "#!/usr/bin/env bash\n"
             "skill=''\n"
             "while [ $# -gt 0 ]; do [ \"$1\" = --skill ] && skill=\"$2\"; shift; done\n"
+            # Drain the prompt: the adapter pipes it in under `set -euo pipefail` and the real
+            # engine reads it, so a stub that exits without reading makes printf take SIGPIPE
+            # (141), which the adapter reports as a spurious "engine 'pi' exited 1" (agents-lx4).
+            "cat >/dev/null\n"
             f"cat '{root}/outputs/'\"$(basename \"$skill\")\".txt\n",
             encoding="utf-8")
         stub.chmod(0o755)

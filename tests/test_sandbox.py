@@ -16,6 +16,7 @@ tests/test_containment.py, which holds the stub-engine harness.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,7 @@ from lib.sandbox import (  # noqa: E402
     SANDBOXED_ENGINES, SandboxError, engine_sandboxed, sandbox_available, sandbox_command,
     sandbox_record,
 )
+from lib import sandbox as sandbox_module  # noqa: E402
 
 LIVE = sandbox_available()
 
@@ -42,8 +44,11 @@ def _pairs(argv, flag):
     return out
 
 
+@unittest.skipUnless(LIVE, "sandbox_command() exercises every wrap, so these need a real bwrap")
 class TestSandboxCommandShape(unittest.TestCase):
-    """What the bwrap argv must contain, checked without running bwrap."""
+    """What the bwrap argv must contain. sandbox_command() now exercises every wrap it builds
+    (agents-kwi), so each of these runs a real exercise rather than only building argv — and
+    needs a functional bubblewrap, hence the LIVE gate."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-9n7-shape-")
@@ -51,6 +56,11 @@ class TestSandboxCommandShape(unittest.TestCase):
         self.root = Path(temporary.name)
         self.factory = self.root / "factory-root"
         (self.factory / "runs" / "old").mkdir(parents=True)
+        # sandbox_command() exercises every wrap it builds (agents-kwi), and an egress wrap
+        # runs lib/net_forward.py from the factory root: the fake root must carry it.
+        (self.factory / "lib").mkdir()
+        shutil.copyfile(ROOT / "lib" / "net_forward.py",
+                        self.factory / "lib" / "net_forward.py")
         self.target = self.root / "target"
         self.target.mkdir()
         self.run_dir = self.factory / "runs" / "run1"
@@ -184,6 +194,102 @@ class TestSandboxCommandShape(unittest.TestCase):
         with self.assertRaises(SandboxError):
             sandbox_command([], target_dir=self.target, factory_root=self.factory,
                             run_dir=self.run_dir)
+
+
+class TestWrapVerification(unittest.TestCase):
+    """agents-kwi: "bwrap is available" is not "this run's child started inside the sandbox".
+
+    sandbox_available()'s probe is a minimal plan (no target/factory/run mounts, no PID
+    namespace); a wrap built for a real run can still fail at exec after it passes. Every
+    sandbox_command() therefore exercises the plan it just built, with a sentinel child, and
+    raises instead of returning a wrap that never started a child — so a station fails before
+    any banner or policy.json can call the run sandboxed.
+
+    Documented residual (review P2, agents-kwi, no code): the exercise checks that the inner
+    program resolves and is executable inside the wrap, but not that a *script* inner's shebang
+    interpreter is bound there. Not reachable today — the inner is the adapter, invoked through
+    an interpreter the plan already binds.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-kwi-wrap-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory-root"
+        (self.factory / "runs").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.run_dir = self.factory / "runs" / "run1"
+        self.run_dir.mkdir(parents=True)
+        self.real_path = os.environ.get("PATH", "")
+        self.addCleanup(os.environ.__setitem__, "PATH", self.real_path)
+        # The probe result is process-cached: every fake-bwrap test must re-probe.
+        self.addCleanup(setattr, sandbox_module, "_probe_result", None)
+
+    def use_fake_bwrap(self, body, name="fakebin"):
+        """Put a fake bwrap on PATH (the path sandbox_command resolves) and return the child
+        environment PATH that goes with it."""
+        fake_bin = self.root / name
+        fake_bin.mkdir()
+        stub = fake_bin / "bwrap"
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(0o755)
+        path = f"{fake_bin}{os.pathsep}{self.real_path}"
+        os.environ["PATH"] = path
+        sandbox_module._probe_result = None
+        return path
+
+    def build(self, path, inner=("/bin/true",)):
+        return sandbox_command(list(inner), target_dir=self.target,
+                               factory_root=self.factory, run_dir=self.run_dir,
+                               env={"PATH": path, "HOME": str(self.root / "home")})
+
+    def test_a_bwrap_that_fails_at_exec_after_a_green_probe_is_refused(self):
+        """The agents-kwi reproduction: a bwrap that answers the availability probe (it is
+        handed a bare plan ending in /bin/true) but exits non-zero for every real wrap. The
+        inner is deliberately NOT /bin/true, so the fake cannot answer the exercised wrap with
+        the probe's own exit-0 clause — this pins bwrap's non-zero exit, not the
+        rc-0-without-a-token path (`..._exits_zero_without_running_the_child...` below)."""
+        path = self.use_fake_bwrap(
+            '#!/bin/sh\n'
+            'for a in "$@"; do [ "$a" = "/bin/true" ] && exit 0; done\n'
+            'exit 1\n')
+        self.assertTrue(sandbox_available(), "the probe alone reports the host as sandboxable")
+        with self.assertRaises(SandboxError) as raised:
+            self.build(path, inner=("/bin/echo", "x"))
+        self.assertIn("exited 1", str(raised.exception))
+        self.assertEqual(list(self.run_dir.iterdir()), [],
+                         "no verification artifact may be left behind")
+
+    def test_a_bwrap_that_exits_zero_without_running_the_child_is_refused(self):
+        """Exit status alone is not proof: a bwrap that returns 0 without launching the child
+        never writes the sentinel's token, so the wrap is refused rather than recorded."""
+        path = self.use_fake_bwrap('#!/bin/sh\nexit 0\n', name="zero-bin")
+        with self.assertRaises(SandboxError) as raised:
+            self.build(path)
+        self.assertIn("could not start a child", str(raised.exception))
+        self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    def test_a_wrap_that_cannot_exec_the_inner_program_is_refused(self):
+        """The verification is not only about bwrap's exit status: the program the wrap will
+        actually exec must be runnable inside the plan. With a real bwrap but an inner that
+        does not exist inside the sandbox, sandbox_command refuses."""
+        if not LIVE:
+            self.skipTest("needs a real bubblewrap to reach the inner-program check")
+        with self.assertRaises(SandboxError) as raised:
+            sandbox_command([str(self.root / "missing-adapter")], target_dir=self.target,
+                            factory_root=self.factory, run_dir=self.run_dir,
+                            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root / "home")})
+        self.assertIn("cannot execute", str(raised.exception))
+
+    @unittest.skipUnless(LIVE, "needs bubblewrap")
+    def test_a_wrap_that_starts_its_child_is_returned_unchanged(self):
+        """The positive half: on a host where the wrap really starts its child, the argv the
+        station runs is the one built, and the exercise leaves no artifact."""
+        argv = self.build("/usr/bin:/bin")
+        self.assertEqual(argv[0], shutil.which("bwrap"))
+        self.assertEqual(argv[-1], "/bin/true")
+        self.assertEqual(list(self.run_dir.iterdir()), [])
 
 
 class TestSandboxRecord(unittest.TestCase):
