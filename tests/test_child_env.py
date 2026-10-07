@@ -227,6 +227,11 @@ class TestCredentialBrokering(unittest.TestCase):
         from lib.credential_broker import PROVIDERS as BROKER_SIDE
         self.assertEqual(set(BROKER_ENV_CONFIGS), set(BROKER_SIDE))
 
+    def test_pi_credentials_are_covered_by_broker_secret_vars(self):
+        # Every credential passed to pi must have a broker entry so a real key
+        # never silently leaks into a sandboxed env without being brokered (agents-8k9).
+        self.assertTrue(set(ENGINE_CREDENTIALS["pi"]) <= {var for _, _, sv in BROKER_ENV_CONFIGS.values() for var in sv})
+
 
 if __name__ == "__main__":
     unittest.main()

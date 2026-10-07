@@ -266,6 +266,37 @@ class TestLifecycle(unittest.TestCase):
         with self.assertRaises(cb.BrokerError):
             cb.CredentialBroker({"azure": "x"})
 
+    def test_broker_error_is_runtime_error_and_tables_match(self):
+        # BrokerError is a RuntimeError; table divergence diagnostic is fail-closed (agents-8k9).
+        self.assertTrue(issubclass(cb.BrokerError, RuntimeError))
+        self.assertEqual(set(cb.PROVIDERS), set(cb.BROKER_ENV_CONFIGS))
+
+    def test_read_request_body_timeout_sets_close_connection(self):
+        # Mid-body read timeout must set close_connection = True to prevent keep-alive desync (agents-8k9 item 5).
+        handler = cb._Handler.__new__(cb._Handler)
+        handler.headers = {"Content-Length": "100"}
+        handler.connection = mock.Mock()
+        handler.connection.gettimeout.return_value = 10.0
+        handler.rfile = mock.Mock()
+        handler.rfile.read.side_effect = TimeoutError("read timed out")
+        handler.close_connection = False
+
+        with self.assertRaises(cb.BrokerError):
+            handler._read_request_body()
+
+        self.assertTrue(handler.close_connection)
+
+    def test_read_request_body_chunked_refusal_sets_close_connection(self):
+        # Refusing chunked encoding must set close_connection = True.
+        handler = cb._Handler.__new__(cb._Handler)
+        handler.headers = {"Transfer-Encoding": "chunked"}
+        handler.close_connection = False
+
+        with self.assertRaises(cb.BrokerError):
+            handler._read_request_body()
+
+        self.assertTrue(handler.close_connection)
+
 
 class TestChildEnvBrokerComposition(BrokerTestBase):
     """The two committed 8h4 components compose: child_environment(broker_urls) hands the engine
