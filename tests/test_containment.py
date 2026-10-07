@@ -14,6 +14,7 @@ Three layers, each tested where it lives:
 Engines are stubs that record their argv: deterministic, no model call, no credentials.
 """
 
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -660,6 +661,31 @@ process.stdin.on('end', () => {
         )
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
+    def _target_fingerprint(self):
+        """A byte-level fingerprint of the target checkout: its HEAD commit plus a sha256 of
+        every working-tree file's relative path and content (.git internals excluded). Equal
+        fingerprints before and after a run prove the checkout is byte-identical — the explicit
+        hard requirement, stronger than `git status` alone."""
+        head = subprocess.run(["git", "-C", str(self.target), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        digest = hashlib.sha256(head.encode("utf-8"))
+        for path in sorted(p for p in self.target.rglob("*")
+                           if p.is_file() and ".git" not in p.relative_to(self.target).parts):
+            digest.update(str(path.relative_to(self.target)).encode("utf-8"))
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
+
+    def _assert_no_leaked_worktree(self):
+        """No disposable session worktree may survive a run (coord hard requirement): neither
+        the directory under the run dir nor a registration in the target's .git/worktrees."""
+        for run_dir in self.run_dirs():
+            self.assertFalse((run_dir / "worktree").exists(),
+                             f"leaked worktree directory in {run_dir}")
+        listing = subprocess.run(
+            ["git", "-C", str(self.target), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("/worktree", listing, "leaked worktree registration: " + listing)
+
     def test_a_write_agent_edits_a_disposable_worktree_and_leaves_the_target_untouched(self):
         """agents-6ce acceptance: a granted write runs in a disposable git worktree. The engine
         edits files there, the dispatcher collects the session diff as the proposal, the
@@ -668,6 +694,7 @@ process.stdin.on('end', () => {
         self._editing_stub()
         self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        before = self._target_fingerprint()
         res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         # The grant is worktree-write and the engine ran inside the worktree, not the target.
@@ -681,9 +708,11 @@ process.stdin.on('end', () => {
         patch_text = patch.read_text(encoding="utf-8")
         self.assertIn("proposed fix", patch_text)
         self.assertIn("proposed.txt", patch_text)
-        # The worktree was discarded ...
-        self.assertFalse((run_dir / "worktree").exists(), "the worktree must be removed")
-        # ... and the target checkout was never modified.
+        # No worktree leaked, and the target checkout is byte-identical (coord hard
+        # requirement: prove a write run never touched the operator's checkout).
+        self._assert_no_leaked_worktree()
+        self.assertEqual(self._target_fingerprint(), before,
+                         "the target checkout must be byte-identical after a write run")
         status = subprocess.run(["git", "-C", str(self.target), "status", "--porcelain"],
                                 capture_output=True, text=True, check=True)
         self.assertEqual(status.stdout.strip(), "",
@@ -698,6 +727,7 @@ process.stdin.on('end', () => {
         self._editing_stub()
         self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        before = self._target_fingerprint()
         res = self.factory("pi")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("Sandbox:     enforced", res.stdout)
@@ -705,6 +735,9 @@ process.stdin.on('end', () => {
         patch = self.run_dirs()[0] / "session.patch"
         self.assertTrue(patch.exists(), "the sandboxed engine's edits must be collected")
         self.assertIn("proposed fix", patch.read_text(encoding="utf-8"))
+        self._assert_no_leaked_worktree()
+        self.assertEqual(self._target_fingerprint(), before,
+                         "the target checkout must be byte-identical after a sandboxed write run")
         status = subprocess.run(["git", "-C", str(self.target), "status", "--porcelain"],
                                 capture_output=True, text=True, check=True)
         self.assertEqual(status.stdout.strip(), "",
@@ -728,6 +761,33 @@ process.stdin.on('end', () => {
         record = json.loads((run_dir / "policy.json").read_text(encoding="utf-8"))
         self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
         self.assertIn("write", record["withheld"])
+
+    def test_the_worktree_is_removed_even_when_the_engine_fails(self):
+        """agents-6ce hard requirement: no leaked worktrees. An engine that edits the worktree
+        and then FAILS must still have its disposable worktree discarded by the finally block,
+        and the target checkout must stay byte-identical."""
+        self._git_init_target()
+        # A stub that edits a file inside the worktree, then fails (non-zero, no report). The
+        # adapter propagates the failure (pi.sh: `pi ... || exit 1`), so run_agent raises
+        # StationError only AFTER the finally has removed the worktree.
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '// edited then crashed\\n' >> fixme.txt\n"
+            "cat >/dev/null\n"
+            "exit 7\n",
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        before = self._target_fingerprint()
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"})
+        self.assertNotEqual(res.returncode, 0, "a failed engine must fail the run")
+        # No worktree leaked despite the failure, and the target is byte-identical.
+        self._assert_no_leaked_worktree()
+        self.assertEqual(self._target_fingerprint(), before,
+                         "the target checkout must be byte-identical even when the engine fails")
 
 
 if __name__ == "__main__":
