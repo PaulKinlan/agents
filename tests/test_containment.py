@@ -771,6 +771,7 @@ class TestDispatcher(unittest.TestCase):
         self.assertIn("egress filtered", res.stdout)
         self.assertIn("Sandbox:     enforced", res.stdout)
 
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     @unittest.skipUnless(shutil.which("node"),
                          "needs a real node to prove a node-shebang engine runs confined")
     def test_a_node_shebang_engine_runs_confined(self):
@@ -873,6 +874,7 @@ process.stdin.on('end', () => {
         self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
         self.assertNotIn("os-sandbox", record["not_enforced"])
 
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_the_system_directive_rides_the_engine_system_channel_not_the_prompt(self):
         """agents-m2n e2e: a pre-pass that declares system_instruction has it lifted OUT of
         the user prompt (Scanner Data carries evidence only) into run_dir/system_directive.txt,
@@ -927,6 +929,7 @@ process.stdin.on('end', () => {
         self.assertEqual((first / "model_output.txt").read_text(encoding="utf-8"), "first output")
         self.assertEqual(second.stat().st_mode & 0o777, 0o700)
 
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_two_runs_never_share_a_run_directory(self):
         """agents-m2n review P2 (same class as agents-30q): run ids resolve to the second,
         and two runs in one second must still get distinct, exclusively-created run
@@ -1492,19 +1495,19 @@ process.stdin.on('end', () => {
         self.assertEqual(record["granted"]["tool_policy"], WORKTREE_WRITE,
                          "the post-session rewrite must restore the dispatcher's record")
 
-    def test_an_unknown_agent_class_refuses_and_a_missing_class_defaults_to_observer(self):
-        """agents-7ik (1): the class is not free-form — an unknown/mis-typed class refuses
-        like an unknown tier (the write gate was already == proposer; this makes the typo
-        loud instead of a silent read-only run), and a MISSING class defaults to observer."""
+    def test_an_unknown_agent_class_refuses_before_any_run(self):
+        """An unknown class fails closed on every host, including without bubblewrap."""
         self.agent("name: probe\nclass: writer\ncontainment: t0-readonly\n"
                    "budget: {max_minutes: 1}\n")
         res = self.factory("pi")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("unknown agent class", res.stderr + res.stdout)
         self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
-        (self.root / "agents" / "probe" / "agent.yaml").write_text(
-            "name: probe\ncontainment: t0-readonly\nbudget: {max_minutes: 1}\n",
-            encoding="utf-8")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_missing_agent_class_defaults_to_observer(self):
+        """A missing class runs as an observer when the OS sandbox is runnable."""
+        self.agent("name: probe\ncontainment: t0-readonly\nbudget: {max_minutes: 1}\n")
         res = self.factory("pi")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)

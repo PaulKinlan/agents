@@ -23,7 +23,11 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from lib.report_schema import normalize_report, validate  # noqa: E402
+from lib.sandbox import sandbox_available  # noqa: E402
 from test_factory_truth import Sandbox, factory_cli  # noqa: E402
+
+_RUNNABLE_BWRAP = sandbox_available()
+_NEEDS_BWRAP = "needs a host where bubblewrap actually runs"
 
 THREAT_SCHEMA = json.loads((ROOT / "agents" / "threat-model" / "report.schema.json").read_text())
 
@@ -92,6 +96,7 @@ class TestFieldAliases(SchemaAgentCase):
         normalize_report(report, THREAT_SCHEMA)
         self.assertTrue(validate(report, THREAT_SCHEMA))
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_station_keeps_its_verdict_end_to_end(self):
         findings = [{"id": "TM-1", "severity": "high", "title": "THREAT_MODEL.md cited but missing",
                      "description": "d"}]
@@ -102,6 +107,7 @@ class TestFieldAliases(SchemaAgentCase):
         store = json.loads((self.box.root / "findings" / "target.json").read_text())
         self.assertEqual([f["rule_id"] for f in store["findings"].values()], ["TM-1"])
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_prompt_carries_the_declared_schema(self):
         self.schema_agent("threat-model", tm_output([]))
         res = self.box.run_agent("threat-model")
@@ -110,6 +116,7 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertIn("MUST be one JSON object", prompt)
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestGenuineRejection(SchemaAgentCase):
     def test_rejection_keeps_the_report_and_states_the_loss(self):
         findings = [{"severity": "high", "description": "no identifier or title at all"}] * 3

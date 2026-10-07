@@ -38,6 +38,12 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -v
 
+      # Even on a laptop where bubblewrap works, exercise the GitHub runner's
+      # no-sandbox condition: successful engine runs must skip, but pi must still
+      # REFUSE an unsandboxed run. No opt-in is set for this public repository.
+      - name: Guard no-bubblewrap CI parity
+        run: python3 -m unittest discover -s tests -p 'test_no_bwrap_guard.py' -v
+
       - name: Prepare run artifacts directory
         run: mkdir -p runs
 

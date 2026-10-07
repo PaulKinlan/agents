@@ -25,6 +25,7 @@ import sys
 sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.report_schema import declared_schema, validate, validate_agent_report  # noqa: E402
+from lib.sandbox import sandbox_available  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader("factory_cli", str(FACTORY_ROOT / "factory"))
 _spec = importlib.util.spec_from_loader("factory_cli", _loader)
@@ -131,6 +132,7 @@ class TestDeclaredSchema(unittest.TestCase):
                 walk(json.loads(schema_path.read_text(encoding="utf-8")))
 
 
+@unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
 class TestDispatcherSchemaGate(unittest.TestCase):
     """A report that violates the declared schema is treated like unparseable output:
     placeholder report, no findings store update (the bead's prescribed handling)."""
