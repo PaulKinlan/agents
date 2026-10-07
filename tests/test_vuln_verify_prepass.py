@@ -137,6 +137,26 @@ class TestVerifierPriming(unittest.TestCase):
                 self.assertEqual(bundle["candidates"][0]["snippet"], "SUCCESSFUL-RETRY")
                 self._assert_no_conclusions(bundle)
 
+    def test_successful_retry_takes_precedence_over_first_attempt_at_same_second(self):
+        """The retry's attempt suffix sorts ahead of the unsuffixed attempt within the
+        same timestamp, so an earlier discovery candidate cannot mask its verdict."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            first = sandbox / "runs" / "threat-model-target-20260101-000000"
+            first.mkdir(parents=True)
+            (first / "candidates.json").write_text(json.dumps({"candidates": [
+                discovery_finding(agent="threat-model", snippet="STALE-FIRST")
+            ]}), encoding="utf-8")
+            retry = sandbox / "runs" / "threat-model-target-20260101-000000-attempt2"
+            retry.mkdir(parents=True)
+            (retry / "report.json").write_text(json.dumps({"findings": [
+                discovery_finding(agent="threat-model", snippet="SUCCESSFUL-RETRY")
+            ]}), encoding="utf-8")
+            bundle = self._run(sandbox, target)
+            self.assertEqual(bundle["candidate_count"], 1)
+            self.assertEqual(bundle["candidates"][0]["snippet"], "SUCCESSFUL-RETRY")
+            self._assert_no_conclusions(bundle)
+
     def test_collision_suffixed_discovery_runs_remain_visible(self):
         """agents-30q review P1: the dispatcher's eight-hex collision suffix is
         also accepted on a non-retry discovery run, without accepting arbitrary names."""
