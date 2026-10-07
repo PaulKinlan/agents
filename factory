@@ -1199,7 +1199,11 @@ def run_hillclimb(
     apply_edits: bool = False,
     engine_arg: str = "auto",
     explicit_sink: Optional[str] = None
-):
+) -> bool:
+    """Run the Class C perf hill-climber. Returns True when the run completed (proposals
+    recorded, or kept edits persisted as a patch proposal); returns False when --apply could
+    not obtain an isolated worktree, so the run refused rather than mutate the operator's
+    checkout (non-negotiable #6: propose, don't apply)."""
     from lib.bench.runner import measure_target, append_ledger, read_ledger
 
     target_name, target_dir, _ = resolve_target(target_arg)
@@ -1219,104 +1223,145 @@ def run_hillclimb(
     print(f"   Max Steps:   {iterations} (Apply & Verify in Worktree = {apply_edits})")
     print("=" * 70)
 
-    for step_idx in range(1, iterations + 1):
-        if current_val <= target_goal:
-            print(f"\n🎯 Goal achieved! ({goal_metric} = {current_val} <= {target_goal})")
-            break
+    def _record_blocked(reason: str) -> bool:
+        append_ledger(target_name, {
+            "step": 0,
+            "hypothesis": "Isolated apply workspace",
+            "files_touched": [],
+            "metric": goal_metric,
+            "baseline_value": current_val,
+            "candidate_value": current_val,
+            "delta": 0,
+            "outcome": "BLOCKED",
+            "reason": reason,
+        })
+        print(f"\n🚨 --apply blocked: {reason}")
+        print("   The operator's checkout was NOT modified. Fix the cause and re-run "
+              "(or run without --apply to record proposals only).")
+        return False
 
-        print(f"\n--- [Iteration {step_idx}/{iterations}] Running perf-hillclimb station ---")
-        res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink)
-        report = res.get("report", {}) if res else {}
-        steps = report.get("hillclimb_steps", [])
-
-        if not steps:
-            print("No further hill-climb steps proposed by model.")
-            break
-
-        top_step = steps[0]
-        hypothesis = top_step.get("hypothesis", "Unnamed optimization step")
-        rel_file = top_step.get("target_file", "")
-        search_snip = top_step.get("search_snippet", "")
-        replace_snip = top_step.get("replace_snippet", "")
-
-        if not apply_edits or not rel_file or not search_snip:
-            append_ledger(target_name, {
-                "step": step_idx,
-                "hypothesis": hypothesis,
-                "files_touched": [rel_file] if rel_file else [],
-                "metric": goal_metric,
-                "baseline_value": current_val,
-                "candidate_value": current_val,
-                "delta": top_step.get("expected_delta", 0),
-                "outcome": "PROPOSED",
-                "reason": "Proposal recorded (run with --apply to execute in-place verification)"
-            })
-            print(f"📝 Recorded proposal to ledger: {hypothesis}")
-            continue
-
-        target_file_path = (target_dir / rel_file).resolve()
-        if not target_file_path.is_relative_to(target_dir.resolve()) or not target_file_path.exists():
-            append_ledger(target_name, {
-                "step": step_idx,
-                "hypothesis": hypothesis,
-                "files_touched": [rel_file],
-                "metric": goal_metric,
-                "baseline_value": current_val,
-                "candidate_value": current_val,
-                "delta": 0,
-                "outcome": "REVERTED",
-                "reason": f"Target file {rel_file} is outside target boundary or does not exist"
-            })
-            continue
-
-        original_text = target_file_path.read_text(encoding="utf-8")
-        if search_snip not in original_text:
-            append_ledger(target_name, {
-                "step": step_idx,
-                "hypothesis": hypothesis,
-                "files_touched": [rel_file],
-                "metric": goal_metric,
-                "baseline_value": current_val,
-                "candidate_value": current_val,
-                "delta": 0,
-                "outcome": "REVERTED",
-                "reason": "search_snippet did not match exact file contents"
-            })
-            continue
-
-        # Apply candidate change and re-measure inside an isolated git worktree (if git repo) or atomic try/finally
-        updated_text = original_text.replace(search_snip, replace_snip, 1)
-        worktree_dir = FACTORY_ROOT / "runs" / "worktrees" / f"{target_name}-{step_idx}-{int(datetime.now().timestamp())}"
-        used_worktree = False
-
+    # --apply must run entirely inside a disposable worktree. There is no fallback to editing
+    # the operator's checkout: if an isolated workspace cannot be provided, the run fails closed
+    # (non-negotiable #6 / agents-6ce) rather than silently escalating to a write on the real
+    # tree. The worktree is created ONCE and reused across iterations so a kept win stays on
+    # disk and the next iteration measures it (not the untouched target).
+    worktree_dir: Optional[Path] = None
+    worktree_gitdir: Optional[Path] = None
+    proposal_run_dir: Optional[Path] = None
+    if apply_edits:
+        if not (target_dir / ".git").exists():
+            return _record_blocked(
+                "the target is not a git repository, so no disposable worktree can isolate "
+                "the candidate edit from the operator's checkout")
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        proposal_run_dir = FACTORY_ROOT / "runs" / f"hillclimb-{target_name}-{run_id}"
         try:
-            if (target_dir / ".git").exists():
-                worktree_dir.parent.mkdir(parents=True, exist_ok=True)
-                wt_res = _run_git(
-                    ["git", "worktree", "add", "--detach", str(worktree_dir)], target_dir
-                )
-                if wt_res.returncode == 0:
-                    used_worktree = True
-                    wt_file = (worktree_dir / rel_file).resolve()
-                    wt_file.write_text(updated_text, encoding="utf-8")
-                    new_metrics = measure_target(worktree_dir)
-                else:
-                    target_file_path.write_text(updated_text, encoding="utf-8")
-                    new_metrics = measure_target(target_dir)
-            else:
-                target_file_path.write_text(updated_text, encoding="utf-8")
-                new_metrics = measure_target(target_dir)
+            proposal_run_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            proposal_run_dir = FACTORY_ROOT / "runs" / f"hillclimb-{target_name}-{run_id}-{token_hex(4)}"
+            proposal_run_dir.mkdir(parents=True, exist_ok=False)
+        os.chmod(proposal_run_dir, 0o700)
+        worktree_dir = proposal_run_dir / "worktree"
+        try:
+            worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
+        except StationError as e:
+            shutil.rmtree(proposal_run_dir, ignore_errors=True)
+            return _record_blocked(f"cannot create the disposable apply worktree: {e}")
+
+    try:
+        for step_idx in range(1, iterations + 1):
+            if current_val <= target_goal:
+                print(f"\n🎯 Goal achieved! ({goal_metric} = {current_val} <= {target_goal})")
+                break
+
+            print(f"\n--- [Iteration {step_idx}/{iterations}] Running perf-hillclimb station ---")
+            res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink)
+            report = res.get("report", {}) if res else {}
+            steps = report.get("hillclimb_steps", [])
+
+            if not steps:
+                print("No further hill-climb steps proposed by model.")
+                break
+
+            top_step = steps[0]
+            hypothesis = top_step.get("hypothesis", "Unnamed optimization step")
+            rel_file = top_step.get("target_file", "")
+            search_snip = top_step.get("search_snippet", "")
+            replace_snip = top_step.get("replace_snippet", "")
+
+            if not apply_edits or not rel_file or not search_snip:
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file] if rel_file else [],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": top_step.get("expected_delta", 0),
+                    "outcome": "PROPOSED",
+                    "reason": "Proposal recorded (run with --apply to execute in-place verification)"
+                })
+                print(f"📝 Recorded proposal to ledger: {hypothesis}")
+                continue
+
+            # Boundary-check rel_file against the TARGET (defence in depth against path
+            # traversal). The edit itself happens only in the isolated worktree.
+            target_file_path = (target_dir / rel_file).resolve()
+            if not target_file_path.is_relative_to(target_dir.resolve()) or not target_file_path.exists():
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": 0,
+                    "outcome": "REVERTED",
+                    "reason": f"Target file {rel_file} is outside target boundary or does not exist"
+                })
+                continue
+
+            # Read and edit the WORKTREE copy, which carries every kept win from prior
+            # iterations. The operator's checkout is never read for the edit or written at all.
+            edit_file = (worktree_dir / rel_file).resolve() if apply_edits else target_file_path
+            if apply_edits and (not edit_file.is_relative_to(worktree_dir.resolve()) or not edit_file.exists()):
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": 0,
+                    "outcome": "REVERTED",
+                    "reason": f"Target file {rel_file} is not present in the apply worktree"
+                })
+                continue
+
+            original_text = edit_file.read_text(encoding="utf-8")
+            if search_snip not in original_text:
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": 0,
+                    "outcome": "REVERTED",
+                    "reason": "search_snippet did not match exact file contents"
+                })
+                continue
+
+            updated_text = original_text.replace(search_snip, replace_snip, 1)
+            edit_file.write_text(updated_text, encoding="utf-8")
+            new_metrics = measure_target(worktree_dir if apply_edits else target_dir)
 
             new_val = float(new_metrics.get(goal_metric, current_val))
             delta = round(new_val - current_val, 2)
 
             if new_val < current_val:
                 print(f"✅ WIN VERIFIED! {goal_metric}: {current_val} -> {new_val} (delta: {delta})")
-                if used_worktree and res and res.get("run_dir"):
-                    diff_res = _run_git(["git", "diff"], worktree_dir)
-                    patch_file = res["run_dir"] / f"winning-step-{step_idx}.patch"
-                    patch_file.write_text(diff_res.stdout, encoding="utf-8")
-                    print(f"   Saved verified patch to: {patch_file}")
                 append_ledger(target_name, {
                     "step": step_idx,
                     "hypothesis": hypothesis,
@@ -1328,8 +1373,14 @@ def run_hillclimb(
                     "outcome": "KEPT",
                     "reason": f"Metric improved by {abs(delta)}"
                 })
+                # The edit is already persisted in the worktree file above, so advancing
+                # current_val matches a value that is now on disk (measure_target would
+                # return it on the next iteration).
                 current_val = new_val
             else:
+                # Revert the worktree file so disk stays exactly at current_val: a rejected
+                # step must not drift the accumulated workspace (or the operator's checkout).
+                edit_file.write_text(original_text, encoding="utf-8")
                 print(f"↩️  REVERTED! {goal_metric}: {current_val} -> {new_val} (did not improve).")
                 append_ledger(target_name, {
                     "step": step_idx,
@@ -1342,13 +1393,23 @@ def run_hillclimb(
                     "outcome": "REVERTED",
                     "reason": f"Metric did not improve (delta {delta})"
                 })
-        finally:
-            if used_worktree:
-                _run_git(
-                    ["git", "worktree", "remove", "--force", str(worktree_dir)], target_dir
-                )
-            elif target_file_path.exists():
-                target_file_path.write_text(original_text, encoding="utf-8")
+
+        # The kept edits accumulated in the worktree; collect them once as the proposal (the
+        # durable artifact that actually persists the wins). The target checkout was never
+        # touched, so the patch is the only thing an operator needs to review and merge.
+        if apply_edits and worktree_dir is not None and worktree_gitdir is not None \
+                and proposal_run_dir is not None:
+            patch_file = _collect_session_diff(worktree_dir, proposal_run_dir, worktree_gitdir)
+            if patch_file is not None:
+                print(f"\n🧾 Collected the hill-climb's kept edits as {patch_file}; "
+                      f"the target checkout was NOT modified. Apply that patch to persist the wins.")
+            else:
+                print("\n🧾 The hill-climb made no kept edits (empty proposal); "
+                      "the target checkout was NOT modified.")
+        return True
+    finally:
+        if apply_edits and worktree_dir is not None:
+            _remove_session_worktree(target_dir, worktree_dir)
 
 
 def install_pre_commit_hook(target_arg: Optional[str] = None, all_targets: bool = False):
@@ -1579,7 +1640,7 @@ def main():
         if not run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink):
             sys.exit(1)
     elif args.command == "hillclimb":
-        run_hillclimb(
+        if not run_hillclimb(
             target_arg=args.target,
             goal_metric=args.metric,
             goal_value=args.goal,
@@ -1587,7 +1648,8 @@ def main():
             apply_edits=args.apply,
             engine_arg=args.engine,
             explicit_sink=args.sink
-        )
+        ):
+            sys.exit(1)
     elif args.command == "hook":
         install_pre_commit_hook(target_arg=getattr(args, "target", None), all_targets=getattr(args, "all", False))
     elif args.command == "skills":
