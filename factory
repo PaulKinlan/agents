@@ -449,18 +449,37 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # is not path-confined by its flags). If bubblewrap cannot run on this host, REFUSE
     # rather than silently fall back to an unsandboxed run where a prompt-injected session
     # reads any file the operator can (review P0). FACTORY_ALLOW_UNSANDBOXED is the one
-    # explicit unsandboxed path, for a TRUSTED target per THREAT_MODEL.md section 7; the
-    # banner and policy.json then report the session NOT confined.
+    # explicit unsandboxed path — and since agents-bp0 it is an ATTESTATION, not a switch:
+    # THREAT_MODEL.md section 7 accepts an unsandboxed run only for a TRUSTED target, so
+    # the opt-in additionally requires the target's own manifest to declare `trusted: true`
+    # with `visibility: private` (targets/<name>.yaml). The ambient environment alone must
+    # never unlock it — anything able to set an environment variable (a compromised
+    # schedule entry, a malicious CI step, a wrapper script, a command a doc tells a
+    # developer to run) must not be able to make the operator's filesystem the read scope.
+    # A public/unknown-visibility target, or a raw --target path with no manifest, always
+    # refuses; the banner and policy.json then report the session NOT confined.
     sandbox_ok = sandbox_available()
     allow_unsandboxed = os.environ.get("FACTORY_ALLOW_UNSANDBOXED", "").strip().lower() \
         in ("1", "true", "yes", "on")
-    if engine in SANDBOXED_ENGINES and not sandbox_ok and not allow_unsandboxed:
+    trusted_opt_in = (allow_unsandboxed
+                      and target_cfg.get("trusted") is True
+                      and normalize_visibility(target_cfg.get("visibility")) == "private")
+    if engine in SANDBOXED_ENGINES and not sandbox_ok and not trusted_opt_in:
+        why = ("and the target does not carry the trusted attestation (targets/<name>.yaml "
+               "`trusted: true` with `visibility: private`)"
+               if allow_unsandboxed else "and no FACTORY_ALLOW_UNSANDBOXED opt-in was given")
         raise ContainmentError(
             f"engine '{engine}' relies on the OS filesystem sandbox to confine its read "
-            f"scope to the target, but bubblewrap cannot run on this host; refusing an "
-            f"unsandboxed run (the model's read tool would reach any file the operator can "
-            f"read). For a TRUSTED target re-run with FACTORY_ALLOW_UNSANDBOXED=1 "
-            f"(THREAT_MODEL.md section 7); the banner and policy.json will then say NOT confined.")
+            f"scope to the target, but bubblewrap cannot run on this host {why}; refusing "
+            f"an unsandboxed run (the model's read tool would reach any file the operator "
+            f"can read). The opt-in exists only for a target that declares `trusted: true` "
+            f"with `visibility: private` in its manifest (THREAT_MODEL.md section 7); the "
+            f"banner and policy.json then say NOT confined.")
+    unsandboxed_note = (
+        f"explicit FACTORY_ALLOW_UNSANDBOXED opt-in on trusted target '{target_name}' "
+        f"(visibility private; THREAT_MODEL.md section 7): the engine process and the "
+        f"pre-pass run as the operator"
+        if engine in SANDBOXED_ENGINES and not sandbox_ok else None)
 
     # Egress control (agents-2x6). The engine session's netns can be isolated only when the
     # engine is sandboxed AND every model-provider key present in the environment maps to a
@@ -589,7 +608,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     print(f"\n[Software Factory] Run Initialized")
     print(f"  Agent:       {agent_name} ({agent_cfg.get('class', 'observer')})")
-    for line in banner_lines(policy, engine, sandbox=sandbox):
+    for line in banner_lines(policy, engine, sandbox=sandbox,
+                             unsandboxed_note=unsandboxed_note):
         print(line)
     print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy, engine)}")
     print(f"  Target:      {target_name} ({target_dir})")
@@ -600,7 +620,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # What was declared, what the session was granted, and what is not enforced — the run's
     # own record, so a finding can be read against the containment it was produced under.
     (run_dir / "policy.json").write_text(
-        json.dumps(policy_record(policy, engine, sandbox=sandbox), indent=2),
+        json.dumps(policy_record(policy, engine, sandbox=sandbox,
+                                 unsandboxed_note=unsandboxed_note), indent=2),
         encoding="utf-8")
 
     # 1. Deterministic pre-pass

@@ -338,11 +338,15 @@ def check_engine(policy: Policy, engine: str) -> None:
             f"{policy.agent} — its adapter has no tool controls; use {alternatives}")
 
 
-def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] = None) -> List[str]:
+def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] = None,
+                 unsandboxed_note: Optional[str] = None) -> List[str]:
     """The run banner's containment block: declared, enforced, withheld, not enforced.
 
     `sandbox` is lib/sandbox.py's sandbox_record(): None on hosts without a sandbox (the
     gap text stays, honestly), or the record of what the OS sandbox actually covers.
+    `unsandboxed_note` (agents-bp0) names the explicit FACTORY_ALLOW_UNSANDBOXED opt-in on
+    a trusted target — a deliberate exception the operator attested to, so it is printed
+    prominently instead of the generic gap text.
     """
     tier_note = "declared" if policy.tier_declared else "not declared; strictest tier assumed"
     engine_sandboxed = bool(sandbox and sandbox.get("engine_sandboxed"))
@@ -357,7 +361,8 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
     for flag, reason in policy.withheld.items():
         lines.append(f"  Withheld:    {flag} — {reason}")
     if sandbox is None:
-        lines.append(f"  Sandbox:     {SANDBOX_GAP}")
+        lines.append(f"  Sandbox:     NOT enforced — {unsandboxed_note}"
+                     if unsandboxed_note else f"  Sandbox:     {SANDBOX_GAP}")
     else:
         tool = sandbox.get("tool", "os-sandbox")
         coverage = ("engine and pre-pass" if engine_sandboxed
@@ -382,7 +387,8 @@ def budget_note(policy: Policy, engine: str) -> str:
 
 
 def policy_record(policy: Policy, engine: str,
-                  sandbox: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  sandbox: Optional[Dict[str, Any]] = None,
+                  unsandboxed_note: Optional[str] = None) -> Dict[str, Any]:
     """The machine-readable account written to the run directory as policy.json.
 
     `sandbox` is lib/sandbox.py's sandbox_record(); the not_enforced list only drops an
@@ -411,7 +417,7 @@ def policy_record(policy: Policy, engine: str,
     }
     if sandbox is not None:
         granted["os_sandbox"] = dict(sandbox)
-    return {
+    record = {
         "agent": policy.agent,
         "engine": engine,
         "declared": {
@@ -425,3 +431,10 @@ def policy_record(policy: Policy, engine: str,
         "withheld": dict(policy.withheld),
         "not_enforced": not_enforced,
     }
+    # agents-bp0: an unsandboxed opt-in run records the attestation it ran under, so the
+    # machine-readable account says WHY the engine is unconfined — a deliberate exception
+    # on a trusted target, not a silent fallback. os-sandbox/read-scope stay in
+    # not_enforced either way; this field never upgrades them.
+    if unsandboxed_note:
+        record["unsandboxed_opt_in"] = unsandboxed_note
+    return record
