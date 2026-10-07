@@ -502,6 +502,50 @@ class TestDispatcher(unittest.TestCase):
         self.assertIn("network-egress", record["not_enforced"])
         self.assertIn("Sandbox:     enforced", res.stdout)
 
+    @unittest.skipUnless(shutil.which("node"),
+                         "needs a real node to prove a node-shebang engine runs confined")
+    def test_a_node_shebang_engine_runs_confined(self):
+        """review P1 (agents-9n7): the real pi is `#!/usr/bin/env node`, so the sandbox must
+        bind node or the engine dies with 'env: node: No such file or directory'. This runs a
+        REAL node program as the engine (not a bash stub) and asserts it both executes inside
+        the sandbox AND cannot read a canary outside the target — proving node is bound and
+        the boundary still holds for a node engine."""
+        outside = tempfile.TemporaryDirectory(prefix="factory-9n7-node-outside-")
+        self.addCleanup(outside.cleanup)
+        canary = Path(outside.name) / "canary.txt"
+        canary.write_text("CANARY-SECRET-NODE", encoding="utf-8")
+        (self.target / "canary-path.txt").write_text(str(canary), encoding="utf-8")
+        node_script = r'''#!/usr/bin/env node
+const fs = require('fs');
+let p = '/nonexistent';
+try { p = fs.readFileSync('canary-path.txt', 'utf8').trim(); } catch (e) {}
+let r;
+try { r = fs.readFileSync(p, 'utf8').split('\n')[0]; } catch (e) { r = e.message; }
+process.stdout.write('CANARY:' + r + '\n');
+process.stdout.write('NODE-ENGINE-OK\n');
+let inp = '';
+process.stdin.on('data', d => { inp += d; });
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({summary: 'node probe', scanned_files: 1, findings: []}) + '\n');
+});
+'''
+        node_pi = self.bin / "pi"
+        node_pi.write_text(node_script, encoding="utf-8")
+        node_pi.chmod(node_pi.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        # node must be on the subprocess PATH so the engine wrap resolves and binds it.
+        node_dir = str(Path(shutil.which("node")).parent)
+        res = self.factory("pi", {"PATH": f"{self.bin}{os.pathsep}{node_dir}{os.pathsep}/usr/bin:/bin"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     enforced", res.stdout)
+        lines = "\n".join(self.stub_lines())
+        self.assertIn("NODE-ENGINE-OK", lines,
+                      "the node engine must actually execute inside the sandbox (node bound)")
+        canary_line = self.stub_line("CANARY:")
+        self.assertNotIn("CANARY-SECRET-NODE", canary_line)
+        self.assertTrue("ENOENT" in canary_line or "No such file" in canary_line, canary_line)
+
     def test_a_pi_run_is_refused_when_the_sandbox_cannot_run(self):
         """review P0 (agents-9n7): pi's read scope is confined ONLY by the OS sandbox. If
         bubblewrap cannot run on the host, the dispatcher must REFUSE — never silently fall

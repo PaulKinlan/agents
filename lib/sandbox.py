@@ -65,13 +65,22 @@ SANDBOXED_ENGINES = frozenset({"pi"})
 # resolved programs (as install trees / launch paths), never whole PATH directories, so an
 # unrelated directory the operator happened to leave on PATH cannot smuggle files into the
 # engine's read scope. Names that resolve under /usr need no bind (already visible); the
-# list matters for tools that live under a hidden home root. Extend it when a pre-pass
-# starts shelling out to a new home-installed tool — a missing tool fails the scan loudly
-# rather than widening the sandbox.
-ENGINE_EXECUTABLES = ("bash", "sh", "env")  # the engine name is added by the dispatcher
+# list matters for tools that live under a hidden home root. A tool that is not listed
+# fails to resolve, which fails the scan loudly rather than widening the sandbox — extend
+# the list when a real run gains a new dependency.
+#
+# The real pi is a `#!/usr/bin/env node` script (its launcher lives in ~/.local/pi), so the
+# engine child MUST have `node` bound or it dies with "env: node: No such file or directory"
+# (review P1, agents-9n7). bash runs the adapter and the pi shim; env resolves the shebangs;
+# the engine name itself ("pi") is added by the dispatcher. pi's model session shells out to
+# nothing else (its read/grep/find/ls tools are builtins or /usr utilities, already visible).
+ENGINE_EXECUTABLES = ("bash", "sh", "env", "node")
+# Audited against agents/*/scripts/*.py: the pre-passes shell out to git, gh, gitleaks and
+# node/npm/npx (the dependency audit), plus python3 for sub-scans; bash/sh/env cover shell
+# shebangs. Only the home-installed tools (node/npm/npx/gitleaks) actually incur a bind —
+# git/gh/python3 resolve under /usr and are already visible.
 PREPASS_EXECUTABLES = (
-    "bash", "sh", "env", "git", "node", "npm", "npx", "gitleaks", "semgrep", "gh", "rg",
-    "jq", "curl", "python3",
+    "bash", "sh", "env", "git", "gh", "gitleaks", "node", "npm", "npx", "python3",
 )
 
 # Directory names that are structural plumbing of an install tree, not the package itself:
