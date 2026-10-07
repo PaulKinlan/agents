@@ -67,14 +67,19 @@ GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 # non-secret placeholder under the var it reads, plus the base-URL var pointed at the broker,
 # which injects the real key host-side. Per provider: (placeholder var the engine reads, base-URL
 # var, every var that could carry a real secret for it — all stripped from the sandboxed env).
-# Scoped to the providers lib/credential_broker.py maps cleanly; deepseek/openrouter/bedrock and
-# the Claude OAuth token follow the same shape but need their URL construction verified first.
+# Scoped to the providers lib/credential_broker.py maps. deepseek and openrouter were added
+# for agents-2x6: under --unshare-net a sandboxed engine cannot dial a provider directly, so
+# every provider pi can use must be brokerable or egress control would regress it. Their pi
+# path-append is a deferred live-run verification item (as is the bedrock/Claude-OAuth shape).
+# This dict MUST stay in step with credential_broker.PROVIDERS (same provider set).
 BROKER_PROVIDERS = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
                   ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")),
     "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL", ("OPENAI_API_KEY",)),
     "google": ("GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL",
                ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+    "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", ("DEEPSEEK_API_KEY",)),
+    "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", ("OPENROUTER_API_KEY",)),
 }
 
 # Requirements that bring the pre-pass a network credential. lib/containment.py refuses any of
