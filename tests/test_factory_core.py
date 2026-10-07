@@ -16,6 +16,8 @@ from pathlib import Path
 from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
+from lib.credential_broker import PLACEHOLDER_KEY
+from lib.sandbox import sandbox_available
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader("factory_cli", str(FACTORY_ROOT / "factory"))
@@ -216,6 +218,9 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                     engine[name] = value
             return prepass, engine
 
+    @unittest.skipUnless(sandbox_available(),
+                         "the pi run is refused without bubblewrap, and brokering (agents-8h4) "
+                         "applies only to a sandboxed engine")
     def test_agent_children_never_inherit_operator_credentials(self):
         prepass, engine = self._run_probe()
         for child, env in (("pre-pass", prepass), ("engine", engine)):
@@ -224,8 +229,16 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                 with self.subTest(child=child, name=name):
                     self.assertNotIn(name, env)
         self.assertNotIn("ANTHROPIC_API_KEY", prepass)
-        self.assertEqual(engine["GEMINI_API_KEY"], "gem-ci")
-        self.assertEqual(engine["ANTHROPIC_API_KEY"], "sk-ant-ci")
+        # agents-8h4: a SANDBOXED engine never carries the operator's real model key. The
+        # dispatcher brokers it — the engine's environ (and so its /proc/self/environ, the leak
+        # vector THREAT_MODEL §6.1 names) holds a non-secret placeholder + the localhost broker
+        # base URL, and the real key is injected host-side only. So the real values are absent.
+        self.assertEqual(engine["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(engine["GEMINI_API_KEY"], PLACEHOLDER_KEY)
+        self.assertNotIn("sk-ant-ci", engine.values())
+        self.assertNotIn("gem-ci", engine.values())
+        self.assertTrue(engine["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"),
+                        engine.get("ANTHROPIC_BASE_URL"))
         self.assertIn("PATH", engine)
 
     def test_prepass_gets_github_only_when_the_agent_declares_gh(self):

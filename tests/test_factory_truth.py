@@ -42,7 +42,7 @@ factory_cli = importlib.util.module_from_spec(_spec)
 _loader.exec_module(factory_cli)
 
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
-               "report_schema.py", "containment.py", "sandbox.py")
+               "credential_broker.py", "report_schema.py", "containment.py", "sandbox.py")
 
 
 def finding(**overrides):

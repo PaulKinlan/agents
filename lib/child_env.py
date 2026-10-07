@@ -100,6 +100,30 @@ def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] 
     return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent)
 
 
+def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Dict[str, str]:
+    """Swap brokered providers' real key vars in `env` for a placeholder + the broker base URL.
+
+    Mutates and returns `env`. For each provider in `broker_urls` that BROKER_PROVIDERS maps,
+    every var that could carry a real secret is dropped and the engine gets PLACEHOLDER_KEY
+    under the var it reads plus the base-URL var pointed at the dispatcher's broker, so a
+    sandboxed engine's /proc/self/environ holds no credential shape while model calls still
+    authenticate (the broker injects the real key host-side). Unmapped providers are left
+    untouched (fail toward the normal allowlist). Extracted from child_environment so the
+    dispatcher can broker an already-built env in place, once it knows the engine will run
+    sandboxed and which real keys it holds (agents-8h4).
+    """
+    for provider, base_url in broker_urls.items():
+        spec = BROKER_PROVIDERS.get(provider)
+        if not spec:
+            continue  # an unmapped provider is left to the normal allowlist (fail toward today)
+        placeholder_var, base_url_var, secret_vars = spec
+        for var in secret_vars:
+            env.pop(var, None)  # no real credential crosses into the sandboxed env
+        env[placeholder_var] = PLACEHOLDER_KEY
+        env[base_url_var] = base_url
+    return env
+
+
 def child_environment(
     engine: Optional[str] = None,
     sink: Optional[str] = None,
@@ -131,13 +155,5 @@ def child_environment(
             env[name] = value
 
     if broker_urls:
-        for provider, base_url in broker_urls.items():
-            spec = BROKER_PROVIDERS.get(provider)
-            if not spec:
-                continue  # an unmapped provider is left to the normal allowlist (fail toward today)
-            placeholder_var, base_url_var, secret_vars = spec
-            for var in secret_vars:
-                env.pop(var, None)  # no real credential crosses into the sandboxed env
-            env[placeholder_var] = PLACEHOLDER_KEY
-            env[base_url_var] = base_url
+        apply_broker_urls(env, broker_urls)
     return env

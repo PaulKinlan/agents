@@ -35,6 +35,7 @@ from lib.containment import (  # noqa: E402
     budget_note, check_engine, load_policy, policy_record,
 )
 from lib.sandbox import sandbox_available  # noqa: E402
+from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
 
 # Whether THIS host can run bubblewrap. The confinement acceptance test needs it; the
 # fail-closed and opt-in tests simulate its absence with a broken bwrap on PATH, so they run
@@ -953,6 +954,59 @@ process.stdin.on('end', () => {
         self._assert_no_leaked_worktree()
         self.assertEqual(self._target_fingerprint(), before,
                          "the target checkout must be byte-identical even when the engine fails")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_sandboxed_engine_gets_a_broker_placeholder_not_the_real_key(self):
+        """agents-8h4 acceptance: a sandboxed engine must not carry the operator's real API key.
+        With a real key in the dispatcher's environment, run_agent starts the localhost
+        credential broker and hands the engine a PLACEHOLDER + the broker base URL instead, so
+        the engine's own /proc/self/environ — the leak vector THREAT_MODEL §6.1 names — holds no
+        credential shape, while the broker (host side) still injects the real key upstream. This
+        proves the key is stripped inside the REAL bwrap sandbox and that the engine can reach
+        the broker through the sandbox's shared host network. Gated on bwrap: brokering applies
+        only to an engine_sandboxed run."""
+        real_key = "sk-ant-REALKEY-do-not-leak"
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo \"ENVKEY:${ANTHROPIC_API_KEY:-unset}\"\n"
+            "echo \"ENVBASE:${ANTHROPIC_BASE_URL:-unset}\"\n"
+            # The leak vector: grep the engine's OWN /proc/self/environ for the real key.
+            "if tr '\\0' '\\n' < /proc/self/environ | grep -qF '" + real_key + "'; then\n"
+            "  echo PROCENV:LEAKED\n"
+            "else\n"
+            "  echo PROCENV:CLEAN\n"
+            "fi\n"
+            # Reach the broker over loopback; the root path 404s BEFORE any upstream hop, so
+            # this needs no real provider network.
+            "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf 'GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3\n"
+            "  read -r LINE <&3 && echo \"BROKERLINE:$LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo BROKERLINE:UNREACHABLE\n"
+            "fi\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        # A read-only observer: brokering applies to any sandboxed engine, no write grant needed.
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi", {"ANTHROPIC_API_KEY": real_key})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # The engine's environ holds the placeholder, never the real key.
+        self.assertEqual(self.stub_line("ENVKEY:"), PLACEHOLDER_KEY)
+        self.assertEqual(self.stub_line("PROCENV:"), "CLEAN",
+                         "the real key must not appear in the sandboxed engine's /proc/self/environ")
+        base = self.stub_line("ENVBASE:")
+        self.assertTrue(base.startswith("http://127.0.0.1:") and base.endswith("/proxy/anthropic"),
+                        f"the engine must be pointed at the localhost broker, got {base!r}")
+        # And it can actually reach the broker through the sandbox network: a 404 on the root
+        # path proves the listener answered (no upstream hop involved).
+        self.assertIn("404", self.stub_line("BROKERLINE:"),
+                      "the sandboxed engine must reach the broker over loopback")
 
 
 if __name__ == "__main__":

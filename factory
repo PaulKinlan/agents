@@ -23,7 +23,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
                                  budget_note, check_engine, downgrade_write_to_read_only,
                                  load_policy, policy_record)
-    from lib.child_env import child_environment, prepass_environment
+    from lib.child_env import apply_broker_urls, child_environment, prepass_environment
+    from lib.credential_broker import CredentialBroker, credentials_from_env
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
@@ -36,7 +37,8 @@ except ImportError:
     from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
                                  budget_note, check_engine, downgrade_write_to_read_only,
                                  load_policy, policy_record)
-    from lib.child_env import child_environment, prepass_environment
+    from lib.child_env import apply_broker_urls, child_environment, prepass_environment
+    from lib.credential_broker import CredentialBroker, credentials_from_env
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
@@ -615,11 +617,33 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # above, before the banner, so "Sandbox: enforced" reflects a wrapper that actually
         # constructed. The prompt is stdin, never argv: it embeds up to 50 raw scanner
         # records, and argv is visible to any local user (agents-pgr).
-        # Disposable worktree lifecycle (agents-6ce): in worktree-write mode create the
-        # throwaway worktree just before the session (so the sandbox's read-write bind of
-        # run_dir picks it up), collect the session diff right after — the engine's edits live
-        # only there and the target checkout was never touched — and always discard it.
+        # Engine-session lifecycle. Disposable worktree (agents-6ce): in worktree-write mode
+        # create the throwaway worktree just before the session (so the sandbox's read-write
+        # bind of run_dir picks it up), collect the session diff right after — the engine's
+        # edits live only there and the target checkout was never touched — and always discard
+        # it. Credential broker (agents-8h4): a sandboxed engine must NOT carry the operator's
+        # real API keys, because bun/pi reads its own /proc/self/environ and a prompt-injected
+        # session would reach them. So when the engine runs inside the OS sandbox and a real
+        # key is present, start a localhost broker and swap the engine's key vars for a
+        # placeholder + the broker base URL; the broker injects the real key host-side and
+        # forwards upstream. The sandbox shares the host network (egress is not filtered yet,
+        # THREAT_MODEL §6.1), so 127.0.0.1 is reachable from inside. Both are started here —
+        # after the pre-pass — and torn down in the finally, so neither leaks on any failure.
+        broker: Optional[CredentialBroker] = None
         try:
+            if engine_sandboxed(engine):
+                broker_creds = credentials_from_env()
+                if broker_creds:
+                    broker = CredentialBroker(broker_creds)
+                    try:
+                        broker.start()
+                    except Exception as e:  # noqa: BLE001 - fail closed, never leak the key
+                        raise StationError(
+                            f"{agent_name}: cannot start the credential broker, so the real API "
+                            f"key cannot be kept out of the sandboxed engine's environ; refusing "
+                            f"the run rather than leaking it: {e}") from e
+                    apply_broker_urls(
+                        adapter_env, {p: broker.base_url(p) for p in broker.providers})
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
             adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
@@ -639,6 +663,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 else:
                     print("  [worktree] The session made no file edits (empty proposal).")
         finally:
+            if broker is not None:
+                broker.stop()
             if worktree_dir is not None:
                 _remove_session_worktree(target_dir, worktree_dir)
         
