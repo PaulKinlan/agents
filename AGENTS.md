@@ -59,9 +59,13 @@ agents/<name>/
 Default to `t0-readonly`. The tier is a ceiling on what an agent may declare, and
 `lib/containment.py` refuses a run whose `capabilities` exceed it (THREAT_MODEL.md §6.1).
 
-The tier is not a grant. Every model session runs with the `read-only` tool policy, whatever the
-tier. Declared `write`, `network` and `browser` are withheld until there is a mechanism to hold
-them to the tier.
+The tier is not a grant. A model session runs with the `read-only` tool policy — **except** that
+an agent declaring `write` within a tier that allows it (`t2-local`) is granted `worktree-write`
+(agents-6ce): the engine edits files inside a disposable git worktree of the target, placed under
+the read-write run directory, so the target checkout stays read-only and the collected session
+diff (`run_dir/session.patch`) *is* the proposal; the worktree is discarded afterwards, and a
+non-git target downgrades to `read-only`. Declared `network` and `browser` are withheld until
+there is a mechanism to hold them to the tier.
 
 On Linux hosts with bubblewrap, the engine session and the pre-pass additionally run inside an
 OS sandbox (`lib/sandbox.py`, agents-9n7): the target read-only, everything else invisible,
@@ -119,11 +123,11 @@ a committed suppressions file.
 
 ## Engines
 
-| | invocation | skills | read-only tool policy (factory runs) |
+| | invocation | skills | tool policy flags (factory runs) |
 |---|---|---|---|
 | `antigravity` | headless conversation API | plugin dir / symlink into the engine config dir | refused: agentapi has no tool controls |
-| `claude` | `claude -p` | `--append-system-prompt-file` in factory runs, because the Skill tool is withheld; `factory skills install` links them into `~/.claude/skills` for interactive use | `--restricted --tools Read,Grep,Glob --strict-mcp-config` |
-| `pi` | `pi -p` | `--skill` | `--tools read,grep,find,ls --no-extensions --no-approve` |
+| `claude` | `claude -p` | `--append-system-prompt-file` in factory runs, because the Skill tool is withheld; `factory skills install` links them into `~/.claude/skills` for interactive use | read-only: `--restricted --tools Read,Grep,Glob --strict-mcp-config` · worktree-write adds `Edit,Write` (`--restricted` still confines them to the worktree) |
+| `pi` | `pi -p` | `--skill` | read-only: `--tools read,grep,find,ls --no-extensions --no-approve` · worktree-write adds `edit,write` (confined by the OS sandbox: the worktree is read-write, the target read-only) |
 
 Install locally by symlinking this repo into the engine's plugin directory — the same pattern as
 `web-resilience-plugin`.
