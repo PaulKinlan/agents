@@ -7,6 +7,7 @@ sink dispatch (file, beads, github-issues).
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +30,15 @@ SUPPRESSIONS_FILENAME = "suppressions.yaml"
 
 class SuppressionFileError(ValueError):
     """The suppressions register cannot be parsed. Loud, never a silent empty dict."""
+
+
+class StoreFileError(ValueError):
+    """The findings store cannot be read or parsed. Loud, never a silent empty store.
+
+    Resetting a corrupt or truncated store to ``{"findings": {}}`` would re-book every prior
+    finding as new and re-file duplicates, so a store that exists but cannot be decoded raises
+    instead (agents-3ls).
+    """
 
 try:  # imported as lib.findings (root on sys.path), or run as a script (lib/ on it)
     from lib.redaction import redact_finding
@@ -247,16 +258,62 @@ class FindingsStore:
         self.store_file = self.findings_dir / f"{target_name}.json"
         self.suppressions_file = self.findings_dir / SUPPRESSIONS_FILENAME
         self.legacy_suppressions_file = self.findings_dir / f"{target_name}.suppressions.json"
-        self.data: Dict[str, Any] = self._load_store()
-        self.suppressions: Dict[str, Any] = self._load_suppressions()
+        # Advisory lock held across the whole load -> mutate -> save window (agents-3ls).
+        # Concurrent factory processes (scheduled timer, manual run, CI) each do a
+        # read-modify-write; without a lock the last writer wins and silently drops the
+        # other's findings and delivery receipts. The lock file is separate from the store
+        # because save() replaces the store's inode via os.replace(), and a lock held on the
+        # store file itself would be left pointing at the superseded inode.
+        self._lock_path = self.store_file.with_name(self.store_file.name + ".lock")
+        self._lock_fh = open(self._lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(self._lock_fh.fileno(), fcntl.LOCK_EX)
+            self.data: Dict[str, Any] = self._load_store()
+            self.suppressions: Dict[str, Any] = self._load_suppressions()
+        except BaseException:
+            self._lock_fh.close()
+            raise
+
+    def close(self) -> None:
+        """Release the advisory lock so another process can load and mutate this store."""
+        fh = getattr(self, "_lock_fh", None)
+        if fh is not None:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+            self._lock_fh = None
+
+    def __enter__(self) -> "FindingsStore":
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
     def _load_store(self) -> Dict[str, Any]:
-        if self.store_file.exists():
-            try:
-                return json.loads(self.store_file.read_text(encoding="utf-8"))
-            except Exception as e:
-                sys.stderr.write(f"Warning: could not read {self.store_file}: {e}\n")
-        return {"target": self.target_name, "findings": {}}
+        if not self.store_file.exists():
+            return {"target": self.target_name, "findings": {}}
+        try:
+            data = json.loads(self.store_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise StoreFileError(
+                f"cannot read findings store {self.store_file}: {e}. Refusing to reset to an "
+                f"empty store, which would re-book every prior finding as new and re-file "
+                f"duplicates. Restore the file from backup, or delete it explicitly to reset."
+            ) from e
+        if not isinstance(data, dict):
+            raise StoreFileError(
+                f"findings store {self.store_file} is not a JSON object; refusing to reset it "
+                f"silently."
+            )
+        data.setdefault("target", self.target_name)
+        if not isinstance(data.get("findings"), dict):
+            raise StoreFileError(
+                f"findings store {self.store_file} has no 'findings' object; refusing to reset "
+                f"it silently."
+            )
+        return data
 
     def _load_suppressions(self) -> Dict[str, Any]:
         """Read the committed suppressions register (agents-411).
@@ -276,7 +333,42 @@ class FindingsStore:
         )
 
     def save(self):
-        self.store_file.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+        """Atomically persist the store: temp file + fsync + os.replace (agents-3ls).
+
+        A direct write_text() could leave a truncated file after a crash/SIGKILL mid-write,
+        which _load_store() would then have to treat as corruption. The temp file lives in the
+        same directory so os.replace() is a same-filesystem rename, never a copy.
+        """
+        payload = json.dumps(self.data, indent=2)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.store_file.parent), prefix=self.store_file.name + ".", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self.store_file)
+            # fsync the directory so the rename itself is durable across a crash. Best-effort:
+            # the rename already made the write atomic; this only makes it durable, and some
+            # filesystems cannot fsync a directory fd.
+            try:
+                dir_fd = os.open(str(self.store_file.parent), os.O_RDONLY)
+            except OSError:
+                dir_fd = None
+            if dir_fd is not None:
+                try:
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
+                finally:
+                    os.close(dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
         """Ingests raw findings from an agent run, applies fingerprinting and state transitions.
@@ -936,8 +1028,8 @@ if __name__ == "__main__":
 
     try:
         store = FindingsStore(target_name=args.target)
-    except SuppressionFileError as e:
-        # Loud and non-zero: a register that cannot be parsed must not silently suppress nothing.
+    except (SuppressionFileError, StoreFileError) as e:
+        # Loud and non-zero: a register or store that cannot be parsed must not silently reset.
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(2)
     candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
@@ -959,3 +1051,4 @@ if __name__ == "__main__":
         )
     finally:
         store.save()
+        store.close()
