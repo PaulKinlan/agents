@@ -16,8 +16,10 @@ What this module does:
   The dispatcher hands it to the engine adapter, which turns it into the engine's own flags —
   a tool allowlist, and no project hooks, extensions, settings or MCP servers. The boundary is
   the harness's tool registry, never prompt text (non-negotiable #2).
-* **Says plainly what is not enforced.** There is no OS sandbox: the engine process and the
-  deterministic pre-pass run as the operator, with the operator's filesystem and network.
+* **Says plainly what is enforced and what is not.** On Linux hosts with bubblewrap the
+  engine session and the pre-pass run inside an OS sandbox (lib/sandbox.py, agents-9n7);
+  elsewhere they run as the operator and the banner and policy.json say NOT confined.
+  Network egress is never filtered yet.
 
 The tier is a ceiling on what an agent may declare. It is not a grant. Write, network and
 browser are declared by some agents and granted to none, each for a stated reason
@@ -86,6 +88,8 @@ WITHHELD_REASONS = {
 }
 SANDBOX_GAP = ("NOT enforced: the engine process and the pre-pass run as the operator, with "
                "the operator's filesystem and network")
+SANDBOX_PARTIAL_NOTE = ("; the engine adapter is not verified under the sandbox, so the "
+                        "engine session itself is NOT confined")
 
 # Adapters with a per-run cost flag. claude -p takes --max-budget-usd; pi (0.87.1) and
 # agentapi have no equivalent (agents-js7), so a declared cap there is reported, not enforced.
@@ -215,18 +219,35 @@ def check_engine(policy: Policy, engine: str) -> None:
             f"{policy.agent} — its adapter has no tool controls; use {alternatives}")
 
 
-def banner_lines(policy: Policy, engine: str) -> List[str]:
-    """The run banner's containment block: declared, enforced, withheld, not enforced."""
+def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] = None) -> List[str]:
+    """The run banner's containment block: declared, enforced, withheld, not enforced.
+
+    `sandbox` is lib/sandbox.py's sandbox_record(): None on hosts without a sandbox (the
+    gap text stays, honestly), or the record of what the OS sandbox actually covers.
+    """
     tier_note = "declared" if policy.tier_declared else "not declared; strictest tier assumed"
+    engine_sandboxed = bool(sandbox and sandbox.get("engine_sandboxed"))
+    read_scope = ((sandbox or {}).get("engine_read_scope")
+                  or ENGINE_READ_SCOPE.get(engine, "unknown"))
     lines = [
         f"  Containment: {policy.tier} ({tier_note}) — a ceiling on capabilities, validated",
         f"  Tool policy: {policy.tool_policy}, enforced by the {engine} adapter: "
         f"{ENGINE_ENFORCEMENT.get(engine, 'unknown')}",
-        f"  Read scope:  {ENGINE_READ_SCOPE.get(engine, 'unknown')}",
+        f"  Read scope:  {read_scope}",
     ]
     for flag, reason in policy.withheld.items():
         lines.append(f"  Withheld:    {flag} — {reason}")
-    lines.append(f"  Sandbox:     {SANDBOX_GAP}")
+    if sandbox is None:
+        lines.append(f"  Sandbox:     {SANDBOX_GAP}")
+    else:
+        tool = sandbox.get("tool", "os-sandbox")
+        coverage = ("engine and pre-pass" if engine_sandboxed
+                    else f"pre-pass only{SANDBOX_PARTIAL_NOTE}")
+        egress = ("network egress NOT filtered"
+                  if not sandbox.get("network_egress_filtered") else "egress filtered")
+        lines.append(f"  Sandbox:     enforced ({tool}): {coverage} — target read-only, "
+                     f"everything else invisible, $HOME hidden (auth via env only), "
+                     f"private PID namespace (host /proc invisible); {egress}")
     return lines
 
 
@@ -241,13 +262,36 @@ def budget_note(policy: Policy, engine: str) -> str:
             f"(the {engine} adapter has no per-run budget flag)")
 
 
-def policy_record(policy: Policy, engine: str) -> Dict[str, Any]:
-    """The machine-readable account written to the run directory as policy.json."""
-    not_enforced = ["os-sandbox"]
-    if engine == "pi":
+def policy_record(policy: Policy, engine: str,
+                  sandbox: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The machine-readable account written to the run directory as policy.json.
+
+    `sandbox` is lib/sandbox.py's sandbox_record(); the not_enforced list only drops an
+    entry when the sandbox actually covers it, and gains `network-egress` because the
+    sandbox does not filter egress (agents-9n7).
+    """
+    engine_sandboxed = bool(sandbox and sandbox.get("engine_sandboxed"))
+    not_enforced = [] if engine_sandboxed else ["os-sandbox"]
+    if engine == "pi" and not engine_sandboxed:
         not_enforced.append("read-scope")
+    if sandbox is not None:
+        if not sandbox.get("network_egress_filtered"):
+            not_enforced.append("network-egress")
+        # bun/pi needs a real procfs, so the engine's own /proc/self/environ is readable by
+        # its own read tool: the engine's API keys (the child_env allowlist, nothing else)
+        # are in reach of a prompt-injected session. Published output is redacted
+        # (lib/redaction.py); a credential-broker proxy is the follow-up (agents-9n7).
+        not_enforced.append("env-credentials")
     if policy.max_usd is not None and engine not in USD_CAPABLE_ENGINES:
         not_enforced.append("budget.max_usd")
+    granted = {
+        "tool_policy": policy.tool_policy,
+        "enforced_by": ENGINE_ENFORCEMENT.get(engine),
+        "read_scope": ((sandbox or {}).get("engine_read_scope")
+                       or ENGINE_READ_SCOPE.get(engine)),
+    }
+    if sandbox is not None:
+        granted["os_sandbox"] = dict(sandbox)
     return {
         "agent": policy.agent,
         "engine": engine,
@@ -258,11 +302,7 @@ def policy_record(policy: Policy, engine: str) -> Dict[str, Any]:
             "requires": list(policy.requires),
             "budget": {"max_minutes": policy.max_minutes, "max_usd": policy.max_usd},
         },
-        "granted": {
-            "tool_policy": policy.tool_policy,
-            "enforced_by": ENGINE_ENFORCEMENT.get(engine),
-            "read_scope": ENGINE_READ_SCOPE.get(engine),
-        },
+        "granted": granted,
         "withheld": dict(policy.withheld),
         "not_enforced": not_enforced,
     }

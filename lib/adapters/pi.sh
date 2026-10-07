@@ -18,8 +18,13 @@ RUN_DIR="${4}"
 #   --no-approve     a target's .pi/ (settings, extensions, skills, SYSTEM.md) is never trusted,
 #                    whatever the operator's defaultProjectTrust says
 # Consequence: model providers that ship as extensions are unavailable to factory runs; pi's
-# built-in providers are not. pi's read tool is not confined to the target (see
-# lib/containment.py ENGINE_READ_SCOPE).
+# built-in providers are not. pi's read tool is not path-confined by these flags; where the
+# host has bubblewrap the dispatcher runs this adapter inside an OS sandbox that confines it
+# to the target (lib/sandbox.py, agents-9n7). Inside the sandbox $HOME is an empty tmpfs, so
+# pi authenticates only from env keys (ANTHROPIC_API_KEY etc., allowlisted by
+# lib/child_env.py) — session auth from the operator's ~/.pi is deliberately unreachable.
+# Those env keys are visible to pi's own /proc/self/environ (bun needs a real procfs), so
+# nothing else secret may ever enter the adapter environment.
 TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
 case "$TOOL_POLICY" in
   read-only) POLICY_FLAGS=(--tools read,grep,find,ls --no-extensions --no-approve) ;;
@@ -44,11 +49,17 @@ OUTPUT_FILE="$RUN_DIR/model_output.txt"
 
 echo "[pi adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
-# Auth comes from pi's own configuration (~/.pi) — a signed-in developer session needs
-# no provider API key in the environment (verified: this adapter completes with
-# ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY unset, and with invalid values
-# set, so nothing needs scrubbing here).
-echo "[pi adapter] Auth: pi session configuration"
+# Auth (review P2, agents-9n7): inside the OS sandbox the engine's own config (~/.pi) is
+# NOT mounted, so the signed-in session file cannot be read and auth reaches pi only as the
+# ANTHROPIC_API_KEY environment variable that lib/child_env.py admits (the residual
+# /proc/self/environ exposure is documented in THREAT_MODEL.md section 7). Outside the
+# sandbox — FACTORY_ALLOW_UNSANDBOXED trusted-target mode, or a host without bubblewrap —
+# pi falls back to its own ~/.pi session configuration. Report whichever is actually true.
+if [ -n "${FACTORY_SANDBOXED:-}" ]; then
+  echo "[pi adapter] Auth: ANTHROPIC_API_KEY env (sandboxed; ~/.pi session config not mounted)"
+else
+  echo "[pi adapter] Auth: pi session configuration (~/.pi)"
+fi
 
 cd "$TARGET_DIR"
 
