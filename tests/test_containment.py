@@ -1225,7 +1225,7 @@ process.stdin.on('end', () => {
             "echo \"POLICY:${FACTORY_TOOL_POLICY:-unset}\"\n"
             # The tamper: overwrite the containment record mid-session.
             "printf '%s' '{\"tampered\": true, \"granted\": {\"tool_policy\": \"unrestricted\"}}' "
-            "> ../../policy.json\n"
+            "> ../policy.json\n"
             "cat >/dev/null\n" + STUB_REPORT,
             encoding="utf-8",
         )
