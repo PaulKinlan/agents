@@ -48,19 +48,11 @@ from urllib.parse import urlsplit
 __all__ = [
     "CredentialBroker",
     "credentials_from_env",
-    "provider_base_url_var",
     "PROVIDERS",
+    "BROKER_ENV_CONFIGS",
     "BrokerError",
+    "PLACEHOLDER_KEY",
 ]
-
-# The base URL environment variable each engine/provider reads. pi honours these
-# (verified in the pi dist for agents-9n7); the Anthropic/OpenAI/Google SDKs treat
-# them as the request base and append their own path.
-_BASE_URL_VARS = {
-    "anthropic": "ANTHROPIC_BASE_URL",
-    "openai": "OPENAI_BASE_URL",
-    "google": "GOOGLE_GEMINI_BASE_URL",
-}
 
 # provider -> (upstream base URL, auth style, env vars that may hold the real key).
 # The upstream base carries whatever the SDK does NOT append: Anthropic's SDK
@@ -74,7 +66,26 @@ PROVIDERS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
                ("OPENAI_API_KEY",)),
     "google": ("https://generativelanguage.googleapis.com", "header:x-goog-api-key",
                ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+    "deepseek": ("https://api.deepseek.com", "bearer",
+                 ("DEEPSEEK_API_KEY",)),
+    "openrouter": ("https://openrouter.ai/api/v1", "bearer",
+                   ("OPENROUTER_API_KEY",)),
 }
+
+# Per provider: (placeholder var the engine reads, base-URL var, every var that could carry a real secret for it)
+BROKER_ENV_CONFIGS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+                  ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")),
+    "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL", ("OPENAI_API_KEY",)),
+    "google": ("GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL",
+               ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+    "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", ("DEEPSEEK_API_KEY",)),
+    "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", ("OPENROUTER_API_KEY",)),
+}
+
+# Ensure the tables match exactly
+if set(PROVIDERS) != set(BROKER_ENV_CONFIGS):
+    raise BrokerError("broker mapping mismatch: PROVIDERS and BROKER_ENV_CONFIGS must define the same providers")
 
 # RFC 7230 6.1 hop-by-hop headers: never forwarded in either direction.
 _HOP_BY_HOP = frozenset({
@@ -105,14 +116,6 @@ _UPSTREAM_TIMEOUT_SECONDS = 900.0
 
 class BrokerError(RuntimeError):
     """The broker could not be started or configured."""
-
-
-def provider_base_url_var(provider: str) -> str:
-    """The engine env var that points `provider` at the broker."""
-    try:
-        return _BASE_URL_VARS[provider]
-    except KeyError:
-        raise BrokerError(f"unknown provider {provider!r}") from None
 
 
 def credentials_from_env(providers: Iterable[str] = tuple(PROVIDERS),
@@ -162,9 +165,17 @@ class _Handler(BaseHTTPRequestHandler):
         length = self.headers.get("Content-Length")
         if length:
             try:
-                return self.rfile.read(int(length))
+                # Add a timeout so a stalled engine connection cannot pin the daemon thread
+                old_timeout = self.connection.gettimeout()
+                self.connection.settimeout(15.0)
+                try:
+                    return self.rfile.read(int(length))
+                finally:
+                    self.connection.settimeout(old_timeout)
             except ValueError:
                 return None
+            except OSError as e:
+                raise BrokerError(f"failed to read request body: {e}") from e
         # A chunked request body from the engine is not expected (SDKs send
         # Content-Length); refuse rather than guess.
         if (self.headers.get("Transfer-Encoding") or "").lower() == "chunked":

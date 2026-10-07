@@ -21,7 +21,7 @@ import os
 from collections.abc import Mapping as MappingABC
 from typing import Dict, Mapping, Optional
 
-from lib.credential_broker import PLACEHOLDER_KEY
+from lib.credential_broker import BROKER_ENV_CONFIGS, PLACEHOLDER_KEY
 
 # Paths, locale, temp and transport. Transport settings (proxies, CA bundles) are routing
 # configuration rather than identity; dropping them silently breaks every engine on a
@@ -61,22 +61,6 @@ ENGINE_CREDENTIALS = {
 # The findings dispatch is a child of the run, and the only one allowed to talk to GitHub.
 GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
-# Credential brokering (agents-8h4). For a provider whose real key the dispatcher holds in a
-# broker, the sandboxed engine must NOT get that key (bun/pi reads its own /proc/self/environ,
-# so any key in the env is in reach of a prompt-injected session). Instead the engine gets a
-# non-secret placeholder under the var it reads, plus the base-URL var pointed at the broker,
-# which injects the real key host-side. Per provider: (placeholder var the engine reads, base-URL
-# var, every var that could carry a real secret for it — all stripped from the sandboxed env).
-# Scoped to the providers lib/credential_broker.py maps cleanly; deepseek/openrouter/bedrock and
-# the Claude OAuth token follow the same shape but need their URL construction verified first.
-BROKER_PROVIDERS = {
-    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
-                  ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")),
-    "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL", ("OPENAI_API_KEY",)),
-    "google": ("GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL",
-               ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
-}
-
 # Requirements that bring the pre-pass a network credential. lib/containment.py refuses any of
 # these unless the agent declares capabilities.network, so a credential never reaches a tier
 # whose ceiling forbids network (agents-05h). tests/test_containment.py holds this list and
@@ -103,19 +87,20 @@ def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] 
 def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Dict[str, str]:
     """Swap brokered providers' real key vars in `env` for a placeholder + the broker base URL.
 
-    Mutates and returns `env`. For each provider in `broker_urls` that BROKER_PROVIDERS maps,
+    Mutates and returns `env`. For each provider in `broker_urls` that BROKER_ENV_CONFIGS maps,
     every var that could carry a real secret is dropped and the engine gets PLACEHOLDER_KEY
     under the var it reads plus the base-URL var pointed at the dispatcher's broker, so a
     sandboxed engine's /proc/self/environ holds no credential shape while model calls still
-    authenticate (the broker injects the real key host-side). Unmapped providers are left
-    untouched (fail toward the normal allowlist). Extracted from child_environment so the
-    dispatcher can broker an already-built env in place, once it knows the engine will run
-    sandboxed and which real keys it holds (agents-8h4).
+    authenticate (the broker injects the real key host-side).
+    
+    If the broker advertised a URL for a provider that we cannot broker (unmapped), we FAIL CLOSED
+    by raising ContainmentError, because continuing would leave the raw key in the environment.
     """
+    from lib.containment import ContainmentError
     for provider, base_url in broker_urls.items():
-        spec = BROKER_PROVIDERS.get(provider)
+        spec = BROKER_ENV_CONFIGS.get(provider)
         if not spec:
-            continue  # an unmapped provider is left to the normal allowlist (fail toward today)
+            raise ContainmentError(f"fail closed: broker provided URL for unmapped provider {provider!r}")
         placeholder_var, base_url_var, secret_vars = spec
         for var in secret_vars:
             env.pop(var, None)  # no real credential crosses into the sandboxed env
