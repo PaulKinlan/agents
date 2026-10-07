@@ -93,8 +93,9 @@ _MANAGED_REQUEST = frozenset({
 _MANAGED_RESPONSE = frozenset({"content-length", "transfer-encoding", "connection"})
 
 # A non-secret value that satisfies an SDK's "api key must be non-empty" check while
-# carrying no credential shape, so nothing in the sandbox environ looks like a key.
-PLACEHOLDER_KEY = "credential-broker-placeholder-not-a-secret"
+# carrying no credential shape (no vendor prefix, no key=value form), so nothing in the
+# sandbox environ looks like a secret to lib/redaction.py or a prompt-injected engine.
+PLACEHOLDER_KEY = "factory-broker-placeholder"
 
 # Generous upstream read timeout: a model generation can run for minutes. The
 # engine's own budget (lib/budget.py) bounds the whole run; this only stops a wedged

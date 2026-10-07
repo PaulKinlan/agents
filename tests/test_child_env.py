@@ -17,12 +17,14 @@ sys.path.insert(0, str(ROOT))
 
 from lib.child_env import (  # noqa: E402
     BASE_ALLOW,
+    BROKER_PROVIDERS,
     ENGINE_CREDENTIALS,
     GITHUB_TOKEN_VARS,
     child_environment,
     declares_requirement,
     prepass_environment,
 )
+from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
 
 SECRETS = {
     "GITHUB_TOKEN": "ghs_ci_token",
@@ -144,6 +146,69 @@ class TestChildEnvironment(unittest.TestCase):
                 self.assertNotIn("TOKEN", name.upper())
                 self.assertNotIn("SECRET", name.upper())
                 self.assertNotIn("KEY", name.upper())
+
+
+class TestCredentialBrokering(unittest.TestCase):
+    """agents-8h4: a brokered provider's real key never enters the sandboxed env; the engine
+    gets a non-secret placeholder + the broker base URL instead."""
+
+    def test_brokered_anthropic_gets_a_placeholder_and_base_url_not_the_real_key(self):
+        url = "http://127.0.0.1:9999/proxy/anthropic"
+        env = child_environment(engine="pi", parent=parent_env(),
+                                broker_urls={"anthropic": url})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], url)
+        self.assertNotIn("sk-ant", env.values())  # the real key is gone
+
+    def test_every_secret_var_of_a_brokered_provider_is_stripped(self):
+        parent = parent_env(ANTHROPIC_AUTH_TOKEN="auth-tok", CLAUDE_CODE_OAUTH_TOKEN="oauth-tok")
+        env = child_environment(engine="claude", parent=parent,
+                                broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"})
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+        self.assertEqual(env["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
+
+    def test_unbrokered_providers_keep_their_real_keys(self):
+        env = child_environment(engine="pi", parent=parent_env(),
+                                broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"})
+        self.assertEqual(env["OPENAI_API_KEY"], "op")   # not brokered -> untouched
+        self.assertEqual(env["GEMINI_API_KEY"], "gem")
+
+    def test_openai_and_google_brokering(self):
+        env = child_environment(engine="pi", parent=parent_env(), broker_urls={
+            "openai": "http://127.0.0.1:1/proxy/openai",
+            "google": "http://127.0.0.1:1/proxy/google",
+        })
+        self.assertEqual(env["OPENAI_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["OPENAI_BASE_URL"], "http://127.0.0.1:1/proxy/openai")
+        self.assertEqual(env["GEMINI_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["GOOGLE_GEMINI_BASE_URL"], "http://127.0.0.1:1/proxy/google")
+        self.assertNotIn("op", env.values())
+        self.assertNotIn("gem", env.values())
+
+    def test_no_broker_urls_leaves_the_env_unchanged(self):
+        with_broker = child_environment(engine="pi", parent=parent_env())
+        self.assertEqual(with_broker["ANTHROPIC_API_KEY"], "sk-ant")  # real key, as today
+        self.assertNotIn("ANTHROPIC_BASE_URL", with_broker)
+
+    def test_an_unmapped_provider_is_ignored(self):
+        # deepseek is not in BROKER_PROVIDERS yet, so its key is left exactly as today.
+        env = child_environment(engine="pi", parent=parent_env(DEEPSEEK_API_KEY="ds-key"),
+                                broker_urls={"deepseek": "http://127.0.0.1:1/proxy/deepseek"})
+        self.assertEqual(env["DEEPSEEK_API_KEY"], "ds-key")
+        self.assertNotIn("DEEPSEEK_BASE_URL", env)
+
+    def test_the_placeholder_is_not_credential_shaped(self):
+        # The whole point: the value in the sandboxed environ must not look like a key, so a
+        # prompt-injected engine reading /proc/self/environ finds nothing worth exfiltrating.
+        self.assertFalse(re.search(r"^(sk-|AIza|ghp_|ghs_|xox)", PLACEHOLDER_KEY))
+        self.assertNotIn("KEY", PLACEHOLDER_KEY.upper().replace("-", "").replace("_", ""))
+
+    def test_broker_provider_table_is_consistent_with_the_broker(self):
+        # child_env's BROKER_PROVIDERS and credential_broker's PROVIDERS must name the same
+        # providers, or a base URL would be set for a provider the broker cannot route.
+        from lib.credential_broker import PROVIDERS as BROKER_SIDE
+        self.assertEqual(set(BROKER_PROVIDERS), set(BROKER_SIDE))
 
 
 if __name__ == "__main__":
