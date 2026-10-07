@@ -1308,16 +1308,33 @@ process.stdin.on('end', () => {
         (wt / "f.txt").write_text("one\ntwo\n", encoding="utf-8")
         factory_cli._collect_session_diff(wt, run_dir, gitdir)
         patch_file = run_dir / "session.patch"
-        first_patch = patch_file.read_text(encoding="utf-8")
-        self.assertIn("two", first_patch)
+        first_patch = patch_file.read_bytes()
+        self.assertIn(b"two", first_patch)
+        self.assertNotIn(b"three", first_patch)
 
-        # A second accumulated edit is re-collected, but its write fails (disk full). The
-        # earlier patch must remain byte-for-byte intact; no partial write may corrupt it.
+        # A second accumulated edit is re-collected, but its write fails (disk full) only
+        # AFTER the target file has been truncated and a partial prefix written — the exact
+        # failure the temp-file+replace path must survive. The earlier patch must remain
+        # byte-for-byte intact (a), so the already-durable KEPT row's proposal still matches
+        # what is on disk (b), and the failed temp file must be cleaned up.
         (wt / "f.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
-        with mock.patch.object(Path, "write_text", side_effect=OSError("disk full")):
+
+        def write_prefix_then_fail(path, data, encoding="utf-8"):
+            # In-place implementations truncate the write target and write a prefix before the
+            # error. Here the prefix lands in whatever file _collect_session_diff is writing;
+            # the assertions below prove that file is a throwaway temp, not session.patch.
+            path.write_bytes(data[:12].encode(encoding))
+            raise OSError("disk full")
+
+        with mock.patch.object(Path, "write_text", write_prefix_then_fail):
             with self.assertRaises(OSError):
                 factory_cli._collect_session_diff(wt, run_dir, gitdir)
-        self.assertEqual(patch_file.read_text(encoding="utf-8"), first_patch)
+
+        self.assertEqual(patch_file.read_bytes(), first_patch)  # (a) byte-for-byte intact
+        self.assertIn(b"two", patch_file.read_bytes())          # (b) kept proposal still on disk
+        self.assertNotIn(b"three", patch_file.read_bytes())
+        self.assertFalse((run_dir / "session.patch.tmp").exists(),
+                         "a failed write must not leak the temp file")
 
     def test_a_non_utf8_worktree_marker_fails_closed(self):
         """agents-7ik (4): a binary .git marker raises UnicodeDecodeError (a ValueError,

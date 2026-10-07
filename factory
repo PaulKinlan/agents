@@ -217,8 +217,18 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     # to a sibling temp file and atomically replace only after a complete write, so a failed
     # write can never corrupt a previously collected patch.
     tmp_file = patch_file.with_name(patch_file.name + ".tmp")
-    tmp_file.write_text(header + patch, encoding="utf-8")
-    os.chmod(tmp_file, 0o600)
+    try:
+        tmp_file.write_text(header + patch, encoding="utf-8")
+        os.chmod(tmp_file, 0o600)
+    except BaseException:
+        # agents-nei P2-1 (round 5): if the write or chmod fails, the sibling temp file must
+        # not leak. session.patch is untouched (os.replace has not run yet), so just remove
+        # the partial temp and re-raise the original error.
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     os.replace(tmp_file, patch_file)
     return patch_file
 
