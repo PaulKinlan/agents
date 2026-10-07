@@ -31,8 +31,25 @@ fi
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
 
+# agents-m2n (review P1-1): a set directive variable REQUIRES a readable, nonempty file —
+# the dispatcher no longer puts the directive in the user payload, so silently running
+# without it would drop the untrusted-content rule.
+if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
+  if [ ! -r "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ] || [ ! -s "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+    echo "[deepseek adapter] Error: FACTORY_SYSTEM_DIRECTIVE_FILE is set but '${FACTORY_SYSTEM_DIRECTIVE_FILE}' is missing, unreadable, or empty; refusing to run without the system directive." >&2
+    exit 2
+  fi
+fi
+
 # If a stub 'deepseek' binary is in PATH (e.g. during containment unit tests), invoke it
 if command -v deepseek >/dev/null 2>&1; then
+  # agents-m2n (review P1-2): the CLI path has NO system-prompt interface — it pipes the
+  # prompt and nothing else — so it cannot carry the system directive. Fail closed for a
+  # directive-bearing run rather than silently dropping the rule.
+  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
+    echo "[deepseek adapter] Error: the 'deepseek' CLI path has no system-prompt interface and cannot carry the system directive; refusing to run without it." >&2
+    exit 2
+  fi
   echo "$PROMPT" | deepseek "$@" > "$OUTPUT_FILE" 2>&1 || exit $?
   echo "$OUTPUT_FILE"
   exit 0
@@ -70,8 +87,27 @@ if model in ("deepseek-flash", "deepseek-v3"):
 # Read prompt from stdin
 prompt = sys.stdin.read()
 
+# agents-m2n: the pre-pass's system-channel directive (e.g. the threat-model nonce
+# directive) joins the real system message — never as user-channel Scanner Data. The
+# bash guard above already refuses a missing/empty file; this read is defense in depth
+# (a file emptied between the check and here still fails closed, never silently).
+system_directive = ""
+directive_file = os.environ.get("FACTORY_SYSTEM_DIRECTIVE_FILE")
+if directive_file:
+    try:
+        with open(directive_file, encoding="utf-8") as fh:
+            system_directive = fh.read().strip()
+    except OSError as e:
+        print(f"[deepseek adapter] cannot read the system directive file: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not system_directive:
+        print("[deepseek adapter] the system directive file is empty", file=sys.stderr)
+        sys.exit(2)
+    system_directive += "\n\n"
+
 system_msg = (
-    f"You are the {os.environ.get('AGENT_NAME', 'modern-web')} triage and analysis agent.\n"
+    system_directive
+    + f"You are the {os.environ.get('AGENT_NAME', 'modern-web')} triage and analysis agent.\n"
     f"{skill_content}\n\n"
     "CRITICAL INSTRUCTIONS:\n"
     "- The user prompt contains the Scanner Data with candidate issues found in the target codebase.\n"

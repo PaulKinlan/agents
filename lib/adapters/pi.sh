@@ -71,6 +71,21 @@ fi
 
 cd "$TARGET_DIR"
 
+# agents-m2n: the pre-pass's system-channel directive (e.g. the threat-model nonce
+# directive) rides pi's system prompt — `--append-system-prompt` accepts a file's contents
+# and may repeat alongside --skill — never as user-channel Scanner Data. When the variable
+# is set the file is REQUIRED (review P1-1): the dispatcher already removed the directive
+# from the user payload, so silently running without it would drop the untrusted-content
+# rule — the adapter fails closed instead.
+SYSTEM_DIRECTIVE_FLAGS=()
+if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
+  if [ ! -r "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ] || [ ! -s "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+    echo "[pi adapter] Error: FACTORY_SYSTEM_DIRECTIVE_FILE is set but '${FACTORY_SYSTEM_DIRECTIVE_FILE}' is missing, unreadable, or empty; refusing to run without the system directive." >&2
+    exit 2
+  fi
+  SYSTEM_DIRECTIVE_FLAGS=(--append-system-prompt "${FACTORY_SYSTEM_DIRECTIVE_FILE}")
+fi
+
 # Run pi non-interactively with the specified skill loaded
 # The engine reads the prompt on stdin too, so it is not in the engine's argv either.
 echo "[pi adapter] Tool policy: $TOOL_POLICY (${POLICY_FLAGS[*]})"
@@ -78,7 +93,8 @@ if [ -n "${FACTORY_MAX_BUDGET_USD:-}" ]; then
   # agents-js7: pi has no per-run budget flag — say so where the run log can see it.
   echo "[pi adapter] Note: budget.max_usd=\$$FACTORY_MAX_BUDGET_USD declared but NOT enforced by this adapter (no per-run budget flag; the claude engine enforces it via --max-budget-usd)."
 fi
-printf '%s' "$PROMPT" | pi --no-session "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" -p > "$OUTPUT_FILE" 2>&1 || {
+# ${SYSTEM_DIRECTIVE_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
+printf '%s' "$PROMPT" | pi --no-session "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" ${SYSTEM_DIRECTIVE_FLAGS[@]+"${SYSTEM_DIRECTIVE_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
   echo "[pi adapter] Error executing pi" >&2
   cat "$OUTPUT_FILE" >&2
   exit 1

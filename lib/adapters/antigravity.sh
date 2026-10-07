@@ -23,6 +23,16 @@ if [ -z "$AGENTAPI_BIN" ]; then
   exit 1
 fi
 
+# agents-m2n (review P1-1): a set directive variable REQUIRES a readable, nonempty file
+# (checked before the engine and tool-policy refusals below, so the dispatcher's
+# input-contract violation is the specific thing reported).
+if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
+  if [ ! -r "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ] || [ ! -s "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+    echo "[antigravity adapter] Error: FACTORY_SYSTEM_DIRECTIVE_FILE is set but '${FACTORY_SYSTEM_DIRECTIVE_FILE}' is missing, unreadable, or empty; refusing to run without the system directive." >&2
+    exit 2
+  fi
+fi
+
 # Tool policy (agents-pnu). `agentapi new-conversation` takes a prompt and nothing else: no
 # tool allowlist, no settings isolation. A prompt is not a containment boundary
 # (non-negotiable #2), so this adapter refuses every policy, read-only included, until agentapi
@@ -49,6 +59,17 @@ if [ -z "$PROMPT" ]; then
 fi
 
 echo "[antigravity adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
+
+# agents-m2n: agentapi new-conversation takes a prompt and NOTHING else (no system
+# channel, no flags — see the tool-policy note above), so this engine cannot receive
+# the pre-pass's system directive in a system channel. The honest fallback: prepend it
+# to the TOP of the user prompt, at maximum salience and outside the Scanner Data —
+# strictly better than the old form, where it was buried inside the JSON payload. Like
+# the prompt itself, it rides argv for the run's duration (agents-pgr class). The
+# directive guard near the top of the file already required a readable, nonempty file.
+if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
+  PROMPT="$(cat "$FACTORY_SYSTEM_DIRECTIVE_FILE")\n\n${PROMPT}"
+fi
 
 cd "$TARGET_DIR"
 
