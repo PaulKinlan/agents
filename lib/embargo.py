@@ -1,24 +1,13 @@
 #!/usr/bin/env python3
-"""Publication embargo: may this finding leave the machine at all?
+"""Finding severity, visibility normalization and legacy fail-closed embargo.
 
-`lib/redaction.py` removes the *value* from text that is published. This module makes the
-separate, earlier decision: whether a finding is routed to a tracker. Every tracker sink is
-reached through `findings.dispatch_to_sink`, which calls `embargo_reason` once per run, so a
-new sink cannot silently omit the check (agents-681).
-
-The decision never treats a model's self-report as authority (agents-94f):
-
-- A missing, non-text or unrecognised severity fails closed to `critical`. The old default
-  was `medium` — exactly the band the public sinks publish, so an absent field authorised
-  publication.
-- `CREDENTIAL_AGENTS` are credential-class by construction: a scanner candidate *is* a
-  credential whatever the triage model called it, so they are critical on identity, a
-  deterministic fact. The same identity rule covers the vulnerability agents (vuln-discovery,
-  vuln-verify, vuln-triage, threat-model): their candidates are attack surfaces, and a model
-  that understates one does not authorise its publication.
-
-The embargo is a routing decision, not deletion. The raw value and the model's own notes stay
-in the local run artifact and findings store, where a human needs them to rotate the secret.
+`reported_severity` preserves the triaged label; `effective_severity` treats unknown labels
+and credential/vulnerability-agent identity as critical for routing. `embargo_reason` still
+withholds high/critical when visibility is missing or invalid, but it is NOT the public-target
+backstop: Paul's explicit-public policy authorises every real severity. Public issue
+publication is guarded by `dispatch_to_sink` and `_dispatch_github`, which require explicit
+public visibility and independently verify the github.com repository before any API write.
+`lib/redaction.py` masks published values; raw evidence stays in the local store/artifacts.
 """
 
 import re
@@ -52,15 +41,14 @@ EMBARGOED_SEVERITIES = frozenset({"critical", "high"})
 # action's step summary). Any other sink, including one added later, is a publication.
 PRIVATE_SINKS = frozenset({"file"})
 
-# Targets declare their repository visibility in targets/*.yaml. The disclosure rule is about
-# *public* trackers, so visibility is the first input to the routing decision: a public target
-# gets the severity embargo, a private target's own tracker is not a public disclosure.
-# Anything else — missing, misspelled, unknown — fails closed to public (SF-09, agents-5rx).
+# normalize_visibility is for the run banner and unsandboxed trusted-target checks in
+# factory. It does NOT prove an explicit public declaration: publication checks the raw
+# manifest value separately. Missing/invalid values remain conservative (SF-09).
 VALID_VISIBILITIES = ("public", "private")
 
 
 def normalize_visibility(value: Any) -> str:
-    """Coerce a target's declared visibility, failing closed to public."""
+    """Coerce visibility for reporting; do not use this as publication authority."""
     if isinstance(value, str) and value.strip().lower() in VALID_VISIBILITIES:
         return value.strip().lower()
     return "public"

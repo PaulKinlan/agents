@@ -89,6 +89,31 @@ class TestStoreLoadCorruption(unittest.TestCase):
                 FindingsStore("target", findings_dir=findings_dir)
 
 
+class TestPendingIssueTransitions(unittest.TestCase):
+    def test_file_only_findings_do_not_accumulate_undeliverable_events(self):
+        """Repeated file-sink lifecycles cannot grow an unbounded GitHub event list."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with FindingsStore("file-only", findings_dir=Path(tmpdir)) as store:
+                item = {"rule_id": "r", "path": "p.js", "line_number": 1,
+                        "snippet": "s", "severity": "high", "title": "t"}
+                for _ in range(20):
+                    store.process_run("lint", [item])
+                    store.process_run("lint", [])
+                finding, = store.data["findings"].values()
+                self.assertEqual(finding["github_pending_transitions"], [])
+                self.assertIsNone(finding["github_issue"])
+
+    def test_issue_sink_keeps_an_event_until_it_can_be_dispatched(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with FindingsStore("issue", findings_dir=Path(tmpdir)) as store:
+                item = {"rule_id": "r", "path": "p.js", "line_number": 1,
+                        "snippet": "s", "severity": "high", "title": "t"}
+                store.process_run("lint", [item], issue_tracking=True)
+                finding, = store.data["findings"].values()
+                self.assertEqual([e["state"] for e in finding["github_pending_transitions"]],
+                                 ["new"])
+
+
 class TestAtomicSave(unittest.TestCase):
     def test_save_is_atomic_and_leaves_no_temp_files(self):
         """save() writes valid JSON and does not leave a half-written temp file behind."""

@@ -78,14 +78,38 @@ with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
     log.write(json.dumps({'tool': tool, 'args': args, 'stdin':
                           sys.stdin.read() if '--input' in args else '',
                           'cwd': os.getcwd()}) + '\n')
+remote_path = Path(os.environ['SINK_REMOTE'])
+state = json.loads(remote_path.read_text())
 if tool == 'bd':
-    sys.exit(19)  # no publication-time bead may ever be created
+    if not os.environ.get('SINK_ALLOW_BD'):
+        sys.exit(19)  # no publication-time bead may ever be created
+    if args[0] == 'list':
+        if os.environ.get('SINK_FAIL_BD_LIST'):
+            sys.exit(9)
+        print(json.dumps(state.get('beads', [])))
+    elif args[0] == 'create':
+        beads = state.setdefault('beads', [])
+        bead = {'id': f'fixture-{len(beads) + 1}',
+                'external_ref': args[args.index('--external-ref') + 1],
+                'description': args[args.index('--description') + 1],
+                'title': args[args.index('--title') + 1], 'status': 'open'}
+        beads.append(bead)
+        remote_path.write_text(json.dumps(state))
+        print(json.dumps(bead))
+    elif args[0] == 'update':
+        bead = next((b for b in state.get('beads', []) if b['id'] == args[1]), None)
+        if bead is None:
+            sys.exit(9)
+        bead['description'] = args[args.index('--description') + 1]
+        remote_path.write_text(json.dumps(state))
+        print(json.dumps(bead))
+    else:
+        sys.exit(19)
+    sys.exit(0)
 if args[:3] != ['api', '--hostname', 'github.com']:
     sys.exit(18)  # reject gh defaults that might target github.int.exe.xyz
 endpoint = args[-1]
 repo = os.environ['SINK_REPO']
-remote_path = Path(os.environ['SINK_REMOTE'])
-state = json.loads(remote_path.read_text())
 if endpoint == f'repos/{repo}':
     url = os.environ.get('SINK_REPO_URL', f'https://github.com/{repo}')
     print(json.dumps({'full_name': repo, 'html_url': url,
@@ -105,6 +129,14 @@ elif endpoint.startswith(f'repos/{repo}/issues/') and endpoint.endswith('/commen
     state['comments'].setdefault(number, []).append(comment)
     remote_path.write_text(json.dumps(state))
     print(json.dumps(comment))
+elif endpoint.startswith(f'repos/{repo}/issues/') and '--method' not in args:
+    if os.environ.get('SINK_FAIL_ISSUE_LOOKUP'):
+        sys.exit(9)
+    number = int(endpoint.split('/')[4])
+    issue = next((i for i in state['issues'] if i['number'] == number), None)
+    if issue is None:
+        sys.exit(9)
+    print(json.dumps(issue))
 elif endpoint == f'repos/{repo}/issues' and '--method' in args:
     payload = json.loads(json.loads(open(os.environ['SINK_CALLS']).readlines()[-1])['stdin'])
     number = len(state['issues']) + 1

@@ -1,6 +1,7 @@
 name: aifocus
 path: ~/Code/aifocus
 repo: PaulKinlan/aifocus
+beads_path: ~/Code/aifocus
 sink: github-issues
 visibility: public
 agents:

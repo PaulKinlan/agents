@@ -49,7 +49,7 @@ except ImportError:
 # Redaction removes the value from published text; the embargo decides whether a finding is
 # routed to a tracker at all. It is a separate module so the policy has one home and one test.
 from lib.embargo import (effective_severity, embargo_reason, is_false_positive,
-                         normalize_visibility, reported_severity)
+                         reported_severity)
 
 # Keys of a per-run delta. `false_positive` counts findings the triage itself declared false
 # positives: they are recorded, never counted as new/unchanged work (journal-35w).
@@ -370,7 +370,7 @@ class FindingsStore:
                 pass
             raise
 
-    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
+    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None, issue_tracking: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
         """Ingests raw findings from an agent run, applies fingerprinting and state transitions.
         
         Returns:
@@ -434,7 +434,11 @@ class FindingsStore:
 
             delta_stats["false_positive" if false_positive else change] += 1
             pending = list(existing.get("github_pending_transitions", [])) if existing else []
-            if change in ("new", "regressed") and not false_positive and fp not in self.suppressions:
+            # File-only targets never consume GitHub events. Keep a pending event only
+            # when this run publishes issues or a prior public issue needs lifecycle repair.
+            tracks_issue = issue_tracking or bool(existing and existing.get("github_issue"))
+            if (tracks_issue and change in ("new", "regressed")
+                    and not false_positive and fp not in self.suppressions):
                 pending.append({"state": change, "at": now,
                                 "event": hashlib.sha256(f"{fp}:{change}:{now}".encode()).hexdigest()[:16]})
             finding_record = {
@@ -479,10 +483,11 @@ class FindingsStore:
                 if existing.get("state") in ("new", "accepted", "regressed"):
                     existing["state"] = "fixed"
                     existing["fixed_at"] = now
-                    existing.setdefault("github_pending_transitions", []).append({
-                        "state": "fixed", "at": now,
-                        "event": hashlib.sha256(f"{fp}:fixed:{now}".encode()).hexdigest()[:16],
-                    })
+                    if issue_tracking or existing.get("github_issue"):
+                        existing.setdefault("github_pending_transitions", []).append({
+                            "state": "fixed", "at": now,
+                            "event": hashlib.sha256(f"{fp}:fixed:{now}".encode()).hexdigest()[:16],
+                        })
                     delta_stats["fixed"] += 1
                     fixed_items.append(existing)
 
@@ -837,136 +842,6 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 
     return "\n".join(lines)
 
-BEAD_EXTERNAL_REF_PREFIX = "factory:"
-_BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
-
-
-def _existing_bead_fingerprints(bd_bin: str, target_dir: Path) -> Optional[Dict[str, List[Dict[str, str]]]]:
-    """fingerprint -> [{id, status}] for every bead (any status) the factory filed before.
-
-    A bead is matched by its `external_ref` (`factory:<fingerprint>`), or, for beads filed
-    before that existed, by the `Fingerprint: <sha256>` line the description always carried.
-    Returns None when the tracker cannot be listed.
-    """
-    cmd = [bd_bin, "list", "--all", "--json", "-n", "0", "-C", str(target_dir)]
-    try:
-        res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True,
-                             check=False, timeout=60)
-        if res.returncode != 0:
-            return None
-        beads = json.loads(res.stdout or "[]")
-    except Exception:
-        return None
-    if not isinstance(beads, list):
-        return None
-    index: Dict[str, List[Dict[str, str]]] = {}
-    for bead in beads:
-        if not isinstance(bead, dict):
-            continue
-        fingerprints = set()
-        ref = bead.get("external_ref")
-        if isinstance(ref, str) and ref.startswith(BEAD_EXTERNAL_REF_PREFIX):
-            fingerprints.add(ref[len(BEAD_EXTERNAL_REF_PREFIX):].strip())
-        description = bead.get("description")
-        if isinstance(description, str):
-            fingerprints.update(_BEAD_FINGERPRINT_LINE.findall(description))
-        for fp in fingerprints:
-            index.setdefault(fp, []).append({"id": str(bead.get("id", "?")),
-                                             "status": str(bead.get("status", ""))})
-    return index
-
-
-def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
-    """Creates beads for active findings if bd is available. Returns delivery counts."""
-    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "duplicate": 0, "note": ""}
-    # Classify first, so the totals do not depend on finding order and never exceed what
-    # was eligible: embargoed or below-band findings are `skipped` whatever happens next;
-    # only the ones this sink would actually file can be `failed` (fleet-xkf review).
-    to_file: List[Dict[str, Any]] = []
-    for f in findings:
-        if "beads" in f.get("dispatched_sinks", []):
-            continue
-        # dispatch_to_sink already applied and logged the embargo; this keeps a direct call to
-        # the sink safe. Beads publishes medium only, as it did before: critical and high are
-        # exactly what the embargo withholds from a synced tracker (agents-681).
-        if embargo_reason(f, "beads", visibility):
-            result["skipped"] += 1
-            continue
-        # Beads is a synced tracker and never takes low/info. On a public target the central
-        # filter has already withheld critical/high; on a private one the embargo lets them
-        # through, which is the point of reading visibility (agents-5rx).
-        if f["state"] in ("new", "regressed") and effective_severity(f) in ("critical", "high", "medium"):
-            to_file.append(f)
-        else:
-            # low/info never go to a synced tracker; counted, so a zero is explained.
-            result["skipped"] += 1
-    if not to_file:
-        return result
-
-    if not (target_dir / ".beads").exists():
-        print(f"Warning: .beads directory not found in {target_dir}. Falling back to file sink.")
-        result["failed"] += len(to_file)
-        result["note"] = f"no .beads directory in {target_dir}: nothing filed"
-        return result
-
-    bd_bin = shutil.which("bd") or str(Path.home() / ".local" / "bin" / "bd")
-    if not os.path.exists(bd_bin):
-        print("Warning: bd binary not available. Findings stored in JSON only.")
-        result["failed"] += len(to_file)
-        result["note"] = "bd binary not available: nothing filed"
-        return result
-
-    # Dedupe against the beads that already exist (fleet-xkf). The store's receipts only
-    # cover this store; a fresh worktree, a renamed target or a reset store re-filed every
-    # finding. Read once; if the tracker cannot be read, file nothing rather than risk
-    # duplicates, and say so.
-    existing = _existing_bead_fingerprints(bd_bin, target_dir)
-    if existing is None:
-        result["failed"] += len(to_file)
-        result["note"] = "could not list existing beads to dedupe against: nothing filed"
-        print(f"Warning: {result['note']}")
-        return result
-
-    for f in to_file:
-        matches = existing.get(f["fingerprint"], [])
-        open_matches = [m for m in matches if m.get("status") != "closed"]
-        if open_matches or (matches and f["state"] != "regressed"):
-            # An open bead already tracks it; or a closed one does and nothing regressed.
-            result["duplicate"] = result.get("duplicate", 0) + 1
-            ids = ", ".join(m.get("id", "?") for m in (open_matches or matches))
-            print(f"Skipped duplicate: {f['fingerprint'][:16]} already tracked by {ids}")
-            continue
-        # Both title and description come from the published view. Building the title from
-        # the raw finding let a credential the scanner had recognised reach `bd --title`
-        # unchanged even though the body was masked (agents-tcd review).
-        published = redact_finding(f)
-        title = f"[{published['agent']}] {published['title']}"
-        desc = (f"{published['description']}\n\nPath: {published['path']}:{published.get('line_number', '?')}\n"
-                f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
-        cmd = [
-            bd_bin, "create",
-            "--title", title,
-            "--description", desc,
-            "--type", "bug" if "vuln" in f['agent'] or "secret" in f['agent'] else "task",
-            # The finding's identity, queryable, so the next run can dedupe (fleet-xkf).
-            "--external-ref", f"{BEAD_EXTERNAL_REF_PREFIX}{f['fingerprint']}",
-            "-C", str(target_dir)
-        ]
-        try:
-            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
-            if res.returncode == 0:
-                f.setdefault("dispatched_sinks", []).append("beads")
-                existing.setdefault(f["fingerprint"], []).append({"id": res.stdout.strip(), "status": "open"})
-                result["published"] += 1
-                print(f"Created bead for: {published['title']}")
-            else:
-                result["failed"] += 1
-                print(f"Failed to create bead (exit {res.returncode}): {res.stderr.strip()}")
-        except Exception as e:
-            result["failed"] += 1
-            print(f"Failed to create bead: {e}")
-    return result
-
 _PUBLIC_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ISSUE_FP = re.compile(r"\*\*Fingerprint\*\*:\s*`([0-9a-f]{64})`")
 
@@ -1009,6 +884,146 @@ def _issue_identity(issue: Dict[str, Any], repo: str) -> Tuple[str, int]:
             or url.lower() != f"https://github.com/{repo}/issues/{number}".lower()):
         raise RuntimeError("github.com returned an issue outside the configured public repository")
     return url, number
+
+
+_PROMOTION_APPROVAL_LABEL = "factory-approved"
+_BEAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _bd_json(bd_bin: str, beads_dir: Path, args: List[str]) -> Any:
+    """Run one bounded Beads operation in the explicitly configured project DB."""
+    res = subprocess.run([bd_bin, *args, "-C", str(beads_dir)], cwd=str(beads_dir),
+                         capture_output=True, text=True, check=False, timeout=60)
+    if res.returncode != 0:
+        # Tracker error output can contain raw finding text; do not copy it to logs.
+        raise RuntimeError(f"bd {args[0]} failed (exit {res.returncode}); promotion may be retried")
+    try:
+        return json.loads(res.stdout)
+    except ValueError as e:
+        raise RuntimeError(f"bd {args[0]} returned invalid JSON; refusing a second create") from e
+
+
+def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str,
+                  issue_url: str, beads_dir: Path) -> Dict[str, str]:
+    """Explicit human-approved issue -> ONE linked bead; safe to call again after partial failure.
+
+    Publication never calls this function. A future approved automation can call the same
+    function only after a human has added `factory-approved` to the verified public issue.
+    The store lock serialises promotion attempts in this checkout; bd's repo-scoped external
+    reference repairs a lost local receipt or failed issue backlink on retry.
+    """
+    if visibility != "public" or not isinstance(repo, str) or not _PUBLIC_REPO.fullmatch(repo):
+        raise ValueError("promotion requires explicit public visibility and OWNER/REPO")
+    match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/issues/([1-9][0-9]*)", issue_url,
+                         flags=re.IGNORECASE)
+    if not match or f"{match.group(1)}/{match.group(2)}".lower() != repo.lower():
+        raise ValueError("issue URL must be in the explicitly configured public github.com repo")
+    beads_dir = beads_dir.expanduser().resolve()
+    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
+        raise ValueError("explicit beads_path must point at an initialized project Beads DB")
+    gh_bin, bd_bin = shutil.which("gh"), shutil.which("bd")
+    if not gh_bin or not bd_bin:
+        raise RuntimeError("both gh and bd must be available for explicit promotion")
+    destination = _gh_api(gh_bin, target_dir, f"repos/{repo}")
+    if (not isinstance(destination, dict)
+            or destination.get("full_name", "").lower() != repo.lower()
+            or destination.get("html_url", "").lower() != f"https://github.com/{repo}".lower()
+            or destination.get("private") is not False
+            or destination.get("has_issues") is not True):
+        raise RuntimeError("configured destination is not a verified public github.com issue repository")
+    number = int(match.group(3))
+    issue = _gh_api(gh_bin, target_dir, f"repos/{repo}/issues/{number}")
+    if not isinstance(issue, dict) or "pull_request" in issue:
+        raise RuntimeError("issue lookup failed or returned a pull request")
+    verified_url, _ = _issue_identity(issue, repo)
+    if verified_url.lower() != issue_url.lower():
+        raise RuntimeError("issue lookup did not match the requested URL")
+    fingerprints = set(_ISSUE_FP.findall(str(issue.get("body") or "")))
+    if len(fingerprints) != 1:
+        raise ValueError("issue must carry exactly one factory fingerprint marker")
+    labels = issue.get("labels")
+    if (not isinstance(labels, list)
+            or _PROMOTION_APPROVAL_LABEL not in {
+                label.get("name") for label in labels if isinstance(label, dict)
+            }):
+        raise PermissionError("human triage approval missing: apply factory-approved issue label first")
+    fp, = fingerprints
+    external_ref = f"factory:github.com/{repo.lower()}:{fp}"
+
+    with FindingsStore(target_name=target_name) as store:
+        finding = store.data["findings"].get(fp)
+        if not isinstance(finding, dict) or finding.get("fingerprint") != fp:
+            raise ValueError("issue fingerprint is not a finding in this target's local store")
+        if finding.get("false_positive") or finding.get("state") == "wontfix":
+            raise ValueError("triaged false positives and suppressed findings are not work")
+        prior_issue = finding.get("github_issue")
+        if prior_issue and (not isinstance(prior_issue, dict)
+                            or str(prior_issue.get("url", "")).lower() != issue_url.lower()):
+            raise ValueError("local finding is linked to a different public issue")
+        if finding.get("promoted_issue") and str(finding["promoted_issue"]).lower() != issue_url.lower():
+            raise ValueError("local promotion receipt points at a different issue")
+        # Read every bead, including CLOSED, before creating. An unavailable or malformed
+        # listing is not an empty database: never create a possible duplicate.
+        beads = _bd_json(bd_bin, beads_dir, ["list", "--all", "--json", "-n", "0"])
+        if not isinstance(beads, list) or any(not isinstance(bead, dict) for bead in beads):
+            raise RuntimeError("bead listing malformed; refusing to create a duplicate")
+        matches = [b for b in beads if b.get("external_ref") == external_ref]
+        if len(matches) > 1:
+            raise RuntimeError("multiple beads already carry this repo-scoped fingerprint")
+        # Legacy unscoped refs/description markers are ambiguous across repositories;
+        # refuse rather than create a second work item before a human resolves the old bead.
+        legacy = [b for b in beads if b.get("external_ref") == f"factory:{fp}"
+                  or (f"Fingerprint: {fp}" in str(b.get("description") or "")
+                      and b.get("external_ref") != external_ref)]
+        if legacy and not matches:
+            raise RuntimeError("legacy bead fingerprint exists; link it manually before promotion")
+        if finding.get("bead_id") and (not matches or str(matches[0].get("id")) != finding["bead_id"]):
+            raise RuntimeError("local bead receipt disagrees with project DB; refusing another create")
+        created = False
+        if matches:
+            bead = matches[0]
+            bead_id = bead.get("id")
+            if not isinstance(bead_id, str) or not _BEAD_ID.fullmatch(bead_id):
+                raise RuntimeError("existing bead has an invalid id")
+            prior_description = str(bead.get("description") or "")
+            linked_urls = re.findall(r"(?m)^Issue:\s*(https://github\.com/\S+/issues/[0-9]+)",
+                                     prior_description)
+            if linked_urls and any(url.lower() != issue_url.lower() for url in linked_urls):
+                raise RuntimeError("existing bead links a different issue; manual triage required")
+            if issue_url not in prior_description:
+                # Repair an existing bead whose issue link was lost; preserve its text.
+                desc = prior_description + f"\n\nIssue: {issue_url}\nFingerprint: {fp}"
+                _bd_json(bd_bin, beads_dir, ["update", bead_id, "--description", desc, "--json"])
+        else:
+            published = redact_finding(finding)
+            desc = (f"{published.get('description', '')}\n\n"
+                    f"Issue: {issue_url}\nFingerprint: {fp}\n"
+                    f"Path: {published.get('path', '')}:{published.get('line_number', '?')}\n"
+                    f"Snippet: {published.get('snippet', '')}")
+            bead = _bd_json(bd_bin, beads_dir, [
+                "create", "--title", f"[{published['agent']}] {published['title']}",
+                "--description", desc,
+                "--type", "bug" if "vuln" in finding.get("agent", "")
+                or "secret" in finding.get("agent", "") else "task",
+                "--external-ref", external_ref, "--json",
+            ])
+            bead_id = bead.get("id") if isinstance(bead, dict) else None
+            if not isinstance(bead_id, str) or not _BEAD_ID.fullmatch(bead_id):
+                raise RuntimeError("bd create did not return an id; query by external ref before retry")
+            created = True
+        finding["bead_id"] = bead_id
+        finding["promoted_issue"] = issue_url
+        finding["github_issue"] = {"url": verified_url, "number": number, "repo": repo}
+        store.save()  # persist the bead side before attempting the GitHub backlink
+        marker = f"<!-- factory-promotion:{external_ref}:{bead_id} -->"
+        comments = _gh_pages(_gh_api(gh_bin, target_dir,
+            f"repos/{repo}/issues/{number}/comments?per_page=100", paginate=True))
+        if not any(marker in str(comment.get("body") or "") for comment in comments):
+            _gh_api(gh_bin, target_dir, f"repos/{repo}/issues/{number}/comments", payload={
+                "body": f"Human-approved factory promotion: work tracked as `{bead_id}`.\n\n{marker}",
+            })
+        return {"status": "created" if created else "already_promoted", "bead_id": bead_id,
+                "issue": issue_url, "external_ref": external_ref}
 
 
 def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]],
@@ -1106,8 +1121,10 @@ def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Process findings into findings store")
     parser.add_argument("--target", required=True, help="Target name")
-    parser.add_argument("--agent", required=True, help="Agent name")
-    parser.add_argument("--input", required=True, help="JSON file with raw findings")
+    parser.add_argument("--agent", help="Agent name (required for a findings run)")
+    parser.add_argument("--input", help="JSON file with raw findings (required for a findings run)")
+    parser.add_argument("--promote-issue", help="Explicitly promote this approved public issue URL")
+    parser.add_argument("--beads-dir", help="Explicit initialized Beads project for promotion")
     parser.add_argument("--candidates", help="Scanner candidates JSON to bind rule_id/path against")
     parser.add_argument("--sink", default="file", help="Sink type (file or github-issues; beads require promotion)")
     parser.add_argument("--visibility", choices=["public", "private"],
@@ -1120,6 +1137,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--fragment", help="Write this station's delta as JSON here (for the line report)")
     args = parser.parse_args(argv)
 
+    if args.promote_issue:
+        if not args.beads_dir or not args.repo or args.visibility != "public":
+            parser.error("promotion needs --beads-dir, --repo and explicit --visibility public")
+        result = promote_issue(args.target, Path(args.target_dir).resolve(), args.repo,
+                               args.visibility, args.promote_issue, Path(args.beads_dir))
+        print(json.dumps(result))
+        return
+    if not args.agent or not args.input:
+        parser.error("a findings run needs --agent and --input")
     input_path = Path(args.input)
     if not input_path.exists():
         sys.stderr.write(f"Input file not found: {input_path}\n")
@@ -1138,6 +1164,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
         processed, stats, fixed_items = store.process_run(
             agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
+            issue_tracking="github-issues" in [s.strip() for s in args.sink.split(",")],
         )
         try:
             results = dispatch_to_sink(

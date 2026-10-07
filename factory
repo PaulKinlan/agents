@@ -1479,6 +1479,31 @@ def print_agent_instructions(section: str = "all") -> None:
     print(content)
 
 
+def promote_public_issue(target_name: str, issue_url: str) -> None:
+    """Explicit issue -> bead action; never called from a run or line publisher."""
+    if (target_name in ("", ".", "..") or "/" in target_name or os.sep in target_name
+            or not (FACTORY_ROOT / "targets" / f"{target_name}.yaml").is_file()):
+        raise ValueError("promotion requires a configured named target, not a raw path")
+    resolved_name, target_dir, cfg = resolve_target(target_name)
+    if cfg.get("visibility") != "public" or not cfg.get("repo") or not cfg.get("beads_path"):
+        raise ValueError("promotion requires explicit public visibility, repo and beads_path")
+    beads_dir = Path(os.path.expanduser(str(cfg["beads_path"]))).resolve()
+    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
+        raise ValueError("beads_path must name an initialized project Beads DB")
+    cmd = [sys.executable, str(FACTORY_ROOT / "lib" / "findings.py"),
+           "--target", resolved_name, "--target-dir", str(target_dir),
+           "--repo", str(cfg["repo"]), "--visibility", "public",
+           "--beads-dir", str(beads_dir), "--promote-issue", issue_url]
+    res = subprocess.run(cmd, cwd=str(FACTORY_ROOT), capture_output=True, text=True,
+                         check=False, timeout=180, env=child_environment(sink="github-issues"))
+    if res.returncode != 0:
+        # The child may have created a bead before its GitHub backlink failed. Retrying
+        # queries the repo-scoped external ref and repairs the link, never auto-creates two.
+        raise RuntimeError(f"promotion refused (exit {res.returncode}); inspect state or retry "
+                           "the same explicit command to repair a partial link")
+    print(res.stdout.strip())
+
+
 def main():
     parser = argparse.ArgumentParser(description="The Software Factory (factory)")
     parser.add_argument("--agent", action="store_true", dest="agent_guide", help="Print machine-actionable instructions and recipes for AI agents to integrate the factory")
@@ -1491,6 +1516,11 @@ def main():
 
     # list
     subparsers.add_parser("list", help="List all available agents")
+
+    # promote (separate human-approved operation, never part of a publication run)
+    promote_parser = subparsers.add_parser("promote", help="Promote a human-approved public issue to one linked bead")
+    promote_parser.add_argument("--target", required=True, help="Configured named public target")
+    promote_parser.add_argument("--issue", required=True, help="Approved public issue URL in the configured repo")
 
     # run
     run_parser = subparsers.add_parser("run", help="Run an agent against a target")
@@ -1577,6 +1607,8 @@ def main():
         sys.exit(0)
     elif args.command == "list":
         list_agents()
+    elif args.command == "promote":
+        promote_public_issue(args.target, args.issue)
     elif args.command == "run":
         run_agent(agent_name=args.agent, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink)
     elif args.command == "line":

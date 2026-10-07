@@ -313,7 +313,7 @@ schedule:
 |---|---|---|
 | **`file`** | Writes markdown delta reports to `findings/<target>-latest.md` and appends history to `findings/<target>-history.jsonl`. | **Default choice.** Safe for all public and private targets; zero external API or tracker dependencies. |
 | **`github-issues`** | First step: verified public `github.com/OWNER/REPO` issue, deduped against open and closed issues by fingerprint. Store issue URL and append lifecycle comments. | Explicit `repo:` and `visibility: public` required in the target manifest. All real severities (including high/critical) publish under Paul's public-disclosure approval; issue prose is redacted. Failed listing fails closed. |
-| **`beads`** | Not an automatic publication sink. `--sink beads` / combined sinks refuse to create work before public triage. | Human-approved, explicit issue-to-bead promotion follows as a separate operation; until available, triage in GitHub and do not auto-file beads. |
+| **`beads`** | Not an automatic publication sink. `--sink beads` / combined sinks refuse to create work before public triage. | After human triage labels the public issue `factory-approved`, run `factory promote --target NAME --issue URL`. It requires explicit `beads_path`, dedupes by repo-scoped fingerprint external ref and repairs missing backlinks on retry. |
 
 ### 3.3 Scheduling Daily Briefings (macOS `launchd`)
 

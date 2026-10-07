@@ -1,6 +1,7 @@
 name: voicebox
 path: ~/Code/voicebox
 repo: PaulKinlan/voicebox
+beads_path: ~/Code/voicebox
 sink: github-issues
 visibility: public
 agents:

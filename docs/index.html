@@ -135,7 +135,7 @@
         <article class="feature-card">
           <h3>🔒 Public Disclosure Guard</h3>
           <p>
-            High and critical security vulnerabilities are never posted directly to public issue trackers. They are safely isolated into encrypted local files or draft security advisories.
+            An explicitly-public target publishes redacted public issues for every real finding, including high and critical. Missing visibility or an unverified public GitHub destination refuses publication; human approval is required before a linked bead is created.
           </p>
         </article>
       </div>
@@ -178,7 +178,7 @@
           <div class="pipeline-row">
             <span class="pipeline-label">5. Sink</span>
             <div class="pipeline-desc">
-              Output lands in local Beads issue database (<code>bd</code>), GitHub Issues via <code>gh</code> CLI, or local markdown reports (guarded by public disclosure embargo).
+              Verified public GitHub issues receive real findings first, with local markdown as the evidence trail. After human approval, <code>factory promote</code> creates one linked Beads work item; publication never auto-creates a bead.
             </div>
           </div>
         </div>
