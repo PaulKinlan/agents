@@ -329,6 +329,23 @@ class TestBannerAndRecord(unittest.TestCase):
         self.assertEqual(policy_record(policy, "claude")["not_enforced"],
                          ["os-sandbox"])
 
+    def test_an_unsandboxed_opt_in_is_surfaced_prominently(self):
+        # agents-bp0: a run that proceeds unsandboxed by the explicit opt-in says so with
+        # the attestation it ran under, in both the banner and policy.json — instead of
+        # the generic gap text. The not_enforced list is unchanged: the note never
+        # upgrades it.
+        policy = load_policy("probe", manifest())
+        note = ("explicit FACTORY_ALLOW_UNSANDBOXED opt-in on trusted target 'trusted' "
+                "(visibility private; THREAT_MODEL.md section 7): the engine process and "
+                "the pre-pass run as the operator")
+        banner = "\n".join(banner_lines(policy, "pi", sandbox=None, unsandboxed_note=note))
+        self.assertIn(f"Sandbox:     NOT enforced — {note}", banner)
+        self.assertNotIn("run as the operator, with", banner)  # generic gap text replaced
+        record = policy_record(policy, "pi", sandbox=None, unsandboxed_note=note)
+        self.assertEqual(record["unsandboxed_opt_in"], note)
+        self.assertEqual(record["not_enforced"], ["os-sandbox", "read-scope"])
+        self.assertNotIn("unsandboxed_opt_in", policy_record(policy, "pi", sandbox=None))
+
     def test_the_budget_line_names_the_enforcement_state_per_engine(self):
         policy = load_policy("probe", manifest(budget={"max_minutes": 5, "max_usd": 0.5}))
         self.assertIn("$0.50 enforced by the claude adapter (--max-budget-usd)",
@@ -521,12 +538,23 @@ class TestDispatcher(unittest.TestCase):
         (directory / "agent.yaml").write_text(yaml_text, encoding="utf-8")
         (directory / "SKILL.md").write_text("# Probe\n", encoding="utf-8")
 
-    def factory(self, engine, extra_env=None):
+    def trusted_target(self, name="trusted", visibility="private", extra=""):
+        """agents-bp0: write a named-target manifest carrying the trusted attestation
+        (`trusted: true` + `visibility: private`) pointing at the harness target.
+        visibility=None omits the field (it then normalizes to public, failing closed)."""
+        (self.root / "targets").mkdir(exist_ok=True)
+        vis = f"visibility: {visibility}\n" if visibility is not None else ""
+        (self.root / "targets" / f"{name}.yaml").write_text(
+            f"name: {name}\npath: {self.target}\n{vis}trusted: true\n{extra}",
+            encoding="utf-8")
+        return name
+
+    def factory(self, engine, extra_env=None, target_arg=None):
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.root)}
         env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, str(self.root / "factory"), "run", "probe", "--target",
-             str(self.target), "--engine", engine, "--sink", "file"],
+             target_arg or str(self.target), "--engine", engine, "--sink", "file"],
             cwd=str(self.root), env=env, capture_output=True, text=True, timeout=120,
         )
 
@@ -554,8 +582,9 @@ class TestDispatcher(unittest.TestCase):
         """A FACTORY_TOOL_POLICY in the caller's environment never reaches the adapter."""
         self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
         res = self.factory("pi", {"FACTORY_TOOL_POLICY": "unrestricted",
-                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
         argv = self.stub_line("ARGV:").split()
@@ -574,8 +603,9 @@ class TestDispatcher(unittest.TestCase):
         ambient FACTORY_MAX_BUDGET_USD in the operator's shell never reaches the adapter."""
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "budget: {max_minutes: 1, max_usd: 0.5}\n")
+        self.trusted_target("trusted")
         res = self.factory("pi", {"FACTORY_MAX_BUDGET_USD": "999",
-                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("BUDGET:"), "0.5", "the declared cap, not the ambient one")
         self.assertIn("NOT enforced (the pi adapter has no per-run budget flag)", res.stdout)
@@ -680,10 +710,13 @@ process.stdin.on('end', () => {
         self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
 
     def test_unsandboxed_run_requires_an_explicit_opt_in(self):
-        """The only unsandboxed path is the explicit FACTORY_ALLOW_UNSANDBOXED opt-in for a
-        TRUSTED target (THREAT_MODEL.md section 7). It must run and say NOT confined,
-        proving the refusal above is the default and this is a deliberate, honest exception
-        rather than a silent fallback."""
+        """agents-bp0 acceptance: the ambient FACTORY_ALLOW_UNSANDBOXED opt-in alone must
+        NOT unlock an unsandboxed run. The attestation lives in the TARGET's own manifest
+        (targets/<name>.yaml `trusted: true` + `visibility: private`), because anything
+        able to set an environment variable — a compromised schedule entry, a malicious CI
+        step, a wrapper script, a command a doc tells a developer to run — must not be able
+        to make the operator's filesystem the read scope. A raw --target path carries no
+        manifest at all, so it refuses exactly like the no-opt-in case above."""
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "budget: {max_minutes: 1}\n")
         broken = self.root / "brokenbin"
@@ -693,11 +726,83 @@ process.stdin.on('end', () => {
         stub.chmod(0o755)
         res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
                                   "FACTORY_ALLOW_UNSANDBOXED": "1"})
+        self.assertNotEqual(res.returncode, 0, "an untrusted target must refuse the opt-in")
+        self.assertIn("trusted attestation", res.stderr + res.stdout)
+        self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
+
+    def test_a_trusted_but_public_target_still_refuses_the_opt_in(self):
+        """agents-bp0: `trusted: true` is necessary but not sufficient — a target whose
+        visibility is public (or undeclared, which normalizes to public) never qualifies:
+        THREAT_MODEL.md section 7's precondition is a trusted AND non-public target."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        broken = self.root / "brokenbin"
+        broken.mkdir()
+        stub = broken / "bwrap"
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        env = {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+               "FACTORY_ALLOW_UNSANDBOXED": "1"}
+        for name, visibility in (("pub", "public"), ("unsetvis", None)):
+            with self.subTest(target=name):
+                self.trusted_target(name, visibility=visibility)
+                res = self.factory("pi", env, target_arg=name)
+                self.assertNotEqual(res.returncode, 0,
+                                    f"{name} must refuse the opt-in")
+                self.assertIn("trusted attestation", res.stderr + res.stdout)
+                self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
+
+    def test_an_absolute_target_path_never_loads_a_planted_manifest(self):
+        """review P1 (agents-bp0): pathlib's absolute-join DISCARD made
+        FACTORY_ROOT/'targets'/f'{target_arg}.yaml' load a manifest from ANYWHERE, so an
+        argv+env-controlling adversary could plant trusted:true + visibility:private +
+        path:<operator home> beside any directory and get an attested unsandboxed run
+        from `--target <dir>`. Only a bare name may load a manifest; an absolute path is
+        a raw target and must refuse the opt-in exactly like any other untrusted one."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        broken = self.root / "brokenbin"
+        broken.mkdir()
+        stub = broken / "bwrap"
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        # The planted manifest sits beside the target directory: with the absolute-join
+        # bug, --target <self.root>/target resolved to it and the run would be attested.
+        (self.root / "target.yaml").write_text(
+            f"name: planted\npath: {self.root}\nvisibility: private\ntrusted: true\n",
+            encoding="utf-8")
+        res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
+        self.assertNotEqual(res.returncode, 0,
+                            "an absolute --target must not load a planted manifest")
+        self.assertIn("trusted attestation", res.stderr + res.stdout)
+        self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
+
+    def test_the_opt_in_runs_only_for_a_trusted_private_target(self):
+        """The only unsandboxed path is the explicit FACTORY_ALLOW_UNSANDBOXED opt-in for a
+        TRUSTED target (THREAT_MODEL.md section 7) — a real precondition since agents-bp0,
+        not just an honour-system docstring. It must run and say NOT enforced with the
+        opt-in named prominently, proving the refusals above are the default and this is a
+        deliberate, attested exception rather than a silent fallback."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        broken = self.root / "brokenbin"
+        broken.mkdir()
+        stub = broken / "bwrap"
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        self.trusted_target("trusted")
+        res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertIn("NOT confined", res.stdout)
+        self.assertIn("Sandbox:     NOT enforced — explicit FACTORY_ALLOW_UNSANDBOXED opt-in "
+                      "on trusted target 'trusted'", res.stdout)
+        self.assertIn("run as the operator", res.stdout)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertIn("os-sandbox", record["not_enforced"])
         self.assertIn("read-scope", record["not_enforced"])
+        self.assertIn("explicit FACTORY_ALLOW_UNSANDBOXED opt-in on trusted target 'trusted'",
+                      record["unsandboxed_opt_in"])
 
     # --- agents-6ce: the disposable per-session worktree -------------------------------
 
@@ -817,10 +922,13 @@ process.stdin.on('end', () => {
         """agents-6ce: the worktree grant needs a git repo. A non-git target downgrades to
         read-only and re-withholds write with the specific reason, so the banner and policy
         stay honest and no worktree/session.patch is produced."""
-        # self.target is a plain directory (not git) from setUp.
+        # self.target is a plain directory (not git) from setUp; the trusted manifest
+        # points at it, so the run proceeds on any host (review P2: the old raw-path +
+        # opt-in form only worked where bubblewrap exists).
+        self.trusted_target("trusted")
         self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
-        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"})
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
         self.assertIn("Tool policy: read-only", res.stdout)
@@ -847,8 +955,9 @@ process.stdin.on('end', () => {
         bwrap = broken / "bwrap"
         bwrap.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         bwrap.chmod(0o755)
+        self.trusted_target("trusted")
         res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
-                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
         self.assertIn("Tool policy: read-only", res.stdout)

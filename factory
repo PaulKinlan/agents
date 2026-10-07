@@ -312,19 +312,31 @@ def list_agents():
     print("=" * 65)
 
 def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
-    # Check targets/ directory first
-    target_yaml = FACTORY_ROOT / "targets" / f"{target_arg}.yaml"
-    if target_yaml.exists():
-        cfg = load_yaml_simple(target_yaml)
-        name = cfg.get("name", target_arg)
-        raw_path = os.path.expanduser(str(cfg.get("path", "")))
-        path = (FACTORY_ROOT / raw_path).resolve() if not os.path.isabs(raw_path) else Path(raw_path).resolve()
-        # A named target whose checkout is missing must fail loudly: every pre-pass would
-        # otherwise "scan" nothing and the station would report a clean zero (journal-wog).
-        if not cfg.get("path") or not path.is_dir():
-            raise FileNotFoundError(
-                f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which is not a directory")
-        return name, path, cfg
+    # A named target is a BARE name resolved under FACTORY_ROOT/targets — never a path.
+    # pathlib's `/` DISCARDS the left side when the right side is absolute, so
+    # FACTORY_ROOT / "targets" / "/tmp/x.yaml" IS /tmp/x.yaml: an adversary controlling
+    # argv and environment could plant a manifest (trusted: true, visibility: private,
+    # path: anywhere) beside any directory and turn `--target /tmp/x` into an attested
+    # unsandboxed run with an arbitrary read scope (review P1, agents-bp0). Only a bare
+    # name — no path separator, not absolute, not a parent reference — may load a
+    # manifest; everything else is a raw path target, which carries no attestation at
+    # all and refuses the unsandboxed opt-in like every other untrusted target.
+    is_bare_name = (target_arg not in ("", ".", "..")
+                    and not os.path.isabs(target_arg)
+                    and os.sep not in target_arg and "/" not in target_arg)
+    if is_bare_name:
+        target_yaml = FACTORY_ROOT / "targets" / f"{target_arg}.yaml"
+        if target_yaml.exists():
+            cfg = load_yaml_simple(target_yaml)
+            name = cfg.get("name", target_arg)
+            raw_path = os.path.expanduser(str(cfg.get("path", "")))
+            path = (FACTORY_ROOT / raw_path).resolve() if not os.path.isabs(raw_path) else Path(raw_path).resolve()
+            # A named target whose checkout is missing must fail loudly: every pre-pass would
+            # otherwise "scan" nothing and the station would report a clean zero (journal-wog).
+            if not cfg.get("path") or not path.is_dir():
+                raise FileNotFoundError(
+                    f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which is not a directory")
+            return name, path, cfg
 
     # Otherwise treat as path
     target_path = Path(os.path.expanduser(target_arg)).resolve()
@@ -449,18 +461,41 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # is not path-confined by its flags). If bubblewrap cannot run on this host, REFUSE
     # rather than silently fall back to an unsandboxed run where a prompt-injected session
     # reads any file the operator can (review P0). FACTORY_ALLOW_UNSANDBOXED is the one
-    # explicit unsandboxed path, for a TRUSTED target per THREAT_MODEL.md section 7; the
-    # banner and policy.json then report the session NOT confined.
+    # explicit unsandboxed path — and since agents-bp0 it is an ATTESTATION, not a switch:
+    # THREAT_MODEL.md section 7 accepts an unsandboxed run only for a TRUSTED target, so
+    # the opt-in additionally requires the target's own manifest to declare `trusted: true`
+    # with `visibility: private` (targets/<name>.yaml). The ambient environment alone must
+    # never unlock it — anything able to set an environment variable (a compromised
+    # schedule entry, a malicious CI step, a wrapper script, a command a doc tells a
+    # developer to run) must not be able to make the operator's filesystem the read scope.
+    # A public/unknown-visibility target, or a raw --target path with no manifest, always
+    # refuses; the banner and policy.json then report the session NOT confined.
     sandbox_ok = sandbox_available()
     allow_unsandboxed = os.environ.get("FACTORY_ALLOW_UNSANDBOXED", "").strip().lower() \
         in ("1", "true", "yes", "on")
-    if engine in SANDBOXED_ENGINES and not sandbox_ok and not allow_unsandboxed:
+    trusted_opt_in = (allow_unsandboxed
+                      and target_cfg.get("trusted") is True
+                      and normalize_visibility(target_cfg.get("visibility")) == "private")
+    if engine in SANDBOXED_ENGINES and not sandbox_ok and not trusted_opt_in:
+        why = ("and the target does not carry the trusted attestation (targets/<name>.yaml "
+               "`trusted: true` with `visibility: private`)"
+               if allow_unsandboxed else "and no FACTORY_ALLOW_UNSANDBOXED opt-in was given")
         raise ContainmentError(
             f"engine '{engine}' relies on the OS filesystem sandbox to confine its read "
-            f"scope to the target, but bubblewrap cannot run on this host; refusing an "
-            f"unsandboxed run (the model's read tool would reach any file the operator can "
-            f"read). For a TRUSTED target re-run with FACTORY_ALLOW_UNSANDBOXED=1 "
-            f"(THREAT_MODEL.md section 7); the banner and policy.json will then say NOT confined.")
+            f"scope to the target, but bubblewrap cannot run on this host {why}; refusing "
+            f"an unsandboxed run (the model's read tool would reach any file the operator "
+            f"can read). The opt-in exists only for a target that declares `trusted: true` "
+            f"with `visibility: private` in its manifest (THREAT_MODEL.md section 7); the "
+            f"banner and policy.json then say NOT confined.")
+    unsandboxed_note = (
+        # The attestation names the manifest's FILE STEM, not the name: field a manifest
+        # self-declares (review P3): the file the operator actually wrote is what was
+        # attested. The opt-in only ever fires for a bare-name manifest target.
+        f"explicit FACTORY_ALLOW_UNSANDBOXED opt-in on trusted target "
+        f"'{Path(target_arg).name}' "
+        f"(visibility private; THREAT_MODEL.md section 7): the engine process and the "
+        f"pre-pass run as the operator"
+        if engine in SANDBOXED_ENGINES and not sandbox_ok else None)
 
     # Egress control (agents-2x6). The engine session's netns can be isolated only when the
     # engine is sandboxed AND every model-provider key present in the environment maps to a
@@ -589,7 +624,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     print(f"\n[Software Factory] Run Initialized")
     print(f"  Agent:       {agent_name} ({agent_cfg.get('class', 'observer')})")
-    for line in banner_lines(policy, engine, sandbox=sandbox):
+    for line in banner_lines(policy, engine, sandbox=sandbox,
+                             unsandboxed_note=unsandboxed_note):
         print(line)
     print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy, engine)}")
     print(f"  Target:      {target_name} ({target_dir})")
@@ -600,7 +636,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # What was declared, what the session was granted, and what is not enforced — the run's
     # own record, so a finding can be read against the containment it was produced under.
     (run_dir / "policy.json").write_text(
-        json.dumps(policy_record(policy, engine, sandbox=sandbox), indent=2),
+        json.dumps(policy_record(policy, engine, sandbox=sandbox,
+                                 unsandboxed_note=unsandboxed_note), indent=2),
         encoding="utf-8")
 
     # 1. Deterministic pre-pass

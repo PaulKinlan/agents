@@ -81,8 +81,12 @@ OS sandbox (`lib/sandbox.py`, agents-9n7): the target read-only, everything else
 whole PATH directories, so an unrelated directory on PATH cannot leak into the read scope.
 For an engine confined only by this sandbox (pi), a host where bubblewrap cannot run **refuses**
 the run rather than degrading silently; `FACTORY_ALLOW_UNSANDBOXED=1` is the one explicit
-unsandboxed path, for a trusted target only. The banner and `policy.json` say which boundary
-was actually up, and report NOT confined when it was not. A sandboxed engine's model API key
+unsandboxed path, and since agents-bp0 it is an attestation rather than a switch: it unlocks
+only for a target whose own manifest declares `trusted: true` with `visibility: private`
+(`targets/<name>.yaml`) — public/unknown-visibility targets and raw `--target` paths always
+refuse, so nothing that can merely set an environment variable can widen the read scope. The
+banner and `policy.json` say which boundary was actually up, and report NOT enforced with the
+opt-in and trusted target named when it was not. A sandboxed engine's model API key
 crosses the boundary through a localhost credential broker (agents-8h4), not as an env var: the
 engine gets a non-secret placeholder plus the broker URL and the dispatcher injects the real key
 host-side when it forwards the request, so a prompt-injected session cannot read the key from the

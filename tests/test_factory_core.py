@@ -145,7 +145,7 @@ class TestDispatcherBudget(unittest.TestCase):
 class TestDispatcherChildEnvironment(unittest.TestCase):
     """The engine and pre-pass children get an explicit, credential-free environment (SF-04)."""
 
-    def _run_probe(self, extra_agent_yaml: str = "", containment: str = "t0-readonly", env_overrides: "typing.Optional[typing.Dict[str, str]]" = None):
+    def _run_probe(self, extra_agent_yaml: str = "", containment: str = "t0-readonly", env_overrides: "typing.Optional[typing.Dict[str, str]]" = None, target_arg: "typing.Optional[str]" = None):
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = Path(tmpdir)
             (sandbox / "agents" / "probe" / "scripts").mkdir(parents=True)
@@ -206,9 +206,17 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
             }
             if env_overrides:
                 overrides.update(env_overrides)
+            target_arg = target_arg or str(target)
+            if target_arg != str(target):
+                # agents-bp0: a named target manifest (e.g. one carrying the trusted
+                # attestation) — resolve_target reads it from the mocked FACTORY_ROOT.
+                (sandbox / "targets").mkdir(exist_ok=True)
+                (sandbox / "targets" / f"{target_arg}.yaml").write_text(
+                    f"name: {target_arg}\npath: {target}\nvisibility: private\n"
+                    f"trusted: true\n", encoding="utf-8")
             with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
                  mock.patch.dict(os.environ, overrides):
-                factory_cli.run_agent("probe", str(target), engine_arg="pi")
+                factory_cli.run_agent("probe", target_arg, engine_arg="pi")
 
             runs = sorted((sandbox / "runs").glob("probe-*"))
             self.assertEqual(len(runs), 1, "expected exactly one run directory")
@@ -227,10 +235,12 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
 
     @mock.patch("lib.sandbox._probe_result", False)
     def test_agent_children_never_inherit_operator_credentials_unbrokered(self):
-        # By setting FACTORY_ALLOW_UNSANDBOXED, we force the pi run even without bubblewrap.
-        # This allows us to prove SF-04 (no unrelated credentials leak) on any host, keeping
+        # By setting FACTORY_ALLOW_UNSANDBOXED for a target that carries the trusted
+        # attestation (agents-bp0), we force the pi run even without bubblewrap. This
+        # allows us to prove SF-04 (no unrelated credentials leak) on any host, keeping
         # the non-brokered assertions meaningful everywhere.
-        prepass, engine = self._run_probe(env_overrides={"FACTORY_ALLOW_UNSANDBOXED": "1"})
+        prepass, engine = self._run_probe(
+            env_overrides={"FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
         for child, env in (("pre-pass", prepass), ("engine", engine)):
             for name in ("GITHUB_TOKEN", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY",
                          "SSH_AUTH_SOCK", "PROJECT_UNRELATED_TOKEN"):
