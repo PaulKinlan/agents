@@ -42,7 +42,7 @@ class TestFingerprints(unittest.TestCase):
             self.assertNotEqual(compute_fingerprint(*original), compute_fingerprint(*changed))
 
 
-class TestSinks(unittest.TestCase):
+class SinkFixture:
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-sinks-")
         self.addCleanup(temporary.cleanup)
@@ -149,6 +149,7 @@ else:
     def finding(self):
         return next(iter(self.store()["findings"].values()))
 
+class TestSinks(SinkFixture, unittest.TestCase):
     def test_file_stays_local_and_does_not_contact_trackers(self):
         result = self.scan("file")
         self.assertEqual(result.returncode, 0, result.stderr)
