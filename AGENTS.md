@@ -69,8 +69,11 @@ bubblewrap qualifies, because the worktree is safe only while the target itself 
 read-only. A non-git target, or an engine that cannot be OS-sandbox-verified (`claude`, which
 relies on `--restricted` rather than a kernel boundary), downgrades to `read-only`. An *optimizer*
 (perf-hillclimb) stays read-only — it
-returns structured steps its driver applies in its own worktree. Declared `network` and `browser`
-are withheld until there is a mechanism to hold them to the tier.
+returns structured steps its driver applies in its own worktree. Declared `network` is now
+granted when the run's egress is actually filtered (agents-2x6: `--unshare-net` plus the
+per-run egress-allowlist proxy, derived from the agent's own `requires`); when it is not — no
+OS sandbox, or a model provider the credential broker cannot cover — it is honestly
+re-withheld for that run. `browser` stays withheld until a localhost-only browser exists.
 
 On Linux hosts with bubblewrap, the engine session and the pre-pass additionally run inside an
 OS sandbox (`lib/sandbox.py`, agents-9n7): the target read-only, everything else invisible,
