@@ -72,13 +72,7 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
     #    deterministic scanner output; the model report is the fallback, reduced the same way.
     runs_dir = FACTORY_ROOT / "runs"
     if runs_dir.exists():
-        # A repair-retry gets -attempt2 and a same-second collision gets an eight-hex
-        # suffix (either or both). Otherwise a successful retry disappears from the
-        # verifier's discovery fallback when the first attempt had no verdict.
-        pattern = re.compile(
-            rf"^(?:vuln-discovery|threat-model)-{re.escape(target_name)}-"
-            rf"\d{{8}}-\d{{6}}(?:-attempt[1-9][0-9]*)?(?:-[0-9a-f]{{8}})?$"
-        )
+        pattern = re.compile(rf"^(?:vuln-discovery|threat-model)-{re.escape(target_name)}-\d{{8}}-\d{{6}}$")
         matching_runs = sorted(
             [d for d in runs_dir.iterdir() if d.is_dir() and pattern.match(d.name)],
             key=lambda x: x.name,
