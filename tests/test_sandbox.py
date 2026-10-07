@@ -410,12 +410,26 @@ class TestSandboxLive(unittest.TestCase):
         sentinel's environ is genuinely readable from the host pid namespace — so on a
         genuinely SHARED namespace the same read inside the sandbox would find the marker
         and this test fails, exactly as it must."""
+        # 76v review P1/P2: the sentinel outlives every probe the test can make (run_inside
+        # has a 120s timeout, wrap verification 60s; 600s dwarfs both), it is asserted ALIVE
+        # immediately before the in-sandbox probe (expiry fails the test loudly instead of
+        # false-passing on an empty /proc entry), and cleanup terminates + REAPS it so no
+        # zombie or orphan sleep is left behind.
         sentinel = subprocess.Popen(
-            ["sleep", "30"],
+            ["sleep", "600"],
             env={**os.environ, "FACTORY_76V_SENTINEL": "host-side-secret-marker"},
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL)
-        self.addCleanup(sentinel.kill)
+
+        def _reap_sentinel():
+            sentinel.terminate()
+            try:
+                sentinel.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                sentinel.kill()
+                sentinel.wait(timeout=10)
+
+        self.addCleanup(_reap_sentinel)
         # Host-side sanity: the sentinel's environ exists and carries the marker — readable
         # from the host pid namespace, which is precisely what a shared-ns sandbox would see.
         host_side = Path(f"/proc/{sentinel.pid}/environ").read_bytes()
@@ -424,6 +438,9 @@ class TestSandboxLive(unittest.TestCase):
         visible = set(res.stdout.split())
         self.assertTrue(visible, "the sandbox must see its own processes")
         self.assertTrue(len(visible) < 12, f"too many PIDs visible: {sorted(visible)}")
+        self.assertIsNone(sentinel.poll(),
+                          "the sentinel expired before the in-sandbox probe - the test "
+                          "cannot tell a leak from an empty /proc entry, so fail loudly")
         probe = self.run_inside(
             f"grep -aq FACTORY_76V_SENTINEL /proc/{sentinel.pid}/environ 2>/dev/null "
             f"&& echo LEAK; echo PROBE_DONE")
