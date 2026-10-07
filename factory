@@ -643,6 +643,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # 1. Deterministic pre-pass
     candidates_data = []
     model_parse_succeeded = True
+    system_directive_text = None  # agents-m2n: lifted from the payload, see below
 
     if prepass_cmd is not None:
         print(f"\n[Step 1/3] Running deterministic pre-pass ({prepass_script.name})...")
@@ -684,6 +685,18 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                f"{res.returncode}; no scan was performed")
         else:
             cand_json = json.loads(candidates_file.read_text(encoding="utf-8"))
+            # agents-m2n: a pre-pass may declare a SYSTEM-channel directive (the threat-model
+            # nonce directive) alongside its evidence. It must never ride in the user prompt
+            # as ordinary Scanner Data — that is exactly the channel confusion the directive
+            # guards against — so it is lifted out here, written to the run directory, and
+            # handed to the adapter through FACTORY_SYSTEM_DIRECTIVE_FILE for the engine's
+            # system channel (lib/adapters/*.sh; engines with no system channel prepend it
+            # to the user prompt at maximum salience, honestly commented). candidates.json
+            # on disk is unchanged: the findings store consumes it as-is.
+            if isinstance(cand_json, dict) \
+                    and isinstance(cand_json.get("system_instruction"), str) \
+                    and cand_json["system_instruction"].strip():
+                system_directive_text = cand_json.pop("system_instruction")
             if isinstance(cand_json, dict) and "candidates" in cand_json:
                 candidates_data = cand_json["candidates"]
                 print(f"-> Deterministic scanner found {len(candidates_data)} candidate matches.")
@@ -735,6 +748,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         prompt_file = run_dir / "prompt.txt"
         prompt_file.write_text(prompt, encoding="utf-8")
         os.chmod(prompt_file, 0o600)
+
+        # agents-m2n: the directive file for the adapter's system channel. run_dir is
+        # already read-write inside the OS sandbox, and the path reaches the adapter as a
+        # dispatcher-set variable (never inherited from the operator's ambient environment,
+        # so nothing outside the factory can point an engine at an arbitrary file).
+        if system_directive_text is not None:
+            directive_file = run_dir / "system_directive.txt"
+            directive_file.write_text(system_directive_text, encoding="utf-8")
+            adapter_env["FACTORY_SYSTEM_DIRECTIVE_FILE"] = str(directive_file)
 
         # adapter_cmd and adapter_env — and the sandbox wrap when one applies — were built
         # above, before the banner, so "Sandbox: enforced" reflects a wrapper that actually

@@ -68,11 +68,16 @@ CHAT_TEMPLATE_PATTERN = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Control characters: C0/C1 control codes, ANSI escapes, bidi overrides, format chars (incl. U+061C), & zero-width
+# Control characters: ANSI escapes and C0/C1 control codes. Format characters (Cf) are
+# NOT listed here — step 2 below strips the ENTIRE Cf category across Unicode, which is
+# broader and stays correct as new codepoints are assigned (bcz P2: the former explicit
+# Cf alternative here was redundant with it). Note the cosmetic effect: ZWJ/ZWNJ and
+# soft hyphens inside code snippets are removed too, which can alter rendering of e.g.
+# Devanagari or Arabic joining text — accepted, since unsanitized format characters are
+# exactly the bidi/override smuggling vector this exists to neutralize.
 CONTROL_CHARS_PATTERN = re.compile(
     r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07"  # ANSI escapes
     r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"  # C0/C1 controls
-    r"|[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"  # Bidi overrides, U+061C, zero-width
 )
 
 SYSTEM_INSTRUCTION = (

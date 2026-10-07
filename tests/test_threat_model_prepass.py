@@ -131,6 +131,17 @@ class TestPromptInjectionHygiene(unittest.TestCase):
         self.assertNotIn("S\u061cy", cleaned_split)
         self.assertIn("[neutralized]", cleaned_split)
 
+    def test_the_full_cf_category_is_stripped_beyond_the_once_listed_ranges(self):
+        """bcz P2 / agents-m2n: CONTROL_CHARS_PATTERN no longer lists format characters —
+        the whole Unicode Cf category is stripped separately — so format codepoints the old
+        explicit alternative never named (soft hyphen, word joiner, invisible math, Mongolian
+        vowel separator) must still be removed by the category strip."""
+        payload = "soft\u00adhyphen word\u2060joiner invisible\u2062times mongolian\u180evowel"
+        cleaned = mine_history.sanitize_untrusted_text(payload, max_length=200)
+        for gone in ("\u00ad", "\u2060", "\u2062", "\u180e"):
+            self.assertNotIn(gone, cleaned)
+        self.assertEqual(cleaned, "softhyphen wordjoiner invisibletimes mongolianvowel")
+
     def test_delimiter_breakout_prevented(self):
         """Untrusted text cannot break out of nonce-fenced blocks."""
         nonce = mine_history.generate_nonce()
@@ -246,7 +257,9 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
 
         P2-4: Appends a marker-free literal sink line (`el.innerHTML = x;`) that does
         not match any line-level self-referential suppression (no `re.compile`, etc.),
-        proving that only file-level exclusion via `is_scanner_file` suppresses it.
+        so this test exercises the file-level exclusion via `is_scanner_file` — not
+        that it is the only suppression mechanism in general (bcz P2 reword: the
+        old 'proving that only ...' overstated it).
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

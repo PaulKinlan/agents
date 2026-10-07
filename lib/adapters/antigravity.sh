@@ -50,6 +50,16 @@ fi
 
 echo "[antigravity adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
+# agents-m2n: agentapi new-conversation takes a prompt and NOTHING else (no system
+# channel, no flags — see the tool-policy note above), so this engine cannot receive
+# the pre-pass's system directive in a system channel. The honest fallback: prepend it
+# to the TOP of the user prompt, at maximum salience and outside the Scanner Data —
+# strictly better than the old form, where it was buried inside the JSON payload. Like
+# the prompt itself, it rides argv for the run's duration (agents-pgr class).
+if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ] && [ -f "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+  PROMPT="$(cat "$FACTORY_SYSTEM_DIRECTIVE_FILE")\n\n${PROMPT}"
+fi
+
 cd "$TARGET_DIR"
 
 # agentapi has no stdin mode, so the prompt is positional here and appears in that engine

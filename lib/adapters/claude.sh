@@ -88,9 +88,21 @@ fi
 # with every bundled one. A file, so SKILL.md stays out of the engine's argv.
 SKILL_FLAGS=()
 if [ -f "$SKILL_DIR/SKILL.md" ]; then
-  SKILL_FLAGS=(--append-system-prompt-file "$SKILL_DIR/SKILL.md")
+  # agents-m2n: when the pre-pass declared a system-channel directive, it joins the
+  # skill in the SAME appended file (the flag is passed once): system prompt = SKILL.md
+  # + directive, never user-channel Scanner Data. Unset = unchanged behaviour.
+  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ] && [ -f "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+    COMBINED_SYSTEM_PROMPT="$RUN_DIR/system_prompt_combined.txt"
+    cat "$SKILL_DIR/SKILL.md" "$FACTORY_SYSTEM_DIRECTIVE_FILE" > "$COMBINED_SYSTEM_PROMPT"
+    SKILL_FLAGS=(--append-system-prompt-file "$COMBINED_SYSTEM_PROMPT")
+  else
+    SKILL_FLAGS=(--append-system-prompt-file "$SKILL_DIR/SKILL.md")
+  fi
 else
   echo "[claude adapter] Warning: no SKILL.md in $SKILL_DIR; running without skill instructions." >&2
+  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ] && [ -f "${FACTORY_SYSTEM_DIRECTIVE_FILE}" ]; then
+    SKILL_FLAGS=(--append-system-prompt-file "$FACTORY_SYSTEM_DIRECTIVE_FILE")
+  fi
 fi
 
 # Fail fast on auth first, then read the prompt: an unauthenticated run should report the

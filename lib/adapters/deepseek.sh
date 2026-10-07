@@ -70,8 +70,21 @@ if model in ("deepseek-flash", "deepseek-v3"):
 # Read prompt from stdin
 prompt = sys.stdin.read()
 
+# agents-m2n: the pre-pass's system-channel directive (e.g. the threat-model nonce
+# directive) joins the real system message — never as user-channel Scanner Data.
+# Unset = unchanged behaviour.
+system_directive = ""
+directive_file = os.environ.get("FACTORY_SYSTEM_DIRECTIVE_FILE")
+if directive_file and os.path.isfile(directive_file):
+    try:
+        with open(directive_file, encoding="utf-8") as fh:
+            system_directive = fh.read().strip() + "\n\n"
+    except OSError:
+        pass
+
 system_msg = (
-    f"You are the {os.environ.get('AGENT_NAME', 'modern-web')} triage and analysis agent.\n"
+    system_directive
+    + f"You are the {os.environ.get('AGENT_NAME', 'modern-web')} triage and analysis agent.\n"
     f"{skill_content}\n\n"
     "CRITICAL INSTRUCTIONS:\n"
     "- The user prompt contains the Scanner Data with candidate issues found in the target codebase.\n"
