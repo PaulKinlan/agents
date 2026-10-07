@@ -22,6 +22,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from lib.credential_broker import PLACEHOLDER_KEY
+from lib.sandbox import sandbox_available
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -301,6 +304,116 @@ class TestLineAndon(unittest.TestCase):
             self.assertIn("flaky", output)
             self.assertIn("okprobe", output)
             self.assertIn("PASS", output)
+
+    def test_the_repair_retry_recovers_via_a_real_adapter_and_preserves_the_first_output(self):
+        """agents-30q (1)+(2): with the REAL adapter and a REAL flaky engine — first call emits
+        garbage and exits zero (a no-verdict), second call emits the valid report — the repair
+        retry recovers the line. Each attempt must land in its OWN run directory: the rejected
+        first output stays beside the retry's, never overwritten, and the retry's directory is
+        visibly attempt-numbered."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["flaky", "okprobe"])
+            sandbox._agent("flaky")
+            report = sandbox.root / "report-src.json"
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                # Statelessly keyed on the retry contract itself: the repair-retry's prompt
+                # (stdin) carries the NO VERDICT hint, the first attempt's does not. The
+                # engine runs sandboxed and cannot write a counter file anywhere but its
+                # own run dir - stdin is the only cross-attempt signal it legitimately gets.
+                "if grep -q 'NO VERDICT'; then\n"
+                "  echo OKPROBE-RAN\n"
+                f"  cat '{report}'\n"
+                "else\n"
+                "  echo 'FIRST ATTEMPT GARBAGE - no JSON here'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertTrue(result, "garbage-then-valid must recover via the repair-retry")
+            self.assertIn("COMPLETE", output)
+            self.assertIn("repair-retry", output)
+            runs = sorted((sandbox.root / "runs").glob("flaky-*"))
+            self.assertEqual(len(runs), 2, f"exactly one retry - one run dir per attempt: {[r.name for r in runs]}")
+            first = next(r for r in runs if "-attempt2" not in r.name)
+            second = next(r for r in runs if "-attempt2" in r.name)
+            self.assertIn("FIRST ATTEMPT GARBAGE", (first / "model_output.txt").read_text(encoding="utf-8"),
+                          "the rejected first output must be preserved for human recovery")
+            second_output = (second / "model_output.txt").read_text(encoding="utf-8")
+            self.assertIn("OKPROBE-RAN", second_output)
+            self.assertIn("\"summary\"", second_output, "the retry's output is the valid report")
+
+    def test_a_genuine_engine_failure_halts_via_a_real_adapter_with_one_invocation(self):
+        """agents-30q (2): the real-adapter counterpart of the mocked halt test — a stub pi
+        that exits NON-ZERO is a genuine engine failure, so the line halts, downstream stations
+        are skipped, and there is NO repair-retry (the engine count proves it: exactly 1)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["genuine", "okprobe"])
+            sandbox._agent("genuine")
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'engine exploded' >&2\n"
+                "exit 7\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertFalse(result)
+            self.assertIn("HALTED", output)
+            self.assertNotIn("repair-retry", output,
+                             "a genuine failure must not be retried")
+            self.assertEqual(len(list((sandbox.root / "runs").glob("genuine-*"))), 1,
+                             "exactly one engine invocation — no retry on genuine failure")
+            self.assertFalse(sandbox.marker.exists(), "the halted line must skip downstream stations")
+
+    @unittest.skipUnless(sandbox_available(),
+                         "the broker only engages for a sandboxed engine (bubblewrap host)")
+    def test_the_credential_broker_lifecycle_spans_each_attempt_cleanly(self):
+        """agents-30q (3): the credential broker is started and stopped per ATTEMPT — across
+        a repair-retry there are two full start/stop cycles. Both attempts' engines see the
+        placeholder + brokered base URL (never the operator's key), and after the line ends no
+        broker socket path survives either attempt. The relay's child-facing port is in
+        the sandbox's private netns, not the host namespace."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["flaky", "okprobe"])
+            sandbox._agent("flaky")
+            report = sandbox.root / "report-src.json"
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo \"KEY:${ANTHROPIC_API_KEY}\"\n"
+                "echo \"BASE:${ANTHROPIC_BASE_URL:-unset}\"\n"
+                "if grep -q 'NO VERDICT'; then\n"
+                f"  cat '{report}'\n"
+                "else\n"
+                "  echo 'FIRST ATTEMPT GARBAGE - no JSON here'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertTrue(result, "sanity: the retry must recover the line")
+            runs = sorted((sandbox.root / "runs").glob("flaky-*"))
+            self.assertEqual(len(runs), 2)
+            for run in runs:
+                text = (run / "model_output.txt").read_text(encoding="utf-8")
+                self.assertIn(f"KEY:{PLACEHOLDER_KEY}", text,
+                              f"attempt {run.name} must see the brokered placeholder, not the real key")
+                self.assertNotIn("stub-key", text)
+                base = next(line for line in text.splitlines() if line.startswith("BASE:"))
+                self.assertTrue(base.startswith("BASE:http://127.0.0.1:"),
+                                f"attempt {run.name} must reach the broker via localhost: {base}")
+                self.assertFalse((run / "egress-broker.sock").exists(),
+                                 f"attempt {run.name} must not leave its broker socket behind")
+            # Each per-attempt broker UNIX socket is gone. Do not claim that binding
+            # 127.0.0.1:8384 on the HOST proves the relay's child-facing port is free:
+            # the relay listened in a separate --unshare-net namespace.
 
 
 if __name__ == "__main__":
