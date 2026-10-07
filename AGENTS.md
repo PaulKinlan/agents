@@ -60,12 +60,13 @@ Default to `t0-readonly`. The tier is a ceiling on what an agent may declare, an
 `lib/containment.py` refuses a run whose `capabilities` exceed it (THREAT_MODEL.md §6.1).
 
 The tier is not a grant. A model session runs with the `read-only` tool policy — **except** that
-an agent declaring `write` within a tier that allows it (`t2-local`) is granted `worktree-write`
+a *proposer* declaring `write` within a tier that allows it (`t2-local`) is granted `worktree-write`
 (agents-6ce): the engine edits files inside a disposable git worktree of the target, placed under
 the read-write run directory, so the target checkout stays read-only and the collected session
 diff (`run_dir/session.patch`) *is* the proposal; the worktree is discarded afterwards, and a
-non-git target downgrades to `read-only`. Declared `network` and `browser` are withheld until
-there is a mechanism to hold them to the tier.
+non-git target downgrades to `read-only`. An *optimizer* (perf-hillclimb) stays read-only — it
+returns structured steps its driver applies in its own worktree. Declared `network` and `browser`
+are withheld until there is a mechanism to hold them to the tier.
 
 On Linux hosts with bubblewrap, the engine session and the pre-pass additionally run inside an
 OS sandbox (`lib/sandbox.py`, agents-9n7): the target read-only, everything else invisible,
