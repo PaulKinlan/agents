@@ -192,7 +192,7 @@ class TestLineDeltaReport(SandboxCase):
         # halt with an engine that exits non-zero (a genuine StationError), so the downstream
         # station is still SKIPPED and named.
         self.box.agent("crashy", report())
-        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\necho '{\"findings\": []}'\nexit 1\n")
+        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\ncat >/dev/null\necho '{\"findings\": []}'\nexit 1\n")
         self.box.agent("quiet", report())
         self.box.line(["crashy", "quiet"], halt=True)
         ok, _ = self.box.run_line()
@@ -258,7 +258,7 @@ class TestNoVerdictIsAnError(SandboxCase):
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_a_failed_engine_is_an_error_even_with_output(self):
         self.box.agent("crashy", report())
-        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\necho '{\"findings\": []}'\nexit 1\n")
+        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\ncat >/dev/null\necho '{\"findings\": []}'\nexit 1\n")
         with self.assertRaises(factory_cli.StationError):
             self.box.run_agent("crashy")
 

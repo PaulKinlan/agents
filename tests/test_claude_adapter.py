@@ -71,6 +71,7 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         stub = bindir / "claude"
         stub.write_text(
             "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"  # claude.sh pipes the prompt under pipefail
             'env > "$FAKE_ENV_DUMP"\n'
             "echo '{\"summary\":\"stub\",\"scanned_files\":0,\"findings\":[]}'\n"
         )
@@ -82,7 +83,7 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         credentials.parent.mkdir(parents=True, exist_ok=True)
         credentials.write_text('{"stub": true}', encoding="utf-8")
 
-    def run_adapter(self, extra_env, unset_home=False):
+    def run_adapter(self, extra_env, unset_home=False, prompt="prompt"):
         env = dict(os.environ)
         env.update({
             "HOME": str(self.home),
@@ -99,11 +100,18 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         env.update(extra_env)
         return subprocess.run(
             ["bash", str(ADAPTER), "probe", str(self.target), str(self.tmp), str(self.run_dir)],
-            input="prompt", capture_output=True, text=True, env=env, timeout=60,
+            input=prompt, capture_output=True, text=True, env=env, timeout=60,
         )
 
     def child_env(self) -> str:
         return self.env_dump.read_text(encoding="utf-8")
+
+    def test_canned_report_drains_a_large_prompt(self):
+        """Fail-on-revert: claude.sh's pipefail must not turn a stub report into exit 1."""
+        self.sign_in()
+        result = self.run_adapter({}, prompt="x" * 200000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"summary":"stub"', (self.run_dir / "model_output.txt").read_text())
 
     def test_expected_set_matches_the_adapter(self):
         self.assertEqual(adapter_override_vars(), EXPECTED_OVERRIDES)
