@@ -198,6 +198,23 @@ class TestCredentialBrokering(unittest.TestCase):
             child_environment(engine="pi", parent=parent_env(UNMAPPED_API_KEY="key"),
                               broker_urls={"unmapped": "http://127.0.0.1:1/proxy/unmapped"})
 
+    def test_deepseek_and_openrouter_are_brokered(self):
+        # agents-2x6: under --unshare-net a sandboxed engine cannot dial a provider directly,
+        # so every provider pi can use must be brokerable. deepseek and openrouter joined
+        # BROKER_PROVIDERS; like anthropic/openai/google their key becomes the placeholder and
+        # they get a base URL, so no real credential crosses into the sandboxed environ.
+        env = child_environment(engine="pi", parent=parent_env(
+            DEEPSEEK_API_KEY="ds-key", OPENROUTER_API_KEY="or-key"), broker_urls={
+            "deepseek": "http://127.0.0.1:1/proxy/deepseek",
+            "openrouter": "http://127.0.0.1:1/proxy/openrouter",
+        })
+        self.assertEqual(env["DEEPSEEK_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["DEEPSEEK_BASE_URL"], "http://127.0.0.1:1/proxy/deepseek")
+        self.assertEqual(env["OPENROUTER_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["OPENROUTER_BASE_URL"], "http://127.0.0.1:1/proxy/openrouter")
+        self.assertNotIn("ds-key", env.values())
+        self.assertNotIn("or-key", env.values())
+
     def test_the_placeholder_is_not_credential_shaped(self):
         # The whole point: the value in the sandboxed environ must not look like a key, so a
         # prompt-injected engine reading /proc/self/environ finds nothing worth exfiltrating.

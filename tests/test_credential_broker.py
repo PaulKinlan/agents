@@ -8,7 +8,10 @@ engine (the streamed body, with the real key never appearing on the engine side)
 import http.client
 import io
 import os
+import shutil
+import socket
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -67,6 +70,31 @@ class _FakeHTTPSConnection:
 
 def _client_request(port, method, path, headers=None, body=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    conn.request(method, path, body=body, headers=headers or {})
+    resp = conn.getresponse()
+    data = resp.read()
+    status, resp_headers = resp.status, dict(resp.getheaders())
+    conn.close()
+    return status, resp_headers, data
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """An HTTPConnection over a UNIX-domain socket, so a test can drive the broker the way
+    the in-sandbox net_forward relay does (agents-2x6): bytes arrive on the broker's UNIX
+    listener, not a TCP loopback."""
+
+    def __init__(self, socket_path, timeout=15):
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._socket_path)
+
+
+def _unix_client_request(socket_path, method, path, headers=None, body=None):
+    conn = _UnixHTTPConnection(socket_path)
     conn.request(method, path, body=body, headers=headers or {})
     resp = conn.getresponse()
     data = resp.read()
@@ -272,6 +300,80 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         self.assertNotIn(cb.PLACEHOLDER_KEY, call["headers"].values())
         # And the real key never comes back to the engine side.
         self.assertNotIn(REAL["anthropic"].encode(), body)
+
+
+class TestUnixSocketMode(BrokerTestBase):
+    """agents-2x6: a sandboxed engine under bwrap --unshare-net cannot reach a host TCP
+    loopback, so the broker also listens on a UNIX socket bind-mounted into the sandbox and
+    reached through the net_forward relay. These prove the UNIX listener serves identically
+    (routing + key injection), that base_url names the relay's child_port, that stop() unlinks
+    the socket, and that the deepseek/openrouter extension routes to the right upstream."""
+
+    def _start_unix(self, credentials, child_port=8384):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = os.path.join(d, "broker.sock")
+        broker = cb.CredentialBroker(credentials)
+        broker.start(unix_path=sock, child_port=child_port)
+        self.addCleanup(broker.stop)
+        return broker, sock
+
+    def test_base_url_names_the_child_relay_port(self):
+        broker, sock = self._start_unix({"anthropic": REAL["anthropic"]})
+        self.assertEqual(broker.base_url("anthropic"),
+                         "http://127.0.0.1:8384/proxy/anthropic")
+        self.assertTrue(os.path.exists(sock))
+
+    def test_unix_listener_serves_and_injects_the_real_key(self):
+        broker, sock = self._start_unix({"anthropic": REAL["anthropic"]})
+        status, _, body = _unix_client_request(
+            sock, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": cb.PLACEHOLDER_KEY, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'{"ok": true}')
+        call = _FakeHTTPSConnection.calls[0]
+        self.assertEqual(call["host"], "api.anthropic.com")
+        self.assertEqual(call["headers"]["x-api-key"], REAL["anthropic"])
+        self.assertNotIn(REAL["anthropic"].encode(), body)
+
+    def test_unix_mode_requires_child_port(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
+        with self.assertRaises(cb.BrokerError):
+            broker.start(unix_path=os.path.join(d, "b.sock"))  # no child_port
+
+    def test_stop_unlinks_the_unix_socket(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = os.path.join(d, "broker.sock")
+        broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
+        broker.start(unix_path=sock, child_port=8384)
+        self.assertTrue(os.path.exists(sock))
+        broker.stop()
+        self.assertFalse(os.path.exists(sock))
+
+    def test_deepseek_and_openrouter_route_to_their_upstreams(self):
+        broker = self.start_broker({"deepseek": "ds-real", "openrouter": "or-real"})
+        _client_request(broker.port, "POST", "/proxy/deepseek/chat/completions",
+                        headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}",
+                                 "content-type": "application/json", "content-length": "2"},
+                        body=b"{}")
+        call = _FakeHTTPSConnection.calls[0]
+        self.assertEqual(call["host"], "api.deepseek.com")
+        self.assertEqual(call["path"], "/chat/completions")
+        self.assertEqual(call["headers"]["Authorization"], "Bearer ds-real")
+        _FakeHTTPSConnection.calls = []
+        _client_request(broker.port, "POST", "/proxy/openrouter/chat/completions",
+                        headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}",
+                                 "content-type": "application/json", "content-length": "2"},
+                        body=b"{}")
+        call = _FakeHTTPSConnection.calls[0]
+        self.assertEqual(call["host"], "openrouter.ai")
+        self.assertEqual(call["path"], "/api/v1/chat/completions")
+        self.assertEqual(call["headers"]["Authorization"], "Bearer or-real")
 
 
 if __name__ == "__main__":

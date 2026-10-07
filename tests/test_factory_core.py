@@ -117,6 +117,10 @@ class TestDispatcherBudget(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            # agents-2x6: a sandboxed engine wraps behind lib/net_forward.py from
+            # FACTORY_ROOT, so the temp factory needs it or the adapter dies instantly.
+            shutil.copyfile(FACTORY_ROOT / "lib" / "net_forward.py",
+                            sandbox / "lib" / "net_forward.py")
             target = sandbox / "target"
             target.mkdir()
             bindir = sandbox / "bin"
@@ -170,7 +174,7 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py"):
+            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
             bindir = sandbox / "bin"
@@ -307,7 +311,7 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py"):
+            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
             bindir = sandbox / "bin"
@@ -373,7 +377,7 @@ class TestTargetVisibility(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py"):
+            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
             bindir = sandbox / "bin"
@@ -437,7 +441,7 @@ class TestPerStationEngine(unittest.TestCase):
                 adapter = sandbox / "lib" / "adapters" / f"{engine}.sh"
                 shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / f"{engine}.sh", adapter)
                 adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py"):
+            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
             bindir = sandbox / "bin"

@@ -104,7 +104,18 @@ WITHHELD_REASONS = {
     # run-time downgrade path (run_agent supplies the specific reason, e.g. a non-git target).
     "write": "the engine runs in the target's own checkout, so proposers return patches in "
              "their report instead of editing files",
-    "network": "no egress allowlist yet, so a network tool cannot be held to the tier's hosts",
+    # network is grantable via the egress-allowlist proxy (agents-2x6): a sandboxed run
+    # under --unshare-net has no route off its netns and its only egress is the per-run
+    # allowlist, so a declared network at t1-fetch is honoured. This reason names the
+    # mechanism and is used by the run-time fallback (downgrade_network_to_withheld):
+    # no OS sandbox on the host, an engine adapter not verified to run under it, or a
+    # model provider the credential broker cannot cover keeps the engine session on the
+    # shared host network, and then a network tool could not be held to the tier's hosts
+    # (the pre-pass may still be egress-isolated; this text is about the engine session).
+    "network": "the egress-allowlist proxy is not active for this engine's run (no OS "
+               "sandbox on this host, the engine adapter is not verified to run under it, "
+               "or a model provider the credential broker cannot cover), so a network "
+               "tool cannot be held to the tier's hosts",
     "browser": "a browser is an unscoped network client and cannot yet be held to localhost",
 }
 
@@ -119,6 +130,33 @@ SANDBOX_GAP = ("NOT enforced: the engine process and the pre-pass run as the ope
                "the operator's filesystem and network")
 SANDBOX_PARTIAL_NOTE = ("; the engine adapter is not verified under the sandbox, so the "
                         "engine session itself is NOT confined")
+
+# A declared `requires` tool -> the egress hosts its deterministic pre-pass fetches from
+# (agents-2x6). The per-run allowlist handed to the egress proxy is derived from the agent's
+# OWN manifest, never a global host list: a tool that is not declared adds nothing, and an
+# unknown tool adds nothing (its pre-pass then has no egress under --unshare-net — exactly
+# the allowlist discipline the t1-fetch tier promises). git is deliberately absent: audited,
+# every git-requiring pre-pass runs local history (git log/diff) against the bound checkout
+# and does no network fetch. The model API is not here either — it goes through the
+# credential broker, not the egress proxy.
+REQUIRE_EGRESS_HOSTS: Dict[str, Tuple[str, ...]] = {
+    "gh": ("api.github.com",),
+    "npm": ("registry.npmjs.org",),
+    "npx": ("registry.npmjs.org",),
+}
+
+
+def egress_allowlist(requires: Tuple[str, ...]) -> Tuple[str, ...]:
+    """The per-run egress allowlist implied by an agent's capabilities.requires
+    (agents-2x6): the union of the hosts each declared tool's pre-pass fetches from, in
+    declaration order, de-duplicated. Empty for an agent that declares no network tools —
+    under --unshare-net its sandbox then has no egress at all, which is the t0 promise."""
+    hosts: List[str] = []
+    for tool in requires:
+        for host in REQUIRE_EGRESS_HOSTS.get(tool, ()):
+            if host not in hosts:
+                hosts.append(host)
+    return tuple(hosts)
 
 # Adapters with a per-run cost flag. claude -p takes --max-budget-usd; pi (0.87.1) and
 # agentapi have no equivalent (agents-js7), so a declared cap there is reported, not enforced.
@@ -154,6 +192,20 @@ def downgrade_write_to_read_only(policy: "Policy", reason: str) -> "Policy":
         return policy
     return replace(policy, tool_policy=READ_ONLY,
                    withheld={**policy.withheld, "write": reason})
+
+
+def downgrade_network_to_withheld(policy: "Policy") -> "Policy":
+    """A copy of `policy` with a declared network re-withheld (agents-2x6). load_policy
+    grants a declared network optimistically — the egress-allowlist proxy can hold it to
+    the tier's hosts — but the grant is only honourable on a run that actually isolates the
+    network namespace. run_agent calls this when it cannot: a host with no OS sandbox, or a
+    model provider the credential broker cannot cover (so --unshare-net would break the
+    engine's own model calls). The banner and policy.json then report network withheld,
+    honestly, instead of claiming an allowlist this run is not enforcing."""
+    if not policy.declared.get("network") or "network" in policy.withheld:
+        return policy
+    return replace(policy,
+                   withheld={**policy.withheld, "network": WITHHELD_REASONS["network"]})
 
 
 def _positive_number(agent: str, field: str, value: Any) -> Optional[float]:
@@ -248,8 +300,11 @@ def load_policy(agent: str, agent_cfg: Mapping[str, Any]) -> Policy:
     # unknown/mis-typed class that declares write is NOT. The grant is further conditional, at
     # run time, on the target being a git repo AND the run being engine_sandboxed; run_agent
     # downgrades to read-only (re-withholding write) when either fails, so the banner and
-    # policy.json stay honest. Network and browser stay withheld: no egress allowlist /
-    # localhost-only browser exists yet.
+    # policy.json stay honest. Network is grantable via the egress-allowlist proxy
+    # (agents-2x6) and is likewise conditional at run time: run_agent re-withholds it
+    # (downgrade_network_to_withheld) when this run cannot isolate the netns — no OS sandbox,
+    # or a model provider the credential broker cannot cover. Browser stays withheld: no
+    # localhost-only browser mechanism exists yet.
     agent_class = agent_cfg.get("class")
     write_granted = declared["write"] and agent_class == "proposer"
     tool_policy = WORKTREE_WRITE if write_granted else READ_ONLY
@@ -259,6 +314,8 @@ def load_policy(agent: str, agent_cfg: Mapping[str, Any]) -> Policy:
             continue
         if flag == "write" and write_granted:
             continue  # granted via the disposable worktree, not withheld
+        if flag == "network":
+            continue  # granted via the egress-allowlist proxy; runtime downgrade if inactive
         withheld[flag] = (OPTIMIZER_WRITE_WITHHELD
                           if flag == "write" and agent_class == "optimizer"
                           else WITHHELD_REASONS[flag])

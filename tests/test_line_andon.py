@@ -31,7 +31,8 @@ factory_cli = importlib.util.module_from_spec(spec)
 loader.exec_module(factory_cli)
 
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
-               "credential_broker.py", "report_schema.py", "containment.py", "sandbox.py")
+               "credential_broker.py", "net_forward.py", "egress_proxy.py",
+               "report_schema.py", "containment.py", "sandbox.py")
 
 
 class _Marker:

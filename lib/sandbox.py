@@ -33,10 +33,14 @@ What the sandbox does (allowlist, not denylist — everything unbound is invisib
 
 What it does NOT do, stated plainly because policy.json must never overclaim:
 
-* **Egress is not filtered.** The engine must reach the model API and bwrap cannot
-  allowlist hosts; ``network-egress`` stays in policy.json's not_enforced until an egress
-  proxy exists. The model session has no network *tool* (read-only policy), so the open
-  egress is the engine binary's own, not the model's.
+* **Egress is filtered when the dispatcher turns it on (agents-2x6).** With
+  ``--unshare-net`` the child has no route off its namespace, so a direct ``connect()`` to
+  any external address fails ENETUNREACH and DNS does not resolve — the kernel enforces the
+  boundary, not a proxy-env convention an injected engine could ignore. Its only egress is
+  the in-sandbox ``lib/net_forward.py`` relay to the host-side credential broker (model API)
+  and the egress allowlist proxy (pre-pass fetches), both reached over bind-mounted UNIX
+  sockets. A run that cannot broker every provider the engine might use keeps the host
+  network instead, and policy.json then keeps reporting ``network-egress`` as not enforced.
 * **Linux + bubblewrap only.** Elsewhere sandbox_available() is False and every banner and
   record keeps saying NOT confined (THREAT_MODEL.md section 7 accepts unsandboxed runs for
   trusted targets; the honesty is the point).
@@ -134,10 +138,15 @@ def engine_sandboxed(engine: str) -> bool:
     return engine in SANDBOXED_ENGINES and sandbox_available()
 
 
-def sandbox_record(engine: str) -> Optional[Dict[str, Any]]:
+def sandbox_record(engine: str, egress_filtered: bool = False) -> Optional[Dict[str, Any]]:
     """The machine-readable sandbox state for policy.json / the banner, or None when this
     host has no sandbox. `engine_sandboxed` says whether the engine session itself is
-    inside it; the pre-pass is sandboxed whenever the host can sandbox at all."""
+    inside it; the pre-pass is sandboxed whenever the host can sandbox at all.
+
+    `egress_filtered` (agents-2x6) reports whether THIS run isolates the network namespace
+    and confines egress to the broker + allowlist proxy. It is per-run and drives whether
+    policy.json drops `network-egress` from not_enforced, so a fallback run that keeps the
+    host network passes False and the record never overclaims."""
     if not sandbox_available():
         return None
     return {
@@ -149,7 +158,7 @@ def sandbox_record(engine: str) -> Optional[Dict[str, Any]]:
                               "system dirs; the operator's home, credentials, other runs "
                               "and the rest of the host filesystem are invisible"
                               if engine in SANDBOXED_ENGINES else None),
-        "network_egress_filtered": False,
+        "network_egress_filtered": egress_filtered,
         "notes": ["host /proc invisible (private PID namespace); the engine's own "
                   "/proc/self/environ is readable by its own read tool, so engine API "
                   "keys reach it only via the lib/child_env.py allowlist and published "
@@ -350,6 +359,7 @@ def sandbox_command(
     run_dir: os.PathLike | str,
     env: Optional[Dict[str, str]] = None,
     executables: Sequence[str] = (),
+    egress_forwards: Optional[Sequence[Tuple[int, str]]] = None,
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
 
@@ -359,6 +369,16 @@ def sandbox_command(
     never bound (review P1, agents-9n7). The child runs in a private PID namespace with a
     real procfs mounted inside it: bun/pi needs a genuine /proc/self (verified by strace),
     and the private namespace keeps every host process — and its environ — invisible.
+
+    `egress_forwards` (agents-2x6) turns on network egress control. When it is not None the
+    child also gets a private network namespace (--unshare-net): it has no route off-box, so
+    a direct connect() to any external address fails ENETUNREACH and DNS does not resolve —
+    kernel-enforced, not a proxy-env convention. Its only egress is lib/net_forward.py, which
+    `inner` is wrapped behind: each (port, unix_socket_path) pair makes net_forward listen on
+    the child's 127.0.0.1:port and relay to that host-side UNIX socket (the credential broker
+    and/or the egress allowlist proxy), reached through the run_dir rw-bind. Pass None (the
+    default) to keep the host network shared — the honest fallback when a run cannot broker
+    every provider, where policy.json must keep reporting network-egress as not enforced.
     """
     bwrap = shutil.which(BWRAP)
     if not bwrap:
@@ -416,6 +436,20 @@ def sandbox_command(
 
     argv = [bwrap, *plan.argv]
     argv += ["--unshare-pid", "--proc", "/proc"]
-    argv += ["--die-with-parent", "--new-session", "--"]
-    argv += [str(item) for item in inner]
+    if egress_forwards is not None:
+        # Egress control (agents-2x6): isolate the network namespace and wrap `inner` behind
+        # the net_forward relay, so the child's only way off-box is the host-side broker /
+        # allowlist proxy on the bind-mounted UNIX sockets. net_forward binds its listeners
+        # before spawning `inner`, so the endpoints exist before the engine's first API call.
+        argv += ["--unshare-net"]
+        net_forward_py = Path(factory_root) / "lib" / "net_forward.py"
+        argv += ["--die-with-parent", "--new-session", "--"]
+        argv += [str(interpreter), str(net_forward_py)]
+        for port, sock in egress_forwards:
+            argv += ["--forward", f"{port}={sock}"]
+        argv += ["--"]
+        argv += [str(item) for item in inner]
+    else:
+        argv += ["--die-with-parent", "--new-session", "--"]
+        argv += [str(item) for item in inner]
     return argv

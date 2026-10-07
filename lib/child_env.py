@@ -61,6 +61,11 @@ ENGINE_CREDENTIALS = {
 # The findings dispatch is a child of the run, and the only one allowed to talk to GitHub.
 GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
+# Backwards-compatible alias: agents-2x6's factory/egress code and its tests reference
+# child_env.BROKER_PROVIDERS, while 62u made credential_broker.BROKER_ENV_CONFIGS the canonical
+# table. Both names MUST be the same mapping object, or a provider could be brokered off one
+# table while being unknown to the other.
+BROKER_PROVIDERS = BROKER_ENV_CONFIGS
 # Requirements that bring the pre-pass a network credential. lib/containment.py refuses any of
 # these unless the agent declares capabilities.network, so a credential never reaches a tier
 # whose ceiling forbids network (agents-05h). tests/test_containment.py holds this list and

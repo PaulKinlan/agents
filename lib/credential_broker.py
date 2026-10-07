@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import http.client
 import os
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Iterable, Mapping, Optional, Tuple
@@ -66,10 +67,16 @@ PROVIDERS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
                ("OPENAI_API_KEY",)),
     "google": ("https://generativelanguage.googleapis.com", "header:x-goog-api-key",
                ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
-    "deepseek": ("https://api.deepseek.com", "bearer",
-                 ("DEEPSEEK_API_KEY",)),
-    "openrouter": ("https://openrouter.ai/api/v1", "bearer",
-                   ("OPENROUTER_API_KEY",)),
+    # OpenAI-compatible providers pi can also use (agents-2x6). Both take a bearer key.
+    # deepseek serves /chat/completions and /v1/chat/completions off the bare origin, so
+    # https://api.deepseek.com is correct whether pi appends the openai-style
+    # /chat/completions or /v1/chat/completions. openrouter's OpenAI-compatible base ends
+    # in /api/v1 (the SDK appends /chat/completions). NOTE: pi's real path append for these
+    # two is a deferred live-run verification item, exactly like 8h4's deferred real-call
+    # acceptance — the brokering mechanism is proven by tests/test_credential_broker.py
+    # against a mock upstream, and a wrong base here is a one-line fix caught on first use.
+    "deepseek": ("https://api.deepseek.com", "bearer", ("DEEPSEEK_API_KEY",)),
+    "openrouter": ("https://openrouter.ai/api/v1", "bearer", ("OPENROUTER_API_KEY",)),
 }
 
 # Per provider: (placeholder var the engine reads, base-URL var, every var that could carry a real secret for it)
@@ -279,6 +286,14 @@ class _BrokerServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
+class _BrokerUnixServer(socketserver.ThreadingUnixStreamServer):
+    """The UNIX-socket twin of _BrokerServer, for a sandboxed engine under
+    bwrap --unshare-net (agents-2x6): the child has no route to a host TCP loopback, so
+    the broker listens on a UNIX socket bind-mounted into the sandbox and reached through
+    the in-sandbox net_forward relay. Same handler, same daemon-thread teardown."""
+    daemon_threads = True
+
+
 class CredentialBroker:
     """A localhost credential-broker proxy, started and stopped by the dispatcher.
 
@@ -299,36 +314,64 @@ class CredentialBroker:
         if unknown:
             raise BrokerError(f"unknown provider(s): {', '.join(unknown)}")
         self._credentials: Dict[str, str] = dict(credentials)
-        self._server: Optional[ThreadingHTTPServer] = None
+        self._server: Optional[socketserver.BaseServer] = None
         self._thread: Optional[threading.Thread] = None
         self.port: Optional[int] = None
+        self.unix_path: Optional[str] = None
+        # In UNIX mode the sandboxed child dials the net_forward relay's port, not the
+        # broker; the dispatcher passes that port so base_url() can name it (agents-2x6).
+        self._child_port: Optional[int] = None
 
     @property
     def providers(self) -> Tuple[str, ...]:
         return tuple(self._credentials)
 
-    def start(self) -> int:
-        """Bind 127.0.0.1 on a dynamic port and serve in a daemon thread."""
+    def start(self, unix_path: Optional[str] = None,
+              child_port: Optional[int] = None) -> int:
+        """Serve in a daemon thread. By default bind 127.0.0.1 on a dynamic TCP port and
+        return it. When `unix_path` is given (agents-2x6: a sandboxed engine under
+        bwrap --unshare-net cannot reach a host TCP loopback), bind a UNIX socket there
+        instead and return 0; the child reaches it through the net_forward relay listening
+        on `child_port`, which base_url() then names. `child_port` is required with
+        `unix_path` so the engine's *_BASE_URL can point at the relay."""
         if self._server is not None:
             raise BrokerError("broker already started")
         if not self._credentials:
             raise BrokerError("refusing to start a broker with no credentials")
         handler = type("_BoundBrokerHandler", (_Handler,),
                        {"credentials": dict(self._credentials)})
-        self._server = _BrokerServer(("127.0.0.1", 0), handler)
-        self.port = self._server.server_address[1]
+        if unix_path is not None:
+            if child_port is None:
+                raise BrokerError("unix_path requires child_port (the net_forward relay "
+                                  "port the engine's base URL names)")
+            # A stale socket file from a crashed run would make bind() fail EADDRINUSE.
+            try:
+                if os.path.exists(unix_path):
+                    os.unlink(unix_path)
+            except OSError:
+                pass
+            self._server = _BrokerUnixServer(unix_path, handler)
+            self.unix_path = unix_path
+            self._child_port = child_port
+            self.port = None
+        else:
+            self._server = _BrokerServer(("127.0.0.1", 0), handler)
+            self.port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever,
                                         name="credential-broker", daemon=True)
         self._thread.start()
-        return self.port
+        return self.port or 0
 
     def base_url(self, provider: str) -> str:
-        """The engine-side base URL for `provider` (points at this broker)."""
-        if self.port is None:
-            raise BrokerError("broker not started")
+        """The engine-side base URL for `provider` (points at this broker). In UNIX mode
+        the engine dials the net_forward relay's child_port (which forwards to the broker
+        socket); in TCP mode it dials the broker's own loopback port."""
         if provider not in self._credentials:
             raise BrokerError(f"broker has no credential for {provider!r}")
-        return f"http://127.0.0.1:{self.port}/proxy/{provider}"
+        port = self._child_port if self._child_port is not None else self.port
+        if port is None:
+            raise BrokerError("broker not started")
+        return f"http://127.0.0.1:{port}/proxy/{provider}"
 
     def stop(self) -> None:
         """Shut the listener down. Idempotent; safe to call from a finally."""
@@ -342,7 +385,17 @@ class CredentialBroker:
                 pass
         if thread is not None:
             thread.join(timeout=5)
+        # A UNIX listener leaves its socket file behind; remove it so a later run (or a
+        # crash recovery) does not hit EADDRINUSE and no stale inode lingers in run_dir.
+        unix_path, self.unix_path = self.unix_path, None
+        if unix_path is not None:
+            try:
+                if os.path.exists(unix_path):
+                    os.unlink(unix_path)
+            except OSError:
+                pass
         self.port = None
+        self._child_port = None
 
     def __enter__(self) -> "CredentialBroker":
         self.start()

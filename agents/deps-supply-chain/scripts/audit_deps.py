@@ -128,6 +128,27 @@ def audit_npm(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
             sys.stderr.write(f"Warning: npm audit failed: {e}\n")
 
     if not raw_audit or "vulnerabilities" not in raw_audit:
+        # agents-2x6 review P2: npm audit was attempted (npm exists, a manifest exists) but
+        # produced no usable result. Under the sandbox's egress allowlist this is exactly
+        # what a custom-registry target looks like (registry outside the allowlist -> 403
+        # -> npm audit exits non-zero with no JSON). Swallowing it let the station
+        # short-circuit to "Clean scan" with zero vulnerability coverage. Surface the gap
+        # as a candidate so the model must report the limitation instead of silence.
+        if npm_bin:
+            candidates.append({
+                "type": "coverage-gap",
+                "rule_id": "npm-audit-unavailable",
+                "severity": "low",
+                "title": "Dependency audit could not run; vulnerability coverage is incomplete",
+                "description": ("`npm audit` produced no usable result. Its configured registry "
+                                "may be unreachable from this run's egress allowlist (e.g. a "
+                                "custom registry in .npmrc), or the audit itself failed. No npm "
+                                "vulnerability data was collected for this target."),
+                "path": "package.json",
+                "remediation": ("Run `npm audit` where its configured registry is reachable, or "
+                                "extend the station's egress allowlist declaration with the "
+                                "registry host and re-run."),
+            })
         return candidates, manifests
 
     vulnerabilities = raw_audit.get("vulnerabilities", {})

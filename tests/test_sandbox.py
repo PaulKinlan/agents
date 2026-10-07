@@ -56,11 +56,11 @@ class TestSandboxCommandShape(unittest.TestCase):
         self.run_dir = self.factory / "runs" / "run1"
         self.run_dir.mkdir(parents=True)
 
-    def build(self, env=None, inner=("/bin/true",), executables=()):
+    def build(self, env=None, inner=("/bin/true",), executables=(), egress_forwards=None):
         return sandbox_command(
             list(inner), target_dir=self.target, factory_root=self.factory,
             run_dir=self.run_dir, env=env if env is not None else {"PATH": "/usr/bin:/bin"},
-            executables=executables,
+            executables=executables, egress_forwards=egress_forwards,
         )
 
     def test_target_is_bound_read_only_and_run_dir_writable(self):
@@ -103,6 +103,30 @@ class TestSandboxCommandShape(unittest.TestCase):
         argv = self.build()
         self.assertIn("--die-with-parent", argv)
         self.assertIn("--new-session", argv)
+
+    def test_no_egress_forwards_keeps_the_host_network(self):
+        # The default (agents-2x6 off, or an unbrokerable-provider fallback): the host
+        # network stays shared and the inner command runs directly, unwrapped.
+        argv = self.build()
+        self.assertNotIn("--unshare-net", argv)
+        self.assertEqual(argv[-1], "/bin/true")
+
+    def test_egress_forwards_isolates_net_and_wraps_in_net_forward(self):
+        # agents-2x6: egress control isolates the netns (a direct connect() off-box fails
+        # ENETUNREACH) and wraps inner behind net_forward, which relays the child's loopback
+        # ports to the host-side broker/proxy UNIX sockets — the only egress path.
+        argv = self.build(inner=("/bin/echo", "hi"),
+                          egress_forwards=[(8384, "/run/x/broker.sock"),
+                                           (8385, "/run/x/proxy.sock")])
+        self.assertIn("--unshare-net", argv)
+        self.assertTrue(any(a.endswith(os.path.join("lib", "net_forward.py")) for a in argv),
+                        "net_forward.py is not the wrapper")
+        self.assertIn("--forward", argv)
+        self.assertIn("8384=/run/x/broker.sock", argv)
+        self.assertIn("8385=/run/x/proxy.sock", argv)
+        # The original inner command survives verbatim after net_forward's own `--`.
+        last_sep = len(argv) - 1 - argv[::-1].index("--")
+        self.assertEqual(argv[last_sep + 1:], ["/bin/echo", "hi"])
 
     def test_nothing_outside_the_allowlist_is_bound(self):
         """Every ro/rw bind source is the factory root, the target, the run dir, a system
