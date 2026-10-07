@@ -213,6 +213,144 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self.assertEqual(len(ledger), 1)
         self.assertEqual(ledger[0]["outcome"], "PROPOSED")
 
+    def test_dirty_checkout_is_blocked_and_never_mutated(self):
+        # P1-1: the baseline is measured on the operator's checkout, but the disposable
+        # worktree starts at HEAD. A dirty checkout would disagree with the worktree and could
+        # mint a phantom KEPT win, so --apply must refuse it before any edit or worktree.
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        index = target / "index.html"
+        # Add a second render-blocking script WITHOUT committing it: the operator's checkout
+        # now measures 30 while the worktree would start at HEAD (15).
+        index.write_text(
+            '<html><head>'
+            '<script src="app.js"></script>'
+            '<script src="extra.js"></script>'
+            '</head><body></body></html>\n', encoding="utf-8")
+        dirty = index.read_text()
+
+        result = factory_cli.run_hillclimb(
+            str(target), goal_metric="perf_hazard_score", goal_value=0,
+            iterations=1, apply_edits=True, engine_arg="pi")
+
+        self.assertFalse(result)
+        self.assertEqual(index.read_text(), dirty)  # the operator's dirty checkout is untouched
+        ledger = self._ledger()
+        self.assertEqual(ledger[-1]["outcome"], "BLOCKED")
+        self.assertIn("uncommitted changes", ledger[-1]["reason"])
+        # Nothing was staged or committed by the factory, and no proposal/worktree was made.
+        self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
+
+    def test_later_iteration_failure_still_collects_kept_proposal(self):
+        # P1-2: iteration 1 keeps a win, iteration 2's run_agent raises. The verified edit must
+        # still be collected as a proposal before the worktree is discarded — otherwise the
+        # ledger keeps a KEPT row with no surviving proposal.
+        target = self._git_target({
+            "index.html": ('<html><head>'
+                           '<script src="a.js"></script>'
+                           '<script src="b.js"></script>'
+                           '</head><body></body></html>\n')
+        })
+        index = target / "index.html"
+        original = index.read_text()
+        step = {
+            "hypothesis": "defer a.js",
+            "target_file": "index.html",
+            "search_snippet": '<script src="a.js"></script>',
+            "replace_snippet": '<script src="a.js" defer></script>',
+        }
+        with mock.patch.object(factory_cli, "run_agent",
+                               side_effect=[
+                                   {"report": {"hillclimb_steps": [step]},
+                                    "run_dir": self.tmp / "run1"},
+                                   factory_cli.StationError("iteration 2 failed"),
+                               ]):
+            with self.assertRaises(factory_cli.StationError):
+                factory_cli.run_hillclimb(
+                    str(target), goal_metric="perf_hazard_score", goal_value=0,
+                    iterations=2, apply_edits=True, engine_arg="pi")
+
+        self.assertEqual(index.read_text(), original)
+        self.assertEqual([e["outcome"] for e in self._ledger()], ["KEPT"])
+        patches = list((self.tmp / "factory-root" / "runs").rglob("session.patch"))
+        self.assertEqual(len(patches), 1)
+        self.assertIn("defer", patches[0].read_text())
+
+    def test_worktree_creation_failure_after_add_is_cleaned_up(self):
+        # P2-1: _create_session_worktree can raise AFTER `git worktree add` succeeded, leaving
+        # a registered admin worktree. The caller must run the cleanup helper on that path too.
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        index = target / "index.html"
+        original = index.read_text()
+
+        def create_then_fail(target_dir, worktree_dir):
+            # The worktree is really registered (so the bug would leak it), then rev-parse
+            # fails and the helper raises.
+            subprocess.run(["git", "worktree", "add", "--detach", str(worktree_dir)],
+                           cwd=target_dir, check=True, capture_output=True, text=True)
+            raise factory_cli.StationError("rev-parse failed after worktree add")
+
+        with mock.patch.object(factory_cli, "_create_session_worktree",
+                               side_effect=create_then_fail):
+            result = factory_cli.run_hillclimb(
+                str(target), goal_metric="perf_hazard_score", goal_value=0,
+                iterations=1, apply_edits=True, engine_arg="pi")
+
+        self.assertFalse(result)
+        self.assertEqual(index.read_text(), original)
+        self.assertEqual(self._ledger()[-1]["outcome"], "BLOCKED")
+        # No leftover worktree registration under the operator's .git, and the run dir is gone.
+        worktrees = target / ".git" / "worktrees"
+        self.assertEqual(list(worktrees.glob("*")) if worktrees.exists() else [], [])
+        self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
+
+    def test_second_iteration_reads_accumulated_worktree(self):
+        # P2-2: a later proposal must be generated against the accumulated worktree (which
+        # carries the prior kept edit), never the operator's unchanged checkout.
+        target = self._git_target({
+            "index.html": ('<html><head>'
+                           '<script src="a.js"></script>'
+                           '<script src="b.js"></script>'
+                           '</head><body></body></html>\n')
+        })
+        index = target / "index.html"
+        original = index.read_text()
+        step_a = {
+            "hypothesis": "defer a.js",
+            "target_file": "index.html",
+            "search_snippet": '<script src="a.js"></script>',
+            "replace_snippet": '<script src="a.js" defer></script>',
+        }
+        step_b = {
+            "hypothesis": "defer b.js",
+            "target_file": "index.html",
+            "search_snippet": '<script src="b.js"></script>',
+            "replace_snippet": '<script src="b.js" defer></script>',
+        }
+        with mock.patch.object(factory_cli, "run_agent",
+                               side_effect=[
+                                   {"report": {"hillclimb_steps": [step_a]},
+                                    "run_dir": self.tmp / "run1"},
+                                   {"report": {"hillclimb_steps": [step_b]},
+                                    "run_dir": self.tmp / "run2"},
+                               ]) as run_agent_mock:
+            result = factory_cli.run_hillclimb(
+                str(target), goal_metric="perf_hazard_score", goal_value=0,
+                iterations=2, apply_edits=True, engine_arg="pi")
+
+        self.assertTrue(result)
+        self.assertEqual(index.read_text(), original)
+        self.assertEqual([e["outcome"] for e in self._ledger()], ["KEPT", "KEPT"])
+        # Both model calls read the SAME disposable worktree, not the operator's checkout.
+        self.assertEqual(run_agent_mock.call_count, 2)
+        read_dirs = [c.kwargs.get("read_target_dir") for c in run_agent_mock.call_args_list]
+        self.assertTrue(all(d is not None for d in read_dirs))
+        self.assertEqual(read_dirs[0], read_dirs[1])
+        self.assertNotEqual(read_dirs[0], target)
+        self.assertEqual(read_dirs[0].name, "worktree")
+        patch = list((self.tmp / "factory-root" / "runs").rglob("session.patch"))[0].read_text()
+        self.assertIn('src="a.js" defer', patch)
+        self.assertIn('src="b.js" defer', patch)
+
 
 if __name__ == "__main__":
     unittest.main()

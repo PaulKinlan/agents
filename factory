@@ -258,6 +258,18 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"[factory] worktree cleanup 'prune' raised: {e}\n")
 
+
+def _target_has_uncommitted_changes(target_dir: Path) -> bool:
+    """True when the target checkout is dirty: any tracked modification, staged change, or
+    untracked file `git status --porcelain` would report. run_hillclimb --apply refuses a
+    dirty target because its baseline is measured on the operator's checkout while the
+    disposable worktree starts at HEAD — a dirty tree would disagree with the worktree and
+    could mint a phantom KEPT win (P1-1, agents-nei). A status failure counts as dirty so the
+    run fails closed rather than assuming a clean tree."""
+    res = _run_git(["git", "status", "--porcelain"], target_dir)
+    return res.returncode != 0 or bool(res.stdout.strip())
+
+
 def _parse_scalar(val: str) -> Any:
     if val.lower() == "true":
         return True
@@ -482,7 +494,8 @@ def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
 
 
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
-              station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1):
+              station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
+              read_target_dir: Optional[Path] = None):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
     agent_yaml = agent_dir / "agent.yaml"
     skill_dir = agent_dir
@@ -500,6 +513,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # dispatch share it, and expiry is a station failure rather than a clean scan.
     budget = budget_for(agent_cfg, label=agent_name)
     target_name, target_dir, target_cfg = resolve_target(target_arg)
+    # read_dir is the tree the engine and pre-pass actually read. run_hillclimb passes its
+    # accumulated disposable worktree here (P2-2, agents-nei) so a later proposal inspects the
+    # kept edits instead of re-proposing against the operator's unchanged checkout. The engine
+    # policy is unchanged — an optimizer stays read-only — only the READ scope moves. Identity
+    # (target_name), sink, visibility and the findings --target-dir stay anchored to the real
+    # target.
+    read_dir = Path(read_target_dir).resolve() if read_target_dir is not None else target_dir
     sink = detect_sink(target_dir, target_cfg, explicit_sink)
     engine = choose_engine(engine_arg)
     check_engine(policy, engine)
@@ -588,7 +608,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # policy.json stay honest and non-git targets keep today's patch-in-report behaviour.
     worktree_dir: Optional[Path] = None
     worktree_gitdir: Optional[Path] = None
-    engine_cwd = target_dir
+    engine_cwd = read_dir
     if policy.tool_policy == WORKTREE_WRITE:
         if not (target_dir / ".git").exists():
             policy = downgrade_write_to_read_only(policy, (
@@ -621,7 +641,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     prepass_env = prepass_environment(agent_cfg)
     prepass_cmd = None
     if prepass_script and prepass_script.exists():
-        prepass_cmd = [sys.executable, str(prepass_script), "--target", str(target_dir),
+        prepass_cmd = [sys.executable, str(prepass_script), "--target", str(read_dir),
+                       "--target-name", str(target_name),
                        "--output", str(candidates_file)]
         # Egress control applies to the pre-pass whenever the host can sandbox (agents-2x6):
         # its netns is isolated and its only egress is the allowlist proxy, reached through
@@ -636,7 +657,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             prepass_env["NO_PROXY"] = "localhost,127.0.0.1"
             try:
                 prepass_cmd = sandbox_command(
-                    prepass_cmd, target_dir=target_dir, factory_root=FACTORY_ROOT,
+                    prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                     run_dir=run_dir, env=prepass_env,
                     executables=tuple(PREPASS_EXECUTABLES) + tuple(policy.requires),
                     egress_forwards=[(EGRESS_PROXY_PORT, str(run_dir / "egress-proxy.sock"))])
@@ -666,7 +687,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         adapter_env["FACTORY_SANDBOXED"] = "1"
         try:
             adapter_cmd = sandbox_command(
-                adapter_cmd, target_dir=target_dir, factory_root=FACTORY_ROOT,
+                adapter_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                 run_dir=run_dir, env=adapter_env,
                 executables=(engine,) + ENGINE_EXECUTABLES,
                 egress_forwards=([(EGRESS_BROKER_PORT, str(run_dir / "egress-broker.sock"))]
@@ -1253,6 +1274,12 @@ def run_hillclimb(
             return _record_blocked(
                 "the target is not a git repository, so no disposable worktree can isolate "
                 "the candidate edit from the operator's checkout")
+        if _target_has_uncommitted_changes(target_dir):
+            return _record_blocked(
+                "the target checkout has uncommitted changes (dirty worktree); --apply "
+                "measures the baseline on that checkout but the disposable worktree starts "
+                "at HEAD, so a dirty tree would disagree with the worktree and could mint a "
+                "phantom KEPT win — commit or stash the changes first")
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         proposal_run_dir = FACTORY_ROOT / "runs" / f"hillclimb-{target_name}-{run_id}"
         try:
@@ -1265,6 +1292,13 @@ def run_hillclimb(
         try:
             worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
         except StationError as e:
+            # P2-1 (agents-nei): _create_session_worktree can raise AFTER `git worktree add`
+            # succeeded (e.g. rev-parse fails), leaving a registered admin worktree under the
+            # target's .git. Run the cleanup helper (idempotent, best-effort) before deleting
+            # the run dir so no leftover registration survives. Guard on the worktree dir so a
+            # pure add-failure (nothing was created) skips the noisy remove attempt.
+            if worktree_dir.exists():
+                _remove_session_worktree(target_dir, worktree_dir)
             shutil.rmtree(proposal_run_dir, ignore_errors=True)
             return _record_blocked(f"cannot create the disposable apply worktree: {e}")
 
@@ -1275,7 +1309,13 @@ def run_hillclimb(
                 break
 
             print(f"\n--- [Iteration {step_idx}/{iterations}] Running perf-hillclimb station ---")
-            res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink)
+            # P2-2: every iteration must read the accumulated worktree (which carries each
+            # prior kept edit), not the operator's unchanged checkout — otherwise a later
+            # proposal re-proposes an already-kept edit and is rejected as an unmatched
+            # snippet. The engine policy stays read-only (run_agent resolves the optimizer's
+            # read-only grant); only the READ scope moves.
+            res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink,
+                            read_target_dir=worktree_dir)
             report = res.get("report", {}) if res else {}
             steps = report.get("hillclimb_steps", [])
 
@@ -1394,9 +1434,28 @@ def run_hillclimb(
                     "reason": f"Metric did not improve (delta {delta})"
                 })
 
-        # The kept edits accumulated in the worktree; collect them once as the proposal (the
-        # durable artifact that actually persists the wins). The target checkout was never
-        # touched, so the patch is the only thing an operator needs to review and merge.
+    except BaseException:
+        # P1-2: an interruption after a verified KEPT must still collect the proposal before
+        # the worktree is discarded — otherwise the ledger keeps a KEPT row whose proposal was
+        # discarded. Best-effort here so a collection failure never masks the original failure
+        # (which is re-raised below).
+        if apply_edits and worktree_dir is not None and worktree_gitdir is not None \
+                and proposal_run_dir is not None:
+            try:
+                patch_file = _collect_session_diff(worktree_dir, proposal_run_dir,
+                                                   worktree_gitdir)
+                if patch_file is not None:
+                    print(f"\n🧾 Preserved the hill-climb's kept edits as {patch_file} "
+                          f"before the interrupted run was discarded; the target checkout "
+                          f"was NOT modified.")
+            except Exception as e:  # noqa: BLE001 - never mask the original failure
+                sys.stderr.write(f"[factory] could not collect the hill-climb proposal "
+                                 f"during interruption: {e}\n")
+        raise
+    else:
+        # Normal completion: the kept edits accumulated in the worktree; collect them once as
+        # the durable proposal. A collection failure HERE is the run's real failure — a KEPT
+        # row without a surviving proposal must not be reported as success — so it propagates.
         if apply_edits and worktree_dir is not None and worktree_gitdir is not None \
                 and proposal_run_dir is not None:
             patch_file = _collect_session_diff(worktree_dir, proposal_run_dir, worktree_gitdir)
