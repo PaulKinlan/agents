@@ -44,8 +44,11 @@ def _pairs(argv, flag):
     return out
 
 
+@unittest.skipUnless(LIVE, "sandbox_command() exercises every wrap, so these need a real bwrap")
 class TestSandboxCommandShape(unittest.TestCase):
-    """What the bwrap argv must contain, checked without running bwrap."""
+    """What the bwrap argv must contain. sandbox_command() now exercises every wrap it builds
+    (agents-kwi), so each of these runs a real exercise rather than only building argv — and
+    needs a functional bubblewrap, hence the LIVE gate."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-9n7-shape-")
@@ -201,6 +204,11 @@ class TestWrapVerification(unittest.TestCase):
     sandbox_command() therefore exercises the plan it just built, with a sentinel child, and
     raises instead of returning a wrap that never started a child — so a station fails before
     any banner or policy.json can call the run sandboxed.
+
+    Documented residual (review P2, agents-kwi, no code): the exercise checks that the inner
+    program resolves and is executable inside the wrap, but not that a *script* inner's shebang
+    interpreter is bound there. Not reachable today — the inner is the adapter, invoked through
+    an interpreter the plan already binds.
     """
 
     def setUp(self):
@@ -231,21 +239,25 @@ class TestWrapVerification(unittest.TestCase):
         sandbox_module._probe_result = None
         return path
 
-    def build(self, path):
-        return sandbox_command(["/bin/true"], target_dir=self.target,
+    def build(self, path, inner=("/bin/true",)):
+        return sandbox_command(list(inner), target_dir=self.target,
                                factory_root=self.factory, run_dir=self.run_dir,
                                env={"PATH": path, "HOME": str(self.root / "home")})
 
     def test_a_bwrap_that_fails_at_exec_after_a_green_probe_is_refused(self):
         """The agents-kwi reproduction: a bwrap that answers the availability probe (it is
-        handed a bare plan ending in /bin/true) but exits non-zero for every real wrap."""
+        handed a bare plan ending in /bin/true) but exits non-zero for every real wrap. The
+        inner is deliberately NOT /bin/true, so the fake cannot answer the exercised wrap with
+        the probe's own exit-0 clause — this pins bwrap's non-zero exit, not the
+        rc-0-without-a-token path (`..._exits_zero_without_running_the_child...` below)."""
         path = self.use_fake_bwrap(
             '#!/bin/sh\n'
             'for a in "$@"; do [ "$a" = "/bin/true" ] && exit 0; done\n'
             'exit 1\n')
         self.assertTrue(sandbox_available(), "the probe alone reports the host as sandboxable")
-        with self.assertRaises(SandboxError):
-            self.build(path)
+        with self.assertRaises(SandboxError) as raised:
+            self.build(path, inner=("/bin/echo", "x"))
+        self.assertIn("exited 1", str(raised.exception))
         self.assertEqual(list(self.run_dir.iterdir()), [],
                          "no verification artifact may be left behind")
 
