@@ -891,7 +891,14 @@ _BEAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _bd_json(bd_bin: str, beads_dir: Path, args: List[str]) -> Any:
-    """Run one bounded Beads operation in the explicitly configured project DB."""
+    """Run one bounded Beads operation in the explicitly configured project DB.
+
+    Verified against real bd 1.3.1 (c1c4b642a, 2026-10-07) in a throwaway DB by
+    tests/test_bd_json_contract.py: create --json returns {id,...}, list --all --json
+    returns [{id,external_ref,description,status,...}], and update --json returns
+    [{id,...}] (an ARRAY, not an object). Promotion intentionally ignores the
+    update value. The recorder matches these shapes; do not trust stubs alone.
+    """
     res = subprocess.run([bd_bin, *args, "-C", str(beads_dir)], cwd=str(beads_dir),
                          capture_output=True, text=True, check=False, timeout=60)
     if res.returncode != 0:
