@@ -102,7 +102,7 @@ if tool == 'bd':
             sys.exit(9)
         bead['description'] = args[args.index('--description') + 1]
         remote_path.write_text(json.dumps(state))
-        print(json.dumps(bead))
+        print(json.dumps([bead]))  # real bd 1.3.1 update --json returns an array
     else:
         sys.exit(19)
     sys.exit(0)
