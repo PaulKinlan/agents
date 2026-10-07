@@ -32,7 +32,8 @@ sys.path.insert(0, str(ROOT))
 
 from lib.containment import (  # noqa: E402
     ENGINE_TOOL_POLICIES, GRANTABLE_POLICIES, READ_ONLY, WORKTREE_WRITE, ContainmentError, banner_lines,
-    budget_note, check_engine, load_policy, policy_record,
+    budget_note, check_engine, downgrade_network_to_withheld, egress_allowlist, load_policy,
+    policy_record,
 )
 from lib.sandbox import sandbox_available  # noqa: E402
 from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
@@ -93,10 +94,12 @@ class TestShippedManifests(unittest.TestCase):
 
     def test_declared_capabilities_are_reported_as_withheld(self):
         # write is granted via the disposable worktree (agents-6ce), so pr-fixer and
-        # docs-write no longer report it as withheld; network and browser still are.
+        # docs-write no longer report it as withheld; network is granted via the
+        # egress-allowlist proxy (agents-2x6 — run_agent re-withholds it per run when the
+        # proxy cannot be active); browser still is.
         expected = {
             "pr-fixer": set(), "docs-write": set(),
-            "deps-supply-chain": {"network"}, "issue-triage": {"network"},
+            "deps-supply-chain": set(), "issue-triage": set(),
             "memory-profile": {"browser"}, "ui-ux-audit": {"browser"},
             "secret-scan": set(),
         }
@@ -172,9 +175,11 @@ class TestDeclarationsFailClosed(unittest.TestCase):
         # tier -> (declared caps, expected tool_policy, expected withheld flags)
         cases = {
             "t0-readonly": ({}, READ_ONLY, set()),
-            "t1-fetch": ({"network": True}, READ_ONLY, {"network"}),
+            "t1-fetch": ({"network": True}, READ_ONLY, set()),
             # write is granted via the disposable worktree (agents-6ce), so it is not
-            # withheld; browser still is (no localhost-only browser mechanism yet).
+            # withheld; browser still is (no localhost-only browser mechanism yet). network
+            # is granted via the egress-allowlist proxy (agents-2x6) and re-withheld at run
+            # time only when this run cannot isolate the netns.
             "t2-local": ({"write": True, "browser": True}, WORKTREE_WRITE, {"browser"}),
         }
         for tier, (caps, tool_policy, withheld) in cases.items():
@@ -185,6 +190,33 @@ class TestDeclarationsFailClosed(unittest.TestCase):
                                                        **{"class": "proposer"}))
                 self.assertEqual(policy.tool_policy, tool_policy)
                 self.assertEqual(set(policy.withheld), withheld)
+
+    def test_the_egress_allowlist_derives_from_the_agents_own_requires(self):
+        """agents-2x6: the per-run allowlist is configuration data — the union of the hosts
+        each DECLARED requires tool fetches from — never a hardcoded global list. A tool that
+        is absent or unknown (git: audited to be local-only) contributes nothing."""
+        self.assertEqual(egress_allowlist(("gh",)), ("api.github.com",))
+        self.assertEqual(egress_allowlist(("gh", "npm", "npx")),
+                         ("api.github.com", "registry.npmjs.org"))
+        self.assertEqual(egress_allowlist(("git",)), ())
+        self.assertEqual(egress_allowlist(()), ())
+        self.assertEqual(egress_allowlist(("curl", "make")), ())
+
+    def test_a_declared_network_is_rewithheld_only_when_declared(self):
+        """agents-2x6: load_policy grants a declared network optimistically (the
+        egress-allowlist proxy can hold it to the tier's hosts); the run-time downgrade
+        re-withholds it with the reason that names the mechanism. Idempotent, and a policy
+        that never declared network is returned untouched."""
+        net = load_policy("probe", manifest(containment="t1-fetch",
+                                             capabilities={"network": True}))
+        self.assertNotIn("network", net.withheld)
+        downgraded = downgrade_network_to_withheld(net)
+        self.assertIn("network", downgraded.withheld)
+        self.assertIn("egress-allowlist proxy", downgraded.withheld["network"])
+        # Idempotent, and an undeclared network is untouched.
+        self.assertIs(downgrade_network_to_withheld(downgraded), downgraded)
+        plain = load_policy("probe", manifest())
+        self.assertIs(downgrade_network_to_withheld(plain), plain)
 
     def test_a_proposer_gets_the_worktree_but_an_optimizer_session_stays_read_only(self):
         """agents-6ce: the session worktree is for a proposer whose output IS a patch. An

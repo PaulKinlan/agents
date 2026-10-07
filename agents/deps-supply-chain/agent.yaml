@@ -10,7 +10,9 @@ capabilities:
   write: false
   network: true
   browser: false
-  requires: []
+  # agents-2x6: the pre-pass runs `npm audit`, so its egress (registry.npmjs.org) is
+  # derived from this declaration — the egress-allowlist proxy allows exactly these hosts.
+  requires: [npm]
 budget:
   max_minutes: 5
 output:
