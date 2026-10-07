@@ -107,6 +107,14 @@ WITHHELD_REASONS = {
     "network": "no egress allowlist yet, so a network tool cannot be held to the tier's hosts",
     "browser": "a browser is an unscoped network client and cannot yet be held to localhost",
 }
+
+# An optimizer's model session stays read-only even when it declares write (agents-6ce): its
+# output is a set of structured steps that its driver applies in its own isolated worktree
+# (run_hillclimb's measure-change-remeasure loop), not a file patch, so a session worktree
+# would be discarded and could displace the structured-steps contract.
+OPTIMIZER_WRITE_WITHHELD = (
+    "an optimizer returns structured steps that its driver applies in its own isolated "
+    "worktree (measure-change-remeasure), so its model session stays read-only")
 SANDBOX_GAP = ("NOT enforced: the engine process and the pre-pass run as the operator, with "
                "the operator's filesystem and network")
 SANDBOX_PARTIAL_NOTE = ("; the engine adapter is not verified under the sandbox, so the "
@@ -230,19 +238,28 @@ def load_policy(agent: str, agent_cfg: Mapping[str, Any]) -> Policy:
     max_minutes = _positive_number(agent, "max_minutes", budget.get("max_minutes"))
     max_usd = _positive_number(agent, "max_usd", budget.get("max_usd"))
 
-    # The grant. Write is now grantable via a disposable per-session git worktree
-    # (agents-6ce): an agent that declares write within a tier that allows it (t2-local) runs
-    # its engine in a throwaway worktree, so edits never touch the target checkout — the
-    # collected session diff is the proposal. The grant is conditional on the target being a
-    # git repo; run_agent resolves that and downgrades to read-only (re-withholding write)
-    # when it is not, so the banner and policy.json stay honest. Network and browser stay
-    # withheld: no egress allowlist / localhost-only browser exists yet.
-    write_granted = declared["write"]  # a declared write already passed the ceiling check
+    # The grant. Write is grantable via a disposable per-session git worktree (agents-6ce),
+    # but only for an agent whose output IS a file patch — a proposer (pr-fixer, docs-write,
+    # perf-review). Such an agent runs its engine in a throwaway worktree, so edits never
+    # touch the target checkout and the collected session diff is the proposal. An optimizer
+    # (perf-hillclimb) is excepted: it returns structured steps its driver applies in its own
+    # worktree, so its session stays read-only (and a read-only engine is not refused at
+    # check_engine). The grant is also conditional on the target being a git repo; run_agent
+    # resolves that and downgrades to read-only (re-withholding write) when it is not, so the
+    # banner and policy.json stay honest. Network and browser stay withheld: no egress
+    # allowlist / localhost-only browser exists yet.
+    agent_class = agent_cfg.get("class")
+    write_granted = declared["write"] and agent_class != "optimizer"
     tool_policy = WORKTREE_WRITE if write_granted else READ_ONLY
     withheld: Dict[str, str] = {}
     for flag in CAPABILITY_FLAGS:
-        if declared[flag] and not (flag == "write" and write_granted):
-            withheld[flag] = WITHHELD_REASONS[flag]
+        if not declared[flag]:
+            continue
+        if flag == "write" and write_granted:
+            continue  # granted via the disposable worktree, not withheld
+        withheld[flag] = (OPTIMIZER_WRITE_WITHHELD
+                          if flag == "write" and agent_class == "optimizer"
+                          else WITHHELD_REASONS[flag])
     return Policy(agent=agent, tier=tier, tier_declared=tier_declared, declared=declared,
                   requires=tuple(requires), tool_policy=tool_policy, withheld=withheld,
                   max_minutes=max_minutes, max_usd=max_usd)

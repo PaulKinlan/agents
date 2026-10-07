@@ -69,10 +69,13 @@ class TestShippedManifests(unittest.TestCase):
                 policy = load_policy(agent_dir.name, cfg)
                 self.assertIn(policy.tool_policy, GRANTABLE_POLICIES)
                 self.assertTrue(policy.tier_declared)
-                # A declared write within a tier that allows it is granted as worktree-write
-                # (agents-6ce); everything else stays read-only.
-                self.assertEqual(policy.tool_policy,
-                                 WORKTREE_WRITE if policy.declared["write"] else READ_ONLY)
+                # A declared write is granted as worktree-write for a proposer (its output is
+                # a patch); an optimizer (perf-hillclimb) stays read-only because its driver
+                # applies structured steps in its own worktree (agents-6ce).
+                expected = (WORKTREE_WRITE
+                            if policy.declared["write"] and cfg.get("class") != "optimizer"
+                            else READ_ONLY)
+                self.assertEqual(policy.tool_policy, expected)
                 # pi and claude enforce every grantable policy; deepseek is read-only, so it
                 # refuses a write agent; antigravity has no tool controls and refuses all.
                 check_engine(policy, "pi")
@@ -176,6 +179,27 @@ class TestDeclarationsFailClosed(unittest.TestCase):
                 policy = load_policy("probe", manifest(containment=tier, capabilities=caps))
                 self.assertEqual(policy.tool_policy, tool_policy)
                 self.assertEqual(set(policy.withheld), withheld)
+
+    def test_a_proposer_gets_the_worktree_but_an_optimizer_session_stays_read_only(self):
+        """agents-6ce: the session worktree is for a proposer whose output IS a patch. An
+        optimizer (perf-hillclimb) returns structured steps its driver applies in its own
+        measure-change-remeasure worktree, so its model session stays read-only — which also
+        keeps a read-only engine (deepseek) usable for it, while a proposer's worktree-write
+        needs an engine that enforces edit/write (pi, claude)."""
+        proposer = load_policy("pr-fixer", manifest(containment="t2-local",
+                                                    capabilities={"write": True},
+                                                    **{"class": "proposer"}))
+        self.assertEqual(proposer.tool_policy, WORKTREE_WRITE)
+        self.assertNotIn("write", proposer.withheld)
+        optimizer = load_policy("perf-hillclimb", manifest(containment="t2-local",
+                                                           capabilities={"write": True},
+                                                           **{"class": "optimizer"}))
+        self.assertEqual(optimizer.tool_policy, READ_ONLY)
+        self.assertIn("write", optimizer.withheld)
+        self.assertIn("optimizer", optimizer.withheld["write"])
+        check_engine(optimizer, "deepseek")  # read-only is enforceable everywhere
+        with self.assertRaises(ContainmentError):
+            check_engine(proposer, "deepseek")  # worktree-write is not
 
     def test_budget_values_parse_like_lib_budget(self):
         policy = load_policy("probe", manifest(budget={"max_minutes": "15", "max_usd": 0.5}))
