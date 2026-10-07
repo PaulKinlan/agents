@@ -354,78 +354,33 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
             self.assertIn("unknown", report_text)
 
 
-@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestTargetVisibility(unittest.TestCase):
-    """The dispatcher passes the target's declared visibility to the findings store (agents-5rx).
+    """A declared public issue target wins over general AGENTS.md beads instructions."""
 
-    Visibility is the primary input to the disclosure embargo: only a target that declares
-    `private` may publish the embargoed bands to its own tracker.
-    """
-
-    def _run(self, visibility: str) -> str:
+    def test_explicit_public_issue_config_precedes_generic_beads_guidance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            sandbox = Path(tmpdir)
-            (sandbox / "agents" / "probe").mkdir(parents=True)
-            (sandbox / "agents" / "probe" / "agent.yaml").write_text(
-                "name: probe\n"
-                "class: observer\n"
-                "containment: t0-readonly\n"
-                "short_circuit_empty: false\n"
-                "budget: {max_minutes: 1}\n",
-                encoding="utf-8",
-            )
-            target = sandbox / "target"
-            (target / ".beads").mkdir(parents=True)
-            (sandbox / "targets").mkdir()
-            (sandbox / "targets" / "sandbox.yaml").write_text(
-                f"name: sandbox\npath: {target}\nsink: beads\nvisibility: {visibility}\n",
-                encoding="utf-8",
-            )
+            root = Path(tmpdir)
+            target = root / "target"
+            target.mkdir()
+            (target / "AGENTS.md").write_text("use `bd` for all task tracking\n")
+            (root / "targets").mkdir()
+            (root / "targets" / "sandbox.yaml").write_text(
+                f"name: sandbox\npath: {target}\nsink: github-issues\n"
+                "repo: PaulKinlan/example\nvisibility: public\n")
+            with mock.patch.object(factory_cli, "FACTORY_ROOT", root):
+                _, path, cfg = factory_cli.resolve_target("sandbox")
+                self.assertEqual(path, target)
+                self.assertEqual(cfg["visibility"], "public")
+                self.assertEqual(cfg["repo"], "PaulKinlan/example")
+                self.assertEqual(factory_cli.detect_sink(path, cfg, None), "github-issues")
 
-            report_src = sandbox / "report-src.json"
-            report_src.write_text(json.dumps({
-                "summary": "stub", "scanned_files": 1,
-                "findings": [{
-                    "rule_id": "critical-rule", "path": "src/a.js", "line_number": 1,
-                    "snippet": "x", "severity": "critical", "title": "Critical finding",
-                    "description": "d", "remediation": "r",
-                }],
-            }), encoding="utf-8")
-
-            (sandbox / "lib" / "adapters").mkdir(parents=True)
-            adapter = sandbox / "lib" / "adapters" / "pi.sh"
-            shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
-            adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
-                shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
-
-            bindir = sandbox / "bin"
-            bindir.mkdir()
-            stub = bindir / "pi"
-            stub.write_text("#!/usr/bin/env bash\n" + f"cat '{report_src}'\n", encoding="utf-8")
-            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-            calls = sandbox / "calls.jsonl"
-            bd_stub = bindir / "bd"
-            bd_stub.write_text(
-                "#!/usr/bin/env bash\n"
-                "if [ \"$1\" = list ]; then echo '[]'; exit 0; fi\n"
-                f"printf '%s\\n' \"$*\" >> '{calls}'\n"
-                "echo 'fixture-123'\n",
-                encoding="utf-8",
-            )
-            bd_stub.chmod(bd_stub.stat().st_mode | stat.S_IEXEC)
-
-            with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
-                 mock.patch.dict(os.environ,
-                                 {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}):
-                factory_cli.run_agent("probe", "sandbox", engine_arg="pi")
-            return calls.read_text(encoding="utf-8") if calls.exists() else ""
-
-    def test_a_private_target_publishes_the_critical_band_to_beads(self):
-        self.assertIn("Critical finding", self._run("private"))
-
-    def test_a_public_target_keeps_the_critical_band_out_of_beads(self):
-        self.assertEqual(self._run("public"), "")
+    def test_raw_target_has_no_publication_attestation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, path, cfg = factory_cli.resolve_target(tmpdir)
+            self.assertEqual(path, Path(tmpdir))
+            self.assertNotIn("visibility", cfg)
+            self.assertNotIn("repo", cfg)
+            self.assertEqual(factory_cli.detect_sink(path, cfg, None), "file")
 
 
 @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)

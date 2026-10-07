@@ -1,7 +1,7 @@
 name: voicebox
 path: ~/Code/voicebox
 repo: PaulKinlan/voicebox
-sink: beads
+sink: github-issues
 visibility: public
 agents:
   - secret-scan

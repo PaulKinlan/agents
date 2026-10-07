@@ -312,8 +312,8 @@ schedule:
 | Sink | Description | When to Choose |
 |---|---|---|
 | **`file`** | Writes markdown delta reports to `findings/<target>-latest.md` and appends history to `findings/<target>-history.jsonl`. | **Default choice.** Safe for all public and private targets; zero external API or tracker dependencies. |
-| **`beads`** | Integrates with [Beads (`bd`)](https://github.com/beads-project/beads). Automatically creates and links beads in `.beads/`. | Use for repositories already tracking tasks in Beads. Embargoes high/critical findings on public repositories. |
-| **`github-issues`** | Dispatches findings as GitHub issues via `gh issue create`. | Use for private repositories or public repos for non-sensitive findings (lint, docs, modern-web). High/critical findings are blocked if `visibility: public`. |
+| **`github-issues`** | First step: verified public `github.com/OWNER/REPO` issue, deduped against open and closed issues by fingerprint. Store issue URL and append lifecycle comments. | Explicit `repo:` and `visibility: public` required in the target manifest. All real severities (including high/critical) publish under Paul's public-disclosure approval; issue prose is redacted. Failed listing fails closed. |
+| **`beads`** | Not an automatic publication sink. `--sink beads` / combined sinks refuse to create work before public triage. | Human-approved, explicit issue-to-bead promotion follows as a separate operation; until available, triage in GitHub and do not auto-file beads. |
 
 ### 3.3 Scheduling Daily Briefings (macOS `launchd`)
 

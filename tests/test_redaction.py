@@ -4,7 +4,7 @@
 A finding's `snippet` is whatever the scanner matched — for `secret-scan` that is the
 credential itself. These tests drive the real CLI and assert the value never reaches a
 published surface: the delta report (which the composite action appends to a public step
-summary), a tracker sink (beads / GitHub Issues), or scanner stdout.
+summary), the public GitHub issue API payload, or scanner stdout.
 
 The fixture credential is assembled at runtime on purpose: a literal in this file would be
 reported as a candidate by the factory's own secret-scan pre-pass on every run, which is
@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib.redaction import CREDENTIAL_AGENTS, mask_text, redact_finding  # noqa: E402
+from tests.test_sinks import REPO, SinkFixture  # noqa: E402
 
 CREDENTIAL = "AKIA" + "IOSFODNN7EXAMPLE"  # AWS documentation example key, not a live secret
 
@@ -95,7 +96,7 @@ class TestRedactionUnit(unittest.TestCase):
         self.assertEqual(finding, before)
 
 
-class TestCredentialEchoRegression(unittest.TestCase):
+class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
     """Regression cases for the factory-astra review of PR #4, which defeated the first version.
 
     The value being withheld is derived from the finding (scanner output and the agent that
@@ -112,48 +113,15 @@ class TestCredentialEchoRegression(unittest.TestCase):
     PEM_HEADER = "-----BEGIN " + "PRIVATE KEY-----"
     PEM_END = "-----END " + "PRIVATE KEY-----"
 
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="factory-echo-")
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.factory = self.root / "factory"
-        (self.factory / "lib").mkdir(parents=True)
-        for module in ("findings.py", "redaction.py", "embargo.py"):
-            shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
-        self.cli = self.factory / "lib" / "findings.py"
-        self.target = self.root / "target"
-        (self.target / ".beads").mkdir(parents=True)
-        self.calls_file = self.root / "calls.jsonl"
-        self.bin = self.root / "bin"
-        self.bin.mkdir()
-        home = self.root / "home"
-        home.mkdir()
-        self.env = {"PATH": str(self.bin), "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
-                    "SINK_CALLS": str(self.calls_file)}
-        recorder = f"#!{sys.executable}\n" + """
-import json, os, sys
-from pathlib import Path
-# The beads sink's read-only dedupe query (fleet-xkf) is not a publication: answer, don't record.
-if Path(sys.argv[0]).name == 'bd' and sys.argv[1:2] == ['list']:
-    print('[]')
-    sys.exit(0)
-with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
-    log.write(json.dumps({'tool': Path(sys.argv[0]).name, 'args': sys.argv[1:]}) + '\\n')
-print('fixture-123')
-"""
-        for tool in ("bd", "gh"):
-            executable = self.bin / tool
-            executable.write_text(recorder, encoding="utf-8")
-            executable.chmod(0o755)
-
     def dispatch(self, sink, finding, agent="secret-scan"):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
-        return subprocess.run(
-            [sys.executable, str(self.cli), "--target", "sandbox", "--agent", agent,
-             "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)],
-            cwd=self.factory, env=self.env, capture_output=True, text=True, check=True, timeout=30,
-        )
+        cmd = [sys.executable, str(self.cli), "--target", "sandbox", "--agent", agent,
+               "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)]
+        if sink == "github-issues":
+            cmd += ["--visibility", "public", "--repo", REPO]
+        return subprocess.run(cmd, cwd=self.factory, env=self.env, capture_output=True,
+                              text=True, check=True, timeout=30)
 
     def surfaces(self, result):
         found = {
@@ -185,8 +153,8 @@ print('fixture-123')
                 self.assertNotIn(needle, text, f"value reached {name}")
 
     def test_credential_in_a_title_reaches_no_tracker_field(self):
-        """The beads title is built from the published view, not the raw finding."""
-        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+        """The public issue title uses the redacted finding, not the raw model field."""
+        for sink, severity in (("file", "high"), ("github-issues", "high")):
             self.assert_clean(sink, self.credential_finding(), CREDENTIAL, severity)
 
     def test_bare_value_echoed_in_prose_is_absent_everywhere(self):
@@ -198,7 +166,7 @@ print('fixture-123')
         finding["description"] = f"I checked the file: {self.OPAQUE} is a live credential."
         finding["remediation"] = f"Rotate {self.OPAQUE} now."
 
-        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+        for sink, severity in (("file", "high"), ("github-issues", "high")):
             self.assert_clean(sink, finding, self.OPAQUE, severity)
 
     def test_pem_body_echoed_in_prose_is_absent_everywhere(self):
@@ -208,14 +176,13 @@ print('fixture-123')
         finding["description"] = f"The private key material starts {self.PEM_BODY} and continues."
         finding["remediation"] = f"Revoke the key; the body is {self.PEM_BODY}."
 
-        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+        for sink, severity in (("file", "high"), ("github-issues", "high")):
             self.assert_clean(sink, finding, self.PEM_BODY, severity)
 
     def test_unknown_shape_in_prose_is_absent_for_a_credential_finding(self):
         """Default-deny: no pattern knows this value, and it still must not be published.
 
-        Every sink, not just the report: the beads log line ("Created bead for: <title>") was
-        one of the surfaces the review probes caught still carrying the value.
+        The public issue API payload is also checked; not just the local report.
         """
         unknown = "zkq" + "7" * 24
         finding = self.credential_finding()
@@ -223,7 +190,7 @@ print('fixture-123')
         finding["description"] = f"The token {unknown} is in the file."
         finding["title"] = f"Token {unknown} found"
 
-        for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+        for sink, severity in (("file", "high"), ("github-issues", "high")):
             self.assert_clean(sink, finding, unknown, severity)
 
     def test_credential_smuggled_through_identity_fields(self):
@@ -241,7 +208,7 @@ print('fixture-123')
         needles = {"path": CREDENTIAL, "rule-id": self.UNKNOWN_SHAPE}
 
         for label, override in cases.items():
-            for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+            for sink, severity in (("file", "high"), ("github-issues", "high")):
                 with self.subTest(field=label, sink=sink):
                     finding = self.credential_finding()
                     finding.update(override)
@@ -299,7 +266,7 @@ print('fixture-123')
         }
 
         for label, override in cases.items():
-            for sink, severity in (("file", "high"), ("beads", "high"), ("github-issues", "medium")):
+            for sink, severity in (("file", "high"), ("github-issues", "high")):
                 with self.subTest(field=label, sink=sink):
                     finding = self.credential_finding()
                     finding.update(override)
@@ -328,7 +295,7 @@ print('fixture-123')
         was returned unchanged and rendered in every location field.
         """
         digits = "3141592653" * 3
-        for sink, severity in (("file", "medium"), ("beads", "medium"), ("github-issues", "medium")):
+        for sink, severity in (("file", "medium"), ("github-issues", "medium")):
             with self.subTest(sink=sink):
                 finding = self.credential_finding()
                 finding.update({
@@ -391,52 +358,18 @@ print('fixture-123')
         self.assertIn("[redacted:", report)
 
 
-class TestPublishedSurfaces(unittest.TestCase):
+class TestPublishedSurfaces(SinkFixture, unittest.TestCase):
     """End-to-end: the real CLI, a sandbox factory, stub tracker binaries."""
-
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="factory-redaction-")
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
-        self.factory = self.root / "factory"
-        (self.factory / "lib").mkdir(parents=True)
-        # A copy, so the report lands inside the sandbox: FACTORY_ROOT is module-level.
-        for module in ("findings.py", "redaction.py", "embargo.py"):
-            shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
-        self.cli = self.factory / "lib" / "findings.py"
-        self.target = self.root / "target"
-        (self.target / ".beads").mkdir(parents=True)
-        self.calls_file = self.root / "calls.jsonl"
-        self.bin = self.root / "bin"
-        self.bin.mkdir()
-        home = self.root / "home"
-        home.mkdir()
-        self.env = {"PATH": str(self.bin), "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
-                    "SINK_CALLS": str(self.calls_file)}
-        recorder = f"#!{sys.executable}\n" + """
-import json, os, sys
-from pathlib import Path
-# The beads sink's read-only dedupe query (fleet-xkf) is not a publication: answer, don't record.
-if Path(sys.argv[0]).name == 'bd' and sys.argv[1:2] == ['list']:
-    print('[]')
-    sys.exit(0)
-with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
-    log.write(json.dumps({'tool': Path(sys.argv[0]).name, 'args': sys.argv[1:]}) + '\\n')
-print('fixture-123')
-"""
-        for tool in ("bd", "gh"):
-            executable = self.bin / tool
-            executable.write_text(recorder, encoding="utf-8")
-            executable.chmod(0o755)
 
     def dispatch(self, sink, finding, agent):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
-        return subprocess.run(
-            [sys.executable, str(self.cli), "--target", "sandbox", "--agent", agent,
-             "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)],
-            cwd=self.factory, env=self.env, capture_output=True, text=True, check=True, timeout=30,
-        )
+        cmd = [sys.executable, str(self.cli), "--target", "sandbox", "--agent", agent,
+               "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)]
+        if sink == "github-issues":
+            cmd += ["--visibility", "public", "--repo", REPO]
+        return subprocess.run(cmd, cwd=self.factory, env=self.env, capture_output=True,
+                              text=True, check=True, timeout=30)
 
     def report(self):
         return (self.factory / "findings" / "sandbox-latest.md").read_text(encoding="utf-8")
@@ -462,46 +395,33 @@ print('fixture-123')
         self.assertIn("src/config.js:12", report)
         self.assertIn("[redacted:secret-scan match", report)
 
-    def test_beads_sink_embargoes_a_credential_agent(self):
-        """A credential finding is critical on identity, so it never reaches the synced tracker."""
-        result = self.dispatch("beads", _secret_finding(agent="secret-scan"), "secret-scan")
-        self.assert_nothing_published(result)
+    def test_direct_beads_sink_refuses_before_any_tracker_call(self):
+        """No untriaged bead, even when the finding is high/critical (agents-559)."""
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            self.dispatch("beads", _secret_finding(agent="secret-scan"), "secret-scan")
+        self.assertNotIn(CREDENTIAL, failure.exception.stderr)
         self.assertEqual(self.tracker_calls(), [])
-        self.assertEqual(result.stdout.count("[SECURITY GUARD]"), 1)
-        # It is still in the private report, where the responder can act on it.
-        report = self.report()
-        self.assertIn("aws-access-key", report)
-        self.assertIn("src/config.js:12", report)
-        self.assertIn("[redacted:secret-scan match", report)
 
-    def test_beads_sink_masks_a_model_echoed_credential(self):
-        """Medium routes past the embargo, so the rendered fields must still be masked."""
-        result = self.dispatch("beads", _secret_finding(agent="docs-drift", severity="medium"),
-                               "docs-drift")
+    def test_high_credential_agent_issue_is_redacted_and_does_publish(self):
+        """Paul approved public sensitive issues; the redaction must hold at the API body."""
+        result = self.dispatch("github-issues", _secret_finding(agent="secret-scan"),
+                               "secret-scan")
         self.assert_nothing_published(result)
-        calls = self.tracker_calls()
-        self.assertEqual([c["tool"] for c in calls], ["bd"])
-        args = calls[0]["args"]
-        # A credential finding publishes scanner-controlled text only; the model's own title is
-        # withheld along with the value.
-        self.assertEqual(args[args.index("--title") + 1],
-                         "[docs-drift] aws-access-key match at src/config.js:12")
-        description = args[args.index("--description") + 1]
-        self.assertIn("withhold the matched value", description)
-        self.assertIn("[redacted:docs-drift match", description)
+        issue, = json.loads(self.remote.read_text())["issues"]
+        self.assertIn("aws-access-key", issue["body"])
+        self.assertNotIn(CREDENTIAL, issue["title"] + issue["body"])
+        self.assertFalse(any(c["tool"] == "bd" for c in self.tracker_calls()))
 
     def test_github_sink_masks_a_model_echoed_credential(self):
-        """Medium severity so the public-disclosure guard lets it through to the sink."""
         result = self.dispatch("github-issues", _secret_finding(agent="docs-drift", severity="medium"),
                                "docs-drift")
         self.assert_nothing_published(result)
-        calls = self.tracker_calls()
-        self.assertEqual([c["tool"] for c in calls], ["gh"])
-        args = calls[0]["args"]
-        self.assertIn("--body", args)                       # a body was actually sent
-        body = args[args.index("--body") + 1]
-        self.assertIn("withhold the matched value", body)
-        self.assertEqual(args[args.index("--title") + 1],
+        creates = [c for c in self.tracker_calls() if c["args"][-1] == f"repos/{REPO}/issues"
+                   and "--method" in c["args"]]
+        self.assertEqual(len(creates), 1)
+        payload = json.loads(creates[0]["stdin"])
+        self.assertIn("withhold the matched value", payload["body"])
+        self.assertEqual(payload["title"],
                          "[factory:docs-drift] aws-access-key match at src/config.js:12")
 
     def test_benign_finding_is_published_unchanged(self):
