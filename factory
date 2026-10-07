@@ -211,8 +211,25 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     base = _run_git(pinned + ["rev-parse", "HEAD"], worktree_dir)
     header = (f"base-commit: {base.stdout.strip()}\n" if base.returncode == 0 else "")
     patch_file = run_dir / "session.patch"
-    patch_file.write_text(header + patch, encoding="utf-8")
-    os.chmod(patch_file, 0o600)
+    # agents-nei P1-2: each kept win rewrites the SAME session.patch in place. If a later
+    # write is interrupted (disk full / error), an in-place write_text could truncate the
+    # previous good patch and leave an earlier durable KEPT row with no usable proposal. Write
+    # to a sibling temp file and atomically replace only after a complete write, so a failed
+    # write can never corrupt a previously collected patch.
+    tmp_file = patch_file.with_name(patch_file.name + ".tmp")
+    try:
+        tmp_file.write_text(header + patch, encoding="utf-8")
+        os.chmod(tmp_file, 0o600)
+    except BaseException:
+        # agents-nei P2-1 (round 5): if the write or chmod fails, the sibling temp file must
+        # not leak. session.patch is untouched (os.replace has not run yet), so just remove
+        # the partial temp and re-raise the original error.
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp_file, patch_file)
     return patch_file
 
 
@@ -257,6 +274,47 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
                 f"{(prune.stderr or '').strip()}\n")
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"[factory] worktree cleanup 'prune' raised: {e}\n")
+
+
+def _apply_workspace_mismatch(target_dir: Path) -> Optional[str]:
+    """agents-nei P1-2: --apply must refuse a checkout whose measured asset set differs from
+    the HEAD worktree it will optimize. Two cases: (a) tracked/staged/untracked changes, and
+    (b) ignored files that measure_target would still measure — an ignored assets/slow.html is
+    in the operator's checkout but not the HEAD worktree, so a checkout-measured baseline would
+    disagree with the worktree and could mint a phantom KEPT win. `git status --porcelain`
+    misses ignored files; `git ls-files --others --ignored --exclude-standard` lists them
+    individually (unlike `--ignored=matching`, which collapses ignored directories)."""
+    from lib.bench.runner import ASSET_EXTS, IGNORE_DIRS
+
+    status = _run_git(["git", "status", "--porcelain", "--untracked-files=all"], target_dir)
+    if status.returncode != 0:
+        return "could not read the target's git status (fail closed rather than assume a clean tree)"
+    if status.stdout.strip():
+        return ("the target checkout has uncommitted changes (dirty worktree); --apply "
+                "measures the baseline on that checkout but the disposable worktree starts "
+                "at HEAD, so a dirty tree would disagree with the worktree and could mint a "
+                "phantom KEPT win — commit or stash the changes first")
+
+    # -z emits NUL-delimited raw paths: `git ls-files` quotes a path containing a newline
+    # ("assets/slow\n.html"), which would otherwise be parsed with a trailing quote and a
+    # mismatched suffix — an ignored measured asset would slip past the refusal below.
+    ignored = _run_git(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
+                       target_dir)
+    if ignored.returncode != 0:
+        return "could not enumerate the target's ignored files (fail closed rather than assume a clean tree)"
+    for rel in ignored.stdout.split("\0"):
+        if not rel:
+            continue
+        path = Path(rel)
+        if any(part in IGNORE_DIRS for part in path.parts):
+            continue
+        if path.suffix.lower() in ASSET_EXTS:
+            return (f"the checkout has an ignored measured asset ({rel}) that is absent from "
+                    f"the HEAD worktree; measuring the baseline on the checkout would disagree "
+                    f"with the worktree and could mint a phantom KEPT win — commit or remove "
+                    f"the ignored asset first")
+    return None
+
 
 def _parse_scalar(val: str) -> Any:
     if val.lower() == "true":
@@ -483,8 +541,23 @@ def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
     return run_dir
 
 
+def _prepass_argv(prepass_script: Path, read_dir: Path, target_name: str,
+                  candidates_file: Path, agent_name: str):
+    """Build the deterministic pre-pass argv. `--target-name` is only understood by
+    perf-hillclimb's measure_and_context.py (it keeps the ledger keyed by the LOGICAL target
+    when run_hillclimb --apply points the read dir at a disposable worktree); every other
+    pre-pass keeps its original contract, so injecting an unrecognised flag would make it exit
+    at argument parsing (P1-1, agents-nei)."""
+    argv = [sys.executable, str(prepass_script), "--target", str(read_dir)]
+    if agent_name == "perf-hillclimb":
+        argv += ["--target-name", str(target_name)]
+    argv += ["--output", str(candidates_file)]
+    return argv
+
+
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
-              station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1):
+              station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
+              read_target_dir: Optional[Path] = None):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
     agent_yaml = agent_dir / "agent.yaml"
     skill_dir = agent_dir
@@ -502,6 +575,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # dispatch share it, and expiry is a station failure rather than a clean scan.
     budget = budget_for(agent_cfg, label=agent_name)
     target_name, target_dir, target_cfg = resolve_target(target_arg)
+    # read_dir is the tree the engine and pre-pass actually read. run_hillclimb passes its
+    # accumulated disposable worktree here (P2-2, agents-nei) so a later proposal inspects the
+    # kept edits instead of re-proposing against the operator's unchanged checkout. The engine
+    # policy is unchanged — an optimizer stays read-only — only the READ scope moves. Identity
+    # (target_name), sink, visibility and the findings --target-dir stay anchored to the real
+    # target.
+    read_dir = Path(read_target_dir).resolve() if read_target_dir is not None else target_dir
     sink = detect_sink(target_dir, target_cfg, explicit_sink)
     engine = choose_engine(engine_arg)
     check_engine(policy, engine)
@@ -590,7 +670,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # policy.json stay honest and non-git targets keep today's patch-in-report behaviour.
     worktree_dir: Optional[Path] = None
     worktree_gitdir: Optional[Path] = None
-    engine_cwd = target_dir
+    engine_cwd = read_dir
     if policy.tool_policy == WORKTREE_WRITE:
         if not (target_dir / ".git").exists():
             policy = downgrade_write_to_read_only(policy, (
@@ -623,8 +703,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     prepass_env = prepass_environment(agent_cfg)
     prepass_cmd = None
     if prepass_script and prepass_script.exists():
-        prepass_cmd = [sys.executable, str(prepass_script), "--target", str(target_dir),
-                       "--output", str(candidates_file)]
+        prepass_cmd = _prepass_argv(prepass_script, read_dir, target_name,
+                                    candidates_file, agent_name)
         # Egress control applies to the pre-pass whenever the host can sandbox (agents-2x6):
         # its netns is isolated and its only egress is the allowlist proxy, reached through
         # the net_forward relay. The proxy itself starts later, just before execution; the
@@ -638,7 +718,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             prepass_env["NO_PROXY"] = "localhost,127.0.0.1"
             try:
                 prepass_cmd = sandbox_command(
-                    prepass_cmd, target_dir=target_dir, factory_root=FACTORY_ROOT,
+                    prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                     run_dir=run_dir, env=prepass_env,
                     executables=tuple(PREPASS_EXECUTABLES) + tuple(policy.requires),
                     egress_forwards=[(EGRESS_PROXY_PORT, str(run_dir / "egress-proxy.sock"))])
@@ -668,7 +748,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         adapter_env["FACTORY_SANDBOXED"] = "1"
         try:
             adapter_cmd = sandbox_command(
-                adapter_cmd, target_dir=target_dir, factory_root=FACTORY_ROOT,
+                adapter_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                 run_dir=run_dir, env=adapter_env,
                 executables=(engine,) + ENGINE_EXECUTABLES,
                 egress_forwards=([(EGRESS_BROKER_PORT, str(run_dir / "egress-broker.sock"))]
@@ -1203,10 +1283,75 @@ def run_hillclimb(
     apply_edits: bool = False,
     engine_arg: str = "auto",
     explicit_sink: Optional[str] = None
-):
+) -> bool:
+    """Run the Class C perf hill-climber. Returns True when the run completed (proposals
+    recorded, or kept edits persisted as a patch proposal); returns False when --apply could
+    not obtain an isolated worktree, so the run refused rather than mutate the operator's
+    checkout (non-negotiable #6: propose, don't apply)."""
     from lib.bench.runner import measure_target, append_ledger, read_ledger
 
     target_name, target_dir, _ = resolve_target(target_arg)
+
+    def _record_blocked(reason: str, baseline_value: float = 0.0,
+                        candidate_value: float = 0.0) -> bool:
+        append_ledger(target_name, {
+            "step": 0,
+            "hypothesis": "Isolated apply workspace",
+            "files_touched": [],
+            "metric": goal_metric,
+            "baseline_value": baseline_value,
+            "candidate_value": candidate_value,
+            "delta": 0,
+            "outcome": "BLOCKED",
+            "reason": reason,
+        })
+        print(f"\n🚨 --apply blocked: {reason}")
+        print("   The operator's checkout was NOT modified. Fix the cause and re-run "
+              "(or run without --apply to record proposals only).")
+        return False
+
+    # --apply must run entirely inside a disposable worktree. There is no fallback to editing
+    # the operator's checkout: if an isolated workspace cannot be provided, the run fails closed
+    # (non-negotiable #6 / agents-6ce) rather than silently escalating to a write on the real
+    # tree. The worktree is created ONCE and reused across iterations so a kept win stays on
+    # disk and the next iteration measures it (not the untouched target).
+    worktree_dir: Optional[Path] = None
+    worktree_gitdir: Optional[Path] = None
+    proposal_run_dir: Optional[Path] = None
+    if apply_edits:
+        # P1-2 (agents-nei): refuse a mismatched workspace BEFORE measuring the checkout. The
+        # baseline is measured on the operator's checkout while the disposable worktree starts
+        # at HEAD; a tracked/untracked change OR an ignored measured asset would make the two
+        # disagree and could mint a phantom KEPT win against a baseline not present in HEAD.
+        if not (target_dir / ".git").exists():
+            return _record_blocked(
+                "the target is not a git repository, so no disposable worktree can isolate "
+                "the candidate edit from the operator's checkout")
+        mismatch = _apply_workspace_mismatch(target_dir)
+        if mismatch is not None:
+            return _record_blocked(mismatch)
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        proposal_run_dir = FACTORY_ROOT / "runs" / f"hillclimb-{target_name}-{run_id}"
+        try:
+            proposal_run_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            proposal_run_dir = FACTORY_ROOT / "runs" / f"hillclimb-{target_name}-{run_id}-{token_hex(4)}"
+            proposal_run_dir.mkdir(parents=True, exist_ok=False)
+        os.chmod(proposal_run_dir, 0o700)
+        worktree_dir = proposal_run_dir / "worktree"
+        try:
+            worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
+        except StationError as e:
+            # P2-1 (agents-nei): _create_session_worktree can raise AFTER `git worktree add`
+            # succeeded (e.g. rev-parse fails), leaving a registered admin worktree under the
+            # target's .git. Run the cleanup helper (idempotent, best-effort) before deleting
+            # the run dir so no leftover registration survives. Guard on the worktree dir so a
+            # pure add-failure (nothing was created) skips the noisy remove attempt.
+            if worktree_dir.exists():
+                _remove_session_worktree(target_dir, worktree_dir)
+            shutil.rmtree(proposal_run_dir, ignore_errors=True)
+            return _record_blocked(f"cannot create the disposable apply worktree: {e}")
+
     baseline = measure_target(target_dir)
 
     if goal_metric == "perf_hazard_score" and baseline.get("perf_hazard_score", 0) == 0:
@@ -1223,104 +1368,112 @@ def run_hillclimb(
     print(f"   Max Steps:   {iterations} (Apply & Verify in Worktree = {apply_edits})")
     print("=" * 70)
 
-    for step_idx in range(1, iterations + 1):
-        if current_val <= target_goal:
-            print(f"\n🎯 Goal achieved! ({goal_metric} = {current_val} <= {target_goal})")
-            break
+    try:
+        for step_idx in range(1, iterations + 1):
+            if current_val <= target_goal:
+                print(f"\n🎯 Goal achieved! ({goal_metric} = {current_val} <= {target_goal})")
+                break
 
-        print(f"\n--- [Iteration {step_idx}/{iterations}] Running perf-hillclimb station ---")
-        res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink)
-        report = res.get("report", {}) if res else {}
-        steps = report.get("hillclimb_steps", [])
+            print(f"\n--- [Iteration {step_idx}/{iterations}] Running perf-hillclimb station ---")
+            # P2-2: every iteration must read the accumulated worktree (which carries each
+            # prior kept edit), not the operator's unchanged checkout — otherwise a later
+            # proposal re-proposes an already-kept edit and is rejected as an unmatched
+            # snippet. The engine policy stays read-only (run_agent resolves the optimizer's
+            # read-only grant); only the READ scope moves.
+            res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink,
+                            read_target_dir=worktree_dir)
+            report = res.get("report", {}) if res else {}
+            steps = report.get("hillclimb_steps", [])
 
-        if not steps:
-            print("No further hill-climb steps proposed by model.")
-            break
+            if not steps:
+                print("No further hill-climb steps proposed by model.")
+                break
 
-        top_step = steps[0]
-        hypothesis = top_step.get("hypothesis", "Unnamed optimization step")
-        rel_file = top_step.get("target_file", "")
-        search_snip = top_step.get("search_snippet", "")
-        replace_snip = top_step.get("replace_snippet", "")
+            top_step = steps[0]
+            hypothesis = top_step.get("hypothesis", "Unnamed optimization step")
+            rel_file = top_step.get("target_file", "")
+            search_snip = top_step.get("search_snippet", "")
+            replace_snip = top_step.get("replace_snippet", "")
 
-        if not apply_edits or not rel_file or not search_snip:
-            append_ledger(target_name, {
-                "step": step_idx,
-                "hypothesis": hypothesis,
-                "files_touched": [rel_file] if rel_file else [],
-                "metric": goal_metric,
-                "baseline_value": current_val,
-                "candidate_value": current_val,
-                "delta": top_step.get("expected_delta", 0),
-                "outcome": "PROPOSED",
-                "reason": "Proposal recorded (run with --apply to execute in-place verification)"
-            })
-            print(f"📝 Recorded proposal to ledger: {hypothesis}")
-            continue
+            if not apply_edits or not rel_file or not search_snip:
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file] if rel_file else [],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": top_step.get("expected_delta", 0),
+                    "outcome": "PROPOSED",
+                    "reason": "Proposal recorded (run with --apply to execute in-place verification)"
+                })
+                print(f"📝 Recorded proposal to ledger: {hypothesis}")
+                continue
 
-        target_file_path = (target_dir / rel_file).resolve()
-        if not target_file_path.is_relative_to(target_dir.resolve()) or not target_file_path.exists():
-            append_ledger(target_name, {
-                "step": step_idx,
-                "hypothesis": hypothesis,
-                "files_touched": [rel_file],
-                "metric": goal_metric,
-                "baseline_value": current_val,
-                "candidate_value": current_val,
-                "delta": 0,
-                "outcome": "REVERTED",
-                "reason": f"Target file {rel_file} is outside target boundary or does not exist"
-            })
-            continue
+            # Boundary-check rel_file against the TARGET (defence in depth against path
+            # traversal). The edit itself happens only in the isolated worktree.
+            target_file_path = (target_dir / rel_file).resolve()
+            if not target_file_path.is_relative_to(target_dir.resolve()) or not target_file_path.exists():
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": 0,
+                    "outcome": "REVERTED",
+                    "reason": f"Target file {rel_file} is outside target boundary or does not exist"
+                })
+                continue
 
-        original_text = target_file_path.read_text(encoding="utf-8")
-        if search_snip not in original_text:
-            append_ledger(target_name, {
-                "step": step_idx,
-                "hypothesis": hypothesis,
-                "files_touched": [rel_file],
-                "metric": goal_metric,
-                "baseline_value": current_val,
-                "candidate_value": current_val,
-                "delta": 0,
-                "outcome": "REVERTED",
-                "reason": "search_snippet did not match exact file contents"
-            })
-            continue
+            # Read and edit the WORKTREE copy, which carries every kept win from prior
+            # iterations. The operator's checkout is never read for the edit or written at all.
+            edit_file = (worktree_dir / rel_file).resolve() if apply_edits else target_file_path
+            if apply_edits and (not edit_file.is_relative_to(worktree_dir.resolve()) or not edit_file.exists()):
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": 0,
+                    "outcome": "REVERTED",
+                    "reason": f"Target file {rel_file} is not present in the apply worktree"
+                })
+                continue
 
-        # Apply candidate change and re-measure inside an isolated git worktree (if git repo) or atomic try/finally
-        updated_text = original_text.replace(search_snip, replace_snip, 1)
-        worktree_dir = FACTORY_ROOT / "runs" / "worktrees" / f"{target_name}-{step_idx}-{int(datetime.now().timestamp())}"
-        used_worktree = False
+            original_text = edit_file.read_text(encoding="utf-8")
+            if search_snip not in original_text:
+                append_ledger(target_name, {
+                    "step": step_idx,
+                    "hypothesis": hypothesis,
+                    "files_touched": [rel_file],
+                    "metric": goal_metric,
+                    "baseline_value": current_val,
+                    "candidate_value": current_val,
+                    "delta": 0,
+                    "outcome": "REVERTED",
+                    "reason": "search_snippet did not match exact file contents"
+                })
+                continue
 
-        try:
-            if (target_dir / ".git").exists():
-                worktree_dir.parent.mkdir(parents=True, exist_ok=True)
-                wt_res = _run_git(
-                    ["git", "worktree", "add", "--detach", str(worktree_dir)], target_dir
-                )
-                if wt_res.returncode == 0:
-                    used_worktree = True
-                    wt_file = (worktree_dir / rel_file).resolve()
-                    wt_file.write_text(updated_text, encoding="utf-8")
-                    new_metrics = measure_target(worktree_dir)
-                else:
-                    target_file_path.write_text(updated_text, encoding="utf-8")
-                    new_metrics = measure_target(target_dir)
-            else:
-                target_file_path.write_text(updated_text, encoding="utf-8")
-                new_metrics = measure_target(target_dir)
+            updated_text = original_text.replace(search_snip, replace_snip, 1)
+            edit_file.write_text(updated_text, encoding="utf-8")
+            new_metrics = measure_target(worktree_dir if apply_edits else target_dir)
 
             new_val = float(new_metrics.get(goal_metric, current_val))
             delta = round(new_val - current_val, 2)
 
             if new_val < current_val:
                 print(f"✅ WIN VERIFIED! {goal_metric}: {current_val} -> {new_val} (delta: {delta})")
-                if used_worktree and res and res.get("run_dir"):
-                    diff_res = _run_git(["git", "diff"], worktree_dir)
-                    patch_file = res["run_dir"] / f"winning-step-{step_idx}.patch"
-                    patch_file.write_text(diff_res.stdout, encoding="utf-8")
-                    print(f"   Saved verified patch to: {patch_file}")
+                if apply_edits:
+                    # P1-3 (agents-nei): persist the proposal BEFORE the KEPT row becomes
+                    # durable. A collection failure here raises before append_ledger, so a KEPT
+                    # row can never outlive the patch that records its edit — the worktree is
+                    # discarded in the finally and no orphan KEPT survives.
+                    _collect_session_diff(worktree_dir, proposal_run_dir, worktree_gitdir)
                 append_ledger(target_name, {
                     "step": step_idx,
                     "hypothesis": hypothesis,
@@ -1332,8 +1485,14 @@ def run_hillclimb(
                     "outcome": "KEPT",
                     "reason": f"Metric improved by {abs(delta)}"
                 })
+                # The edit is already persisted in the worktree file above, so advancing
+                # current_val matches a value that is now on disk (measure_target would
+                # return it on the next iteration).
                 current_val = new_val
             else:
+                # Revert the worktree file so disk stays exactly at current_val: a rejected
+                # step must not drift the accumulated workspace (or the operator's checkout).
+                edit_file.write_text(original_text, encoding="utf-8")
                 print(f"↩️  REVERTED! {goal_metric}: {current_val} -> {new_val} (did not improve).")
                 append_ledger(target_name, {
                     "step": step_idx,
@@ -1346,13 +1505,33 @@ def run_hillclimb(
                     "outcome": "REVERTED",
                     "reason": f"Metric did not improve (delta {delta})"
                 })
-        finally:
-            if used_worktree:
-                _run_git(
-                    ["git", "worktree", "remove", "--force", str(worktree_dir)], target_dir
-                )
-            elif target_file_path.exists():
-                target_file_path.write_text(original_text, encoding="utf-8")
+
+    except BaseException:
+        # P1-3 (agents-nei): a verified KEPT already persisted its proposal before the ledger
+        # row was appended, so an interruption can simply re-raise — session.patch (if any) is
+        # already on disk and the finally discards only the worktree, never the proposal.
+        if apply_edits and proposal_run_dir is not None \
+                and (proposal_run_dir / "session.patch").exists():
+            print(f"\n🧾 Preserved the hill-climb's kept edits as "
+                  f"{proposal_run_dir / 'session.patch'} before the interrupted run was "
+                  f"discarded; the target checkout was NOT modified.")
+        raise
+    else:
+        # Normal completion: every KEPT row already persisted the accumulated proposal as
+        # session.patch before it was recorded (P1-3), so there is no final collection that
+        # could fail after a durable KEPT row.
+        if apply_edits and proposal_run_dir is not None:
+            patch_file = proposal_run_dir / "session.patch"
+            if patch_file.exists():
+                print(f"\n🧾 Collected the hill-climb's kept edits as {patch_file}; "
+                      f"the target checkout was NOT modified. Apply that patch to persist the wins.")
+            else:
+                print("\n🧾 The hill-climb made no kept edits (empty proposal); "
+                      "the target checkout was NOT modified.")
+        return True
+    finally:
+        if apply_edits and worktree_dir is not None:
+            _remove_session_worktree(target_dir, worktree_dir)
 
 
 def install_pre_commit_hook(target_arg: Optional[str] = None, all_targets: bool = False):
@@ -1615,7 +1794,7 @@ def main():
         if not run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink):
             sys.exit(1)
     elif args.command == "hillclimb":
-        run_hillclimb(
+        if not run_hillclimb(
             target_arg=args.target,
             goal_metric=args.metric,
             goal_value=args.goal,
@@ -1623,7 +1802,8 @@ def main():
             apply_edits=args.apply,
             engine_arg=args.engine,
             explicit_sink=args.sink
-        )
+        ):
+            sys.exit(1)
     elif args.command == "hook":
         install_pre_commit_hook(target_arg=getattr(args, "target", None), all_targets=getattr(args, "all", False))
     elif args.command == "skills":

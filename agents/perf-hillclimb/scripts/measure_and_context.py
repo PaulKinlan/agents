@@ -22,13 +22,17 @@ from lib.bench.runner import measure_target, read_ledger  # noqa: E402
 def main():
     parser = argparse.ArgumentParser(description="Measure baseline & ledger for perf-hillclimb")
     parser.add_argument("--target", required=True, help="Target repository path")
+    parser.add_argument("--target-name", help="Logical target name for the ledger lookup (defaults to the target directory name)")
     parser.add_argument("--goal-metric", default="perf_hazard_score", help="Primary metric to hill-climb (perf_hazard_score, total_gzip_bytes, custom_bench_ms)")
     parser.add_argument("--goal-value", type=float, help="Explicit numeric target value")
     parser.add_argument("--output", help="Output JSON path")
     args = parser.parse_args()
 
     target_dir = Path(args.target).resolve()
-    target_name = target_dir.name
+    # The read dir can be a disposable worktree (run_hillclimb --apply passes the accumulated
+    # worktree so the model inspects kept edits); the ledger is keyed by the LOGICAL target
+    # name, which stays the real target even then.
+    target_name = args.target_name or target_dir.name
 
     metrics = measure_target(target_dir)
     ledger = read_ledger(target_name)
