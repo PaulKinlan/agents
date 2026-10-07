@@ -285,6 +285,33 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         # No worktree/proposal was made for the refused run.
         self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
 
+    def test_ignored_measured_asset_with_newline_in_name_is_refused(self):
+        # P1-1 (round 4): git ls-files quotes a path containing a newline, so parsing its
+        # newline-delimited output as literal paths leaves a trailing quote (suffix not .html)
+        # and the ignored assets/slow<NL>.html slips past the refusal — while measure_target
+        # still walks it. NUL-delimited parsing must catch it and refuse the run.
+        target = self._git_target({
+            "index.html": BLOCKING_HTML,
+            ".gitignore": "assets/slow*.html\n",
+        })
+        slow = target / "assets" / "slow\n.html"
+        slow.parent.mkdir(parents=True, exist_ok=True)
+        slow.write_text(BLOCKING_HTML, encoding="utf-8")
+        index = target / "index.html"
+        original = index.read_text()
+
+        result = factory_cli.run_hillclimb(
+            str(target), goal_metric="perf_hazard_score", goal_value=0,
+            iterations=1, apply_edits=True, engine_arg="pi")
+
+        self.assertFalse(result)
+        self.assertEqual(index.read_text(), original)
+        self.assertEqual(slow.read_text(), BLOCKING_HTML)
+        ledger = self._ledger()
+        self.assertEqual(ledger[-1]["outcome"], "BLOCKED")
+        self.assertIn("ignored measured asset", ledger[-1]["reason"])
+        self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
+
     def test_collection_failure_leaves_no_durable_kept_row(self):
         # P1-3: a KEPT row must never outlive its proposal. If the proposal cannot be collected
         # (git add --intent-to-add nonzero), the run must fail BEFORE the KEPT row is durable.

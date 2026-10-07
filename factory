@@ -211,8 +211,15 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     base = _run_git(pinned + ["rev-parse", "HEAD"], worktree_dir)
     header = (f"base-commit: {base.stdout.strip()}\n" if base.returncode == 0 else "")
     patch_file = run_dir / "session.patch"
-    patch_file.write_text(header + patch, encoding="utf-8")
-    os.chmod(patch_file, 0o600)
+    # agents-nei P1-2: each kept win rewrites the SAME session.patch in place. If a later
+    # write is interrupted (disk full / error), an in-place write_text could truncate the
+    # previous good patch and leave an earlier durable KEPT row with no usable proposal. Write
+    # to a sibling temp file and atomically replace only after a complete write, so a failed
+    # write can never corrupt a previously collected patch.
+    tmp_file = patch_file.with_name(patch_file.name + ".tmp")
+    tmp_file.write_text(header + patch, encoding="utf-8")
+    os.chmod(tmp_file, 0o600)
+    os.replace(tmp_file, patch_file)
     return patch_file
 
 
@@ -278,12 +285,14 @@ def _apply_workspace_mismatch(target_dir: Path) -> Optional[str]:
                 "at HEAD, so a dirty tree would disagree with the worktree and could mint a "
                 "phantom KEPT win — commit or stash the changes first")
 
-    ignored = _run_git(["git", "ls-files", "--others", "--ignored", "--exclude-standard"],
+    # -z emits NUL-delimited raw paths: `git ls-files` quotes a path containing a newline
+    # ("assets/slow\n.html"), which would otherwise be parsed with a trailing quote and a
+    # mismatched suffix — an ignored measured asset would slip past the refusal below.
+    ignored = _run_git(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
                        target_dir)
     if ignored.returncode != 0:
         return "could not enumerate the target's ignored files (fail closed rather than assume a clean tree)"
-    for rel in ignored.stdout.splitlines():
-        rel = rel.strip()
+    for rel in ignored.stdout.split("\0"):
         if not rel:
             continue
         path = Path(rel)

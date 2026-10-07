@@ -1287,6 +1287,38 @@ process.stdin.on('end', () => {
         finally:
             lock.unlink(missing_ok=True)
 
+    def test_second_collection_write_failure_keeps_the_first_patch_intact(self):
+        """agents-nei P1-2 (round 4): each kept win re-collects session.patch in place, so a
+        failure during a LATER collection's write (disk full) could truncate the earlier good
+        patch and strand an already-durable KEPT row. The write must go to a sibling temp file
+        and be atomically os.replace()'d only after it completes."""
+        target = self.root / "atomic-target"
+        target.mkdir()
+        subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+        (target / "f.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(target), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(target), "-c", "user.email=f@t", "-c", "user.name=f",
+                        "commit", "-qm", "init"], check=True, capture_output=True)
+        wt = self.root / "atomic-wt"
+        gitdir = factory_cli._create_session_worktree(target, wt)
+        run_dir = self.root / "atomic-run"
+        run_dir.mkdir()
+
+        # First collection succeeds and writes the first accumulated proposal.
+        (wt / "f.txt").write_text("one\ntwo\n", encoding="utf-8")
+        factory_cli._collect_session_diff(wt, run_dir, gitdir)
+        patch_file = run_dir / "session.patch"
+        first_patch = patch_file.read_text(encoding="utf-8")
+        self.assertIn("two", first_patch)
+
+        # A second accumulated edit is re-collected, but its write fails (disk full). The
+        # earlier patch must remain byte-for-byte intact; no partial write may corrupt it.
+        (wt / "f.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+        with mock.patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                factory_cli._collect_session_diff(wt, run_dir, gitdir)
+        self.assertEqual(patch_file.read_text(encoding="utf-8"), first_patch)
+
     def test_a_non_utf8_worktree_marker_fails_closed(self):
         """agents-7ik (4): a binary .git marker raises UnicodeDecodeError (a ValueError,
         not an OSError) — it must surface as a clean StationError, never an unhandled
