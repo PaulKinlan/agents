@@ -29,8 +29,10 @@ browser are declared by some agents and granted to none, each for a stated reaso
 import math
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
-from lib.child_env import NETWORK_CREDENTIAL_REQUIREMENTS
+from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS,
+                           NETWORK_CREDENTIAL_REQUIREMENTS, PLACEHOLDER_KEY)
 
 # docs/PLAN.md section 5. The ceiling is what an agent at that tier may *declare*.
 #   t0-readonly  no network, read-only checkout
@@ -399,15 +401,57 @@ def budget_note(policy: Policy, engine: str) -> str:
             f"(the {engine} adapter has no per-run budget flag)")
 
 
+def _broker_covers_engine_env(engine: str, brokered_providers: Tuple[str, ...],
+                              engine_env: Optional[Mapping[str, str]]) -> bool:
+    """Report broker enforcement only when no real engine credential survives the swap.
+
+    Provider labels are not proof by themselves: the broker must have started, the
+    adapter must have received its placeholder and loopback URL, and *every* model
+    credential exposed by child_environment must be removed or replaced. URL userinfo in
+    inherited proxy settings also remains a credential in the child's environment.
+    """
+    if not brokered_providers or engine_env is None:
+        return False
+    covered = set()
+    for provider in brokered_providers:
+        spec = BROKER_PROVIDERS.get(provider)
+        if spec is None:
+            return False
+        placeholder_var, base_var, secret_vars = spec
+        try:
+            base = urlsplit(engine_env.get(base_var, ""))
+            if (engine_env.get(placeholder_var) != PLACEHOLDER_KEY
+                    or base.scheme != "http" or base.hostname != "127.0.0.1"
+                    or not base.port or base.path != f"/proxy/{provider}"):
+                return False
+        except ValueError:  # malformed URL/port is not evidence of a working broker
+            return False
+        covered.update(secret_vars)
+    for var in ENGINE_CREDENTIALS.get(engine, ()):
+        value = engine_env.get(var)
+        if value and (var not in covered or value != PLACEHOLDER_KEY):
+            return False
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        try:
+            if urlsplit(engine_env.get(var, "")).username is not None:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def policy_record(policy: Policy, engine: str,
                   sandbox: Optional[Dict[str, Any]] = None,
-                  unsandboxed_note: Optional[str] = None) -> Dict[str, Any]:
+                  unsandboxed_note: Optional[str] = None,
+                  brokered_providers: Tuple[str, ...] = (),
+                  engine_env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """The machine-readable account written to the run directory as policy.json.
 
-    `sandbox` is lib/sandbox.py's sandbox_record(), produced only for a wrap that was
-    exercised before the record is written (agents-kwi); the not_enforced list only drops an
-    entry when the sandbox actually covers it, and gains `network-egress` because the
-    sandbox does not filter egress (agents-9n7).
+    `sandbox` is lib/sandbox.py's sandbox_record(), produced only for an exercised wrap
+    (agents-kwi). The credential residual only drops after a broker actually starts and
+    the engine env is verified to contain placeholders rather than real keys (agents-2dj).
+    The dispatcher writes a conservative record before its pre-pass, then replaces it
+    after a successful broker swap and restores those captured bytes after the session.
     """
     engine_sandboxed = bool(sandbox and sandbox.get("engine_sandboxed"))
     not_enforced = [] if engine_sandboxed else ["os-sandbox"]
@@ -416,11 +460,13 @@ def policy_record(policy: Policy, engine: str,
     if sandbox is not None:
         if not sandbox.get("network_egress_filtered"):
             not_enforced.append("network-egress")
-        # bun/pi needs a real procfs, so the engine's own /proc/self/environ is readable by
-        # its own read tool: the engine's API keys (the child_env allowlist, nothing else)
-        # are in reach of a prompt-injected session. Published output is redacted
-        # (lib/redaction.py); a credential-broker proxy is the follow-up (agents-9n7).
-        not_enforced.append("env-credentials")
+        # bun/pi can read its own /proc/self/environ. Record this residual unless an
+        # exercised engine sandbox *and* a running broker swapped every real credential
+        # for a placeholder. A sandboxed pre-pass alone is not sufficient (e.g. claude).
+        brokered_env = (engine_sandboxed and
+                        _broker_covers_engine_env(engine, brokered_providers, engine_env))
+        if not brokered_env:
+            not_enforced.append("env-credentials")
     if policy.max_usd is not None and engine not in USD_CAPABLE_ENGINES:
         not_enforced.append("budget.max_usd")
     granted = {
@@ -431,6 +477,9 @@ def policy_record(policy: Policy, engine: str,
     }
     if sandbox is not None:
         granted["os_sandbox"] = dict(sandbox)
+        if brokered_env:
+            granted["credential_broker"] = {"providers": sorted(brokered_providers),
+                                            "enforced": "engine env contains placeholders only"}
     record = {
         "agent": policy.agent,
         "engine": engine,

@@ -40,6 +40,7 @@ from lib.containment import (  # noqa: E402
 )
 from lib.sandbox import sandbox_available, sandbox_command  # noqa: E402
 from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
+from lib.child_env import child_environment  # noqa: E402
 from lib import egress_proxy  # noqa: E402
 from lib.egress_proxy import EgressProxy  # noqa: E402
 
@@ -332,6 +333,47 @@ class TestBannerAndRecord(unittest.TestCase):
         # agents-js7: the claude adapter enforces a declared cap via --max-budget-usd.
         self.assertEqual(policy_record(policy, "claude")["not_enforced"],
                          ["os-sandbox"])
+
+    def test_only_an_exercised_brokered_engine_drops_the_env_credential_residual(self):
+        """Fail-on-revert: the old unconditional append falsified sandboxed broker runs."""
+        policy = load_policy("probe", manifest())
+        sandbox = {"engine_sandboxed": True, "network_egress_filtered": True,
+                   "engine_read_scope": "OS sandbox"}
+        parent = {"ANTHROPIC_API_KEY": "not-a-real-provider-key"}
+        engine_env = child_environment(engine="pi", parent=parent, broker_urls={
+            "anthropic": "http://127.0.0.1:8384/proxy/anthropic"})
+        kwargs = {"sandbox": sandbox, "brokered_providers": ("anthropic",),
+                  "engine_env": engine_env}
+        record = policy_record(policy, "pi", **kwargs)
+        self.assertNotIn("env-credentials", record["not_enforced"])
+        self.assertEqual(record["granted"]["credential_broker"]["providers"], ["anthropic"])
+        self.assertNotIn("not-a-real-provider-key", json.dumps(record))
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=sandbox, engine_env=engine_env)["not_enforced"],
+            "a placeholder without an actually running broker is not enforcement")
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
+            engine_env=child_environment(engine="pi", parent=parent))["not_enforced"],
+            "a provider name without apply_broker_urls must not upgrade policy.json")
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
+            engine_env=dict(engine_env, ANTHROPIC_BASE_URL="http://[invalid"))[
+                "not_enforced"])
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
+            engine_env=dict(engine_env, OPENAI_API_KEY="unbrokered"))["not_enforced"])
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
+            engine_env=dict(engine_env, HTTPS_PROXY="http://user:pass@proxy.test"))[
+                "not_enforced"])
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox={**sandbox, "engine_sandboxed": False},
+            brokered_providers=("anthropic",), engine_env=engine_env)["not_enforced"],
+            "a sandboxed pre-pass cannot attest to the engine env")
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=sandbox, brokered_providers=(),
+            engine_env=child_environment(engine="pi", parent={}))["not_enforced"],
+            "no credentials means no broker was started; keep the conservative residual")
 
     def test_an_unsandboxed_opt_in_is_surfaced_prominently(self):
         # agents-bp0: a run that proceeds unsandboxed by the explicit opt-in says so with
@@ -756,6 +798,8 @@ class TestDispatcher(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
+        self.assertIn("env-credentials", record["not_enforced"],
+                      "no API key was present, so no credential broker actually started")
         line = self.stub_line("CANARY:")
         self.assertNotIn("CANARY-SECRET-9N7", line)
         self.assertIn("No such file", line)
@@ -1613,6 +1657,12 @@ process.stdin.on('end', () => {
         # path proves the listener answered (no upstream hop involved).
         self.assertIn("404", self.stub_line("BROKERLINE:"),
                       "the sandboxed engine must reach the broker over loopback")
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
+        self.assertNotIn("env-credentials", record["not_enforced"],
+                         "the actual brokered engine env must update the trusted record")
+        self.assertEqual(record["granted"]["credential_broker"]["providers"], ["anthropic"])
+        self.assertNotIn(real_key, json.dumps(record))
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_a_sandboxed_engine_has_no_route_off_its_netns(self):

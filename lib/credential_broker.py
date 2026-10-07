@@ -5,8 +5,9 @@ Why this exists
 The OS sandbox (agents-9n7) hides ``$HOME``, so a sandboxed engine authenticates
 only from environment API keys (lib/child_env.py's allowlist). But bun/pi needs a
 real procfs, so the engine's own ``/proc/self/environ`` is readable by its own read
-tool: those keys are in reach of a prompt-injected session. policy.json lists this
-as ``not_enforced: env-credentials``.
+tool: without brokering those keys are in reach of a prompt-injected session.
+policy.json keeps ``not_enforced: env-credentials`` unless a sandboxed engine's
+actual environment has been fully swapped to broker placeholders (agents-2dj).
 
 The broker removes the secret from the sandbox. The dispatcher runs this localhost
 HTTP proxy *outside* the sandbox. The sandboxed engine is given only a base URL
