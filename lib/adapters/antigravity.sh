@@ -68,7 +68,7 @@ echo "[antigravity adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'.
 # the prompt itself, it rides argv for the run's duration (agents-pgr class). The
 # directive guard near the top of the file already required a readable, nonempty file.
 if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
-  PROMPT="$(cat "$FACTORY_SYSTEM_DIRECTIVE_FILE")\n\n${PROMPT}"
+  PROMPT="$(cat "$FACTORY_SYSTEM_DIRECTIVE_FILE")"$'\n\n'"${PROMPT}"
 fi
 
 cd "$TARGET_DIR"

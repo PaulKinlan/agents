@@ -467,6 +467,20 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     pool = with_findings or objects
     return max(pool, key=lambda o: o[0])[1]
 
+def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
+    """Exclusively allocate a run directory, including on a same-second collision."""
+    run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        # agents-m2n review P2: the egress sockets, prompt and policy must never be shared.
+        run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}-{token_hex(4)}"
+        run_dir.mkdir(parents=True, exist_ok=False)
+    # Raw scanner matches and prompts stay private to the operator (agents-pgr).
+    os.chmod(run_dir, 0o700)
+    return run_dir
+
+
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
               station_only: bool = False, repair_hint: Optional[str] = None):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
@@ -555,19 +569,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         policy = downgrade_network_to_withheld(policy)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
-    try:
-        run_dir.mkdir(parents=True, exist_ok=False)
-    except FileExistsError:
-        # agents-m2n review P2 (same class as agents-30q): the name resolves to the
-        # second, and two runs in one second must not share a run dir — the egress
-        # sockets, prompt, policy.json and session.patch all live there. Disambiguate
-        # with a random suffix and take that directory exclusively.
-        run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}-{token_hex(4)}"
-        run_dir.mkdir(parents=True, exist_ok=False)
-    # The run artifacts hold raw scanner matches (candidates.json, prompt.txt), so the
-    # directory is private to the operator (agents-pgr).
-    os.chmod(run_dir, 0o700)
+    run_dir = create_run_dir(agent_name, target_name, run_id)
 
     # Disposable per-session worktree (agents-6ce). A granted write runs the engine in a
     # throwaway git worktree under the run directory — which the OS sandbox already binds

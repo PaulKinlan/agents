@@ -116,6 +116,28 @@ class TestVerifierPriming(unittest.TestCase):
             self.assertNotIn("SENTINEL-FROM-REPORT", json.dumps(bundle))
             self._assert_no_conclusions(bundle)
 
+    def test_collision_suffixed_discovery_runs_remain_visible(self):
+        """agents-esx: the dispatcher appends eight hex digits on same-second collisions.
+        That run remains eligible for the verifier's location-only fallback."""
+        for agent, source, field in (("vuln-discovery", "candidates.json", "candidates"),
+                                     ("threat-model", "report.json", "findings")):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as tmpdir:
+                sandbox, target = self._sandbox(Path(tmpdir))
+                runs = sandbox / "runs"
+                # A malformed suffix is never a discovery run, even with a later timestamp.
+                invalid = runs / f"{agent}-target-20990101-000000-nothex12"
+                invalid.mkdir(parents=True)
+                (invalid / source).write_text(json.dumps({field: [
+                    discovery_finding(snippet="INVALID-SUFFIX")]}), encoding="utf-8")
+                run_dir = runs / f"{agent}-target-20260101-000000-a1b2c3d4"
+                run_dir.mkdir(parents=True)
+                (run_dir / source).write_text(json.dumps({field: [
+                    discovery_finding(agent=agent, snippet="COLLISION-SUFFIX")]}), encoding="utf-8")
+                bundle = self._run(sandbox, target)
+                self.assertEqual(bundle["candidate_count"], 1)
+                self.assertEqual(bundle["candidates"][0]["snippet"], "COLLISION-SUFFIX")
+                self._assert_no_conclusions(bundle)
+
     def test_the_model_report_is_still_a_stripped_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox, target = self._sandbox(Path(tmpdir))
