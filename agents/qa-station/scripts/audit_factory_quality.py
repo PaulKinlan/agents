@@ -3,9 +3,9 @@
 
 Audits the Software Factory's own fleet and findings store:
 1. Verifies every `agents/<name>/` directory has valid `agent.yaml`, `SKILL.md`, `scripts/`, and `report.schema.json`.
-2. Analyzes `findings/*-findings.json` and `findings/suppressions.yaml` to compute per-agent finding volume,
-   `wontfix` false-positive rates, duplicate snippet rates, and missing remediation quality.
-3. Flags noisy rules (`wontfix_rate > 0.30` or high volume of low-value alerts) for prompt/pre-pass tuning.
+2. Analyzes readable `findings/*.json` lifecycle stores to compute per-agent finding volume,
+   `wontfix` false-positive rates and missing-remediation counts.
+3. Flags agents with at least three findings and `wontfix_rate > 0.30` for prompt/pre-pass tuning.
 """
 
 import argparse
