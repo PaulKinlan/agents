@@ -178,9 +178,14 @@ class TestLineDeltaReport(SandboxCase):
         self.assertEqual(row.split(), ["garbled", "ERROR", "-", "-"])
 
     def test_stations_after_a_halt_are_listed_as_skipped(self):
-        self.box.agent("garbled", "no json here")
+        # agents-noo: a halt is triggered by a GENUINE failure (engine/pre-pass), NOT by a
+        # no-verdict — unparseable output now degrades-and-continues instead of halting. Drive the
+        # halt with an engine that exits non-zero (a genuine StationError), so the downstream
+        # station is still SKIPPED and named.
+        self.box.agent("crashy", report())
+        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\necho '{\"findings\": []}'\nexit 1\n")
         self.box.agent("quiet", report())
-        self.box.line(["garbled", "quiet"], halt=True)
+        self.box.line(["crashy", "quiet"], halt=True)
         ok, _ = self.box.run_line()
         self.assertFalse(ok)
         delta = self.box.findings("target-delta.md")

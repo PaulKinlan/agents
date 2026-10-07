@@ -48,10 +48,23 @@ except ImportError:
 
 
 class StationError(RuntimeError):
-    """A station ran but produced no verdict. Never a clean scan (fleet-ddd, journal-idy).
+    """A station failed and produced no verdict — never a clean scan (fleet-ddd, journal-idy).
 
-    Raised for a failed pre-pass, a failed engine, and model output that cannot be parsed or
-    violates the report schema. `factory run` exits non-zero and a line records ERROR.
+    Raised for a GENUINE failure: a failed pre-pass or a failed engine (the station could not
+    run). A genuine failure halts the line (andon); `factory run` exits non-zero and the line
+    records ERROR. Model output that merely cannot be parsed or violates the report schema is a
+    PLUMBING failure (agents-noo) — that is NoVerdictError, which degrades the station and lets
+    the line continue rather than halting every downstream station.
+    """
+
+
+class NoVerdictError(StationError):
+    """A station ran (its engine exited zero) but its output was unparseable or schema-invalid
+    (agents-noo). A PLUMBING failure, not a genuine one: run_line gives it ONE bounded
+    repair-retry, then degrades the station to ERROR (no verdict) and CONTINUES the line as
+    INCOMPLETE rather than halting and skipping every downstream station. Subclasses StationError
+    so any existing `except StationError` still catches it; run_line matches the specific type to
+    branch (degrade vs halt) instead of parsing the message string.
     """
 
 # Local git plumbing in the hill-climb path is fast when healthy; a wedged git (lock contention,
@@ -395,7 +408,7 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     return max(pool, key=lambda o: o[0])[1]
 
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
-              station_only: bool = False):
+              station_only: bool = False, repair_hint: Optional[str] = None):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
     agent_yaml = agent_dir / "agent.yaml"
     skill_dir = agent_dir
@@ -609,6 +622,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 "Schema. Use these exact property names (e.g. `rule_id`, not `id`):\n"
                 f"{json.dumps(output_schema, indent=2)}\n"
             )
+        if repair_hint:
+            # agents-noo: a repair-retry tells the model exactly what was rejected, so the second
+            # attempt has a real chance of producing a valid report instead of the same garbage.
+            prompt += "\n\n" + repair_hint
         prompt_file = run_dir / "prompt.txt"
         prompt_file.write_text(prompt, encoding="utf-8")
         os.chmod(prompt_file, 0o600)
@@ -736,9 +753,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     report_path = run_dir / "report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     if not model_parse_succeeded:
-        # No verdict is a station failure, never PASS/0 (fleet-ddd, journal-mid). The raw
-        # output stays in the run directory for a human (or a re-import) to recover.
-        raise StationError(f"{agent_name}: {no_verdict}; no verdict (raw output kept in "
+        # No verdict is a station failure, never PASS/0 (fleet-ddd, journal-mid). The raw output
+        # stays in the run directory for a human (or a re-import) to recover. The engine ran and
+        # returned zero — only its output was unusable — so this is a PLUMBING failure, not a
+        # genuine engine failure: NoVerdictError, which run_line repair-retries once then degrades
+        # and continues instead of halting every downstream station (agents-noo).
+        raise NoVerdictError(f"{agent_name}: {no_verdict}; no verdict (raw output kept in "
                            f"{run_dir / 'model_output.txt'})")
 
     # If the agent produced THREAT_MODEL.md content, save it
@@ -800,6 +820,28 @@ def count_criticals(findings: Any) -> int:
     return sum(1 for f in findings if isinstance(f, dict) and reported_severity(f) == "critical")
 
 
+def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str,
+                                  explicit_sink: Optional[str]) -> Any:
+    """Run one station, giving a no-verdict PLUMBING failure ONE bounded repair-retry (agents-noo).
+
+    A GENUINE failure — a StationError that is not a NoVerdictError (a failed pre-pass or engine)
+    or a SystemExit (fail-closed) — propagates immediately and is never retried: the station could
+    not run, so the line must halt. A no-verdict (the engine ran and returned zero but its output
+    was unparseable or schema-invalid) is retried ONCE with a hint telling the model what was
+    rejected; if the retry also produces no verdict, the NoVerdictError propagates so run_line
+    degrades the station to ERROR and continues the line as INCOMPLETE rather than halting."""
+    try:
+        return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True)
+    except NoVerdictError as e:
+        print(f"\n  🔧 [repair-retry] Station '{st_agent}' produced no verdict: {e}")
+        print(f"     Retrying ONCE, telling the model its previous output was rejected...")
+        hint = (f"Your previous output produced NO VERDICT and was rejected: {e}. Respond with "
+                f"ONLY one valid JSON object that validates against the declared report schema — "
+                f"no prose, no code fences, no tool calls.")
+        return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True,
+                         repair_hint=hint)
+
+
 def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None):
     line_yaml = FACTORY_ROOT / "lines" / f"{line_name}.yaml"
     if not line_yaml.exists():
@@ -840,7 +882,7 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         st_engine = station_engines.get(st_agent, engine_arg) if isinstance(station_engines, dict) else engine_arg
         print(f"\n▶ [Station {idx}/{len(stations)}] Commencing: {st_agent} [{st_engine}] -- {st_summary}")
         try:
-            res = run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True)
+            res = run_station_with_repair_retry(st_agent, target_arg, st_engine, explicit_sink)
             report = res.get("report", {}) if res else {}
             findings = [f for f in report.get("findings", []) if isinstance(f, dict) and not is_false_positive(f)]
             criticals = count_criticals(findings)
@@ -862,6 +904,18 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                 print(f"   Discovered {criticals} critical finding(s). Downstream stations aborted.")
                 line_halted = True
                 break
+        except NoVerdictError as e:
+            # Both the original attempt and the ONE bounded repair-retry produced no verdict
+            # (agents-noo). This is a PLUMBING failure — the engine ran and returned zero, only its
+            # output was unparseable or schema-invalid — NOT a genuine engine failure. So degrade
+            # the station to ERROR (no verdict) and CONTINUE the line; do NOT halt and skip every
+            # downstream station. The line is INCOMPLETE and returns failure, so the missing
+            # verdict is never read as a clean PASS (fleet-ddd).
+            print(f"\n  ⚠️ [degrade] Station '{st_agent}' produced no verdict even after the repair-retry.")
+            print(f"     Marking it ERROR (no verdict) and CONTINUING; the line is INCOMPLETE, not halted.")
+            scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": None,
+                              "criticals": None, "error": f"no verdict after repair-retry: {e}"})
+            # No break: fall through to the next station.
         except SystemExit as e:
             # A station that fails closed calls sys.exit (run_agent does it when an adapter
             # produces no model output). SystemExit is not an Exception, so without this branch

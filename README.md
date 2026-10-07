@@ -117,7 +117,7 @@ You can run any agent against a registered target name (from `targets/`) or agai
 
 ### 3. Run a Factory Line (Composition & Andon Cord)
 
-A Factory Line orchestrates multiple agents in sequence across the SDLC. If any station encounters a fatal error or a critical defect (e.g. an exposed secret), the **Andon Cord** immediately halts the line:
+A Factory Line orchestrates multiple agents in sequence across the SDLC. The **Andon Cord** immediately halts the line — skipping every downstream station — when a station hits a *genuine* failure (its engine or pre-pass could not run) or a critical defect (e.g. an exposed secret). A station whose engine ran but produced no usable verdict (unparseable or schema-violating output) is a *plumbing* failure, not a genuine one: it gets one bounded repair-retry, then degrades to `ERROR` and the line continues as `INCOMPLETE` rather than halting:
 
 ```bash
 # Run the full SDLC project audit line against a target

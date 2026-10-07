@@ -207,6 +207,100 @@ class TestLineAndon(unittest.TestCase):
             self.assertIn("FACTORY LINE SCORECARD", res.stdout)
             self.assertIn("ERROR", res.stdout)
 
+    # --- agents-noo: a no-verdict (unparseable/schema-invalid) station is a PLUMBING failure ---
+    # It must degrade-and-continue (line INCOMPLETE), NOT halt and skip every downstream station.
+    # A GENUINE failure (engine/pre-pass) still halts. run_line branches on the NoVerdictError
+    # TYPE, and gives it exactly one bounded repair-retry first.
+
+    def test_unparseable_output_degrades_and_continues_not_halts(self):
+        """agents-noo core: a station whose model output is unparseable (a PLUMBING failure, not a
+        genuine engine failure) must NOT halt the line, even with andon_halt_on_failure=true.
+        run_agent raises NoVerdictError, run_line repair-retries once (still unparseable), then
+        degrades the station to ERROR and CONTINUES. Before this fix the line halted here and
+        skipped every downstream station. This is end-to-end (the real run_agent parses the real
+        stub output), so it also proves the no-verdict path raises NoVerdictError, not StationError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["garbage", "okprobe"])
+            (sandbox.root / "agents" / "garbage").mkdir(parents=True)
+            (sandbox.root / "agents" / "garbage" / "agent.yaml").write_text(
+                "name: garbage\nclass: observer\ncontainment: t0-readonly\n"
+                "short_circuit_empty: false\nbudget: {max_minutes: 1}\n", encoding="utf-8")
+            # Prose, not a JSON report. The OKPROBE-RAN line keeps _Marker's proof that the
+            # downstream station actually ran (the line continued past the no-verdict).
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo OKPROBE-RAN\n"
+                "echo 'This station produced prose only. There is no JSON object here at all.'\n",
+                encoding="utf-8")
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertFalse(result, "a line with a no-verdict station must report failure (INCOMPLETE)")
+            self.assertIn("INCOMPLETE", output)
+            self.assertNotIn("HALTED", output)
+            self.assertNotIn("SKIPPED", output)
+            self.assertIn("garbage", output)
+            self.assertIn("ERROR", output)
+            self.assertIn("repair-retry", output)
+            self.assertTrue(sandbox.marker.exists(),
+                            "the downstream station must RUN: the line continued past the no-verdict")
+
+    def test_a_genuine_engine_failure_still_halts_the_line(self):
+        """agents-noo guard: NoVerdictError degrades, but a GENUINE StationError (a failed engine,
+        not merely unparseable output) must still halt the line and skip downstream stations. This
+        proves the NoVerdictError subclass did not silently turn genuine failures into
+        degrade-and-continue, and that genuine failures are NOT repair-retried."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["genuine", "okprobe"])
+
+            def fake_run_agent(agent_name, *a, **k):
+                raise factory_cli.StationError(f"{agent_name}: engine 'pi' exited 1; genuine failure")
+
+            with mock.patch.object(factory_cli, "run_agent", side_effect=fake_run_agent):
+                result, output = sandbox.run()
+
+            self.assertFalse(result)
+            self.assertIn("HALTED", output)
+            self.assertIn("genuine", output)
+            self.assertIn("ERROR", output)
+            self.assertIn("okprobe", output)
+            self.assertIn("SKIPPED", output)
+            self.assertNotIn("repair-retry", output)
+            self.assertFalse(sandbox.marker.exists(),
+                             "a halted line must not run the downstream station")
+
+    def test_the_repair_retry_recovers_a_station_whose_first_output_was_unparseable(self):
+        """agents-noo: the ONE bounded repair-retry is real — a station that produces no verdict on
+        the first attempt but a valid report on the retry PASSES, and the line completes. Proves the
+        retry can recover a transient bad-output station instead of degrading it, and that it is
+        bounded (exactly one retry)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["flaky", "okprobe"])
+            valid = {"report": {"summary": "ok", "findings": [], "scanned_files": 1},
+                     "fragment": None, "run_dir": tmpdir}
+            calls = {"flaky": 0}
+
+            def fake_run_agent(agent_name, *a, **k):
+                if agent_name == "flaky":
+                    calls["flaky"] += 1
+                    if calls["flaky"] == 1:
+                        raise factory_cli.NoVerdictError("flaky: unparseable output; no verdict")
+                return valid
+
+            with mock.patch.object(factory_cli, "run_agent", side_effect=fake_run_agent):
+                result, output = sandbox.run()
+
+            self.assertTrue(result, "a line whose stations all reached a verdict must report success")
+            self.assertIn("COMPLETE", output)
+            self.assertNotIn("INCOMPLETE", output)
+            self.assertNotIn("HALTED", output)
+            self.assertIn("repair-retry", output)
+            self.assertEqual(calls["flaky"], 2, "flaky must be retried exactly once (bounded)")
+            self.assertIn("flaky", output)
+            self.assertIn("okprobe", output)
+            self.assertIn("PASS", output)
+
 
 if __name__ == "__main__":
     unittest.main()

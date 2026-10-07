@@ -123,7 +123,11 @@ class TestGenuineRejection(SchemaAgentCase):
         self.assertTrue(json.loads((run_dir / "schema_errors.json").read_text()))
 
     def test_a_halt_names_the_skipped_stations(self):
+        # agents-noo: a schema-violating (no-verdict) station now degrades-and-continues, so it no
+        # longer halts. Drive the halt with a GENUINE engine failure (exit non-zero -> StationError)
+        # so the downstream stations are still SKIPPED and named in the halt message.
         self.schema_agent("threat-model", tm_output([{"severity": "high"}]))
+        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\necho '{\"findings\": []}'\nexit 1\n")
         self.box.agent("after-one", json.dumps({"summary": "s", "findings": []}))
         self.box.agent("after-two", json.dumps({"summary": "s", "findings": []}))
         self.box.line(["threat-model", "after-one", "after-two"], halt=True)
