@@ -224,6 +224,7 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
             stub = bindir / "pi"
             stub.write_text(
                 "#!/usr/bin/env bash\n"
+                "cat >/dev/null\n"  # real pi.sh pipes its prompt under pipefail
                 # The env dump goes to stdout (captured into the run directory's
                 # model_output.txt): the sandbox leaves the engine nothing else writable.
                 "echo ENGINE-ENV-BEGIN\n"
@@ -491,6 +492,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
         stub = bindir / "claude"
         stub.write_text(
             "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"  # claude.sh uses pipefail around its prompt pipe
             "printf '%s\\n' \"$*\" > \"$FAKE_PROMPT_LOG\"\n"
             "env > \"$FAKE_ENV_LOG\"\n"
             "echo '{\"summary\":\"stub\",\"scanned_files\":0,\"findings\":[]}'\n"
@@ -498,7 +500,8 @@ class TestEngineAdapterAuth(unittest.TestCase):
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
         return bindir
 
-    def _run_claude_adapter(self, tmp: Path, env_overrides: dict):
+    def _run_claude_adapter(self, tmp: Path, env_overrides: dict,
+                            prompt: str = "prompt"):
         adapter = FACTORY_ROOT / "lib" / "adapters" / "claude.sh"
         run_dir = tmp / "run"
         target = tmp / "target"
@@ -510,8 +513,20 @@ class TestEngineAdapterAuth(unittest.TestCase):
         env.update(env_overrides)
         return subprocess.run(
             ["bash", str(adapter), "probe", str(target), str(tmp), str(run_dir)],
-            input="prompt", capture_output=True, text=True, env=env, timeout=60,
+            input=prompt, capture_output=True, text=True, env=env, timeout=60,
         ), run_dir
+
+    def test_canned_claude_report_drains_a_large_adapter_prompt(self):
+        """Fail-on-revert: an unread pipe would make real claude.sh exit 1."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            bindir = self._stub_engine(tmp)
+            res, run_dir = self._run_claude_adapter(tmp, {
+                "PATH": f"{bindir}:{os.environ['PATH']}",
+                "ANTHROPIC_API_KEY": "synthetic-test-key",
+            }, prompt="x" * 200000)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn('"summary":"stub"', (run_dir / "model_output.txt").read_text())
 
     def test_claude_prefers_session_and_scrubs_ambient_api_key(self):
         """A login on disk must win over a stale API key in the caller's environment."""

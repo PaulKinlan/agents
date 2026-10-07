@@ -134,7 +134,7 @@ class TestGenuineRejection(SchemaAgentCase):
         # longer halts. Drive the halt with a GENUINE engine failure (exit non-zero -> StationError)
         # so the downstream stations are still SKIPPED and named in the halt message.
         self.schema_agent("threat-model", tm_output([{"severity": "high"}]))
-        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\necho '{\"findings\": []}'\nexit 1\n")
+        (self.box.bin / "pi").write_text("#!/usr/bin/env bash\ncat >/dev/null\necho '{\"findings\": []}'\nexit 1\n")
         self.box.agent("after-one", json.dumps({"summary": "s", "findings": []}))
         self.box.agent("after-two", json.dumps({"summary": "s", "findings": []}))
         self.box.line(["threat-model", "after-one", "after-two"], halt=True)
