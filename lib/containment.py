@@ -239,17 +239,19 @@ def load_policy(agent: str, agent_cfg: Mapping[str, Any]) -> Policy:
     max_usd = _positive_number(agent, "max_usd", budget.get("max_usd"))
 
     # The grant. Write is grantable via a disposable per-session git worktree (agents-6ce),
-    # but only for an agent whose output IS a file patch — a proposer (pr-fixer, docs-write,
-    # perf-review). Such an agent runs its engine in a throwaway worktree, so edits never
-    # touch the target checkout and the collected session diff is the proposal. An optimizer
-    # (perf-hillclimb) is excepted: it returns structured steps its driver applies in its own
-    # worktree, so its session stays read-only (and a read-only engine is not refused at
-    # check_engine). The grant is also conditional on the target being a git repo; run_agent
-    # resolves that and downgrades to read-only (re-withholding write) when it is not, so the
-    # banner and policy.json stay honest. Network and browser stay withheld: no egress
-    # allowlist / localhost-only browser exists yet.
+    # but only for an agent whose class is `proposer` — one whose output IS a file patch
+    # (pr-fixer, docs-write, perf-review). Such an agent runs its engine in a throwaway
+    # worktree, so edits never touch the target checkout and the collected session diff is the
+    # proposal. The gate is fail-closed on the class (review P2, agents-6ce): ONLY `proposer`
+    # is granted, so an optimizer (perf-hillclimb — it returns structured steps its driver
+    # applies in its own worktree, so its session stays read-only), an observer, or any
+    # unknown/mis-typed class that declares write is NOT. The grant is further conditional, at
+    # run time, on the target being a git repo AND the run being engine_sandboxed; run_agent
+    # downgrades to read-only (re-withholding write) when either fails, so the banner and
+    # policy.json stay honest. Network and browser stay withheld: no egress allowlist /
+    # localhost-only browser exists yet.
     agent_class = agent_cfg.get("class")
-    write_granted = declared["write"] and agent_class != "optimizer"
+    write_granted = declared["write"] and agent_class == "proposer"
     tool_policy = WORKTREE_WRITE if write_granted else READ_ONLY
     withheld: Dict[str, str] = {}
     for flag in CAPABILITY_FLAGS:

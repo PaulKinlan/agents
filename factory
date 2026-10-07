@@ -89,9 +89,23 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path) -> Optional[Path]:
     """Collect the engine's edits inside the worktree as run_dir/session.patch (agents-6ce):
     stage everything (so new/untracked files are included, respecting the target's .gitignore)
     and diff against the worktree's detached HEAD. Returns the patch path, or None when the
-    engine changed nothing. This patch IS the proposal — the target checkout was never touched."""
-    _run_git(["git", "add", "-A"], worktree_dir)
+    engine changed nothing. This patch IS the proposal — the target checkout was never touched.
+
+    Both git calls are checked (review P1-1, agents-6ce). A staging failure — e.g. a stale
+    index.lock left by a crashed run, which makes `git add -A` exit 128 while the following
+    `git diff --cached` then returns an empty rc0 diff — must RAISE, not be reported as "no
+    edits": silently returning None there discards the engine's proposal while the station
+    exits 0. Mirrors _create_session_worktree's checked returncode."""
+    add = _run_git(["git", "add", "-A"], worktree_dir)
+    if add.returncode != 0:
+        raise StationError(
+            f"cannot stage the session worktree edits at {worktree_dir}: git add exited "
+            f"{add.returncode}: {(add.stderr or '').strip()}")
     diff = _run_git(["git", "diff", "--cached", "--binary"], worktree_dir)
+    if diff.returncode != 0:
+        raise StationError(
+            f"cannot diff the session worktree edits at {worktree_dir}: git diff exited "
+            f"{diff.returncode}: {(diff.stderr or '').strip()}")
     patch = diff.stdout or ""
     if not patch.strip():
         return None
@@ -367,13 +381,26 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     worktree_dir: Optional[Path] = None
     engine_cwd = target_dir
     if policy.tool_policy == WORKTREE_WRITE:
-        if (target_dir / ".git").exists():
-            worktree_dir = run_dir / "worktree"
-            engine_cwd = worktree_dir
-        else:
+        if not (target_dir / ".git").exists():
             policy = downgrade_write_to_read_only(policy, (
                 "the target is not a git repository, so no disposable worktree can be "
                 "created; the engine runs read-only and returns patches in its report"))
+        elif not engine_sandboxed(engine):
+            # Review P1-2 (agents-6ce): the OS sandbox is the ONLY boundary that ro-binds the
+            # target. pi's tools are not path-confined by its flags, and claude is not
+            # sandbox-verified (not in SANDBOXED_ENGINES), so when the run will not be
+            # engine_sandboxed — a bwrap-less host under FACTORY_ALLOW_UNSANDBOXED, or claude
+            # anywhere — a granted write is an unconfined write primitive and the adapter's
+            # "target bound read-only" claim would be false. Downgrade to read-only (the
+            # pre-6ce behaviour for this mode) instead of handing the engine edit/write.
+            policy = downgrade_write_to_read_only(policy, (
+                "the engine session will not run inside the OS sandbox on this host "
+                "(no bubblewrap, or an engine whose adapter is not sandbox-verified), so "
+                "nothing kernel-enforces the target staying read-only; the engine runs "
+                "read-only and returns patches in its report"))
+        else:
+            worktree_dir = run_dir / "worktree"
+            engine_cwd = worktree_dir
 
     # Build the sandbox wraps BEFORE the banner, so "Sandbox: enforced" is printed only for
     # a wrapper that actually constructed; a build failure is a station error, never a
