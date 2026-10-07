@@ -142,6 +142,13 @@ def _validate_worktree_marker(worktree_dir: Path, expected_gitdir: Path) -> None
     except OSError as e:
         raise StationError(
             f"cannot read the session worktree's .git marker at {marker}: {e}") from e
+    except UnicodeDecodeError as e:
+        # agents-7ik: a non-UTF-8 marker (a binary blob written into .git's place) is a
+        # ValueError, not an OSError — it must fail closed as a clean StationError, not
+        # escape as an unhandled traceback.
+        raise StationError(
+            f"the session worktree's .git marker at {marker} is not UTF-8 text "
+            f"({e}); refusing to run host-side git against it") from e
     if not content.startswith("gitdir:"):
         raise StationError(
             f"the session worktree's .git marker at {marker} is not a gitdir pointer (got "
@@ -164,25 +171,36 @@ def _validate_worktree_marker(worktree_dir: Path, expected_gitdir: Path) -> None
 
 def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Optional[Path]:
     """Collect the engine's edits inside the worktree as run_dir/session.patch (agents-6ce):
-    stage everything (so new/untracked files are included, respecting the target's .gitignore)
-    and diff against the worktree's detached HEAD. Returns the patch path, or None when the
-    engine changed nothing. This patch IS the proposal — the target checkout was never touched.
+    record every path with intent-to-add (so new/untracked files appear in the diff,
+    respecting the target's .gitignore) and diff the worktree against its detached HEAD.
+    Returns the patch path, or None when the engine changed nothing trackable. This patch IS
+    the proposal — the target checkout was never touched.
 
     `gitdir` is the admin gitdir captured at worktree creation (trusted). The marker is
     validated against it and every git call is PINNED with --git-dir/--work-tree, so a model
     that repointed the worktree's .git marker (it lives in the writable run_dir) cannot
     redirect host-side git at the operator's real repo/index (review P1-1 round 2). Both calls
     also check the returncode (review P1-1 round 1): a staging failure — e.g. a stale
-    index.lock, which makes `git add -A` exit 128 while `git diff --cached` returns an empty
-    rc0 diff — must RAISE, not be reported as "no edits" and silently drop the proposal."""
+    index.lock, which makes staging exit 128 while `git diff` returns an empty rc0 diff —
+    must RAISE, not be reported as "no edits" and silently drop the proposal.
+
+    agents-7ik fidelity: (a) staging uses --intent-to-add, which records paths WITHOUT
+    writing their content blobs into the target's shared .git/objects — a plain
+    `git add -A` used to leave one unreferenced content blob per new/modified file in
+    the operator's object store on every run (working tree and HEAD identical, nothing
+    to GC-anchor them); intent-to-add's only footprint is the canonical empty blob
+    (e69de29...), 14 bytes, once per repo lifetime, and the diff is taken against HEAD
+    + worktree so new files still carry full content. (b) The patch carries a
+    `base-commit:` header (the trailer git itself uses) so a proposal can never be
+    applied blind against a moved HEAD; `git apply` skips it, verified."""
     _validate_worktree_marker(worktree_dir, gitdir)
     pinned = ["git", f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
-    add = _run_git(pinned + ["add", "-A"], worktree_dir)
+    add = _run_git(pinned + ["add", "-A", "--intent-to-add"], worktree_dir)
     if add.returncode != 0:
         raise StationError(
             f"cannot stage the session worktree edits at {worktree_dir}: git add exited "
             f"{add.returncode}: {(add.stderr or '').strip()}")
-    diff = _run_git(pinned + ["diff", "--cached", "--binary"], worktree_dir)
+    diff = _run_git(pinned + ["diff", "HEAD", "--binary"], worktree_dir)
     if diff.returncode != 0:
         raise StationError(
             f"cannot diff the session worktree edits at {worktree_dir}: git diff exited "
@@ -190,10 +208,25 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     patch = diff.stdout or ""
     if not patch.strip():
         return None
+    base = _run_git(pinned + ["rev-parse", "HEAD"], worktree_dir)
+    header = (f"base-commit: {base.stdout.strip()}\n" if base.returncode == 0 else "")
     patch_file = run_dir / "session.patch"
-    patch_file.write_text(patch, encoding="utf-8")
+    patch_file.write_text(header + patch, encoding="utf-8")
     os.chmod(patch_file, 0o600)
     return patch_file
+
+
+def _worktree_has_ignored_edits(worktree_dir: Path, gitdir: Path) -> bool:
+    """agents-7ik: did the session write anything gitignored? `git add -A` respects the
+    target's .gitignore, so edits that land ONLY in ignored paths produce an empty diff
+    ("no file edits") while files DID change. Used for the honest message — the ignored
+    files themselves are still not proposal content."""
+    pinned = ["git", f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
+    status = _run_git(pinned + ["status", "--porcelain", "--ignored=matching",
+                                "--untracked-files=all"], worktree_dir)
+    if status.returncode != 0:
+        return False  # a status failure must not invent a claim either way
+    return any(line.startswith("!!") for line in status.stdout.splitlines())
 
 
 def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
@@ -644,10 +677,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     # What was declared, what the session was granted, and what is not enforced — the run's
     # own record, so a finding can be read against the containment it was produced under.
-    (run_dir / "policy.json").write_text(
-        json.dumps(policy_record(policy, engine, sandbox=sandbox,
-                                 unsandboxed_note=unsandboxed_note), indent=2),
-        encoding="utf-8")
+    # Written BEFORE the session (a crash mid-session still leaves the record) and REWRITTEN
+    # from this captured string after the session closes (agents-7ik): run_dir is the
+    # read-write bind, so a granted-write session could otherwise tamper with its own
+    # containment record and leave the tampered version behind.
+    policy_record_json = json.dumps(
+        policy_record(policy, engine, sandbox=sandbox, unsandboxed_note=unsandboxed_note),
+        indent=2)
+    (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
 
     # 1. Deterministic pre-pass
     candidates_data = []
@@ -816,14 +853,33 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             for line in (adapter_res.stdout or "").splitlines():
                 if line.startswith("["):
                     print(f"  {line}")
+            # agents-7ik: collect the proposal ONLY from a successful session — a failed one
+            # leaves partial edits that must not be presented as "the proposal"; they are
+            # discarded together with the worktree in the finally below.
+            session_succeeded = (adapter_res.returncode == 0
+                                 and (run_dir / "model_output.txt").exists())
             if worktree_dir is not None:
-                patch_file = _collect_session_diff(worktree_dir, run_dir, worktree_gitdir)
-                if patch_file is not None:
-                    print(f"  [worktree] Collected the session's edits as {patch_file.name}; "
-                          f"the target checkout was not modified.")
+                if session_succeeded:
+                    patch_file = _collect_session_diff(worktree_dir, run_dir, worktree_gitdir)
+                    if patch_file is not None:
+                        print(f"  [worktree] Collected the session's edits as {patch_file.name}; "
+                              f"the target checkout was not modified.")
+                    elif _worktree_has_ignored_edits(worktree_dir, worktree_gitdir):
+                        # agents-7ik: gitignored edits are real changes on disk that `git
+                        # add -A` rightly refuses to stage — "no file edits" would be false.
+                        print("  [worktree] The session's only edits are gitignored files — "
+                              "real changes on disk, but not representable as a patch proposal.")
+                    else:
+                        print("  [worktree] The session made no file edits (empty proposal).")
                 else:
-                    print("  [worktree] The session made no file edits (empty proposal).")
+                    print("  [worktree] Session failed; discarding its partial edits "
+                          "(no proposal collected).")
         finally:
+            # agents-7ik: restore policy.json from the captured dispatcher record. The
+            # session just held run_dir read-write (it is the sandbox's rw bind), so its own
+            # containment record is rewritten from trusted bytes — whatever the session
+            # left there does not survive it.
+            (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
             if broker is not None:
                 broker.stop()
             if worktree_dir is not None:

@@ -63,6 +63,9 @@ READ_ONLY = "read-only"
 # read-only, so "propose, don't apply" holds and the collected session diff IS the proposal.
 WORKTREE_WRITE = "worktree-write"
 GRANTABLE_POLICIES = (READ_ONLY, WORKTREE_WRITE)
+# The only classes an agent manifest may declare (agents-7ik): the write grant is gated on
+# == proposer and an unknown class must refuse loudly, not silently downgrade.
+VALID_CLASSES = ("observer", "proposer", "optimizer")
 ENGINE_TOOL_POLICIES: Dict[str, frozenset] = {
     "pi": frozenset({READ_ONLY, WORKTREE_WRITE}),
     "claude": frozenset({READ_ONLY, WORKTREE_WRITE}),
@@ -305,7 +308,15 @@ def load_policy(agent: str, agent_cfg: Mapping[str, Any]) -> Policy:
     # (downgrade_network_to_withheld) when this run cannot isolate the netns — no OS sandbox,
     # or a model provider the credential broker cannot cover. Browser stays withheld: no
     # localhost-only browser mechanism exists yet.
-    agent_class = agent_cfg.get("class")
+    # agents-7ik: the class is not free-form. An unknown or mis-typed class used to slip
+    # through silently (the write gate was already fail-closed on == proposer, but a typo'd
+    # class quietly ran read-only with no hint); now it refuses like an unknown tier or
+    # capability, and a MISSING class defaults to observer — the strictest of the three.
+    agent_class = agent_cfg.get("class", "observer")
+    if agent_class not in VALID_CLASSES:
+        raise ContainmentError(
+            f"{agent}: unknown agent class {agent_class!r} — nothing would gate its grant "
+            f"correctly (known: {', '.join(VALID_CLASSES)}; omit `class` for observer)")
     write_granted = declared["write"] and agent_class == "proposer"
     tool_policy = WORKTREE_WRITE if write_granted else READ_ONLY
     withheld: Dict[str, str] = {}

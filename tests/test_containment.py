@@ -246,16 +246,20 @@ class TestDeclarationsFailClosed(unittest.TestCase):
 
     def test_a_non_proposer_class_is_not_granted_write(self):
         """Review P2 (agents-6ce): the write gate is fail-closed on class == proposer. An
-        observer, or any unknown/mis-typed class, that declares write is NOT granted
-        worktree-write — it stays read-only with write withheld. (Before the fix the gate was
-        `!= optimizer`, which granted a write primitive to any class nobody had vetted.)"""
-        for klass in ("observer", "totally-unknown-class"):
-            with self.subTest(klass=klass):
-                policy = load_policy("probe", manifest(containment="t2-local",
-                                                       capabilities={"write": True},
-                                                       **{"class": klass}))
-                self.assertEqual(policy.tool_policy, READ_ONLY)
-                self.assertIn("write", policy.withheld)
+        observer that declares write is NOT granted worktree-write — it stays read-only
+        with write withheld. (Before the fix the gate was `!= optimizer`, which granted a
+        write primitive to any class nobody had vetted.) agents-7ik tightened the tail:
+        an unknown/mis-typed class no longer slips through as a silent read-only run — it
+        REFUSES, like an unknown tier."""
+        policy = load_policy("probe", manifest(containment="t2-local",
+                                               capabilities={"write": True},
+                                               **{"class": "observer"}))
+        self.assertEqual(policy.tool_policy, READ_ONLY)
+        self.assertIn("write", policy.withheld)
+        with self.assertRaises(ContainmentError):
+            load_policy("probe", manifest(containment="t2-local",
+                                           capabilities={"write": True},
+                                           **{"class": "totally-unknown-class"}))
         # The positive case is unchanged: a proposer IS granted it.
         proposer = load_policy("probe", manifest(containment="t2-local",
                                                  capabilities={"write": True},
@@ -1222,7 +1226,25 @@ process.stdin.on('end', () => {
                              "a failed stage must not produce a patch")
         finally:
             lock.unlink(missing_ok=True)
-            factory_cli._remove_session_worktree(target, wt)
+
+    def test_a_non_utf8_worktree_marker_fails_closed(self):
+        """agents-7ik (4): a binary .git marker raises UnicodeDecodeError (a ValueError,
+        not an OSError) — it must surface as a clean StationError, never an unhandled
+        traceback. Fail-closed: host-side git is refused against the marker."""
+        target = self.root / "bin-target"
+        target.mkdir()
+        subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+        (target / "f.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(target), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(target), "-c", "user.email=f@t", "-c", "user.name=f",
+                        "commit", "-qm", "init"], check=True, capture_output=True)
+        wt = self.root / "bin-wt"
+        gitdir = factory_cli._create_session_worktree(target, wt)
+        (wt / ".git").write_bytes(b"\xff\xfe\x00not-a-gitdir-pointer")
+        with self.assertRaises(factory_cli.StationError) as ctx:
+            factory_cli._validate_worktree_marker(wt, gitdir)
+        self.assertIn("not UTF-8", str(ctx.exception))
+        factory_cli._remove_session_worktree(target, wt)
 
     def test_a_redirected_worktree_git_marker_is_refused_not_followed(self):
         """Review P1-1 round 2 (agents-6ce): the worktree's .git marker is a FILE inside the
@@ -1299,6 +1321,136 @@ process.stdin.on('end', () => {
         self._assert_no_leaked_worktree()
         self.assertEqual(self._target_fingerprint(), before,
                          "the target checkout must be byte-identical even when the engine fails")
+        # agents-7ik (d): a failed session's partial edits are NOT collected as a proposal.
+        self.assertIn("discarding its partial edits", res.stdout)
+        self.assertFalse((self.run_dirs()[0] / "session.patch").exists(),
+                         "a failed session must not leave a proposal patch")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_the_session_patch_carries_a_base_commit_and_applies_cleanly(self):
+        """agents-7ik (b): session.patch begins with a `base-commit:` trailer naming the
+        base HEAD, so a proposal can never be applied blind against a moved HEAD — and
+        git apply skips the trailer (verified here by applying the whole marked patch to a
+        fresh clone of the same base)."""
+        self._git_init_target()
+        self._editing_stub()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run_dir = self.run_dirs()[0]
+        patch_text = (run_dir / "session.patch").read_text(encoding="utf-8")
+        head = subprocess.run(["git", "-C", str(self.target), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.assertTrue(patch_text.startswith(f"base-commit: {head}\n"),
+                        patch_text[:120])
+        clone = self.root / "apply-clone"
+        subprocess.run(["git", "clone", "-q", str(self.target), str(clone)],
+                       check=True, capture_output=True)
+        applied = subprocess.run(["git", "-C", str(clone), "apply",
+                                  str(run_dir / "session.patch")],
+                                 capture_output=True, text=True)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertTrue((clone / "proposed.txt").exists(),
+                        "the proposal's new file must apply")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_staging_writes_no_content_blobs_into_the_shared_object_store(self):
+        """agents-7ik (c): intent-to-add staging must not litter the target's shared
+        .git/objects with unreferenced content blobs (a plain `git add -A` wrote one per
+        new/modified file every run). At most the canonical empty blob (size 0) may
+        appear, once; never the session's content."""
+        self._git_init_target()
+        self._editing_stub()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        objects = self.target / ".git" / "objects"
+        before = {p for p in objects.rglob("*") if p.is_file()}
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        after = {p for p in objects.rglob("*") if p.is_file()}
+        new_objects = after - before
+        self.assertLessEqual(len(new_objects), 1,
+                             f"staging wrote {len(new_objects)} objects: {new_objects}")
+        for obj in new_objects:
+            sha = f"{obj.parent.name}{obj.name}"
+            size = subprocess.run(["git", "-C", str(self.target), "cat-file", "-s", sha],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(size, "0", "the only allowed new object is the empty blob")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_gitignored_edits_are_reported_honestly(self):
+        """agents-7ik (a): a session whose only edits land in gitignored paths must not
+        be reported as 'no file edits' — the files exist on disk — but as ignored edits,
+        honestly not representable as a patch proposal."""
+        self._git_init_target()
+        (self.target / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.target), "add", ".gitignore"], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(self.target), "-c", "user.email=factory@test",
+                        "-c", "user.name=factory", "commit", "-qm", "gitignore"],
+                       check=True, capture_output=True)
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "mkdir -p ignored && printf 'junk\\n' > ignored/x.txt\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("gitignored files", res.stdout)
+        self.assertIn("not representable as a patch proposal", res.stdout)
+        self.assertNotIn("no file edits", res.stdout)
+        self.assertFalse((self.run_dirs()[0] / "session.patch").exists())
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_session_cannot_tamper_with_its_own_policy_record(self):
+        """agents-7ik (2): run_dir is the read-write bind, so a granted-write session can
+        reach its own policy.json — but whatever it writes there does not survive it: the
+        dispatcher rewrites the record from its captured bytes after the session closes."""
+        self._git_init_target()
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo \"POLICY:${FACTORY_TOOL_POLICY:-unset}\"\n"
+            # The tamper: overwrite the containment record mid-session.
+            "printf '%s' '{\"tampered\": true, \"granted\": {\"tool_policy\": \"unrestricted\"}}' "
+            "> ../policy.json\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.stub_line("POLICY:"), WORKTREE_WRITE,
+                         "sanity: this really was a granted-write session")
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertNotIn("tampered", record)
+        self.assertEqual(record["granted"]["tool_policy"], WORKTREE_WRITE,
+                         "the post-session rewrite must restore the dispatcher's record")
+
+    def test_an_unknown_agent_class_refuses_and_a_missing_class_defaults_to_observer(self):
+        """agents-7ik (1): the class is not free-form — an unknown/mis-typed class refuses
+        like an unknown tier (the write gate was already == proposer; this makes the typo
+        loud instead of a silent read-only run), and a MISSING class defaults to observer."""
+        self.agent("name: probe\nclass: writer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unknown agent class", res.stderr + res.stdout)
+        self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
+        (self.root / "agents" / "probe" / "agent.yaml").write_text(
+            "name: probe\ncontainment: t0-readonly\nbudget: {max_minutes: 1}\n",
+            encoding="utf-8")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_a_sandboxed_engine_gets_a_broker_placeholder_not_the_real_key(self):

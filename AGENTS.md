@@ -142,7 +142,7 @@ a committed suppressions file.
 | | invocation | skills | tool policy flags (factory runs) |
 |---|---|---|---|
 | `antigravity` | headless conversation API | plugin dir / symlink into the engine config dir | refused: agentapi has no tool controls |
-| `claude` | `claude -p` | `--append-system-prompt-file` in factory runs, because the Skill tool is withheld; `factory skills install` links them into `~/.claude/skills` for interactive use | read-only: `--restricted --tools Read,Grep,Glob --strict-mcp-config` · worktree-write adds `Edit,Write` (`--restricted` still confines them to the worktree) |
+| `claude` | `claude -p` | `--append-system-prompt-file` in factory runs, because the Skill tool is withheld; `factory skills install` links them into `~/.claude/skills` for interactive use | read-only: `--restricted --tools Read,Grep,Glob --strict-mcp-config`. A write declaration always downgrades to read-only at runtime (claude is not OS-sandbox-verified, so it never receives worktree-write; the adapter's Edit,Write arm exists but is never taken) |
 | `pi` | `pi -p` | `--skill` | read-only: `--tools read,grep,find,ls --no-extensions --no-approve` · worktree-write adds `edit,write` (confined by the OS sandbox: the worktree is read-write, the target read-only) |
 
 Install locally by symlinking this repo into the engine's plugin directory — the same pattern as
