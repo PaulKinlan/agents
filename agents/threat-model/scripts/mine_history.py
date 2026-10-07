@@ -5,10 +5,18 @@ Mines repository git history, issue tracker records (.beads/issues.jsonl),
 package configurations, and code patterns for security fixes, past bugs,
 and exposed entry points to produce a rich factual basis for threat modeling.
 
-Applies strict prompt-injection hygiene (agents-1mu): unpredictable nonces,
-non-spoofable delimiter fencing, control/escape/chat-template sequence
-neutralization, and structured length caps.
-Suppresses scanner self-matches and ignores tests/fixtures/outputs (agents-55r).
+Prompt-injection defence (agents-1mu, agents-bcz):
+- The primary load-bearing control is unpredictable nonce delimiter fencing
+  (wrap_untrusted) and delimiter-breakout prevention.
+- Prompt hygiene (control/format-character stripping including full Unicode Cf
+  category and U+061C, NFKC normalization, chat-template neutralization, length
+  caps) acts as defense-in-depth, but is explicitly acknowledged as partial and
+  incomplete (prompt hygiene is not containment per non-negotiable #2).
+
+Scanner precision and suppression (agents-55r, agents-bcz):
+- Suppresses scanner self-matches and ignores tests/fixtures/outputs.
+- Note: suppression rules are global across all scanned files and trade recall
+  for precision (see is_self_referential_line and is_scanner_file).
 """
 
 import argparse
@@ -18,8 +26,9 @@ import re
 import secrets
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 SECURITY_KEYWORDS = [
     "security", "vuln", "cve", "sanitize", "escape", "bypass", "auth",
@@ -47,23 +56,23 @@ SELF_REFERENTIAL_SUPPRESSIONS = [
     re.compile(r"""\b(?:self\.assertEqual|self\.assertTrue|assert\s+.*(?:innerHTML|eval|fetch))"""),
 ]
 
-# Chat-template markers, instruction injection tags, and role headers
+# Chat-template markers, instruction injection tags, and role headers (including tool-call tokens)
 CHAT_TEMPLATE_PATTERN = re.compile(
-    r"<\|(?:im_start|im_end|system|user|assistant|endoftext|end|begin_of_text|eot_id|start_of_turn|end_of_turn)[^|>]*\|>"
-    r"|</?(?:start_of_turn|end_of_turn)>"
-    r"|\[/?(?:INST|AVAILABLE_TOOLS)\]"
+    r"<\|(?:im_start|im_end|system|user|assistant|endoftext|end|begin_of_text|eot_id|start_of_turn|end_of_turn|tool_call|tool_calls|tool_response)[^|>]*\|>"
+    r"|</?(?:start_of_turn|end_of_turn|tool_call|tool_calls)>"
+    r"|\[/?(?:INST|AVAILABLE_TOOLS|TOOL_CALLS)\]"
     r"|<<?/?SYS>>?"
     r"|</?s>"
     r"|\b(?:system|user|assistant|human|ai)\s*:"
-    r"|###\s*(?:system|instruction|human|assistant)",
+    r"|###\s*(?:system|instruction|human|assistant)\s*:?",
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Control characters: C0/C1 control codes, ANSI escapes, bidi overrides & zero-width chars
+# Control characters: C0/C1 control codes, ANSI escapes, bidi overrides, format chars (incl. U+061C), & zero-width
 CONTROL_CHARS_PATTERN = re.compile(
     r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07"  # ANSI escapes
     r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"  # C0/C1 controls
-    r"|[\u202a-\u202e\u2066-\u2069\ufeff\u200b-\u200f]"  # Bidi overrides & zero-width
+    r"|[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"  # Bidi overrides, U+061C, zero-width
 )
 
 SYSTEM_INSTRUCTION = (
@@ -82,29 +91,48 @@ def generate_nonce() -> str:
 
 
 def sanitize_untrusted_text(text: Any, max_length: int = 120, nonce: Optional[str] = None) -> str:
-    """Strip/neutralize control, escape, chat-template sequences, backticks, and enforce length caps."""
+    """Strip/neutralize control, escape, chat-template sequences, backticks, and enforce length caps.
+
+    Defense-in-depth pre-filter: strips ANSI escapes, C0/C1 controls, and all Unicode category
+    Cf (format) characters (including U+061C Arabic letter mark, bidi overrides, and zero-width
+    marks); applies Unicode NFKC normalization to collapse fullwidth/homoglyph tokens; neutralizes
+    known chat-template/role tokens; and enforces length caps.
+
+    NOTE (agents-bcz P2-2): Marker neutralization is inherently incomplete (blocklists cannot
+    enumerate all possible encodings or injection phrases; prompt hygiene is NOT containment per
+    non-negotiable #2). The unpredictable random-nonce delimiter fence in `wrap_untrusted` is the
+    load-bearing control.
+    """
     if text is None:
         return ""
     if not isinstance(text, str):
         text = str(text)
 
-    # 1. Strip ANSI escapes, control codes, and bidi override characters
+    # 1. Strip ANSI escapes and C0/C1 control codes
     text = CONTROL_CHARS_PATTERN.sub("", text)
 
-    # 2. Neutralize chat-template sequences and instruction framing markers
+    # 2. Strip all Unicode category Cf (format) characters across the entire Unicode space
+    # (e.g. U+061C Arabic letter mark, U+200B-U+200F zero-width marks, U+202A-U+202E bidi controls)
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+
+    # 3. Unicode NFKC normalization to fold fullwidth characters (e.g. Ｓｙｓｔｅｍ -> System,
+    # ＜｜ｔｏｏｌ＿ｃａｌｌ｜＞ -> <|tool_call|>) and compatibility equivalents before matching
+    text = unicodedata.normalize("NFKC", text)
+
+    # 4. Neutralize chat-template sequences and instruction framing markers
     text = CHAT_TEMPLATE_PATTERN.sub("[neutralized]", text)
 
-    # 3. Strip backticks and fence markers so content cannot break out of fenced blocks
+    # 5. Strip backticks and fence markers so content cannot break out of fenced blocks
     text = text.replace("`", "'")
 
-    # 4. If a nonce is active, neutralize any occurrence to prevent delimiter spoofing
+    # 6. If a nonce is active, neutralize any occurrence to prevent delimiter spoofing
     if nonce:
         text = text.replace(nonce, "[nonce-redacted]")
 
-    # 5. Flatten excessive whitespace and newlines
+    # 7. Flatten excessive whitespace and newlines
     text = re.sub(r"\s+", " ", text).strip()
 
-    # 6. Enforce per-field length cap so no field can carry a coherent instruction
+    # 8. Enforce per-field length cap so no field can carry a coherent instruction
     return text[:max_length].strip()
 
 
@@ -115,7 +143,12 @@ def wrap_untrusted(text: Any, nonce: str, max_length: int = 120) -> str:
 
 
 def is_test_or_fixture_path(rel_path: str, fname: str) -> bool:
-    """Check if path is inside tests, fixtures, or is a test file."""
+    """Check if path is inside tests, fixtures, or is a test file.
+
+    TRADE-OFF (agents-bcz P2-5): Trades recall for precision. Any production file
+    or package whose path or filename begins with 'test' or 'fixture' (e.g.
+    `testing_framework/` or `fixtures_client.py`) will be silently unscanned.
+    """
     parts = Path(rel_path).parts
     for part in parts[:-1]:
         pl = part.lower()
@@ -131,7 +164,13 @@ def is_test_or_fixture_path(rel_path: str, fname: str) -> bool:
 
 
 def is_scanner_file(fpath: Path, rel_path: str) -> bool:
-    """Check if file is a pattern-defining scanner script or scanner output."""
+    """Check if file is a pattern-defining scanner script or scanner output.
+
+    TRADE-OFF (agents-bcz P2-5): Silently unscans any files under `agents/*/scripts/`
+    and any file named `mine_history.py`. If a target repository ships production code
+    under those paths, it will be excluded. This is a deliberate precision-over-recall
+    choice to prevent the scanner's own pattern definitions from generating self-matches.
+    """
     try:
         if fpath.resolve() == Path(__file__).resolve():
             return True
@@ -147,7 +186,15 @@ def is_scanner_file(fpath: Path, rel_path: str) -> bool:
 
 
 def is_self_referential_line(line: str) -> bool:
-    """Suppress comments and pattern-definition lines."""
+    """Suppress comments and pattern-definition lines.
+
+    TRADE-OFF (agents-bcz P2-5): This suppression is GLOBAL across every line of
+    every scanned file in the target repository. If production code defines regexes
+    using `re.compile`, or defines objects with keys matching `rule_id`, `category`,
+    etc., or contains test assertions, those lines will be suppressed. This trade-off
+    bounds noise and self-matches at the cost of missing genuine sinks co-located on
+    such lines.
+    """
     clean = line.strip()
     if not clean or clean.startswith(("//", "#", "*", "/*", "'''", '"""')):
         return True
@@ -255,6 +302,11 @@ def scan_entry_points(target_dir: Path, nonce: Optional[str] = None) -> List[Dic
     Excludes test directories, test files, scanner definitions, and output directories.
     Suppresses self-referential pattern literals and comments.
     Wraps snippets in unpredictable nonce delimiters.
+
+    NOTE (agents-bcz P2-5): Suppression is global. Path exclusions (test*, fixture*,
+    agents/*/scripts/) and line-level suppressions (re.compile, rule_id literals) trade
+    recall for precision by silently unscanning any production code that matches those
+    rules.
     """
     findings = []
     active_nonce = nonce or generate_nonce()
@@ -323,38 +375,6 @@ def extract_project_metadata(target_dir: Path, nonce: Optional[str] = None) -> D
         except Exception:
             pass
     return meta
-
-
-def validate_threat_model_citations(
-    findings: List[Dict[str, Any]],
-    mined_context: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Validate model findings against deterministic candidate IDs and attack surfaces."""
-    valid_ids: Set[str] = set(mined_context.get("candidate_ids", []))
-    valid_paths: Set[str] = {
-        ep.get("path") for ep in mined_context.get("entry_points", []) if isinstance(ep, dict) and "path" in ep
-    }
-
-    validated = []
-    unreferenced = []
-    for item in findings:
-        cited_id = item.get("candidate_id") or item.get("id") or item.get("rule_id")
-        path = item.get("path")
-        is_grounded = (cited_id in valid_ids) or (path in valid_paths)
-        validated.append({
-            "finding": item,
-            "grounded": is_grounded,
-            "cited_id": cited_id
-        })
-        if not is_grounded:
-            unreferenced.append(item)
-
-    return {
-        "total_findings": len(findings),
-        "grounded_findings": len(findings) - len(unreferenced),
-        "unreferenced_findings": unreferenced,
-        "valid_candidate_count": len(valid_ids)
-    }
 
 
 def main():
