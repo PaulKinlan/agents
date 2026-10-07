@@ -10,6 +10,27 @@
   <link rel="icon" href="/favicon.png">
   <link rel="stylesheet" href="/css/projects.css">
   <link rel="stylesheet" href="/css/product.css">
+  <script type="speculationrules">
+  {
+    "prefetch": [
+      {
+        "where": { "href_matches": "/*" },
+        "eagerness": "conservative"
+      }
+    ],
+    "prerender": [
+      {
+        "where": {
+          "and": [
+            { "href_matches": "/*" },
+            { "not": { "href_matches": "/" } }
+          ]
+        },
+        "eagerness": "moderate"
+      }
+    ]
+  }
+  </script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
