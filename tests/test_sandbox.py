@@ -397,19 +397,56 @@ class TestSandboxLive(unittest.TestCase):
 
     def test_host_processes_are_invisible(self):
         """Private PID namespace: the sandbox sees only its own process tree, so no host
-        process's /proc/<pid>/environ is reachable."""
-        host_pids = {p for p in os.listdir("/proc") if p.isdigit()}
+        process's /proc/<pid>/environ is reachable.
+
+        agents-76v: the old numeric-range probe was a false-positive machine — every probed
+        pid was read by a spawned `cat` whose own namespace-LOCAL pid could equal the host
+        pid being probed, so `cat` read its OWN environ and reported a LEAK (observed on
+        plain main). The probe is now ONE sentinel process started OUTSIDE the sandbox —
+        long-lived, carrying a marker in its environ — read by a single grep that requires
+        the MARKER, not merely 'some environ readable': even if the prober's own local pid
+        collided with the sentinel's host pid, its environ cannot contain the host-side
+        marker, so a self-read stays harmless. The host-side sanity read first proves the
+        sentinel's environ is genuinely readable from the host pid namespace — so on a
+        genuinely SHARED namespace the same read inside the sandbox would find the marker
+        and this test fails, exactly as it must."""
+        # 76v review P1/P2: the sentinel outlives every probe the test can make (run_inside
+        # has a 120s timeout, wrap verification 60s; 600s dwarfs both), it is asserted ALIVE
+        # immediately before the in-sandbox probe (expiry fails the test loudly instead of
+        # false-passing on an empty /proc entry), and cleanup terminates + REAPS it so no
+        # zombie or orphan sleep is left behind.
+        sentinel = subprocess.Popen(
+            ["sleep", "600"],
+            env={**os.environ, "FACTORY_76V_SENTINEL": "host-side-secret-marker"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+
+        def _reap_sentinel():
+            sentinel.terminate()
+            try:
+                sentinel.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                sentinel.kill()
+                sentinel.wait(timeout=10)
+
+        self.addCleanup(_reap_sentinel)
+        # Host-side sanity: the sentinel's environ exists and carries the marker — readable
+        # from the host pid namespace, which is precisely what a shared-ns sandbox would see.
+        host_side = Path(f"/proc/{sentinel.pid}/environ").read_bytes()
+        self.assertIn(b"FACTORY_76V_SENTINEL=host-side-secret-marker", host_side)
         res = self.run_inside("ls /proc | grep '^[0-9]'")
         visible = set(res.stdout.split())
         self.assertTrue(visible, "the sandbox must see its own processes")
         self.assertTrue(len(visible) < 12, f"too many PIDs visible: {sorted(visible)}")
-        outside_only = host_pids - {"1"} - visible
-        self.assertTrue(outside_only, "test needs host PIDs the sandbox should not see")
+        self.assertIsNone(sentinel.poll(),
+                          "the sentinel expired before the in-sandbox probe - the test "
+                          "cannot tell a leak from an empty /proc entry, so fail loudly")
         probe = self.run_inside(
-            "for p in " + " ".join(sorted(outside_only)[:20]) +
-            "; do cat /proc/$p/environ >/dev/null 2>&1 && echo LEAK $p; done; echo PROBE_DONE")
+            f"grep -aq FACTORY_76V_SENTINEL /proc/{sentinel.pid}/environ 2>/dev/null "
+            f"&& echo LEAK; echo PROBE_DONE")
         self.assertIn("PROBE_DONE", probe.stdout)
-        self.assertNotIn("LEAK", probe.stdout)
+        self.assertNotIn("LEAK", probe.stdout,
+                         "a host process's environ (the sentinel's) leaked into the sandbox")
 
     def test_env_credentials_are_the_only_secret_in_reach(self):
         """Documented residual (policy.json not_enforced: env-credentials): the engine's
