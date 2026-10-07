@@ -116,6 +116,45 @@ class TestVerifierPriming(unittest.TestCase):
             self.assertNotIn("SENTINEL-FROM-REPORT", json.dumps(bundle))
             self._assert_no_conclusions(bundle)
 
+    def test_successful_repair_retry_is_discovered_after_no_verdict(self):
+        """agents-30q review P1: first attempt had no verdict/candidates, but the
+        successful threat-model retry's report remains visible to vuln-verify. Cover
+        both -attempt2 and the same-second collision suffix on that retry."""
+        for suffix in ("-attempt2", "-attempt2-a1b2c3d4"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmpdir:
+                sandbox, target = self._sandbox(Path(tmpdir))
+                runs = sandbox / "runs"
+                first = runs / "threat-model-target-20260101-000000"
+                first.mkdir(parents=True)
+                (first / "candidates.json").write_text('{"candidates": []}', encoding="utf-8")
+                retry = runs / f"threat-model-target-20260101-000000{suffix}"
+                retry.mkdir(parents=True)
+                (retry / "report.json").write_text(json.dumps({"findings": [
+                    discovery_finding(agent="threat-model", snippet="SUCCESSFUL-RETRY")
+                ]}), encoding="utf-8")
+                bundle = self._run(sandbox, target)
+                self.assertEqual(bundle["candidate_count"], 1)
+                self.assertEqual(bundle["candidates"][0]["snippet"], "SUCCESSFUL-RETRY")
+                self._assert_no_conclusions(bundle)
+
+    def test_collision_suffixed_discovery_runs_remain_visible(self):
+        """agents-30q review P1: the dispatcher's eight-hex collision suffix is
+        also accepted on a non-retry discovery run, without accepting arbitrary names."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            invalid = sandbox / "runs" / "vuln-discovery-target-20990101-000000-nothex12"
+            invalid.mkdir(parents=True)
+            (invalid / "candidates.json").write_text(json.dumps({"candidates": [
+                discovery_finding(snippet="INVALID-SUFFIX")]}), encoding="utf-8")
+            run_dir = sandbox / "runs" / "vuln-discovery-target-20260101-000000-a1b2c3d4"
+            run_dir.mkdir(parents=True)
+            (run_dir / "candidates.json").write_text(json.dumps({"candidates": [
+                discovery_finding(snippet="COLLISION-SUFFIX")]}), encoding="utf-8")
+            bundle = self._run(sandbox, target)
+            self.assertEqual(bundle["candidate_count"], 1)
+            self.assertEqual(bundle["candidates"][0]["snippet"], "COLLISION-SUFFIX")
+            self._assert_no_conclusions(bundle)
+
     def test_the_model_report_is_still_a_stripped_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox, target = self._sandbox(Path(tmpdir))

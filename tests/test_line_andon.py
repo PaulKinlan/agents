@@ -14,7 +14,6 @@ import io
 import json
 import os
 import shutil
-import socket
 import stat
 import subprocess
 import sys
@@ -378,7 +377,8 @@ class TestLineAndon(unittest.TestCase):
         """agents-30q (3): the credential broker is started and stopped per ATTEMPT — across
         a repair-retry there are two full start/stop cycles. Both attempts' engines see the
         placeholder + brokered base URL (never the operator's key), and after the line ends no
-        broker listener or socket file survives either attempt."""
+        broker socket path survives either attempt. The relay's child-facing port is in
+        the sandbox's private netns, not the host namespace."""
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = self._sandbox(tmpdir, halt=True, stations=["flaky", "okprobe"])
             sandbox._agent("flaky")
@@ -411,15 +411,9 @@ class TestLineAndon(unittest.TestCase):
                                 f"attempt {run.name} must reach the broker via localhost: {base}")
                 self.assertFalse((run / "egress-broker.sock").exists(),
                                  f"attempt {run.name} must not leave its broker socket behind")
-            # No orphan listener on the fixed broker port: it must be free to bind again.
-            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                probe.bind(("127.0.0.1", 8384))
-            except OSError as e:
-                self.fail(f"a broker listener survived the retried line: {e}")
-            finally:
-                probe.close()
+            # Each per-attempt broker UNIX socket is gone. Do not claim that binding
+            # 127.0.0.1:8384 on the HOST proves the relay's child-facing port is free:
+            # the relay listened in a separate --unshare-net namespace.
 
 
 if __name__ == "__main__":
