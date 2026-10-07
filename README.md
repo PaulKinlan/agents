@@ -343,6 +343,17 @@ When a run completes, findings are dispatched based on target configuration:
 - **`beads`**: For projects using [Beads](https://github.com/beads-project/beads). Active findings automatically create or update issues via `bd create`.
 - **`github-issues`**: For GitHub repositories. Creates labeled issues via `gh issue create`.
 
+**QA precision needs lifecycle observations.** `qa-station` reads `findings/<target>.json`
+from the *same factory checkout* that runs it; these stores are gitignored, not shared
+between worktrees. A missing store **or one with an empty `findings` map** yields the
+`qa-no-findings-store` measurement-gap candidate, not evidence of a clean fleet.
+After the owner-managed project-audit line has populated that checkout's store, inspect
+its per-agent volume, `wontfix_rate` and `estimated_precision` without a model call:
+`python3 agents/qa-station/scripts/audit_factory_quality.py --target . --output /tmp/qa-audit.json`.
+The estimates describe recorded lifecycle states, not human-validated precision;
+`new` findings with no `wontfix` dispositions do not certify 100% precision.
+Do not copy a private findings store into Git to make a QA scorecard appear.
+
 ### Public Disclosure Protection
 
 > [!CAUTION]

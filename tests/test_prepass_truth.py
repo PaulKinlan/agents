@@ -56,6 +56,30 @@ class TestPrepassFixes(unittest.TestCase):
                 data = qa.audit_findings_precision()
             self.assertEqual([c["rule_id"] for c in data["noisy_candidates"]], ["qa-no-findings-store"])
 
+    def test_qa_station_does_not_treat_an_empty_lifecycle_file_as_measured_precision(self):
+        """agents-2e8: a real station can create a valid but empty target.json; the QA
+        pre-pass must still surface a measurement gap rather than report clean."""
+        script = ROOT / "agents" / "qa-station" / "scripts" / "audit_factory_quality.py"
+        loader = importlib.machinery.SourceFileLoader("qa_audit_empty_2e8", str(script))
+        spec = importlib.util.spec_from_loader("qa_audit_empty_2e8", loader)
+        qa = importlib.util.module_from_spec(spec)
+        loader.exec_module(qa)
+        with tempfile.TemporaryDirectory() as tmp:
+            findings_dir = Path(tmp) / "findings"
+            findings_dir.mkdir()
+            (findings_dir / "target.json").write_text(
+                json.dumps({"target": "target", "findings": {}}), encoding="utf-8")
+            out = Path(tmp) / "qa-output.json"
+            with mock.patch.object(qa, "FINDINGS_DIR", findings_dir), \
+                 mock.patch.object(sys, "argv", ["qa", "--target", tmp, "--output", str(out)]):
+                qa.main()
+            result = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(result["stores_read"], ["target.json"])
+            self.assertEqual(result["agent_scorecards"], [])
+            gaps = [c for c in result["candidates"] if c["rule_id"] == "qa-no-findings-store"]
+            self.assertEqual(len(gaps), 1)
+            self.assertIn("No findings lifecycle records", gaps[0]["title"])
+
     def test_docs_drift_git_index_sees_deleted_files(self):
         sys.path.insert(0, str(ROOT / "agents" / "docs-drift" / "scripts"))
         import check_docs  # noqa: E402

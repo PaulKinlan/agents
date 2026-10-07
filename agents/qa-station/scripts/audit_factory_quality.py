@@ -104,16 +104,21 @@ def audit_findings_precision() -> Dict[str, Any]:
                 "rationale": "High wontfix ratio indicates false-positive creep; tighten deterministic pre-pass filters or SKILL.md triage rules."
             })
 
-    if not stores_read:
-        # No data is not a precision of 100%: say so, so the station cannot report clean.
+    if not agent_stats:
+        # A line can create findings/<target>.json with an EMPTY findings map. The old
+        # `not stores_read` check then treated that file as measurement evidence and
+        # reported a clean fleet despite having zero lifecycle records (agents-2e8).
+        # No observations are not a precision of 100%, regardless of file presence.
         noisy_candidates.append({
             "rule_id": "qa-no-findings-store",
             "agent": "qa-station",
             "path": "findings/",
             "severity": "info",
-            "title": "No findings store found: agent precision was not measured",
-            "rationale": f"No findings/<target>.json store exists under {FINDINGS_DIR}; run a line "
-                         "before trusting a qa-station precision verdict.",
+            "title": "No findings lifecycle records: agent precision was not measured",
+            "rationale": (f"No valid findings/<target>.json lifecycle records under {FINDINGS_DIR} "
+                          f"(stores read: {len(stores_read)}). A populated store from real "
+                          "station runs and human disposition is needed before trusting a "
+                          "qa-station precision verdict."),
         })
 
     return {

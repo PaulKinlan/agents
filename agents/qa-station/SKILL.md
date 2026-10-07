@@ -15,6 +15,7 @@ Your purpose is to **guard the human operator's attention** by auditing the prec
 2. **Precision & Alert Fatigue (`agent_scorecards`)**:
    - Review each agent's `estimated_precision` (`1 - wontfix_rate`) and `missing_remediation` count.
    - Any agent with `wontfix_rate > 0.25` or findings lacking actionable remediation snippets requires a concrete prompt or pre-pass filter tuning recommendation.
+   - If `agent_scorecards` is empty or the scanner emits `qa-no-findings-store`, say precision is **unmeasured**; do not claim a clean fleet or supply `fleet_precision`. An empty `findings/<target>.json` is not lifecycle evidence. A `1.0` estimate from unreviewed `new` findings means only that no wontfix has been recorded yet, not that human-reviewed precision is 100%.
 3. **Feedback Loop (`wontfix` → `THREAT_MODEL.md` / Pre-Pass)**:
    - Recommend specific regex exclusions or threat-model non-threat entries to prevent recurring false positives.
 
