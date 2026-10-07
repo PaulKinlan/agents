@@ -45,6 +45,12 @@ What it does NOT do, stated plainly because policy.json must never overclaim:
   record keeps saying NOT confined (THREAT_MODEL.md section 7 accepts unsandboxed runs for
   trusted targets; the honesty is the point).
 
+Two things stay deliberately distinct, because a record must never conflate them: bubblewrap
+being available on the host (sandbox_available(), a minimal probe) and the wrap built for a run
+actually starting its child (sandbox_command() exercises the plan it just built before it
+returns — agents-kwi). An unexercised wrap raises SandboxError, so the station fails before any
+banner or policy.json claims the run was sandboxed.
+
 Engines are added to SANDBOXED_ENGINES only after their adapter is verified to run inside
 the wrapper; an unlisted engine runs unsandboxed and its banner says so.
 """
@@ -54,7 +60,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
@@ -97,10 +103,25 @@ _HIDDEN_ROOTS = ("/home", "/root")
 # Hard cap on bind mounts: a pathological PATH must not produce an unbounded bwrap argv.
 _MAX_BINDS = 96
 
+# Exec-time verification (agents-kwi). sandbox_available() answers "can bubblewrap run on this
+# host?" with a minimal probe; it does NOT answer "does the wrap built for THIS run start its
+# child?". A wrap that fails at exec — bwrap present and the probe green, but the child never
+# launched (a broken/hostile bwrap, an inner program that is not exec-able inside the plan) —
+# used to be recorded as "Sandbox: enforced"/engine_sandboxed: true, because the record was
+# built from the probe. sandbox_command() therefore EXERCISES the plan it just built, once,
+# with a sentinel child, before it returns: the sentinel runs inside the wrap, proves it got in
+# by writing a one-time token into the run directory (rw-bound by the plan), and exits 0. No
+# proof, no wrap — SandboxError, so the station fails before any banner or policy.json exists,
+# exactly like the bwrap-missing path. Cost: one short-lived bwrap per wrap.
+_VERIFY_TIMEOUT = 60
+_VERIFY_INNER_NOT_EXECUTABLE = 41     # the sentinel got in; the real inner is not runnable there
+_VERIFY_RUN_DIR_NOT_WRITABLE = 42     # the sentinel got in; the run-directory bind is not writable
+
 
 class SandboxError(RuntimeError):
     """The sandbox was requested but cannot be built (too many binds, bwrap missing at
-    wrap time). The station fails rather than running unsandboxed and overclaiming."""
+    wrap time, or a wrap that cannot start a child inside the sandbox). The station fails
+    rather than running unsandboxed and overclaiming."""
 
 
 _probe_result: Optional[bool] = None
@@ -113,6 +134,70 @@ def sandbox_available() -> bool:
     if _probe_result is None:
         _probe_result = _probe()
     return _probe_result
+
+
+def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", *,
+                 inner: Sequence[str], run_dir: Path, env: Dict[str, str]) -> None:
+    """Start a sentinel child inside the wrap that was just built, and require proof that it
+    got in (agents-kwi). Raises SandboxError when the wrap cannot launch its child.
+
+    `head` and `tail` are the wrap's own argv split around its command, so the exercise runs
+    the SAME plan, the same namespaces and the same net_forward relay argv (agents-2x6) — only
+    the final command is replaced by the sentinel. The sentinel is /bin/sh (every Linux host
+    has it, and the plan binds the system directories), given the inner program to resolve, a
+    one-time token, and its path under the run directory. It exits 0 only after resolving
+    `inner[0]` inside the sandbox AND writing the token through the run-directory bind, so the
+    proof is the child's own write and not bwrap's exit status: a bwrap that returns 0 without
+    running the child fails too.
+
+    What this does and does not establish: it establishes that a child starts inside the wrap
+    built for this run, with the real inner resolved there. It does not run the real command
+    (that would run the engine), so an inner that starts and then fails on its own is an engine
+    failure, reported by the station, not a wrap failure.
+    """
+    token = os.urandom(16).hex()
+    token_path = run_dir / f".sandbox-wrap-verify-{token[:8]}"
+    script = ('if { [ -f "$1" ] && [ -x "$1" ]; } || command -v "$1" >/dev/null 2>&1; '
+              f'then :; else exit {_VERIFY_INNER_NOT_EXECUTABLE}; fi\n'
+              'printf "%s" "$2" > "$3" 2>/dev/null || '
+              f'exit {_VERIFY_RUN_DIR_NOT_WRITABLE}\n')
+    sentinel = ["/bin/sh", "-c", script, "factory-wrap-verify", str(inner[0]), token,
+                str(token_path)]
+    try:
+        res = subprocess.run([*head, *tail(sentinel)], stdin=subprocess.DEVNULL,
+                             capture_output=True, timeout=_VERIFY_TIMEOUT, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise SandboxError(
+            f"could not exercise the {BWRAP} wrap before returning it ({e}); refusing to run "
+            f"(and to record the run as sandboxed) on a wrap that was never shown to start "
+            f"its child") from e
+    try:
+        proof = token_path.read_text(encoding="utf-8") == token
+    except OSError:
+        proof = False
+    finally:
+        try:
+            token_path.unlink()
+        except OSError:
+            pass
+    if res.returncode == _VERIFY_INNER_NOT_EXECUTABLE:
+        raise SandboxError(
+            f"the sandbox wrap cannot execute {str(inner[0])!r} inside it, so the child it was "
+            f"built for would never start; refusing to run (and to record the run as "
+            f"sandboxed) on a wrap that was never shown to start its child")
+    if res.returncode == _VERIFY_RUN_DIR_NOT_WRITABLE:
+        raise SandboxError(
+            f"the sandbox wrap cannot write to the run directory {run_dir}, so the child's "
+            f"output could not be collected; refusing to run (and to record the run as "
+            f"sandboxed) on a wrap that was never shown to start its child")
+    if res.returncode != 0 or not proof:
+        detail = (f"{BWRAP} exited 0 without launching the child" if res.returncode == 0
+                  else f"{BWRAP} exited {res.returncode}")
+        raise SandboxError(
+            f"the wrap built for this run could not start a child inside the sandbox "
+            f"({detail}); bwrap being available is not proof that this child starts, so "
+            f"refusing to run (and to record the run as sandboxed) on a wrap that was never "
+            f"shown to start its child")
 
 
 def _probe() -> bool:
@@ -370,6 +455,10 @@ def sandbox_command(
     real procfs mounted inside it: bun/pi needs a genuine /proc/self (verified by strace),
     and the private namespace keeps every host process — and its environ — invisible.
 
+    agents-kwi: before returning, the plan is exercised once with a sentinel child (see
+    _verify_wrap) — a wrap that cannot start a child inside the sandbox raises SandboxError
+    here, so "bwrap is available" is never reported as "this child started inside it".
+
     `egress_forwards` (agents-2x6) turns on network egress control. When it is not None the
     child also gets a private network namespace (--unshare-net): it has no route off-box, so
     a direct connect() to any external address fails ENETUNREACH and DNS does not resolve —
@@ -434,22 +523,29 @@ def sandbox_command(
             plan.ro_bind(str(root))
     _executable_binds(plan, executables, child_env.get("PATH", ""), home)
 
-    argv = [bwrap, *plan.argv]
-    argv += ["--unshare-pid", "--proc", "/proc"]
+    head = [bwrap, *plan.argv, "--unshare-pid", "--proc", "/proc"]
+    net_forward_py = Path(factory_root) / "lib" / "net_forward.py"
     if egress_forwards is not None:
         # Egress control (agents-2x6): isolate the network namespace and wrap `inner` behind
         # the net_forward relay, so the child's only way off-box is the host-side broker /
         # allowlist proxy on the bind-mounted UNIX sockets. net_forward binds its listeners
         # before spawning `inner`, so the endpoints exist before the engine's first API call.
-        argv += ["--unshare-net"]
-        net_forward_py = Path(factory_root) / "lib" / "net_forward.py"
-        argv += ["--die-with-parent", "--new-session", "--"]
-        argv += [str(interpreter), str(net_forward_py)]
-        for port, sock in egress_forwards:
-            argv += ["--forward", f"{port}={sock}"]
-        argv += ["--"]
-        argv += [str(item) for item in inner]
-    else:
-        argv += ["--die-with-parent", "--new-session", "--"]
-        argv += [str(item) for item in inner]
+        head += ["--unshare-net"]
+
+    def tail(command: Sequence[str]) -> List[str]:
+        """The wrap's argv after its mount/namespace flags, for a given final command: the
+        net_forward relay layer when egress is controlled, else no layer at all."""
+        out = ["--die-with-parent", "--new-session", "--"]
+        if egress_forwards is not None:
+            out += [str(interpreter), str(net_forward_py)]
+            for port, sock in egress_forwards:
+                out += ["--forward", f"{port}={sock}"]
+            out += ["--"]
+        return out + [str(item) for item in command]
+
+    argv = head + tail(inner)
+    # agents-kwi: never hand back a wrap that has not been shown to start a child inside its
+    # own plan. The station builds both wraps before it prints the banner or writes
+    # policy.json, so a raise here means no run record ever claims the run was sandboxed.
+    _verify_wrap(head, tail, inner=inner, run_dir=Path(runs), env=child_env)
     return argv
