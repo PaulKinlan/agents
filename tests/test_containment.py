@@ -852,39 +852,87 @@ process.stdin.on('end', () => {
         """Review P1-1 (agents-6ce): if a crashed run left a stale index.lock, `git add -A`
         exits non-zero (128) while the following `git diff --cached` returns an empty rc0 diff.
         _collect_session_diff must RAISE, not return None — returning None would print 'no file
-        edits (empty proposal)' and exit 0, silently discarding the engine's proposal."""
-        wt = self.root / "lock-wt"
-        wt.mkdir()
-        subprocess.run(["git", "init", "-q", str(wt)], check=True, capture_output=True)
-        (wt / "f.txt").write_text("one\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(wt), "-c", "user.email=f@t", "-c", "user.name=f",
+        edits (empty proposal)' and exit 0, silently discarding the engine's proposal. Uses a
+        real linked worktree (round 2) so the .git marker and admin gitdir match production."""
+        target = self.root / "lock-target"
+        target.mkdir()
+        subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+        (target / "f.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(target), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(target), "-c", "user.email=f@t", "-c", "user.name=f",
                         "commit", "-qm", "init"], check=True, capture_output=True)
-        # The session "edited" a file, then a crashed run left a stale lock behind.
+        wt = self.root / "lock-wt"
+        gitdir = factory_cli._create_session_worktree(target, wt)
+        # The session "edited" a file, then a crashed run left a stale lock in the admin gitdir.
         (wt / "f.txt").write_text("one\ntwo\n", encoding="utf-8")
-        git_dir = subprocess.run(["git", "-C", str(wt), "rev-parse", "--git-dir"],
-                                 capture_output=True, text=True, check=True).stdout.strip()
-        lock = wt / git_dir / "index.lock"
-        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock = gitdir / "index.lock"
         lock.write_text("", encoding="utf-8")
         run_dir = self.root / "lock-run"
         run_dir.mkdir()
-        with self.assertRaises(factory_cli.StationError):
-            factory_cli._collect_session_diff(wt, run_dir)
-        self.assertFalse((run_dir / "session.patch").exists(),
-                         "a failed stage must not produce a patch")
+        try:
+            with self.assertRaises(factory_cli.StationError):
+                factory_cli._collect_session_diff(wt, run_dir, gitdir)
+            self.assertFalse((run_dir / "session.patch").exists(),
+                             "a failed stage must not produce a patch")
+        finally:
+            lock.unlink(missing_ok=True)
+            factory_cli._remove_session_worktree(target, wt)
 
+    def test_a_redirected_worktree_git_marker_is_refused_not_followed(self):
+        """Review P1-1 round 2 (agents-6ce): the worktree's .git marker is a FILE inside the
+        writable run_dir, so a write-enabled model can replace `gitdir: <target>/.git/worktrees/
+        <name>` with `gitdir: <target>/.git`. An unpinned host-side `git add -A` would then run
+        against the operator's real repo and STAGE THE OPERATOR'S uncommitted target edits.
+        _collect_session_diff must validate the marker against the admin gitdir captured at
+        creation and REFUSE; its --git-dir/--work-tree pinning is the second layer that makes
+        the redirect ineffective regardless. The operator's target index must be untouched."""
+        target = self.root / "redirect-target"
+        target.mkdir()
+        subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+        (target / "committed.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(target), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(target), "-c", "user.email=f@t", "-c", "user.name=f",
+                        "commit", "-qm", "init"], check=True, capture_output=True)
+        # An operator edit sitting UNSTAGED in the target's own checkout — exactly what the
+        # attack would stage into the target's index if host-side git followed the marker.
+        (target / "committed.txt").write_text("base\nOPERATOR UNCOMMITTED WORK\n", encoding="utf-8")
+        index_before = (target / ".git" / "index").read_bytes()
+
+        wt = self.root / "redirect-wt"
+        gitdir = factory_cli._create_session_worktree(target, wt)
+        # The model edits its worktree, then repoints the .git marker at the target's real .git.
+        (wt / "committed.txt").write_text("base\nmodel edit\n", encoding="utf-8")
+        (wt / ".git").write_text(f"gitdir: {target / '.git'}\n", encoding="utf-8")
+
+        run_dir = self.root / "redirect-run"
+        run_dir.mkdir()
+        try:
+            with self.assertRaises(factory_cli.StationError):
+                factory_cli._collect_session_diff(wt, run_dir, gitdir)
+            self.assertFalse((run_dir / "session.patch").exists(),
+                             "a refused marker redirect must not produce a patch")
+            self.assertEqual((target / ".git" / "index").read_bytes(), index_before,
+                             "the redirected marker must never stage the operator's target index")
+        finally:
+            factory_cli._remove_session_worktree(target, wt)
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_the_worktree_is_removed_even_when_the_engine_fails(self):
         """agents-6ce hard requirement: no leaked worktrees. An engine that edits the worktree
         and then FAILS must still have its disposable worktree discarded by the finally block,
-        and the target checkout must stay byte-identical."""
+        and the target checkout must stay byte-identical. Gated on bwrap and asserting the
+        worktree-write policy + a /worktree cwd FIRST (review P1-2 round 2): without a real OS
+        sandbox the run downgrades to read-only, no worktree is created, and the cleanup
+        assertions below would pass vacuously — proving nothing about worktree cleanup."""
         self._git_init_target()
-        # A stub that edits a file inside the worktree, then fails (non-zero, no report). The
-        # adapter propagates the failure (pi.sh: `pi ... || exit 1`), so run_agent raises
-        # StationError only AFTER the finally has removed the worktree.
+        # A stub that records its policy/cwd, edits a file inside the worktree, then fails
+        # (non-zero, no report). The adapter propagates the failure (pi.sh: `pi ... || exit 1`),
+        # so run_agent raises StationError only AFTER the finally has removed the worktree.
         stub = self.bin / "pi"
         stub.write_text(
             "#!/usr/bin/env bash\n"
+            "echo \"POLICY:${FACTORY_TOOL_POLICY:-unset}\"\n"
+            "echo \"CWD:$(pwd)\"\n"
             "printf '// edited then crashed\\n' >> fixme.txt\n"
             "cat >/dev/null\n"
             "exit 7\n",
@@ -894,8 +942,13 @@ process.stdin.on('end', () => {
         self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
         before = self._target_fingerprint()
-        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"})
+        res = self.factory("pi")
         self.assertNotEqual(res.returncode, 0, "a failed engine must fail the run")
+        # Prove the worktree path was actually taken (review P1-2 round 2): the grant was
+        # worktree-write and the engine ran inside the disposable worktree, not the target.
+        # Without this the cleanup assertions below could pass on a downgraded read-only run.
+        self.assertEqual(self.stub_line("POLICY:"), WORKTREE_WRITE)
+        self.assertTrue(self.stub_line("CWD:").endswith("/worktree"), self.stub_line("CWD:"))
         # No worktree leaked despite the failure, and the target is byte-identical.
         self._assert_no_leaked_worktree()
         self.assertEqual(self._target_fingerprint(), before,

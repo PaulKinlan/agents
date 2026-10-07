@@ -63,8 +63,12 @@ The tier is not a grant. A model session runs with the `read-only` tool policy �
 a *proposer* declaring `write` within a tier that allows it (`t2-local`) is granted `worktree-write`
 (agents-6ce): the engine edits files inside a disposable git worktree of the target, placed under
 the read-write run directory, so the target checkout stays read-only and the collected session
-diff (`run_dir/session.patch`) *is* the proposal; the worktree is discarded afterwards, and a
-non-git target downgrades to `read-only`. An *optimizer* (perf-hillclimb) stays read-only — it
+diff (`run_dir/session.patch`) *is* the proposal; the worktree is discarded afterwards. The grant
+also requires an **OS-sandboxed engine** (review P1-2, agents-6ce): only `pi` under a working
+bubblewrap qualifies, because the worktree is safe only while the target itself is kernel-confined
+read-only. A non-git target, or an engine that cannot be OS-sandbox-verified (`claude`, which
+relies on `--restricted` rather than a kernel boundary), downgrades to `read-only`. An *optimizer*
+(perf-hillclimb) stays read-only — it
 returns structured steps its driver applies in its own worktree. Declared `network` and `browser`
 are withheld until there is a mechanism to hold them to the tier.
 
