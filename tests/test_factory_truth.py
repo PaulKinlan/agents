@@ -412,5 +412,38 @@ class TestStableFingerprints(unittest.TestCase):
         self.assertEqual(len(store.data["findings"]), 1)
 
 
+class TestPrepassArgvIsolation(unittest.TestCase):
+    """agents-nei P1-1: --target-name must reach only perf-hillclimb's pre-pass, never the
+    other agents' pre-passes (which use argparse without that option and would exit)."""
+
+    def test_prepass_argv_adds_target_name_only_for_perf_hillclimb(self):
+        secret = factory_cli._prepass_argv(
+            Path("prepass.py"), Path("/tmp/read"), "target", Path("/tmp/candidates.json"),
+            "secret-scan")
+        self.assertIn("--target", secret)
+        self.assertIn("--output", secret)
+        self.assertNotIn("--target-name", secret)
+
+        hc = factory_cli._prepass_argv(
+            Path("measure_and_context.py"), Path("/tmp/read"), "target",
+            Path("/tmp/candidates.json"), "perf-hillclimb")
+        self.assertIn("--target-name", hc)
+        self.assertEqual(hc[hc.index("--target-name") + 1], "target")
+
+    def test_secret_scan_prepass_runs_with_the_dispatcher_argv(self):
+        """The real secret-scan pre-pass must accept the dispatcher's argv (fail-on-revert: an
+        injected --target-name would make argparse exit 2)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            (target / "index.html").write_text("<html>no secrets</html>\n", encoding="utf-8")
+            out = Path(tmp) / "candidates.json"
+            script = ROOT / "agents" / "secret-scan" / "scripts" / "scan.py"
+            argv = factory_cli._prepass_argv(script, target, "target", out, "secret-scan")
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertTrue(out.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

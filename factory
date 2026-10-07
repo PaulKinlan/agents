@@ -259,15 +259,42 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
         sys.stderr.write(f"[factory] worktree cleanup 'prune' raised: {e}\n")
 
 
-def _target_has_uncommitted_changes(target_dir: Path) -> bool:
-    """True when the target checkout is dirty: any tracked modification, staged change, or
-    untracked file `git status --porcelain` would report. run_hillclimb --apply refuses a
-    dirty target because its baseline is measured on the operator's checkout while the
-    disposable worktree starts at HEAD — a dirty tree would disagree with the worktree and
-    could mint a phantom KEPT win (P1-1, agents-nei). A status failure counts as dirty so the
-    run fails closed rather than assuming a clean tree."""
-    res = _run_git(["git", "status", "--porcelain"], target_dir)
-    return res.returncode != 0 or bool(res.stdout.strip())
+def _apply_workspace_mismatch(target_dir: Path) -> Optional[str]:
+    """agents-nei P1-2: --apply must refuse a checkout whose measured asset set differs from
+    the HEAD worktree it will optimize. Two cases: (a) tracked/staged/untracked changes, and
+    (b) ignored files that measure_target would still measure — an ignored assets/slow.html is
+    in the operator's checkout but not the HEAD worktree, so a checkout-measured baseline would
+    disagree with the worktree and could mint a phantom KEPT win. `git status --porcelain`
+    misses ignored files; `git ls-files --others --ignored --exclude-standard` lists them
+    individually (unlike `--ignored=matching`, which collapses ignored directories)."""
+    from lib.bench.runner import ASSET_EXTS, IGNORE_DIRS
+
+    status = _run_git(["git", "status", "--porcelain", "--untracked-files=all"], target_dir)
+    if status.returncode != 0:
+        return "could not read the target's git status (fail closed rather than assume a clean tree)"
+    if status.stdout.strip():
+        return ("the target checkout has uncommitted changes (dirty worktree); --apply "
+                "measures the baseline on that checkout but the disposable worktree starts "
+                "at HEAD, so a dirty tree would disagree with the worktree and could mint a "
+                "phantom KEPT win — commit or stash the changes first")
+
+    ignored = _run_git(["git", "ls-files", "--others", "--ignored", "--exclude-standard"],
+                       target_dir)
+    if ignored.returncode != 0:
+        return "could not enumerate the target's ignored files (fail closed rather than assume a clean tree)"
+    for rel in ignored.stdout.splitlines():
+        rel = rel.strip()
+        if not rel:
+            continue
+        path = Path(rel)
+        if any(part in IGNORE_DIRS for part in path.parts):
+            continue
+        if path.suffix.lower() in ASSET_EXTS:
+            return (f"the checkout has an ignored measured asset ({rel}) that is absent from "
+                    f"the HEAD worktree; measuring the baseline on the checkout would disagree "
+                    f"with the worktree and could mint a phantom KEPT win — commit or remove "
+                    f"the ignored asset first")
+    return None
 
 
 def _parse_scalar(val: str) -> Any:
@@ -493,6 +520,20 @@ def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
     return run_dir
 
 
+def _prepass_argv(prepass_script: Path, read_dir: Path, target_name: str,
+                  candidates_file: Path, agent_name: str):
+    """Build the deterministic pre-pass argv. `--target-name` is only understood by
+    perf-hillclimb's measure_and_context.py (it keeps the ledger keyed by the LOGICAL target
+    when run_hillclimb --apply points the read dir at a disposable worktree); every other
+    pre-pass keeps its original contract, so injecting an unrecognised flag would make it exit
+    at argument parsing (P1-1, agents-nei)."""
+    argv = [sys.executable, str(prepass_script), "--target", str(read_dir)]
+    if agent_name == "perf-hillclimb":
+        argv += ["--target-name", str(target_name)]
+    argv += ["--output", str(candidates_file)]
+    return argv
+
+
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
               station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
               read_target_dir: Optional[Path] = None):
@@ -641,9 +682,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     prepass_env = prepass_environment(agent_cfg)
     prepass_cmd = None
     if prepass_script and prepass_script.exists():
-        prepass_cmd = [sys.executable, str(prepass_script), "--target", str(read_dir),
-                       "--target-name", str(target_name),
-                       "--output", str(candidates_file)]
+        prepass_cmd = _prepass_argv(prepass_script, read_dir, target_name,
+                                    candidates_file, agent_name)
         # Egress control applies to the pre-pass whenever the host can sandbox (agents-2x6):
         # its netns is isolated and its only egress is the allowlist proxy, reached through
         # the net_forward relay. The proxy itself starts later, just before execution; the
@@ -1228,30 +1268,16 @@ def run_hillclimb(
     from lib.bench.runner import measure_target, append_ledger, read_ledger
 
     target_name, target_dir, _ = resolve_target(target_arg)
-    baseline = measure_target(target_dir)
 
-    if goal_metric == "perf_hazard_score" and baseline.get("perf_hazard_score", 0) == 0:
-        goal_metric = "total_gzip_bytes"
-
-    current_val = float(baseline.get(goal_metric, baseline["total_gzip_bytes"]))
-    target_goal = goal_value if goal_value is not None else (0.0 if goal_metric == "perf_hazard_score" else round(current_val * 0.90, 2))
-
-    print("\n" + "=" * 70)
-    print(f"⛰️  CLASS C HILL-CLIMB OPTIMIZER STARTED")
-    print(f"   Target:      {target_name} ({target_dir})")
-    print(f"   Metric:      {goal_metric}")
-    print(f"   Baseline:    {current_val}  -->  Goal: {target_goal}")
-    print(f"   Max Steps:   {iterations} (Apply & Verify in Worktree = {apply_edits})")
-    print("=" * 70)
-
-    def _record_blocked(reason: str) -> bool:
+    def _record_blocked(reason: str, baseline_value: float = 0.0,
+                        candidate_value: float = 0.0) -> bool:
         append_ledger(target_name, {
             "step": 0,
             "hypothesis": "Isolated apply workspace",
             "files_touched": [],
             "metric": goal_metric,
-            "baseline_value": current_val,
-            "candidate_value": current_val,
+            "baseline_value": baseline_value,
+            "candidate_value": candidate_value,
             "delta": 0,
             "outcome": "BLOCKED",
             "reason": reason,
@@ -1270,16 +1296,17 @@ def run_hillclimb(
     worktree_gitdir: Optional[Path] = None
     proposal_run_dir: Optional[Path] = None
     if apply_edits:
+        # P1-2 (agents-nei): refuse a mismatched workspace BEFORE measuring the checkout. The
+        # baseline is measured on the operator's checkout while the disposable worktree starts
+        # at HEAD; a tracked/untracked change OR an ignored measured asset would make the two
+        # disagree and could mint a phantom KEPT win against a baseline not present in HEAD.
         if not (target_dir / ".git").exists():
             return _record_blocked(
                 "the target is not a git repository, so no disposable worktree can isolate "
                 "the candidate edit from the operator's checkout")
-        if _target_has_uncommitted_changes(target_dir):
-            return _record_blocked(
-                "the target checkout has uncommitted changes (dirty worktree); --apply "
-                "measures the baseline on that checkout but the disposable worktree starts "
-                "at HEAD, so a dirty tree would disagree with the worktree and could mint a "
-                "phantom KEPT win — commit or stash the changes first")
+        mismatch = _apply_workspace_mismatch(target_dir)
+        if mismatch is not None:
+            return _record_blocked(mismatch)
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         proposal_run_dir = FACTORY_ROOT / "runs" / f"hillclimb-{target_name}-{run_id}"
         try:
@@ -1301,6 +1328,22 @@ def run_hillclimb(
                 _remove_session_worktree(target_dir, worktree_dir)
             shutil.rmtree(proposal_run_dir, ignore_errors=True)
             return _record_blocked(f"cannot create the disposable apply worktree: {e}")
+
+    baseline = measure_target(target_dir)
+
+    if goal_metric == "perf_hazard_score" and baseline.get("perf_hazard_score", 0) == 0:
+        goal_metric = "total_gzip_bytes"
+
+    current_val = float(baseline.get(goal_metric, baseline["total_gzip_bytes"]))
+    target_goal = goal_value if goal_value is not None else (0.0 if goal_metric == "perf_hazard_score" else round(current_val * 0.90, 2))
+
+    print("\n" + "=" * 70)
+    print(f"⛰️  CLASS C HILL-CLIMB OPTIMIZER STARTED")
+    print(f"   Target:      {target_name} ({target_dir})")
+    print(f"   Metric:      {goal_metric}")
+    print(f"   Baseline:    {current_val}  -->  Goal: {target_goal}")
+    print(f"   Max Steps:   {iterations} (Apply & Verify in Worktree = {apply_edits})")
+    print("=" * 70)
 
     try:
         for step_idx in range(1, iterations + 1):
@@ -1402,6 +1445,12 @@ def run_hillclimb(
 
             if new_val < current_val:
                 print(f"✅ WIN VERIFIED! {goal_metric}: {current_val} -> {new_val} (delta: {delta})")
+                if apply_edits:
+                    # P1-3 (agents-nei): persist the proposal BEFORE the KEPT row becomes
+                    # durable. A collection failure here raises before append_ledger, so a KEPT
+                    # row can never outlive the patch that records its edit — the worktree is
+                    # discarded in the finally and no orphan KEPT survives.
+                    _collect_session_diff(worktree_dir, proposal_run_dir, worktree_gitdir)
                 append_ledger(target_name, {
                     "step": step_idx,
                     "hypothesis": hypothesis,
@@ -1435,31 +1484,22 @@ def run_hillclimb(
                 })
 
     except BaseException:
-        # P1-2: an interruption after a verified KEPT must still collect the proposal before
-        # the worktree is discarded — otherwise the ledger keeps a KEPT row whose proposal was
-        # discarded. Best-effort here so a collection failure never masks the original failure
-        # (which is re-raised below).
-        if apply_edits and worktree_dir is not None and worktree_gitdir is not None \
-                and proposal_run_dir is not None:
-            try:
-                patch_file = _collect_session_diff(worktree_dir, proposal_run_dir,
-                                                   worktree_gitdir)
-                if patch_file is not None:
-                    print(f"\n🧾 Preserved the hill-climb's kept edits as {patch_file} "
-                          f"before the interrupted run was discarded; the target checkout "
-                          f"was NOT modified.")
-            except Exception as e:  # noqa: BLE001 - never mask the original failure
-                sys.stderr.write(f"[factory] could not collect the hill-climb proposal "
-                                 f"during interruption: {e}\n")
+        # P1-3 (agents-nei): a verified KEPT already persisted its proposal before the ledger
+        # row was appended, so an interruption can simply re-raise — session.patch (if any) is
+        # already on disk and the finally discards only the worktree, never the proposal.
+        if apply_edits and proposal_run_dir is not None \
+                and (proposal_run_dir / "session.patch").exists():
+            print(f"\n🧾 Preserved the hill-climb's kept edits as "
+                  f"{proposal_run_dir / 'session.patch'} before the interrupted run was "
+                  f"discarded; the target checkout was NOT modified.")
         raise
     else:
-        # Normal completion: the kept edits accumulated in the worktree; collect them once as
-        # the durable proposal. A collection failure HERE is the run's real failure — a KEPT
-        # row without a surviving proposal must not be reported as success — so it propagates.
-        if apply_edits and worktree_dir is not None and worktree_gitdir is not None \
-                and proposal_run_dir is not None:
-            patch_file = _collect_session_diff(worktree_dir, proposal_run_dir, worktree_gitdir)
-            if patch_file is not None:
+        # Normal completion: every KEPT row already persisted the accumulated proposal as
+        # session.patch before it was recorded (P1-3), so there is no final collection that
+        # could fail after a durable KEPT row.
+        if apply_edits and proposal_run_dir is not None:
+            patch_file = proposal_run_dir / "session.patch"
+            if patch_file.exists():
                 print(f"\n🧾 Collected the hill-climb's kept edits as {patch_file}; "
                       f"the target checkout was NOT modified. Apply that patch to persist the wins.")
             else:

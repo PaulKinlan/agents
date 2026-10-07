@@ -16,6 +16,7 @@ the file), so a KEPT ledger row could fire on a value not on disk. These tests d
 
 import importlib.machinery
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,14 @@ _loader = importlib.machinery.SourceFileLoader("factory_cli_hc", str(FACTORY_ROO
 _spec = importlib.util.spec_from_loader("factory_cli_hc", _loader)
 factory_cli = importlib.util.module_from_spec(_spec)
 _loader.exec_module(factory_cli)
+
+# The real perf-hillclimb pre-pass, loaded in-process so a test can drive it against the
+# disposable worktree while the patched FINDINGS_DIR keeps ledger I/O inside the tmp tree.
+_measure_script = FACTORY_ROOT / "agents" / "perf-hillclimb" / "scripts" / "measure_and_context.py"
+_measure_loader = importlib.machinery.SourceFileLoader("measure_and_context_hc", str(_measure_script))
+_measure_spec = importlib.util.spec_from_loader("measure_and_context_hc", _measure_loader)
+measure_and_context = importlib.util.module_from_spec(_measure_spec)
+_measure_loader.exec_module(measure_and_context)
 
 BLOCKING_HTML = '<html><head><script src="app.js"></script></head><body></body></html>\n'
 
@@ -74,6 +83,14 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
             return factory_cli.run_hillclimb(
                 str(target), goal_metric="perf_hazard_score", goal_value=goal_value,
                 iterations=iterations, apply_edits=True, engine_arg="pi")
+
+    def _run_prepass(self, read_dir, out_path):
+        """Drive the REAL perf-hillclimb pre-pass against the given tree, in-process, so the
+        patched FINDINGS_DIR keeps ledger I/O inside the tmp tree."""
+        with mock.patch.object(sys, "argv", ["measure_and_context.py", "--target", str(read_dir),
+                                             "--target-name", "target", "--output", str(out_path)]):
+            measure_and_context.main()
+        return json.loads(out_path.read_text(encoding="utf-8"))
 
     def test_apply_on_non_git_target_is_blocked_and_target_unchanged(self):
         target = self.tmp / "target"
@@ -240,6 +257,66 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         # Nothing was staged or committed by the factory, and no proposal/worktree was made.
         self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
 
+    def test_ignored_measured_asset_is_refused_not_a_phantom_win(self):
+        # P1-2: git status --porcelain misses ignored files, while measure_target still walks
+        # an ignored assets/slow.html (a blocking script) in the operator's checkout. That file
+        # is absent from the HEAD worktree, so a checkout-measured baseline would disagree with
+        # the worktree and could mint a phantom KEPT win. --apply must refuse the mismatch.
+        target = self._git_target({
+            "index.html": BLOCKING_HTML,
+            ".gitignore": "assets/slow.html\n",
+        })
+        slow = target / "assets" / "slow.html"
+        slow.parent.mkdir(parents=True, exist_ok=True)
+        slow.write_text(BLOCKING_HTML, encoding="utf-8")
+        index = target / "index.html"
+        original = index.read_text()
+
+        result = factory_cli.run_hillclimb(
+            str(target), goal_metric="perf_hazard_score", goal_value=0,
+            iterations=1, apply_edits=True, engine_arg="pi")
+
+        self.assertFalse(result)
+        self.assertEqual(index.read_text(), original)  # the operator's checkout is untouched
+        self.assertEqual(slow.read_text(), BLOCKING_HTML)
+        ledger = self._ledger()
+        self.assertEqual(ledger[-1]["outcome"], "BLOCKED")
+        self.assertIn("ignored measured asset", ledger[-1]["reason"])
+        # No worktree/proposal was made for the refused run.
+        self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
+
+    def test_collection_failure_leaves_no_durable_kept_row(self):
+        # P1-3: a KEPT row must never outlive its proposal. If the proposal cannot be collected
+        # (git add --intent-to-add nonzero), the run must fail BEFORE the KEPT row is durable.
+        target = self._git_target({
+            "index.html": ('<html><head>'
+                           '<script src="a.js"></script>'
+                           '<script src="b.js"></script>'
+                           '</head><body></body></html>\n')
+        })
+        index = target / "index.html"
+        original = index.read_text()
+        step = {
+            "hypothesis": "defer a.js",
+            "target_file": "index.html",
+            "search_snippet": '<script src="a.js"></script>',
+            "replace_snippet": '<script src="a.js" defer></script>',
+        }
+        with mock.patch.object(factory_cli, "run_agent",
+                               return_value={"report": {"hillclimb_steps": [step]},
+                                             "run_dir": self.tmp / "run"}):
+            with mock.patch.object(factory_cli, "_collect_session_diff",
+                                   side_effect=factory_cli.StationError(
+                                       "git add --intent-to-add failed (index lock)")):
+                with self.assertRaises(factory_cli.StationError):
+                    factory_cli.run_hillclimb(
+                        str(target), goal_metric="perf_hazard_score", goal_value=0,
+                        iterations=1, apply_edits=True, engine_arg="pi")
+
+        self.assertEqual(index.read_text(), original)
+        self.assertEqual(self._ledger(), [])  # no durable KEPT row survives the failed collection
+        self.assertEqual(list((self.tmp / "factory-root" / "runs").rglob("session.patch")), [])
+
     def test_later_iteration_failure_still_collects_kept_proposal(self):
         # P1-2: iteration 1 keeps a win, iteration 2's run_agent raises. The verified edit must
         # still be collected as a proposal before the worktree is discarded — otherwise the
@@ -305,7 +382,9 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
 
     def test_second_iteration_reads_accumulated_worktree(self):
         # P2-2: a later proposal must be generated against the accumulated worktree (which
-        # carries the prior kept edit), never the operator's unchanged checkout.
+        # carries the prior kept edit), never the operator's unchanged checkout. Drive the REAL
+        # perf-hillclimb pre-pass on each iteration's read dir so the assertion is the measured
+        # hazard score, not just run_agent's argument.
         target = self._git_target({
             "index.html": ('<html><head>'
                            '<script src="a.js"></script>'
@@ -326,13 +405,18 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
             "search_snippet": '<script src="b.js"></script>',
             "replace_snippet": '<script src="b.js" defer></script>',
         }
-        with mock.patch.object(factory_cli, "run_agent",
-                               side_effect=[
-                                   {"report": {"hillclimb_steps": [step_a]},
-                                    "run_dir": self.tmp / "run1"},
-                                   {"report": {"hillclimb_steps": [step_b]},
-                                    "run_dir": self.tmp / "run2"},
-                               ]) as run_agent_mock:
+        measured_scores = []
+
+        def run_agent_side_effect(agent_name, target_arg, *args, **kwargs):
+            read_dir = kwargs["read_target_dir"]
+            out = self.tmp / f"prepass-{len(measured_scores)}.json"
+            payload = self._run_prepass(read_dir, out)
+            measured_scores.append(payload["baseline_metrics"]["perf_hazard_score"])
+            steps = [step_a] if len(measured_scores) == 1 else [step_b]
+            return {"report": {"hillclimb_steps": steps},
+                    "run_dir": self.tmp / f"run{len(measured_scores)}"}
+
+        with mock.patch.object(factory_cli, "run_agent", side_effect=run_agent_side_effect):
             result = factory_cli.run_hillclimb(
                 str(target), goal_metric="perf_hazard_score", goal_value=0,
                 iterations=2, apply_edits=True, engine_arg="pi")
@@ -340,13 +424,10 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(index.read_text(), original)
         self.assertEqual([e["outcome"] for e in self._ledger()], ["KEPT", "KEPT"])
-        # Both model calls read the SAME disposable worktree, not the operator's checkout.
-        self.assertEqual(run_agent_mock.call_count, 2)
-        read_dirs = [c.kwargs.get("read_target_dir") for c in run_agent_mock.call_args_list]
-        self.assertTrue(all(d is not None for d in read_dirs))
-        self.assertEqual(read_dirs[0], read_dirs[1])
-        self.assertNotEqual(read_dirs[0], target)
-        self.assertEqual(read_dirs[0].name, "worktree")
+        # The REAL pre-pass measured 30 on the HEAD worktree, then 15 after the first kept
+        # edit — proving it read the accumulated worktree, not the operator's checkout (which
+        # still measures 30 because it was never modified).
+        self.assertEqual(measured_scores, [30, 15])
         patch = list((self.tmp / "factory-root" / "runs").rglob("session.patch"))[0].read_text()
         self.assertIn('src="a.js" defer', patch)
         self.assertIn('src="b.js" defer', patch)
