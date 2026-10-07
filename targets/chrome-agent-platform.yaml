@@ -1,6 +1,7 @@
 name: chrome-agent-platform
 path: ~/Code/chrome-agent-platform
 repo: PaulKinlan/chrome-agent-platform
+beads_path: ~/Code/chrome-agent-platform
 sink: github-issues
 visibility: public
 agents:
