@@ -101,8 +101,9 @@ boundary for read-only sessions, not that runner.
 A committed `targets/<name>.yaml` sink takes precedence over general task-tracker prose in
 another repository's `AGENTS.md`: the public issue is the triage gate; beads are internal
 work only after approval. Without an explicit sink, repository guidance is consulted and
-then `file` is the local fallback. Automatic `beads` or combined sinks refuse publication
-until the separate, explicit issue-to-bead promotion is implemented.
+then `file` is the local fallback. Automatic `beads` or combined sinks refuse publication. After human triage applies the
+`factory-approved` label, use `factory promote --target NAME --issue URL` to create one
+linked bead in the target's explicitly configured `beads_path`.
 
 | Target | Sink | Notes |
 |---|---|---|

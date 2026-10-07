@@ -444,21 +444,23 @@ This is the important discovery. It already has:
 `chrome-agent-platform/AGENTS.md` carries a hard rule: *"beads (bd) is the ONLY task/bug/next-work
 tracker... TASKS.md, TASKS-DONE.md, KNOWN-ISSUES.md and every other markdown tracker are RETIRED."*
 
-If the factory writes findings to `findings/*.md` there, it violates that rule on day one and
-recreates precisely the duplicate-tracker problem §7 warns about.
+Factory-local `findings/*.md` is a gitignored evidence trail, not a second public task
+tracker. The public GitHub issue is the triage surface; only explicit approval promotes it
+to the project's configured Beads DB.
 
 **Sink selection hierarchy**:
-1. **Target repo guidance**: Read target's `AGENTS.md` or repo rules (e.g., `chrome-agent-platform` specifies `bd`).
-2. **Target configuration**: Check `targets/<project>.yaml`.
-3. **Interactive / fallback**: Prompt the user or fall back to `file` (local JSON/markdown in `findings/`).
+1. **Explicit target config**: A named `targets/<project>.yaml` declares public visibility,
+   repo, and `github-issues`; generic target `AGENTS.md` task guidance cannot auto-file beads.
+2. **Fallback**: A raw/unconfigured target keeps findings in the local `file` evidence trail.
 
 ```yaml
 # targets/chrome-agent-platform.yaml
-sink: beads              # findings become beads
-# targets/fauxmium.yaml
-sink: github-issues      # findings become labelled issues
-# default
-sink: file               # local JSON, for repos with no tracker
+visibility: public
+repo: PaulKinlan/chrome-agent-platform
+beads_path: ~/Code/chrome-agent-platform
+sink: github-issues      # publish issue; factory promote requires human approval
+# target without an explicit public repo
+sink: file               # local evidence, no public issue or automatic bead
 ```
 
 Fingerprinting, dedupe, and the state machine stay **factory-side**; only the *sink* is pluggable.
@@ -466,12 +468,12 @@ That keeps one noise-control implementation while respecting whatever each proje
 
 ### Severity & public disclosure rules
 
-> [!CAUTION]
-> **Never publish unembargoed high or critical security vulnerabilities to a public tracker.**
-> In a public repository, dropping a 0-day finding as an open GitHub issue is irresponsible.
-> - High and critical findings on public repos must be routed to private channels: draft GitHub Security Advisories (`ghsa`), local `beads`, or private `file` sink.
-> - Public issue creation is restricted to non-sensitive findings (lint, docs drift, bundle metrics) or private repos.
-> - Target configuration or interactive prompt confirms whether a sink is safe for public visibility.
+> [!IMPORTANT]
+> **Current policy (Paul, 2026-10-07):** An explicitly-public target publishes redacted
+> public issues for every real finding, high/critical included. Missing/invalid visibility
+> or an unverified `github.com/OWNER/REPO` destination refuses publication. Human triage
+> applies `factory-approved` before the separate `factory promote` operation creates a bead;
+> publishing findings never creates beads automatically. There is no private publishing route.
 
 ### The standout quick win
 
@@ -628,7 +630,7 @@ rate. Don't skip ahead to scanning.
 > **Resolved:**
 > - **11.1 Model mix**: 100% clean session isolation (zero shared context/history) between discovery and verification is mandatory. Different model families across phases is supported and optional, but not critical.
 > - **11.2 Autonomy ceiling**: Confirmed. Class B agents open PRs and never push to default branches. The human merge is the control point.
-> - **11.3 Sinks & Disclosure**: Sinks are pluggable. Auto-detect from target repo's `AGENTS.md` first, fall back to target config or prompt user/default to `file`. Depending on severity, high/critical vulnerabilities must not be posted publicly to public issue trackers.
+> - **11.3 Sinks & Disclosure**: Explicit target config outranks generic task-tracker prose. A verified public GitHub issue is the first triage step for every real severity; a human-set `factory-approved` label gates explicit, idempotent promotion to a linked internal bead. Unconfigured targets default to local `file` evidence.
 > - **11.4 `gh` CLI**: Installed and authenticated (`v2.101.0` at `/opt/homebrew/bin/gh`).
 > - **11.5 Scope of CI**: The factory focuses specifically on SDLC agent workflows and composite actions; standard unit/integration test CI remains owned by the respective target projects.
 > - **11.6 Log source for `log-check`**: Defined per target in `targets/<project>.yaml` or target `AGENTS.md` (e.g. file paths, Cloud Logging, test artifacts).

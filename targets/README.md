@@ -4,6 +4,8 @@ One file per project the factory runs against. Declares which agents apply, wher
 and any target-specific scoping.
 
 Each public-issue target explicitly declares `visibility: public` and `repo: OWNER/REPO`.
+For post-triage promotion it also declares `beads_path:` pointing to an initialized
+project Beads DB; the factory never guesses that location from a checkout remote.
 The publisher verifies the destination really is public on github.com before disclosing
 any finding, including high/critical under Paul's 2026-10-07 approval. Missing/invalid
 visibility does not authorise disclosure; a raw path without a manifest remains file-only.
