@@ -122,7 +122,7 @@ else:
             executable.chmod(0o755)
 
     def scan(self, sink="github-issues", items=None, *, agent="lint", visibility="public",
-             repo=REPO, extra_env=None):
+             repo=REPO, extra_env=None, candidates=None):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": [SAMPLE] if items is None else items}), encoding="utf-8")
         cmd = [sys.executable, str(self.cli), "--target", "fixture", "--agent", agent,
@@ -131,6 +131,10 @@ else:
             cmd += ["--visibility", visibility]
         if repo is not None:
             cmd += ["--repo", repo]
+        if candidates is not None:
+            path = self.root / "candidates.json"
+            path.write_text(json.dumps(candidates), encoding="utf-8")
+            cmd += ["--candidates", str(path)]
         return subprocess.run(cmd, cwd=self.factory, env=dict(self.env, **(extra_env or {})),
                               capture_output=True, text=True, check=False, timeout=20)
 
@@ -149,6 +153,20 @@ else:
     def finding(self):
         return next(iter(self.store()["findings"].values()))
 
+    def report(self):
+        return (self.factory / "findings" / "fixture-delta.md").read_text()
+
+    def summary_report(self):
+        return (self.factory / "findings" / "fixture-summary.md").read_text()
+
+    def stats(self):
+        history = self.factory / "findings" / "fixture-history.jsonl"
+        return json.loads(history.read_text().splitlines()[-1])["delta"]
+
+    def shifted(self):
+        return dict(SAMPLE, line_number=700, path="src/example.py", snippet="  unused  = True\n")
+
+
 class TestSinks(SinkFixture, unittest.TestCase):
     def test_file_stays_local_and_does_not_contact_trackers(self):
         result = self.scan("file")
@@ -157,6 +175,127 @@ class TestSinks(SinkFixture, unittest.TestCase):
         report = (self.factory / "findings" / "fixture-delta.md").read_text()
         self.assertIn("Unused export", report)
         self.assertEqual(self.finding()["change"], "new")
+
+    def test_step_summary_withholds_high_critical_prose(self):
+        """The public Actions step summary remains reduced even though issues are public."""
+        high = dict(SAMPLE, severity="high", rule_id="xss-injection",
+                    title="XSS via profile name", path="src/profile.js", line_number=42,
+                    description="PoC: <img src=x onerror=alert(1)> executes.",
+                    snippet="<img src=x onerror=alert(1)>",
+                    remediation="Escape the name before interpolation.")
+        medium = dict(SAMPLE)
+        self.assertEqual(self.scan("file", [high, medium]).returncode, 0)
+        summary = self.summary_report()
+        self.assertIn("| **2** |", summary)
+        self.assertIn("xss-injection", summary)
+        self.assertIn("src/profile.js:42", summary)
+        self.assertIn("Withheld", summary)
+        for sensitive in ("XSS via profile name", "PoC: <img", "Escape the name"):
+            self.assertNotIn(sensitive, summary)
+        self.assertIn("Unused export", summary)
+        self.assertIn("Synthetic sink verification finding.", summary)
+        self.assertIn("XSS via profile name", self.report())
+
+    def test_step_summary_uses_routing_severity_when_model_understates_it(self):
+        understated = dict(SAMPLE, severity="low", rule_id="sqli",
+                           title="SQL injection via sort parameter", path="src/query.js",
+                           line_number=7, description="PoC: ' OR 1=1--",
+                           remediation="Parameterise.")
+        self.assertEqual(self.scan("file", [understated], agent="vuln-discovery").returncode, 0)
+        summary = self.summary_report()
+        self.assertIn("[LOW · routed critical]", summary)
+        self.assertIn("sqli", summary)
+        self.assertIn("src/query.js:7", summary)
+        for sensitive in ("SQL injection via sort parameter", "PoC:", "Parameterise."):
+            self.assertNotIn(sensitive, summary)
+
+    def test_clean_delta_after_line_shift_and_no_withheld_note(self):
+        self.assertEqual(self.scan("file").returncode, 0)
+        self.assertIn("Action Required", self.report())
+        self.assertEqual(self.scan("file", [self.shifted()]).returncode, 0)
+        self.assertIn("Clean Delta", self.report())
+        self.assertIn("Active Findings (Unchanged)", self.report())
+        self.assertIn("src/example.py:700", self.report())
+        self.assertNotIn("Action Required", self.report())
+        self.assertNotIn("Withheld", self.summary_report())
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.stats(), {"new": 0, "regressed": 0, "fixed": 0,
+                                        "unchanged": 1, "suppressed": 0,
+                                        "false_positive": 0})
+        self.assertEqual(len(self.store()["findings"]), 1)
+
+    def test_duplicate_input_is_one_finding_and_one_issue(self):
+        result = self.scan(items=[SAMPLE, self.shifted(), SAMPLE])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stats()["new"], 1)
+        self.assertEqual(len(self.store()["findings"]), 1)
+        self.assertEqual(len(self.state()["issues"]), 1)
+        self.assertEqual(self.report().count("### [MEDIUM] Unused export"), 1)
+
+    def test_candidates_bind_invented_identity_and_keep_matching_identity(self):
+        candidates = {"candidates": [{"rule_id": "unused-export", "path": "src/example.py"}]}
+        result = self.scan("file", [dict(SAMPLE, rule_id="model-invented",
+                                              path="elsewhere.js", title="Invented location")],
+                           candidates=candidates)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["rule_id"], "unclassified")
+        self.assertEqual(self.finding()["path"], "unknown")
+        self.assertIn("unclassified", self.report())
+        self.assertIn("unknown", self.report())
+        # A fresh store: the next assertion must not be affected by prior identity.
+        (self.factory / "findings" / "fixture.json").unlink()
+        result = self.scan("file", [dict(SAMPLE, title="Kept")], candidates=candidates)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["rule_id"], "unused-export")
+        self.assertEqual(self.finding()["path"], "./src/example.py")
+
+    def test_issue_shaped_candidates_have_no_location_binding(self):
+        candidates = {"candidates": [{"id": "42", "title": "an issue"}]}
+        item = dict(SAMPLE, rule_id="triage-missing-repro", path="issues/42", title="Issue triage")
+        result = self.scan("file", [item], agent="issue-triage", candidates=candidates)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["rule_id"], "triage-missing-repro")
+        self.assertEqual(self.finding()["path"], "issues/42")
+
+    def test_suppressed_and_accepted_findings_do_not_publish(self):
+        self.assertEqual(self.scan("file", [SAMPLE, dict(SAMPLE, rule_id="accepted-rule")]).returncode, 0)
+        store_file = self.factory / "findings" / "fixture.json"
+        store = self.store()
+        first, second = store["findings"]
+        store["findings"][second]["state"] = "accepted"
+        store_file.write_text(json.dumps(store))
+        (self.factory / "findings" / "suppressions.yaml").write_text(
+            f"{first}:\n  reason: Synthetic accepted risk\n")
+        result = self.scan(items=[SAMPLE, dict(SAMPLE, rule_id="accepted-rule")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.stats()["suppressed"], 1)
+        self.assertEqual(self.stats()["unchanged"], 1)
+        self.assertIn("Synthetic accepted risk", self.report())
+
+    def test_malformed_suppression_register_and_visibility_fail_loudly(self):
+        raw = self.root / "input.json"
+        raw.write_text(json.dumps({"findings": [SAMPLE]}))
+        invalid = subprocess.run([sys.executable, str(self.cli), "--target", "fixture",
+                                  "--agent", "lint", "--input", str(raw), "--sink", "file",
+                                  "--visibility", "internal"], cwd=self.factory, env=self.env,
+                                 capture_output=True, text=True, timeout=10)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("invalid choice", invalid.stderr)
+        findings_dir = self.factory / "findings"
+        findings_dir.mkdir(exist_ok=True)
+        (findings_dir / "suppressions.yaml").write_text(": broken\n")
+        malformed = self.scan("file")
+        self.assertEqual(malformed.returncode, 2)
+        self.assertIn("suppressions", malformed.stderr)
+
+    def test_missing_gh_binary_retains_local_finding_and_exits_nonzero(self):
+        (self.bin / "gh").unlink()
+        result = self.scan()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("publication failed", result.stderr)
+        self.assertEqual(self.finding()["state"], "new")
+        self.assertEqual(self.state()["issues"], [])
 
     def test_seeded_high_severity_reaches_public_issue_not_just_configuration(self):
         high = dict(SAMPLE, severity="high", title="Seeded high finding", rule_id="seed-high")

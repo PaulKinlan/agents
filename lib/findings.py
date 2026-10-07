@@ -518,6 +518,9 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     held = {"embargoed": 0, "false_positive": 0, "already_delivered": 0, "not_active": 0}
     for f in findings:
         pending_issue_transition = sink == "github-issues" and bool(f.get("github_pending_transitions"))
+        if f.get("state") in ("accepted", "wontfix"):
+            held["not_active"] += 1
+            continue
         if f.get("state") not in ("new", "regressed") and not pending_issue_transition:
             held["not_active"] += 1
             continue
