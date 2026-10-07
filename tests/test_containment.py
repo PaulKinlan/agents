@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib.containment import (  # noqa: E402
-    ENGINE_TOOL_POLICIES, GRANTABLE_POLICIES, READ_ONLY, ContainmentError, banner_lines,
+    ENGINE_TOOL_POLICIES, GRANTABLE_POLICIES, READ_ONLY, WORKTREE_WRITE, ContainmentError, banner_lines,
     budget_note, check_engine, load_policy, policy_record,
 )
 from lib.sandbox import sandbox_available  # noqa: E402
@@ -60,24 +60,36 @@ def manifest(**overrides):
 
 
 class TestShippedManifests(unittest.TestCase):
-    def test_every_shipped_agent_validates_and_gets_read_only(self):
+    def test_every_shipped_agent_validates_and_gets_a_grantable_policy(self):
         agents = sorted(p for p in (ROOT / "agents").iterdir() if (p / "agent.yaml").exists())
         self.assertTrue(agents)
         for agent_dir in agents:
             with self.subTest(agent=agent_dir.name):
                 cfg = factory_cli.load_yaml_simple(agent_dir / "agent.yaml")
                 policy = load_policy(agent_dir.name, cfg)
-                self.assertEqual(policy.tool_policy, READ_ONLY)
+                self.assertIn(policy.tool_policy, GRANTABLE_POLICIES)
                 self.assertTrue(policy.tier_declared)
+                # A declared write within a tier that allows it is granted as worktree-write
+                # (agents-6ce); everything else stays read-only.
+                self.assertEqual(policy.tool_policy,
+                                 WORKTREE_WRITE if policy.declared["write"] else READ_ONLY)
+                # pi and claude enforce every grantable policy; deepseek is read-only, so it
+                # refuses a write agent; antigravity has no tool controls and refuses all.
                 check_engine(policy, "pi")
                 check_engine(policy, "claude")
-                check_engine(policy, "deepseek")
+                if policy.tool_policy == READ_ONLY:
+                    check_engine(policy, "deepseek")
+                else:
+                    with self.assertRaises(ContainmentError):
+                        check_engine(policy, "deepseek")
                 with self.assertRaises(ContainmentError):
                     check_engine(policy, "antigravity")
 
     def test_declared_capabilities_are_reported_as_withheld(self):
+        # write is granted via the disposable worktree (agents-6ce), so pr-fixer and
+        # docs-write no longer report it as withheld; network and browser still are.
         expected = {
-            "pr-fixer": {"write"}, "docs-write": {"write"},
+            "pr-fixer": set(), "docs-write": set(),
             "deps-supply-chain": {"network"}, "issue-triage": {"network"},
             "memory-profile": {"browser"}, "ui-ux-audit": {"browser"},
             "secret-scan": set(),
@@ -150,17 +162,20 @@ class TestDeclarationsFailClosed(unittest.TestCase):
         with self.assertRaises(ContainmentError):
             load_policy("probe", cfg)
 
-    def test_each_tier_accepts_its_ceiling_and_grants_read_only(self):
+    def test_each_tier_accepts_its_ceiling_and_grants_the_policy(self):
+        # tier -> (declared caps, expected tool_policy, expected withheld flags)
         cases = {
-            "t0-readonly": {},
-            "t1-fetch": {"network": True},
-            "t2-local": {"write": True, "browser": True},
+            "t0-readonly": ({}, READ_ONLY, set()),
+            "t1-fetch": ({"network": True}, READ_ONLY, {"network"}),
+            # write is granted via the disposable worktree (agents-6ce), so it is not
+            # withheld; browser still is (no localhost-only browser mechanism yet).
+            "t2-local": ({"write": True, "browser": True}, WORKTREE_WRITE, {"browser"}),
         }
-        for tier, caps in cases.items():
+        for tier, (caps, tool_policy, withheld) in cases.items():
             with self.subTest(tier=tier):
                 policy = load_policy("probe", manifest(containment=tier, capabilities=caps))
-                self.assertEqual(policy.tool_policy, READ_ONLY)
-                self.assertEqual(set(policy.withheld), set(caps))
+                self.assertEqual(policy.tool_policy, tool_policy)
+                self.assertEqual(set(policy.withheld), withheld)
 
     def test_budget_values_parse_like_lib_budget(self):
         policy = load_policy("probe", manifest(budget={"max_minutes": "15", "max_usd": 0.5}))
@@ -203,11 +218,16 @@ class TestDeclarationsFailClosed(unittest.TestCase):
 
 class TestBannerAndRecord(unittest.TestCase):
     def test_the_banner_says_what_is_enforced_and_what_is_not(self):
+        # A declared write at t2-local is granted via the disposable worktree (agents-6ce):
+        # the banner says worktree-write and does NOT list write as withheld. Declare browser
+        # too so the banner still shows what is NOT enforced.
         policy = load_policy("pr-fixer", manifest(containment="t2-local",
-                                                  capabilities={"write": True}))
+                                                  capabilities={"write": True, "browser": True}))
         pi_banner = "\n".join(banner_lines(policy, "pi"))
-        self.assertIn("read-only, enforced by the pi adapter", pi_banner)
-        self.assertIn("Withheld:    write", pi_banner)
+        self.assertIn("worktree-write, enforced by the pi adapter", pi_banner)
+        self.assertIn("edit,write", pi_banner)
+        self.assertNotIn("Withheld:    write", pi_banner)
+        self.assertIn("Withheld:    browser", pi_banner)
         self.assertIn("Sandbox:     NOT enforced", pi_banner)
         self.assertIn("NOT confined", pi_banner)
         self.assertIn("confined to the target directory",
@@ -587,6 +607,103 @@ process.stdin.on('end', () => {
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertIn("os-sandbox", record["not_enforced"])
         self.assertIn("read-scope", record["not_enforced"])
+
+    # --- agents-6ce: the disposable per-session worktree -------------------------------
+
+    def _git_init_target(self):
+        """Make self.target a git repo with one committed file, so a write grant can create a
+        disposable worktree of its HEAD."""
+        subprocess.run(["git", "init", "-q", str(self.target)], check=True, capture_output=True)
+        (self.target / "fixme.txt").write_text("original line\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.target), "add", "-A"], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(self.target), "-c", "user.email=factory@test",
+                        "-c", "user.name=factory", "commit", "-qm", "initial"], check=True,
+                       capture_output=True)
+
+    def _editing_stub(self):
+        """Overwrite the stub pi with one that records its policy/cwd and makes an edit
+        (modify a tracked file + add a new one) so the session diff is non-empty."""
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo \"POLICY:${FACTORY_TOOL_POLICY:-unset}\"\n"
+            "echo \"CWD:$(pwd)\"\n"
+            "printf '// proposed fix\\n' >> fixme.txt\n"
+            "printf 'brand new file\\n' > proposed.txt\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+    def test_a_write_agent_edits_a_disposable_worktree_and_leaves_the_target_untouched(self):
+        """agents-6ce acceptance: a granted write runs in a disposable git worktree. The engine
+        edits files there, the dispatcher collects the session diff as the proposal, the
+        worktree is discarded, and the target checkout is never modified."""
+        self._git_init_target()
+        self._editing_stub()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # The grant is worktree-write and the engine ran inside the worktree, not the target.
+        self.assertEqual(self.stub_line("POLICY:"), WORKTREE_WRITE)
+        self.assertIn("Tool policy: worktree-write", res.stdout)
+        self.assertTrue(self.stub_line("CWD:").endswith("/worktree"), self.stub_line("CWD:"))
+        # The session diff was collected as the proposal (both the edit and the new file).
+        run_dir = self.run_dirs()[0]
+        patch = run_dir / "session.patch"
+        self.assertTrue(patch.exists(), "session.patch must be collected")
+        patch_text = patch.read_text(encoding="utf-8")
+        self.assertIn("proposed fix", patch_text)
+        self.assertIn("proposed.txt", patch_text)
+        # The worktree was discarded ...
+        self.assertFalse((run_dir / "worktree").exists(), "the worktree must be removed")
+        # ... and the target checkout was never modified.
+        status = subprocess.run(["git", "-C", str(self.target), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(status.stdout.strip(), "",
+                         "the target must be clean, got: " + status.stdout)
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_the_worktree_is_writable_inside_the_sandbox(self):
+        """End-to-end: under the enforced OS sandbox the worktree (under the read-write-bound
+        run directory) is writable, so the engine's edits are collected and the target stays
+        read-only and unmodified. No FACTORY_ALLOW_UNSANDBOXED here — the sandbox is enforced."""
+        self._git_init_target()
+        self._editing_stub()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     enforced", res.stdout)
+        self.assertEqual(self.stub_line("POLICY:"), WORKTREE_WRITE)
+        patch = self.run_dirs()[0] / "session.patch"
+        self.assertTrue(patch.exists(), "the sandboxed engine's edits must be collected")
+        self.assertIn("proposed fix", patch.read_text(encoding="utf-8"))
+        status = subprocess.run(["git", "-C", str(self.target), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(status.stdout.strip(), "",
+                         "the target must be clean, got: " + status.stdout)
+
+    def test_a_write_agent_on_a_non_git_target_downgrades_to_read_only(self):
+        """agents-6ce: the worktree grant needs a git repo. A non-git target downgrades to
+        read-only and re-withholds write with the specific reason, so the banner and policy
+        stay honest and no worktree/session.patch is produced."""
+        # self.target is a plain directory (not git) from setUp.
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
+        self.assertIn("Tool policy: read-only", res.stdout)
+        self.assertIn("not a git repository", res.stdout)
+        run_dir = self.run_dirs()[0]
+        self.assertFalse((run_dir / "worktree").exists())
+        self.assertFalse((run_dir / "session.patch").exists())
+        record = json.loads((run_dir / "policy.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
+        self.assertIn("write", record["withheld"])
 
 
 if __name__ == "__main__":

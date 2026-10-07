@@ -27,7 +27,7 @@ browser are declared by some agents and granted to none, each for a stated reaso
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from lib.child_env import NETWORK_CREDENTIAL_REQUIREMENTS
@@ -58,21 +58,33 @@ BUDGET_KEYS = frozenset({"max_minutes", "max_usd"})
 # lib/adapters/<engine>.sh reads FACTORY_TOOL_POLICY and refuses anything it cannot enforce;
 # tests/test_containment.py asserts the adapters and this table agree.
 READ_ONLY = "read-only"
-GRANTABLE_POLICIES = (READ_ONLY,)
+# A write grant runs the engine in a disposable per-session git worktree (agents-6ce): the
+# model may edit files, but only inside the throwaway worktree — the target checkout is bound
+# read-only, so "propose, don't apply" holds and the collected session diff IS the proposal.
+WORKTREE_WRITE = "worktree-write"
+GRANTABLE_POLICIES = (READ_ONLY, WORKTREE_WRITE)
 ENGINE_TOOL_POLICIES: Dict[str, frozenset] = {
-    "pi": frozenset({READ_ONLY}),
-    "claude": frozenset({READ_ONLY}),
+    "pi": frozenset({READ_ONLY, WORKTREE_WRITE}),
+    "claude": frozenset({READ_ONLY, WORKTREE_WRITE}),
     "deepseek": frozenset({READ_ONLY}),
     # `agentapi new-conversation` takes a prompt and nothing else: no tool controls.
     "antigravity": frozenset(),
 }
 
-# How each adapter enforces read-only, and what that leaves open. Stated in the banner and in
-# policy.json so the operator reads the enforcement, not an adjective.
-ENGINE_ENFORCEMENT = {
-    "pi": "pi --tools read,grep,find,ls --no-extensions --no-approve",
-    "claude": "claude --restricted --tools Read,Grep,Glob --strict-mcp-config",
-    "deepseek": "deepseek-api read-only payload triage",
+# How each adapter enforces each grantable policy, and what that leaves open. Stated in the
+# banner and in policy.json so the operator reads the enforcement, not an adjective.
+ENGINE_ENFORCEMENT: Dict[str, Dict[str, str]] = {
+    "pi": {
+        READ_ONLY: "pi --tools read,grep,find,ls --no-extensions --no-approve",
+        WORKTREE_WRITE: ("pi --tools read,grep,find,ls,edit,write --no-extensions --no-approve "
+                         "in a disposable worktree (target bound read-only)"),
+    },
+    "claude": {
+        READ_ONLY: "claude --restricted --tools Read,Grep,Glob --strict-mcp-config",
+        WORKTREE_WRITE: ("claude --restricted --tools Read,Grep,Glob,Edit,Write "
+                         "--strict-mcp-config in a disposable worktree"),
+    },
+    "deepseek": {READ_ONLY: "deepseek-api read-only payload triage"},
 }
 ENGINE_READ_SCOPE = {
     "pi": "NOT confined: pi's read tool reaches any file the operator can read",
@@ -80,9 +92,18 @@ ENGINE_READ_SCOPE = {
     "deepseek": "confined to scanner context and payload",
 }
 
+
+def enforcement_for(engine: str, tool_policy: str) -> str:
+    """The adapter's enforcement string for a granted policy (banner + policy.json)."""
+    return ENGINE_ENFORCEMENT.get(engine, {}).get(tool_policy, "unknown")
+
+
 WITHHELD_REASONS = {
-    "write": "no disposable worktree yet: the engine runs in the target's own checkout, so "
-             "proposers return patches in their report instead of editing files",
+    # write is grantable via the disposable worktree (agents-6ce), so load_policy no longer
+    # withholds a declared write at a tier that allows it. This generic reason remains for the
+    # run-time downgrade path (run_agent supplies the specific reason, e.g. a non-git target).
+    "write": "the engine runs in the target's own checkout, so proposers return patches in "
+             "their report instead of editing files",
     "network": "no egress allowlist yet, so a network tool cannot be held to the tier's hosts",
     "browser": "a browser is an unscoped network client and cannot yet be held to localhost",
 }
@@ -113,6 +134,18 @@ class Policy:
     withheld: Dict[str, str]
     max_minutes: Optional[float]
     max_usd: Optional[float]
+
+
+def downgrade_write_to_read_only(policy: "Policy", reason: str) -> "Policy":
+    """A copy of `policy` with a granted worktree-write downgraded to read-only and `write`
+    re-withheld for a target-specific reason. Used when a declared write cannot be honoured at
+    run time (agents-6ce) — e.g. the target is not a git repository, so no disposable worktree
+    can be created. The banner and policy.json then report read-only with write withheld,
+    honestly, instead of claiming a write grant the run will not deliver."""
+    if policy.tool_policy != WORKTREE_WRITE:
+        return policy
+    return replace(policy, tool_policy=READ_ONLY,
+                   withheld={**policy.withheld, "write": reason})
 
 
 def _positive_number(agent: str, field: str, value: Any) -> Optional[float]:
@@ -197,11 +230,21 @@ def load_policy(agent: str, agent_cfg: Mapping[str, Any]) -> Policy:
     max_minutes = _positive_number(agent, "max_minutes", budget.get("max_minutes"))
     max_usd = _positive_number(agent, "max_usd", budget.get("max_usd"))
 
-    # The grant. Nothing beyond read-only is enforceable yet, so every declared write,
-    # network or browser capability is withheld, with the reason and the missing mechanism.
-    withheld = {flag: WITHHELD_REASONS[flag] for flag in CAPABILITY_FLAGS if declared[flag]}
+    # The grant. Write is now grantable via a disposable per-session git worktree
+    # (agents-6ce): an agent that declares write within a tier that allows it (t2-local) runs
+    # its engine in a throwaway worktree, so edits never touch the target checkout — the
+    # collected session diff is the proposal. The grant is conditional on the target being a
+    # git repo; run_agent resolves that and downgrades to read-only (re-withholding write)
+    # when it is not, so the banner and policy.json stay honest. Network and browser stay
+    # withheld: no egress allowlist / localhost-only browser exists yet.
+    write_granted = declared["write"]  # a declared write already passed the ceiling check
+    tool_policy = WORKTREE_WRITE if write_granted else READ_ONLY
+    withheld: Dict[str, str] = {}
+    for flag in CAPABILITY_FLAGS:
+        if declared[flag] and not (flag == "write" and write_granted):
+            withheld[flag] = WITHHELD_REASONS[flag]
     return Policy(agent=agent, tier=tier, tier_declared=tier_declared, declared=declared,
-                  requires=tuple(requires), tool_policy=READ_ONLY, withheld=withheld,
+                  requires=tuple(requires), tool_policy=tool_policy, withheld=withheld,
                   max_minutes=max_minutes, max_usd=max_usd)
 
 
@@ -232,7 +275,7 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
     lines = [
         f"  Containment: {policy.tier} ({tier_note}) — a ceiling on capabilities, validated",
         f"  Tool policy: {policy.tool_policy}, enforced by the {engine} adapter: "
-        f"{ENGINE_ENFORCEMENT.get(engine, 'unknown')}",
+        f"{enforcement_for(engine, policy.tool_policy)}",
         f"  Read scope:  {read_scope}",
     ]
     for flag, reason in policy.withheld.items():
@@ -286,7 +329,7 @@ def policy_record(policy: Policy, engine: str,
         not_enforced.append("budget.max_usd")
     granted = {
         "tool_policy": policy.tool_policy,
-        "enforced_by": ENGINE_ENFORCEMENT.get(engine),
+        "enforced_by": enforcement_for(engine, policy.tool_policy),
         "read_scope": ((sandbox or {}).get("engine_read_scope")
                        or ENGINE_READ_SCOPE.get(engine)),
     }

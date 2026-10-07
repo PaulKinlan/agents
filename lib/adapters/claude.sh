@@ -55,6 +55,11 @@ fi
 TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
 case "$TOOL_POLICY" in
   read-only) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob" --strict-mcp-config) ;;
+  # worktree-write (agents-6ce): Edit,Write are added, but --restricted still confines the
+  # file tools to the working directory — which the dispatcher sets to a disposable git
+  # worktree — and the OS sandbox binds that worktree read-write while the target checkout
+  # stays read-only. Bash stays off; the worktree is discarded after the session.
+  worktree-write) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob,Edit,Write" --strict-mcp-config) ;;
   *)
     echo "[claude adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
     exit 3

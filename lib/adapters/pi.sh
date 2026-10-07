@@ -28,6 +28,11 @@ RUN_DIR="${4}"
 TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
 case "$TOOL_POLICY" in
   read-only) POLICY_FLAGS=(--tools read,grep,find,ls --no-extensions --no-approve) ;;
+  # worktree-write (agents-6ce): the model may edit files, but the dispatcher runs this
+  # adapter with cwd = a disposable git worktree and the OS sandbox binds that worktree
+  # read-write while the target checkout stays read-only, so edits can only land in the
+  # throwaway worktree. edit,write are pi's file-mutation tools; bash/network stay off.
+  worktree-write) POLICY_FLAGS=(--tools read,grep,find,ls,edit,write --no-extensions --no-approve) ;;
   *)
     echo "[pi adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
     exit 3
