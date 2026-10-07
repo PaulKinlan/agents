@@ -43,7 +43,8 @@ IDENTITY_CRITICAL_AGENTS = CREDENTIAL_AGENTS | frozenset({
 # The accepted severity vocabulary. Anything outside it is not a severity.
 VALID_SEVERITIES = ("critical", "high", "medium", "low", "info")
 
-# Bands that must never reach a public tracker (AGENTS.md disclosure rule).
+# Legacy fail-closed bands when visibility is missing or invalid. A target explicitly
+# declaring visibility: public authorises publication of these bands too (agents-559).
 EMBARGOED_SEVERITIES = frozenset({"critical", "high"})
 
 # The evidence trail a human reads: never subject to this routing decision. Values in it are
@@ -146,17 +147,18 @@ def effective_severity(finding: Dict[str, Any]) -> str:
     return normalize_severity(finding.get("severity"))
 
 
-def embargo_reason(finding: Dict[str, Any], sink: str, visibility: Any = "public") -> Optional[str]:
+def embargo_reason(finding: Dict[str, Any], sink: str, visibility: Any = None) -> Optional[str]:
     """Why this finding must not go to `sink`, or None when it may.
 
-    Fail-closed by default: `file` is the local evidence trail and is never embargoed; every
-    other sink — known, or one added later — is treated as a publication boundary. Visibility
-    is read first: only a target that explicitly declares `private` may publish the embargoed
-    bands to its own tracker. A missing or unrecognised value is treated as public (SF-09).
+    Fail-closed by default: `file` is local evidence. An explicitly declared `public`
+    authorises public disclosure of every genuine finding, including high/critical, per
+    the project's public-issue policy. An explicitly declared `private` is still subject
+    to the issue publisher's separate public-repository check. Missing/invalid visibility
+    never silently authorises high/critical disclosure (SF-09).
     """
     if sink in PRIVATE_SINKS:
         return None
-    if normalize_visibility(visibility) == "private":
+    if visibility in VALID_VISIBILITIES:
         return None
     severity = effective_severity(finding)
     if severity in EMBARGOED_SEVERITIES:

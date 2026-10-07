@@ -9,8 +9,7 @@ a sandbox, with a stub `pi` that prints a per-agent canned model output. They pi
   journal-mid), as is a failed pre-pass or engine (journal-idy, journal-wog);
 - the stored, displayed and andon-counted severity is the triaged one; the fail-closed routing
   value only routes (journal-1kg, journal-35w, journal-y5m, journal-aaj);
-- tracker sinks report what they did, so `--sink beads` filing nothing is explained
-  (fleet-eqv, journal-np8);
+- public issue publication refuses an untriaged direct bead sink (agents-559);
 - fingerprints bind to the scanner's snippet, so a re-quoted line is not new+fixed churn
   (fleet-oed).
 """
@@ -340,41 +339,6 @@ class TestOneSeveritySource(SandboxCase):
         self.assertIn("Triaged False Positives", delta)
         self.assertNotIn("CRITICAL", delta)
         self.assertNotIn("Action Required", delta)
-
-
-@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
-class TestSinkAccounting(SandboxCase):
-    """fleet-eqv, journal-np8: --sink beads filing nothing must say why."""
-
-    def test_embargoed_findings_are_counted_and_reported(self):
-        (self.box.target / ".beads").mkdir()
-        bd = self.box.bin / "bd"
-        bd.write_text("#!/usr/bin/env bash\nif [ \"$1\" = list ]; then echo '[]'; exit 0; fi\n"
-                      f"echo \"$@\" >> '{self.box.root}/bd.log'\n")
-        bd.chmod(0o755)
-        items = [finding(rule_id="a", severity="high", snippet="1", title="High one"),
-                 finding(rule_id="b", severity="medium", snippet="2", title="Medium one"),
-                 finding(rule_id="c", severity="low", snippet="3", title="Low one")]
-        self.box.agent("lint", report(*items))
-        self.box.line(["lint"])
-        with mock.patch.dict(os.environ, {"HOME": str(self.box.root)}):
-            out = io.StringIO()
-            with self.box.patched(), contextlib.redirect_stdout(out):
-                factory_cli.run_line("testline", str(self.box.target), engine_arg="pi",
-                                     explicit_sink="beads")
-        self.assertEqual((self.box.root / "bd.log").read_text().count("create --title"), 1)
-        delta = self.box.findings("target-delta.md")
-        self.assertIn("**beads**: published 1, failed 0, duplicate 0, embargoed 1, below band 1", delta)
-        machine = json.loads(self.box.findings("target-line.json"))
-        self.assertEqual(machine["sinks"]["beads"]["published"], 1)
-        self.assertEqual(machine["sinks"]["beads"]["embargoed"], 1)
-
-    def test_a_missing_beads_dir_is_a_reported_failure(self):
-        self.box.agent("lint", report(finding()))
-        self.box.run_agent("lint", sink="beads")
-        delta = self.box.findings("target-delta.md")
-        self.assertIn("failed 1", delta)
-        self.assertIn("no .beads directory", delta)
 
 
 class TestStableFingerprints(unittest.TestCase):

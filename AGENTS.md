@@ -98,28 +98,27 @@ boundary for read-only sessions, not that runner.
 
 ## Sinks
 
-Findings are written to whatever tracker the target already uses.
-Discovery order for sink selection:
-1. **Target repository guidance**: Check the target's `AGENTS.md` or repository rules first.
-2. **Explicit target config**: Look up `targets/<name>.yaml`.
-3. **Fallback / Interactive**: Ask the user or fall back to `file` (local JSON/markdown).
+A committed `targets/<name>.yaml` sink takes precedence over general task-tracker prose in
+another repository's `AGENTS.md`: the public issue is the triage gate; beads are internal
+work only after approval. Without an explicit sink, repository guidance is consulted and
+then `file` is the local fallback. Automatic `beads` or combined sinks refuse publication
+until the separate, explicit issue-to-bead promotion is implemented.
 
 | Target | Sink | Notes |
 |---|---|---|
-| `chrome-agent-platform` | `beads` | **Hard rule in that repo's AGENTS.md**: `bd` is the only tracker. Raw findings → wisps; verified → `bd promote`; chains → `bd link --type discovered-from`. |
-| `voicebox` | `beads` | **Mandated in `voicebox/AGENTS.md`**: Uses `bd` (beads) for task tracking; falls back to local `file` sink if `.beads` is not yet initialized. |
-| `fauxmium` | `github-issues` | Label machine findings so they're filterable. |
-| `aifocus` | `file` | Hugo + Cloudflare Workers blog/demos (`findings/aifocus-latest.md`). |
-| *default* | `file` | Local JSON, for targets with no tracker. |
+| `agents`, `chrome-agent-platform`, `voicebox`, `aifocus` | `github-issues` | Each declares an explicit public repo and visibility; publish the issue first, then require human triage before bead promotion. |
+| `fauxmium` | `file` | No explicit verified `repo:` is configured; local evidence only until its public destination is declared. |
+| *default* | `file` | Local JSON for targets without a configured public repository. |
 
 ### Severity & Public Disclosure Rules
 
-> [!CAUTION]
-> **Never publish unembargoed high or critical security findings to a public tracker.**
-> If the target repository is public:
-> - High/critical findings must be routed to a private channel (draft GitHub Security Advisory, local private bead/file, or private review queue).
-> - Public issue creation is restricted to non-sensitive findings (lint, docs drift, bundle metrics) or private repos.
-> - When in doubt, hold findings locally in `file` sink and alert the operator.
+> [!IMPORTANT]
+> Paul approved PUBLIC GitHub issues for every real finding, including sensitive high/critical
+> findings (2026-10-07). A target must explicitly declare `visibility: public` and a
+> `repo: OWNER/REPO`; the publisher verifies that it is a public github.com repository,
+> searches open and closed issues by fingerprint, and redacts issue prose. Missing/invalid
+> visibility still embargoes high/critical and cannot publish to GitHub. Do not invent a
+> private sink or auto-create beads during issue publication.
 
 ## Noise control
 

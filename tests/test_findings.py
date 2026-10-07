@@ -13,7 +13,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from lib import findings
 from lib.findings import FindingsStore, StoreFileError
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
@@ -103,6 +105,33 @@ class TestAtomicSave(unittest.TestCase):
             self.assertEqual(len(data["findings"]), 1)
             leftovers = list(findings_dir.glob("target.json.*.tmp"))
             self.assertEqual(leftovers, [])
+
+
+class TestCliStoreCleanup(unittest.TestCase):
+    def test_close_runs_when_candidate_loading_processing_or_save_fails(self):
+        """A held flock cannot survive an exception on any CLI path (agents-559/3ls)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw = Path(tmpdir) / "input.json"
+            raw.write_text('{"findings": []}', encoding="utf-8")
+            candidates = Path(tmpdir) / "candidates.json"
+            candidates.write_text('{}', encoding="utf-8")
+            argv = ["--target", "fixture", "--agent", "lint", "--input", str(raw),
+                    "--candidates", str(candidates), "--sink", "file"]
+            for failure in ("candidate", "process", "save"):
+                with self.subTest(failure=failure):
+                    store = mock.Mock()
+                    store.process_run.return_value = ([], {key: 0 for key in findings.DELTA_KEYS}, [])
+                    if failure == "process":
+                        store.process_run.side_effect = RuntimeError("process failed")
+                    if failure == "save":
+                        store.save.side_effect = RuntimeError("save failed")
+                    with mock.patch.object(findings, "FindingsStore", return_value=store), \
+                         mock.patch.object(findings, "load_candidate_index",
+                                           side_effect=RuntimeError("candidate failed") if failure == "candidate" else None), \
+                         mock.patch.object(findings, "dispatch_to_sink", return_value={}):
+                        with self.assertRaisesRegex(RuntimeError, failure + " failed"):
+                            findings.main(argv)
+                    store.close.assert_called_once()
 
 
 class TestConcurrentWriters(unittest.TestCase):

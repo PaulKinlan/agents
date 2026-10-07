@@ -433,6 +433,10 @@ class FindingsStore:
                 suppression_reason = existing.get("suppression_reason")
 
             delta_stats["false_positive" if false_positive else change] += 1
+            pending = list(existing.get("github_pending_transitions", [])) if existing else []
+            if change in ("new", "regressed") and not false_positive and fp not in self.suppressions:
+                pending.append({"state": change, "at": now,
+                                "event": hashlib.sha256(f"{fp}:{change}:{now}".encode()).hexdigest()[:16]})
             finding_record = {
                 "fingerprint": fp,
                 "agent": agent,
@@ -458,8 +462,9 @@ class FindingsStore:
                 # Lifecycle and this run's delta are separate: 'new' can remain active.
                 "change": change,
                 # Retry failed deliveries, but only notify once per sink and recurrence.
-                "dispatched_sinks": list(existing.get("dispatched_sinks", []))
-                    if existing and change != "regressed" else [],
+                "dispatched_sinks": list(existing.get("dispatched_sinks", [])) if existing else [],
+                "github_issue": existing.get("github_issue") if existing else None,
+                "github_pending_transitions": pending,
                 "first_seen": existing.get("first_seen", now) if existing else now,
                 "last_seen": now,
                 "suppression_reason": suppression_reason
@@ -474,6 +479,10 @@ class FindingsStore:
                 if existing.get("state") in ("new", "accepted", "regressed"):
                     existing["state"] = "fixed"
                     existing["fixed_at"] = now
+                    existing.setdefault("github_pending_transitions", []).append({
+                        "state": "fixed", "at": now,
+                        "event": hashlib.sha256(f"{fp}:fixed:{now}".encode()).hexdigest()[:16],
+                    })
                     delta_stats["fixed"] += 1
                     fixed_items.append(existing)
 
@@ -490,32 +499,29 @@ class FindingsStore:
 
         return processed, delta_stats, fixed_items
 
-def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: Any = "public") -> List[Dict[str, Any]]:
+def _publishable_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: Any = None) -> List[Dict[str, Any]]:
     """Filter a run's findings down to what `sink` may receive.
 
-    The one choke point every sink goes through. Eligibility (state, delivery receipt) and the
-    publication embargo are both decided here, so a new dispatch branch cannot silently publish
-    an embargoed finding. `visibility` comes from the target manifest and is the first input to
-    the decision; a missing or unknown value is treated as public and `embargo_reason` fails
-    closed for every sink except the local `file` evidence trail (agents-681, agents-94f,
-    agents-5rx).
+    Eligibility (state, delivery receipt) and the publication embargo are both decided
+    here. Only an explicit public declaration plus a verified destination authorises
+    publishing to GitHub; missing visibility never silently discloses high/critical.
     """
     return _partition_for_sink(sink, findings, visibility)[0]
 
 
-def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: Any = "public") -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: Any = None) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """`_publishable_for_sink`, plus a count of why the rest was not published.
 
-    The counts are reported, so `--sink beads` filing nothing is never silent (fleet-eqv,
-    journal-np8): an operator can tell "embargoed on a public target" from "nothing new".
+    The counts make missing/invalid visibility and delivery failures visible to callers.
     """
     publishable = []
     held = {"embargoed": 0, "false_positive": 0, "already_delivered": 0, "not_active": 0}
     for f in findings:
-        if f.get("state") not in ("new", "regressed"):
+        pending_issue_transition = sink == "github-issues" and bool(f.get("github_pending_transitions"))
+        if f.get("state") not in ("new", "regressed") and not pending_issue_transition:
             held["not_active"] += 1
             continue
-        if sink in f.get("dispatched_sinks", []):
+        if sink in f.get("dispatched_sinks", []) and not pending_issue_transition:
             held["already_delivered"] += 1
             continue
         # A finding the triage declared a false positive is evidence, not work (journal-35w).
@@ -534,7 +540,7 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     return publishable, held
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = "public", agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None) -> Dict[str, Any]:
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = None, agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, repo: Optional[str] = None) -> Dict[str, Any]:
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
@@ -550,20 +556,25 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed, {stats.get('false_positive', 0)} triaged false positive")
 
     sinks = [s.strip() for s in sink.split(",") if s.strip()]
-    if "both" in sinks or "all" in sinks:
-        sinks = ["beads", "github-issues"]
+    if "both" in sinks or "all" in sinks or "beads" in sinks:
+        raise ValueError("Automatic bead publication is disabled: publish a public GitHub "
+                         "issue first, then explicitly promote it after human triage")
+    if "github-issues" in sinks and (visibility != "public" or not isinstance(repo, str)
+                                    or not _PUBLIC_REPO.fullmatch(repo)):
+        raise ValueError("Public GitHub issue publication requires an explicit visibility: public "
+                         "and configured github.com OWNER/REPO")
 
     sink_results: Dict[str, Dict[str, Any]] = {}
     for s in sinks:
         if s == "file":
             continue
-        publishable, held = _partition_for_sink(s, processed_findings, visibility)
+        publishable, held = _partition_for_sink(
+            s, processed_findings + (fixed_items or []) if s == "github-issues" else processed_findings,
+            visibility)
         result = dict(held, eligible=len(publishable), published=0, failed=0, skipped=0,
                       duplicate=0, note="")
-        if s == "beads":
-            result.update(_dispatch_beads(target_dir, publishable, visibility))
-        elif s == "github-issues":
-            result.update(_dispatch_github(target_name, target_dir, publishable, visibility))
+        if s == "github-issues":
+            result.update(_dispatch_github(target_name, target_dir, publishable, visibility, repo))
         else:
             result["note"] = f"unknown sink {s!r}: nothing published"
         sink_results[s] = result
@@ -572,10 +583,9 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
               f"embargoed {result['embargoed']}, below band {result['skipped']}, "
               f"false positive {result['false_positive']}"
               + (f" ({result['note']})" if result.get("note") else ""))
-        if result["embargoed"] and normalize_visibility(visibility) == "public":
-            print(f"[Sink {s}] {result['embargoed']} finding(s) held in the local store: the target "
-                  f"is treated as PUBLIC. Only a committed targets/<name>.yaml declaring "
-                  f"`visibility: private` changes that, and only if the tracker really is private.")
+        if result["embargoed"]:
+            print(f"[Sink {s}] {result['embargoed']} finding(s) held locally: visibility must "
+                  "be explicitly declared before public issue publication.")
 
     # Always write the local factory delta report. It is the complete evidence trail, so it
     # deliberately includes findings the publication embargo withholds from a tracker sink.
@@ -954,69 +964,158 @@ def _dispatch_beads(target_dir: Path, findings: List[Dict[str, Any]], visibility
             print(f"Failed to create bead: {e}")
     return result
 
-def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
-    """Public disclosure guard and issue creation for GitHub Issues. Returns delivery counts."""
-    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "note": ""}
-    gh_bin = shutil.which("gh")
-    if not gh_bin and findings:
-        result["failed"] = len(findings)
-        result["note"] = "gh binary not available: nothing filed"
+_PUBLIC_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_ISSUE_FP = re.compile(r"\*\*Fingerprint\*\*:\s*`([0-9a-f]{64})`")
+
+
+def _gh_api(gh_bin: str, target_dir: Path, endpoint: str, *, payload: Optional[Dict[str, Any]] = None,
+            paginate: bool = False) -> Any:
+    """Force github.com even if GH_HOST points at an internal GitHub Enterprise server."""
+    cmd = [gh_bin, "api", "--hostname", "github.com"]
+    if paginate:
+        cmd += ["--paginate", "--slurp"]
+    if payload is not None:
+        cmd += ["--method", "POST", "--input", "-"]
+    cmd.append(endpoint)
+    res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True,
+                         input=json.dumps(payload) if payload is not None else None,
+                         check=False, timeout=60)
+    if res.returncode != 0:
+        # gh stderr can contain sensitive response bodies. Never echo it into a public log.
+        raise RuntimeError(f"github.com API {endpoint.split('?')[0]} failed (exit {res.returncode})")
+    try:
+        return json.loads(res.stdout)
+    except ValueError as e:
+        raise RuntimeError("github.com API returned invalid JSON; refusing publication") from e
+
+
+def _gh_pages(data: Any) -> List[Dict[str, Any]]:
+    if not isinstance(data, list) or any(not isinstance(page, list) for page in data):
+        raise RuntimeError("github.com issue listing was incomplete or malformed; refusing publication")
+    issues = [item for page in data for item in page]
+    if any(not isinstance(item, dict) for item in issues):
+        raise RuntimeError("github.com issue listing contains malformed entries; refusing publication")
+    return issues
+
+
+def _issue_identity(issue: Dict[str, Any], repo: str) -> Tuple[str, int]:
+    number = issue.get("number")
+    url = issue.get("html_url")
+    if (not isinstance(number, int) or isinstance(number, bool) or number <= 0
+            or not isinstance(url, str)
+            or url.lower() != f"https://github.com/{repo}/issues/{number}".lower()):
+        raise RuntimeError("github.com returned an issue outside the configured public repository")
+    return url, number
+
+
+def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]],
+                     visibility: Any = None, repo: Optional[str] = None) -> Dict[str, Any]:
+    """Verify a public destination, then find OPEN+CLOSED issues before every create.
+
+    The store lock serialises publication in this checkout. A lost receipt is repairable:
+    the issue body carries the fingerprint and the exhaustive API listing finds it again.
+    """
+    result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "duplicate": 0, "note": ""}
+    if not findings:
         return result
+    if visibility != "public" or not isinstance(repo, str) or not _PUBLIC_REPO.fullmatch(repo):
+        result.update(failed=len(findings), note="explicit public target visibility and OWNER/REPO required")
+        return result
+    gh_bin = shutil.which("gh")
+    if not gh_bin:
+        result.update(failed=len(findings), note="gh binary not available: nothing filed")
+        return result
+    try:
+        destination = _gh_api(gh_bin, target_dir, f"repos/{repo}")
+        if (not isinstance(destination, dict)
+                or destination.get("full_name", "").lower() != repo.lower()
+                or destination.get("html_url", "").lower() != f"https://github.com/{repo}".lower()
+                or destination.get("private") is not False
+                or destination.get("has_issues") is not True):
+            raise RuntimeError("configured destination is not a verified public github.com issue repository")
+        # Do not use GitHub Search: its indexing lag could create duplicates after a lost
+        # store receipt. Exhaustively list open AND closed issues, including all pages.
+        issues = _gh_pages(_gh_api(gh_bin, target_dir,
+                         f"repos/{repo}/issues?state=all&per_page=100", paginate=True))
+        index: Dict[str, List[Dict[str, Any]]] = {}
+        for issue in issues:
+            if "pull_request" in issue:
+                continue
+            for fp in set(_ISSUE_FP.findall(str(issue.get("body") or ""))):
+                _issue_identity(issue, repo)
+                index.setdefault(fp, []).append(issue)
+    except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
+        result.update(failed=len(findings), note=str(e))
+        return result  # fail closed: never create if lookup or visibility verification failed
+
     for f in findings:
-        if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):
-            continue
-        # dispatch_to_sink already logged and filtered this; the check keeps a direct call to
-        # this sink safe. Fail-closed severity and credential-agent identity live in one place.
-        if embargo_reason(f, "github-issues", visibility):
-            # The guard's own log line is published too: derive every value it renders.
-            guarded = redact_finding(f)
-            print(f"[SECURITY GUARD] Suppressing public GitHub issue for {effective_severity(f)} finding: {guarded['title']}")
-            print(f"-> Please review in private store or file private security advisory.")
-            result["skipped"] += 1
-            continue
-        if gh_bin and effective_severity(f) in ("critical", "high", "medium", "low"):
-            published = redact_finding(f)
-            title = f"[factory:{published['agent']}] {published['title']}"
-            body = (
-                f"**Rule**: `{published['rule_id']}`\n"
-                f"**Severity**: `{published['severity']}`\n"
-                f"**Location**: `{published['path']}:{published.get('line_number', '?')}`\n"
-                f"**Fingerprint**: `{f['fingerprint']}`\n\n"
-                f"### Description\n{published['description']}\n\n"
-                f"### Remediation\n{published.get('remediation', 'N/A')}\n"
-            )
-            cmd = [gh_bin, "issue", "create", "--title", title, "--body", body]
-            try:
-                res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False, timeout=30)
-                if res.returncode == 0:
-                    f.setdefault("dispatched_sinks", []).append("github-issues")
-                    result["published"] += 1
-                    print(f"Created GitHub issue: {res.stdout.strip()}")
-                else:
-                    result["failed"] += 1
-                    print(f"Failed to create GitHub issue (exit {res.returncode}): {res.stderr.strip()}")
-            except Exception as e:
-                result["failed"] += 1
-                print(f"Failed to create GitHub issue: {e}")
-        else:
-            result["skipped"] += 1
+        try:
+            if embargo_reason(f, "github-issues", visibility):
+                raise RuntimeError("finding is not authorised for public publication")
+            fp = f["fingerprint"]
+            matches = index.get(fp, [])
+            if len(matches) > 1:
+                raise RuntimeError("multiple issues carry this fingerprint; human resolution required")
+            if matches:
+                issue = matches[0]
+                result["duplicate"] += 1
+            else:
+                published = redact_finding(f)
+                body = (
+                    f"**Rule**: `{published['rule_id']}`\n"
+                    f"**Severity**: `{published['severity']}`\n"
+                    f"**Location**: `{published['path']}:{published.get('line_number', '?')}`\n"
+                    f"**Fingerprint**: `{fp}`\n\n"
+                    f"### Description\n{published['description']}\n\n"
+                    f"### Remediation\n{published.get('remediation') or 'N/A'}\n"
+                )
+                issue = _gh_api(gh_bin, target_dir, f"repos/{repo}/issues", payload={
+                    "title": f"[factory:{published['agent']}] {published['title']}",
+                    "body": body,
+                })
+                if not isinstance(issue, dict) or fp not in _ISSUE_FP.findall(str(issue.get("body") or "")):
+                    raise RuntimeError("github.com did not confirm the issue fingerprint")
+                index[fp] = [issue]
+                result["published"] += 1
+            url, number = _issue_identity(issue, repo)
+            f["github_issue"] = {"url": url, "number": number, "repo": repo}
+            if "github-issues" not in f.get("dispatched_sinks", []):
+                f.setdefault("dispatched_sinks", []).append("github-issues")
+            pending = f.get("github_pending_transitions", [])
+            if pending:
+                comments = _gh_pages(_gh_api(gh_bin, target_dir,
+                    f"repos/{repo}/issues/{number}/comments?per_page=100", paginate=True))
+                existing_events = {str(c.get("body") or "") for c in comments}
+                for event in list(pending):
+                    marker = f"<!-- factory-transition:{fp}:{event['event']} -->"
+                    if not any(marker in text for text in existing_events):
+                        comment = (f"Factory transition: {event['state']} at {event['at']}.\n\n{marker}")
+                        _gh_api(gh_bin, target_dir, f"repos/{repo}/issues/{number}/comments",
+                                payload={"body": comment})
+                        existing_events.add(comment)
+                    pending.remove(event)
+            print(f"Public GitHub issue for {fp[:16]}: {url}")
+        except (OSError, subprocess.TimeoutExpired, RuntimeError, KeyError, ValueError) as e:
+            result["failed"] += 1
+            result["note"] = str(e)
     return result
 
-if __name__ == "__main__":
+def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Process findings into findings store")
     parser.add_argument("--target", required=True, help="Target name")
     parser.add_argument("--agent", required=True, help="Agent name")
     parser.add_argument("--input", required=True, help="JSON file with raw findings")
     parser.add_argument("--candidates", help="Scanner candidates JSON to bind rule_id/path against")
-    parser.add_argument("--sink", default="file", help="Sink type (file, beads, github-issues)")
-    parser.add_argument("--visibility", choices=["public", "private"], default="public",
-                        help="Target repository visibility; private relaxes the public-disclosure embargo")
+    parser.add_argument("--sink", default="file", help="Sink type (file or github-issues; beads require promotion)")
+    parser.add_argument("--visibility", choices=["public", "private"],
+                        help="Explicit target visibility; missing does not authorise public high/critical issues")
+    parser.add_argument("--repo", help="Explicit public github.com/OWNER/REPO issue destination")
     parser.add_argument("--target-dir", default=".", help="Target repository directory")
     parser.add_argument("--station-only", action="store_true",
                         help="One station of a factory line: write <target>-<agent>-delta.md, "
                              "not the run's <target>-delta.md (the line writes that)")
     parser.add_argument("--fragment", help="Write this station's delta as JSON here (for the line report)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -1032,23 +1131,33 @@ if __name__ == "__main__":
         # Loud and non-zero: a register or store that cannot be parsed must not silently reset.
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(2)
-    candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
-    processed, stats, fixed_items = store.process_run(
-        agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
-    )
     try:
-        dispatch_to_sink(
-            sink=args.sink,
-            target_name=args.target,
-            target_dir=Path(args.target_dir).resolve(),
-            processed_findings=processed,
-            stats=stats,
-            fixed_items=fixed_items,
-            visibility=args.visibility,
-            agent=args.agent,
-            station_only=args.station_only,
-            fragment=Path(args.fragment) if args.fragment else None,
+        candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
+        processed, stats, fixed_items = store.process_run(
+            agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
         )
+        try:
+            results = dispatch_to_sink(
+                sink=args.sink,
+                target_name=args.target,
+                target_dir=Path(args.target_dir).resolve(),
+                processed_findings=processed,
+                stats=stats,
+                fixed_items=fixed_items,
+                visibility=args.visibility,
+                repo=args.repo,
+                agent=args.agent,
+                station_only=args.station_only,
+                fragment=Path(args.fragment) if args.fragment else None,
+            )
+        finally:
+            store.save()
     finally:
-        store.save()
-        store.close()
+        store.close()  # even if candidate loading, processing or save() raises
+    if any(result.get("failed") for result in results.values()):
+        sys.stderr.write("Error: GitHub issue publication failed; findings retained for retry\n")
+        sys.exit(3)
+
+
+if __name__ == "__main__":
+    main()

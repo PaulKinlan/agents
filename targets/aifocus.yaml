@@ -1,7 +1,7 @@
 name: aifocus
 path: ~/Code/aifocus
 repo: PaulKinlan/aifocus
-sink: file
+sink: github-issues
 visibility: public
 agents:
   - secret-scan

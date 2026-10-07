@@ -1,6 +1,7 @@
 name: agents
 path: ~/agents
-sink: file
+repo: PaulKinlan/agents
+sink: github-issues
 visibility: public
 agents:
   - secret-scan

@@ -106,6 +106,13 @@ class TestEmbargoReason(unittest.TestCase):
         self.assertIsNone(embargo_reason(finding(severity="critical"), "file"))
         self.assertIsNone(embargo_reason(finding(agent="secret-scan"), "file"))
 
+    def test_explicit_public_target_publishes_high_critical_and_security_identity(self):
+        """Paul explicitly approved public issues even for sensitive findings (agents-559)."""
+        for item in (finding(severity="high"), finding(severity="critical"),
+                     finding(agent="secret-scan", severity="low")):
+            with self.subTest(item=item):
+                self.assertIsNone(embargo_reason(item, "github-issues", visibility="public"))
+
     def test_a_private_target_may_publish_the_embargoed_bands(self):
         """A private tracker is not a public disclosure: visibility is the primary input."""
         for severity in ("critical", "high"):

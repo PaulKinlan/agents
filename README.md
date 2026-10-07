@@ -339,9 +339,9 @@ agents/<name>/
 
 When a run completes, findings are dispatched based on target configuration:
 - **`file`** (Default): Writes formatted markdown delta reports to `findings/<target>-latest.md` and appends metrics to `findings/<target>-history.jsonl`. In a `factory line`, each station writes `findings/<target>-<agent>-delta.md` and the line writes the run's `findings/<target>-delta.md` (plus machine-readable `findings/<target>-line.json`) once, from every station. A station that produced no verdict (pre-pass/engine failure, timeout, unparseable or schema-violating output) is `ERROR`, the run is `INCOMPLETE`, never "Clean Delta", and the command exits non-zero.
-- **Severity**: reports, the store and the andon count the *triaged* severity (`unclassified` when missing; triaged false positives are listed separately and never counted or published). The fail-closed routing value (`routing_severity`) only decides what the embargo withholds from a tracker; every tracker sink reports published / embargoed / below-band / failed counts.
-- **`beads`**: For projects using [Beads](https://github.com/beads-project/beads). Active findings automatically create or update issues via `bd create`.
-- **`github-issues`**: For GitHub repositories. Creates labeled issues via `gh issue create`.
+- **Severity**: reports, the store and the andon count the *triaged* severity (`unclassified` when missing; triaged false positives are evidence, not public work). `routing_severity` remains fail-closed when visibility is undeclared. An explicitly public target publishes real findings in **every band**, including high/critical and info; sensitive values are redacted from the issue body. The sink reports published / embargoed / failed counts.
+- **`github-issues`**: The first public triage step. Requires `visibility: public` and an explicit `repo: OWNER/REPO` in `targets/<name>.yaml` (or the matching explicit CLI arguments). The factory verifies the destination is a public `github.com` repository with issues enabled, enumerates open **and closed** issues for the fingerprint marker, creates only when none exists, stores the issue URL/number and adds deduplicated new/fixed/regressed transition comments. Failed verification/listing fails closed and exits non-zero. The GitHub token reaches only the trusted findings child, not the model engine.
+- **`beads`**: Automatic bead creation during publishing is **disabled**, including `--sink beads` and `--sink github-issues,beads`. A public issue is the human triage gate; explicit approved issue-to-bead promotion is the next implementation step. Do not treat two independent sinks as an issue-first workflow.
 
 **QA precision needs lifecycle observations.** `qa-station` aggregates valid records
 across all readable `findings/*.json` stores in the *same factory checkout* that runs it;
@@ -356,12 +356,10 @@ The estimates describe recorded lifecycle states, not human-validated precision;
 `new` findings with no `wontfix` dispositions do not certify 100% precision.
 Do not copy a private findings store into Git to make a QA scorecard appear.
 
-### Public Disclosure Protection
+### Public Disclosure Policy
 
-> [!CAUTION]
-> Never publish unembargoed security vulnerabilities to a public tracker.
-> - If `visibility: public`, high and critical findings are automatically blocked from public trackers (`github-issues`) and retained in local file reports only.
-> - `.gitignore` is configured to exclude `findings/*` and `runs/` so private vulnerability data is never leaked when this repository is pushed.
+> [!IMPORTANT]
+> Paul explicitly approved public issues for **all real findings**, sensitive high/critical included (2026-10-07). Only an explicit per-target `visibility: public` plus a verified public `github.com/OWNER/REPO` authorises the public issue sink. Missing/invalid visibility fails closed; `visibility: private` cannot target this public sink. No private publishing route is implied. Human triage precedes any internal bead. `.gitignore` keeps raw `findings/*` and `runs/` out of Git; public issue prose is redacted, but reviewers must still consider the disclosure policy before opting a target in.
 
 ### Noise Control & State Machine
 
