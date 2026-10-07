@@ -752,6 +752,32 @@ process.stdin.on('end', () => {
                 self.assertIn("trusted attestation", res.stderr + res.stdout)
                 self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
 
+    def test_an_absolute_target_path_never_loads_a_planted_manifest(self):
+        """review P1 (agents-bp0): pathlib's absolute-join DISCARD made
+        FACTORY_ROOT/'targets'/f'{target_arg}.yaml' load a manifest from ANYWHERE, so an
+        argv+env-controlling adversary could plant trusted:true + visibility:private +
+        path:<operator home> beside any directory and get an attested unsandboxed run
+        from `--target <dir>`. Only a bare name may load a manifest; an absolute path is
+        a raw target and must refuse the opt-in exactly like any other untrusted one."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        broken = self.root / "brokenbin"
+        broken.mkdir()
+        stub = broken / "bwrap"
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        # The planted manifest sits beside the target directory: with the absolute-join
+        # bug, --target <self.root>/target resolved to it and the run would be attested.
+        (self.root / "target.yaml").write_text(
+            f"name: planted\npath: {self.root}\nvisibility: private\ntrusted: true\n",
+            encoding="utf-8")
+        res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
+        self.assertNotEqual(res.returncode, 0,
+                            "an absolute --target must not load a planted manifest")
+        self.assertIn("trusted attestation", res.stderr + res.stdout)
+        self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
+
     def test_the_opt_in_runs_only_for_a_trusted_private_target(self):
         """The only unsandboxed path is the explicit FACTORY_ALLOW_UNSANDBOXED opt-in for a
         TRUSTED target (THREAT_MODEL.md section 7) — a real precondition since agents-bp0,
@@ -896,10 +922,13 @@ process.stdin.on('end', () => {
         """agents-6ce: the worktree grant needs a git repo. A non-git target downgrades to
         read-only and re-withholds write with the specific reason, so the banner and policy
         stay honest and no worktree/session.patch is produced."""
-        # self.target is a plain directory (not git) from setUp.
+        # self.target is a plain directory (not git) from setUp; the trusted manifest
+        # points at it, so the run proceeds on any host (review P2: the old raw-path +
+        # opt-in form only worked where bubblewrap exists).
+        self.trusted_target("trusted")
         self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
-        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"})
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
         self.assertIn("Tool policy: read-only", res.stdout)

@@ -312,19 +312,31 @@ def list_agents():
     print("=" * 65)
 
 def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
-    # Check targets/ directory first
-    target_yaml = FACTORY_ROOT / "targets" / f"{target_arg}.yaml"
-    if target_yaml.exists():
-        cfg = load_yaml_simple(target_yaml)
-        name = cfg.get("name", target_arg)
-        raw_path = os.path.expanduser(str(cfg.get("path", "")))
-        path = (FACTORY_ROOT / raw_path).resolve() if not os.path.isabs(raw_path) else Path(raw_path).resolve()
-        # A named target whose checkout is missing must fail loudly: every pre-pass would
-        # otherwise "scan" nothing and the station would report a clean zero (journal-wog).
-        if not cfg.get("path") or not path.is_dir():
-            raise FileNotFoundError(
-                f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which is not a directory")
-        return name, path, cfg
+    # A named target is a BARE name resolved under FACTORY_ROOT/targets — never a path.
+    # pathlib's `/` DISCARDS the left side when the right side is absolute, so
+    # FACTORY_ROOT / "targets" / "/tmp/x.yaml" IS /tmp/x.yaml: an adversary controlling
+    # argv and environment could plant a manifest (trusted: true, visibility: private,
+    # path: anywhere) beside any directory and turn `--target /tmp/x` into an attested
+    # unsandboxed run with an arbitrary read scope (review P1, agents-bp0). Only a bare
+    # name — no path separator, not absolute, not a parent reference — may load a
+    # manifest; everything else is a raw path target, which carries no attestation at
+    # all and refuses the unsandboxed opt-in like every other untrusted target.
+    is_bare_name = (target_arg not in ("", ".", "..")
+                    and not os.path.isabs(target_arg)
+                    and os.sep not in target_arg and "/" not in target_arg)
+    if is_bare_name:
+        target_yaml = FACTORY_ROOT / "targets" / f"{target_arg}.yaml"
+        if target_yaml.exists():
+            cfg = load_yaml_simple(target_yaml)
+            name = cfg.get("name", target_arg)
+            raw_path = os.path.expanduser(str(cfg.get("path", "")))
+            path = (FACTORY_ROOT / raw_path).resolve() if not os.path.isabs(raw_path) else Path(raw_path).resolve()
+            # A named target whose checkout is missing must fail loudly: every pre-pass would
+            # otherwise "scan" nothing and the station would report a clean zero (journal-wog).
+            if not cfg.get("path") or not path.is_dir():
+                raise FileNotFoundError(
+                    f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which is not a directory")
+            return name, path, cfg
 
     # Otherwise treat as path
     target_path = Path(os.path.expanduser(target_arg)).resolve()
@@ -476,7 +488,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             f"with `visibility: private` in its manifest (THREAT_MODEL.md section 7); the "
             f"banner and policy.json then say NOT confined.")
     unsandboxed_note = (
-        f"explicit FACTORY_ALLOW_UNSANDBOXED opt-in on trusted target '{target_name}' "
+        # The attestation names the manifest's FILE STEM, not the name: field a manifest
+        # self-declares (review P3): the file the operator actually wrote is what was
+        # attested. The opt-in only ever fires for a bare-name manifest target.
+        f"explicit FACTORY_ALLOW_UNSANDBOXED opt-in on trusted target "
+        f"'{Path(target_arg).name}' "
         f"(visibility private; THREAT_MODEL.md section 7): the engine process and the "
         f"pre-pass run as the operator"
         if engine in SANDBOXED_ENGINES and not sandbox_ok else None)
