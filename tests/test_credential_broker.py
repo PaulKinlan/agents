@@ -12,11 +12,13 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib import credential_broker as cb  # noqa: E402
+from lib.child_env import child_environment  # noqa: E402
 
 REAL = {
     "anthropic": "sk-ant-REAL-DO-NOT-LEAK",
@@ -235,6 +237,41 @@ class TestLifecycle(unittest.TestCase):
     def test_unknown_provider_is_rejected_at_construction(self):
         with self.assertRaises(cb.BrokerError):
             cb.CredentialBroker({"azure": "x"})
+
+
+class TestChildEnvBrokerComposition(BrokerTestBase):
+    """The two committed 8h4 components compose: child_environment(broker_urls) hands the engine
+    a placeholder + base URL, and a request to THAT base URL with THAT placeholder is routed by
+    the broker to the right upstream with the REAL key injected. This is the integration point
+    the two unit suites each cover only one side of. (The sandboxed /proc/self/environ leg is
+    9n7's proven property; the full run_agent-wired acceptance test lands with the integration,
+    which is deferred until agents-6ce lands since both touch factory run_agent.)"""
+
+    def test_child_env_base_url_and_placeholder_drive_the_broker_to_inject_the_real_key(self):
+        # The dispatcher holds the real key and starts the broker with it.
+        parent = {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": REAL["anthropic"]}
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        # The engine's env, built the way run_agent will: placeholder + base URL, no real key.
+        env = child_environment(engine="pi", parent=parent,
+                                broker_urls={"anthropic": broker.base_url("anthropic")})
+        self.assertEqual(env["ANTHROPIC_API_KEY"], cb.PLACEHOLDER_KEY)
+        self.assertNotIn(REAL["anthropic"], env.values())
+        # Simulate the engine's SDK: POST {base_url}/v1/messages with the placeholder key.
+        split = urlsplit(env["ANTHROPIC_BASE_URL"])
+        status, _, body = _client_request(
+            split.port, "POST", split.path + "/v1/messages",
+            headers={"x-api-key": env["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01",
+                     "content-type": "application/json", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 200)
+        call = _FakeHTTPSConnection.calls[0]
+        self.assertEqual(call["host"], "api.anthropic.com")
+        self.assertEqual(call["path"], "/v1/messages")
+        # The broker stripped the placeholder the engine sent and injected the real key.
+        self.assertEqual(call["headers"]["x-api-key"], REAL["anthropic"])
+        self.assertNotIn(cb.PLACEHOLDER_KEY, call["headers"].values())
+        # And the real key never comes back to the engine side.
+        self.assertNotIn(REAL["anthropic"].encode(), body)
 
 
 if __name__ == "__main__":
