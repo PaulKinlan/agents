@@ -157,8 +157,9 @@ class TestNoUnboundedSubprocess(unittest.TestCase):
         # lib/budget.py's host-side machinery cannot reach it. Its child is bounded
         # transitively instead: the enclosing run_station_command kills the whole process
         # group at the station budget, and net_forward forwards signals and propagates the
-        # child's exit code (tests/test_containment.py's hung-engine-at-budget test rides
-        # this exact path).
+        # child's exit code (tests/test_factory_core.py
+        # TestDispatcherBudget.test_hung_engine_is_killed_at_the_station_budget rides this
+        # exact path).
         self.assertEqual(offenders, [])
 
 

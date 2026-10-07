@@ -111,6 +111,11 @@ def _public_addresses(host: str, port: int) -> List[str]:
         if (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
                 or ip.is_multicast or ip.is_unspecified):
             continue
+        # And the catch-all (review P3, agents-2x6): ip.is_global is False for CGNAT
+        # 100.64.0.0/10 and any other special range the named predicates above miss — an
+        # allowlisted host that resolves there must not become a pivot either.
+        if not ip.is_global:
+            continue
         if ip_str not in out:
             out.append(ip_str)
     return out
@@ -228,7 +233,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         host = parts.hostname
         if not host:
             return self._deny("expected an absolute-form request URI (proxy mode)")
-        port = parts.port or 80
+        try:
+            port = parts.port or 80
+        except ValueError:
+            # urlsplit defers port validation to access (review P3, agents-2x6): a URI
+            # like http://host:abc/ must be refused cleanly, not raise through the handler.
+            return self._deny(f"bad port in request URI {self.path!r}")
         ip = self._resolve_allowed(host, port)
         if ip is None:
             return
@@ -284,8 +294,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
 class _EgressServer(socketserver.ThreadingUnixStreamServer):
     """A ThreadingUnixStreamServer whose request threads are daemons, so a wedged tunnel
-    cannot outlive stop() -- set here, not globally, to avoid leaking it process-wide."""
+    cannot outlive stop() -- set here, not globally, to avoid leaking it process-wide.
+    block_on_close=False (review P3, agents-2x6): stop() must not join handler threads,
+    or a wedged CONNECT tunnel / stalled upstream could delay the run's teardown by up
+    to the tunnel idle timeout; the daemon threads drain on their own afterwards."""
     daemon_threads = True
+    block_on_close = False
 
 
 class EgressProxy:

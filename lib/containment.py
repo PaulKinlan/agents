@@ -107,11 +107,14 @@ WITHHELD_REASONS = {
     # network is grantable via the egress-allowlist proxy (agents-2x6): a sandboxed run
     # under --unshare-net has no route off its netns and its only egress is the per-run
     # allowlist, so a declared network at t1-fetch is honoured. This reason names the
-    # mechanism and is used by the run-time fallback (downgrade_network_to_withheld): a host
-    # with no OS sandbox, or a model provider the credential broker cannot cover, keeps the
-    # host network shared, and then a network tool could not be held to the tier's hosts.
-    "network": "the egress-allowlist proxy is not active for this run (no OS sandbox on this "
-               "host, or a model provider the credential broker cannot cover), so a network "
+    # mechanism and is used by the run-time fallback (downgrade_network_to_withheld):
+    # no OS sandbox on the host, an engine adapter not verified to run under it, or a
+    # model provider the credential broker cannot cover keeps the engine session on the
+    # shared host network, and then a network tool could not be held to the tier's hosts
+    # (the pre-pass may still be egress-isolated; this text is about the engine session).
+    "network": "the egress-allowlist proxy is not active for this engine's run (no OS "
+               "sandbox on this host, the engine adapter is not verified to run under it, "
+               "or a model provider the credential broker cannot cover), so a network "
                "tool cannot be held to the tier's hosts",
     "browser": "a browser is an unscoped network client and cannot yet be held to localhost",
 }

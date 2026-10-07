@@ -127,6 +127,12 @@ class SsrfGuardTest(unittest.TestCase):
         with mock.patch.object(ep.socket, "getaddrinfo", side_effect=socket.gaierror):
             self.assertEqual(ep._public_addresses("nope.invalid", 443), [])
 
+    def test_cgnat_refused(self):
+        # Review P3 (agents-2x6): 100.64.0.0/10 is not loopback/private/link-local by the
+        # named predicates — only the is_global catch-all refuses it.
+        with self._addrinfo(["100.64.0.1"]):
+            self.assertEqual(ep._public_addresses("cgnat.test", 443), [])
+
 
 class SplitAuthorityTest(unittest.TestCase):
     def test_host_port(self):
@@ -190,6 +196,20 @@ class ProxyEnforcementTest(unittest.TestCase):
         try:
             c = self._client()
             c.sendall(b"GET http://denied.test/x HTTP/1.1\r\nHost: denied.test\r\n\r\n")
+            self.assertIn(b"403", _recv_some(c))
+            c.close()
+        finally:
+            proxy.stop()
+
+    def test_bad_port_refused_cleanly(self):
+        # Review P3 (agents-2x6): urlsplit defers port validation to access — a URI like
+        # http://allowed.test:abc/ must be denied with a 403, not raise through the
+        # handler into the dispatcher's stderr.
+        proxy = ep.EgressProxy(["allowed.test"], self.path)
+        proxy.start()
+        try:
+            c = self._client()
+            c.sendall(b"GET http://allowed.test:abc/x HTTP/1.1\r\nHost: allowed.test\r\n\r\n")
             self.assertIn(b"403", _recv_some(c))
             c.close()
         finally:

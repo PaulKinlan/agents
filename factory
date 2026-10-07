@@ -479,7 +479,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     sandbox = sandbox_record(engine, egress_filtered=egress_active)
     if not egress_active:
         # Honest per-run downgrade (lib/containment.py): the egress-allowlist proxy is not
-        # active for this run, so a declared network could not be held to the tier's hosts.
+        # active for this ENGINE session (no OS sandbox, an adapter not verified to run
+        # under it, or an unbrokerable provider), so a declared network could not be held
+        # to the tier's hosts. The pre-pass above may still be egress-isolated; this
+        # downgrade is about the run's network grant as a whole.
         policy = downgrade_network_to_withheld(policy)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
