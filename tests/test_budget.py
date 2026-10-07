@@ -150,8 +150,15 @@ class TestNoUnboundedSubprocess(unittest.TestCase):
                 if func.attr in ("run", "call", "check_call", "check_output"):
                     if not any(kw.arg == "timeout" for kw in node.keywords):
                         offenders.append(f"{where}: subprocess.{func.attr} without timeout=")
-                if func.attr == "Popen" and path.name != "budget.py":
+                if func.attr == "Popen" and path.name not in ("budget.py", "net_forward.py"):
                     offenders.append(f"{where}: subprocess.Popen outside lib/budget.py")
+        # lib/net_forward.py (agents-2x6) is the deliberate exception: it IS the in-sandbox
+        # relay/supervisor — it runs inside the bubblewrap invocation, where
+        # lib/budget.py's host-side machinery cannot reach it. Its child is bounded
+        # transitively instead: the enclosing run_station_command kills the whole process
+        # group at the station budget, and net_forward forwards signals and propagates the
+        # child's exit code (tests/test_containment.py's hung-engine-at-budget test rides
+        # this exact path).
         self.assertEqual(offenders, [])
 
 
