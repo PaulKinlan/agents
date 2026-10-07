@@ -32,6 +32,10 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from lib.sandbox import sandbox_available  # noqa: E402
+
+_RUNNABLE_BWRAP = sandbox_available()
+_NEEDS_BWRAP = "needs a host where bubblewrap actually runs"
 
 from lib.embargo import is_false_positive, reported_severity  # noqa: E402
 from lib.findings import FindingsStore, load_candidate_index  # noqa: E402
@@ -136,6 +140,7 @@ class SandboxCase(unittest.TestCase):
         self.box = Sandbox(Path(tmp.name).resolve())
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestLineDeltaReport(SandboxCase):
     """fleet-810: the run's delta report describes the run, not the last station."""
 
@@ -228,12 +233,14 @@ class TestNoVerdictIsAnError(SandboxCase):
         self.assertIsNone(factory_cli.extract_json_from_output("All clean, nothing to report."))
         self.assertIsNone(factory_cli.extract_json_from_output("```json\n{broken\n```"))
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_unparseable_output_raises_and_never_touches_the_store(self):
         self.box.agent("garbled", "Could not decide.")
         with self.assertRaises(factory_cli.StationError):
             self.box.run_agent("garbled")
         self.assertFalse((self.box.root / "findings" / "target.json").exists())
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_an_object_without_findings_is_not_a_verdict(self):
         """A truncated report whose only decodable piece is an inner object."""
         truncated = json.dumps({"summary": "s", "findings": [{"a": {"b": 1}}]})[:-3]
@@ -241,6 +248,7 @@ class TestNoVerdictIsAnError(SandboxCase):
         with self.assertRaises(factory_cli.StationError):
             self.box.run_agent("truncated")
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_a_failed_prepass_is_an_error_not_a_clean_short_circuit(self):
         self.box.agent("scanner", report(), short_circuit=True,
                        prepass="import sys\nsys.exit(3)\n")
@@ -248,12 +256,14 @@ class TestNoVerdictIsAnError(SandboxCase):
             self.box.run_agent("scanner")
         self.assertIn("pre-pass exited 3", str(caught.exception))
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_a_failed_engine_is_an_error_even_with_output(self):
         self.box.agent("crashy", report())
         (self.box.bin / "pi").write_text("#!/usr/bin/env bash\necho '{\"findings\": []}'\nexit 1\n")
         with self.assertRaises(factory_cli.StationError):
             self.box.run_agent("crashy")
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_cli_exits_non_zero_on_no_verdict(self):
         shutil.copyfile(ROOT / "factory", self.box.root / "factory")
         self.box.agent("garbled", "nothing parseable")
@@ -290,6 +300,7 @@ class TestOneSeveritySource(SandboxCase):
         self.assertFalse(is_false_positive({"title": "This is not a false positive"}))
         self.assertFalse(is_false_positive({"title": "SQL injection", "status": "new"}))
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_store_and_andon_agree_and_fps_are_not_critical(self):
         fp = finding(rule_id="r2", severity="critical", snippet="// fetch(url)",
                      title="config.ts:433 is a false positive (comment, not a network call)")
@@ -318,6 +329,7 @@ class TestOneSeveritySource(SandboxCase):
         self.assertNotIn("false positive", action)
         self.assertEqual(json.loads(self.box.findings("target-line.json"))["stats"]["new"], 2)
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_a_secret_scan_info_verdict_does_not_read_critical(self):
         """journal-aaj: triage downgraded to info; the report still said CRITICAL."""
         item = finding(rule_id="openai-key", severity="info", verdict="false_positive",
@@ -330,6 +342,7 @@ class TestOneSeveritySource(SandboxCase):
         self.assertNotIn("Action Required", delta)
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestSinkAccounting(SandboxCase):
     """fleet-eqv, journal-np8: --sink beads filing nothing must say why."""
 

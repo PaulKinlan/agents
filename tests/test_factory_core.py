@@ -26,6 +26,11 @@ spec = importlib.util.spec_from_loader("factory_cli", loader)
 factory_cli = importlib.util.module_from_spec(spec)
 loader.exec_module(factory_cli)
 
+# The dispatcher must REFUSE pi on hosts without a runnable OS sandbox. Engine-run
+# tests cannot assert successful execution there; refusal tests remain ungated.
+_RUNNABLE_BWRAP = sandbox_available()
+_NEEDS_BWRAP = "needs a host where bubblewrap actually runs"
+
 
 class TestSoftwareFactoryCore(unittest.TestCase):
     def test_fingerprint_line_number_independence(self):
@@ -93,6 +98,7 @@ class TestSoftwareFactoryCore(unittest.TestCase):
             tf_path.unlink(missing_ok=True)
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestDispatcherBudget(unittest.TestCase):
     """budget.max_minutes is enforced by the dispatcher, not decorative (SF-06)."""
 
@@ -269,6 +275,7 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                         engine.get("ANTHROPIC_BASE_URL"))
         self.assertIn("PATH", engine)
 
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_prepass_gets_github_only_when_the_agent_declares_gh(self):
         """issue-triage's pre-pass calls gh: it declares requires: [gh] at t1-fetch with network
         (a manifest listing gh without network is refused, agents-05h); nothing else gets it."""
@@ -278,6 +285,7 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", engine)
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestDispatcherCandidateBinding(unittest.TestCase):
     """The dispatcher hands the scanner's candidates to the store, which binds model strings to
     them (agents-nha): an invented rule_id/path is stored as unclassified/unknown."""
@@ -346,6 +354,7 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
             self.assertIn("unknown", report_text)
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestTargetVisibility(unittest.TestCase):
     """The dispatcher passes the target's declared visibility to the findings store (agents-5rx).
 
@@ -419,6 +428,7 @@ class TestTargetVisibility(unittest.TestCase):
         self.assertEqual(self._run("public"), "")
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestPerStationEngine(unittest.TestCase):
     """A line can pin a station's engine, so verification need not share discovery's family."""
 

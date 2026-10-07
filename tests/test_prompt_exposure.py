@@ -22,6 +22,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from lib.sandbox import sandbox_available  # noqa: E402
 
 loader = importlib.machinery.SourceFileLoader("factory_cli_pgr", str(ROOT / "factory"))
 spec = importlib.util.spec_from_loader("factory_cli_pgr", loader)
@@ -110,6 +111,7 @@ class PromptSandbox:
 
 
 class TestPromptExposure(unittest.TestCase):
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_the_prompt_is_delivered_on_stdin_and_the_run_dir_is_private(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = PromptSandbox(Path(tmpdir))

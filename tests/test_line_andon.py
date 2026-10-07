@@ -158,6 +158,7 @@ class TestLineAndon(unittest.TestCase):
             self.assertFalse(sandbox.marker.exists(),
                              "a station after a halted failure must not run")
 
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_halt_on_failure_false_continues_and_keeps_the_scorecard(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox = self._sandbox(tmpdir, halt=False, stations=["missing-agent", "okprobe"])
@@ -171,6 +172,7 @@ class TestLineAndon(unittest.TestCase):
             self.assertIn("ERROR", output)
             self.assertTrue(sandbox.marker.exists(), "downstream stations must run when not halting")
 
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_a_fail_closed_adapter_is_a_station_failure_not_an_abort(self):
         """The bead's repro: an adapter exits 1 without producing model output, so run_agent
         calls sys.exit(1). This used antigravity with no agentapi; since agents-pnu the
@@ -216,6 +218,7 @@ class TestLineAndon(unittest.TestCase):
     # A GENUINE failure (engine/pre-pass) still halts. run_line branches on the NoVerdictError
     # TYPE, and gives it exactly one bounded repair-retry first.
 
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_unparseable_output_degrades_and_continues_not_halts(self):
         """agents-noo core: a station whose model output is unparseable (a PLUMBING failure, not a
         genuine engine failure) must NOT halt the line, even with andon_halt_on_failure=true.
@@ -305,6 +308,7 @@ class TestLineAndon(unittest.TestCase):
             self.assertIn("okprobe", output)
             self.assertIn("PASS", output)
 
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_the_repair_retry_recovers_via_a_real_adapter_and_preserves_the_first_output(self):
         """agents-30q (1)+(2): with the REAL adapter and a REAL flaky engine — first call emits
         garbage and exits zero (a no-verdict), second call emits the valid report — the repair
@@ -346,6 +350,7 @@ class TestLineAndon(unittest.TestCase):
             self.assertIn("OKPROBE-RAN", second_output)
             self.assertIn("\"summary\"", second_output, "the retry's output is the valid report")
 
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
     def test_a_genuine_engine_failure_halts_via_a_real_adapter_with_one_invocation(self):
         """agents-30q (2): the real-adapter counterpart of the mocked halt test — a stub pi
         that exits NON-ZERO is a genuine engine failure, so the line halts, downstream stations
