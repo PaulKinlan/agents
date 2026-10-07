@@ -388,7 +388,7 @@ class TestAdapters(unittest.TestCase):
         self.home.mkdir()
 
     def run_adapter(self, engine, policy=None, skill_dir=None, budget_usd=None,
-                    directive_file=None):
+                    directive_file=None, env_overrides=None):
         if self.argv_log.exists():
             self.argv_log.unlink()
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
@@ -400,6 +400,7 @@ class TestAdapters(unittest.TestCase):
         if directive_file is not None:
             # agents-m2n: the dispatcher-set system-directive channel.
             env["FACTORY_SYSTEM_DIRECTIVE_FILE"] = str(directive_file)
+        env.update(env_overrides or {})
         res = subprocess.run(
             ["bash", str(ROOT / "lib" / "adapters" / f"{engine}.sh"), "probe", str(self.target),
              str(skill_dir or self.skill), str(self.tmp / "run")],
@@ -477,8 +478,15 @@ class TestAdapters(unittest.TestCase):
         empty = self.tmp / "run" / "system_directive.txt"
         empty.parent.mkdir(exist_ok=True)
         empty.write_text("", encoding="utf-8")
-        for engine in ("pi", "claude", "antigravity"):
-            for label, directive in (("missing", missing), ("empty", empty)):
+        unreadable = self.tmp / "run" / "unreadable.txt"
+        unreadable.write_text("directive", encoding="utf-8")
+        unreadable.chmod(0)
+        self.addCleanup(unreadable.chmod, 0o600)
+        cases = [("missing", missing), ("empty", empty)]
+        if not os.access(unreadable, os.R_OK):
+            cases.append(("unreadable", unreadable))
+        for engine in ("pi", "claude", "antigravity", "deepseek"):
+            for label, directive in cases:
                 with self.subTest(engine=engine, directive=label):
                     if self.argv_log.exists():
                         self.argv_log.unlink()
@@ -487,6 +495,41 @@ class TestAdapters(unittest.TestCase):
                     self.assertIn("refusing to run without the system directive",
                                   res.stderr + res.stdout)
                     self.assertIsNone(argv, "the engine binary must never run")
+
+    def test_antigravity_directive_separator_is_a_real_newline(self):
+        """agents-esx: agentapi currently refuses every tool policy before prompt assembly.
+        Exercise the adapter's actual assignment in isolation to pin the separator; a
+        literal backslash-n in double quotes must not replace the two real newlines."""
+        directive = self.tmp / "run" / "system_directive.txt"
+        directive.parent.mkdir(exist_ok=True)
+        directive.write_text("DIRECTIVE\n", encoding="utf-8")
+        source = (ROOT / "lib" / "adapters" / "antigravity.sh").read_text(encoding="utf-8")
+        assignment = next(line for line in source.splitlines()
+                          if line.strip().startswith('PROMPT="$(cat "$FACTORY_SYSTEM_DIRECTIVE_FILE")'))
+        res = subprocess.run(["bash", "-c", f'PROMPT="Scanner Data"\n{assignment}\nprintf "%s" "$PROMPT"'],
+                             env={"PATH": "/usr/bin:/bin", "FACTORY_SYSTEM_DIRECTIVE_FILE": str(directive)},
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout, "DIRECTIVE\n\nScanner Data")
+
+    def test_deepseek_python_path_fails_closed_on_empty_and_read_errors(self):
+        """agents-esx: exercise the Python API path, not the CLI refusal. A nonempty
+        whitespace-only file passes bash's -s but fails Python's .strip() check; a
+        directory passes bash's -r/-s but Python cannot read it as a file. Both must
+        fail before any network request, with the exact Python error in model_output."""
+        (self.bin / "deepseek").unlink()
+        whitespace = self.tmp / "run" / "whitespace.txt"
+        whitespace.parent.mkdir(exist_ok=True)
+        whitespace.write_text("  \n", encoding="utf-8")
+        for label, directive, message in (("empty", whitespace, "directive file is empty"),
+                                           ("read-error", self.skill, "cannot read the system directive file")):
+            with self.subTest(case=label):
+                res, argv = self.run_adapter("deepseek", directive_file=directive,
+                                             env_overrides={"DEEPSEEK_API_KEY": "dummy-key"})
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn(message, res.stderr)
+                self.assertIsNone(argv)
+                self.assertNotIn("API Request Error", res.stderr)
 
     def test_the_deepseek_cli_path_refuses_a_directive_bearing_run(self):
         """agents-m2n review P1-2: the 'deepseek' CLI path pipes the prompt and has no
@@ -869,6 +912,20 @@ process.stdin.on('end', () => {
         self.assertTrue(self.stub_line("SDENV:").endswith("system_directive.txt"),
                         self.stub_line("SDENV:"))
         self.assertIn("CRITICAL TEST DIRECTIVE", self.stub_line("SDFILE:"))
+
+    def test_same_second_collision_is_allocated_exclusively(self):
+        """agents-esx: force the exact old run id twice. Without the exclusive mkdir
+        fallback this would reuse the first run dir, even if two real subprocesses
+        happened to land on different seconds in the integration test below."""
+        with mock.patch.object(factory_cli, "FACTORY_ROOT", self.root), \
+             mock.patch.object(factory_cli, "token_hex", return_value="a1b2c3d4"):
+            first = factory_cli.create_run_dir("probe", "target", "20261007-123456")
+            (first / "model_output.txt").write_text("first output", encoding="utf-8")
+            second = factory_cli.create_run_dir("probe", "target", "20261007-123456")
+        self.assertNotEqual(first, second)
+        self.assertEqual(second.name, "probe-target-20261007-123456-a1b2c3d4")
+        self.assertEqual((first / "model_output.txt").read_text(encoding="utf-8"), "first output")
+        self.assertEqual(second.stat().st_mode & 0o777, 0o700)
 
     def test_two_runs_never_share_a_run_directory(self):
         """agents-m2n review P2 (same class as agents-30q): run ids resolve to the second,
