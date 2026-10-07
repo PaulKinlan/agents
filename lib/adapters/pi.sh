@@ -49,11 +49,17 @@ OUTPUT_FILE="$RUN_DIR/model_output.txt"
 
 echo "[pi adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
-# Auth comes from pi's own configuration (~/.pi) — a signed-in developer session needs
-# no provider API key in the environment (verified: this adapter completes with
-# ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY unset, and with invalid values
-# set, so nothing needs scrubbing here).
-echo "[pi adapter] Auth: pi session configuration"
+# Auth (review P2, agents-9n7): inside the OS sandbox the engine's own config (~/.pi) is
+# NOT mounted, so the signed-in session file cannot be read and auth reaches pi only as the
+# ANTHROPIC_API_KEY environment variable that lib/child_env.py admits (the residual
+# /proc/self/environ exposure is documented in THREAT_MODEL.md section 7). Outside the
+# sandbox — FACTORY_ALLOW_UNSANDBOXED trusted-target mode, or a host without bubblewrap —
+# pi falls back to its own ~/.pi session configuration. Report whichever is actually true.
+if [ -n "${FACTORY_SANDBOXED:-}" ]; then
+  echo "[pi adapter] Auth: ANTHROPIC_API_KEY env (sandboxed; ~/.pi session config not mounted)"
+else
+  echo "[pi adapter] Auth: pi session configuration (~/.pi)"
+fi
 
 cd "$TARGET_DIR"
 

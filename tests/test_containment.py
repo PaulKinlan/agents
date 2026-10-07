@@ -33,6 +33,12 @@ from lib.containment import (  # noqa: E402
     ENGINE_TOOL_POLICIES, GRANTABLE_POLICIES, READ_ONLY, ContainmentError, banner_lines,
     budget_note, check_engine, load_policy, policy_record,
 )
+from lib.sandbox import sandbox_available  # noqa: E402
+
+# Whether THIS host can run bubblewrap. The confinement acceptance test needs it; the
+# fail-closed and opt-in tests simulate its absence with a broken bwrap on PATH, so they run
+# anywhere (review P0, agents-9n7).
+_BWRAP = sandbox_available()
 
 _loader = importlib.machinery.SourceFileLoader("factory_cli_pnu", str(ROOT / "factory"))
 _spec = importlib.util.spec_from_loader("factory_cli_pnu", _loader)
@@ -442,7 +448,8 @@ class TestDispatcher(unittest.TestCase):
         """A FACTORY_TOOL_POLICY in the caller's environment never reaches the adapter."""
         self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
-        res = self.factory("pi", {"FACTORY_TOOL_POLICY": "unrestricted"})
+        res = self.factory("pi", {"FACTORY_TOOL_POLICY": "unrestricted",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
         argv = self.stub_line("ARGV:").split()
@@ -461,19 +468,19 @@ class TestDispatcher(unittest.TestCase):
         ambient FACTORY_MAX_BUDGET_USD in the operator's shell never reaches the adapter."""
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "budget: {max_minutes: 1, max_usd: 0.5}\n")
-        res = self.factory("pi", {"FACTORY_MAX_BUDGET_USD": "999"})
+        res = self.factory("pi", {"FACTORY_MAX_BUDGET_USD": "999",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("BUDGET:"), "0.5", "the declared cap, not the ambient one")
         self.assertIn("NOT enforced (the pi adapter has no per-run budget flag)", res.stdout)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertIn("budget.max_usd", record["not_enforced"])
 
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_the_engine_cannot_read_outside_the_target(self):
-        """agents-9n7 acceptance, end to end: the agents-pnu probe. A canary sits outside
-        the target; a pi factory run must not be able to read it. Without a sandbox on the
-        host the old gap applies and the run honestly reports NOT confined — this test
-        asserts the sandboxed behaviour where a sandbox exists, and the honest banner
-        where it does not."""
+        """agents-9n7 acceptance, end to end (the agents-pnu probe): with the sandbox up, a
+        pi factory run cannot read a canary that sits outside the target. This PROVES
+        confinement — it does not tolerate the sandbox's absence (review P0)."""
         outside = tempfile.TemporaryDirectory(prefix="factory-9n7-outside-")
         self.addCleanup(outside.cleanup)
         canary = Path(outside.name) / "canary.txt"
@@ -484,21 +491,58 @@ class TestDispatcher(unittest.TestCase):
         res = self.factory("pi")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
-        sandboxed = "os_sandbox" in record["granted"] and record["granted"]["os_sandbox"]["engine_sandboxed"]
-        if sandboxed:
-            line = self.stub_line("CANARY:")
-            self.assertNotIn("CANARY-SECRET-9N7", line)
-            self.assertIn("No such file", line)
-            self.assertNotIn("CANARY-SECRET-9N7", res.stdout + res.stderr)
-            self.assertIn("confined to the target", record["granted"]["read_scope"])
-            self.assertNotIn("read-scope", record["not_enforced"])
-            self.assertNotIn("os-sandbox", record["not_enforced"])
-            self.assertIn("network-egress", record["not_enforced"])
-            self.assertIn("Sandbox:     enforced", res.stdout)
-        else:
-            self.assertIn("NOT confined", res.stdout)
-            self.assertIn("os-sandbox", record["not_enforced"])
-            self.assertIn("read-scope", record["not_enforced"])
+        self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
+        line = self.stub_line("CANARY:")
+        self.assertNotIn("CANARY-SECRET-9N7", line)
+        self.assertIn("No such file", line)
+        self.assertNotIn("CANARY-SECRET-9N7", res.stdout + res.stderr)
+        self.assertIn("confined by the OS sandbox to the target", record["granted"]["read_scope"])
+        self.assertNotIn("read-scope", record["not_enforced"])
+        self.assertNotIn("os-sandbox", record["not_enforced"])
+        self.assertIn("network-egress", record["not_enforced"])
+        self.assertIn("Sandbox:     enforced", res.stdout)
+
+    def test_a_pi_run_is_refused_when_the_sandbox_cannot_run(self):
+        """review P0 (agents-9n7): pi's read scope is confined ONLY by the OS sandbox. If
+        bubblewrap cannot run on the host, the dispatcher must REFUSE — never silently fall
+        back to an unsandboxed run where a prompt-injected model reads any file the operator
+        can. A broken bwrap on PATH simulates a host where the real probe fails."""
+        outside = tempfile.TemporaryDirectory(prefix="factory-9n7-outside-")
+        self.addCleanup(outside.cleanup)
+        canary = Path(outside.name) / "canary.txt"
+        canary.write_text("CANARY-SECRET-9N7", encoding="utf-8")
+        (self.target / "canary-path.txt").write_text(str(canary), encoding="utf-8")
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        broken = self.root / "brokenbin"
+        broken.mkdir()
+        stub = broken / "bwrap"
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin"})
+        self.assertNotEqual(res.returncode, 0, "an unsandboxed pi run must be refused")
+        self.assertIn("OS filesystem sandbox", res.stderr + res.stdout)
+        self.assertEqual(self.run_dirs(), [], "a refused run must leave no run directory")
+
+    def test_unsandboxed_run_requires_an_explicit_opt_in(self):
+        """The only unsandboxed path is the explicit FACTORY_ALLOW_UNSANDBOXED opt-in for a
+        TRUSTED target (THREAT_MODEL.md section 7). It must run and say NOT confined,
+        proving the refusal above is the default and this is a deliberate, honest exception
+        rather than a silent fallback."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        broken = self.root / "brokenbin"
+        broken.mkdir()
+        stub = broken / "bwrap"
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        res = self.factory("pi", {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("NOT confined", res.stdout)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertIn("os-sandbox", record["not_enforced"])
+        self.assertIn("read-scope", record["not_enforced"])
 
 
 if __name__ == "__main__":

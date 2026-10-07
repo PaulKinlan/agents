@@ -56,10 +56,11 @@ class TestSandboxCommandShape(unittest.TestCase):
         self.run_dir = self.factory / "runs" / "run1"
         self.run_dir.mkdir(parents=True)
 
-    def build(self, env=None, inner=("/bin/true",)):
+    def build(self, env=None, inner=("/bin/true",), executables=()):
         return sandbox_command(
             list(inner), target_dir=self.target, factory_root=self.factory,
             run_dir=self.run_dir, env=env if env is not None else {"PATH": "/usr/bin:/bin"},
+            executables=executables,
         )
 
     def test_target_is_bound_read_only_and_run_dir_writable(self):
@@ -105,7 +106,7 @@ class TestSandboxCommandShape(unittest.TestCase):
 
     def test_nothing_outside_the_allowlist_is_bound(self):
         """Every ro/rw bind source is the factory root, the target, the run dir, a system
-        directory, or an executable tree from the child's PATH — nothing else."""
+        directory, or a resolved allowlisted executable tree — nothing else."""
         path_dirs = []
         with tempfile.TemporaryDirectory(prefix="factory-9n7-bin-") as bindir:
             path_dirs.append(bindir)
@@ -119,12 +120,41 @@ class TestSandboxCommandShape(unittest.TestCase):
                 or source in ("/bin", "/sbin", "/lib", "/lib64"),
                 f"unexpected bind source: {source}")
 
-    def test_path_directories_under_hidden_roots_are_rebound(self):
+    def test_only_allowlisted_executables_are_bound_never_whole_path_dirs(self):
+        """review P1 (agents-9n7): a directory on the inherited PATH is never bound whole.
+        Only the resolved executables named in the allowlist are bound (plus a dedicated
+        package dir named after the tool), so a canary an attacker drops into a PATH
+        directory stays invisible to the engine. The tools dir lives outside the factory
+        root so the factory bind cannot mask the assertion."""
         with tempfile.TemporaryDirectory(prefix="factory-9n7-tools-") as tools:
-            argv = self.build(env={"PATH": f"{tools}:/usr/bin", "HOME": "/nonexistent"})
-        sources = [s for s, _d in _pairs(argv, "--ro-bind")]
-        self.assertIn(os.path.realpath(tools), sources,
-                      "executables the child's PATH needs must be reachable inside")
+            tool = Path(tools) / "mytool"
+            tool.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+            tool.chmod(0o755)
+            (Path(tools) / "canary.txt").write_text("SECRET", encoding="utf-8")
+            argv = self.build(env={"PATH": f"{tools}:/usr/bin", "HOME": "/nonexistent"},
+                              executables=("mytool",))
+            bound = {s for s, _d in _pairs(argv, "--ro-bind") + _pairs(argv, "--bind")}
+            # the allowlisted tool is reachable...
+            self.assertIn(os.path.realpath(tool), bound)
+            # ...but the flat directory is NOT bound whole, so the canary is not exposed.
+            self.assertNotIn(os.path.realpath(tools), bound)
+            for source in bound:
+                self.assertFalse(source.endswith("canary.txt"),
+                                 f"a PATH directory's non-executable content must not be "
+                                 f"bound: {source}")
+
+    def test_an_unallowlisted_program_on_path_is_not_bound(self):
+        """A program on PATH that the caller did not allowlist contributes no bind at all —
+        the sandbox binds by name, not by directory (review P1, agents-9n7)."""
+        with tempfile.TemporaryDirectory(prefix="factory-9n7-extra-") as extra:
+            rogue = Path(extra) / "rogue"
+            rogue.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+            rogue.chmod(0o755)
+            argv = self.build(env={"PATH": f"{extra}:/usr/bin", "HOME": "/nonexistent"},
+                              executables=("mytool",))  # mytool, not rogue
+            bound = {s for s, _d in _pairs(argv, "--ro-bind") + _pairs(argv, "--bind")}
+            self.assertNotIn(os.path.realpath(rogue), bound)
+            self.assertNotIn(os.path.realpath(extra), bound)
 
     def test_an_empty_command_is_refused(self):
         with self.assertRaises(SandboxError):
@@ -144,7 +174,7 @@ class TestSandboxRecord(unittest.TestCase):
             record = sandbox_record(engine)
             self.assertTrue(record["engine_sandboxed"])
             self.assertTrue(record["prepass_sandboxed"])
-            self.assertIn("confined to the target", record["engine_read_scope"])
+            self.assertIn("confined by the OS sandbox to the target", record["engine_read_scope"])
             self.assertFalse(record["network_egress_filtered"])
             self.assertTrue(engine_sandboxed(engine))
 

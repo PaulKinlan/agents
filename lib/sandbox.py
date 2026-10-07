@@ -50,7 +50,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
@@ -60,6 +60,19 @@ TOOL = "bubblewrap"
 # payload-only. pi authenticates from env keys (lib/child_env.py ENGINE_CREDENTIALS), so
 # hiding $HOME costs it nothing (agents-9n7).
 SANDBOXED_ENGINES = frozenset({"pi"})
+
+# Narrow executable allowlists (review P1, agents-9n7). The sandbox binds ONLY these
+# resolved programs (as install trees / launch paths), never whole PATH directories, so an
+# unrelated directory the operator happened to leave on PATH cannot smuggle files into the
+# engine's read scope. Names that resolve under /usr need no bind (already visible); the
+# list matters for tools that live under a hidden home root. Extend it when a pre-pass
+# starts shelling out to a new home-installed tool — a missing tool fails the scan loudly
+# rather than widening the sandbox.
+ENGINE_EXECUTABLES = ("bash", "sh", "env")  # the engine name is added by the dispatcher
+PREPASS_EXECUTABLES = (
+    "bash", "sh", "env", "git", "node", "npm", "npx", "gitleaks", "semgrep", "gh", "rg",
+    "jq", "curl", "python3",
+)
 
 # Directory names that are structural plumbing of an install tree, not the package itself:
 # a resolved symlink's package root is the first ancestor that is not one of these.
@@ -122,8 +135,10 @@ def sandbox_record(engine: str) -> Optional[Dict[str, Any]]:
         "tool": TOOL,
         "engine_sandboxed": engine in SANDBOXED_ENGINES,
         "prepass_sandboxed": True,
-        "engine_read_scope": ("confined to the target directory by the OS sandbox "
-                              "(bubblewrap bind mounts)"
+        "engine_read_scope": ("confined by the OS sandbox to the target (read-only) plus "
+                              "the factory runtime, the engine's own install tree and "
+                              "system dirs; the operator's home, credentials, other runs "
+                              "and the rest of the host filesystem are invisible"
                               if engine in SANDBOXED_ENGINES else None),
         "network_egress_filtered": False,
         "notes": ["host /proc invisible (private PID namespace); the engine's own "
@@ -165,8 +180,11 @@ class _BindPlan:
         best: Optional[Path] = None
         kind: Optional[str] = None
         for mounted, mounted_kind in self._mounts:
+            # Longest prefix wins; on a tie (the same path mounted twice — e.g. a tmpfs
+            # later covered by a ro/rw bind) the LAST recorded mount is the effective one,
+            # because bwrap applies mounts in order and the later bind covers the tmpfs.
             if (path == mounted or mounted in path.parents) and (
-                    best is None or len(mounted.parts) > len(best.parts)):
+                    best is None or len(mounted.parts) >= len(best.parts)):
                 best, kind = mounted, mounted_kind
         return kind
 
@@ -190,21 +208,22 @@ class _BindPlan:
         self._mounts.append((Path(path), "ro"))
         self._cap()
 
-    def ro_bind(self, source: str) -> None:
-        self._bind(source, ro=True)
+    def ro_bind(self, source: str, dest: Optional[str] = None) -> None:
+        self._bind(source, ro=True, dest=dest)
 
-    def rw_bind(self, source: str) -> None:
-        self._bind(source, ro=False)
+    def rw_bind(self, source: str, dest: Optional[str] = None) -> None:
+        self._bind(source, ro=False, dest=dest)
 
-    def _bind(self, source: str, ro: bool) -> None:
+    def _bind(self, source: str, ro: bool, dest: Optional[str] = None) -> None:
         path = Path(os.path.realpath(source))
         if not path.exists():
             return
-        nearest = self._nearest(path)
+        target = Path(dest) if dest else path
+        nearest = self._nearest(target)
         if ro and nearest in ("ro", "rw"):
             return  # already inside a bind with the real content
-        self.argv += (["--ro-bind"] if ro else ["--bind"]) + [str(path), str(path)]
-        self._mounts.append((path, "ro" if ro else "rw"))
+        self.argv += (["--ro-bind"] if ro else ["--bind"]) + [str(path), str(target)]
+        self._mounts.append((target, "ro" if ro else "rw"))
         self._cap()
 
     def _cap(self) -> None:
@@ -217,13 +236,29 @@ class _BindPlan:
 
 
 def _package_root(path: Path) -> Optional[Path]:
-    """The install-tree root for a resolved executable: walk past bin/lib-style directory
-    names (~/.local/pi/pi -> ~/.local/pi; .../node_modules/npm/bin/npm-cli.js -> .../npm).
-    None when the walk escapes into a hidden root or the filesystem root — those are never
-    bound whole."""
-    current = path.parent if path.is_file() else path
+    """The install-tree root for a resolved executable, inferred conservatively so a flat
+    directory of unrelated files is never bound whole (review P1, agents-9n7). A package
+    root is returned only when either:
+      (a) the executable sits under a structural directory (bin/sbin/libexec/lib/...) that
+          signals a real install tree with siblings — .../npm/bin/npm-cli.js -> .../npm,
+          .../v24/bin/node -> .../v24; or
+      (b) the executable's own directory is named after it, i.e. a dedicated package dir
+          (~/.local/pi/pi -> ~/.local/pi, which holds pi's resources).
+    A lone executable in an unrelated flat directory (/tmp/tools/mytool) has no inferable
+    package, so None is returned and only the file is bound. None also when the walk escapes
+    into a hidden root or the filesystem root."""
+    if path.is_file():
+        exe_name = path.name
+        current = path.parent
+    else:
+        exe_name = None
+        current = path
+    walked = False
     while current.name in _STRUCTURAL and current != current.parent:
         current = current.parent
+        walked = True
+    if not walked and not (exe_name is not None and current.name == exe_name):
+        return None  # lone executable in an unrelated flat directory: bind the file only
     if current == current.parent:  # reached /
         return None
     for root in _HIDDEN_ROOTS:
@@ -232,29 +267,70 @@ def _package_root(path: Path) -> Optional[Path]:
     return current
 
 
-def _path_binds(plan: _BindPlan, path_env: str) -> None:
-    """Bind the PATH directories the child needs that are not otherwise visible, resolving
-    symlinks inside them to their package roots so shim chains work (agents-9n7)."""
+def _is_broad_root(pkg: Path, home: Optional[str]) -> bool:
+    """A package root that is really a top-level user prefix (~/.local, ~/fleet): binding it
+    whole would expose far more than the one tool. Detected by the root's parent being the
+    user's home or a hidden root, so we fall back to binding just the executable file."""
+    parent = pkg.parent
+    if str(parent) in _HIDDEN_ROOTS:
+        return True
+    if home and str(parent) == str(Path(home)):
+        return True
+    return False
+
+
+def _resolutions(name: str, path_env: str) -> List[str]:
+    """Every executable path for `name` across PATH, like `which -a` — a launcher shim in
+    one directory often execs the real binary in another, and both launch paths must exist
+    inside the sandbox."""
+    out: List[str] = []
     for entry in path_env.split(os.pathsep):
-        if not entry or not os.path.isdir(entry):
+        if not entry:
             continue
-        if plan.visible(entry):
-            continue
-        plan.ro_bind(entry)
+        candidate = os.path.join(entry, name)
         try:
-            entries = sorted(os.listdir(entry))
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                out.append(candidate)
         except OSError:
             continue
-        for name in entries:
-            candidate = os.path.join(entry, name)
-            if not os.path.islink(candidate):
+    return out
+
+
+def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
+                      home: Optional[str]) -> None:
+    """Bind only the resolved executables the child needs — NEVER whole PATH directories.
+
+    An arbitrary directory on the inherited operator PATH could hold a canary or credential
+    file that has nothing to do with any tool; binding it would re-expose exactly what the
+    sandbox hides (review P1, agents-9n7). So each name is resolved across PATH and bound
+    as (a) its narrow install tree when that tree is tool-specific, and (b) its launch path
+    when that path lives outside the tree (shim/symlink chains). A name that resolves under
+    /usr needs nothing (already visible). A name that cannot be resolved safely is skipped —
+    a missing tool fails the scan loudly rather than widening the sandbox.
+    """
+    for name in names:
+        for launch in _resolutions(name, path_env):
+            launch_p = Path(launch)
+            real = Path(os.path.realpath(launch))
+            if not real.exists():
                 continue
-            resolved = Path(os.path.realpath(candidate))
-            if not resolved.exists() or plan.visible(str(resolved)):
-                continue
-            root = _package_root(resolved)
-            if root is not None:
-                plan.ro_bind(str(root))
+            # Bind the tool's own install tree when it is tool-specific (node's versioned
+            # tree, pi's ~/.local/pi), so the real binary and its siblings resolve at their
+            # true paths. A tree that is really a top-level user prefix (~/.local) is too
+            # broad to bind whole — the executable file alone is bound instead.
+            pkg = _package_root(real)
+            if pkg is not None and not _is_broad_root(pkg, home) and not plan.visible(str(pkg)):
+                plan.ro_bind(str(pkg))
+            if not plan.visible(str(real)):
+                plan.ro_bind(str(real))
+            # Make the launch path the child's PATH/shim resolves exist and point at the
+            # real binary: a symlink is replicated as a symlink (so a self-locating binary
+            # like pi still finds its resources), a real file is bound in place.
+            if not plan.visible(str(launch_p)):
+                if os.path.islink(launch):
+                    plan.symlink(str(real), str(launch_p))
+                else:
+                    plan.ro_bind(str(real), dest=str(launch_p))
 
 
 def sandbox_command(
@@ -264,13 +340,16 @@ def sandbox_command(
     factory_root: os.PathLike | str,
     run_dir: os.PathLike | str,
     env: Optional[Dict[str, str]] = None,
+    executables: Sequence[str] = (),
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
 
-    `env` is the child's environment (lib/child_env.py allowlist); its PATH decides which
-    executable trees get re-bound. The child runs in a private PID namespace with a real
-    procfs mounted inside it: bun/pi needs a genuine /proc/self (verified by strace), and
-    the private namespace keeps every host process — and its environ — invisible.
+    `env` is the child's environment (lib/child_env.py allowlist). `executables` is the
+    narrow allowlist of program names the child may exec; each is resolved across env's
+    PATH and bound as its install tree / launch path — PATH directories themselves are
+    never bound (review P1, agents-9n7). The child runs in a private PID namespace with a
+    real procfs mounted inside it: bun/pi needs a genuine /proc/self (verified by strace),
+    and the private namespace keeps every host process — and its environ — invisible.
     """
     bwrap = shutil.which(BWRAP)
     if not bwrap:
@@ -282,6 +361,7 @@ def sandbox_command(
     target = str(Path(target_dir).resolve())
     factory = str(Path(factory_root).resolve())
     runs = str(Path(run_dir).resolve())
+    home = child_env.get("HOME")
 
     plan = _BindPlan()
     _system_binds(plan)
@@ -297,11 +377,10 @@ def sandbox_command(
     # parent tmpfs is empty, so without this the path itself would not exist and tools
     # that write to $HOME or $TMPDIR would fail with ENOENT instead of working on a
     # private scratch space.
-    home = child_env.get("HOME")
     if home and home.startswith("/") and home not in _HIDDEN_ROOTS:
         plan.tmpfs(home)
     tmpdir = child_env.get("TMPDIR")
-    if tmpdir and tmpdir.startswith("/"):
+    if tmpdir and tmpdir.startswith("/") and not plan.visible(tmpdir):
         plan.tmpfs(tmpdir)
 
     # Factory root read-only (adapter scripts, SKILL.md), with other runs' artifacts masked
@@ -315,14 +394,16 @@ def sandbox_command(
     # The target, read-only.
     plan.ro_bind(target)
 
-    # Executables: the pre-pass interpreter and everything the child's PATH must find.
+    # Executables: the pre-pass interpreter, then the narrow allowlist the caller named.
+    # Resolved by name and bound as install trees / launch paths — never whole PATH dirs.
     interpreter = Path(sys.executable).resolve()
     if not plan.visible(str(interpreter)):
         root = _package_root(interpreter)
-        if root is None:
-            raise SandboxError(f"cannot expose the interpreter {interpreter} safely")
-        plan.ro_bind(str(root))
-    _path_binds(plan, child_env.get("PATH", ""))
+        if root is None or _is_broad_root(root, home):
+            plan.ro_bind(str(interpreter))
+        else:
+            plan.ro_bind(str(root))
+    _executable_binds(plan, executables, child_env.get("PATH", ""), home)
 
     argv = [bwrap, *plan.argv]
     argv += ["--unshare-pid", "--proc", "/proc"]
