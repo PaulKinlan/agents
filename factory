@@ -769,10 +769,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     # What was declared, what the session was granted, and what is not enforced — the run's
     # own record, so a finding can be read against the containment it was produced under.
-    # Written BEFORE the session (a crash mid-session still leaves the record) and REWRITTEN
-    # from this captured string after the session closes (agents-7ik): run_dir is the
-    # read-write bind, so a granted-write session could otherwise tamper with its own
-    # containment record and leave the tampered version behind.
+    # Written conservatively BEFORE the pre-pass (a crash still leaves the record).
+    # After a credential broker actually starts and swaps the engine env, the captured
+    # record is updated. It is REWRITTEN from those captured bytes after the session
+    # (agents-7ik): a granted-write session could otherwise tamper with its record.
     policy_record_json = json.dumps(
         policy_record(policy, engine, sandbox=sandbox, unsandboxed_note=unsandboxed_note),
         indent=2)
@@ -934,6 +934,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             f"the run rather than leaking it: {e}") from e
                     apply_broker_urls(
                         adapter_env, {p: broker.base_url(p) for p in broker.providers})
+                    # agents-2dj: only now can policy.json claim broker enforcement.
+                    # The recorder checks the actual adapter env for every remaining
+                    # model key and proxy credential, rather than trusting broker startup
+                    # or egress_active as proof that no real key reaches /proc/self/environ.
+                    policy_record_json = json.dumps(
+                        policy_record(policy, engine, sandbox=sandbox,
+                                      unsandboxed_note=unsandboxed_note,
+                                      brokered_providers=tuple(broker.providers),
+                                      engine_env=adapter_env), indent=2)
+                    (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
             adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
