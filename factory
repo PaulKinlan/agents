@@ -468,7 +468,7 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     return max(pool, key=lambda o: o[0])[1]
 
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
-              station_only: bool = False, repair_hint: Optional[str] = None):
+              station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
     agent_yaml = agent_dir / "agent.yaml"
     skill_dir = agent_dir
@@ -555,6 +555,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         policy = downgrade_network_to_withheld(policy)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if attempt > 1:
+        # agents-30q: every attempt gets its OWN run directory. pi.sh redirects the engine's
+        # output into $RUN_DIR/model_output.txt, so a retry that shared the first attempt's
+        # directory would overwrite the rejected first output — defeating the 'raw output
+        # kept for human recovery' property the repair-retry exists to provide.
+        run_id = f"{run_id}-attempt{attempt}"
     run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -1039,7 +1045,7 @@ def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str
                 f"ONLY one valid JSON object that validates against the declared report schema — "
                 f"no prose, no code fences, no tool calls.")
         return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True,
-                         repair_hint=hint)
+                         repair_hint=hint, attempt=2)
 
 
 def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None):
