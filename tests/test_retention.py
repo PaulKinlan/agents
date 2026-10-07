@@ -10,11 +10,14 @@ accumulate without bound. These tests pin the retention contract:
 - the in-progress run (excluded) is never pruned;
 - the age/TTL bound is deterministic (explicit mtimes and an injected clock,
   never sleeps);
+- a fresh ``.active`` marker protects an in-progress run from being swept by a
+  concurrent run, while a stale marker is eventually swept (bounded grace);
+- the hill-climb ``runs/hillclimb-*/`` proposal dir is never pruned;
 - the default configuration is bounded;
 - pruning never follows a symlink out of ``runs/`` and tolerates unexpected
-  contents (non-directory files, the hill-climb ``worktrees/`` staging dir);
-- the ``factory`` ``create_run_dir`` hook actually applies the policy (so
-  removing the hook fails the suite).
+  contents (non-directory files);
+- the ``factory`` ``create_run_dir`` hook actually applies the policy and marks the
+  new run active (so removing the hook fails the suite).
 """
 
 import contextlib
@@ -33,8 +36,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib.retention import (  # noqa: E402
+    ACTIVE_GRACE_SECONDS_DEFAULT,
+    ACTIVE_MARKER_NAME,
     RETAIN_AGE_DAYS_DEFAULT,
     RETAIN_COUNT_DEFAULT,
+    active_grace_seconds,
     prune_run_dirs,
     retention_config,
     run_directories,
@@ -185,17 +191,21 @@ class TestSymlinkAndUnexpectedContents(unittest.TestCase):
             self.assertTrue(log.exists())
             self.assertEqual(pruned, [old.resolve()])
 
-    def test_worktrees_staging_dir_is_not_a_run_directory(self):
+    def test_hillclimb_proposal_dir_is_not_a_run_directory(self):
+        # agents-ped P0: the hill-climb proposal dir uses the REAL name
+        # runs/hillclimb-<target>-<run_id>, not a literal "worktrees" dir. Skipping only
+        # the phantom name masked this and let the live proposal be swept mid-run.
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp)
-            worktrees = runs / "worktrees"
-            worktrees.mkdir()
+            proposal = runs / "hillclimb-fauxmium-20260101-000000"
+            proposal.mkdir()
             old = make_dir(runs, "old-run", 1)
 
             pruned = prune_run_dirs(runs, now=1000, retain=0, max_age_seconds=1)
 
-            self.assertTrue(worktrees.exists())
+            self.assertTrue(proposal.exists())
             self.assertFalse(old.exists())
+            self.assertEqual(pruned, [old.resolve()])
 
     def test_a_run_dir_with_a_symlink_inside_is_removed_without_following_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,6 +230,73 @@ class TestSymlinkAndUnexpectedContents(unittest.TestCase):
             runs = Path(tmp) / "does-not-exist"
             self.assertEqual(prune_run_dirs(runs), [])
             self.assertEqual(list(run_directories(runs)), [])
+
+
+class TestActiveRunGuard(unittest.TestCase):
+    def test_fresh_active_marker_protects_a_long_running_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            # The run dir itself is ancient (so the age bound alone would prune it),
+            # but its marker is fresh: a concurrent run must not sweep it.
+            active = make_dir(runs, "active-run", 1)
+            marker = active / ACTIVE_MARKER_NAME
+            marker.write_text("active\n", encoding="utf-8")
+            os.utime(marker, (2000, 2000))
+            os.utime(active, (1, 1))  # the run dir is ancient; only the marker is fresh
+            old = make_dir(runs, "old-run", 2)
+
+            pruned = prune_run_dirs(runs, now=2000, retain=0, max_age_seconds=1,
+                                    active_grace=100)
+
+            self.assertTrue(active.exists())
+            self.assertFalse(old.exists())
+            self.assertEqual(pruned, [old.resolve()])
+
+    def test_stale_active_marker_is_swept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            stale = make_dir(runs, "stale-run", 1)
+            marker = stale / ACTIVE_MARKER_NAME
+            marker.write_text("active\n", encoding="utf-8")
+            os.utime(marker, (1000, 1000))  # 1000s older than `now`, beyond grace=100
+            os.utime(stale, (1, 1))
+
+            pruned = prune_run_dirs(runs, now=2000, retain=10**9, max_age_seconds=1,
+                                    active_grace=100)
+
+            self.assertFalse(stale.exists())
+            self.assertEqual(pruned, [stale.resolve()])
+
+    def test_non_regular_file_marker_does_not_count_as_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            fake = make_dir(runs, "fake-active", 1)
+            (fake / ACTIVE_MARKER_NAME).mkdir()  # a directory is not a marker
+            os.utime(fake, (1, 1))
+
+            pruned = prune_run_dirs(runs, now=2000, retain=0, max_age_seconds=1,
+                                    active_grace=100)
+
+            self.assertFalse(fake.exists())
+            self.assertEqual(pruned, [fake.resolve()])
+
+
+class TestActiveGraceConfig(unittest.TestCase):
+    def test_default_grace_is_bounded(self):
+        self.assertGreater(ACTIVE_GRACE_SECONDS_DEFAULT, 0)
+        self.assertEqual(active_grace_seconds({}), ACTIVE_GRACE_SECONDS_DEFAULT)
+
+    def test_env_override(self):
+        self.assertEqual(
+            active_grace_seconds({"FACTORY_RUN_ACTIVE_GRACE_SECONDS": "123"}), 123)
+
+    def test_unparseable_or_non_positive_falls_back_to_default(self):
+        self.assertEqual(
+            active_grace_seconds({"FACTORY_RUN_ACTIVE_GRACE_SECONDS": "soon"}),
+            ACTIVE_GRACE_SECONDS_DEFAULT)
+        self.assertEqual(
+            active_grace_seconds({"FACTORY_RUN_ACTIVE_GRACE_SECONDS": "0"}),
+            ACTIVE_GRACE_SECONDS_DEFAULT)
 
 
 class TestFactoryHook(unittest.TestCase):
@@ -250,6 +327,9 @@ class TestFactoryHook(unittest.TestCase):
                 new_dir = factory_cli.create_run_dir("agent", "target", "20260101-000000")
 
             self.assertTrue(new_dir.exists())
+            # The freshly allocated run is marked active so a concurrent run cannot sweep
+            # it (agents-ped P2).
+            self.assertTrue((new_dir / ACTIVE_MARKER_NAME).exists())
             # The three newest pre-existing runs survive, plus the new run.
             remaining = sorted(d.name for d in runs.iterdir() if d.is_dir())
             self.assertEqual(

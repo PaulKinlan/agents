@@ -422,10 +422,21 @@ FACTORY_RUN_RETENTION=50 FACTORY_RUN_RETENTION_AGE_DAYS=7 ./factory run secret-s
 
 Pruning is explicit and safe: the run directory being written is never removed;
 symlinks are never followed (and are left in place); non-directory files such as the
-scheduler's `schedule-*.stdout.log` and the hill-climb `runs/worktrees/` staging
-directory are never swept. If a run crashes mid-way, its partial directory is still the
-newest entry and survives that pass; it is pruned on a later run once it is old enough
-or falls past the count bound. See `lib/retention.py` for the exact policy.
+scheduler's `schedule-*.stdout.log` and the hill-climb `runs/hillclimb-<target>-<run_id>/`
+proposal directories are never swept (they are proposals, not run records). If a run
+crashes mid-way, its partial directory is still the newest entry and survives that pass;
+it is pruned on a later run once it is old enough or falls past the count bound. See
+`lib/retention.py` for the exact policy.
+
+**Active-run guard** — a concurrently running `factory` (e.g. a scheduled scan) must
+never sweep another process's still-running run directory, even when many fast runs
+overflow the count bound. Each run directory carries a `.active` marker created at
+allocation; pruning skips any directory whose marker is fresher than
+`FACTORY_RUN_ACTIVE_GRACE_SECONDS` (default `3600`, one hour). The marker is removed
+when the run completes successfully; a run that crashes or is hard-killed leaves its
+marker behind, and the grace bounds how long that stale marker protects the directory
+before it is swept. Set `FACTORY_RUN_ACTIVE_GRACE_SECONDS` larger than your longest
+station `budget.max_minutes` if you override budgets.
 
 ---
 

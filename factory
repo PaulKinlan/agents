@@ -32,7 +32,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
-    from lib.retention import prune_run_dirs, retention_config
+    from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -50,7 +50,7 @@ except ImportError:
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
-    from lib.retention import prune_run_dirs, retention_config
+    from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -540,12 +540,19 @@ def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
         run_dir.mkdir(parents=True, exist_ok=False)
     # Raw scanner matches and prompts stay private to the operator (agents-pgr).
     os.chmod(run_dir, 0o700)
+    # Mark the run active (agents-ped P2): a concurrent scheduled run must never sweep a
+    # still-running run directory, even when fast runs overflow the count bound. The marker
+    # mtime is the freshness signal prune_run_dirs checks; it is removed on successful
+    # completion, and a crashed/killed run's marker goes stale and is swept after the grace.
+    (run_dir / ACTIVE_MARKER_NAME).touch()
     # Bounded retention (agents-ped): run artifacts embed raw scanner matches and model
     # output, so prune old run directories now that this run's directory is in place. The
     # just-allocated directory is excluded, so a mid-run crash never loses the live run.
     retain_count, max_age_seconds = retention_config()
+    active_grace = active_grace_seconds()
     for pruned in prune_run_dirs(FACTORY_ROOT / "runs", retain=retain_count,
-                                 max_age_seconds=max_age_seconds, exclude={run_dir}):
+                                 max_age_seconds=max_age_seconds,
+                                 active_grace=active_grace, exclude={run_dir}):
         print(f"[retention] pruned old run directory: {pruned}")
     return run_dir
 
@@ -1101,6 +1108,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             env=child_environment(sink=sink))
     print(f"\nRun complete. Artifacts saved to:\n  {run_dir}\n")
     fragment = run_dir / "delta.json"
+    # Run finished successfully: drop the active marker so this directory is eligible for
+    # retention on a later run (agents-ped P2). A failed or killed run leaves its marker,
+    # which the active grace eventually sweeps; the just-written artifacts are still kept.
+    try:
+        (run_dir / ACTIVE_MARKER_NAME).unlink(missing_ok=True)
+    except OSError:
+        pass
     return {
         "run_id": run_id,
         "run_dir": run_dir,
