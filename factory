@@ -109,35 +109,48 @@ class EnvironmentFailureError(StationError):
 AdapterAuthError = EnvironmentFailureError
 
 AUTH_ERROR_PATTERNS = (
-    re.compile(r"no api key found", re.IGNORECASE),
-    re.compile(r"use /login to log into a provider", re.IGNORECASE),
-    re.compile(r"no claude credentials", re.IGNORECASE),
-    re.compile(r"claude code returned invalid authentication status", re.IGNORECASE),
-    re.compile(r"claude code must be logged in", re.IGNORECASE),
-    re.compile(r"deepseek_api_key is not configured", re.IGNORECASE),
-    re.compile(r"authentication failure", re.IGNORECASE),
-    re.compile(r"authentication failed", re.IGNORECASE),
-    re.compile(r"authentication error", re.IGNORECASE),
-    re.compile(r"invalid_api_key", re.IGNORECASE),
-    re.compile(r"invalid api key", re.IGNORECASE),
-    re.compile(r"401 unauthorized", re.IGNORECASE),
-    re.compile(r"status code:? 401", re.IGNORECASE),
-    re.compile(r"http error 401", re.IGNORECASE),
-    re.compile(r"http status 401", re.IGNORECASE),
-    re.compile(r"unauthorized", re.IGNORECASE),
+    (re.compile(r"no api key found for the selected model", re.IGNORECASE),
+     lambda m: "No API key found for the selected model"),
+    (re.compile(r"no api key found for ([a-zA-Z0-9._/-]+)", re.IGNORECASE),
+     lambda m: f"No API key found for {m.group(1)}"),
+    (re.compile(r"no api key found", re.IGNORECASE),
+     lambda m: "No API key found for the selected model"),
+    (re.compile(r"use /login to log into a provider", re.IGNORECASE),
+     lambda m: "Provider login required (use /login or set API key)"),
+    (re.compile(r"no claude credentials", re.IGNORECASE),
+     lambda m: "No Claude credentials configured"),
+    (re.compile(r"claude code returned invalid authentication status", re.IGNORECASE),
+     lambda m: "Invalid Claude authentication status"),
+    (re.compile(r"claude code must be logged in", re.IGNORECASE),
+     lambda m: "Claude Code must be logged in"),
+    (re.compile(r"deepseek_api_key is not configured", re.IGNORECASE),
+     lambda m: "DEEPSEEK_API_KEY is not configured"),
+    (re.compile(r"authentication\s+(?:failure|failed|error)", re.IGNORECASE),
+     lambda m: "Model provider authentication failed"),
+    (re.compile(r"(?:invalid|missing)\s+(?:api[_-]?key|auth[_-]?token)", re.IGNORECASE),
+     lambda m: "Invalid or missing API key"),
+    (re.compile(r"\b401\s+unauthorized\b", re.IGNORECASE),
+     lambda m: "Model API returned HTTP 401 Unauthorized"),
+    (re.compile(r"(?:status(?:\s*code)?|http(?:\s*status|\s*error)?)\s*[:=]?\s*401\b", re.IGNORECASE),
+     lambda m: "Model API returned HTTP 401 Unauthorized"),
 )
 
 
 def detect_adapter_auth_failure(raw_output: str, stderr: str, stdout: str = "") -> Optional[str]:
-    """Check output and stderr for known engine authentication failure patterns."""
+    """Check output and stderr for known engine authentication failure patterns.
+
+    Returns a sanitized reason description, never raw diagnostic lines that might contain
+    request headers or credentials (agents-zrn).
+    """
     combined = f"{raw_output}\n{stderr}\n{stdout}"
     for line in combined.splitlines():
         line_clean = line.strip()
         if not line_clean:
             continue
-        for pat in AUTH_ERROR_PATTERNS:
-            if pat.search(line_clean):
-                return line_clean
+        for pat, desc_fn in AUTH_ERROR_PATTERNS:
+            m = pat.search(line_clean)
+            if m:
+                return desc_fn(m)
     return None
 
 # Local git plumbing in the hill-climb path is fast when healthy; a wedged git (lock contention,

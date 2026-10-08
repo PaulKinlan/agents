@@ -746,7 +746,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"Line: `{line_name or '?'}` — {len(stations)} station(s), "
                      f"{has_verdict_count} with a verdict.")
         lines.append("")
-    if env_failure:
+    if env_failure or env_failed:
         lines += [
             f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
             f"|:---:|:---:|:---:|:---:|:---:|:---:|",

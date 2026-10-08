@@ -60,7 +60,7 @@ class TestAdapterAuthFailureDetection(unittest.TestCase):
         stderr = "[claude adapter] Error: no Claude credentials. Run 'claude login' for session auth"
         reason = detect_adapter_auth_failure("", stderr)
         self.assertIsNotNone(reason)
-        self.assertIn("no Claude credentials", reason)
+        self.assertIn("No Claude credentials", reason)
 
     def test_deepseek_key_failure_detected(self):
         stderr = "[deepseek adapter] Error: DEEPSEEK_API_KEY is not configured.\n"
@@ -68,15 +68,25 @@ class TestAdapterAuthFailureDetection(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("DEEPSEEK_API_KEY is not configured", reason)
 
-    def test_http_401_detected(self):
-        stderr = "HTTP Error 401: Unauthorized\n"
+    def test_http_401_detected_and_sanitized(self):
+        stderr = "HTTP Error 401: Unauthorized; Authorization: Bearer sk-ant-secret-1234567890\n"
         reason = detect_adapter_auth_failure("", stderr)
         self.assertIsNotNone(reason)
-        self.assertIn("401", reason)
+        self.assertEqual(reason, "Model API returned HTTP 401 Unauthorized")
+        self.assertNotIn("Bearer", reason)
+        self.assertNotIn("secret", reason)
 
     def test_non_auth_failure_not_detected(self):
         output = "SyntaxError: Unexpected token in JSON at position 0\n"
         stderr = "fatal: segmentation fault\n"
+        reason = detect_adapter_auth_failure(output, stderr)
+        self.assertIsNone(reason)
+
+    def test_finding_mentioning_unauthorized_does_not_trigger_auth_failure(self):
+        """Reviewer finding P2: a non-auth failure mentioning 'unauthorized access' in findings
+        or code discussion must not be misclassified as adapter auth failure."""
+        output = '{"findings": [{"title": "Unauthorized access to /admin endpoint"}]}\n'
+        stderr = "fatal: process killed by SIGTERM\n"
         reason = detect_adapter_auth_failure(output, stderr)
         self.assertIsNone(reason)
 
@@ -186,7 +196,7 @@ class TestSingleStationAdapterAuthFailure(unittest.TestCase):
 
         err = ctx.exception
         self.assertEqual(err.engine, "claude")
-        self.assertIn("no Claude credentials", err.reason)
+        self.assertIn("No Claude credentials", err.reason)
         self.assertIn("[environment failure]", stderr_buf.getvalue())
 
 
@@ -281,6 +291,8 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
         self.assertIn("`a11y-test`", line_delta)
         self.assertIn("UNKNOWN (not zero)", line_delta)
         self.assertNotIn("Clean Delta", line_delta)
+        # Headline table must be unknown, not zeroes (reviewer finding P1)
+        self.assertIn("| — | — | — | — | — | — |", line_delta)
         self.assertIn("| `a11y-test` | ENV_FAILURE | — | — |", line_delta)
 
         # Check line machine json
