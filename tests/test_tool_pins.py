@@ -8,14 +8,15 @@ resolution/verification logic without touching the real tools.
 """
 
 import os
+import shutil
 import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from lib.tool_pins import (ToolPinError, allowlisted_path, load_tool_pins, resolve_tool,
-                           sha256_file, tool_dir, verify_pin)
+from lib.tool_pins import (ToolPinError, allowlisted_path, host_pins_path, load_tool_pins,
+                           resolve_tool, sha256_file, tool_dir, verify_pin)
 
 
 def _make_tool(directory: Path, name: str, content: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -148,6 +149,57 @@ class AllowlistedPathTests(unittest.TestCase):
         self.assertIn("/usr/bin", entries)  # bash + env live here
         self.assertIn("/bin", entries)
         self.assertNotIn(str(self.bin_c.resolve()), entries)
+
+
+class HostPinsTests(unittest.TestCase):
+    """agents-3g6: FACTORY_TOOL_PINS host file is merged OVER tools.yaml (the out-of-band
+    pin source that makes fail-closed deployable without editing the repo)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="hostpins-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.gh = _make_tool(self.tmp, "gh")
+
+    def test_host_pins_merge_over_repo_per_tool(self):
+        repo = self.tmp / "tools.yaml"
+        repo.write_text(
+            f"gh:\n  path: /repo/gh\n  sha256: {sha256_file(self.gh)}\n"
+            "bd:\n  sha256: " + "a" * 64 + "\n", encoding="utf-8")
+        host = self.tmp / "host.pins.yaml"
+        host_sha = "b" * 64
+        host.write_text(f"gh:\n  path: {self.gh}\n  sha256: {host_sha}\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(host)}):
+            pins = load_tool_pins(path=repo)
+        # gh is overridden by the host file; bd (not in the host file) keeps the repo entry.
+        self.assertEqual(pins["gh"], {"path": str(self.gh), "sha256": host_sha})
+        self.assertEqual(pins["bd"], {"sha256": "a" * 64})
+
+    def test_host_pins_missing_file_is_no_change(self):
+        repo = self.tmp / "tools.yaml"
+        repo.write_text(f"gh:\n  sha256: {sha256_file(self.gh)}\n", encoding="utf-8")
+        missing = self.tmp / "does-not-exist.pins.yaml"
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(missing)}):
+            pins = load_tool_pins(path=repo)
+        self.assertEqual(pins["gh"], {"sha256": sha256_file(self.gh)})
+
+    def test_host_pins_malformed_file_raises(self):
+        host = self.tmp / "host.pins.yaml"
+        host.write_text("gh:\n  sha256: not-hex\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(host)}):
+            with self.assertRaises(ToolPinError):
+                load_tool_pins()
+
+    def test_host_pins_path_is_none_when_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(host_pins_path())
+
+    def test_host_pins_still_fails_closed_when_host_is_absent(self):
+        # A missing host file must NOT relax the fail-closed default: an unpinned trusted
+        # tool still refuses to resolve.
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(self.tmp / "nope.yaml"),
+                                          "FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
+            with self.assertRaises(ToolPinError):
+                resolve_tool("gh", path_env=str(self.tmp), pins=load_tool_pins())
 
 
 if __name__ == "__main__":

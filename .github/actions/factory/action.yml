@@ -81,6 +81,17 @@ runs:
           echo "FACTORY_DIR=$RUNNER_TEMP/software-factory" >> "$GITHUB_ENV"
         fi
 
+    - name: Generate Tool Pins (agents-7bj fail-closed pinning)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # agents-7bj made host-side tool resolution FAIL-CLOSED: every trusted tool the
+        # factory resolves must carry a sha256 pin or the run is refused. Hashes are
+        # host-specific, so we generate them for THIS runner and hand the factory the file
+        # via FACTORY_TOOL_PINS (merged over the repo tools.yaml by lib.tool_pins).
+        bash "$FACTORY_DIR/tools/generate-tool-pins.sh" "$RUNNER_TEMP/tools.pins.yaml"
+        echo "FACTORY_TOOL_PINS=$RUNNER_TEMP/tools.pins.yaml" >> "$GITHUB_ENV"
+
     - name: Execute Factory Agent
       id: run-agent
       shell: bash

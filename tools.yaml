@@ -13,7 +13,15 @@
 # without a matching `sha256` is a config error (a symlink could redirect it). The only
 # exception is the explicit dev/test opt-in FACTORY_ALLOW_UNPINNED_TOOLS=1, never the default.
 #
-# Generate a pin with:  sha256sum "$(command -v gh)"
+# OUT-OF-BAND HOST PINS (agents-3g6): binary hashes are host-specific, so this repo file
+# ships the format with pins commented out. A deployer points FACTORY_TOOL_PINS at a
+# host-local file (e.g. /etc/factory/tools.pins.yaml or $HOME/.config/factory/tools.pins.yaml)
+# that is merged OVER this file (host wins per tool). Generate it with:
+#
+#   tools/generate-tool-pins.sh            # writes $HOME/.config/factory/tools.pins.yaml
+#   export FACTORY_TOOL_PINS="$HOME/.config/factory/tools.pins.yaml"
+#
+# Generate a single pin by hand with:  sha256sum "$(command -v gh)"
 gh:
   # path: /usr/local/bin/gh
   # sha256: <64 hex>

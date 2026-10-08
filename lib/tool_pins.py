@@ -26,6 +26,14 @@ tree), so it is refused regardless of the opt-in.
 
 The sandbox binder (lib/sandbox.py ``_executable_binds``) calls ``verify_pin`` for each
 pinned tool before binding it, so a pinned pre-pass tool is authenticated by the same rule.
+
+**Out-of-band host pins (agents-3g6).** The repo ``tools.yaml`` is the default, but a repo
+cannot carry host-specific hashes (every machine's binaries differ). A deployer points
+``FACTORY_TOOL_PINS`` at a host-local file (e.g. ``/etc/factory/tools.pins.yaml`` or
+``$HOME/.config/factory/tools.pins.yaml``) that is *merged over* ``tools.yaml`` — the host
+file wins per tool. An unset env var or a missing host file leaves the repo pins as-is (so
+the fail-closed default is unchanged); a *malformed* host file raises ``ToolPinError`` rather
+than being silently ignored. Generate the file with ``tools/generate-tool-pins.sh``.
 """
 
 import hashlib
@@ -36,6 +44,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = FACTORY_ROOT / "tools.yaml"
+
+# Env var naming a host-local pins file, merged OVER tools.yaml (agents-3g6). Host-specific
+# hashes cannot live in the repo, so the fleet nightly runner, CI and downstream consumers
+# generate one on the host and point this at it. Absent/unset = repo pins only (still
+# fail-closed); a malformed file raises instead of being ignored.
+HOST_PINS_ENV = "FACTORY_TOOL_PINS"
 
 # Host-side tools the factory must resolve + pin before it trusts them.
 # `bd`/`git` are the findings store and the worktree/admin; `gh` fetches issues and drives
@@ -72,22 +86,21 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
-    """Parse ``tools.yaml`` into ``{tool: {path?, sha256?}}``.
+def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
+    """Parse one pins YAML file into ``{tool: {path?, sha256?}}``.
 
-    The format is a two-level map (a hand-rolled indent parser, so the findings child does
-    not grow a PyYAML dependency):
+    A hand-rolled indent parser (so the findings child grows no PyYAML dependency) for a
+    two-level map:
 
         gh:
           path: /usr/bin/gh      # optional: absolute path the tool must resolve to
           sha256: <64 hex>       # required for a trusted tool (the content/version pin)
 
-    A missing file is an empty pin set — the subsequent resolution then fails closed for any
-    trusted tool, so a deleted config can never silently widen trust. A malformed entry — a
-    non-string path/sha256, a sha256 that is not 64 hex chars, or a path pin without a sha256
-    — raises ``ToolPinError`` so a bad pin cannot silently not-match.
+    A missing file is an empty pin set — resolution then fails closed for any trusted tool, so
+    a deleted config can never silently widen trust. A malformed entry — a non-string
+    path/sha256, a sha256 that is not 64 hex chars, or a path pin without a sha256 — raises
+    ``ToolPinError`` so a bad pin cannot silently not-match.
     """
-    path = Path(path) if path is not None else CONFIG_PATH
     if not path.exists():
         return {}
     pins: Dict[str, Dict[str, str]] = {}
@@ -111,19 +124,43 @@ def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
                     pins[current][key] = value
     for tool, entry in pins.items():
         if not isinstance(entry, dict):
-            raise ToolPinError(f"tools.yaml: {tool!r} entry is malformed")
+            raise ToolPinError(f"{label}: {tool!r} entry is malformed")
         for key in ("path", "sha256"):
             value = entry.get(key)
             if value is not None and not isinstance(value, str):
-                raise ToolPinError(f"tools.yaml: {tool}.{key} must be a string")
+                raise ToolPinError(f"{label}: {tool}.{key} must be a string")
         sha = entry.get("sha256")
         if sha is not None and (len(sha) != 64 or any(c not in "0123456789abcdefABCDEF" for c in sha)):
-            raise ToolPinError(f"tools.yaml: {tool}.sha256 must be 64 hex chars")
+            raise ToolPinError(f"{label}: {tool}.sha256 must be 64 hex chars")
         if entry.get("path") is not None and sha is None:
             raise ToolPinError(
-                f"tools.yaml: {tool}.path requires a matching {tool}.sha256 (a bare path pin "
+                f"{label}: {tool}.path requires a matching {tool}.sha256 (a bare path pin "
                 "can be redirected through a symlink)")
     return pins
+
+
+def host_pins_path() -> Optional[Path]:
+    """The host-local pins file named by ``FACTORY_TOOL_PINS`` (agents-3g6), or None."""
+    raw = os.environ.get(HOST_PINS_ENV, "").strip()
+    if not raw:
+        return None
+    return Path(os.path.expanduser(raw))
+
+
+def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
+    """Load the effective pins: ``tools.yaml`` (or `path`) merged OVER by the host file.
+
+    The repo ``tools.yaml`` (or `path`, for tests) is parsed first. If ``FACTORY_TOOL_PINS``
+    names an existing host file, it is parsed and its per-tool entries REPLACE the repo's —
+    the host file wins for every tool it defines, because only the host knows its own
+    binaries' hashes. An unset env var or a missing host file leaves the repo pins unchanged
+    (still fail-closed when unpinned); a malformed host file raises ``ToolPinError``.
+    """
+    repo = _parse_pins_file(Path(path) if path is not None else CONFIG_PATH, "tools.yaml")
+    host = host_pins_path()
+    if host is not None and host.exists():
+        repo.update(_parse_pins_file(host, f"FACTORY_TOOL_PINS ({host})"))
+    return repo
 
 
 def _require_pin(name: str, entry: Dict[str, str]) -> None:
@@ -137,8 +174,9 @@ def _require_pin(name: str, entry: Dict[str, str]) -> None:
         return
     if entry.get("sha256") is None and not _unpinned_allowed():
         raise ToolPinError(
-            f"trusted tool {name!r} is not pinned (no {name}.sha256 in tools.yaml); pin it, "
-            "or set FACTORY_ALLOW_UNPINNED_TOOLS=1 to opt out explicitly for a dev/test run")
+            f"trusted tool {name!r} is not pinned (no {name}.sha256 in tools.yaml nor the "
+            f"{HOST_PINS_ENV} host file); pin it, or set FACTORY_ALLOW_UNPINNED_TOOLS=1 to "
+            "opt out explicitly for a dev/test run")
 
 
 def _resolve_candidate(name: str, pins: Dict[str, Dict[str, str]],
