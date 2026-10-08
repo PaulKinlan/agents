@@ -216,7 +216,7 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
+            for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "net_forward.py", "egress_proxy.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
             bindir = sandbox / "bin"
@@ -366,7 +366,7 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
+            for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "net_forward.py", "egress_proxy.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
             bindir = sandbox / "bin"
@@ -452,7 +452,7 @@ class TestPerStationEngine(unittest.TestCase):
                 adapter = sandbox / "lib" / "adapters" / f"{engine}.sh"
                 shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / f"{engine}.sh", adapter)
                 adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
-            for module in ("findings.py", "redaction.py", "embargo.py", "net_forward.py", "egress_proxy.py"):
+            for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "net_forward.py", "egress_proxy.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
             bindir = sandbox / "bin"

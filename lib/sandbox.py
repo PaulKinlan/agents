@@ -29,7 +29,9 @@ What the sandbox does (allowlist, not denylist — everything unbound is invisib
 * **Executables re-bound by resolution.** PATH directories outside the visible roots are
   ro-bound, and symlinks inside them are resolved to their package root (``bin/``-style
   directory names walked past), so launcher shims and versioned installs (nvm, ``~/.local``)
-  work inside without binding whole home subtrees.
+  work inside without binding whole home subtrees. A pinned trusted tool (gh/bd/git/semgrep/
+  gitleaks/node/npm/npx, agents-7bj) has its SHA-256 verified before it is bound; a mismatch
+  fails the wrap closed.
 
 What it does NOT do, stated plainly because policy.json must never overclaim:
 
@@ -61,6 +63,11 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+# Integrity pins for host-side trusted tools (agents-7bj): a pinned tool's content is
+# authenticated (SHA-256) before it is bound into the sandbox (see _executable_binds).
+from lib.tool_pins import TRUSTED_TOOLS as PINNED_TOOLS
+from lib.tool_pins import verify_pin
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
@@ -417,6 +424,13 @@ def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
             real = Path(os.path.realpath(launch))
             if not real.exists():
                 continue
+            # agents-7bj: authenticate a pinned trusted tool's content before binding it into
+            # the child. verify_pin is a no-op unless the tool has a configured sha256 pin, so
+            # unpinned names (bash/sh/env/python3) and absent optional tools (gitleaks/semgrep)
+            # behave exactly as before; a pinned tool whose binary does not hash-match fails the
+            # wrap closed rather than binding an unverified binary.
+            if name in PINNED_TOOLS:
+                verify_pin(name, str(real))
             # Bind the tool's own install tree when it is tool-specific (node's versioned
             # tree, pi's ~/.local/pi), so the real binary and its siblings resolve at their
             # true paths. A tree that is really a top-level user prefix (~/.local) is too

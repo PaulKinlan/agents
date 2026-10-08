@@ -36,6 +36,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
+    from lib.tool_pins import allowlisted_path
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -54,6 +55,7 @@ except ImportError:
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
+    from lib.tool_pins import allowlisted_path
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -1253,8 +1255,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
         if candidates_snapshot is not None:
             findings_cmd += ["--candidates", str(candidates_file)]
-        run_station_command(findings_cmd, budget, "findings dispatch", check=True,
-                            env=child_environment(sink=sink))
+        dispatch_env = child_environment(sink=sink)
+        # agents-7bj: when the sink is the synced beads tracker the findings child resolves
+        # `bd` by name; give it a PATH rebuilt from only that tool's install tree, so it can
+        # never pick up a trojaned binary from an unrelated directory earlier on PATH.
+        # Resolution itself is pinned (lib.tool_pins) and fails closed on a missing or
+        # mismatched tool. The `file` sink resolves no trusted tool, so its PATH is untouched.
+        if any(s.strip() in ("beads", "both", "all") for s in sink.split(",")):
+            dispatch_env["PATH"] = allowlisted_path(("bd",), dispatch_env.get("PATH", ""))
+        run_station_command(findings_cmd, budget, "findings dispatch", check=True, env=dispatch_env)
     print(f"\nRun complete. Artifacts saved to:\n  {run_dir}\n")
     fragment = run_dir / "delta.json"
     # Run finished successfully: drop the active marker so this directory is eligible for

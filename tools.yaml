@@ -1,0 +1,40 @@
+# Integrity pins for the factory's host-side trusted tools (agents-7bj).
+#
+# Each tool listed here is resolved by lib/tool_pins.resolve_tool(): the configured `path`
+# (if set) is preferred, otherwise it is found by name across PATH, and its SHA-256 is
+# verified against `sha256` when one is set. A mismatch fails the run closed — the factory
+# refuses to execute an unverified binary.
+#
+#   path:   (optional) absolute path the tool MUST resolve to.
+#   sha256: (optional) 64-hex SHA-256 the resolved binary MUST hash to (this IS the
+#           content/version pin — a rebuilt or swapped binary changes the hash).
+#
+# A tool with neither key still resolves by name (backward compatible), but the findings
+# dispatch child is then given a PATH rebuilt from only the resolved tools' directories, so
+# it never relies on the inherited PATH order to find gh/bd.
+#
+# Generate a pin with:  sha256sum "$(command -v gh)"
+gh:
+  # path: /usr/bin/gh
+  # sha256: <64 hex>
+bd:
+  # path: /usr/local/bin/bd
+  # sha256: <64 hex>
+git:
+  # path: /usr/bin/git
+  # sha256: <64 hex>
+semgrep:
+  # path: /usr/local/bin/semgrep
+  # sha256: <64 hex>
+gitleaks:
+  # path: /usr/local/bin/gitleaks
+  # sha256: <64 hex>
+node:
+  # path: /usr/bin/node
+  # sha256: <64 hex>
+npm:
+  # path: /usr/bin/npm
+  # sha256: <64 hex>
+npx:
+  # path: /usr/bin/npx
+  # sha256: <64 hex>

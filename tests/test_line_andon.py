@@ -35,7 +35,8 @@ loader.exec_module(factory_cli)
 
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
                "credential_broker.py", "net_forward.py", "egress_proxy.py",
-               "report_schema.py", "containment.py", "sandbox.py", "retention.py")
+               "report_schema.py", "containment.py", "sandbox.py", "retention.py",
+               "tool_pins.py")
 
 
 class _Marker:

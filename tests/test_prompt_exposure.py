@@ -69,7 +69,7 @@ class PromptSandbox:
         shutil.copyfile(ROOT / "lib" / "adapters" / "pi.sh", adapter)
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
         for module in ("findings.py", "redaction.py", "embargo.py",
-                       "net_forward.py", "egress_proxy.py"):
+                       "tool_pins.py", "net_forward.py", "egress_proxy.py"):
             shutil.copyfile(ROOT / "lib" / module, self.root / "lib" / module)
 
         report = self.root / "report-src.json"

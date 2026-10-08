@@ -75,7 +75,7 @@ class SinkFixture:
         self.root = Path(temporary.name).resolve()
         self.factory = self.root / "factory"
         (self.factory / "lib").mkdir(parents=True)
-        for module in ("findings.py", "redaction.py", "embargo.py"):
+        for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py"):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         self.cli = self.factory / "lib" / "findings.py"
         self.target = self.root / "target with spaces"
