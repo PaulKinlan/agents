@@ -550,6 +550,13 @@ class ToolPinBindTests(unittest.TestCase):
         from lib.sandbox import _BindPlan, _executable_binds
         tmp = Path(tempfile.mkdtemp(prefix="binds-pin-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # agents-3g6: a host-local FACTORY_TOOL_PINS file overlays the repo tools.yaml in
+        # load_tool_pins(), so its `path` pin would not match this fake binary and the test
+        # would fail for reasons unrelated to what it asserts. Isolate these fixtures from
+        # the host env so they test the repo-pin path deterministically.
+        host_pins = os.environ.pop("FACTORY_TOOL_PINS", None)
+        if host_pins is not None:
+            self.addCleanup(os.environ.__setitem__, "FACTORY_TOOL_PINS", host_pins)
         fake = tmp / name
         fake.write_text(content, encoding="utf-8")
         fake.chmod(fake.stat().st_mode | 0o111)
