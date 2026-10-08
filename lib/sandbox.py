@@ -58,6 +58,7 @@ the wrapper; an unlisted engine runs unsandboxed and its banner says so.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -406,6 +407,44 @@ def _resolutions(name: str, path_env: str) -> List[str]:
     return out
 
 
+def _package_json_root(path: Path) -> Optional[Path]:
+    """Nearest ancestor directory containing a ``package.json`` (a node package root), for a
+    runtime file a wrapper launcher execs. The pi bundle is
+    ``.../pi-coding-agent/dist/bundle/cli.js``; its package root is ``.../pi-coding-agent``
+    (the whole package is needed: ``cli-runtime.js``, ``chunks/``, ``node_modules``)."""
+    current = path.parent if path.is_file() else path
+    while current != current.parent:
+        if (current / "package.json").is_file():
+            return current
+        current = current.parent
+    return None
+
+
+def _wrapper_runtime_paths(real: Path) -> List[str]:
+    """Existing absolute paths a ``#!`` wrapper script references directly.
+
+    A launcher often execs a runtime in a different tree than its own (agents-wza: pi's
+    ``~/.local/pi/pi`` execs ``node ~/.pi/agent/npm/.../dist/bundle/cli.js``). Binding
+    only the launcher's own tree leaves that hardcoded runtime invisible inside the sandbox
+    (``$HOME`` is tmpfs'd), so the module cannot resolve. Extract the absolute paths the
+    script mentions and let the caller bind their install trees. A path that no longer
+    exists is skipped — it cannot be a live runtime dependency.
+    """
+    if not real.is_file():
+        return []
+    try:
+        text = real.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    if not text.lstrip().startswith("#!"):
+        return []
+    paths: List[str] = []
+    for tok in re.findall(r"/[^\s'\"`;|&()<>]+", text):
+        if os.path.exists(tok):
+            paths.append(tok)
+    return paths
+
+
 def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
                       home: Optional[str]) -> None:
     """Bind only the resolved executables the child needs — NEVER whole PATH directories.
@@ -449,6 +488,24 @@ def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
                     plan.symlink(str(real), str(launch_p))
                 else:
                     plan.ro_bind(str(real), dest=str(launch_p))
+            # A wrapper launcher may exec a runtime in another tree (agents-wza: pi's
+            # launcher execs `node <abs>/dist/bundle/cli.js` under ~/.pi/agent/npm, which is
+            # hidden once $HOME is tmpfs'd). Bind that runtime's package root too, so the
+            # module resolves. The package root is inferred narrowly (nearest package.json),
+            # never a whole PATH dir or $HOME, so the agents-9n7/ejm invariants hold.
+            for runtime in _wrapper_runtime_paths(real):
+                rp = Path(runtime)
+                pkg = _package_json_root(rp) or _package_root(rp)
+                if pkg is None or _is_broad_root(pkg, home):
+                    continue
+                # Bind the package's REAL content AT the path the launcher references, not at
+                # its resolved location. A symlinked bundle (pi: ~/.pi/agent/npm/... ->
+                # ~/fleet/sdk-host/...) must be reachable at the hardcoded path node opens,
+                # or the entry still fails MODULE_NOT_FOUND even though the resolved tree is
+                # bound. ro_bind(dest=) mounts the real content at the symlink path (bwrap
+                # creates missing parents); for a non-symlinked package dest == source.
+                if not plan.visible(str(pkg)):
+                    plan.ro_bind(str(pkg), dest=str(pkg))
 
 
 def sandbox_command(
