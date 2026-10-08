@@ -211,7 +211,15 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     if not patch.strip():
         return None
     base = _run_git(pinned + ["rev-parse", "HEAD"], worktree_dir)
-    header = (f"base-commit: {base.stdout.strip()}\n" if base.returncode == 0 else "")
+    if base.returncode != 0:
+        # agents-5bn: a patch without a resolvable base is a proposal that can only ever be
+        # applied blind. Fail closed like the add/diff checks above instead of emitting an
+        # untagged patch whose base cannot be verified.
+        raise StationError(
+            f"cannot resolve the session worktree's HEAD at {worktree_dir}: git rev-parse "
+            f"exited {base.returncode}: {(base.stderr or '').strip()}; refusing to collect a "
+            "patch whose base cannot be verified")
+    header = f"base-commit: {base.stdout.strip()}\n"
     patch_file = run_dir / "session.patch"
     # agents-nei P1-2: each kept win rewrites the SAME session.patch in place. If a later
     # write is interrupted (disk full / error), an in-place write_text could truncate the
@@ -220,6 +228,12 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     # write can never corrupt a previously collected patch.
     tmp_file = patch_file.with_name(patch_file.name + ".tmp")
     try:
+        # agents-5bn: the run dir is rw-bound inside the sandbox, so a write-granted session
+        # could plant a symlink at session.patch.tmp pointing at an arbitrary operator-writable
+        # host file; host-side write_text would follow it and overwrite the target. The session
+        # has already ended (no concurrent writer), so unlink the name first — the write then
+        # creates a fresh regular file, never following a planted link.
+        tmp_file.unlink(missing_ok=True)
         tmp_file.write_text(header + patch, encoding="utf-8")
         os.chmod(tmp_file, 0o600)
     except BaseException:
@@ -232,7 +246,74 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
             pass
         raise
     os.replace(tmp_file, patch_file)
+    # agents-5bn: the patch IS the proposal, so its base-commit trailer must name the
+    # worktree's detached HEAD — the only base it may ever be applied against. Assert it back
+    # (fail closed) so a collected patch can never be consumed under a base it does not match.
+    if _patch_base_commit(patch_file) != base.stdout.strip():
+        raise StationError(
+            f"collected session.patch at {patch_file} does not carry the worktree HEAD "
+            f"{base.stdout.strip()} as its base-commit; refusing to present a proposal whose "
+            "base cannot be verified")
     return patch_file
+
+
+def _patch_base_commit(patch_file: Path) -> Optional[str]:
+    """The base-commit trailer a collected session.patch must carry, or None when absent."""
+    try:
+        with patch_file.open("r", encoding="utf-8") as fh:
+            first = fh.readline().rstrip("\n")
+    except OSError:
+        return None
+    prefix = "base-commit: "
+    return first[len(prefix):].strip() if first.startswith(prefix) else None
+
+
+def _verify_candidates_integrity(candidates_file: Path, snapshot: bytes) -> None:
+    """Fail closed if the write-granted engine session changed candidates.json (agents-5bn).
+
+    candidates.json is the deterministic scanner's ground truth (agents-nha) that binds the
+    triage model's rule_id/path at findings dispatch — which runs AFTER the engine session. The
+    run directory is rw-bound inside the OS sandbox, so a prompt-injected write-granted session
+    (its worktree lives at run_dir/worktree, under that same rw run dir) can overwrite
+    candidates.json and forge the binding: a forged rule_id/path set would let it re-book real
+    vulnerabilities or mint phantom ones in the findings store and the public sink, defeating the
+    noise-control fingerprint. Snapshot the trusted bytes before the session and refuse the
+    dispatch on any change (the mirror of the policy.json restore control).
+    """
+    try:
+        current = candidates_file.read_bytes()
+    except OSError as e:
+        raise StationError(
+            f"candidates.json is unreadable after the engine session ({e}); a write-granted "
+            "session may have deleted or replaced the scanner ground truth — refusing to "
+            "dispatch findings against unverified candidates") from e
+    if current != snapshot:
+        raise StationError(
+            "candidates.json changed during the engine session; a write-granted session may "
+            "have tampered with the scanner ground truth that binds findings identity — "
+            "refusing to dispatch findings against unverified candidates")
+
+
+def _write_run_artifact(path: Path, data: str) -> None:
+    """Write a run-dir artifact without following a symlink a session may have planted.
+
+    The run directory is rw-bound inside the OS sandbox, so a write-granted session (or a
+    prompt-injected one) can plant a symlink at any run-dir path while it runs; a later
+    host-side write_text would follow that symlink and overwrite an arbitrary operator-writable
+    host file (agents-5bn P0 — the session.patch.tmp unlink fixed only that one path). Unlink the
+    name first — the session has already ended, so there is no concurrent writer, and unlink
+    removes the link itself, never the target — so the write creates a fresh regular file. A path
+    the session replaced with a directory fails closed (unlink raises) rather than writing
+    through it. Every run-dir artifact is a direct child of the run directory, whose mount point
+    a session cannot replace, so there is no symlinked parent directory to resolve.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        raise StationError(
+            f"cannot clear {path} before writing the run artifact (a session may have planted "
+            f"a symlink or directory there): {e}") from e
+    path.write_text(data, encoding="utf-8")
 
 
 def _worktree_has_ignored_edits(worktree_dir: Path, gitdir: Path) -> bool:
@@ -812,10 +893,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     policy_record_json = json.dumps(
         policy_record(policy, engine, sandbox=sandbox, unsandboxed_note=unsandboxed_note),
         indent=2)
-    (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
+    _write_run_artifact(run_dir / "policy.json", policy_record_json)
 
     # 1. Deterministic pre-pass
     candidates_data = []
+    candidates_snapshot: Optional[bytes] = None
     model_parse_succeeded = True
     system_directive_text = None  # agents-m2n: lifted from the payload, see below
 
@@ -878,6 +960,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 candidates_data = cand_json
                 print(f"-> Deterministic pre-pass produced context payload.")
 
+        # agents-5bn: snapshot the scanner's ground truth BEFORE the engine session. The run
+        # directory is rw-bound inside the OS sandbox, so a write-granted session could
+        # overwrite candidates.json and forge the agents-nha identity binding; the bytes are
+        # re-verified before findings dispatch (_verify_candidates_integrity).
+        candidates_snapshot = candidates_file.read_bytes()
+
     # Short-circuit only if configured and 0 candidates found for an observer scan
     should_short_circuit = agent_cfg.get("short_circuit_empty", False)
     if should_short_circuit and len(candidates_data) == 0:
@@ -920,7 +1008,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # attempt has a real chance of producing a valid report instead of the same garbage.
             prompt += "\n\n" + repair_hint
         prompt_file = run_dir / "prompt.txt"
-        prompt_file.write_text(prompt, encoding="utf-8")
+        _write_run_artifact(prompt_file, prompt)
         os.chmod(prompt_file, 0o600)
 
         # agents-m2n: the directive file for the adapter's system channel. run_dir is
@@ -929,7 +1017,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # so nothing outside the factory can point an engine at an arbitrary file).
         if system_directive_text is not None:
             directive_file = run_dir / "system_directive.txt"
-            directive_file.write_text(system_directive_text, encoding="utf-8")
+            _write_run_artifact(directive_file, system_directive_text)
             adapter_env["FACTORY_SYSTEM_DIRECTIVE_FILE"] = str(directive_file)
 
         # adapter_cmd and adapter_env — and the sandbox wrap when one applies — were built
@@ -979,9 +1067,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                       unsandboxed_note=unsandboxed_note,
                                       brokered_providers=tuple(broker.providers),
                                       engine_env=adapter_env), indent=2)
-                    (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
+                    _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
+                # agents-5bn: the run dir is rw-bound inside the sandbox, so a write-granted
+                # session could pre-place run_dir/session.patch and be credited with a proposal
+                # it never made in the worktree. Unlink before the engine so only
+                # _collect_session_diff (host-side, after the session) can produce it.
+                (run_dir / "session.patch").unlink(missing_ok=True)
+                (run_dir / "session.patch.tmp").unlink(missing_ok=True)
             adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
                                               input=prompt, capture_output=True, text=True,
                                               check=False, env=adapter_env)
@@ -1002,22 +1096,31 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     if patch_file is not None:
                         print(f"  [worktree] Collected the session's edits as {patch_file.name}; "
                               f"the target checkout was not modified.")
-                    elif _worktree_has_ignored_edits(worktree_dir, worktree_gitdir):
-                        # agents-7ik: gitignored edits are real changes on disk that `git
-                        # add -A` rightly refuses to stage — "no file edits" would be false.
-                        print("  [worktree] The session's only edits are gitignored files — "
-                              "real changes on disk, but not representable as a patch proposal.")
                     else:
-                        print("  [worktree] The session made no file edits (empty proposal).")
+                        # agents-5bn: no collected edits, so any session.patch still in the run
+                        # dir is one the write-granted session wrote itself (it ran with the run
+                        # dir rw-bound). Only a patch _collect_session_diff produced is a real
+                        # proposal — discard the rest.
+                        (run_dir / "session.patch").unlink(missing_ok=True)
+                        if _worktree_has_ignored_edits(worktree_dir, worktree_gitdir):
+                            # agents-7ik: gitignored edits are real changes on disk that `git
+                            # add -A` rightly refuses to stage — "no file edits" would be false.
+                            print("  [worktree] The session's only edits are gitignored files — "
+                                  "real changes on disk, but not representable as a patch proposal.")
+                        else:
+                            print("  [worktree] The session made no file edits (empty proposal).")
                 else:
+                    # agents-5bn: a failed session must not leave a forged session.patch either.
+                    (run_dir / "session.patch").unlink(missing_ok=True)
                     print("  [worktree] Session failed; discarding its partial edits "
                           "(no proposal collected).")
         finally:
             # agents-7ik: restore policy.json from the captured dispatcher record. The
             # session just held run_dir read-write (it is the sandbox's rw bind), so its own
             # containment record is rewritten from trusted bytes — whatever the session
-            # left there does not survive it.
-            (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
+            # left there does not survive it (agents-5bn P0: the rewrite must not follow a
+            # symlink the session planted at policy.json).
+            _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if broker is not None:
                 broker.stop()
             if worktree_dir is not None:
@@ -1059,8 +1162,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             if normalised:
                 print(f"Note: normalised {len(normalised)} field name(s)/value(s) in the model "
                       f"report (first: {normalised[0]}); see normalised_fields.json.")
-                (run_dir / "normalised_fields.json").write_text(json.dumps(normalised, indent=2),
-                                                                encoding="utf-8")
+                _write_run_artifact(run_dir / "normalised_fields.json",
+                                    json.dumps(normalised, indent=2))
             # The output contract is the deterministic half of the agent (SF-07): a report
             # that violates it is treated exactly like unparseable output — the store never
             # sees it, so no finding transitions on half-formed data.
@@ -1070,10 +1173,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 rejected = report.get("findings") if isinstance(report.get("findings"), list) else []
                 # Say what was lost and where it is, so a rejection never reads as an empty
                 # response (fleet-9wyi): the full violation list and the parsed report are kept.
-                (run_dir / "schema_errors.json").write_text(json.dumps(schema_errors, indent=2),
-                                                            encoding="utf-8")
-                (run_dir / "rejected_report.json").write_text(json.dumps(report, indent=2),
-                                                              encoding="utf-8")
+                _write_run_artifact(run_dir / "schema_errors.json",
+                                    json.dumps(schema_errors, indent=2))
+                _write_run_artifact(run_dir / "rejected_report.json",
+                                    json.dumps(report, indent=2))
                 no_verdict = (f"Model output violates the declared report schema "
                               f"({len(schema_errors)} violation(s); first: {schema_errors[0]}); "
                               f"{len(rejected)} finding(s) were in the rejected report "
@@ -1089,7 +1192,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 }
 
     report_path = run_dir / "report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _write_run_artifact(report_path, json.dumps(report, indent=2))
     if not model_parse_succeeded:
         # No verdict is a station failure, never PASS/0 (fleet-ddd, journal-mid). The raw output
         # stays in the run directory for a human (or a re-import) to recover. The engine ran and
@@ -1102,7 +1205,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # If the agent produced THREAT_MODEL.md content, save it
     if report.get("threat_model_markdown"):
         tm_run_file = run_dir / "THREAT_MODEL.md"
-        tm_run_file.write_text(report["threat_model_markdown"], encoding="utf-8")
+        _write_run_artifact(tm_run_file, report["threat_model_markdown"])
         tm_findings_file = FACTORY_ROOT / "findings" / f"{target_name}-THREAT_MODEL.md"
         tm_findings_file.parent.mkdir(parents=True, exist_ok=True)
         tm_findings_file.write_text(report["threat_model_markdown"], encoding="utf-8")
@@ -1110,6 +1213,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     # 3. Findings Store & Sink Dispatch (only if model output parsed cleanly)
     if model_parse_succeeded:
+        if candidates_snapshot is not None:
+            _verify_candidates_integrity(candidates_file, candidates_snapshot)
+        elif candidates_file.exists():
+            # agents-5bn: no pre-pass produced candidates, yet one exists after the session — a
+            # write-granted session wrote it. Refuse rather than bind findings against a
+            # candidates.json with no trusted origin.
+            raise StationError(
+                "candidates.json appeared during the engine session without a deterministic "
+                "pre-pass to produce it; a write-granted session may have forged scanner ground "
+                "truth — refusing to dispatch findings against it")
         print(f"\n[Step 3/3] Processing findings through deduplication and sink adapter...")
         findings_py = FACTORY_ROOT / "lib" / "findings.py"
         findings_cmd = [
@@ -1132,7 +1245,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             findings_cmd += ["--repo", str(target_cfg["repo"])]
         # Bind the model's rule_id/path to the scanner's candidates when a pre-pass produced
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
-        if candidates_file.exists():
+        if candidates_snapshot is not None:
             findings_cmd += ["--candidates", str(candidates_file)]
         run_station_command(findings_cmd, budget, "findings dispatch", check=True,
                             env=child_environment(sink=sink))
