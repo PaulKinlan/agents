@@ -47,6 +47,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Iterable, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
+from lib.sandbox import SUN_PATH_LIMIT
+
 __all__ = [
     "CredentialBroker",
     "credentials_from_env",
@@ -376,6 +378,12 @@ class CredentialBroker:
             if child_port is None:
                 raise BrokerError("unix_path requires child_port (the net_forward relay "
                                   "port the engine's base URL names)")
+            # agents-x8l: AF_UNIX sun_path holds at most 107 bytes; refuse a long path loudly
+            # instead of failing bind() with a cryptic ENAMETOOLONG deep in the server thread.
+            if len(unix_path) > SUN_PATH_LIMIT:
+                raise BrokerError(
+                    f"UNIX socket path {unix_path!r} is {len(unix_path)} bytes, over the "
+                    f"{SUN_PATH_LIMIT}-byte AF_UNIX sun_path limit; use a shorter socket path")
             # A stale socket file from a crashed run would make bind() fail EADDRINUSE.
             try:
                 if os.path.exists(unix_path):

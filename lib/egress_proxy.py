@@ -42,6 +42,8 @@ from http.server import BaseHTTPRequestHandler
 from typing import Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+from lib.sandbox import SUN_PATH_LIMIT
+
 # Hop-by-hop headers (RFC 7230 6.1) that belong to one transport connection and must not
 # be forwarded upstream; Connection: close is re-added so the upstream closes after the
 # response and the relay can end on EOF.
@@ -319,6 +321,12 @@ class EgressProxy:
     def start(self) -> str:
         if self._server is not None:
             return self.socket_path
+        # agents-x8l: AF_UNIX sun_path holds at most 107 bytes; refuse a long path loudly
+        # instead of failing bind() with a cryptic ENAMETOOLONG deep in the server thread.
+        if len(self.socket_path) > SUN_PATH_LIMIT:
+            raise OSError(
+                f"UNIX socket path {self.socket_path!r} is {len(self.socket_path)} bytes, over "
+                f"the {SUN_PATH_LIMIT}-byte AF_UNIX sun_path limit; use a shorter socket path")
         # A stale socket file from a crashed run would make bind() fail with EADDRINUSE.
         try:
             if os.path.exists(self.socket_path):

@@ -72,6 +72,9 @@ from lib.tool_pins import verify_pin
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
+# AF_UNIX sun_path is 108 bytes including the terminating NUL, so a usable path is at most
+# 107 bytes. Longer paths fail bind() with ENAMETOOLONG; we refuse them loudly first (agents-x8l).
+SUN_PATH_LIMIT = 107
 
 # Engines whose adapters are verified to run inside sandbox_command(). claude/antigravity
 # need their session auth from $HOME, which the sandbox hides by design; deepseek is
@@ -587,6 +590,20 @@ def sandbox_command(
     if factory_runs.is_dir():
         plan.tmpfs(str(factory_runs))
     plan.rw_bind(runs)
+
+    # agents-x8l: egress sockets may live outside run_dir (a short per-run dir under /tmp,
+    # because run_dir embeds the worktree path and can exceed AF_UNIX's sun_path limit). Bind
+    # each socket's parent dir so the in-sandbox net_forward relay reaches the host-side
+    # listener, and refuse a path too long to bind loudly rather than fail at bind() time.
+    if egress_forwards is not None:
+        for _port, sock in egress_forwards:
+            if len(sock) > SUN_PATH_LIMIT:
+                raise SandboxError(
+                    f"egress socket path {sock!r} is {len(sock)} bytes, over the "
+                    f"{SUN_PATH_LIMIT}-byte AF_UNIX sun_path limit; use a shorter socket path")
+            parent = os.path.dirname(sock)
+            if parent and not plan.visible(parent):
+                plan.rw_bind(parent)
 
     # The target, read-only.
     plan.ro_bind(target)
