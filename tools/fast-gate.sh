@@ -16,6 +16,10 @@
 #
 # A changed lib module whose mapped test file is absent exits non-zero. Override the base
 # branch with GIT_BASE=<ref> (used by tests).
+#
+# Wiring (per-VM ~/.fleet/check.conf, alongside the full-gate CHECK_CMD):
+#   CHECK_FAST_CMD="bash tools/fast-gate.sh"
+#   CHECK_FAST_TIMEOUT=180
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
