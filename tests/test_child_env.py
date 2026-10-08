@@ -82,13 +82,21 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertEqual(env["PATH"], "/usr/bin")
 
     def test_github_sink_gets_a_token_and_nothing_else(self):
-        for sink in ("github-issues", "github-issues,beads", "both"):
+        for sink in ("github-issues", "github-issues,beads"):
             with self.subTest(sink=sink):
                 env = child_environment(sink=sink, parent=parent_env())
                 self.assertEqual(env["GH_TOKEN"], "ghs_ci_token")
                 self.assertEqual(env["GITHUB_TOKEN"], "ghs_ci_token")
                 self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
                 self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_beads_alias_sinks_get_no_github_token(self):
+        """agents-eyo: `both`/`all` are now aliases for beads and grant no GitHub token."""
+        for sink in ("beads", "both", "all"):
+            with self.subTest(sink=sink):
+                env = child_environment(sink=sink, parent=parent_env())
+                for name in GITHUB_TOKEN_VARS:
+                    self.assertNotIn(name, env)
 
     def test_other_sinks_get_no_github_token(self):
         for sink in ("file", "beads", None):

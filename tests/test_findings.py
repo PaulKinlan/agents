@@ -89,29 +89,21 @@ class TestStoreLoadCorruption(unittest.TestCase):
                 FindingsStore("target", findings_dir=findings_dir)
 
 
-class TestPendingIssueTransitions(unittest.TestCase):
-    def test_file_only_findings_do_not_accumulate_undeliverable_events(self):
-        """Repeated file-sink lifecycles cannot grow an unbounded GitHub event list."""
+class TestFindingRecordShape(unittest.TestCase):
+    def test_findings_do_not_track_github_lifecycle_events(self):
+        """agents-eyo: findings no longer publish to public GitHub issues, so the per-finding
+        lifecycle-event list is gone. `github_issue` stays: promote_issue links a public-input
+        issue to a bead and reads that receipt."""
         with tempfile.TemporaryDirectory() as tmpdir:
             with FindingsStore("file-only", findings_dir=Path(tmpdir)) as store:
                 item = {"rule_id": "r", "path": "p.js", "line_number": 1,
                         "snippet": "s", "severity": "high", "title": "t"}
-                for _ in range(20):
+                for _ in range(3):
                     store.process_run("lint", [item])
                     store.process_run("lint", [])
                 finding, = store.data["findings"].values()
-                self.assertEqual(finding["github_pending_transitions"], [])
+                self.assertNotIn("github_pending_transitions", finding)
                 self.assertIsNone(finding["github_issue"])
-
-    def test_issue_sink_keeps_an_event_until_it_can_be_dispatched(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with FindingsStore("issue", findings_dir=Path(tmpdir)) as store:
-                item = {"rule_id": "r", "path": "p.js", "line_number": 1,
-                        "snippet": "s", "severity": "high", "title": "t"}
-                store.process_run("lint", [item], issue_tracking=True)
-                finding, = store.data["findings"].values()
-                self.assertEqual([e["state"] for e in finding["github_pending_transitions"]],
-                                 ["new"])
 
 
 class TestAtomicSave(unittest.TestCase):

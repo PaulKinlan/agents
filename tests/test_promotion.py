@@ -21,10 +21,23 @@ ROOT = Path(__file__).resolve().parent.parent
 class TestPromotion(SinkFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        (self.target / ".beads").mkdir()
-        published = self.scan()
+        # agents-eyo: findings file to beads now, not public issues. Seed the finding locally
+        # (file sink: no tracker) plus a legacy public issue carrying its fingerprint marker;
+        # each test calls approve() to add the human-triage label before promotion.
+        published = self.scan(sink="file")
         self.assertEqual(published.returncode, 0, published.stderr)
-        self.issue_url = self.state()["issues"][0]["html_url"]
+        fp = self.finding()["fingerprint"]
+        state = self.state()
+        state["issues"] = [{
+            "number": 1,
+            "html_url": f"https://github.com/{REPO}/issues/1",
+            "body": f"**Fingerprint**: `{fp}`",
+            "labels": [],
+            "state": "OPEN",
+            "title": "Public input issue",
+        }]
+        self.remote.write_text(json.dumps(state))
+        self.issue_url = state["issues"][0]["html_url"]
         self.calls_file.unlink(missing_ok=True)
 
     def approve(self):
@@ -79,11 +92,19 @@ class TestPromotion(SinkFixture, unittest.TestCase):
         sensitive = {"rule_id": "aws-access-key", "path": "src/config.js", "line_number": 3,
                      "snippet": token, "severity": "high", "title": "Exposed " + token,
                      "description": "Remove the leaked " + token, "remediation": "Rotate it."}
-        result = self.scan(items=[sensitive], agent="secret-scan")
+        result = self.scan(sink="file", items=[sensitive], agent="secret-scan")
         self.assertEqual(result.returncode, 0, result.stderr)
+        fp = next(f["fingerprint"] for f in self.store()["findings"].values()
+                  if f["agent"] == "secret-scan")
         state = self.state()
-        state["issues"][1]["labels"] = [{"name": "factory-approved"}]
-        self.issue_url = state["issues"][1]["html_url"]
+        state["issues"] = [{
+            "number": 1,
+            "html_url": f"https://github.com/{REPO}/issues/1",
+            "body": f"**Fingerprint**: `{fp}`",
+            "labels": [{"name": "factory-approved"}],
+            "state": "OPEN",
+            "title": "Sensitive public issue",
+        }]
         self.remote.write_text(json.dumps(state))
         self.calls_file.unlink(missing_ok=True)
         promoted = self.promote()
@@ -91,7 +112,7 @@ class TestPromotion(SinkFixture, unittest.TestCase):
         bead, = self.state()["beads"]
         self.assertNotIn(token, bead["title"] + bead["description"])
         self.assertNotIn(token, json.dumps(self.calls()))
-        self.assertIn("factory-promotion:", self.state()["comments"]["2"][-1]["body"])
+        self.assertIn("factory-promotion:", self.state()["comments"]["1"][-1]["body"])
 
     def test_wrong_repo_missing_marker_and_unrelated_fingerprint_refuse(self):
         self.approve()
@@ -221,7 +242,7 @@ class TestPromotion(SinkFixture, unittest.TestCase):
         targets.mkdir()
         (targets / "fixture.yaml").write_text(
             f"name: fixture\npath: {self.target}\nrepo: {REPO}\n"
-            f"beads_path: {self.target}\nsink: github-issues\nvisibility: public\n")
+            f"beads_path: {self.target}\nsink: beads\nvisibility: public\n")
         loader = importlib.machinery.SourceFileLoader("factory_cli_promotion", str(ROOT / "factory"))
         spec = importlib.util.spec_from_loader("factory_cli_promotion", loader)
         factory_cli = importlib.util.module_from_spec(spec)

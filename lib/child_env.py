@@ -8,9 +8,9 @@ environment built by addition:
 
 * a base allowlist of paths, locale, temp and transport settings (no secrets, no SSH agent);
 * the model-auth variables of the engine being dispatched, and nothing else;
-* a GitHub token for a `github-issues` findings dispatch, or for a pre-pass whose agent
-  declares `requires: [gh]` (issue-triage) — the only children that talk to GitHub on the
-  run's behalf.
+* a GitHub token for an explicit public-issue promotion (`factory promote`, which reuses the
+  `github-issues` sink name), or for a pre-pass whose agent declares `requires: [gh]`
+  (issue-triage) — the only children that talk to GitHub on the run's behalf.
 
 Cloud credentials, the SSH agent, unrelated project tokens and everything else the operator's
 shell happened to hold are never added. An unknown engine gets no credentials at all: a new
@@ -137,7 +137,10 @@ def child_environment(
     env = {name: source[name] for name in BASE_ALLOW if name in source}
 
     names = list(ENGINE_CREDENTIALS.get(engine or "", ()))
-    if github or (sink and any(s.strip() in ("github-issues", "both", "all") for s in sink.split(","))):
+    # agents-eyo: `github-issues` as a sink string survives only as the explicit promotion
+    # flow's sentinel (factory promote); findings no longer dispatch to public issues, so
+    # `both`/`all` (now aliases for beads) grant no GitHub token.
+    if github or (sink and any(s.strip() == "github-issues" for s in sink.split(","))):
         names.extend(GITHUB_TOKEN_VARS)
     for name in names:
         value = source.get(name)

@@ -3,18 +3,21 @@
 One file per project the factory runs against. Declares which agents apply, where findings go,
 and any target-specific scoping.
 
-Each public-issue target explicitly declares `visibility: public` and `repo: OWNER/REPO`.
-For post-triage promotion it also declares `beads_path:` pointing to an initialized
-project Beads DB; the factory never guesses that location from a checkout remote.
-The publisher verifies the destination really is public on github.com before disclosing
-any finding, including high/critical under Paul's 2026-10-07 approval. Missing/invalid
-visibility does not authorise disclosure; a raw path without a manifest remains file-only.
-Do not derive `repo:` from a checkout remote (which may be github.int.exe.xyz).
+Findings file to **beads** automatically (agents-eyo): `sink: beads` dispatches every
+finding into the project's Beads DB with no public GitHub issue and no human step. The
+`beads_path:` field names that initialized project Beads DB; the factory never guesses the
+location from a checkout remote.
+
+GitHub issues are the place for **public input**, not findings: the `issue-triage` station
+reads issues the public raises in `repo: OWNER/REPO`, and `factory promote` is the explicit,
+human-approved issue -> bead link. `visibility: public` still matters — missing visibility
+withholds high/critical from the synced beads tracker — and it authorises promotion. Do not
+derive `repo:` from a checkout remote (which may be github.int.exe.xyz).
 
 See [../docs/PLAN.md](../docs/PLAN.md) §6 (pilots) and §12 (self-hosting).
 
 | Target | Sink | Role |
 |---|---|---|
-| `fauxmium.yaml` | `file` | No verified public repo configured yet; local evidence only |
-| `chrome-agent-platform.yaml` | `github-issues` | Public triage before explicit, approved bead promotion |
-| `agents.yaml` | `github-issues` | Self-hosting public issue triage; sensitive prose redacted |
+| `fauxmium.yaml` | `file` | No beads DB configured yet; local evidence only |
+| `chrome-agent-platform.yaml` | `beads` | Findings file to the project Beads DB automatically |
+| `agents.yaml` | `beads` | Self-hosting; findings file to beads, public input via issue-triage |

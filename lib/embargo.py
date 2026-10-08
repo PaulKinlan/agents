@@ -2,12 +2,13 @@
 """Finding severity, visibility normalization and legacy fail-closed embargo.
 
 `reported_severity` preserves the triaged label; `effective_severity` treats unknown labels
-and credential/vulnerability-agent identity as critical for routing. `embargo_reason` still
-withholds high/critical when visibility is missing or invalid, but it is NOT the public-target
-backstop: Paul's explicit-public policy authorises every real severity. Public issue
-publication is guarded by `dispatch_to_sink` and `_dispatch_github`, which require explicit
-public visibility and independently verify the github.com repository before any API write.
-`lib/redaction.py` masks published values; raw evidence stays in the local store/artifacts.
+and credential/vulnerability-agent identity as critical for routing. `embargo_reason` withholds
+high/critical when visibility is missing or invalid: the synced beads tracker is a shared
+surface, so missing visibility must not silently file a high/critical bead. `dispatch_to_sink`
+and `_dispatch_beads` (lib/findings.py) apply the embargo; public GitHub issues are no longer a
+finding sink (agents-eyo) — public input is triaged separately, and `promote_issue` is the
+explicit, human-approved issue -> bead link. `lib/redaction.py` masks published values; raw
+evidence stays in the local store/artifacts.
 """
 
 import re

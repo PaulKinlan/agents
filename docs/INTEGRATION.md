@@ -64,9 +64,9 @@ paulkinlan/agents/.github/actions/factory@<ref>
 | `agent` | String | **Yes** | — | Name of the factory agent to execute (e.g., `secret-scan`, `deps-supply-chain`, `docs-drift`, `modern-web`, `bundle-size`, `issue-triage`). |
 | `target` | String | No | `.` | Path to the target repository directory relative to workspace root. |
 | `engine` | String | No | `auto` | Engine adapter to run: `auto`, `pi`, `claude`, or `antigravity`. |
-| `sink` | String | No | `file` | Findings destination: `file` (markdown artifacts), `github-issues`, or `beads`. |
+| `sink` | String | No | `file` | Findings destination: `file` (markdown artifacts) or `beads` (Beads DB). Public GitHub issues are public input (issue-triage), not a finding sink. |
 | `model_api_key` | Secret | Optional* | `""` | Inference API key (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`). *Required for agents requiring AI model triage. |
-| `github_token` | Secret | Optional* | `""` | GitHub token (`${{ secrets.GITHUB_TOKEN }}`). *Required for `sink: github-issues` or reading issues/PRs. |
+| `github_token` | Secret | Optional* | `""` | GitHub token (`${{ secrets.GITHUB_TOKEN }}`). *Required for `agent: issue-triage` (reading issues/PRs) or `factory promote`. |
 | `factory_ref` | String | No | *(pinned)* | 40-character commit SHA of the Software Factory repository to fetch. |
 
 | Output | Description |
@@ -82,7 +82,7 @@ Configure least-privilege permissions in your workflow:
 ```yaml
 permissions:
   contents: read          # Default read-only access for code scans
-  issues: write          # ONLY required if using `sink: github-issues` or `agent: issue-triage`
+  issues: write          # ONLY required for `agent: issue-triage` (public-input triage)
   pull-requests: read    # Required if analyzing PR metadata
 ```
 
@@ -96,7 +96,7 @@ The composite action enforces strict security policies out of the box:
 1. **Credential Erasure during Setup**: `fetch_factory.sh` blanks all environment tokens and model keys while downloading factory code, preventing prompt leakage or third-party tampering.
 2. **Step Summary Redaction (agents-pgj)**: `GITHUB_STEP_SUMMARY` is readable by any logged-in GitHub user on public repositories. The action masks secret values and withholds prose/PoC details for High/Critical findings.
 3. **Authenticated Full Reports**: The complete, unredacted delta report is uploaded as a private, authenticated workflow artifact (`factory-delta-report-<agent>`).
-4. **Public Sink Embargo**: If a target repository is public, `sink: github-issues` automatically blocks filing High or Critical issues to prevent zero-day disclosure.
+4. **Synced-Tracker Embargo**: A target without an explicit `visibility` withholds High/Critical from the synced beads tracker. Findings file to beads automatically (no public issue).
 
 ---
 
@@ -229,7 +229,7 @@ jobs:
         with:
           agent: issue-triage
           target: '.'
-          sink: github-issues
+          sink: beads
           model_api_key: ${{ secrets.GEMINI_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -290,7 +290,7 @@ Create a YAML manifest inside the Factory's `targets/` folder:
 # targets/my-service.yaml
 name: my-service
 path: /Users/username/Code/my-service
-sink: file                 # Sink: file | beads | github-issues
+sink: file                 # Sink: file | beads
 visibility: public         # Visibility: public | private
 agents:
   - secret-scan
@@ -312,8 +312,8 @@ schedule:
 | Sink | Description | When to Choose |
 |---|---|---|
 | **`file`** | Writes markdown delta reports to `findings/<target>-latest.md` and appends history to `findings/<target>-history.jsonl`. | **Default choice.** Safe for all public and private targets; zero external API or tracker dependencies. |
-| **`github-issues`** | First step: verified public `github.com/OWNER/REPO` issue, deduped against open and closed issues by fingerprint. Store issue URL and append lifecycle comments. | Explicit `repo:` and `visibility: public` required in the target manifest. All real severities (including high/critical) publish under Paul's public-disclosure approval; issue prose is redacted. Failed listing fails closed. |
-| **`beads`** | Not an automatic publication sink. `--sink beads` / combined sinks refuse to create work before public triage. | After human triage labels the public issue `factory-approved`, run `factory promote --target NAME --issue URL`. It requires explicit `beads_path`, dedupes by repo-scoped fingerprint external ref and repairs missing backlinks on retry. |
+| **`beads`** | Files findings as beads automatically in the target's Beads DB, deduped by fingerprint (`external_ref`). No public issue, no human step. | Requires `beads_path` in the target manifest; medium and above file (low/info are skipped), and a target without explicit `visibility` withholds high/critical. |
+| **public input (issue-triage)** | Public GitHub issues are public *input*, not a finding sink: the `issue-triage` station reads them, and `factory promote --target NAME --issue URL` links a human-approved (`factory-approved`) public issue to a bead. | Use `repo:` + `visibility: public` for the public-input side; `factory promote` dedupes by repo-scoped fingerprint and repairs lost backlinks on retry. |
 
 ### 3.3 Scheduling Daily Briefings (macOS `launchd`)
 
