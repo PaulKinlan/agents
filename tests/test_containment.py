@@ -1642,6 +1642,56 @@ process.stdin.on('end', () => {
         self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
         self.assertIn("candidates.json appeared during the engine session", res.stderr)
 
+    def test_write_run_artifact_does_not_follow_a_planted_symlink(self):
+        """agents-5bn P0: a write-granted session can plant a symlink at any run-dir path; the
+        helper must unlink it first so the write never follows it to an arbitrary host file."""
+        run_dir = self.root / "symlink-artifact-run"
+        run_dir.mkdir()
+        canary = self.root / "authorized_keys"
+        canary.write_text("SSH CANARY", encoding="utf-8")
+        target = run_dir / "report.json"
+        target.symlink_to(canary)
+        factory_cli._write_run_artifact(target, '{"summary": "clean"}')
+        self.assertEqual(canary.read_text(encoding="utf-8"), "SSH CANARY",
+                         "the write must not follow the planted symlink")
+        self.assertEqual(target.read_text(encoding="utf-8"), '{"summary": "clean"}',
+                         "the artifact must be a fresh regular file")
+
+    def test_write_run_artifact_fails_closed_on_a_planted_directory(self):
+        """agents-5bn P0: a session could plant a directory at an artifact path; unlink on a
+        directory raises, so the write fails closed rather than erroring into a bad state."""
+        run_dir = self.root / "symlink-dir-run"
+        run_dir.mkdir()
+        target = run_dir / "report.json"
+        target.mkdir()
+        with self.assertRaises(factory_cli.StationError):
+            factory_cli._write_run_artifact(target, "x")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_planted_report_json_symlink_is_not_followed(self):
+        """agents-5bn P0 end-to-end: a write-granted session plants a symlink at
+        run_dir/report.json pointing at a host canary; the post-session report.json write must
+        unlink it first, so the canary is untouched and the real report is written."""
+        self._git_init_target()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        canary = self.root / "authorized_keys"
+        canary.write_text("SSH CANARY", encoding="utf-8")
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f"ln -s {canary} ../report.json\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(canary.read_text(encoding="utf-8"), "SSH CANARY",
+                         "the post-session report.json write must not follow the planted symlink")
+        report = json.loads((self.run_dirs()[0] / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report.get("summary"), "stub", "the real report.json must be written")
+
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_staging_writes_no_content_blobs_into_the_shared_object_store(self):
         """agents-7ik (c): intent-to-add staging must not litter the target's shared

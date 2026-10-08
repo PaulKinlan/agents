@@ -601,6 +601,11 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
                    agent=agent if station_only else None, sink_results=sink_results)
 
     if fragment is not None:
+        # agents-5bn P0: the fragment lives in the run directory, which a write-granted session
+        # held rw-bound — it may have planted a symlink there. Unlink first so this write never
+        # follows it to an arbitrary operator-writable host file (the session has ended, so there
+        # is no concurrent writer); a planted directory fails closed (unlink raises).
+        fragment.unlink(missing_ok=True)
         fragment.write_text(json.dumps({
             "agent": agent,
             "stats": stats,

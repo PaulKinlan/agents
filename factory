@@ -294,6 +294,28 @@ def _verify_candidates_integrity(candidates_file: Path, snapshot: bytes) -> None
             "refusing to dispatch findings against unverified candidates")
 
 
+def _write_run_artifact(path: Path, data: str) -> None:
+    """Write a run-dir artifact without following a symlink a session may have planted.
+
+    The run directory is rw-bound inside the OS sandbox, so a write-granted session (or a
+    prompt-injected one) can plant a symlink at any run-dir path while it runs; a later
+    host-side write_text would follow that symlink and overwrite an arbitrary operator-writable
+    host file (agents-5bn P0 — the session.patch.tmp unlink fixed only that one path). Unlink the
+    name first — the session has already ended, so there is no concurrent writer, and unlink
+    removes the link itself, never the target — so the write creates a fresh regular file. A path
+    the session replaced with a directory fails closed (unlink raises) rather than writing
+    through it. Every run-dir artifact is a direct child of the run directory, whose mount point
+    a session cannot replace, so there is no symlinked parent directory to resolve.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        raise StationError(
+            f"cannot clear {path} before writing the run artifact (a session may have planted "
+            f"a symlink or directory there): {e}") from e
+    path.write_text(data, encoding="utf-8")
+
+
 def _worktree_has_ignored_edits(worktree_dir: Path, gitdir: Path) -> bool:
     """agents-7ik: did the session write anything gitignored? `git add -A` respects the
     target's .gitignore, so edits that land ONLY in ignored paths produce an empty diff
@@ -851,7 +873,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     policy_record_json = json.dumps(
         policy_record(policy, engine, sandbox=sandbox, unsandboxed_note=unsandboxed_note),
         indent=2)
-    (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
+    _write_run_artifact(run_dir / "policy.json", policy_record_json)
 
     # 1. Deterministic pre-pass
     candidates_data = []
@@ -966,7 +988,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # attempt has a real chance of producing a valid report instead of the same garbage.
             prompt += "\n\n" + repair_hint
         prompt_file = run_dir / "prompt.txt"
-        prompt_file.write_text(prompt, encoding="utf-8")
+        _write_run_artifact(prompt_file, prompt)
         os.chmod(prompt_file, 0o600)
 
         # agents-m2n: the directive file for the adapter's system channel. run_dir is
@@ -975,7 +997,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # so nothing outside the factory can point an engine at an arbitrary file).
         if system_directive_text is not None:
             directive_file = run_dir / "system_directive.txt"
-            directive_file.write_text(system_directive_text, encoding="utf-8")
+            _write_run_artifact(directive_file, system_directive_text)
             adapter_env["FACTORY_SYSTEM_DIRECTIVE_FILE"] = str(directive_file)
 
         # adapter_cmd and adapter_env — and the sandbox wrap when one applies — were built
@@ -1025,7 +1047,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                       unsandboxed_note=unsandboxed_note,
                                       brokered_providers=tuple(broker.providers),
                                       engine_env=adapter_env), indent=2)
-                    (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
+                    _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
                 # agents-5bn: the run dir is rw-bound inside the sandbox, so a write-granted
@@ -1076,8 +1098,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # agents-7ik: restore policy.json from the captured dispatcher record. The
             # session just held run_dir read-write (it is the sandbox's rw bind), so its own
             # containment record is rewritten from trusted bytes — whatever the session
-            # left there does not survive it.
-            (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
+            # left there does not survive it (agents-5bn P0: the rewrite must not follow a
+            # symlink the session planted at policy.json).
+            _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if broker is not None:
                 broker.stop()
             if worktree_dir is not None:
@@ -1119,8 +1142,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             if normalised:
                 print(f"Note: normalised {len(normalised)} field name(s)/value(s) in the model "
                       f"report (first: {normalised[0]}); see normalised_fields.json.")
-                (run_dir / "normalised_fields.json").write_text(json.dumps(normalised, indent=2),
-                                                                encoding="utf-8")
+                _write_run_artifact(run_dir / "normalised_fields.json",
+                                    json.dumps(normalised, indent=2))
             # The output contract is the deterministic half of the agent (SF-07): a report
             # that violates it is treated exactly like unparseable output — the store never
             # sees it, so no finding transitions on half-formed data.
@@ -1130,10 +1153,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 rejected = report.get("findings") if isinstance(report.get("findings"), list) else []
                 # Say what was lost and where it is, so a rejection never reads as an empty
                 # response (fleet-9wyi): the full violation list and the parsed report are kept.
-                (run_dir / "schema_errors.json").write_text(json.dumps(schema_errors, indent=2),
-                                                            encoding="utf-8")
-                (run_dir / "rejected_report.json").write_text(json.dumps(report, indent=2),
-                                                              encoding="utf-8")
+                _write_run_artifact(run_dir / "schema_errors.json",
+                                    json.dumps(schema_errors, indent=2))
+                _write_run_artifact(run_dir / "rejected_report.json",
+                                    json.dumps(report, indent=2))
                 no_verdict = (f"Model output violates the declared report schema "
                               f"({len(schema_errors)} violation(s); first: {schema_errors[0]}); "
                               f"{len(rejected)} finding(s) were in the rejected report "
@@ -1149,7 +1172,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 }
 
     report_path = run_dir / "report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _write_run_artifact(report_path, json.dumps(report, indent=2))
     if not model_parse_succeeded:
         # No verdict is a station failure, never PASS/0 (fleet-ddd, journal-mid). The raw output
         # stays in the run directory for a human (or a re-import) to recover. The engine ran and
@@ -1162,7 +1185,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # If the agent produced THREAT_MODEL.md content, save it
     if report.get("threat_model_markdown"):
         tm_run_file = run_dir / "THREAT_MODEL.md"
-        tm_run_file.write_text(report["threat_model_markdown"], encoding="utf-8")
+        _write_run_artifact(tm_run_file, report["threat_model_markdown"])
         tm_findings_file = FACTORY_ROOT / "findings" / f"{target_name}-THREAT_MODEL.md"
         tm_findings_file.parent.mkdir(parents=True, exist_ok=True)
         tm_findings_file.write_text(report["threat_model_markdown"], encoding="utf-8")
