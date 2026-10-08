@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -432,8 +433,22 @@ class TestSandboxLive(unittest.TestCase):
         self.addCleanup(_reap_sentinel)
         # Host-side sanity: the sentinel's environ exists and carries the marker — readable
         # from the host pid namespace, which is precisely what a shared-ns sandbox would see.
-        host_side = Path(f"/proc/{sentinel.pid}/environ").read_bytes()
-        self.assertIn(b"FACTORY_76V_SENTINEL=host-side-secret-marker", host_side)
+        # Bounded poll for execve to populate /proc/<pid>/environ (agents-h4q, agents-76v):
+        # immediately after fork() before execve() finishes, /proc/<pid>/environ can return
+        # transient empty bytes (b'').
+        host_side = b""
+        deadline = time.monotonic() + 5.0
+        environ_path = Path(f"/proc/{sentinel.pid}/environ")
+        while time.monotonic() < deadline:
+            try:
+                host_side = environ_path.read_bytes()
+                if host_side:
+                    break
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+            time.sleep(0.01)
+        self.assertIn(b"FACTORY_76V_SENTINEL=host-side-secret-marker", host_side,
+                      "host-side sentinel environ must be non-empty and carry the marker")
         res = self.run_inside("ls /proc | grep '^[0-9]'")
         visible = set(res.stdout.split())
         self.assertTrue(visible, "the sandbox must see its own processes")
