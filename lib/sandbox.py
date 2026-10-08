@@ -432,11 +432,18 @@ def _wrapper_runtime_paths(real: Path) -> List[str]:
     """
     if not real.is_file():
         return []
+    # Peek the shebang with a 2-byte read rather than slurping the whole file: a resolved
+    # executable is often a binary (node is ~80 MB), and decoding it as text just to learn it
+    # is not a script costs seconds and ate the tight station-budget fixtures (agents-wza).
+    try:
+        with real.open("rb") as f:
+            if f.read(2) != b"#!":
+                return []
+    except OSError:
+        return []
     try:
         text = real.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return []
-    if not text.lstrip().startswith("#!"):
         return []
     paths: List[str] = []
     for tok in re.findall(r"/[^\s'\"`;|&()<>]+", text):
