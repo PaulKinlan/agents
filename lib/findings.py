@@ -841,7 +841,9 @@ _ISSUE_FP = re.compile(r"\*\*Fingerprint\*\*:\s*`([0-9a-f]{64})`")
 # fingerprint, never a human gate. external_ref is `factory:<fingerprint>`; beads filed before
 # that field existed carried `Fingerprint: <sha256>` in their description instead.
 _BEAD_EXTERNAL_REF_PREFIX = "factory:"
-_BEAD_EXTERNAL_REF_RE = re.compile(r"^factory:(?:github\.com/[^/:]+/[^/:]+:)?([0-9a-f]{64})$")
+_BEAD_EXTERNAL_REF_RE = re.compile(
+    r"^factory:(?:github\.com/[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*:)?([0-9a-f]{64})$"
+)
 _BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
 
 

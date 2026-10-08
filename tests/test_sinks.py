@@ -53,11 +53,19 @@ class TestFingerprints(unittest.TestCase):
         self.assertIsNotNone(m_scoped)
         self.assertEqual(m_scoped.group(1), fp)
 
-        # (ii) Reject factory:unrelated:<64hex>
+        m_scoped_alnum = _BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/Owner-1.A/Repo_2.b:{fp}")
+        self.assertIsNotNone(m_scoped_alnum)
+        self.assertEqual(m_scoped_alnum.group(1), fp)
+
+        # (ii) Reject malformed github scopes, missing components, or unrelated scopes
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/not an owner/repo:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/not a repo:{fp}"))
         self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:unrelated:{fp}"))
         self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:gitlab.com/owner/repo:{fp}"))
         self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner:{fp}"))
         self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/repo/extra:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/-owner/repo:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/-repo:{fp}"))
 
 
 class SinkFixture:
@@ -429,6 +437,25 @@ class TestSinks(SinkFixture, unittest.TestCase):
             "external_ref": f"factory:unrelated:{fp}",
             "description": "unrelated bead with arbitrary scope",
             "title": "Unrelated bead",
+            "status": "open",
+        }]
+        self.remote.write_text(json.dumps(remote_state))
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        beads = self.state()["beads"]
+        self.assertEqual(len(beads), 2)
+        self.assertEqual(beads[1]["external_ref"], f"factory:{fp}")
+
+    def test_malformed_scoped_external_ref_does_not_suppress_finding(self):
+        """factory:github.com/not an owner/repo:<64hex> is rejected and does not suppress finding in _dispatch_beads."""
+        self.assertEqual(self.scan("file").returncode, 0)
+        fp = self.finding()["fingerprint"]
+        remote_state = self.state()
+        remote_state["beads"] = [{
+            "id": "malformed-1",
+            "external_ref": f"factory:github.com/not an owner/repo:{fp}",
+            "description": "malformed bead scope with spaces",
+            "title": "Malformed bead",
             "status": "open",
         }]
         self.remote.write_text(json.dumps(remote_state))
