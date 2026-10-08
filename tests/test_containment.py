@@ -577,6 +577,61 @@ class TestAdapters(unittest.TestCase):
                 self.assertIsNone(argv)
                 self.assertNotIn("API Request Error", res.stderr)
 
+    def test_deepseek_python_path_sends_the_prompt_in_the_user_message(self):
+        """agents-w8z: the heredoc owns the Python process's stdin (it IS the program), so
+        sys.stdin.read() was always empty and every deepseek run sent an empty user
+        message — a schema-valid false-clean report with zero findings. The prompt must
+        ride PROMPT in the environment and reach the outgoing user message."""
+        import http.server
+        (self.bin / "deepseek").unlink()  # force the Python API path, not the CLI stub
+        captured = {}
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server hook
+                length = int(self.headers.get("Content-Length", "0"))
+                captured["body"] = self.rfile.read(length)
+                reply = json.dumps({"choices": [{"message": {"content":
+                    json.dumps({"summary": "stub", "findings": []})}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args):  # noqa: N802 - silence request logging
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        res, argv = self.run_adapter(
+            "deepseek",
+            env_overrides={"DEEPSEEK_API_KEY": "dummy-key",
+                           "DEEPSEEK_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}"},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("body", captured, "the adapter must actually issue the API request")
+        payload = json.loads(captured["body"])
+        self.assertEqual(payload["messages"][1]["content"], "the prompt",
+                         "the prompt must reach the outgoing user message")
+
+    def test_deepseek_python_path_fails_loudly_on_an_empty_prompt(self):
+        """agents-w8z (b): an empty prompt must fail loudly, never exit 0 with a valid
+        empty report. A whitespace-only stdin passes bash's -z guard but fails the Python
+        .strip() check before any network request."""
+        (self.bin / "deepseek").unlink()  # force the Python API path
+        res = subprocess.run(
+            ["bash", str(ROOT / "lib" / "adapters" / "deepseek.sh"), "probe",
+             str(self.target), str(self.skill), str(self.tmp / "run")],
+            input="   \n", capture_output=True, text=True, timeout=60,
+            env={"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
+                 "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+                 "DEEPSEEK_API_KEY": "dummy-key"},
+        )
+        self.assertNotEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("empty prompt", res.stderr + res.stdout)
+
     def test_the_deepseek_cli_path_refuses_a_directive_bearing_run(self):
         """agents-m2n review P1-2: the 'deepseek' CLI path pipes the prompt and has no
         system-prompt interface, so it cannot carry the system directive — it fails
