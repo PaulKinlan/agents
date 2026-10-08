@@ -108,11 +108,24 @@ class EnvironmentFailureError(StationError):
 
 AdapterAuthError = EnvironmentFailureError
 
+KNOWN_AUTH_PROVIDERS = frozenset({
+    "anthropic", "openai", "gemini", "antigravity", "google",
+    "deepseek", "qwen", "zai", "kimi", "groq", "bedrock", "vertex",
+})
+
+
+def _format_no_key_reason(m: re.Match) -> str:
+    provider = (m.group(1) or "").strip().rstrip(".").lower()
+    if provider in KNOWN_AUTH_PROVIDERS:
+        return f"No API key found for {provider}"
+    return "No API key found for the selected model"
+
+
 AUTH_ERROR_PATTERNS = (
     (re.compile(r"no api key found for the selected model", re.IGNORECASE),
      lambda m: "No API key found for the selected model"),
-    (re.compile(r"no api key found for ([a-zA-Z0-9._/-]+)", re.IGNORECASE),
-     lambda m: f"No API key found for {m.group(1)}"),
+    (re.compile(r"no api key found for\s+([a-zA-Z0-9._/-]+)", re.IGNORECASE),
+     _format_no_key_reason),
     (re.compile(r"no api key found", re.IGNORECASE),
      lambda m: "No API key found for the selected model"),
     (re.compile(r"use /login to log into a provider", re.IGNORECASE),

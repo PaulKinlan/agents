@@ -54,7 +54,18 @@ class TestAdapterAuthFailureDetection(unittest.TestCase):
         output = "No API key found for antigravity.\nUse /login to log into a provider via OAuth or API key."
         reason = detect_adapter_auth_failure(output, "")
         self.assertIsNotNone(reason)
-        self.assertIn("No API key found for antigravity", reason)
+        self.assertEqual(reason, "No API key found for antigravity")
+
+    def test_pi_token_shaped_provider_not_leaked(self):
+        """Reviewer finding P1: token-shaped string after 'No API key found for' must never be
+        echoed into the reason code."""
+        output = "No API key found for sk-ant-secret-token-1234567890\n"
+        reason = detect_adapter_auth_failure(output, "")
+        self.assertIsNotNone(reason)
+        self.assertEqual(reason, "No API key found for the selected model")
+        self.assertNotIn("sk-ant", reason)
+        self.assertNotIn("secret", reason)
+        self.assertNotIn("1234567890", reason)
 
     def test_claude_credentials_failure_detected(self):
         stderr = "[claude adapter] Error: no Claude credentials. Run 'claude login' for session auth"
