@@ -136,6 +136,11 @@ class TestSingleStationAdapterAuthFailure(unittest.TestCase):
         """When pi adapter fails with 'No API key found', run_agent raises AdapterAuthError,
         writes report.json with status ENV_FAILURE and verdict environment_failure, and writes
         an ENVIRONMENT FAILURE delta report with UNKNOWN findings."""
+        (self.root / "targets").mkdir(exist_ok=True)
+        (self.root / "targets" / "target.yaml").write_text(
+            f"name: target\npath: {self.target}\ntrusted: true\nvisibility: private\n",
+            encoding="utf-8",
+        )
         adapter = self.root / "lib" / "adapters" / "pi.sh"
         adapter.write_text(
             "#!/usr/bin/env bash\n"
@@ -154,7 +159,7 @@ class TestSingleStationAdapterAuthFailure(unittest.TestCase):
              mock.patch.object(factory_module, "sandbox_command", side_effect=lambda cmd, **kw: cmd), \
              contextlib.redirect_stderr(stderr_buf):
             with self.assertRaises(AdapterAuthError) as ctx:
-                run_agent("a11y-test", str(self.target), engine_arg="pi", explicit_sink="file")
+                run_agent("a11y-test", "target", engine_arg="pi", explicit_sink="file")
 
         err = ctx.exception
         self.assertIsInstance(err, EnvironmentFailureError)
@@ -315,7 +320,15 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
 
     def test_cli_run_adapter_auth_failure_exits_2_with_environment_failure_stderr(self):
         """When factory run encounters an adapter auth failure, it outputs [environment failure]
-        and exits 2 (not generic no-verdict station failure)."""
+        and exits 2 (not generic no-verdict station failure).
+        
+        Uses a trusted, private target manifest so the documented unsandboxed opt-in applies
+        cleanly even on hosts without working bubblewrap (agents-6qf, coord review finding)."""
+        (self.root / "targets").mkdir(exist_ok=True)
+        (self.root / "targets" / "target.yaml").write_text(
+            f"name: target\npath: {self.target}\ntrusted: true\nvisibility: private\n",
+            encoding="utf-8",
+        )
         factory_script = self.root / "factory"
         shutil.copyfile(ROOT / "factory", factory_script)
         factory_script.chmod(0o755)
@@ -333,7 +346,7 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
 
         res = subprocess.run(
             [sys.executable, str(factory_script), "run", "a11y-test",
-             "--target", str(self.target), "--engine", "pi", "--sink", "file"],
+             "--target", "target", "--engine", "pi", "--sink", "file"],
             cwd=str(self.root),
             env=dict(os.environ, FACTORY_ALLOW_UNSANDBOXED="1", ANTHROPIC_API_KEY="dummy"),
             capture_output=True, text=True, timeout=30,
