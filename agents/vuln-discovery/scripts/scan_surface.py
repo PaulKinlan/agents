@@ -20,6 +20,7 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 IGNORE_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
     "coverage", ".beads", ".agent-state", "runs", "fixtures", "findings",
+    "tests", "test", "__tests__",
     "__pycache__", ".vscode", ".idea"
 }
 
@@ -91,6 +92,47 @@ SURFACE_PATTERNS: List[Tuple[str, str, str, re.Pattern]] = [
         re.compile(r"""(?:http\.createServer|app\.(?:get|post|put|delete|use)|server\.listen)\s*\(""")
     ),
 ]
+
+# Lines that define patterns or rule metadata rather than exercising them at runtime.
+# These are suppressed globally to stop the scanner from reporting its own
+# SURFACE_PATTERNS (and any target's re.compile / rule-description dicts) as sinks.
+SELF_REFERENTIAL_SUPPRESSIONS = [
+    re.compile(r"""(?:re\.compile|SURFACE_PATTERNS)\b"""),
+    re.compile(r"""\b(?:rule_id|category|severity|severity_hint|description|threat_context|remediation|rationale)\s*["']?\s*:"""),
+]
+
+
+def is_scanner_file(fpath: Path, rel_path: str) -> bool:
+    """Check if a file is the scanner itself or another pattern-defining scanner script.
+
+    Silently unscans the scanner's own file, any file named scan_surface.py, and
+    anything under agents/*/scripts/ (the factory's own scanner scripts). This is a
+    deliberate precision-over-recall choice to prevent the scanner's pattern
+    definitions from producing self-matches.
+    """
+    try:
+        if fpath.resolve() == Path(__file__).resolve():
+            return True
+    except Exception:
+        pass
+    if fpath.name == "scan_surface.py":
+        return True
+    # Exclude scanner scripts in agents/*/scripts/
+    parts = Path(rel_path).parts
+    if len(parts) >= 3 and parts[0] == "agents" and parts[2] == "scripts":
+        return True
+    return False
+
+
+def is_self_referential_line(line: str) -> bool:
+    """Suppress comments and pattern-definition lines (re.compile / rule-description dicts)."""
+    clean = line.strip()
+    if not clean or clean.startswith(("//", "#", "*", "/*", "'''", '"""')):
+        return True
+    for pat in SELF_REFERENTIAL_SUPPRESSIONS:
+        if pat.search(line):
+            return True
+    return False
 
 
 def load_threat_model(target_dir: Path) -> Optional[Dict[str, Any]]:
@@ -206,6 +248,11 @@ def scan_source_files(target_dir: Path, threat_model: Optional[Dict[str, Any]]) 
 
             filepath = Path(root) / file
             rel_path = filepath.relative_to(target_dir).as_posix()
+
+            # Skip the scanner's own file and other pattern-defining scanner scripts
+            if is_scanner_file(filepath, rel_path):
+                continue
+
             scanned_files_count += 1
 
             # Skip large files (> 1MB)
@@ -222,9 +269,9 @@ def scan_source_files(target_dir: Path, threat_model: Optional[Dict[str, Any]]) 
             for line_idx, line in enumerate(lines, start=1):
                 if len(line) > 1000:
                     continue
-                clean_line = line.strip()
-                if not clean_line or clean_line.startswith("//") or clean_line.startswith("#") or clean_line.startswith("*"):
+                if is_self_referential_line(line):
                     continue
+                clean_line = line.strip()
 
                 for rule_id, category, description, pattern in SURFACE_PATTERNS:
                     if pattern.search(line):
