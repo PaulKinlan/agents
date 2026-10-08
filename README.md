@@ -117,7 +117,17 @@ You can run any agent against a registered target name (from `targets/`) or agai
 
 ### 3. Run a Factory Line (Composition & Andon Cord)
 
-A Factory Line orchestrates multiple agents in sequence across the SDLC. The **Andon Cord** immediately halts the line — skipping every downstream station — when a station hits a *genuine* failure (its engine or pre-pass could not run) or a critical defect (e.g. an exposed secret). A station whose engine ran but produced no usable verdict (unparseable or schema-violating output) is a *plumbing* failure, not a genuine one: it gets one bounded repair-retry, then degrades to `ERROR` and the line continues as `INCOMPLETE` rather than halting:
+A Factory Line orchestrates multiple agents in sequence across the SDLC. The **Andon Cord** immediately halts the line — skipping every downstream station — when a station hits a *genuine* failure (its engine or pre-pass could not run) or a critical defect (e.g. an exposed secret). A station whose engine ran but produced no usable verdict (unparseable or schema-violating output) is a *plumbing* failure, not a genuine one: it gets one bounded repair-retry, then degrades to `ERROR` and the line continues as `INCOMPLETE` rather than halting.
+
+#### Adapter Auth & Environment Failures (`ENV_FAILURE`)
+
+When an engine adapter fails due to missing, invalid, or inaccessible credentials (e.g. `pi` exit 1 with `"No API key found"`, `claude` exit 1 with `"no Claude credentials"`, or missing `DEEPSEEK_API_KEY`):
+- It is classified and reported as a named **`ENV_FAILURE` (Environment Failure)**, distinct from a code defect or absent verdict.
+- **Never rendered as clean or PASS**: findings count is marked **`UNKNOWN` (`—`)**, not zero. A reader can immediately see that the station could not authenticate and did not run.
+- **Single-station runs**: `factory run` prints `[environment failure]` to stderr, writes an `ENVIRONMENT FAILURE` delta report trio, and exits 2.
+- **Factory Line behaviour**:
+  - If `andon_halt_on_failure: true` (e.g. `project-audit`): the line **halts immediately**, pulls the Andon cord, skips downstream stations, and finishes in state `HALTED` (exit 1).
+  - If `andon_halt_on_failure: false` (e.g. `web-excellence`): the failed station is recorded on the scorecard as `ENV_FAILURE` (`-` findings, `-` criticals), downstream stations continue running, and the overall line finishes in state `INCOMPLETE` (exit 1). The delta report displays a prominent `ENVIRONMENT FAILURE` callout and never produces a "Clean Delta" banner.
 
 ```bash
 # Run the full SDLC project audit line against a target

@@ -30,7 +30,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.credential_broker import CredentialBroker, credentials_from_env
     from lib.egress_proxy import EgressProxy
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
-    from lib.findings import VERDICT_STATUSES, write_line_report
+    from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
     from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
@@ -48,7 +48,7 @@ except ImportError:
     from lib.credential_broker import CredentialBroker, credentials_from_env
     from lib.egress_proxy import EgressProxy
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
-    from lib.findings import VERDICT_STATUSES, write_line_report
+    from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
     from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
@@ -83,6 +83,88 @@ class NoVerdictError(StationError):
     so any existing `except StationError` still catches it; run_line matches the specific type to
     branch (degrade vs halt) instead of parsing the message string.
     """
+
+
+class EnvironmentFailureError(StationError):
+    """An engine adapter failed due to missing, invalid, or inaccessible credentials (agents-zrn).
+
+    This is an ENVIRONMENT failure (e.g. no API key in the sandbox, unauthenticated
+    session), distinct from a scanning error or absent verdict. It must never be rendered
+    as PASS or a clean 0-findings run.
+    """
+
+    def __init__(self, agent: str, engine: str, returncode: int, reason: str,
+                 output_file: Optional[Path] = None):
+        self.agent = agent
+        self.engine = engine
+        self.returncode = returncode
+        self.reason = reason
+        self.output_file = output_file
+        detail = f" (see {output_file})" if output_file else ""
+        super().__init__(
+            f"{agent}: engine '{engine}' adapter authentication failure: {reason}{detail}"
+        )
+
+
+AdapterAuthError = EnvironmentFailureError
+
+KNOWN_AUTH_PROVIDERS = frozenset({
+    "anthropic", "openai", "gemini", "antigravity", "google",
+    "deepseek", "qwen", "zai", "kimi", "groq", "bedrock", "vertex",
+})
+
+
+def _format_no_key_reason(m: re.Match) -> str:
+    provider = (m.group(1) or "").strip().rstrip(".").lower()
+    if provider in KNOWN_AUTH_PROVIDERS:
+        return f"No API key found for {provider}"
+    return "No API key found for the selected model"
+
+
+AUTH_ERROR_PATTERNS = (
+    (re.compile(r"no api key found for the selected model", re.IGNORECASE),
+     lambda m: "No API key found for the selected model"),
+    (re.compile(r"no api key found for\s+([a-zA-Z0-9._/-]+)", re.IGNORECASE),
+     _format_no_key_reason),
+    (re.compile(r"no api key found", re.IGNORECASE),
+     lambda m: "No API key found for the selected model"),
+    (re.compile(r"use /login to log into a provider", re.IGNORECASE),
+     lambda m: "Provider login required (use /login or set API key)"),
+    (re.compile(r"no claude credentials", re.IGNORECASE),
+     lambda m: "No Claude credentials configured"),
+    (re.compile(r"claude code returned invalid authentication status", re.IGNORECASE),
+     lambda m: "Invalid Claude authentication status"),
+    (re.compile(r"claude code must be logged in", re.IGNORECASE),
+     lambda m: "Claude Code must be logged in"),
+    (re.compile(r"deepseek_api_key is not configured", re.IGNORECASE),
+     lambda m: "DEEPSEEK_API_KEY is not configured"),
+    (re.compile(r"authentication\s+(?:failure|failed|error)", re.IGNORECASE),
+     lambda m: "Model provider authentication failed"),
+    (re.compile(r"(?:invalid|missing)\s+(?:api[_-]?key|auth[_-]?token)", re.IGNORECASE),
+     lambda m: "Invalid or missing API key"),
+    (re.compile(r"\b401\s+unauthorized\b", re.IGNORECASE),
+     lambda m: "Model API returned HTTP 401 Unauthorized"),
+    (re.compile(r"(?:status(?:\s*code)?|http(?:\s*status|\s*error)?)\s*[:=]?\s*401\b", re.IGNORECASE),
+     lambda m: "Model API returned HTTP 401 Unauthorized"),
+)
+
+
+def detect_adapter_auth_failure(raw_output: str, stderr: str, stdout: str = "") -> Optional[str]:
+    """Check output and stderr for known engine authentication failure patterns.
+
+    Returns a sanitized reason description, never raw diagnostic lines that might contain
+    request headers or credentials (agents-zrn).
+    """
+    combined = f"{raw_output}\n{stderr}\n{stdout}"
+    for line in combined.splitlines():
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        for pat, desc_fn in AUTH_ERROR_PATTERNS:
+            m = pat.search(line_clean)
+            if m:
+                return desc_fn(m)
+    return None
 
 # Local git plumbing in the hill-climb path is fast when healthy; a wedged git (lock contention,
 # a huge tree) must not hold the run. Fixed cap: these calls are not stations and have no agent
@@ -1127,6 +1209,28 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 _remove_session_worktree(target_dir, worktree_dir)
         
         output_file = run_dir / "model_output.txt"
+        raw_output = output_file.read_text(encoding="utf-8", errors="replace") if output_file.exists() else ""
+        if adapter_res.returncode != 0:
+            auth_reason = detect_adapter_auth_failure(raw_output, adapter_res.stderr or "", adapter_res.stdout or "")
+            if auth_reason:
+                sys.stderr.write(f"\n[environment failure] {agent_name}: engine '{engine}' adapter "
+                                 f"authentication failed: {auth_reason}\n")
+                report = {
+                    "summary": f"ENVIRONMENT FAILURE: engine '{engine}' adapter authentication failed: {auth_reason}",
+                    "verdict": "environment_failure",
+                    "status": "ENV_FAILURE",
+                    "error": auth_reason,
+                    "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
+                    "findings": []
+                }
+                report_path = run_dir / "report.json"
+                _write_run_artifact(report_path, json.dumps(report, indent=2))
+                if not station_only:
+                    dispatch_env_failure_report(target_name, agent_name, engine, auth_reason,
+                                               findings_dir=FACTORY_ROOT / "findings")
+                raise AdapterAuthError(agent_name, engine, adapter_res.returncode, auth_reason,
+                                       output_file if output_file.exists() else None)
+
         if not output_file.exists():
             sys.stderr.write(f"Model output not produced: {adapter_res.stderr}\n")
             sys.exit(1)
@@ -1370,6 +1474,20 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                 print(f"   Discovered {criticals} critical finding(s). Downstream stations aborted.")
                 line_halted = True
                 break
+        except AdapterAuthError as e:
+            # An environment/auth failure: the adapter could not authenticate (agents-zrn).
+            # Record it as ENV_FAILURE with unknown counts, never PASS and never clean 0.
+            print(f"\n🚨 [ENVIRONMENT FAILURE] Station '{st_agent}' adapter authentication failed: {e}")
+            scorecard.append({
+                "station": st_agent,
+                "status": "ENV_FAILURE",
+                "findings_count": None,
+                "criticals": None,
+                "error": f"adapter auth failure: {e.reason}",
+            })
+            if halt_on_failure:
+                line_halted = True
+                break
         except NoVerdictError as e:
             # Both the original attempt and the ONE bounded repair-retry produced no verdict
             # (agents-noo). This is a PLUMBING failure — the engine ran and returned zero, only its
@@ -1430,8 +1548,14 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
               f"{'-' if crit is None else crit}")
     print("=" * 70 + "\n")
     if errored:
-        print(f"⚠️  {len(errored)} station(s) produced no verdict: "
-              f"{', '.join(sc['station'] for sc in errored)}. This run is not clean.\n")
+        env_fails = [sc for sc in scorecard if sc["status"] == "ENV_FAILURE"]
+        if env_fails:
+            print(f"🚨 {len(env_fails)} station(s) encountered ENVIRONMENT FAILURE (adapter auth): "
+                  f"{', '.join(sc['station'] for sc in env_fails)}.\n")
+        other_errored = [sc for sc in errored if sc["status"] != "ENV_FAILURE"]
+        if other_errored:
+            print(f"⚠️  {len(other_errored)} station(s) produced no verdict: "
+                  f"{', '.join(sc['station'] for sc in other_errored)}. This run is not clean.\n")
 
     # The run's delta report is written once, from every station (fleet-810).
     if target_name:
@@ -2073,6 +2197,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except AdapterAuthError as e:
+        sys.stderr.write(f"\n[environment failure] {e}\n")
+        sys.exit(2)
     except (StationTimeout, StationError) as e:
         sys.stderr.write(f"\n[station failure] {e}\n")
         sys.exit(2)
