@@ -232,7 +232,52 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
             pass
         raise
     os.replace(tmp_file, patch_file)
+    # agents-5bn: the patch IS the proposal, so its base-commit trailer must name the
+    # worktree's detached HEAD — the only base it may ever be applied against. Assert it back
+    # (fail closed) so a collected patch can never be consumed under a base it does not match.
+    if base.returncode == 0 and _patch_base_commit(patch_file) != base.stdout.strip():
+        raise StationError(
+            f"collected session.patch at {patch_file} does not carry the worktree HEAD "
+            f"{base.stdout.strip()} as its base-commit; refusing to present a proposal whose "
+            "base cannot be verified")
     return patch_file
+
+
+def _patch_base_commit(patch_file: Path) -> Optional[str]:
+    """The base-commit trailer a collected session.patch must carry, or None when absent."""
+    try:
+        with patch_file.open("r", encoding="utf-8") as fh:
+            first = fh.readline().rstrip("\n")
+    except OSError:
+        return None
+    prefix = "base-commit: "
+    return first[len(prefix):].strip() if first.startswith(prefix) else None
+
+
+def _verify_candidates_integrity(candidates_file: Path, snapshot: bytes) -> None:
+    """Fail closed if the write-granted engine session changed candidates.json (agents-5bn).
+
+    candidates.json is the deterministic scanner's ground truth (agents-nha) that binds the
+    triage model's rule_id/path at findings dispatch — which runs AFTER the engine session. The
+    run directory is rw-bound inside the OS sandbox, so a prompt-injected write-granted session
+    (its worktree lives at run_dir/worktree, under that same rw run dir) can overwrite
+    candidates.json and forge the binding: a forged rule_id/path set would let it re-book real
+    vulnerabilities or mint phantom ones in the findings store and the public sink, defeating the
+    noise-control fingerprint. Snapshot the trusted bytes before the session and refuse the
+    dispatch on any change (the mirror of the policy.json restore control).
+    """
+    try:
+        current = candidates_file.read_bytes()
+    except OSError as e:
+        raise StationError(
+            f"candidates.json is unreadable after the engine session ({e}); a write-granted "
+            "session may have deleted or replaced the scanner ground truth — refusing to "
+            "dispatch findings against unverified candidates") from e
+    if current != snapshot:
+        raise StationError(
+            "candidates.json changed during the engine session; a write-granted session may "
+            "have tampered with the scanner ground truth that binds findings identity — "
+            "refusing to dispatch findings against unverified candidates")
 
 
 def _worktree_has_ignored_edits(worktree_dir: Path, gitdir: Path) -> bool:
@@ -796,6 +841,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     # 1. Deterministic pre-pass
     candidates_data = []
+    candidates_snapshot: Optional[bytes] = None
     model_parse_succeeded = True
     system_directive_text = None  # agents-m2n: lifted from the payload, see below
 
@@ -857,6 +903,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             else:
                 candidates_data = cand_json
                 print(f"-> Deterministic pre-pass produced context payload.")
+
+        # agents-5bn: snapshot the scanner's ground truth BEFORE the engine session. The run
+        # directory is rw-bound inside the OS sandbox, so a write-granted session could
+        # overwrite candidates.json and forge the agents-nha identity binding; the bytes are
+        # re-verified before findings dispatch (_verify_candidates_integrity).
+        candidates_snapshot = candidates_file.read_bytes()
 
     # Short-circuit only if configured and 0 candidates found for an observer scan
     should_short_circuit = agent_cfg.get("short_circuit_empty", False)
@@ -962,6 +1014,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     (run_dir / "policy.json").write_text(policy_record_json, encoding="utf-8")
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
+                # agents-5bn: the run dir is rw-bound inside the sandbox, so a write-granted
+                # session could pre-place run_dir/session.patch and be credited with a proposal
+                # it never made in the worktree. Unlink before the engine so only
+                # _collect_session_diff (host-side, after the session) can produce it.
+                (run_dir / "session.patch").unlink(missing_ok=True)
             adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
                                               input=prompt, capture_output=True, text=True,
                                               check=False, env=adapter_env)
@@ -982,13 +1039,19 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     if patch_file is not None:
                         print(f"  [worktree] Collected the session's edits as {patch_file.name}; "
                               f"the target checkout was not modified.")
-                    elif _worktree_has_ignored_edits(worktree_dir, worktree_gitdir):
-                        # agents-7ik: gitignored edits are real changes on disk that `git
-                        # add -A` rightly refuses to stage — "no file edits" would be false.
-                        print("  [worktree] The session's only edits are gitignored files — "
-                              "real changes on disk, but not representable as a patch proposal.")
                     else:
-                        print("  [worktree] The session made no file edits (empty proposal).")
+                        # agents-5bn: no collected edits, so any session.patch still in the run
+                        # dir is one the write-granted session wrote itself (it ran with the run
+                        # dir rw-bound). Only a patch _collect_session_diff produced is a real
+                        # proposal — discard the rest.
+                        (run_dir / "session.patch").unlink(missing_ok=True)
+                        if _worktree_has_ignored_edits(worktree_dir, worktree_gitdir):
+                            # agents-7ik: gitignored edits are real changes on disk that `git
+                            # add -A` rightly refuses to stage — "no file edits" would be false.
+                            print("  [worktree] The session's only edits are gitignored files — "
+                                  "real changes on disk, but not representable as a patch proposal.")
+                        else:
+                            print("  [worktree] The session made no file edits (empty proposal).")
                 else:
                     print("  [worktree] Session failed; discarding its partial edits "
                           "(no proposal collected).")
@@ -1090,6 +1153,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
     # 3. Findings Store & Sink Dispatch (only if model output parsed cleanly)
     if model_parse_succeeded:
+        if candidates_snapshot is not None:
+            _verify_candidates_integrity(candidates_file, candidates_snapshot)
         print(f"\n[Step 3/3] Processing findings through deduplication and sink adapter...")
         findings_py = FACTORY_ROOT / "lib" / "findings.py"
         findings_cmd = [

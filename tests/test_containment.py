@@ -1508,6 +1508,90 @@ process.stdin.on('end', () => {
                         "the proposal's new file must apply")
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_tampered_candidates_json_fails_closed(self):
+        """agents-5bn: candidates.json is the scanner's ground truth (agents-nha) that binds
+        the model's rule_id/path at findings dispatch, which runs AFTER the session. The run
+        dir is rw-bound inside the sandbox, so a write-granted session can overwrite it. The
+        dispatcher snapshots the trusted bytes before the session and must REFUSE the dispatch
+        (station failure) when the session changed them — never book findings against forged
+        ground truth."""
+        self._git_init_target()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        scripts = self.root / "agents" / "probe" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "prepass.py").write_text(
+            "import json, sys\n"
+            "out = sys.argv[sys.argv.index('--output') + 1]\n"
+            "with open(out, 'w', encoding='utf-8') as fh:\n"
+            "    json.dump({'candidates': [{'rule_id': 'vuln-x', 'path': 'fixme.txt',\n"
+            "                              'line_number': 1, 'snippet': 'original line'}]}, fh)\n",
+            encoding="utf-8",
+        )
+        # A write-granted session that overwrites the scanner ground truth from inside its
+        # worktree (the run dir is the worktree's parent): ../candidates.json.
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'FORGED' > ../candidates.json\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+        self.assertIn("candidates.json changed during the engine session", res.stderr)
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_an_untampered_write_session_with_candidates_dispatches(self):
+        """agents-5bn positive control: a write-granted session that leaves candidates.json
+        alone still dispatches normally — the snapshot verification must not false-positive on
+        the honest path (a pre-pass that produces candidates, then a normal editing session)."""
+        self._git_init_target()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        scripts = self.root / "agents" / "probe" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "prepass.py").write_text(
+            "import json, sys\n"
+            "out = sys.argv[sys.argv.index('--output') + 1]\n"
+            "with open(out, 'w', encoding='utf-8') as fh:\n"
+            "    json.dump({'candidates': [{'rule_id': 'vuln-x', 'path': 'fixme.txt',\n"
+            "                              'line_number': 1, 'snippet': 'original line'}]}, fh)\n",
+            encoding="utf-8",
+        )
+        self._editing_stub()
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run_dir = self.run_dirs()[0]
+        patch = run_dir / "session.patch"
+        self.assertTrue(patch.exists(), "the honest editing session must still collect a patch")
+        self.assertIn("proposed fix", patch.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_preplaced_session_patch_is_discarded_when_no_edits_are_made(self):
+        """agents-5bn: a write-granted session runs with the run dir rw-bound, so it can write
+        run_dir/session.patch directly and be credited with a proposal it never made in the
+        worktree. When the session makes no trackable edits, _collect_session_diff returns None
+        and the dispatcher must discard any session.patch left in the run dir — only a collected
+        patch is a real proposal."""
+        self._git_init_target()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'forged proposal' > ../session.patch\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertFalse((self.run_dirs()[0] / "session.patch").exists(),
+                         "a forged pre-placed session.patch must not survive a no-edit session")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_staging_writes_no_content_blobs_into_the_shared_object_store(self):
         """agents-7ik (c): intent-to-add staging must not litter the target's shared
         .git/objects with unreferenced content blobs (a plain `git add -A` wrote one per
