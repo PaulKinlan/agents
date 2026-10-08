@@ -43,6 +43,10 @@ ENGINE_CREDENTIALS = {
     "pi": (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
         "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
+        # Keyless BYOK providers (agents-3y2): pi reads <NAME>_API_KEY/<NAME>_BASE_URL,
+        # and the managed endpoints inject auth server-side, so a placeholder key + the
+        # broker's base URL is all a sandboxed pi needs for these.
+        "KIMI_API_KEY", "ZAI_API_KEY", "QWEN_API_KEY",
     ),
     # Kept aligned with lib/adapters/claude.sh's SESSION_OVERRIDE_VARS plus the session token
     # the adapter deliberately preserves; tests/test_child_env.py asserts the relationship.

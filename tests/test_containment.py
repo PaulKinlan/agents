@@ -480,6 +480,18 @@ class TestAdapters(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertNotIn("--append-system-prompt", argv)
 
+    def test_pi_passes_the_model_when_set(self):
+        """agents-3y2: with FACTORY_MODEL set, pi.sh names the model via --model so a
+        sandboxed pi runs the keyless deepseek path instead of falling back to its Anthropic
+        default (which asks for ANTHROPIC_API_KEY and fails). Unset = no --model flag."""
+        res, argv = self.run_adapter("pi", env_overrides={"FACTORY_MODEL": "deepseek/deepseek-flash"})
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(argv[argv.index("--model") + 1], "deepseek/deepseek-flash")
+        self.assertIn("Model: deepseek/deepseek-flash", res.stdout)
+        res, argv = self.run_adapter("pi")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("--model", argv)
+
     def test_claude_gets_the_read_only_flags_and_the_skill_as_a_file(self):
         for policy in ("read-only", None):
             with self.subTest(policy=policy):
@@ -615,6 +627,48 @@ class TestAdapters(unittest.TestCase):
         payload = json.loads(captured["body"])
         self.assertEqual(payload["messages"][1]["content"], "the prompt",
                          "the prompt must reach the outgoing user message")
+
+    def test_deepseek_python_path_is_keyless_without_a_key(self):
+        """agents-3y2: with NO DEEPSEEK_API_KEY, the adapter still issues the request keylessly
+        (no Authorization header) and uses the managed endpoint's provider-prefixed model id by
+        default, so the exe.dev BYOK endpoint authenticates server-side."""
+        import http.server
+        (self.bin / "deepseek").unlink()  # force the Python API path, not the CLI stub
+        captured = {}
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server hook
+                length = int(self.headers.get("Content-Length", "0"))
+                captured["body"] = self.rfile.read(length)
+                captured["authorization"] = self.headers.get("Authorization")
+                captured["path"] = self.path
+                reply = json.dumps({"choices": [{"message": {"content":
+                    json.dumps({"summary": "stub", "findings": []})}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args):  # noqa: N802 - silence request logging
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        # NOTE: no DEEPSEEK_API_KEY at all; only the base URL is pointed at the mock server.
+        res, argv = self.run_adapter(
+            "deepseek",
+            env_overrides={"DEEPSEEK_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}"},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn("body", captured, "the adapter must actually issue the API request")
+        self.assertIsNone(captured["authorization"],
+                          "no Authorization header for a keyless call")
+        payload = json.loads(captured["body"])
+        self.assertEqual(payload["model"], "deepseek/deepseek-flash",
+                         "the managed endpoint's provider-prefixed model id is the default")
 
     def test_deepseek_python_path_fails_loudly_on_an_empty_prompt(self):
         """agents-w8z (b): an empty prompt must fail loudly, never exit 0 with a valid
@@ -858,8 +912,9 @@ class TestDispatcher(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
-        self.assertIn("env-credentials", record["not_enforced"],
-                      "no API key was present, so no credential broker actually started")
+        # agents-3y2: the keyless BYOK broker starts even with no real key present, so the
+        # credential residual is covered (placeholders only), not recorded as not enforced.
+        self.assertNotIn("env-credentials", record["not_enforced"])
         line = self.stub_line("CANARY:")
         self.assertNotIn("CANARY-SECRET-9N7", line)
         self.assertIn("No such file", line)
@@ -1970,7 +2025,8 @@ process.stdin.on('end', () => {
         self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
         self.assertNotIn("env-credentials", record["not_enforced"],
                          "the actual brokered engine env must update the trusted record")
-        self.assertEqual(record["granted"]["credential_broker"]["providers"], ["anthropic"])
+        self.assertEqual(record["granted"]["credential_broker"]["providers"],
+                         ["anthropic", "deepseek", "kimi", "qwen", "zai"])
         self.assertNotIn(real_key, json.dumps(record))
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")

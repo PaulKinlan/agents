@@ -86,6 +86,15 @@ if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
   SYSTEM_DIRECTIVE_FLAGS=(--append-system-prompt "${FACTORY_SYSTEM_DIRECTIVE_FILE}")
 fi
 
+# agents-3y2: the model the pi engine runs (the dispatcher sets FACTORY_MODEL; default
+# deepseek/deepseek-flash on the keyless managed endpoint). Without it, pi falls back to its
+# Anthropic default and asks for ANTHROPIC_API_KEY, which is never the sandboxed keyless path.
+MODEL_FLAGS=()
+if [ -n "${FACTORY_MODEL:-}" ]; then
+  MODEL_FLAGS=(--model "$FACTORY_MODEL")
+  echo "[pi adapter] Model: $FACTORY_MODEL"
+fi
+
 # Run pi non-interactively with the specified skill loaded
 # The engine reads the prompt on stdin too, so it is not in the engine's argv either.
 echo "[pi adapter] Tool policy: $TOOL_POLICY (${POLICY_FLAGS[*]})"
@@ -94,7 +103,7 @@ if [ -n "${FACTORY_MAX_BUDGET_USD:-}" ]; then
   echo "[pi adapter] Note: budget.max_usd=\$$FACTORY_MAX_BUDGET_USD declared but NOT enforced by this adapter (no per-run budget flag; the claude engine enforces it via --max-budget-usd)."
 fi
 # ${SYSTEM_DIRECTIVE_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
-printf '%s' "$PROMPT" | pi --no-session "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" ${SYSTEM_DIRECTIVE_FLAGS[@]+"${SYSTEM_DIRECTIVE_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
+printf '%s' "$PROMPT" | pi --no-session "${MODEL_FLAGS[@]}" "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" ${SYSTEM_DIRECTIVE_FLAGS[@]+"${SYSTEM_DIRECTIVE_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
   echo "[pi adapter] Error executing pi" >&2
   cat "$OUTPUT_FILE" >&2
   exit 1

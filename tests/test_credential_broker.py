@@ -262,6 +262,14 @@ class TestLifecycle(unittest.TestCase):
         with self.assertRaises(cb.BrokerError):
             cb.CredentialBroker({}).start()
 
+    def test_a_keyless_only_broker_starts(self):
+        # agents-3y2: a broker holding only keyless providers (None values) is not empty, so
+        # it must start and serve the managed endpoints with no host key.
+        broker = cb.CredentialBroker({"deepseek": None})
+        broker.start()
+        self.addCleanup(broker.stop)
+        self.assertIsNotNone(broker.port)
+
     def test_unknown_provider_is_rejected_at_construction(self):
         with self.assertRaises(cb.BrokerError):
             cb.CredentialBroker({"azure": "x"})
@@ -332,6 +340,26 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         # And the real key never comes back to the engine side.
         self.assertNotIn(REAL["anthropic"].encode(), body)
 
+    def test_keyless_deepseek_base_url_and_placeholder_reach_the_managed_upstream(self):
+        # agents-3y2: with NO real key anywhere, child_environment hands the engine a
+        # placeholder + the broker's base URL, and a request to THAT URL reaches the keyless
+        # managed upstream with no Authorization header injected.
+        parent = {"PATH": "/usr/bin"}
+        broker = self.start_broker({"deepseek": None})
+        env = child_environment(engine="pi", parent=parent,
+                                broker_urls={"deepseek": broker.base_url("deepseek")})
+        self.assertEqual(env["DEEPSEEK_API_KEY"], cb.PLACEHOLDER_KEY)
+        split = urlsplit(env["DEEPSEEK_BASE_URL"])
+        status, _, body = _client_request(
+            split.port, "POST", split.path + "/chat/completions",
+            headers={"authorization": f"Bearer {env['DEEPSEEK_API_KEY']}",
+                     "content-type": "application/json", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 200)
+        call = _FakeHTTPSConnection.calls[0]
+        self.assertEqual(call["host"], "deepseek.int.exe.xyz")
+        self.assertNotIn("Authorization", call["headers"])
+
 
 class TestUnixSocketMode(BrokerTestBase):
     """agents-2x6: a sandboxed engine under bwrap --unshare-net cannot reach a host TCP
@@ -386,16 +414,18 @@ class TestUnixSocketMode(BrokerTestBase):
         broker.stop()
         self.assertFalse(os.path.exists(sock))
 
-    def test_deepseek_and_openrouter_route_to_their_upstreams(self):
-        broker = self.start_broker({"deepseek": "ds-real", "openrouter": "or-real"})
+    def test_deepseek_is_keyless_and_openrouter_is_bearer(self):
+        # agents-3y2: deepseek routes to the keyless managed endpoint with NO injected key
+        # (auth style "none"); openrouter stays a bearer-keyed provider.
+        broker = self.start_broker({"deepseek": None, "openrouter": "or-real"})
         _client_request(broker.port, "POST", "/proxy/deepseek/chat/completions",
                         headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}",
                                  "content-type": "application/json", "content-length": "2"},
                         body=b"{}")
         call = _FakeHTTPSConnection.calls[0]
-        self.assertEqual(call["host"], "api.deepseek.com")
-        self.assertEqual(call["path"], "/chat/completions")
-        self.assertEqual(call["headers"]["Authorization"], "Bearer ds-real")
+        self.assertEqual(call["host"], "deepseek.int.exe.xyz")
+        self.assertEqual(call["path"], "/v1/chat/completions")  # upstream base carries /v1
+        self.assertNotIn("Authorization", call["headers"])  # keyless: no key injected
         _FakeHTTPSConnection.calls = []
         _client_request(broker.port, "POST", "/proxy/openrouter/chat/completions",
                         headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}",
@@ -405,6 +435,9 @@ class TestUnixSocketMode(BrokerTestBase):
         self.assertEqual(call["host"], "openrouter.ai")
         self.assertEqual(call["path"], "/api/v1/chat/completions")
         self.assertEqual(call["headers"]["Authorization"], "Bearer or-real")
+
+    def test_keyless_providers_are_the_managed_byok_endpoints(self):
+        self.assertEqual(cb.keyless_providers(), ("deepseek", "zai", "kimi", "qwen"))
 
 
 if __name__ == "__main__":

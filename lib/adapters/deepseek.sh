@@ -70,9 +70,10 @@ import urllib.request
 import urllib.error
 
 key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("deepseek_api_key")
-if not key:
-    sys.stderr.write("[deepseek adapter] Error: DEEPSEEK_API_KEY is not configured.\n")
-    sys.exit(1)
+# agents-3y2: the default base URL is the keyless exe.dev managed endpoint
+# (deepseek.int.exe.xyz), which injects auth server-side, so a missing key is valid and no
+# Authorization header is sent. A keyed endpoint reached without a key 401s loudly and is
+# caught by the HTTPError handler below.
 
 skill_dir = sys.argv[1] if len(sys.argv) > 1 else ""
 skill_file = os.path.join(skill_dir, "SKILL.md") if skill_dir else ""
@@ -81,10 +82,8 @@ if skill_file and os.path.exists(skill_file):
     with open(skill_file, "r", encoding="utf-8") as f:
         skill_content = f.read()
 
-base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-if model in ("deepseek-flash", "deepseek-v3"):
-    model = "deepseek-chat"
+base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://deepseek.int.exe.xyz/v1").rstrip("/")
+model = os.environ.get("DEEPSEEK_MODEL", "deepseek/deepseek-flash")
 
 # agents-w8z: read the prompt from PROMPT, never stdin — the heredoc owns stdin (it IS
 # the program), so sys.stdin.read() was always empty and every run sent an empty user
@@ -144,9 +143,12 @@ payload = {
 url = f"{base_url}/chat/completions"
 headers = {
     "Content-Type": "application/json",
-    "Authorization": f"Bearer {key}",
     "User-Agent": "SoftwareFactory/1.0"
 }
+if key:
+    # agents-3y2: the managed keyless endpoint ignores Authorization, but a keyed endpoint
+    # (e.g. api.deepseek.com) still needs the bearer; send it only when one is configured.
+    headers["Authorization"] = f"Bearer {key}"
 
 req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
 
