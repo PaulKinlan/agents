@@ -16,6 +16,7 @@ tests/test_containment.py, which holds the stub-engine harness.
 """
 
 import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import subprocess
 import sys
@@ -481,6 +482,42 @@ class TestSandboxLive(unittest.TestCase):
                       "the engine's own key must reach it (env is the only channel)")
         self.assertNotIn("must-not-appear", res.stdout,
                          "the operator's shell env must never reach the sandbox child")
+
+
+class ToolPinBindTests(unittest.TestCase):
+    """agents-7bj P2-6: the sandbox binder authenticates a pinned trusted tool's content
+    before binding it, failing the wrap closed on a hash mismatch (never binding an
+    unverified binary)."""
+
+    def _bind(self, name, content):
+        from unittest import mock
+        import lib.tool_pins as tool_pins
+        from lib.sandbox import _BindPlan, _executable_binds
+        tmp = Path(tempfile.mkdtemp(prefix="binds-pin-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        fake = tmp / name
+        fake.write_text(content, encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | 0o111)
+        return mock, tool_pins, _BindPlan, _executable_binds, tmp, fake
+
+    def test_executable_binds_fails_closed_on_hash_mismatch(self):
+        mock, tool_pins, _BindPlan, _executable_binds, tmp, fake = \
+            self._bind("node", "#!/bin/sh\necho rogue\n")
+        cfg = tmp / "tools.yaml"
+        cfg.write_text("node:\n  sha256: " + "0" * 64 + "\n", encoding="utf-8")
+        with mock.patch.object(tool_pins, "CONFIG_PATH", cfg):
+            with self.assertRaises(tool_pins.ToolPinError):
+                _executable_binds(_BindPlan(), ("node",), str(tmp), "/tmp")
+
+    def test_executable_binds_binds_a_hash_matching_pinned_tool(self):
+        mock, tool_pins, _BindPlan, _executable_binds, tmp, fake = \
+            self._bind("node", "#!/bin/sh\necho ok\n")
+        cfg = tmp / "tools.yaml"
+        cfg.write_text("node:\n  sha256: " + tool_pins.sha256_file(fake) + "\n", encoding="utf-8")
+        with mock.patch.object(tool_pins, "CONFIG_PATH", cfg):
+            plan = _BindPlan()
+            _executable_binds(plan, ("node",), str(tmp), "/tmp")
+            self.assertTrue(plan.visible(str(fake.resolve())))
 
 
 if __name__ == "__main__":

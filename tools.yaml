@@ -1,21 +1,21 @@
 # Integrity pins for the factory's host-side trusted tools (agents-7bj).
 #
-# Each tool listed here is resolved by lib/tool_pins.resolve_tool(): the configured `path`
-# (if set) is preferred, otherwise it is found by name across PATH, and its SHA-256 is
-# verified against `sha256` when one is set. A mismatch fails the run closed — the factory
-# refuses to execute an unverified binary.
+# A trusted tool (gh, bd, git, semgrep, gitleaks, node, npm, npx) is resolved by
+# lib/tool_pins.resolve_tool(): the configured `path` (if set) is preferred, otherwise it is
+# found by name across PATH, and its SHA-256 is verified against `sha256`. A mismatch fails
+# the run closed — the factory refuses to execute an unverified binary.
 #
 #   path:   (optional) absolute path the tool MUST resolve to.
-#   sha256: (optional) 64-hex SHA-256 the resolved binary MUST hash to (this IS the
+#   sha256: (REQUIRED) 64-hex SHA-256 the resolved binary MUST hash to (this IS the
 #           content/version pin — a rebuilt or swapped binary changes the hash).
 #
-# A tool with neither key still resolves by name (backward compatible), but the findings
-# dispatch child is then given a PATH rebuilt from only the resolved tools' directories, so
-# it never relies on the inherited PATH order to find gh/bd.
+# FAIL CLOSED: a trusted tool with no `sha256` is refused (no silent PATH fallback). `path`
+# without a matching `sha256` is a config error (a symlink could redirect it). The only
+# exception is the explicit dev/test opt-in FACTORY_ALLOW_UNPINNED_TOOLS=1, never the default.
 #
 # Generate a pin with:  sha256sum "$(command -v gh)"
 gh:
-  # path: /usr/bin/gh
+  # path: /usr/local/bin/gh
   # sha256: <64 hex>
 bd:
   # path: /usr/local/bin/bd

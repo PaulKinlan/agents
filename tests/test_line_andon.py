@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import stat
 import subprocess

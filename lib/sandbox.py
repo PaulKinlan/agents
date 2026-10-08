@@ -424,11 +424,12 @@ def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
             real = Path(os.path.realpath(launch))
             if not real.exists():
                 continue
-            # agents-7bj: authenticate a pinned trusted tool's content before binding it into
-            # the child. verify_pin is a no-op unless the tool has a configured sha256 pin, so
-            # unpinned names (bash/sh/env/python3) and absent optional tools (gitleaks/semgrep)
-            # behave exactly as before; a pinned tool whose binary does not hash-match fails the
-            # wrap closed rather than binding an unverified binary.
+            # agents-7bj: authenticate a pinned trusted tool's content (and configured path)
+            # before binding it into the child. A pinned tool whose binary does not hash-match,
+            # or whose real path is not the configured path, fails the wrap closed rather than
+            # binding an unverified binary. A trusted tool with NO pin also fails closed here
+            # (unless FACTORY_ALLOW_UNPINNED_TOOLS=1) — see lib.tool_pins._require_pin. Untrusted
+            # names (bash/sh/env/python3) are never passed to verify_pin and need no pin.
             if name in PINNED_TOOLS:
                 verify_pin(name, str(real))
             # Bind the tool's own install tree when it is tool-specific (node's versioned

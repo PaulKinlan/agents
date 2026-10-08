@@ -12,6 +12,8 @@ exactly the permanent false positive this work exists to avoid.
 """
 
 import json
+import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import subprocess
 import sys

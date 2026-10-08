@@ -19,6 +19,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import socket
 import stat
@@ -434,7 +435,8 @@ class TestAdapters(unittest.TestCase):
         if self.argv_log.exists():
             self.argv_log.unlink()
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
-               "ANTHROPIC_API_KEY": "stub-key"}
+               "ANTHROPIC_API_KEY": "stub-key",
+               "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
         if policy is not None:
             env["FACTORY_TOOL_POLICY"] = policy
         if budget_usd is not None:
@@ -549,7 +551,9 @@ class TestAdapters(unittest.TestCase):
         assignment = next(line for line in source.splitlines()
                           if line.strip().startswith('PROMPT="$(cat "$FACTORY_SYSTEM_DIRECTIVE_FILE")'))
         res = subprocess.run(["bash", "-c", f'PROMPT="Scanner Data"\n{assignment}\nprintf "%s" "$PROMPT"'],
-                             env={"PATH": "/usr/bin:/bin", "FACTORY_SYSTEM_DIRECTIVE_FILE": str(directive)},
+                             env={"PATH": "/usr/bin:/bin",
+                                  "FACTORY_SYSTEM_DIRECTIVE_FILE": str(directive),
+                                  "FACTORY_ALLOW_UNPINNED_TOOLS": "1"},
                              capture_output=True, text=True, timeout=10)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(res.stdout, "DIRECTIVE\n\nScanner Data")
@@ -720,7 +724,8 @@ class TestDispatcher(unittest.TestCase):
         return name
 
     def factory(self, engine, extra_env=None, target_arg=None):
-        env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.root)}
+        env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.root),
+               "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
         env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, str(self.root / "factory"), "run", "probe", "--target",
@@ -1044,7 +1049,8 @@ process.stdin.on('end', () => {
         stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         stub.chmod(0o755)
         env = {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
-               "FACTORY_ALLOW_UNSANDBOXED": "1"}
+               "FACTORY_ALLOW_UNSANDBOXED": "1",
+               "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
         for name, visibility in (("pub", "public"), ("unsetvis", None)):
             with self.subTest(target=name):
                 self.trusted_target(name, visibility=visibility)
@@ -2117,7 +2123,8 @@ class TestEgressEndToEnd(unittest.TestCase):
             child_env = {"PATH": "/usr/bin:/bin",
                          "HTTP_PROXY": "http://127.0.0.1:8385",
                          "HTTPS_PROXY": "http://127.0.0.1:8385",
-                         "NO_PROXY": "localhost,127.0.0.1"}
+                         "NO_PROXY": "localhost,127.0.0.1",
+                         "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
             try:
                 with mock.patch.object(egress_proxy, "_public_addresses",
                                        return_value=["127.0.0.1"]):
