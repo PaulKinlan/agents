@@ -342,6 +342,65 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertEqual(self.scan("beads").returncode, 0)
         self.assertEqual(len(self.state()["beads"]), 1)
 
+    def test_regressed_finding_with_closed_bead_creates_new_bead(self):
+        """A finding that was fixed and then reappears (regressed) with its prior bead closed creates a NEW bead (guards FIX 1)."""
+        # 1. Initial run: finding is filed to beads
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
+        self.assertEqual(self.finding()["state"], "new")
+        self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
+
+        # 2. Finding is fixed in a subsequent run
+        self.assertEqual(self.scan("beads", items=[]).returncode, 0)
+        self.assertEqual(self.finding()["state"], "fixed")
+
+        # 3. Prior bead is closed in the tracker
+        remote_state = self.state()
+        remote_state["beads"][0]["status"] = "closed"
+        self.remote.write_text(json.dumps(remote_state))
+
+        # 4. Finding reappears (regressed): prior bead is closed, so a new bead is filed
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["state"], "regressed")
+        self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
+        beads = self.state()["beads"]
+        self.assertEqual(len(beads), 2)
+        self.assertEqual(beads[0]["status"], "closed")
+        self.assertEqual(beads[1]["status"], "open")
+        self.assertEqual(beads[0]["external_ref"], beads[1]["external_ref"])
+
+    def test_regressed_finding_with_open_bead_does_not_duplicate(self):
+        """A finding that was fixed and reappears (regressed) while prior bead is still open does NOT file a duplicate."""
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
+        self.assertEqual(self.scan("beads", items=[]).returncode, 0)
+        self.assertEqual(self.finding()["state"], "fixed")
+
+        # Reappears while prior bead is still open
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["state"], "regressed")
+        self.assertEqual(len(self.state()["beads"]), 1)
+
+    def test_repo_scoped_external_ref_dedupes(self):
+        """_existing_bead_fingerprints accepts repo-scoped promote_issue external_ref shape (FIX 4)."""
+        self.assertEqual(self.scan("file").returncode, 0)
+        fp = self.finding()["fingerprint"]
+        remote_state = self.state()
+        remote_state["beads"] = [{
+            "id": "promoted-1",
+            "external_ref": f"factory:github.com/{REPO.lower()}:{fp}",
+            "description": "promoted bead",
+            "title": "Promoted bead",
+            "status": "open",
+        }]
+        self.remote.write_text(json.dumps(remote_state))
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
     def test_low_and_info_findings_never_reach_beads(self):
         """agents-eyo: beads is a synced tracker and never takes low/info."""
         result = self.scan("beads", [dict(SAMPLE, severity="low", rule_id="low-x"),

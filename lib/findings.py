@@ -460,7 +460,7 @@ class FindingsStore:
                 # Lifecycle and this run's delta are separate: 'new' can remain active.
                 "change": change,
                 # Retry failed deliveries, but only notify once per sink and recurrence.
-                "dispatched_sinks": list(existing.get("dispatched_sinks", [])) if existing else [],
+                "dispatched_sinks": [] if (not existing or change == "regressed") else list(existing.get("dispatched_sinks", [])),
                 "github_issue": existing.get("github_issue") if existing else None,
                 "first_seen": existing.get("first_seen", now) if existing else now,
                 "last_seen": now,
@@ -841,6 +841,7 @@ _ISSUE_FP = re.compile(r"\*\*Fingerprint\*\*:\s*`([0-9a-f]{64})`")
 # fingerprint, never a human gate. external_ref is `factory:<fingerprint>`; beads filed before
 # that field existed carried `Fingerprint: <sha256>` in their description instead.
 _BEAD_EXTERNAL_REF_PREFIX = "factory:"
+_BEAD_EXTERNAL_REF_RE = re.compile(r"^factory:(?:[^:]+:)?([0-9a-f]{64})$")
 _BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
 
 
@@ -1055,8 +1056,10 @@ def _existing_bead_fingerprints(bd_bin: str, beads_dir: Path) -> Optional[Dict[s
             continue
         fingerprints = set()
         ref = bead.get("external_ref")
-        if isinstance(ref, str) and ref.startswith(_BEAD_EXTERNAL_REF_PREFIX):
-            fingerprints.add(ref[len(_BEAD_EXTERNAL_REF_PREFIX):].strip())
+        if isinstance(ref, str):
+            m = _BEAD_EXTERNAL_REF_RE.match(ref.strip())
+            if m:
+                fingerprints.add(m.group(1))
         description = bead.get("description")
         if isinstance(description, str):
             fingerprints.update(_BEAD_FINGERPRINT_LINE.findall(description))

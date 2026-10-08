@@ -99,27 +99,30 @@ boundary for read-only sessions, not that runner.
 ## Sinks
 
 A committed `targets/<name>.yaml` sink takes precedence over general task-tracker prose in
-another repository's `AGENTS.md`: the public issue is the triage gate; beads are internal
-work only after approval. Without an explicit sink, repository guidance is consulted and
-then `file` is the local fallback. Automatic `beads` or combined sinks refuse publication. After human triage applies the
-`factory-approved` label, use `factory promote --target NAME --issue URL` to create one
-linked bead in the target's explicitly configured `beads_path`.
+another repository's `AGENTS.md`. Findings dispatch to **`beads`** automatically (agents-eyo):
+internal findings file directly into the target's configured `beads_path` without a public issue
+or human triage gate, deduped by fingerprint (`external_ref: factory:<fingerprint>`). Public GitHub
+issues are exclusively for public-input triage (`issue-triage` station); `--sink github-issues` is
+rejected for findings. Without an explicit sink, repository guidance is consulted and
+then `file` is the local fallback. After human triage applies the
+`factory-approved` label to a public input issue, use
+`factory promote --target NAME --issue URL` to create one linked bead in the target's
+explicitly configured `beads_path`.
 
 | Target | Sink | Notes |
 |---|---|---|
-| `agents`, `chrome-agent-platform`, `voicebox`, `aifocus` | `github-issues` | Each declares an explicit public repo and visibility; publish the issue first, then require human triage before bead promotion. |
-| `fauxmium` | `file` | No explicit verified `repo:` is configured; local evidence only until its public destination is declared. |
-| *default* | `file` | Local JSON for targets without a configured public repository. |
+| `agents`, `chrome-agent-platform`, `voicebox`, `aifocus` | `beads` | Findings file to beads automatically; public input is triaged via issue-triage. |
+| `fauxmium` | `file` | No beads DB configured yet; local evidence only until its destination is declared. |
+| *default* | `file` | Local JSON for targets without a configured beads DB. |
 
 ### Severity & Public Disclosure Rules
 
 > [!IMPORTANT]
-> Paul approved PUBLIC GitHub issues for every real finding, including sensitive high/critical
-> findings (2026-10-07). A target must explicitly declare `visibility: public` and a
-> `repo: OWNER/REPO`; the publisher verifies that it is a public github.com repository,
-> searches open and closed issues by fingerprint, and redacts issue prose. Missing/invalid
-> visibility still embargoes high/critical and cannot publish to GitHub. Do not invent a
-> private sink or auto-create beads during issue publication.
+> Findings file to the target's Beads DB automatically without a public issue or human gate
+> (agents-eyo). Public GitHub issues are exclusively for public-input triage. Missing/invalid
+> target `visibility` withholds high/critical findings from the synced beads tracker (`embargo_reason`).
+> `--sink github-issues` is rejected for findings. For public-input issues, once human triage
+> applies `factory-approved`, `factory promote` creates the linked bead.
 
 ## Noise control
 

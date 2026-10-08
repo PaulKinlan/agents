@@ -2,7 +2,7 @@
 
 A schedulable fleet of software-development-lifecycle (SDLC) agents that run **locally** under your existing developer session auth (`antigravity`, `claude`, `pi`) and **in CI** on GitHub Actions.
 
-Deterministic scanners enumerate; AI models triage, synthesize, and judge. Findings flow directly into whatever issue tracker your target repository already uses (`beads`, `github-issues`, or local reports).
+Deterministic scanners enumerate; AI models triage, synthesize, and judge. Findings flow directly into whatever issue tracker your target repository already uses (`beads` or local reports; public GitHub issues are triaged separately as public input).
 
 ---
 
@@ -208,7 +208,7 @@ Targets represent repositories the factory audits. Targets are defined as simple
 # targets/my-service.yaml
 name: my-service
 path: /Users/username/Code/my-service
-sink: file                 # Sink: file | beads | github-issues
+sink: file                 # Sink: file | beads
 visibility: public         # Visibility: public | private (guards disclosure)
 trusted: false             # agents-bp0: `true` (+ visibility: private) is the attestation
                            # FACTORY_ALLOW_UNSANDBOXED=1 requires on a host without
@@ -238,7 +238,7 @@ schedule:
 |---|---|---|
 | `name` | Unique project identifier used in findings and logs | String (e.g. `my-service`) |
 | `path` | Absolute path to the repository on your machine | `/path/to/repo` |
-| `sink` | Issue-first publication or local evidence | `file` (default) · `github-issues`; automatic `beads` refuses |
+| `sink` | Findings destination | `file` (default) · `beads`; `--sink github-issues` is rejected for findings |
 | `visibility` | Explicit publication policy; missing/invalid does not authorise GitHub | `public` (publishes every real severity) · `private` (local-only) |
 | `repo` | Explicit public GitHub issue destination (never inferred from `origin`) | `OWNER/REPO` on github.com |
 | `beads_path` | Explicit initialized project Beads DB for approved promotion | `/path/to/project` (contains `.beads/`) |
@@ -342,8 +342,8 @@ agents/<name>/
 When a run completes, findings are dispatched based on target configuration:
 - **`file`** (Default): Writes formatted markdown delta reports to `findings/<target>-latest.md` and appends metrics to `findings/<target>-history.jsonl`. In a `factory line`, each station writes `findings/<target>-<agent>-delta.md` and the line writes the run's `findings/<target>-delta.md` (plus machine-readable `findings/<target>-line.json`) once, from every station. A station that produced no verdict (pre-pass/engine failure, timeout, unparseable or schema-violating output) is `ERROR`, the run is `INCOMPLETE`, never "Clean Delta", and the command exits non-zero.
 - **Severity**: reports, the store and the andon count the *triaged* severity (`unclassified` when missing; triaged false positives are evidence, not public work). `routing_severity` remains fail-closed when visibility is undeclared. An explicitly public target publishes real findings in **every band**, including high/critical and info; sensitive values are redacted from the issue body. The sink reports published / embargoed / failed counts.
-- **`github-issues`**: The first public triage step. Requires `visibility: public` and an explicit `repo: OWNER/REPO` in `targets/<name>.yaml` (or the matching explicit CLI arguments). The factory verifies the destination is a public `github.com` repository with issues enabled, enumerates open **and closed** issues for the fingerprint marker, creates only when none exists, stores the issue URL/number and adds deduplicated new/fixed/regressed transition comments. Failed verification/listing fails closed and exits non-zero. The GitHub token reaches only the trusted findings child, not the model engine.
-- **`beads`**: Automatic bead creation during publishing is **disabled**, including `--sink beads` and combined sinks. After a human triages a public issue and applies its `factory-approved` label, run `./factory promote --target NAME --issue https://github.com/OWNER/REPO/issues/NUMBER`. The command verifies the repo, issue fingerprint, approval label, local finding and configured `beads_path`; it creates **at most one** bead using a repo-scoped fingerprint external ref, links the issue URL on the bead and comments the bead ID on the issue. Retrying repairs incomplete backlinks without duplicate work items. Run promotion from the **same factory checkout** whose gitignored `findings/<target>.json` produced the issue; stores are not shared between worktrees. If the configured project Beads DB is missing or unreadable, promotion refuses instead of guessing a DB.
+- **`beads`**: Findings dispatch to beads **automatically** (agents-eyo): internal findings file directly into the target's configured `beads_path` without a public GitHub issue and without a human triage gate. Medium and above severities file (low and info are skipped); a target without explicit `visibility` withholds high/critical from the synced tracker (`embargo_reason`). Bead creation is deduped by fingerprint (`external_ref: factory:<fingerprint>`), so re-runs never file duplicate beads.
+- **Public GitHub issues & Promotion**: Public GitHub issues are exclusively for **public input**, not a findings sink; `--sink github-issues` is rejected for findings. The `issue-triage` station reads public issues, and after human triage applies the `factory-approved` label, `./factory promote --target NAME --issue https://github.com/OWNER/REPO/issues/NUMBER` creates at most one linked bead using a repo-scoped fingerprint external ref (`factory:github.com/OWNER/REPO:<fingerprint>`), links the issue URL on the bead, and comments the bead ID on the issue. Promotion must run from the same factory checkout whose `findings/<target>.json` produced the issue; stores are not shared between worktrees. If the configured project Beads DB is missing or unreadable, promotion refuses instead of guessing a DB.
 
 **QA precision needs lifecycle observations.** `qa-station` aggregates valid records
 across all readable `findings/*.json` stores in the *same factory checkout* that runs it;
@@ -361,7 +361,7 @@ Do not copy a private findings store into Git to make a QA scorecard appear.
 ### Public Disclosure Policy
 
 > [!IMPORTANT]
-> Paul explicitly approved public issues for **all real findings**, sensitive high/critical included (2026-10-07). Only an explicit per-target `visibility: public` plus a verified public `github.com/OWNER/REPO` authorises the public issue sink. Missing/invalid visibility fails closed; `visibility: private` cannot target this public sink. No private publishing route is implied. Human triage precedes any internal bead. `.gitignore` keeps raw `findings/*` and `runs/` out of Git; public issue prose is redacted, but reviewers must still consider the disclosure policy before opting a target in.
+> Findings file to the target's Beads DB automatically without a public issue or human gate (agents-eyo). Public GitHub issues are exclusively for public-input triage (`issue-triage`), never a direct findings sink; `--sink github-issues` is rejected for findings. Missing or invalid target `visibility` withholds high/critical findings from the synced beads tracker (`embargo_reason`). `.gitignore` keeps raw `findings/*` and `runs/` out of Git; tracker prose is redacted, but reviewers must still consider the disclosure policy before opting a target in.
 
 ### Noise Control & State Machine
 
