@@ -1276,8 +1276,10 @@ process.stdin.on('end', () => {
         sandbox-verified), so engine_sandboxed('claude') is False on EVERY host — claude never
         gets the OS sandbox that ro-binds the target. Its --restricted is claude's own
         confinement, not a kernel boundary, so a claude write agent downgrades to read-only
-        anywhere. No broken bwrap needed here: claude is never engine_sandboxed."""
+        anywhere. No broken bwrap needed here: claude is never engine_sandboxed. agents-ejm:
+        claude also needs the trusted-private target attestation, so this runs against one."""
         self._git_init_target()
+        self.trusted_target("trusted")
         stub = self.bin / "claude"
         stub.write_text(
             "#!/usr/bin/env bash\n"
@@ -1291,7 +1293,8 @@ process.stdin.on('end', () => {
                    "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
         # ANTHROPIC_API_KEY satisfies claude.sh's deterministic auth gate (a presence check);
         # the stub never calls the real API.
-        res = self.factory("claude", {"ANTHROPIC_API_KEY": "sk-ant-test-not-real"})
+        res = self.factory("claude", {"ANTHROPIC_API_KEY": "sk-ant-test-not-real"},
+                          target_arg="trusted")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
         self.assertIn("will not run inside the OS sandbox", res.stdout)
@@ -1301,6 +1304,66 @@ process.stdin.on('end', () => {
         record = json.loads((run_dir / "policy.json").read_text(encoding="utf-8"))
         self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
         self.assertIn("write", record["withheld"])
+
+    def test_a_claude_run_against_a_public_target_is_refused(self):
+        """agents-ejm: claude runs without the OS sandbox (--restricted only, not a kernel
+        boundary) and with unbrokered credentials, so it is refused against any target whose
+        manifest does not declare the trusted-private attestation — a raw --target path carries
+        no manifest at all and refuses, fail-closed, before any run directory exists."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        # The stub is never reached — the refusal is before the adapter — but it proves a
+        # reverted check would run claude to a clean exit 0, not an adapter-not-found failure.
+        stub = self.bin / "claude"
+        stub.write_text("#!/usr/bin/env bash\ncat >/dev/null\n" + STUB_REPORT, encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        res = self.factory("claude", {"ANTHROPIC_API_KEY": "sk-ant-test-not-real"})
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("claude", res.stderr)
+        self.assertIn("trusted: true", res.stderr)
+        self.assertEqual(self.run_dirs(), [], "a refused claude run must leave no run directory")
+
+    def test_a_claude_run_against_a_public_named_target_is_refused(self):
+        """agents-ejm: the attestation is the manifest's `trusted: true` + `visibility: private`,
+        so a NAMED target that declares visibility: public (even with a trusted field absent)
+        refuses a claude run — the public sink is exactly what a no-kernel-boundary engine must
+        not reach."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        stub = self.bin / "claude"
+        stub.write_text("#!/usr/bin/env bash\ncat >/dev/null\n" + STUB_REPORT, encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        (self.root / "targets").mkdir(exist_ok=True)
+        (self.root / "targets" / "public.yaml").write_text(
+            f"name: public\npath: {self.target}\nvisibility: public\n", encoding="utf-8")
+        res = self.factory("claude", {"ANTHROPIC_API_KEY": "sk-ant-test-not-real"},
+                          target_arg="public")
+        self.assertEqual(res.returncode, 3, res.stdout + res.stderr)
+        self.assertIn("trusted: true", res.stderr)
+        self.assertEqual(self.run_dirs(), [], "a refused claude run must leave no run directory")
+
+    def test_a_claude_read_only_run_against_a_trusted_private_target_proceeds(self):
+        """agents-ejm positive control: a claude run against a manifest declaring trusted: true +
+        visibility: private is allowed (read-only, unsandboxed) — the restriction must not
+        over-block the one target class claude is permitted on."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        stub = self.bin / "claude"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo \"POLICY:${FACTORY_TOOL_POLICY:-unset}\"\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        res = self.factory("claude", {"ANTHROPIC_API_KEY": "sk-ant-test-not-real"},
+                          target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.stub_line("POLICY:"), READ_ONLY)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
+        self.assertIn("os-sandbox", record["not_enforced"])
 
     def test_collect_session_diff_raises_on_a_stale_index_lock(self):
         """Review P1-1 (agents-6ce): if a crashed run left a stale index.lock, `git add -A`
