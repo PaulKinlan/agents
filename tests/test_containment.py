@@ -912,8 +912,9 @@ class TestDispatcher(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
-        self.assertIn("env-credentials", record["not_enforced"],
-                      "no API key was present, so no credential broker actually started")
+        # agents-3y2: the keyless BYOK broker starts even with no real key present, so the
+        # credential residual is covered (placeholders only), not recorded as not enforced.
+        self.assertNotIn("env-credentials", record["not_enforced"])
         line = self.stub_line("CANARY:")
         self.assertNotIn("CANARY-SECRET-9N7", line)
         self.assertIn("No such file", line)
@@ -2024,7 +2025,8 @@ process.stdin.on('end', () => {
         self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
         self.assertNotIn("env-credentials", record["not_enforced"],
                          "the actual brokered engine env must update the trusted record")
-        self.assertEqual(record["granted"]["credential_broker"]["providers"], ["anthropic"])
+        self.assertEqual(record["granted"]["credential_broker"]["providers"],
+                         ["anthropic", "deepseek", "kimi", "qwen", "zai"])
         self.assertNotIn(real_key, json.dumps(record))
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
