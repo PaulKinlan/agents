@@ -211,7 +211,15 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     if not patch.strip():
         return None
     base = _run_git(pinned + ["rev-parse", "HEAD"], worktree_dir)
-    header = (f"base-commit: {base.stdout.strip()}\n" if base.returncode == 0 else "")
+    if base.returncode != 0:
+        # agents-5bn: a patch without a resolvable base is a proposal that can only ever be
+        # applied blind. Fail closed like the add/diff checks above instead of emitting an
+        # untagged patch whose base cannot be verified.
+        raise StationError(
+            f"cannot resolve the session worktree's HEAD at {worktree_dir}: git rev-parse "
+            f"exited {base.returncode}: {(base.stderr or '').strip()}; refusing to collect a "
+            "patch whose base cannot be verified")
+    header = f"base-commit: {base.stdout.strip()}\n"
     patch_file = run_dir / "session.patch"
     # agents-nei P1-2: each kept win rewrites the SAME session.patch in place. If a later
     # write is interrupted (disk full / error), an in-place write_text could truncate the
@@ -220,6 +228,12 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     # write can never corrupt a previously collected patch.
     tmp_file = patch_file.with_name(patch_file.name + ".tmp")
     try:
+        # agents-5bn: the run dir is rw-bound inside the sandbox, so a write-granted session
+        # could plant a symlink at session.patch.tmp pointing at an arbitrary operator-writable
+        # host file; host-side write_text would follow it and overwrite the target. The session
+        # has already ended (no concurrent writer), so unlink the name first — the write then
+        # creates a fresh regular file, never following a planted link.
+        tmp_file.unlink(missing_ok=True)
         tmp_file.write_text(header + patch, encoding="utf-8")
         os.chmod(tmp_file, 0o600)
     except BaseException:
@@ -235,7 +249,7 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     # agents-5bn: the patch IS the proposal, so its base-commit trailer must name the
     # worktree's detached HEAD — the only base it may ever be applied against. Assert it back
     # (fail closed) so a collected patch can never be consumed under a base it does not match.
-    if base.returncode == 0 and _patch_base_commit(patch_file) != base.stdout.strip():
+    if _patch_base_commit(patch_file) != base.stdout.strip():
         raise StationError(
             f"collected session.patch at {patch_file} does not carry the worktree HEAD "
             f"{base.stdout.strip()} as its base-commit; refusing to present a proposal whose "
@@ -1019,6 +1033,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 # it never made in the worktree. Unlink before the engine so only
                 # _collect_session_diff (host-side, after the session) can produce it.
                 (run_dir / "session.patch").unlink(missing_ok=True)
+                (run_dir / "session.patch.tmp").unlink(missing_ok=True)
             adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
                                               input=prompt, capture_output=True, text=True,
                                               check=False, env=adapter_env)
@@ -1053,6 +1068,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         else:
                             print("  [worktree] The session made no file edits (empty proposal).")
                 else:
+                    # agents-5bn: a failed session must not leave a forged session.patch either.
+                    (run_dir / "session.patch").unlink(missing_ok=True)
                     print("  [worktree] Session failed; discarding its partial edits "
                           "(no proposal collected).")
         finally:
@@ -1155,6 +1172,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     if model_parse_succeeded:
         if candidates_snapshot is not None:
             _verify_candidates_integrity(candidates_file, candidates_snapshot)
+        elif candidates_file.exists():
+            # agents-5bn: no pre-pass produced candidates, yet one exists after the session — a
+            # write-granted session wrote it. Refuse rather than bind findings against a
+            # candidates.json with no trusted origin.
+            raise StationError(
+                "candidates.json appeared during the engine session without a deterministic "
+                "pre-pass to produce it; a write-granted session may have forged scanner ground "
+                "truth — refusing to dispatch findings against it")
         print(f"\n[Step 3/3] Processing findings through deduplication and sink adapter...")
         findings_py = FACTORY_ROOT / "lib" / "findings.py"
         findings_cmd = [
@@ -1177,7 +1202,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             findings_cmd += ["--repo", str(target_cfg["repo"])]
         # Bind the model's rule_id/path to the scanner's candidates when a pre-pass produced
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
-        if candidates_file.exists():
+        if candidates_snapshot is not None:
             findings_cmd += ["--candidates", str(candidates_file)]
         run_station_command(findings_cmd, budget, "findings dispatch", check=True,
                             env=child_environment(sink=sink))

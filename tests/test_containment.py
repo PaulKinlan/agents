@@ -1591,6 +1591,57 @@ process.stdin.on('end', () => {
         self.assertFalse((self.run_dirs()[0] / "session.patch").exists(),
                          "a forged pre-placed session.patch must not survive a no-edit session")
 
+    def test_a_planted_session_patch_tmp_symlink_is_not_followed(self):
+        """agents-5bn: the run dir is rw-bound inside the sandbox, so a write-granted session
+        could plant a symlink at session.patch.tmp pointing at an arbitrary operator-writable
+        host file; host-side collection writing the temp file must not follow it. Unlink the name
+        before writing so the planted target is never overwritten."""
+        target = self.root / "symlink-target"
+        target.mkdir()
+        subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+        (target / "f.txt").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(target), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(target), "-c", "user.email=f@t", "-c", "user.name=f",
+                        "commit", "-qm", "init"], check=True, capture_output=True)
+        wt = self.root / "symlink-wt"
+        gitdir = factory_cli._create_session_worktree(target, wt)
+        (wt / "f.txt").write_text("one\ntwo\n", encoding="utf-8")
+        run_dir = self.root / "symlink-run"
+        run_dir.mkdir()
+        canary = self.root / "canary.txt"
+        canary.write_text("DO NOT OVERWRITE", encoding="utf-8")
+        # A planted symlink at the temp-file path, as a write-granted session could leave.
+        (run_dir / "session.patch.tmp").symlink_to(canary)
+        try:
+            patch_file = factory_cli._collect_session_diff(wt, run_dir, gitdir)
+            self.assertIsNotNone(patch_file)
+            self.assertEqual(canary.read_text(encoding="utf-8"), "DO NOT OVERWRITE",
+                             "the planted symlink must never redirect the temp write at its target")
+            self.assertIn("two", (run_dir / "session.patch").read_text(encoding="utf-8"))
+        finally:
+            factory_cli._remove_session_worktree(target, wt)
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_forged_candidates_json_without_a_prepass_fails_closed(self):
+        """agents-5bn: even a write-granted agent with no deterministic pre-pass must not be
+        able to mint its own candidates.json — it has no trusted origin. The dispatcher refuses
+        findings dispatch when candidates.json exists but no pre-pass produced it."""
+        self._git_init_target()
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"candidates\":[{\"rule_id\":\"forged\",\"path\":\"forged.py\"}]}'"
+            " > ../candidates.json\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+        self.assertIn("candidates.json appeared during the engine session", res.stderr)
+
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_staging_writes_no_content_blobs_into_the_shared_object_store(self):
         """agents-7ik (c): intent-to-add staging must not litter the target's shared
