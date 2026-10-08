@@ -60,7 +60,9 @@ echo "[deepseek adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR' via
 export PYTHONUNBUFFERED=1
 
 STATUS=0
-python3 - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
+# agents-w8z: the heredoc below owns this process's stdin (it IS the program), so the
+# prompt cannot ride stdin. Pass it explicitly as PROMPT in the environment instead.
+PROMPT="$PROMPT" python3 - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
 import json
 import os
 import sys
@@ -84,8 +86,13 @@ model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 if model in ("deepseek-flash", "deepseek-v3"):
     model = "deepseek-chat"
 
-# Read prompt from stdin
-prompt = sys.stdin.read()
+# agents-w8z: read the prompt from PROMPT, never stdin — the heredoc owns stdin (it IS
+# the program), so sys.stdin.read() was always empty and every run sent an empty user
+# message (a schema-valid false-clean report, zero findings).
+prompt = os.environ.get("PROMPT", "")
+if not prompt.strip():
+    sys.stderr.write("[deepseek adapter] Error: empty prompt (no Scanner Data was supplied).\n")
+    sys.exit(2)
 
 # agents-m2n: the pre-pass's system-channel directive (e.g. the threat-model nonce
 # directive) joins the real system message — never as user-channel Scanner Data. The
