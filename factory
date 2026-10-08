@@ -643,6 +643,26 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         f"pre-pass run as the operator"
         if engine in SANDBOXED_ENGINES and not sandbox_ok else None)
 
+    # agents-ejm: claude is NEVER kernel-sandboxed — its adapter is not in SANDBOXED_ENGINES
+    # (its session auth lives in $HOME/.claude, which the sandbox hides by design), so its read
+    # scope is only claude's own --restricted tool flags, not a kernel boundary (non-negotiable
+    # #2), and its credentials are never brokered (they reach the child env, readable from the
+    # engine's own /proc/self/environ). Until claude is verified end-to-end inside the bwrap
+    # wrapper with a bind-mounted auth dir, it may run only against a target whose manifest
+    # declares `trusted: true` + `visibility: private` — the same per-target attestation an
+    # unsandboxed pi run requires (agents-bp0). Public/unknown-visibility targets and raw
+    # --target paths refuse, and the banner/policy.json keep reporting the session NOT confined.
+    if engine == "claude" and not (
+            target_cfg.get("trusted") is True
+            and normalize_visibility(target_cfg.get("visibility")) == "private"):
+        raise ContainmentError(
+            f"engine 'claude' runs without the OS filesystem sandbox (its adapter is not "
+            f"sandbox-verified, so its read scope is only claude's --restricted tool flags, "
+            f"not a kernel boundary) and its credentials are never brokered; refusing on "
+            f"target '{target_name}'. A claude run is allowed only for a target whose manifest "
+            f"declares `trusted: true` with `visibility: private` (THREAT_MODEL.md section 7). "
+            f"Use a sandboxed engine (pi) for public targets.")
+
     # Egress control (agents-2x6). The engine session's netns can be isolated only when the
     # engine is sandboxed AND every model-provider key present in the environment maps to a
     # brokered provider: under --unshare-net the engine cannot dial a provider directly, so
