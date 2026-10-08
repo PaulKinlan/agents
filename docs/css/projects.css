@@ -18,6 +18,10 @@
     --line: #2a3857;
     --accent: #77e1b5;
     --accent-2: #8bb8ff;
+    --accent-3: #c084fc;
+    --accent-strong: #62d6a5;
+    --code-bg: #060913;
+    --code-fg: #e2e8f0;
     --max-width: 76rem;
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-synthesis: none;
