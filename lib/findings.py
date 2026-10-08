@@ -602,7 +602,23 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
         }, indent=2), encoding="utf-8")
     return sink_results
 
-def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]], agent: Optional[str] = None, sink_results: Optional[Dict[str, Any]] = None, stations: Optional[List[Dict[str, Any]]] = None, line_name: Optional[str] = None, findings_dir: Optional[Path] = None):
+def dispatch_env_failure_report(target_name: str, agent: str, engine: str, reason: str,
+                                findings_dir: Optional[Path] = None) -> Path:
+    """Write an honest single-station delta report for an environment failure (agents-zrn).
+
+    Findings are UNKNOWN (not 0), and the report clearly indicates the station did not run.
+    """
+    return _dispatch_file(
+        target_name, [],
+        {"new": 0, "regressed": 0, "fixed": 0, "unchanged": 0, "suppressed": 0, "false_positive": 0},
+        [],
+        agent=agent,
+        findings_dir=findings_dir,
+        env_failure=f"engine '{engine}': {reason}",
+    )
+
+
+def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]], agent: Optional[str] = None, sink_results: Optional[Dict[str, Any]] = None, stations: Optional[List[Dict[str, Any]]] = None, line_name: Optional[str] = None, findings_dir: Optional[Path] = None, env_failure: Optional[str] = None):
     """Write the delta report trio (full, `-latest` alias, step-summary variant).
 
     With `agent` set, the trio is the station's own (`<target>-<agent>-delta.md` ...), never
@@ -618,7 +634,7 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
     fixed_items = [redact_finding(f) for f in fixed_items]
 
     title = f"{target_name} / {agent}" if agent else target_name
-    kwargs = dict(sink_results=sink_results, stations=stations, line_name=line_name)
+    kwargs = dict(sink_results=sink_results, stations=stations, line_name=line_name, env_failure=env_failure)
     report = _render_delta_report(title, findings, stats, fixed_items, **kwargs)
     report_file.write_text(report, encoding="utf-8")
     # Preserve the original path for existing consumers.
@@ -697,7 +713,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
                          fixed_items: List[Dict[str, Any]], *, step_summary: bool = False,
                          sink_results: Optional[Dict[str, Any]] = None,
                          stations: Optional[List[Dict[str, Any]]] = None,
-                         line_name: Optional[str] = None) -> str:
+                         line_name: Optional[str] = None,
+                         env_failure: Optional[str] = None) -> str:
     """Render the delta report; with step_summary=True, high/critical finding prose is reduced.
 
     effective_severity decides the band, matching the embargo: an understated or absent
@@ -716,7 +733,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     unchanged = [f for f in live if f["change"] == "unchanged"]
     suppressed = [f for f in live if f["state"] == "wontfix"]
     withheld = [f for f in findings if reduced(f)]
-    no_verdict = [s for s in (stations or []) if s.get("status") not in VERDICT_STATUSES]
+    env_failed = [s for s in (stations or []) if s.get("status") == "ENV_FAILURE"]
+    no_verdict = [s for s in (stations or []) if s.get("status") not in VERDICT_STATUSES and s.get("status") != "ENV_FAILURE"]
 
     lines = [
         f"# Software Factory Delta Report: {target_name}",
@@ -724,22 +742,42 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         f"",
     ]
     if stations is not None:
+        has_verdict_count = len(stations) - len(env_failed) - len(no_verdict)
         lines.append(f"Line: `{line_name or '?'}` — {len(stations)} station(s), "
-                     f"{len(stations) - len(no_verdict)} with a verdict.")
+                     f"{has_verdict_count} with a verdict.")
         lines.append("")
-    lines += [
-        f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
-        f"|:---:|:---:|:---:|:---:|:---:|:---:|",
-        f"| **{stats['new']}** | **{stats['regressed']}** | **{stats['fixed']}** | {stats['unchanged']} | {stats['suppressed']} | {stats.get('false_positive', 0)} |",
-        f""
-    ]
+    if env_failure:
+        lines += [
+            f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
+            f"|:---:|:---:|:---:|:---:|:---:|:---:|",
+            f"| — | — | — | — | — | — |",
+            f""
+        ]
+    else:
+        lines += [
+            f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
+            f"|:---:|:---:|:---:|:---:|:---:|:---:|",
+            f"| **{stats['new']}** | **{stats['regressed']}** | **{stats['fixed']}** | {stats['unchanged']} | {stats['suppressed']} | {stats.get('false_positive', 0)} |",
+            f""
+        ]
 
+    if env_failure:
+        lines.append(f"> 🚨 **ENVIRONMENT FAILURE**: Station failed due to adapter authentication/environment error:\n"
+                     f"> `{env_failure}`\n>\n"
+                     f"> The model triage step could not authenticate and did NOT run.\n"
+                     f"> Findings count is **UNKNOWN** (not zero). This is **NOT** a clean scan.")
+        lines.append("")
+    if env_failed:
+        names = ", ".join(f"`{s.get('station')}`" for s in env_failed)
+        lines.append(f"> 🚨 **ENVIRONMENT FAILURE**: {len(env_failed)} station(s) failed due to adapter authentication/environment issues: {names}. "
+                     "Findings for these stations are UNKNOWN (not zero). The stations could not run. This run is NOT clean.")
+        lines.append("")
     if no_verdict:
         names = ", ".join(f"`{s.get('station')}` ({s.get('status')})" for s in no_verdict)
         lines.append(f"> **INCOMPLETE**: {len(no_verdict)} station(s) produced no verdict: {names}. "
                      "Their zero is not a clean result; this run is not clean.")
         lines.append("")
-    elif stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
+    elif not env_failure and not env_failed and stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
         lines.append("> **Clean Delta**: No new, regressed, or resolved findings in this run.")
         lines.append("")
 
