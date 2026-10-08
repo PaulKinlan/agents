@@ -27,7 +27,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
                                child_environment, prepass_environment)
-    from lib.credential_broker import CredentialBroker, credentials_from_env
+    from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
     from lib.egress_proxy import EgressProxy
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
@@ -46,7 +46,7 @@ except ImportError:
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
                                child_environment, prepass_environment)
-    from lib.credential_broker import CredentialBroker, credentials_from_env
+    from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
     from lib.egress_proxy import EgressProxy
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
@@ -64,6 +64,11 @@ except ImportError:
 # to live in the run directory, which the sandbox already binds read-write.
 EGRESS_BROKER_PORT = 8384
 EGRESS_PROXY_PORT = 8385
+
+# The default model for a sandboxed pi run (agents-3y2): the fleet's BYOK deepseek-flash on
+# the exe.dev managed endpoint, reachable keylessly through the credential broker. Overridable
+# per run via `--model`, or via the FACTORY_MODEL environment variable.
+DEFAULT_PI_MODEL = "deepseek/deepseek-flash"
 
 
 class StationError(RuntimeError):
@@ -738,7 +743,7 @@ def _prepass_argv(prepass_script: Path, read_dir: Path, target_name: str,
 
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
               station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
-              read_target_dir: Optional[Path] = None):
+              read_target_dir: Optional[Path] = None, model_arg: Optional[str] = None):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
     agent_yaml = agent_dir / "agent.yaml"
     skill_dir = agent_dir
@@ -935,6 +940,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # ambient FACTORY_TOOL_POLICY in the operator's shell never reaches the adapter.
     adapter_env = child_environment(engine=engine)
     adapter_env["FACTORY_TOOL_POLICY"] = policy.tool_policy
+    if engine == "pi":
+        # agents-3y2: name the model explicitly so a sandboxed pi runs deepseek/deepseek-flash
+        # (the keyless BYOK path) instead of falling back to its Anthropic default and asking
+        # for ANTHROPIC_API_KEY. --model wins, then the FACTORY_MODEL env, then the default.
+        adapter_env["FACTORY_MODEL"] = (
+            model_arg or os.environ.get("FACTORY_MODEL") or DEFAULT_PI_MODEL)
     if policy.max_usd is not None:
         # Same explicit-channel rule as the tool policy: the declared cost cap reaches the
         # adapter only from here, and only an adapter with a per-run flag enforces it.
@@ -1127,6 +1138,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         try:
             if engine_sandboxed(engine):
                 broker_creds = credentials_from_env()
+                # agents-3y2: keyless BYOK providers (the exe.dev managed endpoints) are brokered
+                # even with no real key on the host, so a sandboxed engine reaches them through
+                # the host-side forwarder. Scope to providers this engine's credential allowlist
+                # actually names; a None value means "forward with no injected key".
+                engine_secret_vars = set(ENGINE_CREDENTIALS.get(engine, ()))
+                for provider in keyless_providers():
+                    _placeholder, _base_url, secret_vars = BROKER_PROVIDERS[provider]
+                    if any(var in engine_secret_vars for var in secret_vars):
+                        broker_creds.setdefault(provider, None)
                 if broker_creds:
                     broker = CredentialBroker(broker_creds)
                     try:
@@ -1407,7 +1427,8 @@ def count_criticals(findings: Any) -> int:
 
 
 def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str,
-                                  explicit_sink: Optional[str]) -> Any:
+                                  explicit_sink: Optional[str],
+                                  model_arg: Optional[str] = None) -> Any:
     """Run one station, giving a no-verdict PLUMBING failure ONE bounded repair-retry (agents-noo).
 
     A GENUINE failure — a StationError that is not a NoVerdictError (a failed pre-pass or engine)
@@ -1417,7 +1438,8 @@ def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str
     rejected; if the retry also produces no verdict, the NoVerdictError propagates so run_line
     degrades the station to ERROR and continues the line as INCOMPLETE rather than halting."""
     try:
-        return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True)
+        return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True,
+                         model_arg=model_arg)
     except NoVerdictError as e:
         print(f"\n  🔧 [repair-retry] Station '{st_agent}' produced no verdict: {e}")
         print(f"     Retrying ONCE, telling the model its previous output was rejected...")
@@ -1425,10 +1447,11 @@ def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str
                 f"ONLY one valid JSON object that validates against the declared report schema — "
                 f"no prose, no code fences, no tool calls.")
         return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True,
-                         repair_hint=hint, attempt=2)
+                         repair_hint=hint, attempt=2, model_arg=model_arg)
 
 
-def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None):
+def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
+             model_arg: Optional[str] = None):
     line_yaml = FACTORY_ROOT / "lines" / f"{line_name}.yaml"
     if not line_yaml.exists():
         sys.stderr.write(f"Factory line '{line_name}' not found in {FACTORY_ROOT / 'lines'}\n")
@@ -1468,7 +1491,8 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         st_engine = station_engines.get(st_agent, engine_arg) if isinstance(station_engines, dict) else engine_arg
         print(f"\n▶ [Station {idx}/{len(stations)}] Commencing: {st_agent} [{st_engine}] -- {st_summary}")
         try:
-            res = run_station_with_repair_retry(st_agent, target_arg, st_engine, explicit_sink)
+            res = run_station_with_repair_retry(st_agent, target_arg, st_engine, explicit_sink,
+                                                 model_arg=model_arg)
             report = res.get("report", {}) if res else {}
             findings = [f for f in report.get("findings", []) if isinstance(f, dict) and not is_false_positive(f)]
             criticals = count_criticals(findings)
@@ -2027,6 +2051,7 @@ def main():
     run_parser.add_argument("agent", help="Name of the agent to run (e.g. secret-scan)")
     run_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     run_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
+    run_parser.add_argument("--model", default=None, help="Model for the pi engine (default deepseek/deepseek-flash)")
     run_parser.add_argument("--sink", help="Override sink (file or beads)")
 
     # line
@@ -2034,6 +2059,7 @@ def main():
     line_parser.add_argument("line", help="Name of the line to run (e.g. project-audit)")
     line_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     line_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agents with")
+    line_parser.add_argument("--model", default=None, help="Model for the pi engine (default deepseek/deepseek-flash)")
     line_parser.add_argument("--sink", help="Override sink (file or beads)")
 
     # hillclimb
@@ -2110,9 +2136,11 @@ def main():
     elif args.command == "promote":
         promote_public_issue(args.target, args.issue)
     elif args.command == "run":
-        run_agent(agent_name=args.agent, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink)
+        run_agent(agent_name=args.agent, target_arg=args.target, engine_arg=args.engine,
+                  explicit_sink=args.sink, model_arg=getattr(args, "model", None))
     elif args.command == "line":
-        if not run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine, explicit_sink=args.sink):
+        if not run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine,
+                        explicit_sink=args.sink, model_arg=getattr(args, "model", None)):
             sys.exit(1)
     elif args.command == "hillclimb":
         if not run_hillclimb(

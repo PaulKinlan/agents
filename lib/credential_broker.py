@@ -50,6 +50,7 @@ from urllib.parse import urlsplit
 __all__ = [
     "CredentialBroker",
     "credentials_from_env",
+    "keyless_providers",
     "PROVIDERS",
     "BROKER_ENV_CONFIGS",
     "BrokerError",
@@ -64,7 +65,8 @@ class BrokerError(RuntimeError):
 # The upstream base carries whatever the SDK does NOT append: Anthropic's SDK
 # appends /v1/messages to a bare origin, whereas OpenAI's SDK appends /chat/...
 # to a base that already ends in /v1, so openai's upstream base includes /v1.
-# Auth style is "header:<name>" or "bearer".
+# Auth style is "header:<name>", "bearer", or "none" (keyless: the upstream does
+# server-side auth, so the broker forwards WITHOUT injecting a key).
 PROVIDERS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
     "anthropic": ("https://api.anthropic.com", "header:x-api-key",
                   ("ANTHROPIC_API_KEY",)),
@@ -72,15 +74,17 @@ PROVIDERS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
                ("OPENAI_API_KEY",)),
     "google": ("https://generativelanguage.googleapis.com", "header:x-goog-api-key",
                ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
-    # OpenAI-compatible providers pi can also use (agents-2x6). Both take a bearer key.
-    # deepseek serves /chat/completions and /v1/chat/completions off the bare origin, so
-    # https://api.deepseek.com is correct whether pi appends the openai-style
-    # /chat/completions or /v1/chat/completions. openrouter's OpenAI-compatible base ends
-    # in /api/v1 (the SDK appends /chat/completions). NOTE: pi's real path append for these
-    # two is a deferred live-run verification item, exactly like 8h4's deferred real-call
-    # acceptance — the brokering mechanism is proven by tests/test_credential_broker.py
-    # against a mock upstream, and a wrong base here is a one-line fix caught on first use.
-    "deepseek": ("https://api.deepseek.com", "bearer", ("DEEPSEEK_API_KEY",)),
+    # Keyless BYOK providers (agents-3y2): the exe.dev managed endpoints inject auth
+    # server-side, so the broker forwards these with NO key (auth style "none"). deepseek
+    # and qwen serve OpenAI-style /v1 (the SDK appends /chat/completions); zai and kimi
+    # serve Anthropic-style /v1/messages off the bare origin. The env-var tuple still names
+    # the key the engine may read (a placeholder/dummy satisfies an SDK's non-empty check);
+    # the broker never forwards that value upstream.
+    "deepseek": ("https://deepseek.int.exe.xyz/v1", "none", ("DEEPSEEK_API_KEY",)),
+    "zai": ("https://zai.int.exe.xyz", "none", ("ZAI_API_KEY",)),
+    "kimi": ("https://kimi.int.exe.xyz", "none", ("KIMI_API_KEY",)),
+    "qwen": ("https://qwen.int.exe.xyz/v1", "none", ("QWEN_API_KEY",)),
+    # openrouter is OpenAI-compatible with a bearer key; its base ends in /api/v1.
     "openrouter": ("https://openrouter.ai/api/v1", "bearer", ("OPENROUTER_API_KEY",)),
 }
 
@@ -92,6 +96,9 @@ BROKER_ENV_CONFIGS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
     "google": ("GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL",
                ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
     "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", ("DEEPSEEK_API_KEY",)),
+    "zai": ("ZAI_API_KEY", "ZAI_BASE_URL", ("ZAI_API_KEY",)),
+    "kimi": ("KIMI_API_KEY", "KIMI_BASE_URL", ("KIMI_API_KEY",)),
+    "qwen": ("QWEN_API_KEY", "QWEN_BASE_URL", ("QWEN_API_KEY",)),
     "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", ("OPENROUTER_API_KEY",)),
 }
 
@@ -149,6 +156,17 @@ def credentials_from_env(providers: Iterable[str] = tuple(PROVIDERS),
     return found
 
 
+def keyless_providers() -> Tuple[str, ...]:
+    """Providers whose upstream does server-side auth (auth style "none").
+
+    These are the exe.dev managed BYOK endpoints (agents-3y2): the broker forwards their
+    requests with NO injected key, so they can be brokered even when the host holds no real
+    credential for them. The dispatcher adds them to the broker's provider set so a
+    sandboxed engine still reaches them through the host-side forwarder.
+    """
+    return tuple(p for p, (_base, auth, _vars) in PROVIDERS.items() if auth == "none")
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Forwards one engine request to its provider, injecting the real credential.
 
@@ -158,7 +176,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     server_version = "factory-credential-broker/1.0"
-    credentials: Dict[str, str] = {}
+    credentials: Dict[str, Optional[str]] = {}
 
     # --- helpers -------------------------------------------------------------
     def _respond_error(self, code: int, message: str) -> None:
@@ -217,13 +235,16 @@ class _Handler(BaseHTTPRequestHandler):
             return self._respond_error(404, f"unknown provider {provider!r}")
         rest = "/" + "/".join(segments[2:])
         if provider not in self.credentials:
-            # No real key for this provider: fail closed rather than forward the
+            # Not configured for this provider: fail closed rather than forward the
             # engine's placeholder (which the provider would reject anyway, and
             # which must never be mistaken for a working credential).
             return self._respond_error(502, f"broker holds no credential for {provider!r}")
 
         upstream_base, auth_style, _ = PROVIDERS[provider]
         key = self.credentials[provider]
+        if key is None and auth_style != "none":
+            # A keyed provider with no key: fail closed rather than send "Bearer None".
+            return self._respond_error(502, f"broker holds no credential for {provider!r}")
         try:
             body = self._read_request_body()
         except BrokerError as e:
@@ -234,6 +255,8 @@ class _Handler(BaseHTTPRequestHandler):
             headers["Authorization"] = f"Bearer {key}"
         elif auth_style.startswith("header:"):
             headers[auth_style.split(":", 1)[1]] = key
+        elif auth_style == "none":
+            pass  # keyless upstream: it injects auth server-side (agents-3y2)
         else:  # pragma: no cover - guarded by PROVIDERS being a fixed table
             return self._respond_error(500, f"bad auth style {auth_style!r}")
 
@@ -316,11 +339,13 @@ class CredentialBroker:
     no listener leaks.
     """
 
-    def __init__(self, credentials: Mapping[str, str]):
+    def __init__(self, credentials: Mapping[str, Optional[str]]):
         unknown = sorted(set(credentials) - set(PROVIDERS))
         if unknown:
             raise BrokerError(f"unknown provider(s): {', '.join(unknown)}")
-        self._credentials: Dict[str, str] = dict(credentials)
+        # Keyless providers (auth "none") carry a None value: the broker forwards them
+        # without a key (agents-3y2). Keyed providers carry the real key, held only here.
+        self._credentials: Dict[str, Optional[str]] = dict(credentials)
         self._server: Optional[socketserver.BaseServer] = None
         self._thread: Optional[threading.Thread] = None
         self.port: Optional[int] = None
