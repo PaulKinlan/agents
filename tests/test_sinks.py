@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lib.findings import compute_fingerprint
+from lib.findings import compute_fingerprint, _BEAD_EXTERNAL_REF_RE
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "PaulKinlan/example"
@@ -40,6 +40,24 @@ class TestFingerprints(unittest.TestCase):
             changed = original.copy()
             changed[index] += "-different"
             self.assertNotEqual(compute_fingerprint(*original), compute_fingerprint(*changed))
+
+    def test_bead_external_ref_matcher(self):
+        """_BEAD_EXTERNAL_REF_RE accepts unscoped and repo-scoped refs; rejects unrelated scopes."""
+        fp = "0123456789abcdef" * 4
+        # (i) Accept unscoped factory:<64hex> and repo-scoped factory:github.com/owner/repo:<64hex>
+        m_unscoped = _BEAD_EXTERNAL_REF_RE.match(f"factory:{fp}")
+        self.assertIsNotNone(m_unscoped)
+        self.assertEqual(m_unscoped.group(1), fp)
+
+        m_scoped = _BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/repo:{fp}")
+        self.assertIsNotNone(m_scoped)
+        self.assertEqual(m_scoped.group(1), fp)
+
+        # (ii) Reject factory:unrelated:<64hex>
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:unrelated:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:gitlab.com/owner/repo:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/repo/extra:{fp}"))
 
 
 class SinkFixture:
@@ -400,6 +418,25 @@ class TestSinks(SinkFixture, unittest.TestCase):
         result = self.scan("beads")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.state()["beads"]), 1)
+
+    def test_unrelated_scoped_external_ref_does_not_suppress_finding(self):
+        """factory:unrelated:<64hex> is rejected and does not suppress finding in _dispatch_beads."""
+        self.assertEqual(self.scan("file").returncode, 0)
+        fp = self.finding()["fingerprint"]
+        remote_state = self.state()
+        remote_state["beads"] = [{
+            "id": "unrelated-1",
+            "external_ref": f"factory:unrelated:{fp}",
+            "description": "unrelated bead with arbitrary scope",
+            "title": "Unrelated bead",
+            "status": "open",
+        }]
+        self.remote.write_text(json.dumps(remote_state))
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        beads = self.state()["beads"]
+        self.assertEqual(len(beads), 2)
+        self.assertEqual(beads[1]["external_ref"], f"factory:{fp}")
 
     def test_low_and_info_findings_never_reach_beads(self):
         """agents-eyo: beads is a synced tracker and never takes low/info."""
