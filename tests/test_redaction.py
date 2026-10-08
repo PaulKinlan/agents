@@ -118,8 +118,8 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         raw.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
         cmd = [sys.executable, str(self.cli), "--target", "sandbox", "--agent", agent,
                "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)]
-        if sink == "github-issues":
-            cmd += ["--visibility", "public", "--repo", REPO]
+        if sink == "beads":
+            cmd += ["--beads-dir", str(self.target), "--visibility", "public"]
         return subprocess.run(cmd, cwd=self.factory, env=self.env, capture_output=True,
                               text=True, check=True, timeout=30)
 
@@ -154,7 +154,7 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
 
     def test_credential_in_a_title_reaches_no_tracker_field(self):
         """The public issue title uses the redacted finding, not the raw model field."""
-        for sink, severity in (("file", "high"), ("github-issues", "high")):
+        for sink, severity in (("file", "high"), ("beads", "high")):
             self.assert_clean(sink, self.credential_finding(), CREDENTIAL, severity)
 
     def test_bare_value_echoed_in_prose_is_absent_everywhere(self):
@@ -166,7 +166,7 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         finding["description"] = f"I checked the file: {self.OPAQUE} is a live credential."
         finding["remediation"] = f"Rotate {self.OPAQUE} now."
 
-        for sink, severity in (("file", "high"), ("github-issues", "high")):
+        for sink, severity in (("file", "high"), ("beads", "high")):
             self.assert_clean(sink, finding, self.OPAQUE, severity)
 
     def test_pem_body_echoed_in_prose_is_absent_everywhere(self):
@@ -176,7 +176,7 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         finding["description"] = f"The private key material starts {self.PEM_BODY} and continues."
         finding["remediation"] = f"Revoke the key; the body is {self.PEM_BODY}."
 
-        for sink, severity in (("file", "high"), ("github-issues", "high")):
+        for sink, severity in (("file", "high"), ("beads", "high")):
             self.assert_clean(sink, finding, self.PEM_BODY, severity)
 
     def test_unknown_shape_in_prose_is_absent_for_a_credential_finding(self):
@@ -190,7 +190,7 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         finding["description"] = f"The token {unknown} is in the file."
         finding["title"] = f"Token {unknown} found"
 
-        for sink, severity in (("file", "high"), ("github-issues", "high")):
+        for sink, severity in (("file", "high"), ("beads", "high")):
             self.assert_clean(sink, finding, unknown, severity)
 
     def test_credential_smuggled_through_identity_fields(self):
@@ -208,7 +208,7 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         needles = {"path": CREDENTIAL, "rule-id": self.UNKNOWN_SHAPE}
 
         for label, override in cases.items():
-            for sink, severity in (("file", "high"), ("github-issues", "high")):
+            for sink, severity in (("file", "high"), ("beads", "high")):
                 with self.subTest(field=label, sink=sink):
                     finding = self.credential_finding()
                     finding.update(override)
@@ -266,7 +266,7 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         }
 
         for label, override in cases.items():
-            for sink, severity in (("file", "high"), ("github-issues", "high")):
+            for sink, severity in (("file", "high"), ("beads", "high")):
                 with self.subTest(field=label, sink=sink):
                     finding = self.credential_finding()
                     finding.update(override)
@@ -295,7 +295,7 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         was returned unchanged and rendered in every location field.
         """
         digits = "3141592653" * 3
-        for sink, severity in (("file", "medium"), ("github-issues", "medium")):
+        for sink, severity in (("file", "medium"), ("beads", "medium")):
             with self.subTest(sink=sink):
                 finding = self.credential_finding()
                 finding.update({
@@ -361,13 +361,15 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
 class TestPublishedSurfaces(SinkFixture, unittest.TestCase):
     """End-to-end: the real CLI, a sandbox factory, stub tracker binaries."""
 
-    def dispatch(self, sink, finding, agent):
+    def dispatch(self, sink, finding, agent, visibility=None):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
         cmd = [sys.executable, str(self.cli), "--target", "sandbox", "--agent", agent,
                "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)]
-        if sink == "github-issues":
-            cmd += ["--visibility", "public", "--repo", REPO]
+        if sink == "beads":
+            cmd += ["--beads-dir", str(self.target)]
+        if visibility:
+            cmd += ["--visibility", visibility]
         return subprocess.run(cmd, cwd=self.factory, env=self.env, capture_output=True,
                               text=True, check=True, timeout=30)
 
@@ -395,34 +397,32 @@ class TestPublishedSurfaces(SinkFixture, unittest.TestCase):
         self.assertIn("src/config.js:12", report)
         self.assertIn("[redacted:secret-scan match", report)
 
-    def test_direct_beads_sink_refuses_before_any_tracker_call(self):
-        """No untriaged bead, even when the finding is high/critical (agents-559)."""
-        with self.assertRaises(subprocess.CalledProcessError) as failure:
-            self.dispatch("beads", _secret_finding(agent="secret-scan"), "secret-scan")
-        self.assertNotIn(CREDENTIAL, failure.exception.stderr)
-        self.assertEqual(self.tracker_calls(), [])
-
-    def test_high_credential_agent_issue_is_redacted_and_does_publish(self):
-        """Paul approved public sensitive issues; the redaction must hold at the API body."""
-        result = self.dispatch("github-issues", _secret_finding(agent="secret-scan"),
-                               "secret-scan")
+    def test_direct_beads_sink_files_a_redacted_bead(self):
+        """agents-eyo: findings file to beads automatically; redaction must hold at the bead."""
+        result = self.dispatch("beads", _secret_finding(agent="secret-scan"), "secret-scan",
+                               visibility="public")
         self.assert_nothing_published(result)
-        issue, = json.loads(self.remote.read_text())["issues"]
-        self.assertIn("aws-access-key", issue["body"])
-        self.assertNotIn(CREDENTIAL, issue["title"] + issue["body"])
-        self.assertFalse(any(c["tool"] == "bd" for c in self.tracker_calls()))
+        bead, = json.loads(self.remote.read_text())["beads"]
+        self.assertIn("aws-access-key", bead["description"])
+        self.assertNotIn(CREDENTIAL, bead["title"] + bead["description"])
+        self.assertFalse(any(c["tool"] == "gh" for c in self.tracker_calls()))
 
-    def test_github_sink_masks_a_model_echoed_credential(self):
-        result = self.dispatch("github-issues", _secret_finding(agent="docs-drift", severity="medium"),
+    def test_beads_sink_masks_a_model_echoed_credential(self):
+        """agents-eyo: a non-credential agent that echoes a matched value is masked in the bead."""
+        result = self.dispatch("beads", _secret_finding(agent="docs-drift", severity="medium"),
                                "docs-drift")
         self.assert_nothing_published(result)
-        creates = [c for c in self.tracker_calls() if c["args"][-1] == f"repos/{REPO}/issues"
-                   and "--method" in c["args"]]
-        self.assertEqual(len(creates), 1)
-        payload = json.loads(creates[0]["stdin"])
-        self.assertIn("withhold the matched value", payload["body"])
-        self.assertEqual(payload["title"],
-                         "[factory:docs-drift] aws-access-key match at src/config.js:12")
+        bead, = json.loads(self.remote.read_text())["beads"]
+        self.assertIn("aws-access-key", bead["description"])
+        self.assertNotIn(CREDENTIAL, bead["title"] + bead["description"])
+
+    def test_github_issues_sink_is_refused(self):
+        """agents-eyo: public GitHub issues are no longer a findings sink."""
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            self.dispatch("github-issues", _secret_finding(agent="docs-drift", severity="medium"),
+                          "docs-drift", visibility="public")
+        self.assertIn("no longer a findings sink", failure.exception.stderr)
+        self.assertFalse(any(c["tool"] == "gh" for c in self.tracker_calls()))
 
     def test_benign_finding_is_published_unchanged(self):
         """No regression: masking must not censor ordinary findings."""

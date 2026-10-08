@@ -2,7 +2,7 @@ name: agents
 path: ~/agents
 repo: PaulKinlan/agents
 beads_path: ~/agents
-sink: github-issues
+sink: beads
 visibility: public
 agents:
   - secret-scan

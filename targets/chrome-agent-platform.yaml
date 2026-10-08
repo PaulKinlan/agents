@@ -2,7 +2,7 @@ name: chrome-agent-platform
 path: ~/Code/chrome-agent-platform
 repo: PaulKinlan/chrome-agent-platform
 beads_path: ~/Code/chrome-agent-platform
-sink: github-issues
+sink: beads
 visibility: public
 agents:
   - secret-scan

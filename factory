@@ -525,8 +525,8 @@ def detect_sink(target_path: Path, target_cfg: Dict[str, Any], explicit_sink: Op
         return explicit_sink
 
     # Explicit target publication policy takes precedence over generic task-tracker prose.
-    # AGENTS.md may require bd for human work; that is NOT approval to create beads
-    # automatically before a public GitHub issue receives human triage (agents-559).
+    # AGENTS.md requiring bd for human work is a strong signal the target tracks work as beads,
+    # which is exactly where findings belong (agents-eyo: findings file to beads automatically).
     if target_cfg.get("sink"):
         return target_cfg["sink"]
 
@@ -1237,6 +1237,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         if station_only:
             # One station of a line: the line writes the run's delta report (fleet-810).
             findings_cmd += ["--station-only", "--fragment", str(fragment_path)]
+        # agents-eyo: findings file to beads automatically. Resolve the Beads DB from the
+        # target manifest's beads_path (never guessed from a checkout remote), falling back to
+        # the target checkout itself for a legacy layout.
+        if any(s.strip() in ("beads", "both", "all") for s in sink.split(",")):
+            beads_root = target_cfg.get("beads_path") or str(target_dir)
+            findings_cmd += ["--beads-dir", str(Path(os.path.expanduser(str(beads_root))).resolve())]
         # Preserve the difference between an explicit public declaration and a missing
         # visibility: the latter must never authorise high/critical publication.
         if target_cfg.get("visibility") in ("public", "private"):
@@ -1872,14 +1878,14 @@ def main():
     run_parser.add_argument("agent", help="Name of the agent to run (e.g. secret-scan)")
     run_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     run_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
-    run_parser.add_argument("--sink", help="Override sink (file or github-issues; beads require explicit post-triage promotion)")
+    run_parser.add_argument("--sink", help="Override sink (file or beads)")
 
     # line
     line_parser = subparsers.add_parser("line", help="Execute an ordered Factory Line composed of multiple stations")
     line_parser.add_argument("line", help="Name of the line to run (e.g. project-audit)")
     line_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     line_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agents with")
-    line_parser.add_argument("--sink", help="Override sink (file or github-issues; beads require explicit post-triage promotion)")
+    line_parser.add_argument("--sink", help="Override sink (file or beads)")
 
     # hillclimb
     hc_parser = subparsers.add_parser("hillclimb", help="Run Class C goal-directed performance hill-climber with ledger")
@@ -1889,7 +1895,7 @@ def main():
     hc_parser.add_argument("--iterations", type=int, default=1, help="Number of hill-climb iterations")
     hc_parser.add_argument("--apply", action="store_true", help="Apply candidate edits in worktree, re-measure, keep wins, revert losses")
     hc_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
-    hc_parser.add_argument("--sink", help="Override sink (file or github-issues; beads require explicit post-triage promotion)")
+    hc_parser.add_argument("--sink", help="Override sink (file or beads)")
 
     # hook
     hook_parser = subparsers.add_parser("hook", help="Manage deterministic git pre-commit hooks (Rule 8 compliant)")

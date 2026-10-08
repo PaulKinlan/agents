@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lib.findings import compute_fingerprint
+from lib.findings import compute_fingerprint, _BEAD_EXTERNAL_REF_RE
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "PaulKinlan/example"
@@ -41,6 +41,32 @@ class TestFingerprints(unittest.TestCase):
             changed[index] += "-different"
             self.assertNotEqual(compute_fingerprint(*original), compute_fingerprint(*changed))
 
+    def test_bead_external_ref_matcher(self):
+        """_BEAD_EXTERNAL_REF_RE accepts unscoped and repo-scoped refs; rejects unrelated scopes."""
+        fp = "0123456789abcdef" * 4
+        # (i) Accept unscoped factory:<64hex> and repo-scoped factory:github.com/owner/repo:<64hex>
+        m_unscoped = _BEAD_EXTERNAL_REF_RE.match(f"factory:{fp}")
+        self.assertIsNotNone(m_unscoped)
+        self.assertEqual(m_unscoped.group(1), fp)
+
+        m_scoped = _BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/repo:{fp}")
+        self.assertIsNotNone(m_scoped)
+        self.assertEqual(m_scoped.group(1), fp)
+
+        m_scoped_alnum = _BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/Owner-1.A/Repo_2.b:{fp}")
+        self.assertIsNotNone(m_scoped_alnum)
+        self.assertEqual(m_scoped_alnum.group(1), fp)
+
+        # (ii) Reject malformed github scopes, missing components, or unrelated scopes
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/not an owner/repo:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/not a repo:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:unrelated:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:gitlab.com/owner/repo:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/repo/extra:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/-owner/repo:{fp}"))
+        self.assertIsNone(_BEAD_EXTERNAL_REF_RE.match(f"factory:github.com/owner/-repo:{fp}"))
+
 
 class SinkFixture:
     def setUp(self):
@@ -54,6 +80,7 @@ class SinkFixture:
         self.cli = self.factory / "lib" / "findings.py"
         self.target = self.root / "target with spaces"
         self.target.mkdir()
+        (self.target / ".beads").mkdir()
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.calls_file = self.root / "calls.jsonl"
@@ -81,8 +108,6 @@ with open(os.environ['SINK_CALLS'], 'a', encoding='utf-8') as log:
 remote_path = Path(os.environ['SINK_REMOTE'])
 state = json.loads(remote_path.read_text())
 if tool == 'bd':
-    if not os.environ.get('SINK_ALLOW_BD'):
-        sys.exit(19)  # no publication-time bead may ever be created
     if args[0] == 'list':
         if os.environ.get('SINK_FAIL_BD_LIST'):
             sys.exit(9)
@@ -153,12 +178,14 @@ else:
             executable.write_text(recorder, encoding="utf-8")
             executable.chmod(0o755)
 
-    def scan(self, sink="github-issues", items=None, *, agent="lint", visibility="public",
-             repo=REPO, extra_env=None, candidates=None):
+    def scan(self, sink="beads", items=None, *, agent="lint", visibility="public",
+             repo=None, extra_env=None, candidates=None):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": [SAMPLE] if items is None else items}), encoding="utf-8")
         cmd = [sys.executable, str(self.cli), "--target", "fixture", "--agent", agent,
                "--input", str(raw), "--sink", sink, "--target-dir", str(self.target)]
+        if sink in ("beads", "both", "all"):
+            cmd += ["--beads-dir", str(self.target)]
         if visibility is not None:
             cmd += ["--visibility", visibility]
         if repo is not None:
@@ -256,12 +283,12 @@ class TestSinks(SinkFixture, unittest.TestCase):
                                         "false_positive": 0})
         self.assertEqual(len(self.store()["findings"]), 1)
 
-    def test_duplicate_input_is_one_finding_and_one_issue(self):
-        result = self.scan(items=[SAMPLE, self.shifted(), SAMPLE])
+    def test_duplicate_input_is_one_finding_and_one_bead(self):
+        result = self.scan("beads", items=[SAMPLE, self.shifted(), SAMPLE])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.stats()["new"], 1)
         self.assertEqual(len(self.store()["findings"]), 1)
-        self.assertEqual(len(self.state()["issues"]), 1)
+        self.assertEqual(len(self.state()["beads"]), 1)
         self.assertEqual(self.report().count("### [MEDIUM] Unused export"), 1)
 
     def test_candidates_bind_invented_identity_and_keep_matching_identity(self):
@@ -321,155 +348,166 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertEqual(malformed.returncode, 2)
         self.assertIn("suppressions", malformed.stderr)
 
-    def test_missing_gh_binary_retains_local_finding_and_exits_nonzero(self):
-        (self.bin / "gh").unlink()
-        result = self.scan()
+    def test_beads_sink_files_a_bead_automatically_without_a_public_issue(self):
+        """agents-eyo: findings file to beads directly — no public issue, no human step."""
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        bead, = self.state()["beads"]
+        fp = self.finding()["fingerprint"]
+        self.assertEqual(bead["external_ref"], f"factory:{fp}")
+        self.assertIn("Unused export", bead["title"])
+        self.assertIn(f"Fingerprint: {fp}", bead["description"])
+        self.assertEqual(self.state()["issues"], [])
+        self.assertFalse(any(c["tool"] == "gh" for c in self.calls()))
+        self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
+
+    def test_fresh_store_dedupes_by_fingerprint(self):
+        """agents-eyo: a reset store re-files nothing — the external_ref fingerprint is the guard."""
+        self.assertEqual(self.scan("beads").returncode, 0)
+        (self.factory / "findings" / "fixture.json").unlink()
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
+    def test_regressed_finding_with_closed_bead_creates_new_bead(self):
+        """A finding that was fixed and then reappears (regressed) with its prior bead closed creates a NEW bead (guards FIX 1)."""
+        # 1. Initial run: finding is filed to beads
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
+        self.assertEqual(self.finding()["state"], "new")
+        self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
+
+        # 2. Finding is fixed in a subsequent run
+        self.assertEqual(self.scan("beads", items=[]).returncode, 0)
+        self.assertEqual(self.finding()["state"], "fixed")
+
+        # 3. Prior bead is closed in the tracker
+        remote_state = self.state()
+        remote_state["beads"][0]["status"] = "closed"
+        self.remote.write_text(json.dumps(remote_state))
+
+        # 4. Finding reappears (regressed): prior bead is closed, so a new bead is filed
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["state"], "regressed")
+        self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
+        beads = self.state()["beads"]
+        self.assertEqual(len(beads), 2)
+        self.assertEqual(beads[0]["status"], "closed")
+        self.assertEqual(beads[1]["status"], "open")
+        self.assertEqual(beads[0]["external_ref"], beads[1]["external_ref"])
+
+    def test_regressed_finding_with_open_bead_does_not_duplicate(self):
+        """A finding that was fixed and reappears (regressed) while prior bead is still open does NOT file a duplicate."""
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
+        self.assertEqual(self.scan("beads", items=[]).returncode, 0)
+        self.assertEqual(self.finding()["state"], "fixed")
+
+        # Reappears while prior bead is still open
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["state"], "regressed")
+        self.assertEqual(len(self.state()["beads"]), 1)
+
+    def test_repo_scoped_external_ref_dedupes(self):
+        """_existing_bead_fingerprints accepts repo-scoped promote_issue external_ref shape (FIX 4)."""
+        self.assertEqual(self.scan("file").returncode, 0)
+        fp = self.finding()["fingerprint"]
+        remote_state = self.state()
+        remote_state["beads"] = [{
+            "id": "promoted-1",
+            "external_ref": f"factory:github.com/{REPO.lower()}:{fp}",
+            "description": "promoted bead",
+            "title": "Promoted bead",
+            "status": "open",
+        }]
+        self.remote.write_text(json.dumps(remote_state))
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
+    def test_unrelated_scoped_external_ref_does_not_suppress_finding(self):
+        """factory:unrelated:<64hex> is rejected and does not suppress finding in _dispatch_beads."""
+        self.assertEqual(self.scan("file").returncode, 0)
+        fp = self.finding()["fingerprint"]
+        remote_state = self.state()
+        remote_state["beads"] = [{
+            "id": "unrelated-1",
+            "external_ref": f"factory:unrelated:{fp}",
+            "description": "unrelated bead with arbitrary scope",
+            "title": "Unrelated bead",
+            "status": "open",
+        }]
+        self.remote.write_text(json.dumps(remote_state))
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        beads = self.state()["beads"]
+        self.assertEqual(len(beads), 2)
+        self.assertEqual(beads[1]["external_ref"], f"factory:{fp}")
+
+    def test_malformed_scoped_external_ref_does_not_suppress_finding(self):
+        """factory:github.com/not an owner/repo:<64hex> is rejected and does not suppress finding in _dispatch_beads."""
+        self.assertEqual(self.scan("file").returncode, 0)
+        fp = self.finding()["fingerprint"]
+        remote_state = self.state()
+        remote_state["beads"] = [{
+            "id": "malformed-1",
+            "external_ref": f"factory:github.com/not an owner/repo:{fp}",
+            "description": "malformed bead scope with spaces",
+            "title": "Malformed bead",
+            "status": "open",
+        }]
+        self.remote.write_text(json.dumps(remote_state))
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        beads = self.state()["beads"]
+        self.assertEqual(len(beads), 2)
+        self.assertEqual(beads[1]["external_ref"], f"factory:{fp}")
+
+    def test_low_and_info_findings_never_reach_beads(self):
+        """agents-eyo: beads is a synced tracker and never takes low/info."""
+        result = self.scan("beads", [dict(SAMPLE, severity="low", rule_id="low-x"),
+                                     dict(SAMPLE, severity="info", rule_id="info-x")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state().get("beads", []), [])
+
+    def test_high_severity_without_visibility_is_embargoed_from_beads(self):
+        """agents-eyo: missing visibility withholds high/critical from the synced tracker."""
+        result = self.scan("beads", [dict(SAMPLE, severity="high", rule_id="high-x")],
+                           visibility=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state().get("beads", []), [])
+
+    def test_missing_bd_binary_retains_local_finding_and_exits_nonzero(self):
+        (self.bin / "bd").unlink()
+        result = self.scan("beads")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("publication failed", result.stderr)
         self.assertEqual(self.finding()["state"], "new")
-        self.assertEqual(self.state()["issues"], [])
+        self.assertEqual(self.state().get("beads", []), [])
 
-    def test_seeded_high_severity_reaches_public_issue_not_just_configuration(self):
-        high = dict(SAMPLE, severity="high", title="Seeded high finding", rule_id="seed-high")
-        result = self.scan(items=[high])
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        issue, = self.state()["issues"]
-        fp = self.finding()["fingerprint"]
-        self.assertIn("Seeded high finding", issue["title"])
-        self.assertIn(f"**Fingerprint**: `{fp}`", issue["body"])
-        self.assertEqual(self.finding()["github_issue"], {
-            "url": issue["html_url"], "number": issue["number"], "repo": REPO})
-        self.assertEqual(self.calls(write_only=True)[0]["tool"], "gh")
-        self.assertTrue(self.state()["comments"]["1"])
-        self.assertFalse(any(c["tool"] == "bd" for c in self.calls()))
-
-    def test_every_real_band_including_info_and_security_identity_publishes(self):
-        items = [dict(SAMPLE, rule_id=severity, severity=severity, title=severity)
-                 for severity in ("critical", "high", "medium", "low", "info")]
-        result = self.scan(items=items)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(len(self.state()["issues"]), 5)
-        security = dict(SAMPLE, severity="low", title="Sensitive scanner result")
-        result = self.scan(items=[security], agent="secret-scan")
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(len(self.state()["issues"]), 6)
-        self.assertTrue(any(f["agent"] == "secret-scan" and f["routing_severity"] == "critical"
-                            for f in self.store()["findings"].values()))
-
-    def test_sensitive_value_is_redacted_before_publication(self):
-        token = "AKIA" + "IOSFODNN7EXAMPLE"
-        item = dict(SAMPLE, severity="high", title="Key " + token, snippet=token,
-                    description="Leaked " + token)
-        result = self.scan(items=[item], agent="secret-scan")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        issue, = self.state()["issues"]
-        self.assertNotIn(token, issue["title"] + issue["body"])
-        self.assertIn(token, self.finding()["snippet"])
-
-    def test_retries_search_open_and_closed_and_repair_lost_receipt(self):
-        self.assertEqual(self.scan().returncode, 0)
-        issue, = self.state()["issues"]
-        state = self.state()
-        state["issues"][0]["state"] = "CLOSED"
-        self.remote.write_text(json.dumps(state))
-        # Simulate a lost local receipt: the remote issue still owns the fingerprint.
-        store = self.store()
-        fp, = store["findings"]
-        store["findings"][fp].pop("github_issue")
-        store["findings"][fp]["dispatched_sinks"] = []
-        (self.factory / "findings" / "fixture.json").write_text(json.dumps(store))
-        shifted = dict(SAMPLE, line_number=700)
-        self.assertEqual(self.scan(items=[shifted]).returncode, 0)
-        self.assertEqual(len(self.state()["issues"]), 1)
-        self.assertEqual(self.finding()["github_issue"]["url"], issue["html_url"])
-        self.assertEqual(len(self.state()["comments"]["1"]), 1)
-        self.assertTrue(any("state=all" in a for c in self.calls() for a in c["args"]))
-
-    def test_transition_comments_new_fixed_regressed_once(self):
-        self.assertEqual(self.scan().returncode, 0)
-        self.assertEqual(self.scan(items=[]).returncode, 0)
-        self.assertEqual(self.scan(items=[]).returncode, 0)
-        self.assertEqual(self.scan(items=[dict(SAMPLE, line_number=88)]).returncode, 0)
-        self.assertEqual(self.scan(items=[dict(SAMPLE, line_number=89)]).returncode, 0)
-        comments = [c["body"] for c in self.state()["comments"]["1"]]
-        self.assertEqual(len(comments), 3)
-        for transition in ("new", "fixed", "regressed"):
-            self.assertEqual(sum(f"Factory transition: {transition}" in c for c in comments), 1)
-        self.assertEqual(len(self.state()["issues"]), 1)
-
-    def test_created_issue_survives_a_failed_comment_and_repairs_on_retry(self):
-        failed = self.scan(extra_env={"SINK_FAIL_COMMENT": "1"})
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertEqual(len(self.state()["issues"]), 1)
-        self.assertEqual(self.finding()["github_pending_transitions"][0]["state"], "new")
-        self.assertEqual(self.scan().returncode, 0)
-        self.assertEqual(len(self.state()["issues"]), 1)
-        self.assertEqual(len(self.state()["comments"]["1"]), 1)
-        self.assertEqual(self.finding()["github_pending_transitions"], [])
-
-    def test_a_lost_comment_receipt_does_not_repeat_transition(self):
-        self.assertEqual(self.scan().returncode, 0)
-        store = self.store()
-        fp, = store["findings"]
-        event = self.state()["comments"]["1"][0]["body"].split("factory-transition:")[1].split(":")[1].split(" ")[0]
-        store["findings"][fp]["github_pending_transitions"] = [
-            {"state": "new", "at": "recovered", "event": event}]
-        (self.factory / "findings" / "fixture.json").write_text(json.dumps(store))
-        self.assertEqual(self.scan().returncode, 0)
-        self.assertEqual(len(self.state()["comments"]["1"]), 1)
-        self.assertEqual(self.finding()["github_pending_transitions"], [])
-
-    def test_concurrent_processes_publish_one_issue(self):
-        raw = self.root / "input.json"
-        raw.write_text(json.dumps({"findings": [SAMPLE]}))
-        cmd = [sys.executable, str(self.cli), "--target", "fixture", "--agent", "lint",
-               "--input", str(raw), "--sink", "github-issues", "--target-dir", str(self.target),
-               "--visibility", "public", "--repo", REPO]
-        procs = [subprocess.Popen(cmd, cwd=self.factory, env=self.env,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                 for _ in range(2)]
-        try:
-            for proc in procs:
-                out, err = proc.communicate(timeout=40)
-                self.assertEqual(proc.returncode, 0, out + err)
-        finally:
-            for proc in procs:
-                if proc.poll() is None:
-                    proc.kill()
-        self.assertEqual(len(self.state()["issues"]), 1)
-        self.assertEqual(len(self.state()["comments"]["1"]), 1)
-
-    def test_unreadable_listing_fails_closed_and_retries(self):
-        failed = self.scan(extra_env={"SINK_FAIL_LIST": "1"})
+    def test_unreadable_bead_listing_fails_closed_and_retries(self):
+        failed = self.scan("beads", extra_env={"SINK_FAIL_BD_LIST": "1"})
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("publication failed", failed.stderr)
-        self.assertEqual(self.state()["issues"], [])
-        self.assertEqual(self.scan().returncode, 0)
-        self.assertEqual(len(self.state()["issues"]), 1)
+        self.assertEqual(self.state().get("beads", []), [])
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
 
-    def test_wrong_or_private_destination_never_creates(self):
-        for config in ({"SINK_REPO_URL": "https://github.int.exe.xyz/PaulKinlan/example"},
-                       {"SINK_PRIVATE": "1"}):
-            with self.subTest(config=config):
-                result = self.scan(extra_env=config)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(self.state()["issues"], [])
-
-    def test_missing_visibility_repo_or_unapproved_beads_fail_loudly(self):
-        for kwargs in ({"visibility": None}, {"visibility": "private"}, {"repo": None},
-                       {"repo": "https://github.int.exe.xyz/PaulKinlan/example"},
-                       {"sink": "beads"}, {"sink": "github-issues,beads"}):
-            with self.subTest(kwargs=kwargs):
-                result = self.scan(**kwargs)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(self.state()["issues"], [])
-                self.assertFalse(any(c["tool"] == "bd" for c in self.calls()))
-
-    def test_false_positive_is_evidence_not_public_work(self):
+    def test_false_positive_is_evidence_not_work(self):
         item = dict(SAMPLE, false_positive=True)
-        self.assertEqual(self.scan(items=[item]).returncode, 0)
-        self.assertEqual(self.state()["issues"], [])
+        self.assertEqual(self.scan("beads", items=[item]).returncode, 0)
+        self.assertEqual(self.state().get("beads", []), [])
         self.assertEqual(self.finding()["severity"], "info")
+
+    def test_github_issues_sink_is_refused(self):
+        """agents-eyo: public GitHub issues are no longer a findings sink."""
+        result = self.scan("github-issues")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no longer a findings sink", result.stderr)
+        self.assertEqual(self.state()["issues"], [])
+        self.assertFalse(any(c["tool"] == "gh" for c in self.calls()))
 
 
 if __name__ == "__main__":

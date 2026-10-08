@@ -15,7 +15,7 @@ inputs:
     required: false
     default: 'auto'
   sink:
-    description: 'Findings sink override (file, github-issues, beads)'
+    description: 'Findings sink override (file, beads)'
     required: false
     default: 'file'
   github_token:

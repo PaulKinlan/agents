@@ -3,7 +3,9 @@
 
 Handles finding identity (excluding line numbers), deduplication, lifecycle
 state transitions (new -> accepted | wontfix -> fixed -> regressed), and
-sink dispatch (file, beads, github-issues).
+sink dispatch (file, beads). Public GitHub issues are no longer a finding sink
+(agents-eyo): findings file to beads; public input is triaged separately and
+`promote_issue` is the explicit, human-approved issue -> bead link.
 """
 
 import argparse
@@ -370,7 +372,7 @@ class FindingsStore:
                 pass
             raise
 
-    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None, issue_tracking: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
+    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
         """Ingests raw findings from an agent run, applies fingerprinting and state transitions.
         
         Returns:
@@ -433,14 +435,6 @@ class FindingsStore:
                 suppression_reason = existing.get("suppression_reason")
 
             delta_stats["false_positive" if false_positive else change] += 1
-            pending = list(existing.get("github_pending_transitions", [])) if existing else []
-            # File-only targets never consume GitHub events. Keep a pending event only
-            # when this run publishes issues or a prior public issue needs lifecycle repair.
-            tracks_issue = issue_tracking or bool(existing and existing.get("github_issue"))
-            if (tracks_issue and change in ("new", "regressed")
-                    and not false_positive and fp not in self.suppressions):
-                pending.append({"state": change, "at": now,
-                                "event": hashlib.sha256(f"{fp}:{change}:{now}".encode()).hexdigest()[:16]})
             finding_record = {
                 "fingerprint": fp,
                 "agent": agent,
@@ -466,9 +460,8 @@ class FindingsStore:
                 # Lifecycle and this run's delta are separate: 'new' can remain active.
                 "change": change,
                 # Retry failed deliveries, but only notify once per sink and recurrence.
-                "dispatched_sinks": list(existing.get("dispatched_sinks", [])) if existing else [],
+                "dispatched_sinks": [] if (not existing or change == "regressed") else list(existing.get("dispatched_sinks", [])),
                 "github_issue": existing.get("github_issue") if existing else None,
-                "github_pending_transitions": pending,
                 "first_seen": existing.get("first_seen", now) if existing else now,
                 "last_seen": now,
                 "suppression_reason": suppression_reason
@@ -483,11 +476,6 @@ class FindingsStore:
                 if existing.get("state") in ("new", "accepted", "regressed"):
                     existing["state"] = "fixed"
                     existing["fixed_at"] = now
-                    if issue_tracking or existing.get("github_issue"):
-                        existing.setdefault("github_pending_transitions", []).append({
-                            "state": "fixed", "at": now,
-                            "event": hashlib.sha256(f"{fp}:fixed:{now}".encode()).hexdigest()[:16],
-                        })
                     delta_stats["fixed"] += 1
                     fixed_items.append(existing)
 
@@ -522,14 +510,13 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     publishable = []
     held = {"embargoed": 0, "false_positive": 0, "already_delivered": 0, "not_active": 0}
     for f in findings:
-        pending_issue_transition = sink == "github-issues" and bool(f.get("github_pending_transitions"))
         if f.get("state") in ("accepted", "wontfix"):
             held["not_active"] += 1
             continue
-        if f.get("state") not in ("new", "regressed") and not pending_issue_transition:
+        if f.get("state") not in ("new", "regressed"):
             held["not_active"] += 1
             continue
-        if sink in f.get("dispatched_sinks", []) and not pending_issue_transition:
+        if sink in f.get("dispatched_sinks", []):
             held["already_delivered"] += 1
             continue
         # A finding the triage declared a false positive is evidence, not work (journal-35w).
@@ -548,7 +535,7 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     return publishable, held
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = None, agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, repo: Optional[str] = None) -> Dict[str, Any]:
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = None, agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, repo: Optional[str] = None, beads_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
@@ -564,25 +551,25 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed, {stats.get('false_positive', 0)} triaged false positive")
 
     sinks = [s.strip() for s in sink.split(",") if s.strip()]
-    if "both" in sinks or "all" in sinks or "beads" in sinks:
-        raise ValueError("Automatic bead publication is disabled: publish a public GitHub "
-                         "issue first, then explicitly promote it after human triage")
-    if "github-issues" in sinks and (visibility != "public" or not isinstance(repo, str)
-                                    or not _PUBLIC_REPO.fullmatch(repo)):
-        raise ValueError("Public GitHub issue publication requires an explicit visibility: public "
-                         "and configured github.com OWNER/REPO")
+    # agents-eyo: findings file to beads automatically. `both`/`all` are legacy aliases for the
+    # one tracker sink that remains. Public GitHub issues are no longer a FINDINGS sink — the
+    # issue-triage station handles public INPUT issues as a separate flow (promote_issue is that
+    # flow's explicit, human-approved issue -> bead link).
+    if "both" in sinks or "all" in sinks:
+        sinks = ["beads"]
+    if "github-issues" in sinks:
+        raise ValueError("github-issues is no longer a findings sink: internal findings file "
+                         "to beads automatically; public-input issue triage is a separate flow")
 
     sink_results: Dict[str, Dict[str, Any]] = {}
     for s in sinks:
         if s == "file":
             continue
-        publishable, held = _partition_for_sink(
-            s, processed_findings + (fixed_items or []) if s == "github-issues" else processed_findings,
-            visibility)
+        publishable, held = _partition_for_sink(s, processed_findings, visibility)
         result = dict(held, eligible=len(publishable), published=0, failed=0, skipped=0,
                       duplicate=0, note="")
-        if s == "github-issues":
-            result.update(_dispatch_github(target_name, target_dir, publishable, visibility, repo))
+        if s == "beads":
+            result.update(_dispatch_beads(beads_dir or target_dir, publishable, visibility))
         else:
             result["note"] = f"unknown sink {s!r}: nothing published"
         sink_results[s] = result
@@ -593,7 +580,7 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
               + (f" ({result['note']})" if result.get("note") else ""))
         if result["embargoed"]:
             print(f"[Sink {s}] {result['embargoed']} finding(s) held locally: visibility must "
-                  "be explicitly declared before public issue publication.")
+                  "be explicitly declared before synced-tracker publication.")
 
     # Always write the local factory delta report. It is the complete evidence trail, so it
     # deliberately includes findings the publication embargo withholds from a tracker sink.
@@ -850,6 +837,15 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 _PUBLIC_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ISSUE_FP = re.compile(r"\*\*Fingerprint\*\*:\s*`([0-9a-f]{64})`")
 
+# Bead dedupe identity (agents-eyo): automatic findings -> beads is guarded by the finding's
+# fingerprint, never a human gate. external_ref is `factory:<fingerprint>`; beads filed before
+# that field existed carried `Fingerprint: <sha256>` in their description instead.
+_BEAD_EXTERNAL_REF_PREFIX = "factory:"
+_BEAD_EXTERNAL_REF_RE = re.compile(
+    r"^factory:(?:github\.com/[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*:)?([0-9a-f]{64})$"
+)
+_BEAD_FINGERPRINT_LINE = re.compile(r"Fingerprint:\s*([0-9a-f]{64})")
+
 
 def _gh_api(gh_bin: str, target_dir: Path, endpoint: str, *, payload: Optional[Dict[str, Any]] = None,
             paginate: bool = False) -> Any:
@@ -1038,97 +1034,130 @@ def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str
                 "issue": issue_url, "external_ref": external_ref}
 
 
-def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]],
-                     visibility: Any = None, repo: Optional[str] = None) -> Dict[str, Any]:
-    """Verify a public destination, then find OPEN+CLOSED issues before every create.
+def _existing_bead_fingerprints(bd_bin: str, beads_dir: Path) -> Optional[Dict[str, List[Dict[str, str]]]]:
+    """fingerprint -> [{id, status}] for every bead (any status) the factory filed before.
 
-    The store lock serialises publication in this checkout. A lost receipt is repairable:
-    the issue body carries the fingerprint and the exhaustive API listing finds it again.
+    A bead is matched by its `external_ref` (`factory:<fingerprint>`), or, for beads filed
+    before that existed, by the `Fingerprint: <sha256>` line the description always carried.
+    Returns None when the tracker cannot be listed (never treat an unreadable listing as empty).
+    """
+    cmd = [bd_bin, "list", "--all", "--json", "-n", "0", "-C", str(beads_dir)]
+    try:
+        res = subprocess.run(cmd, cwd=str(beads_dir), capture_output=True, text=True,
+                             check=False, timeout=60)
+        if res.returncode != 0:
+            return None
+        beads = json.loads(res.stdout or "[]")
+    except Exception:
+        return None
+    if not isinstance(beads, list):
+        return None
+    index: Dict[str, List[Dict[str, str]]] = {}
+    for bead in beads:
+        if not isinstance(bead, dict):
+            continue
+        fingerprints = set()
+        ref = bead.get("external_ref")
+        if isinstance(ref, str):
+            m = _BEAD_EXTERNAL_REF_RE.match(ref.strip())
+            if m:
+                fingerprints.add(m.group(1))
+        description = bead.get("description")
+        if isinstance(description, str):
+            fingerprints.update(_BEAD_FINGERPRINT_LINE.findall(description))
+        for fp in fingerprints:
+            index.setdefault(fp, []).append({"id": str(bead.get("id", "?")),
+                                             "status": str(bead.get("status", ""))})
+    return index
+
+
+def _dispatch_beads(beads_dir: Path, findings: List[Dict[str, Any]],
+                    visibility: Any = None) -> Dict[str, Any]:
+    """File findings as beads automatically (agents-eyo): beads is the tracked owner-visible
+    surface where untriaged findings belong, with no public GitHub issue and no human gate.
+
+    The only guard is fingerprint dedupe (external_ref `factory:<fingerprint>`), never a human:
+    a re-run matches the existing bead and files nothing new. A tracker that cannot be listed
+    files nothing rather than risk duplicates. Returns delivery counts.
     """
     result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "duplicate": 0, "note": ""}
-    if not findings:
-        return result
-    if visibility != "public" or not isinstance(repo, str) or not _PUBLIC_REPO.fullmatch(repo):
-        result.update(failed=len(findings), note="explicit public target visibility and OWNER/REPO required")
-        return result
-    gh_bin = shutil.which("gh")
-    if not gh_bin:
-        result.update(failed=len(findings), note="gh binary not available: nothing filed")
-        return result
-    try:
-        destination = _gh_api(gh_bin, target_dir, f"repos/{repo}")
-        if (not isinstance(destination, dict)
-                or destination.get("full_name", "").lower() != repo.lower()
-                or destination.get("html_url", "").lower() != f"https://github.com/{repo}".lower()
-                or destination.get("private") is not False
-                or destination.get("has_issues") is not True):
-            raise RuntimeError("configured destination is not a verified public github.com issue repository")
-        # Do not use GitHub Search: its indexing lag could create duplicates after a lost
-        # store receipt. Exhaustively list open AND closed issues, including all pages.
-        issues = _gh_pages(_gh_api(gh_bin, target_dir,
-                         f"repos/{repo}/issues?state=all&per_page=100", paginate=True))
-        index: Dict[str, List[Dict[str, Any]]] = {}
-        for issue in issues:
-            if "pull_request" in issue:
-                continue
-            for fp in set(_ISSUE_FP.findall(str(issue.get("body") or ""))):
-                _issue_identity(issue, repo)
-                index.setdefault(fp, []).append(issue)
-    except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
-        result.update(failed=len(findings), note=str(e))
-        return result  # fail closed: never create if lookup or visibility verification failed
-
+    # Classify first so the totals do not depend on finding order and never exceed what was
+    # eligible: embargoed or below-band findings are `skipped`; only ones this sink would
+    # actually file can be `failed`.
+    to_file: List[Dict[str, Any]] = []
     for f in findings:
+        if "beads" in f.get("dispatched_sinks", []):
+            continue
+        # dispatch_to_sink already applied and logged the embargo; this keeps a direct call to
+        # the sink safe. Beads publishes medium and above: critical and high are what the
+        # embargo withholds from a synced tracker when visibility is missing.
+        if embargo_reason(f, "beads", visibility):
+            result["skipped"] += 1
+            continue
+        # Beads is a synced tracker and never takes low/info.
+        if f["state"] in ("new", "regressed") and effective_severity(f) in ("critical", "high", "medium"):
+            to_file.append(f)
+        else:
+            result["skipped"] += 1
+    if not to_file:
+        return result
+
+    beads_dir = beads_dir.expanduser().resolve()
+    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
+        result["failed"] += len(to_file)
+        result["note"] = f"no initialized Beads DB in {beads_dir}: nothing filed"
+        print(f"Warning: {result['note']}")
+        return result
+
+    bd_bin = shutil.which("bd") or str(Path.home() / ".local" / "bin" / "bd")
+    if not os.path.exists(bd_bin):
+        result["failed"] += len(to_file)
+        result["note"] = "bd binary not available: nothing filed"
+        print(f"Warning: {result['note']}")
+        return result
+
+    # Dedupe against the beads that already exist. The store's receipts only cover this store;
+    # a fresh worktree, a renamed target or a reset store re-filed every finding. Read once;
+    # if the tracker cannot be read, file nothing rather than risk duplicates, and say so.
+    existing = _existing_bead_fingerprints(bd_bin, beads_dir)
+    if existing is None:
+        result["failed"] += len(to_file)
+        result["note"] = "could not list existing beads to dedupe against: nothing filed"
+        print(f"Warning: {result['note']}")
+        return result
+
+    for f in to_file:
+        matches = existing.get(f["fingerprint"], [])
+        open_matches = [m for m in matches if m.get("status") != "closed"]
+        if open_matches or (matches and f["state"] != "regressed"):
+            result["duplicate"] += 1
+            ids = ", ".join(m.get("id", "?") for m in (open_matches or matches))
+            print(f"Skipped duplicate: {f['fingerprint'][:16]} already tracked by {ids}")
+            continue
+        published = redact_finding(f)
+        title = f"[{published['agent']}] {published['title']}"
+        desc = (f"{published['description']}\n\n"
+                f"Path: {published['path']}:{published.get('line_number', '?')}\n"
+                f"Fingerprint: {f['fingerprint']}\nSnippet:\n{published['snippet']}")
         try:
-            if embargo_reason(f, "github-issues", visibility):
-                raise RuntimeError("finding is not authorised for public publication")
-            fp = f["fingerprint"]
-            matches = index.get(fp, [])
-            if len(matches) > 1:
-                raise RuntimeError("multiple issues carry this fingerprint; human resolution required")
-            if matches:
-                issue = matches[0]
-                result["duplicate"] += 1
-            else:
-                published = redact_finding(f)
-                body = (
-                    f"**Rule**: `{published['rule_id']}`\n"
-                    f"**Severity**: `{published['severity']}`\n"
-                    f"**Location**: `{published['path']}:{published.get('line_number', '?')}`\n"
-                    f"**Fingerprint**: `{fp}`\n\n"
-                    f"### Description\n{published['description']}\n\n"
-                    f"### Remediation\n{published.get('remediation') or 'N/A'}\n"
-                )
-                issue = _gh_api(gh_bin, target_dir, f"repos/{repo}/issues", payload={
-                    "title": f"[factory:{published['agent']}] {published['title']}",
-                    "body": body,
-                })
-                if not isinstance(issue, dict) or fp not in _ISSUE_FP.findall(str(issue.get("body") or "")):
-                    raise RuntimeError("github.com did not confirm the issue fingerprint")
-                index[fp] = [issue]
-                result["published"] += 1
-            url, number = _issue_identity(issue, repo)
-            f["github_issue"] = {"url": url, "number": number, "repo": repo}
-            if "github-issues" not in f.get("dispatched_sinks", []):
-                f.setdefault("dispatched_sinks", []).append("github-issues")
-            pending = f.get("github_pending_transitions", [])
-            if pending:
-                comments = _gh_pages(_gh_api(gh_bin, target_dir,
-                    f"repos/{repo}/issues/{number}/comments?per_page=100", paginate=True))
-                existing_events = {str(c.get("body") or "") for c in comments}
-                for event in list(pending):
-                    marker = f"<!-- factory-transition:{fp}:{event['event']} -->"
-                    if not any(marker in text for text in existing_events):
-                        comment = (f"Factory transition: {event['state']} at {event['at']}.\n\n{marker}")
-                        _gh_api(gh_bin, target_dir, f"repos/{repo}/issues/{number}/comments",
-                                payload={"body": comment})
-                        existing_events.add(comment)
-                    pending.remove(event)
-            print(f"Public GitHub issue for {fp[:16]}: {url}")
-        except (OSError, subprocess.TimeoutExpired, RuntimeError, KeyError, ValueError) as e:
+            bead = _bd_json(bd_bin, beads_dir, [
+                "create", "--title", title, "--description", desc,
+                "--type", "bug" if "vuln" in f.get("agent", "") or "secret" in f.get("agent", "") else "task",
+                "--external-ref", f"{_BEAD_EXTERNAL_REF_PREFIX}{f['fingerprint']}", "--json",
+            ])
+            bead_id = bead.get("id") if isinstance(bead, dict) else None
+            if not isinstance(bead_id, str) or not _BEAD_ID.fullmatch(bead_id):
+                raise RuntimeError("bd create did not return a valid id")
+            f.setdefault("dispatched_sinks", []).append("beads")
+            existing.setdefault(f["fingerprint"], []).append({"id": bead_id, "status": "open"})
+            result["published"] += 1
+            print(f"Created bead for: {published['title']}")
+        except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError) as e:
             result["failed"] += 1
             result["note"] = str(e)
+            print(f"Failed to create bead: {e}")
     return result
+
 
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Process findings into findings store")
@@ -1136,11 +1165,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--agent", help="Agent name (required for a findings run)")
     parser.add_argument("--input", help="JSON file with raw findings (required for a findings run)")
     parser.add_argument("--promote-issue", help="Explicitly promote this approved public issue URL")
-    parser.add_argument("--beads-dir", help="Explicit initialized Beads project for promotion")
+    parser.add_argument("--beads-dir", help="Explicit initialized Beads project (beads sink and promotion)")
     parser.add_argument("--candidates", help="Scanner candidates JSON to bind rule_id/path against")
-    parser.add_argument("--sink", default="file", help="Sink type (file or github-issues; beads require promotion)")
+    parser.add_argument("--sink", default="file", help="Sink type (file or beads)")
     parser.add_argument("--visibility", choices=["public", "private"],
-                        help="Explicit target visibility; missing does not authorise public high/critical issues")
+                        help="Explicit target visibility; missing withholds high/critical from a synced tracker")
     parser.add_argument("--repo", help="Explicit public github.com/OWNER/REPO issue destination")
     parser.add_argument("--target-dir", default=".", help="Target repository directory")
     parser.add_argument("--station-only", action="store_true",
@@ -1176,7 +1205,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
         processed, stats, fixed_items = store.process_run(
             agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
-            issue_tracking="github-issues" in [s.strip() for s in args.sink.split(",")],
         )
         try:
             results = dispatch_to_sink(
@@ -1191,13 +1219,14 @@ def main(argv: Optional[List[str]] = None) -> None:
                 agent=args.agent,
                 station_only=args.station_only,
                 fragment=Path(args.fragment) if args.fragment else None,
+                beads_dir=Path(args.beads_dir) if args.beads_dir else None,
             )
         finally:
             store.save()
     finally:
         store.close()  # even if candidate loading, processing or save() raises
     if any(result.get("failed") for result in results.values()):
-        sys.stderr.write("Error: GitHub issue publication failed; findings retained for retry\n")
+        sys.stderr.write("Error: sink publication failed; findings retained for retry\n")
         sys.exit(3)
 
 
