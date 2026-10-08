@@ -36,6 +36,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
+    from lib.tool_pins import ToolPinError, allowlisted_path
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -54,6 +55,7 @@ except ImportError:
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
+    from lib.tool_pins import ToolPinError, allowlisted_path
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -1357,8 +1359,22 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
         if candidates_snapshot is not None:
             findings_cmd += ["--candidates", str(candidates_file)]
-        run_station_command(findings_cmd, budget, "findings dispatch", check=True,
-                            env=child_environment(sink=sink))
+        dispatch_env = child_environment(sink=sink)
+        # agents-7bj: when the sink is the synced beads tracker the findings child resolves
+        # `bd` by name; give it a PATH rebuilt from only that tool's install tree (plus the
+        # system bin dirs a wrapped/shimmed bd's shebang needs), so it can never pick up a
+        # trojaned binary from an unrelated directory earlier on PATH. Resolution itself is
+        # pinned (lib.tool_pins) and fails closed on a missing or mismatched tool. The `file`
+        # sink resolves no trusted tool, so its PATH is untouched. On a pin/resolution failure
+        # we leave the PATH intact and let the findings child's own pinned resolution fail
+        # closed with the finding retained — we never crash before findings.py runs (P0-1).
+        if any(s.strip() in ("beads", "both", "all") for s in sink.split(",")):
+            try:
+                dispatch_env["PATH"] = allowlisted_path(("bd",), dispatch_env.get("PATH", ""))
+            except ToolPinError as e:
+                print(f"Warning: findings dispatch PATH not constrained ({e}); "
+                      "findings.py will resolve bd itself and fail closed")
+        run_station_command(findings_cmd, budget, "findings dispatch", check=True, env=dispatch_env)
     print(f"\nRun complete. Artifacts saved to:\n  {run_dir}\n")
     fragment = run_dir / "delta.json"
     # Run finished successfully: drop the active marker so this directory is eligible for
@@ -1969,8 +1985,17 @@ def promote_public_issue(target_name: str, issue_url: str) -> None:
            "--target", resolved_name, "--target-dir", str(target_dir),
            "--repo", str(cfg["repo"]), "--visibility", "public",
            "--beads-dir", str(beads_dir), "--promote-issue", issue_url]
+    # agents-7bj (P1-4): the promotion child resolves both gh and bd by name; apply the same
+    # pinned, allowlisted PATH as the findings dispatch so it cannot pick up a trojaned binary
+    # from PATH order. On a pin failure we leave the PATH intact and let the child fail closed.
+    env = child_environment(sink="github-issues")
+    try:
+        env["PATH"] = allowlisted_path(("gh", "bd"), env.get("PATH", ""))
+    except ToolPinError as e:
+        print(f"Warning: promotion PATH not constrained ({e}); findings.py will resolve "
+              "gh/bd itself and fail closed")
     res = subprocess.run(cmd, cwd=str(FACTORY_ROOT), capture_output=True, text=True,
-                         check=False, timeout=180, env=child_environment(sink="github-issues"))
+                         check=False, timeout=180, env=env)
     if res.returncode != 0:
         # The child may have created a bead before its GitHub backlink failed. Retrying
         # queries the repo-scoped external ref and repairs the link, never auto-creates two.

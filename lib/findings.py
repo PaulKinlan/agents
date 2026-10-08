@@ -52,6 +52,9 @@ except ImportError:
 # routed to a tracker at all. It is a separate module so the policy has one home and one test.
 from lib.embargo import (effective_severity, embargo_reason, is_false_positive,
                          reported_severity)
+# Host-side trusted tools are resolved by absolute path + SHA-256 pin (agents-7bj); a
+# mismatch fails closed rather than executing an unverified gh/bd.
+from lib.tool_pins import ToolPinError, resolve_tool
 
 # Keys of a per-run delta. `false_positive` counts findings the triage itself declared false
 # positives: they are recorded, never counted as new/unchanged work (journal-35w).
@@ -967,9 +970,7 @@ def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str
     beads_dir = beads_dir.expanduser().resolve()
     if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
         raise ValueError("explicit beads_path must point at an initialized project Beads DB")
-    gh_bin, bd_bin = shutil.which("gh"), shutil.which("bd")
-    if not gh_bin or not bd_bin:
-        raise RuntimeError("both gh and bd must be available for explicit promotion")
+    gh_bin, bd_bin = resolve_tool("gh"), resolve_tool("bd")
     destination = _gh_api(gh_bin, target_dir, f"repos/{repo}")
     if (not isinstance(destination, dict)
             or destination.get("full_name", "").lower() != repo.lower()
@@ -1147,10 +1148,14 @@ def _dispatch_beads(beads_dir: Path, findings: List[Dict[str, Any]],
         print(f"Warning: {result['note']}")
         return result
 
-    bd_bin = shutil.which("bd") or str(Path.home() / ".local" / "bin" / "bd")
-    if not os.path.exists(bd_bin):
+    try:
+        bd_bin = resolve_tool("bd")
+    except ToolPinError as e:
+        # Fail closed, but retain the finding and report a clean failure (agents-7bj): a
+        # missing bd or a bd that does not match its integrity pin must never silently file
+        # nothing and look like a pass.
         result["failed"] += len(to_file)
-        result["note"] = "bd binary not available: nothing filed"
+        result["note"] = f"bd unavailable or unverified: {e}"
         print(f"Warning: {result['note']}")
         return result
 

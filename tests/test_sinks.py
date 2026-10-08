@@ -9,6 +9,7 @@ remote so a second CLI process cannot rely solely on local delivery receipts.
 import hashlib
 import json
 import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import subprocess
 import sys
@@ -75,7 +76,7 @@ class SinkFixture:
         self.root = Path(temporary.name).resolve()
         self.factory = self.root / "factory"
         (self.factory / "lib").mkdir(parents=True)
-        for module in ("findings.py", "redaction.py", "embargo.py"):
+        for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py"):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         self.cli = self.factory / "lib" / "findings.py"
         self.target = self.root / "target with spaces"
@@ -92,6 +93,7 @@ class SinkFixture:
             "PATH": str(self.bin), "HOME": str(home),
             "XDG_CONFIG_HOME": str(home / ".config"), "SINK_CALLS": str(self.calls_file),
             "SINK_REMOTE": str(self.remote), "SINK_REPO": REPO,
+            "FACTORY_ALLOW_UNPINNED_TOOLS": "1",  # agents-7bj: stub gh/bd are unpinned
         }
         recorder = f"#!{sys.executable}\n" + r'''
 import json

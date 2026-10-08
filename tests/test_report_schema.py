@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import stat
 import subprocess
@@ -179,7 +180,7 @@ class TestDispatcherSchemaGate(unittest.TestCase):
         shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
         for module in ("findings.py", "redaction.py", "embargo.py",
-                       "net_forward.py", "egress_proxy.py"):
+                       "tool_pins.py", "net_forward.py", "egress_proxy.py"):
             shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
 
         bindir = sandbox / "bin"

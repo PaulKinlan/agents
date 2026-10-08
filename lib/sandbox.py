@@ -29,7 +29,9 @@ What the sandbox does (allowlist, not denylist — everything unbound is invisib
 * **Executables re-bound by resolution.** PATH directories outside the visible roots are
   ro-bound, and symlinks inside them are resolved to their package root (``bin/``-style
   directory names walked past), so launcher shims and versioned installs (nvm, ``~/.local``)
-  work inside without binding whole home subtrees.
+  work inside without binding whole home subtrees. A pinned trusted tool (gh/bd/git/semgrep/
+  gitleaks/node/npm/npx, agents-7bj) has its SHA-256 verified before it is bound; a mismatch
+  fails the wrap closed.
 
 What it does NOT do, stated plainly because policy.json must never overclaim:
 
@@ -61,6 +63,11 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+# Integrity pins for host-side trusted tools (agents-7bj): a pinned tool's content is
+# authenticated (SHA-256) before it is bound into the sandbox (see _executable_binds).
+from lib.tool_pins import TRUSTED_TOOLS as PINNED_TOOLS
+from lib.tool_pins import verify_pin
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
@@ -417,6 +424,14 @@ def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
             real = Path(os.path.realpath(launch))
             if not real.exists():
                 continue
+            # agents-7bj: authenticate a pinned trusted tool's content (and configured path)
+            # before binding it into the child. A pinned tool whose binary does not hash-match,
+            # or whose real path is not the configured path, fails the wrap closed rather than
+            # binding an unverified binary. A trusted tool with NO pin also fails closed here
+            # (unless FACTORY_ALLOW_UNPINNED_TOOLS=1) — see lib.tool_pins._require_pin. Untrusted
+            # names (bash/sh/env/python3) are never passed to verify_pin and need no pin.
+            if name in PINNED_TOOLS:
+                verify_pin(name, str(real))
             # Bind the tool's own install tree when it is tool-specific (node's versioned
             # tree, pi's ~/.local/pi), so the real binary and its siblings resolve at their
             # true paths. A tree that is really a top-level user prefix (~/.local) is too

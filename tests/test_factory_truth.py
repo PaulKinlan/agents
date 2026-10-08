@@ -20,6 +20,7 @@ import importlib.util
 import io
 import json
 import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import stat
 import subprocess
@@ -46,7 +47,8 @@ _loader.exec_module(factory_cli)
 
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
                "credential_broker.py", "net_forward.py", "egress_proxy.py",
-               "report_schema.py", "containment.py", "sandbox.py", "retention.py")
+               "report_schema.py", "containment.py", "sandbox.py", "retention.py",
+               "tool_pins.py")
 
 
 def finding(**overrides):

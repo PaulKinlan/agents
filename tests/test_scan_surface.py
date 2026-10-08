@@ -10,6 +10,8 @@ Covers:
 """
 
 import sys
+import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import tempfile
 import unittest
 from pathlib import Path

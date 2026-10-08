@@ -234,6 +234,43 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+### 1.5 Tool Integrity Pinning (agents-7bj / agents-3g6)
+
+The factory resolves its host-side trusted tools (`gh`, `bd`, `git`, `semgrep`, `gitleaks`, `node`/`npm`/`npx`) and now **fails closed** unless each one carries a SHA-256 pin — a trojaned binary earlier on `PATH` must never run with the factory's GitHub token or write access (threat-model `tm-external-tool-integrity`). A resolved binary whose hash does not match its pin, or a trusted tool with no pin at all, is refused (`ToolPinError`) rather than executed.
+
+Binary hashes are host-specific, so the repo's `tools.yaml` ships the **format** with the pins commented out. Deployers supply the actual hashes out-of-band through a host-local file named by `FACTORY_TOOL_PINS`, which `lib/tool_pins.load_tool_pins()` merges **over** `tools.yaml` (host wins per tool):
+
+```text
+FACTORY_TOOL_PINS=/etc/factory/tools.pins.yaml        # or $HOME/.config/factory/tools.pins.yaml
+```
+
+```yaml
+# /etc/factory/tools.pins.yaml  (merged over the repo tools.yaml)
+gh:
+  path: /usr/local/bin/gh
+  sha256: <64 hex>
+bd:
+  path: /usr/local/bin/bd
+  sha256: <64 hex>
+```
+
+Generate it with the bundled helper (explicit operator/runner step — the factory never generates or relaxes its own pins):
+
+```bash
+tools/generate-tool-pins.sh                       # writes $HOME/.config/factory/tools.pins.yaml
+export FACTORY_TOOL_PINS="$HOME/.config/factory/tools.pins.yaml"
+
+# one-liner for a single tool
+printf 'gh:\n  path: %s\n  sha256: %s\n' "$(command -v gh)" "$(sha256sum "$(command -v gh)" | cut -d' ' -f1)"
+```
+
+Semantics: an **unset** `FACTORY_TOOL_PINS`, or a path that does not exist, leaves the repo pins unchanged (still fail-closed); a **malformed** host file raises rather than being silently ignored. The only way to run with unpinned tools is the explicit dev/test opt-in `FACTORY_ALLOW_UNPINNED_TOOLS=1` (never the default).
+
+Consumers already satisfy this:
+- **Composite action** (`.github/actions/factory`): a *Generate Tool Pins* step runs `tools/generate-tool-pins.sh` on the runner and exports `FACTORY_TOOL_PINS`, so downstream `factory run <agent>` calls work without any repo edit.
+- **Fleet nightly runner** (`factory line project-audit`): the host's timer/environment must export `FACTORY_TOOL_PINS` (generate once, regenerate after any tool upgrade) the same way.
+- **Local scheduler / target enrolment** (Layer 3): run the helper on the host and export `FACTORY_TOOL_PINS` in the launchd/systemd unit's environment before `factory run`/`factory line`.
+
 ---
 
 ## 2. Pre-Commit Plane (Layer 1: Deterministic Gate)
