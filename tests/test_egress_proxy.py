@@ -164,6 +164,15 @@ class ProxyLifecycleTest(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             proxy.stop()
 
+    def test_a_long_socket_path_is_refused_loudly(self):
+        # agents-x8l: AF_UNIX sun_path holds at most 107 bytes; refuse before bind() so the
+        # failure is a clear OSError, not a cryptic ENAMETOOLONG from the server thread.
+        proxy = ep.EgressProxy(["allowed.test"], "/" * 108)
+        with self.assertRaises(OSError) as cm:
+            proxy.start()
+        self.assertIn("sun_path", str(cm.exception))
+        self.assertIn("107", str(cm.exception))
+
 
 class ProxyEnforcementTest(unittest.TestCase):
     def setUp(self):

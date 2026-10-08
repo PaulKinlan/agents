@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_hex
@@ -699,6 +700,20 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     pool = with_findings or objects
     return max(pool, key=lambda o: o[0])[1]
 
+def _make_socket_dir() -> Path:
+    """Allocate a short, private, per-run directory for the egress UNIX sockets (agents-x8l).
+
+    The credential broker and egress allowlist proxy listen on UNIX sockets that the sandbox
+    reaches through lib/net_forward.py. AF_UNIX's sun_path holds at most 107 bytes, and run_dir
+    embeds the full worktree path — long worktrees overflow it. The sockets therefore get their
+    own collision-free mktemp directory under /tmp (already 0700), kept private so a concurrent
+    run can neither read nor bind them.
+    """
+    d = Path(tempfile.mkdtemp(prefix="factory-sock-", dir="/tmp"))
+    os.chmod(d, 0o700)  # mkdtemp is 0700 by default; be explicit against umask drift
+    return d
+
+
 def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
     """Exclusively allocate a run directory, including on a same-second collision."""
     run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
@@ -867,6 +882,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # lives in the helper; the per-attempt suffix above is applied before it is called.
     run_dir = create_run_dir(agent_name, target_name, run_id)
 
+    # Egress sockets (agents-x8l): run_dir can exceed AF_UNIX's 107-byte sun_path in a long
+    # worktree path, so both sockets live in a short per-run dir under /tmp. The sandbox rw-binds
+    # that dir (lib/sandbox.py derives it from each egress socket's parent); the broker finally
+    # removes it once both listeners have stopped.
+    sock_dir = _make_socket_dir()
+    proxy_sock = sock_dir / "proxy.sock"
+    broker_sock = sock_dir / "broker.sock"
+
     # Disposable per-session worktree (agents-6ce). A granted write runs the engine in a
     # throwaway git worktree under the run directory — which the OS sandbox already binds
     # read-write — so the model can edit files but only there: the target checkout stays
@@ -927,7 +950,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                     run_dir=run_dir, env=prepass_env,
                     executables=tuple(PREPASS_EXECUTABLES) + tuple(policy.requires),
-                    egress_forwards=[(EGRESS_PROXY_PORT, str(run_dir / "egress-proxy.sock"))])
+                    egress_forwards=[(EGRESS_PROXY_PORT, str(proxy_sock))])
             except SandboxError as e:
                 raise StationError(f"{agent_name}: cannot sandbox the pre-pass: {e}") from e
 
@@ -963,7 +986,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 adapter_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                 run_dir=run_dir, env=adapter_env,
                 executables=(engine,) + ENGINE_EXECUTABLES,
-                egress_forwards=([(EGRESS_BROKER_PORT, str(run_dir / "egress-broker.sock"))]
+                egress_forwards=([(EGRESS_BROKER_PORT, str(broker_sock))]
                                  if egress_active else None))
         except SandboxError as e:
             raise StationError(f"{agent_name}: cannot sandbox engine '{engine}': {e}") from e
@@ -1014,7 +1037,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         egress_proxy: Optional[EgressProxy] = None
         if prepass_egress:
             egress_proxy = EgressProxy(egress_allowlist(policy.requires),
-                                       str(run_dir / "egress-proxy.sock"))
+                                       str(proxy_sock))
             try:
                 egress_proxy.start()
             except OSError as e:
@@ -1065,6 +1088,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     should_short_circuit = agent_cfg.get("short_circuit_empty", False)
     if should_short_circuit and len(candidates_data) == 0:
         print(f"\n[Step 2/3] Zero candidates found by deterministic pre-pass. Short-circuiting model invocation.")
+        # agents-x8l: no engine ran, so the broker finally below never fires; remove the short
+        # per-run socket dir here (the pre-pass proxy already stopped and unlinked its socket).
+        shutil.rmtree(sock_dir, ignore_errors=True)
         report = {
             "summary": f"Clean scan. Deterministic pre-pass found 0 candidate issues in {target_name}.",
             "scanned_files": 0,
@@ -1151,7 +1177,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     broker = CredentialBroker(broker_creds)
                     try:
                         if egress_active:
-                            broker.start(unix_path=str(run_dir / "egress-broker.sock"),
+                            broker.start(unix_path=str(broker_sock),
                                          child_port=EGRESS_BROKER_PORT)
                         else:
                             broker.start()
@@ -1227,6 +1253,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if broker is not None:
                 broker.stop()
+            # agents-x8l: both egress listeners (broker + proxy) have stopped and unlinked their
+            # sockets, so the short per-run socket dir is empty. ignore_errors: a crashed or
+            # short-circuited run may leave it without ever binding, and /tmp reaps a stray
+            # empty 0700 dir harmlessly.
+            shutil.rmtree(sock_dir, ignore_errors=True)
             if worktree_dir is not None:
                 _remove_session_worktree(target_dir, worktree_dir)
         

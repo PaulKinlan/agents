@@ -270,6 +270,15 @@ class TestLifecycle(unittest.TestCase):
         self.addCleanup(broker.stop)
         self.assertIsNotNone(broker.port)
 
+    def test_a_long_unix_socket_path_is_refused_loudly(self):
+        # agents-x8l: AF_UNIX sun_path holds at most 107 bytes; refuse before bind() so the
+        # failure is a clear BrokerError, not a cryptic ENAMETOOLONG from the server thread.
+        broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
+        with self.assertRaises(cb.BrokerError) as cm:
+            broker.start(unix_path="/" * 108, child_port=8384)
+        self.assertIn("sun_path", str(cm.exception))
+        self.assertIn("107", str(cm.exception))
+
     def test_unknown_provider_is_rejected_at_construction(self):
         with self.assertRaises(cb.BrokerError):
             cb.CredentialBroker({"azure": "x"})

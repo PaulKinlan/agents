@@ -140,6 +140,25 @@ class TestSandboxCommandShape(unittest.TestCase):
         last_sep = len(argv) - 1 - argv[::-1].index("--")
         self.assertEqual(argv[last_sep + 1:], ["/bin/echo", "hi"])
 
+    def test_an_egress_socket_path_over_the_sun_path_limit_is_refused(self):
+        # agents-x8l: AF_UNIX sun_path holds at most 107 bytes. Refuse a path that can never
+        # bind loudly, rather than let bind() fail with ENAMETOOLONG deep in the server thread.
+        with self.assertRaises(SandboxError) as cm:
+            self.build(egress_forwards=[(8384, "/" * 108)])
+        self.assertIn("sun_path", str(cm.exception))
+        self.assertIn("107", str(cm.exception))
+
+    def test_egress_sockets_outside_run_dir_get_their_parent_bound(self):
+        # agents-x8l: the egress sockets live in a short per-run dir under /tmp (run_dir can
+        # exceed AF_UNIX's sun_path limit). sandbox_command must rw-bind that dir so the
+        # in-sandbox net_forward relay reaches the host-side listener.
+        sock_dir = Path(tempfile.mkdtemp(prefix="factory-sock-test-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, sock_dir, True)
+        argv = self.build(egress_forwards=[(8384, str(sock_dir / "broker.sock"))])
+        rw = dict(_pairs(argv, "--bind"))
+        self.assertEqual(rw.get(os.path.realpath(sock_dir)), os.path.realpath(sock_dir),
+                         "the socket's parent dir must be rw-bound into the sandbox")
+
     def test_nothing_outside_the_allowlist_is_bound(self):
         """Every ro/rw bind source is the factory root, the target, the run dir, a system
         directory, or a resolved allowlisted executable tree — nothing else."""
