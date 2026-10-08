@@ -484,6 +484,61 @@ class TestSandboxLive(unittest.TestCase):
                          "the operator's shell env must never reach the sandbox child")
 
 
+class WrapperRuntimeBindTests(unittest.TestCase):
+    """agents-wza: a wrapper launcher (pi) execs a runtime in a different tree than its own;
+    the binder must mount that runtime's package at the path the launcher references — even
+    through a symlink — or the module fails to resolve once $HOME is hidden."""
+
+    def test_wrapper_runtime_paths_extracts_existing_absolute_paths(self):
+        from lib.sandbox import _wrapper_runtime_paths
+        tmp = Path(tempfile.mkdtemp(prefix="wza-runtime-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        bundle = tmp / "bundle" / "cli.js"
+        bundle.parent.mkdir(parents=True)
+        bundle.write_text("// stub\n", encoding="utf-8")
+        launcher = tmp / "pi"
+        launcher.write_text(f"#!/bin/sh\nexec /usr/bin/node {bundle} \"$@\"\n", encoding="utf-8")
+        self.assertIn(str(bundle), _wrapper_runtime_paths(launcher))
+
+    def test_wrapper_runtime_paths_skips_non_scripts_and_missing_paths(self):
+        from lib.sandbox import _wrapper_runtime_paths
+        tmp = Path(tempfile.mkdtemp(prefix="wza-skip-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        not_a_script = tmp / "pi"
+        not_a_script.write_text("exec /does/not/exist/cli.js \"$@\"\n", encoding="utf-8")
+        self.assertEqual(_wrapper_runtime_paths(not_a_script), [])
+
+    def test_executable_binds_mounts_a_symlinked_runtime_at_the_launch_path(self):
+        from lib.sandbox import _BindPlan, _executable_binds
+        tmp = Path(tempfile.mkdtemp(prefix="wza-bind-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # A "real" package tree at a resolved location ...
+        real_pkg = tmp / "real" / "pi-coding-agent"
+        (real_pkg / "dist" / "bundle").mkdir(parents=True)
+        (real_pkg / "package.json").write_text("{}\n", encoding="utf-8")
+        (real_pkg / "dist" / "bundle" / "cli.js").write_text("// stub\n", encoding="utf-8")
+        # ... symlinked at the path a launcher hardcodes.
+        link = tmp / "linked" / "pi-coding-agent"
+        link.parent.mkdir()
+        link.symlink_to(real_pkg)
+        # A flat launcher (name != dir, not under a structural dir) binds only its own file,
+        # so the runtime bind below is what must bring the package in.
+        launcher = tmp / "pi"
+        launcher.write_text(
+            f"#!/bin/sh\nexec /usr/bin/node {link / 'dist' / 'bundle' / 'cli.js'} \"$@\"\n",
+            encoding="utf-8")
+        launcher.chmod(launcher.stat().st_mode | 0o111)
+        plan = _BindPlan()
+        _executable_binds(plan, ("pi",), str(tmp), str(tmp))
+        # The resolved content is mounted AT the symlink path the launcher references.
+        self.assertTrue(plan.visible(str(link)),
+                        "the symlinked runtime must be visible at its launch path")
+        pairs = _pairs(plan.argv, "--ro-bind")
+        self.assertIn((os.path.realpath(str(link)), str(link)), pairs,
+                      "the real package must be mounted AT the symlink path, not at its "
+                      "resolved location")
+
+
 class ToolPinBindTests(unittest.TestCase):
     """agents-7bj P2-6: the sandbox binder authenticates a pinned trusted tool's content
     before binding it, failing the wrap closed on a hash mismatch (never binding an
@@ -495,6 +550,13 @@ class ToolPinBindTests(unittest.TestCase):
         from lib.sandbox import _BindPlan, _executable_binds
         tmp = Path(tempfile.mkdtemp(prefix="binds-pin-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # agents-3g6: a host-local FACTORY_TOOL_PINS file overlays the repo tools.yaml in
+        # load_tool_pins(), so its `path` pin would not match this fake binary and the test
+        # would fail for reasons unrelated to what it asserts. Isolate these fixtures from
+        # the host env so they test the repo-pin path deterministically.
+        host_pins = os.environ.pop("FACTORY_TOOL_PINS", None)
+        if host_pins is not None:
+            self.addCleanup(os.environ.__setitem__, "FACTORY_TOOL_PINS", host_pins)
         fake = tmp / name
         fake.write_text(content, encoding="utf-8")
         fake.chmod(fake.stat().st_mode | 0o111)

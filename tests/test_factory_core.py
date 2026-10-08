@@ -153,7 +153,7 @@ class TestDispatcherBudget(unittest.TestCase):
                 "class: observer\n"
                 "containment: t0-readonly\n"
                 "short_circuit_empty: false\n"
-                "budget: {max_minutes: 0.05}\n",  # 3 s
+                "budget: {max_minutes: 0.25}\n",  # 15 s: headroom so pre-pass + sandbox bind setup finishes before the engine step
                 encoding="utf-8",
             )
             (sandbox / "lib" / "adapters").mkdir(parents=True)
@@ -182,7 +182,7 @@ class TestDispatcherBudget(unittest.TestCase):
             elapsed = time.monotonic() - started
             self.assertIn("engine 'pi'", str(ctx.exception))
             self.assertIn("station budget", str(ctx.exception))
-            self.assertLess(elapsed, 15, "the hung engine was not stopped at its budget")
+            self.assertLess(elapsed, 30, "the hung engine was not stopped at its budget")
 
 
 class TestDispatcherChildEnvironment(unittest.TestCase):
