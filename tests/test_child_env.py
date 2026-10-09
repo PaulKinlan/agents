@@ -169,6 +169,57 @@ class TestChildEnvironment(unittest.TestCase):
             self.assertNotIn("FACTORY_TOOL_PINS", child_environment(parent=parent))
             self.assertNotIn("FACTORY_TOOL_PINS", child_environment(engine="pi", parent=parent))
 
+    def test_findings_child_resolves_an_unpinned_tool_with_the_parent_opt_in(self):
+        """agents-7ua: the sink child must inherit the parent's unpinned-tools opt-in.
+
+        `FACTORY_ALLOW_UNPINNED_TOOLS=1` is a run-scoped widening the parent already applied
+        when it resolved the tool. The findings/promotion child resolves the same tool itself,
+        so without that variable its own `resolve_tool` fails closed even though the parent
+        just resolved the same binary — the web-uplift halt. `trusted_tools=True` forwards it
+        exactly like `FACTORY_TOOL_PINS`.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fake_bd = tmp / "bd"
+            fake_bd.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_bd.chmod(0o755)
+            # No pins file: bd is UNPINNED, so only the explicit opt-in lets it resolve.
+            parent = {"PATH": tmpdir, "HOME": str(tmp),
+                      "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
+            probe = ("import sys; sys.path.insert(0, %r); "
+                     "from lib.tool_pins import resolve_tool, ToolPinError\n"
+                     "try: print('RESOLVED', resolve_tool('bd'))\n"
+                     "except ToolPinError as e: print('FAILED', e)\n") % str(ROOT)
+
+            def resolve(child):
+                env = child_environment(parent=parent, trusted_tools=child)
+                out = subprocess.run([sys.executable, "-c", probe], env=env, text=True,
+                                     capture_output=True, cwd=str(ROOT), timeout=60)
+                return env, out.stdout.strip()
+
+            with_optin, out = resolve(True)
+            self.assertEqual(with_optin["FACTORY_ALLOW_UNPINNED_TOOLS"], "1")
+            self.assertEqual(out, f"RESOLVED {fake_bd}")
+
+            # The opt-in is only for the children that resolve a trusted tool themselves.
+            without, out = resolve(False)
+            self.assertNotIn("FACTORY_ALLOW_UNPINNED_TOOLS", without)
+            self.assertTrue(out.startswith("FAILED"))
+
+            self.assertNotIn("FACTORY_ALLOW_UNPINNED_TOOLS",
+                             child_environment(parent=parent))
+            self.assertNotIn("FACTORY_ALLOW_UNPINNED_TOOLS",
+                             child_environment(engine="pi", parent=parent))
+
+    def test_findings_child_opt_in_never_leaks_secrets(self):
+        """agents-7ua: forwarding the unpinned opt-in must not widen the secret boundary."""
+        parent = parent_env(FACTORY_ALLOW_UNPINNED_TOOLS="1")
+        env = child_environment(sink="beads", trusted_tools=True, parent=parent)
+        self.assertEqual(env["FACTORY_ALLOW_UNPINNED_TOOLS"], "1")
+        for name in list(SECRETS) + ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"]:
+            with self.subTest(name=name):
+                self.assertNotIn(name, env)
+
     def test_proxy_and_ca_vars_not_forwarded_by_default(self):
         # agents-5d9: a poisoned operator proxy/CA must not reach a child by default.
         parent = parent_env(HTTP_PROXY="http://attacker:8080",
