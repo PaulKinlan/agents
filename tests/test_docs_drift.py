@@ -122,6 +122,30 @@ class TestTreeDiagramParser(unittest.TestCase):
             references = {c["reference"] for c in check_docs.scan_target(tmp)}
             self.assertNotIn("audits/", references)
 
+    def test_ambiguous_directory_name_is_still_reported(self):
+        """The guard rail for the name fallback: `scripts/` is ambiguous, so drift survives.
+
+        This is the drift the review of 946b23e caught: an unconditional name search let a
+        `scripts/` reference match `agents/*/scripts/` and silenced a claim about a
+        directory that does not exist at the level the document describes.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            for agent in ("alpha", "beta"):
+                (tmp / "agents" / agent / "scripts").mkdir(parents=True)
+            (tmp / "README.md").write_text("Pre-pass tool lives in `scripts/`.\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("scripts/", references)
+
+    def test_generic_directory_name_is_not_resolved_globally(self):
+        """A lone `app/src/` must not satisfy a document's claim about `src/`."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "app" / "src").mkdir(parents=True)
+            (tmp / "README.md").write_text("Sources live in `src/`.\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("src/", references)
+
     def test_uri_schemes_are_not_paths(self):
         """`file://` and `chrome://extensions` are URLs, not repository paths."""
         with tempfile.TemporaryDirectory() as tmpdir:

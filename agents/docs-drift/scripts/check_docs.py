@@ -43,6 +43,19 @@ EXTERNAL_REPO_INDICATORS = {
     "google-github-actions/", "actions/"
 }
 
+# Bare DIRECTORY names that are too generic to resolve by name anywhere in the tree.
+# `src/`, `build/` and friends appear in nearly every project, so a document naming one
+# is almost always describing the TARGET project's layout, not this repository's; letting
+# one match a directory somewhere else would hide a moved/renamed path.
+GENERIC_DIR_NAMES = {
+    "src", "source", "sources", "script", "scripts", "test", "tests", "spec", "specs",
+    "lib", "libs", "bin", "build", "dist", "out", "output", "docs", "doc", "app",
+    "apps", "packages", "package", "assets", "public", "static", "fixtures", "fixture",
+    "extension", "extensions", "pages", "page", "tools", "config", "configs", "tmp",
+    "temp", "cache", "vendor", "node_modules", "examples", "example", "samples",
+    "screenshots", "images", "img", "components", "styles", "tests-e2e", "e2e",
+}
+
 def is_ignored_doc(p: Path, target_dir: Path) -> bool:
     """Check if document file is in an ignored directory."""
     try:
@@ -85,6 +98,7 @@ def get_markdown_headings(file_path: Path) -> Set[str]:
 GIT_INDEX_TIMEOUT_SECONDS = 120
 _GIT_INDEX_CACHE: Dict[Tuple[str, str], List[str]] = {}
 _NAME_INDEX_CACHE: Dict[str, Set[str]] = {}
+_DIR_INDEX_CACHE: Dict[str, Dict[str, int]] = {}
 
 
 def _git_paths(target_dir: Path, kind: str) -> List[str]:
@@ -145,6 +159,24 @@ def _file_names(target_dir: Path) -> Set[str]:
         _NAME_INDEX_CACHE[key] = names
     return _NAME_INDEX_CACHE[key]
 
+
+def _dir_name_counts(target_dir: Path) -> Dict[str, int]:
+    """How many distinct directories carry each name (walked once, cached).
+
+    Used to keep the bare-name fallback honest: a name that occurs once is unambiguous,
+    while `scripts` (22 directories in this repo) is not, so a document naming a
+    `scripts/` directory that no longer exists where it claims is still reported.
+    """
+    key = str(target_dir)
+    if key not in _DIR_INDEX_CACHE:
+        counts: Dict[str, int] = {}
+        for _root, dirs, _files in os.walk(target_dir):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            for d in dirs:
+                counts[d] = counts.get(d, 0) + 1
+        _DIR_INDEX_CACHE[key] = counts
+    return _DIR_INDEX_CACHE[key]
+
 def expand_path_braces(path_str: str) -> List[str]:
     """Expands brace expressions like lib/adapters/{antigravity,claude,pi}.sh"""
     match = re.search(r"\{([^}]+)\}", path_str)
@@ -191,15 +223,22 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     except Exception:
         pass
 
-    # Bare name search across the target repo — a FILE (`manifest.json`) or a DIRECTORY
-    # (`audits/`). A doc may name an artefact by name only when the full path is obvious
-    # in context, and the siblings resolve the same way (`PLAN.md`, `DESIGN.md` and
-    # `INTEGRATION.md` in AGENTS.md all match by name; `audits/` was reported missing
-    # purely because it has no dot in it — agents-04h). Direct doc-relative and
-    # repo-relative resolution is tried first, so this only widens the last resort and a
-    # name that exists nowhere in the repo is still reported.
-    if "/" not in clean_p and clean_p in _file_names(target_dir):
-        return True, False
+    # Bare name searches. A document may name a file or directory by name alone when the
+    # full path is obvious in context, and this repo's own docs rely on it: `PLAN.md`,
+    # `DESIGN.md` and `INTEGRATION.md` in AGENTS.md all match by name, as does `audits/`
+    # (only `docs/audits/` exists) - reporting that one was the agents-04h false positive.
+    #
+    # It is deliberately narrow for directories. A bare directory name resolves only when
+    # it is unambiguously ONE directory in the whole tree and is not a generic container
+    # word. An unconditional name search hid real drift: `scripts/` occurs 22 times
+    # (`agents/*/scripts/`), so `scripts/` in README.md - which does not exist at the repo
+    # root it describes - was silently swallowed (review of 946b23e).
+    if "/" not in clean_p:
+        if "." in clean_p and clean_p in _file_names(target_dir):
+            return True, False
+        if (clean_p.lower() not in GENERIC_DIR_NAMES
+                and _dir_name_counts(target_dir).get(clean_p) == 1):
+            return True, False
 
     return False, False
 
