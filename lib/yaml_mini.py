@@ -152,8 +152,10 @@ def _parse_block_scalar(
     value = "\n".join(content) if style == "|" else _fold(content)
     if chomp == "-":
         value = value.rstrip("\n")
-    elif chomp != "+" and content:
-        value = value + "\n"
+    elif chomp == "+":
+        value = value + "\n" if content else ""
+    else:
+        value = value.rstrip("\n") + "\n" if content else ""
     return value, i
 
 
