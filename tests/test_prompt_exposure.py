@@ -72,6 +72,8 @@ class PromptSandbox:
         for module in ("findings.py", "redaction.py", "embargo.py",
                        "tool_pins.py", "net_forward.py", "egress_proxy.py"):
             shutil.copyfile(ROOT / "lib" / module, self.root / "lib" / module)
+            # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
+            shutil.copytree(ROOT / "lib" / "sinks", self.root / "lib" / "sinks", dirs_exist_ok=True)
 
         report = self.root / "report-src.json"
         report.write_text(json.dumps({"summary": "stub", "scanned_files": 1, "findings": []}),

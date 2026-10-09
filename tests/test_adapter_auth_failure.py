@@ -240,6 +240,8 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
         (self.root / "lib" / "adapters").mkdir(parents=True)
         for mod in (ROOT / "lib").glob("*.py"):
             shutil.copyfile(mod, self.root / "lib" / mod.name)
+        # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
+        shutil.copytree(ROOT / "lib" / "sinks", self.root / "lib" / "sinks", dirs_exist_ok=True)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)

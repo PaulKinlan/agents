@@ -43,6 +43,10 @@ while IFS= read -r f; do
       # The dispatcher script; covered by the core runner + the truth harness.
       mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py"
       ;;
+    lib/sinks/*.py)
+      # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, and layering.
+      mapped="$mapped tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in

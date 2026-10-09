@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lib.findings import _bd_json
+from lib.sinks.beads import _bd_json
 
 
 def _real_bd():
