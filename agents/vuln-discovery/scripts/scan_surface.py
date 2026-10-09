@@ -99,6 +99,8 @@ SURFACE_PATTERNS: List[Tuple[str, str, str, re.Pattern]] = [
 SELF_REFERENTIAL_SUPPRESSIONS = [
     re.compile(r"""(?:re\.compile|SURFACE_PATTERNS)\b"""),
     re.compile(r"""\b(?:rule_id|category|severity|severity_hint|description|threat_context|remediation|rationale)\s*["']?\s*:"""),
+    # agents-5gg: refusal / denial guards (raising ContainmentError, StationError, etc.)
+    re.compile(r"""\braise\s+(?:ContainmentError|StationError|PermissionError)\b"""),
 ]
 
 
@@ -115,7 +117,7 @@ def is_scanner_file(fpath: Path, rel_path: str) -> bool:
             return True
     except Exception:
         pass
-    if fpath.name == "scan_surface.py":
+    if fpath.name == "scan_surface.py" or fpath.name.endswith("-THREAT_MODEL.md"):
         return True
     # Exclude scanner scripts in agents/*/scripts/
     parts = Path(rel_path).parts

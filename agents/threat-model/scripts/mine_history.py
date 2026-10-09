@@ -54,6 +54,8 @@ SELF_REFERENTIAL_SUPPRESSIONS = [
     re.compile(r"""(?:re\.compile|ENTRY_POINT_PATTERNS|SURFACE_PATTERNS)\b"""),
     re.compile(r"""\b(?:rule_id|category|severity|remediation|rationale)\s*["']?\s*:"""),
     re.compile(r"""\b(?:self\.assertEqual|self\.assertTrue|assert\s+.*(?:innerHTML|eval|fetch))"""),
+    # agents-5gg: refusal / denial guards (raising ContainmentError, StationError, etc.)
+    re.compile(r"""\braise\s+(?:ContainmentError|StationError|PermissionError)\b"""),
 ]
 
 # Chat-template markers, instruction injection tags, and role headers (including tool-call tokens)
@@ -181,7 +183,7 @@ def is_scanner_file(fpath: Path, rel_path: str) -> bool:
             return True
     except Exception:
         pass
-    if fpath.name == "mine_history.py":
+    if fpath.name == "mine_history.py" or fpath.name.endswith("-THREAT_MODEL.md"):
         return True
     # Exclude scanner scripts in agents/*/scripts/
     parts = Path(rel_path).parts

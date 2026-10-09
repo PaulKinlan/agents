@@ -42,6 +42,11 @@ Findings must strictly match `report.schema.json` (`rule_id`, `path`, `line_numb
 `title`, `description`, `remediation`). Do NOT add unmodeled fields such as `candidate_id` to findings objects;
 weave any relevant candidate context directly into the finding's `description`.
 
+### False Positive and Exclusion Discipline
+- **Refusal & Denial Guards**: Code that checks preconditions and refuses execution (e.g. `raise ContainmentError(...)`, `raise StationError(...)`, `if ... and not (...): raise ...`) is an enforcement guard preventing insecure execution, NOT a vulnerability or architectural gap. Do NOT report refusal or denial paths as findings; a finding requires positive evidence of an actual unguarded invocation.
+- **Accepted Residual Risks (Section 7)**: Documented architectural exclusions and accepted risks (e.g. claude permitted only on trusted-private targets per agents-ejm) belong strictly in Section 7 of `threat_model_markdown`. Do NOT report pre-approved accepted risks as active items in `findings`.
+- **Station Output Artifacts**: The factory's own artifact outputs (e.g. `findings/<target>-THREAT_MODEL.md`, `findings/*.json`, `runs/`) are expected local evidence stores and must NOT be flagged as unredacted persistence gaps or cross-target store exposures.
+
 ## Output Requirements
 You must return a valid JSON object matching `report.schema.json`:
 ```json
