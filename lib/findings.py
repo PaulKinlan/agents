@@ -83,6 +83,35 @@ def normalize_path(path: Any) -> str:
         return ""
     return path.replace("\\", "/").strip().lstrip("./")
 
+def path_resolves_in_target(path: Any, target_dir: Optional[Path]) -> bool:
+    """True when `path` names an existing entry inside `target_dir` (agents-0tl).
+
+    Used by `bind_candidates` and by the verifier's location guard (lib/report_schema.py) for
+    one question: is this location real? The anti-hallucination guard exists to stop a model
+    inventing a location, so a path that actually exists must never be destroyed by it.
+
+    Containment is enforced against the *resolved* target, so neither a traversal
+    (`../../etc/passwd`) nor an absolute path outside the tree can masquerade as a location.
+    A missing/empty path, or no target to check against, is not resolvable.
+    """
+    if not isinstance(path, str) or not path.strip():
+        return False
+    if target_dir is None:
+        return False
+    try:
+        root = Path(target_dir).resolve()
+    except OSError:
+        return False
+    if not root.is_dir():
+        return False
+    raw = path.strip()
+    try:
+        candidate = Path(raw).resolve() if os.path.isabs(raw) else (root / raw).resolve()
+        candidate.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return candidate.exists()
+
 def compute_fingerprint(agent: str, rule_id: str, path: str, snippet: str) -> str:
     """Compute stable fingerprint: sha256(agent:rule_id:normalized_path:normalized_snippet).
     
@@ -209,7 +238,8 @@ def identity_raw_match(item: Dict[str, Any], rule_id: Any, path: Any,
         return options[0]
     return item.get("raw_match")
 
-def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, Any]]) -> Tuple[Any, Any]:
+def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, Any]],
+                    target_dir: Optional[Path] = None) -> Tuple[Any, Any]:
     """Bind a finding's `rule_id` and `path` to the deterministic scanner's output.
 
     The triage model returns these strings, so without a contract any string it invents is
@@ -217,6 +247,13 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
     replaced with `unclassified`; a path that is not among the candidate paths with `unknown`.
     When no candidate set exists there is nothing to bind to, and the model's values pass
     through to the redaction backstop exactly as before (agents-nha).
+
+    Binding must never destroy a REAL location (agents-0tl). A model path that resolves inside
+    the target is evidence, not an invention, so it survives even when it is not a scanner
+    candidate - otherwise a context-shaped candidate set (vuln-discovery's single threat-model
+    entry, deps-supply-chain's package.json) blanks every genuine path to `unknown` and the
+    finding becomes untriageable. The guard still fires on an invented path: an empty path, or
+    a path that resolves nowhere, is bound to `unknown` exactly as before.
     """
     rule_id = item.get("rule_id") or "generic"
     path = item.get("path") or ""
@@ -227,7 +264,8 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
         if not (isinstance(rule_id, str) and rule_id.strip() in candidate_index["rule_ids"]):
             rule_id = "unclassified"
     if candidate_index["paths"] and normalize_path(path) not in candidate_index["paths"]:
-        path = "unknown"
+        if not path_resolves_in_target(path, target_dir):
+            path = "unknown"
     return rule_id, path
 
 def bind_severity(item: Dict[str, Any], rule_id: Any, path: Any,
@@ -470,7 +508,8 @@ class FindingsStore:
                 pass
             raise
 
-    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
+    def process_run(self, agent: str, raw_findings: List[Dict[str, Any]], candidate_index: Optional[Dict[str, Any]] = None,
+                    target_dir: Optional[Path] = None) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
         """Ingests raw findings from an agent run, applies fingerprinting and state transitions.
         
         Returns:
@@ -487,7 +526,7 @@ class FindingsStore:
         for item in raw_findings:
             if not isinstance(item, dict):
                 continue
-            rule_id, path = bind_candidates(item, candidate_index)
+            rule_id, path = bind_candidates(item, candidate_index, target_dir)
             item["severity"] = bind_severity(item, rule_id, path, candidate_index)
             item["raw_match"] = identity_raw_match(item, rule_id, path, candidate_index)
             item["agent"] = agent
@@ -1028,6 +1067,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
         processed, stats, fixed_items = store.process_run(
             agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
+            target_dir=Path(args.target_dir).resolve(),
         )
         try:
             results = dispatch_to_sink(

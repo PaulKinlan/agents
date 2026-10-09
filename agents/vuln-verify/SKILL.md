@@ -49,6 +49,17 @@ For every candidate finding, methodically hunt for the following five defenses:
 
 For each candidate:
 
+- **UNVERIFIABLE** (when you cannot locate the claim):
+  - Assigned when the record carries no resolvable location - `path` is missing, empty, or a
+    placeholder like `unknown`, or names a file that does not exist in the target. You cannot
+    disprove (or verify) a claim about code you cannot point at.
+  - Set `verdict: "unverifiable"` and say in `reasoning` exactly which location you need.
+  - This is mandatory, not optional: a report that returns `verified`/`disproved` for an
+    unlocatable record is REJECTED by the dispatcher (agents-0tl).
+  - A finding with no single line but a real whole-repo scope ("no SECURITY.md", "no
+    dependabot config") is not unlocatable: cite the path you did read (e.g. the repository
+    root file or directory that should exist) rather than inventing a location.
+
 - **DISPROVED**:
   - Assigned when *any* defense, sanitizer, auth gate, framework handler, or threat-model trust rule mitigates the issue or renders it unreachable.
   - Set `verdict: "disproved"`.
@@ -80,9 +91,9 @@ You must output a single valid JSON object strictly matching `report.schema.json
       "rule_id": "candidate-rule-id",
       "path": "path/to/file.js",
       "line_number": 123,
-      "verdict": "verified" | "disproved",
+      "verdict": "verified" | "disproved" | "unverifiable",
       "confidence": "high" | "medium" | "low",
-      "reasoning": "Adversarial analysis detailing why this finding is genuine or why it was disproved.",
+      "reasoning": "Adversarial analysis detailing why this finding is genuine or why it was disproved; for 'unverifiable', the location you need and why none could be identified.",
       "disproving_factors": ["upstream_sanitizer"],
       "exploit_chain_viable": true | false
     }

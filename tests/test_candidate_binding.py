@@ -150,3 +150,91 @@ class TestProcessRunBinding(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBindingNeverDestroysARealLocation(unittest.TestCase):
+    """agents-0tl: binding must keep the guard's purpose without destroying real locations.
+
+    Observed on the 2026-10-09 dogfood audit: vuln-discovery's candidates file holds exactly one
+    entry, the threat-model CONTEXT ({rule_id: threat-model-context, path: THREAT_MODEL.md}),
+    which was enough to arm binding - so all seven real model locations (lib/bench/runner.py,
+    agents/memory-profile/scripts/scan_memory_leaks.py, ...) were replaced with 'unknown' and
+    the findings became untriageable. One of them was real and is now fixed (agents-uxt).
+    """
+
+    # The context-shaped index that caused it, as load_candidate_index built it.
+    CONTEXT_INDEX = {"rule_ids": {"threat-model-context"}, "paths": {"THREAT_MODEL.md"}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self.tmp.name)
+        (self.target / "lib" / "bench").mkdir(parents=True)
+        (self.target / "lib" / "bench" / "runner.py").write_text("x = 1\n")
+        (self.target / "THREAT_MODEL.md").write_text("# threat model\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_an_existing_model_path_survives_binding(self):
+        """The 7-of-7 repro, as a regression: a real location must not be blanked."""
+        _, path = bind_candidates(finding(path="lib/bench/runner.py"), self.CONTEXT_INDEX,
+                                  target_dir=self.target)
+        self.assertEqual(path, "lib/bench/runner.py")
+
+    def test_context_shaped_candidates_do_not_blank_real_locations(self):
+        """Every real path in the observed set survives, not just the first."""
+        for real in ("lib/bench/runner.py", "THREAT_MODEL.md"):
+            _, path = bind_candidates(finding(path=real), self.CONTEXT_INDEX, target_dir=self.target)
+            self.assertEqual(path, real, f"{real} must survive a context-shaped candidate set")
+
+    def test_invented_path_is_still_bound_to_unknown(self):
+        """The guard still does its job: a location that does not exist is not trusted."""
+        _, path = bind_candidates(finding(path="lib/bench/invented.py"), self.CONTEXT_INDEX,
+                                  target_dir=self.target)
+        self.assertEqual(path, "unknown")
+
+    def test_empty_path_is_still_bound_to_unknown(self):
+        _, path = bind_candidates(finding(path=""), self.CONTEXT_INDEX, target_dir=self.target)
+        self.assertEqual(path, "unknown")
+
+    def test_path_outside_the_target_is_not_a_location(self):
+        """Containment: traversal and outside-the-tree absolute paths cannot pass as real."""
+        outside = Path(self.tmp.name).parent / "outside-target-secret.txt"
+        outside.write_text("secret\n")
+        try:
+            for escaping in ("../../etc/passwd", str(outside)):
+                _, path = bind_candidates(finding(path=escaping), self.CONTEXT_INDEX,
+                                          target_dir=self.target)
+                self.assertEqual(path, "unknown", f"{escaping!r} must not count as a location")
+        finally:
+            outside.unlink()
+
+    def test_directory_location_is_accepted(self):
+        _, path = bind_candidates(finding(path="lib/bench"), self.CONTEXT_INDEX, target_dir=self.target)
+        self.assertEqual(path, "lib/bench")
+
+    def test_no_target_keeps_the_previous_behaviour(self):
+        """Without a target to check against, the guard stays closed (unknown), not open."""
+        _, path = bind_candidates(finding(path="lib/bench/runner.py"), self.CONTEXT_INDEX)
+        self.assertEqual(path, "unknown")
+
+    def test_candidate_paths_are_still_preferred_and_rule_ids_still_bound(self):
+        index = {"rule_ids": {"scanner-rule"}, "paths": {"src/a.js"}}
+        self.assertEqual(bind_candidates(finding(path="./src/a.js", rule_id="scanner-rule"), index,
+                                         target_dir=self.target), ("scanner-rule", "./src/a.js"))
+        self.assertEqual(bind_candidates(finding(path="src/a.js", rule_id="invented"), index,
+                                         target_dir=self.target), ("unclassified", "src/a.js"))
+
+    def test_store_keeps_a_real_path_through_process_run(self):
+        """End to end at the ingest boundary the audit actually used."""
+        store = FindingsStore("t", findings_dir=self.target / "store")
+        try:
+            processed, _, _ = store.process_run(
+                agent="vuln-discovery",
+                raw_findings=[finding(path="lib/bench/runner.py", title="real")],
+                candidate_index=self.CONTEXT_INDEX,
+                target_dir=self.target,
+            )
+        finally:
+            store.close()
+        self.assertEqual(processed[0]["path"], "lib/bench/runner.py")
