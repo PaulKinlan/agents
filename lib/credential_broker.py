@@ -57,12 +57,20 @@ __all__ = [
     "PROVIDERS",
     "BROKER_ENV_CONFIGS",
     "BrokerError",
+    "BrokerPayloadTooLarge",
+    "MAX_BROKER_BODY_BYTES",
     "PLACEHOLDER_KEY",
 ]
+
+MAX_BROKER_BODY_BYTES = 32 * 1024 * 1024  # 32 MiB hard limit (agents-ce2)
 
 
 class BrokerError(RuntimeError):
     """The broker could not be started or configured."""
+
+
+class BrokerPayloadTooLarge(BrokerError):
+    """Request body exceeded MAX_BROKER_BODY_BYTES."""
 
 # provider -> (upstream base URL, auth style, env vars that may hold the real key).
 # The upstream base carries whatever the SDK does NOT append: Anthropic's SDK
@@ -196,19 +204,50 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
     def _read_request_body(self) -> Optional[bytes]:
-        length = self.headers.get("Content-Length")
-        if length:
+        length_str = self.headers.get("Content-Length")
+        if length_str is not None:
+            try:
+                length = int(length_str.strip())
+            except ValueError:
+                self.close_connection = True
+                raise BrokerError("invalid Content-Length header (must be an integer)")
+            if length < 0:
+                self.close_connection = True
+                raise BrokerError("negative Content-Length header is not allowed")
+            if length > MAX_BROKER_BODY_BYTES:
+                self.close_connection = True
+                raise BrokerPayloadTooLarge(
+                    f"request body ({length} bytes) exceeds maximum limit of {MAX_BROKER_BODY_BYTES} bytes"
+                )
+
             try:
                 # Add a timeout so a stalled engine connection cannot pin the daemon thread
                 old_timeout = self.connection.gettimeout()
                 self.connection.settimeout(15.0)
                 try:
-                    return self.rfile.read(int(length))
+                    chunks = []
+                    remaining = length
+                    total_read = 0
+                    chunk_size = 64 * 1024
+                    while remaining > 0:
+                        to_read = min(remaining, chunk_size)
+                        chunk = self.rfile.read(to_read)
+                        if not chunk:
+                            self.close_connection = True
+                            raise BrokerError("unexpected end of stream while reading request body")
+                        chunks.append(chunk)
+                        total_read += len(chunk)
+                        if total_read > MAX_BROKER_BODY_BYTES:
+                            self.close_connection = True
+                            raise BrokerPayloadTooLarge(
+                                f"request body stream exceeded limit of {MAX_BROKER_BODY_BYTES} bytes"
+                            )
+                        remaining -= len(chunk)
+                    return b"".join(chunks)
                 finally:
                     self.connection.settimeout(old_timeout)
-            except ValueError:
-                self.close_connection = True
-                return None
+            except (BrokerPayloadTooLarge, BrokerError):
+                raise
             except OSError as e:
                 self.close_connection = True
                 raise BrokerError(f"failed to read request body: {e}") from e
@@ -255,6 +294,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._respond_error(502, f"broker holds no credential for {provider!r}")
         try:
             body = self._read_request_body()
+        except BrokerPayloadTooLarge as e:
+            return self._respond_error(413, str(e))
         except BrokerError as e:
             return self._respond_error(400, str(e))
 

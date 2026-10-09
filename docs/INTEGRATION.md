@@ -74,6 +74,7 @@ paulkinlan/agents/.github/actions/factory@<ref>
 | `status` | Run status (`success`, `failure`, or `andon-halt`). |
 | `new_findings` | Integer count of net-new findings discovered in this run. |
 | `delta_report` | Path to generated markdown delta report. |
+| `artifact_name` | Name of the uploaded delta report artifact. |
 
 ### 1.2 Required Permissions & Secrets
 
