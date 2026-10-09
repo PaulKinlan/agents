@@ -143,6 +143,83 @@ class TestPrepassFixes(unittest.TestCase):
         self.assertIn("transition: none", block)
         self.assertIn("transform: none", block)
 
+    def test_scan_ui_ux_considers_co_loaded_page_stylesheets_for_focus_visible(self):
+        """[agents-p9u] scan_ui_ux does not emit false missing-focus-visible-state when a
+        co-loaded stylesheet on the same HTML page defines :focus-visible (e.g. projects.css + product.css)."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            css_dir = tmp_path / "css"
+            css_dir.mkdir()
+
+            # Global stylesheet defines base :focus-visible ring
+            (css_dir / "global.css").write_text("""
+            a:focus-visible {
+                outline: 2px solid var(--accent);
+                outline-offset: 2px;
+            }
+            """, encoding="utf-8")
+
+            # Component stylesheet defines :hover without its own :focus-visible
+            (css_dir / "component.css").write_text("""
+            .breadcrumb a:hover {
+                text-decoration: underline;
+            }
+            .nav-link:hover {
+                color: #fff;
+            }
+            """, encoding="utf-8")
+
+            # HTML page links both stylesheets
+            (tmp_path / "page.html").write_text("""
+            <!doctype html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <link rel="stylesheet" href="/css/global.css">
+                <link rel="stylesheet" href="/css/component.css">
+            </head>
+            <body>
+                <nav class="breadcrumb"><a href="#">Home</a></nav>
+            </body>
+            </html>
+            """, encoding="utf-8")
+
+            # 1. Scanning page directory (target contains HTML + CSS)
+            res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                 capture_output=True, text=True, check=True)
+            data = json.loads(res.stdout)
+            focus_candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
+            self.assertEqual(len(focus_candidates), 0,
+                             f"Expected 0 false missing-focus-visible-state candidates for co-loaded bundle, got: {focus_candidates}")
+
+            # 2. Scanning CSS directory directly (target contains sibling stylesheets)
+            res_css = subprocess.run([sys.executable, str(script), "--target", str(css_dir)],
+                                     capture_output=True, text=True, check=True)
+            data_css = json.loads(res_css.stdout)
+            focus_candidates_css = [c for c in data_css["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
+            self.assertEqual(len(focus_candidates_css), 0,
+                             f"Expected 0 false missing-focus-visible-state candidates for sibling bundle, got: {focus_candidates_css}")
+
+    def test_scan_ui_ux_flags_genuinely_missing_focus_visible_state(self):
+        """[agents-p9u] scan_ui_ux emits missing-focus-visible-state when no stylesheet defines :focus-visible."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "bad.css").write_text("""
+            .button:hover {
+                background: red;
+            }
+            """, encoding="utf-8")
+
+            res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                 capture_output=True, text=True, check=True)
+            data = json.loads(res.stdout)
+            focus_candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
+            self.assertEqual(len(focus_candidates), 1)
+            self.assertEqual(focus_candidates[0]["severity"], "high")
+            self.assertEqual(focus_candidates[0]["path"], "bad.css")
+
 
 if __name__ == "__main__":
     unittest.main()

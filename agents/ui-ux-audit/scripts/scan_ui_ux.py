@@ -16,7 +16,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 IGNORE_DIRS = {
     ".git", "node_modules", "vendor", "dist", "build", ".next", ".nuxt",
@@ -32,120 +32,207 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
     css_custom_props_count = 0
     hardcoded_color_count = 0
 
+    discovered_files: List[Path] = []
+    file_contents: Dict[Path, str] = {}
+
+    # Discover UI files in target_dir
     for root, dirs, files in os.walk(target_dir):
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
         for fname in sorted(files):
             fpath = Path(root) / fname
-            ext = fpath.suffix.lower()
-            if ext not in UI_EXTS:
-                continue
+            if fpath.suffix.lower() in UI_EXTS:
+                try:
+                    file_contents[fpath] = fpath.read_text(encoding="utf-8", errors="ignore")
+                    discovered_files.append(fpath)
+                except Exception:
+                    continue
 
+    # Discover HTML files for mapping stylesheet links
+    # (search inside target_dir, or check target_dir.parent if target_dir is a subfolder like css/)
+    html_files = [p for p in discovered_files if p.suffix.lower() in {".html", ".htm"}]
+    if not html_files and target_dir.parent != target_dir:
+        for f in target_dir.parent.glob("*.html"):
             try:
-                content = fpath.read_text(encoding="utf-8", errors="ignore")
+                file_contents[f] = f.read_text(encoding="utf-8", errors="ignore")
+                html_files.append(f)
             except Exception:
-                continue
+                pass
+        for f in target_dir.parent.glob("*.htm"):
+            try:
+                file_contents[f] = f.read_text(encoding="utf-8", errors="ignore")
+                html_files.append(f)
+            except Exception:
+                pass
 
-            scanned_files += 1
-            rel_path = str(fpath.relative_to(target_dir))
-            lines = content.splitlines()
+    css_files = [p for p in discovered_files if p.suffix.lower() in {".css", ".scss"}]
+    all_css_files = set(css_files)
+    for p in file_contents:
+        if p.suffix.lower() in {".css", ".scss"}:
+            all_css_files.add(p)
 
-            # 1. CSS & Styling checks (either .css/.scss or <style> blocks in .html/.vue/.svelte)
-            if ext in {".css", ".scss", ".html", ".htm", ".vue", ".svelte"}:
-                css_vars = len(re.findall(r"--[a-zA-Z0-9_-]+\s*:", content))
-                css_custom_props_count += css_vars
-                hex_matches = list(re.finditer(r"#[0-9a-fA-F]{3,8}\b", content))
-                hardcoded_color_count += len(hex_matches)
+    # Map each stylesheet to the set of stylesheets co-loaded with it across HTML pages
+    co_loaded_map: Dict[Path, Set[Path]] = {p: set() for p in all_css_files}
+    for html_path in html_files:
+        html_content = file_contents.get(html_path, "")
+        loaded_on_page: Set[Path] = set()
 
-                # Rule 1: Hardcoded hex colors bypassing design tokens
-                if len(hex_matches) >= 3 and "var(--" not in content:
-                    m = hex_matches[0]
-                    line_no = content.count("\n", 0, m.start()) + 1
-                    candidates.append({
-                        "rule_id": "design-token-drift-colors",
-                        "dimension": "Visual Consistency & Design Tokens",
-                        "path": rel_path,
-                        "line_number": line_no,
-                        "snippet": lines[line_no - 1].strip()[:180],
-                        "severity": "medium",
-                        "title": f"Hardcoded Color Palette ({len(hex_matches)} hex literals) Without CSS Custom Properties",
-                        "rationale": "Hardcoded hex colors scatter palette decisions across stylesheets, making theming, dark mode, and contrast tuning fragile."
-                    })
+        for link_tag in re.findall(r'<link\b[^>]*>', html_content, re.IGNORECASE):
+            if re.search(r'\brel=["\']?stylesheet["\']?', link_tag, re.IGNORECASE):
+                m = re.search(r'\bhref=["\']([^"\'>]+)["\']', link_tag, re.IGNORECASE)
+                if m:
+                    raw_href = m.group(1).split("?")[0].split("#")[0].strip()
+                    matched = None
+                    cand1 = (html_path.parent / raw_href.lstrip("/")).resolve()
+                    if cand1 in all_css_files:
+                        matched = cand1
+                    else:
+                        cand2 = (target_dir / raw_href.lstrip("/")).resolve()
+                        if cand2 in all_css_files:
+                            matched = cand2
+                        else:
+                            for p in all_css_files:
+                                if raw_href.endswith(p.name):
+                                    matched = p
+                                    break
+                    if matched:
+                        loaded_on_page.add(matched)
 
-                # Rule 2: :hover defined without :focus-visible
-                if ":hover" in content and ":focus-visible" not in content:
-                    m = re.search(r":hover\b", content)
+        # Check for inline <style> with :focus-visible
+        has_inline_focus = bool(re.search(r'<style\b[^>]*>[\s\S]*?:focus-visible[\s\S]*?</style>', html_content, re.IGNORECASE))
+        for p in loaded_on_page:
+            co_loaded_map[p].update(loaded_on_page)
+            if has_inline_focus:
+                co_loaded_map[p].add(html_path)
+
+    def has_focus_visible_coverage(fpath: Path, content: str) -> bool:
+        # 1. The file itself contains a :focus-visible rule
+        if ":focus-visible" in content:
+            return True
+
+        # 2. Any stylesheet co-loaded on the same HTML page defines :focus-visible
+        co_loaded = co_loaded_map.get(fpath, set())
+        for co_p in co_loaded:
+            if ":focus-visible" in file_contents.get(co_p, ""):
+                return True
+
+        # 3. If scanning a CSS directory without HTML page links, check if any sibling stylesheet defines baseline :focus-visible
+        for sibling in fpath.parent.glob("*.css"):
+            if sibling != fpath:
+                sib_content = file_contents.get(sibling)
+                if sib_content is None and sibling.exists():
+                    try:
+                        sib_content = sibling.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        sib_content = ""
+                if sib_content and re.search(r'(?:\*|a|button|input|:root|\b[a-zA-Z0-9_-]+)\s*:focus-visible\b', sib_content):
+                    return True
+
+        return False
+
+    for fpath in discovered_files:
+        ext = fpath.suffix.lower()
+        content = file_contents[fpath]
+        scanned_files += 1
+        rel_path = str(fpath.relative_to(target_dir))
+        lines = content.splitlines()
+
+        # 1. CSS & Styling checks (either .css/.scss or <style> blocks in .html/.vue/.svelte)
+        if ext in {".css", ".scss", ".html", ".htm", ".vue", ".svelte"}:
+            css_vars = len(re.findall(r"--[a-zA-Z0-9_-]+\s*:", content))
+            css_custom_props_count += css_vars
+            hex_matches = list(re.finditer(r"#[0-9a-fA-F]{3,8}\b", content))
+            hardcoded_color_count += len(hex_matches)
+
+            # Rule 1: Hardcoded hex colors bypassing design tokens
+            if len(hex_matches) >= 3 and "var(--" not in content:
+                m = hex_matches[0]
+                line_no = content.count("\n", 0, m.start()) + 1
+                candidates.append({
+                    "rule_id": "design-token-drift-colors",
+                    "dimension": "Visual Consistency & Design Tokens",
+                    "path": rel_path,
+                    "line_number": line_no,
+                    "snippet": lines[line_no - 1].strip()[:180],
+                    "severity": "medium",
+                    "title": f"Hardcoded Color Palette ({len(hex_matches)} hex literals) Without CSS Custom Properties",
+                    "rationale": "Hardcoded hex colors scatter palette decisions across stylesheets, making theming, dark mode, and contrast tuning fragile."
+                })
+
+            # Rule 2: :hover defined without :focus-visible
+            if ":hover" in content and not has_focus_visible_coverage(fpath, content):
+                m = re.search(r":hover\b", content)
+                line_no = content.count("\n", 0, m.start()) + 1 if m else 1
+                candidates.append({
+                    "rule_id": "missing-focus-visible-state",
+                    "dimension": "Interaction States & Affordances",
+                    "path": rel_path,
+                    "line_number": line_no,
+                    "snippet": lines[line_no - 1].strip()[:180] if lines else ":hover",
+                    "severity": "high",
+                    "title": "Hover State Defined Without Matching :focus-visible Keyboard Ring",
+                    "rationale": "Interactive elements that visually respond to :hover must also provide a clear :focus-visible indicator for keyboard and assistive-tech users."
+                })
+
+            # Rule 3: Missing dark mode / color-scheme support when light background is hardcoded
+            if re.search(r"background(?:-color)?\s*:\s*(?:#fff(?:fff)?|white|#f[0-9a-f]{5})\b", content, re.IGNORECASE):
+                if "prefers-color-scheme" not in content and "color-scheme" not in content and "light-dark(" not in content:
+                    m = re.search(r"background(?:-color)?\s*:", content, re.IGNORECASE)
                     line_no = content.count("\n", 0, m.start()) + 1 if m else 1
                     candidates.append({
-                        "rule_id": "missing-focus-visible-state",
-                        "dimension": "Interaction States & Affordances",
-                        "path": rel_path,
-                        "line_number": line_no,
-                        "snippet": lines[line_no - 1].strip()[:180] if lines else ":hover",
-                        "severity": "high",
-                        "title": "Hover State Defined Without Matching :focus-visible Keyboard Ring",
-                        "rationale": "Interactive elements that visually respond to :hover must also provide a clear :focus-visible indicator for keyboard and assistive-tech users."
-                    })
-
-                # Rule 3: Missing dark mode / color-scheme support when light background is hardcoded
-                if re.search(r"background(?:-color)?\s*:\s*(?:#fff(?:fff)?|white|#f[0-9a-f]{5})\b", content, re.IGNORECASE):
-                    if "prefers-color-scheme" not in content and "color-scheme" not in content and "light-dark(" not in content:
-                        m = re.search(r"background(?:-color)?\s*:", content, re.IGNORECASE)
-                        line_no = content.count("\n", 0, m.start()) + 1 if m else 1
-                        candidates.append({
-                            "rule_id": "missing-dark-mode-adaptation",
-                            "dimension": "Theme & Visual Comfort",
-                            "path": rel_path,
-                            "line_number": line_no,
-                            "snippet": lines[line_no - 1].strip()[:180],
-                            "severity": "low",
-                            "title": "Hardcoded Light Surface Background Without Dark Mode Adaptation",
-                            "rationale": "Hardcoding white/light surfaces without `color-scheme: light dark`, `light-dark()`, or `@media (prefers-color-scheme: dark)` causes blinding glare for dark-mode users."
-                        })
-
-                # Rule 4: Small font sizes (< 12px) or magic z-index
-                small_font = re.search(r"font-size\s*:\s*([0-9]|1[01])px\b", content, re.IGNORECASE)
-                if small_font:
-                    line_no = content.count("\n", 0, small_font.start()) + 1
-                    candidates.append({
-                        "rule_id": "illegible-micro-typography",
-                        "dimension": "Typography & Hierarchy",
+                        "rule_id": "missing-dark-mode-adaptation",
+                        "dimension": "Theme & Visual Comfort",
                         "path": rel_path,
                         "line_number": line_no,
                         "snippet": lines[line_no - 1].strip()[:180],
-                        "severity": "medium",
-                        "title": f"Illegible Font Size ({small_font.group(0)}) Below 12px Readability Floor",
-                        "rationale": "Body or UI copy below 12px (0.75rem) impairs legibility on high-DPI and mobile displays; use relative rem units with a 0.75rem–0.875rem minimum."
+                        "severity": "low",
+                        "title": "Hardcoded Light Surface Background Without Dark Mode Adaptation",
+                        "rationale": "Hardcoding white/light surfaces without `color-scheme: light dark`, `light-dark()`, or `@media (prefers-color-scheme: dark)` causes blinding glare for dark-mode users."
                     })
 
-            # 2. Async UI States check (JS/TS/HTML components calling fetch() without loading/error feedback)
-            if ext in {".js", ".ts", ".jsx", ".tsx", ".vue", ".svelte"}:
-                if "fetch(" in content and not re.search(r"\b(loading|isLoading|spinner|skeleton|aria-busy|error|catch)\b", content, re.IGNORECASE):
-                    m = re.search(r"\bfetch\(", content)
-                    line_no = content.count("\n", 0, m.start()) + 1 if m else 1
-                    candidates.append({
-                        "rule_id": "missing-async-loading-error-state",
-                        "dimension": "Perceived Performance & Feedback",
-                        "path": rel_path,
-                        "line_number": line_no,
-                        "snippet": lines[line_no - 1].strip()[:180],
-                        "severity": "high",
-                        "title": "Network Fetch Without Visible Loading / Error UI State Handling",
-                        "rationale": "Asynchronous network operations need explicit loading (`aria-busy`, skeleton/spinner) and human-readable error recovery states so users are not left staring at frozen or blank UI."
-                    })
+            # Rule 4: Small font sizes (< 12px) or magic z-index
+            small_font = re.search(r"font-size\s*:\s*([0-9]|1[01])px\b", content, re.IGNORECASE)
+            if small_font:
+                line_no = content.count("\n", 0, small_font.start()) + 1
+                candidates.append({
+                    "rule_id": "illegible-micro-typography",
+                    "dimension": "Typography & Hierarchy",
+                    "path": rel_path,
+                    "line_number": line_no,
+                    "snippet": lines[line_no - 1].strip()[:180],
+                    "severity": "medium",
+                    "title": f"Illegible Font Size ({small_font.group(0)}) Below 12px Readability Floor",
+                    "rationale": "Body or UI copy below 12px (0.75rem) impairs legibility on high-DPI and mobile displays; use relative rem units with a 0.75rem–0.875rem minimum."
+                })
 
-            # 3. HTML Viewport & Form Ergonomics
-            if ext in {".html", ".htm"}:
-                if "<head" in content.lower() and 'name="viewport"' not in content.lower():
-                    candidates.append({
-                        "rule_id": "missing-responsive-viewport-meta",
-                        "dimension": "Responsive Layout",
-                        "path": rel_path,
-                        "line_number": 1,
-                        "snippet": "<head>",
-                        "severity": "medium",
-                        "title": "Missing Responsive <meta name=\"viewport\"> Declaration",
-                        "rationale": "Without `<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">`, mobile browsers render at a zoomed-out 980px desktop canvas."
-                    })
+        # 2. Async UI States check (JS/TS/HTML components calling fetch() without loading/error feedback)
+        if ext in {".js", ".ts", ".jsx", ".tsx", ".vue", ".svelte"}:
+            if "fetch(" in content and not re.search(r"\b(loading|isLoading|spinner|skeleton|aria-busy|error|catch)\b", content, re.IGNORECASE):
+                m = re.search(r"\bfetch\(", content)
+                line_no = content.count("\n", 0, m.start()) + 1 if m else 1
+                candidates.append({
+                    "rule_id": "missing-async-loading-error-state",
+                    "dimension": "Perceived Performance & Feedback",
+                    "path": rel_path,
+                    "line_number": line_no,
+                    "snippet": lines[line_no - 1].strip()[:180],
+                    "severity": "high",
+                    "title": "Network Fetch Without Visible Loading / Error UI State Handling",
+                    "rationale": "Asynchronous network operations need explicit loading (`aria-busy`, skeleton/spinner) and human-readable error recovery states so users are not left staring at frozen or blank UI."
+                })
+
+        # 3. HTML Viewport & Form Ergonomics
+        if ext in {".html", ".htm"}:
+            if "<head" in content.lower() and 'name="viewport"' not in content.lower():
+                candidates.append({
+                    "rule_id": "missing-responsive-viewport-meta",
+                    "dimension": "Responsive Layout",
+                    "path": rel_path,
+                    "line_number": 1,
+                    "snippet": "<head>",
+                    "severity": "medium",
+                    "title": "Missing Responsive <meta name=\"viewport\"> Declaration",
+                    "rationale": "Without `<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">`, mobile browsers render at a zoomed-out 980px desktop canvas."
+                })
 
     return {
         "target": target_dir.name,
