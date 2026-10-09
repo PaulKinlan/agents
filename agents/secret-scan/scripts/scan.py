@@ -56,10 +56,14 @@ def _scoped(pattern: "re.Pattern[str]") -> str:
 # station's 5-minute budget, the process group was killed and no scanner ran (fleet-wa8).
 ANY_PATTERN = re.compile("|".join(_scoped(pattern) for _, pattern in PATTERNS))
 
-IGNORE_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
-    "__pycache__", ".beads", ".agent-state", "runs", "fixtures", "findings"
-}
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS
+    IGNORE_DIRS = DEFAULT_IGNORE_DIRS | {"fixtures"}
+except ImportError:
+    IGNORE_DIRS = {
+        ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
+        "__pycache__", ".beads", ".agent-state", "runs", "fixtures", "findings"
+    }
 
 IGNORE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2",

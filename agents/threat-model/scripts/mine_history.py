@@ -44,11 +44,19 @@ ENTRY_POINT_PATTERNS = [
     ("external-fetch", re.compile(r"""\b(?:fetch|axios(?:\.get|\.post)?|request\.continue)\s*\(""")),
 ]
 
-IGNORED_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
-    "coverage", ".beads", "runs", "fixtures", "findings", "reports",
-    "tests", "test", "__tests__", "__pycache__", ".github", ".vscode", ".idea"
-}
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS
+    IGNORED_DIRS = DEFAULT_IGNORE_DIRS | {"fixtures", "reports", "tests", "test", "__tests__", ".github", ".vscode", ".idea"}
+except ImportError:
+    IGNORED_DIRS = {
+        ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
+        "coverage", ".beads", "runs", "fixtures", "findings", "reports",
+        "tests", "test", "__tests__", "__pycache__", ".github", ".vscode", ".idea"
+    }
 
 SELF_REFERENTIAL_SUPPRESSIONS = [
     re.compile(r"""(?:re\.compile|ENTRY_POINT_PATTERNS|SURFACE_PATTERNS)\b"""),

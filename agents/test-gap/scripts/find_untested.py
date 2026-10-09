@@ -13,6 +13,18 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
+except ImportError:
+    IGNORE_DIRS = {
+        ".git", "node_modules", "vendor", "dist", "build", ".next", ".nuxt",
+        "coverage", ".venv", "venv", "__pycache__", ".beads", "runs", "findings"
+    }
+
 SRC_EXTS = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py"}
 TEST_PATTERNS = ["*.test.*", "*.spec.*", "*_test.*", "test_*.*"]
 
@@ -29,7 +41,7 @@ def find_files(target_dir: Path):
     test_files = []
 
     for root, dirs, files in os.walk(target_dir):
-        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", ".beads", "venv", ".next", "dist", "build")]
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
         for f in files:
             p = Path(root) / f
             if any(p.match(pat) for pat in TEST_PATTERNS) or "test" in p.parts or "__tests__" in p.parts:

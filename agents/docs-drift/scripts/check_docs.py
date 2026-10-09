@@ -22,10 +22,18 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-IGNORE_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
-    "__pycache__", ".beads", ".agent-state", "runs", "findings", "scratch"
-}
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS
+    IGNORE_DIRS = DEFAULT_IGNORE_DIRS | {"scratch"}
+except ImportError:
+    IGNORE_DIRS = {
+        ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
+        "__pycache__", ".beads", ".agent-state", "runs", "findings", "scratch"
+    }
 
 IGNORE_SYMBOLS = {
     "JSON", "YAML", "SHA256", "UUID", "HTTP", "HTTPS", "OAuth", "REST",
