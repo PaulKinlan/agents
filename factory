@@ -1070,8 +1070,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # its netns is isolated and its only egress is the allowlist proxy, reached through
         # the net_forward relay. The proxy itself starts later, just before execution; the
         # socket path is deterministic (run_dir, already rw-bound) so the wrap is built here,
-        # before the banner, exactly like the sandbox wrap. The proxy env vars reach the
-        # pre-pass through child_environment's BASE_ALLOW (HTTP(S)_PROXY are allowlisted).
+        # before the banner, exactly like the sandbox wrap. The proxy env vars are set by the
+        # dispatcher below (agents-5d9 removed them from child_environment's BASE_ALLOW; a
+        # sandboxed pre-pass never inherits the operator's proxy).
         prepass_egress = sandbox_ok
         if sandbox_ok:
             prepass_env["HTTP_PROXY"] = prepass_env["HTTPS_PROXY"] = \
