@@ -22,6 +22,7 @@ from collections.abc import Mapping as MappingABC
 from typing import Dict, Mapping, Optional
 
 from lib.credential_broker import BROKER_ENV_CONFIGS, PLACEHOLDER_KEY
+from lib.tool_pins import HOST_PINS_ENV
 
 # Paths, locale, temp and transport. Transport settings (proxies, CA bundles) are routing
 # configuration rather than identity; dropping them silently breaks every engine on a
@@ -124,12 +125,20 @@ def child_environment(
     github: bool = False,
     parent: Optional[Mapping[str, str]] = None,
     broker_urls: Optional[Mapping[str, str]] = None,
+    trusted_tools: bool = False,
 ) -> Dict[str, str]:
     """Build the environment for one child process by addition.
 
     `engine` selects the model-auth class; `sink`/`github` add a GitHub token for the children
     that legitimately talk to GitHub. `parent` defaults to os.environ and is only read, never
     mutated.
+
+    `trusted_tools` is for the children that resolve a trusted tool THEMSELVES — the findings
+    dispatch and promotion run `lib/sinks/*`, which call `lib.tool_pins.resolve_tool` for
+    `gh`/`bd`. On a pinned host the pins live behind `FACTORY_TOOL_PINS`, and without that
+    variable such a child cannot verify the tool it is about to execute and fails closed, with
+    strictly less information than the parent that already verified the same file (agents-dpt).
+    Children that never resolve a trusted tool (engine sessions, pre-passes) get nothing extra.
 
     `broker_urls` (agents-8h4) maps a provider name to the base URL of a dispatcher-run
     credential broker. For each such provider the real key vars are dropped and the engine gets
@@ -139,6 +148,9 @@ def child_environment(
     """
     source = os.environ if parent is None else parent
     env = {name: source[name] for name in BASE_ALLOW if name in source}
+
+    if trusted_tools and source.get(HOST_PINS_ENV):
+        env[HOST_PINS_ENV] = str(source[HOST_PINS_ENV])
 
     names = list(ENGINE_CREDENTIALS.get(engine or "", ()))
     # agents-eyo: `github-issues` as a sink string survives only as the explicit promotion

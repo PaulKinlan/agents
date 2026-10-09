@@ -1549,7 +1549,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
         if candidates_snapshot is not None:
             findings_cmd += ["--candidates", str(candidates_file)]
-        dispatch_env = child_environment(sink=sink)
+        # The findings child resolves `bd` (and `gh`) itself through lib.sinks, so it needs the
+        # same trusted-tool pin source the parent just verified against (agents-dpt).
+        dispatch_env = child_environment(sink=sink, trusted_tools=True)
         # agents-7bj: when the sink is the synced beads tracker the findings child resolves
         # `bd` by name; give it a PATH rebuilt from only that tool's install tree (plus the
         # system bin dirs a wrapped/shimmed bd's shebang needs), so it can never pick up a
@@ -2185,7 +2187,7 @@ def promote_public_issue(target_name: str, issue_url: str) -> None:
     # agents-7bj (P1-4): the promotion child resolves both gh and bd by name; apply the same
     # pinned, allowlisted PATH as the findings dispatch so it cannot pick up a trojaned binary
     # from PATH order. On a pin failure we leave the PATH intact and let the child fail closed.
-    env = child_environment(sink="github-issues")
+    env = child_environment(sink="github-issues", trusted_tools=True)
     try:
         env["PATH"] = allowlisted_path(("gh", "bd"), env.get("PATH", ""))
     except ToolPinError as e:
