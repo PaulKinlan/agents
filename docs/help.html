@@ -16,12 +16,17 @@
   <header class="site-header">
     <a class="identity" href="index.html">◈ The Software Factory</a>
     <nav aria-label="Site">
-      <a href="index.html">Overview</a>
-      <a href="install.html">Install</a>
-      <a href="use.html">Use</a>
-      <a href="stations.html">Stations</a>
-      <a href="lines.html">Lines</a>
-      <a href="help.html" aria-current="page">Help</a>
+      <details class="site-menu">
+        <summary>Menu <span aria-hidden="true">·</span> <span class="site-menu-here">Help</span></summary>
+        <ul>
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="install.html">Install</a></li>
+          <li><a href="use.html">Use</a></li>
+          <li><a href="stations.html">Stations</a></li>
+          <li><a href="lines.html">Lines</a></li>
+          <li><a href="help.html" aria-current="page">Help</a></li>
+        </ul>
+      </details>
     </nav>
   </header>
   <main id="content">
@@ -73,7 +78,11 @@
           <p>Triaged severity drives routing: the configured Beads sink files medium and above, skips low and informational findings, and withholds high and critical when visibility is missing or invalid. Public issues are inputs to triage, not a findings sink. A fingerprint built from station, rule, normalized path and snippet excludes line number; repeat runs dedupe work, while fixed findings can later regress.</p>
           <div class="callout">
             <strong>Operational state vocabulary</strong>
-            <p><span class="state">Result</span> A verified finding is eligible for policy-based routing. <span class="state state--empty">No findings</span> A completed run may be empty. <span class="state state--error">Incomplete</span> Missing or invalid verdicts are never reported as clean.</p>
+            <ul class="state-list">
+              <li><span class="state">Result</span> A verified finding is eligible for policy-based routing.</li>
+              <li><span class="state state--empty">No findings</span> A completed run may be empty.</li>
+              <li><span class="state state--error">Incomplete</span> Missing or invalid verdicts are never reported as clean.</li>
+            </ul>
           </div>
         </section>
       </div>
