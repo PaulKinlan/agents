@@ -7,8 +7,11 @@ engine's own model-auth variables, and a GitHub token only for the findings disp
 talks to GitHub.
 """
 
+import hashlib
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -130,6 +133,41 @@ class TestChildEnvironment(unittest.TestCase):
 
     def test_absent_variables_are_not_invented(self):
         self.assertEqual(child_environment(parent={"PATH": "/bin"}), {"PATH": "/bin"})
+
+    def test_findings_child_resolves_a_pinned_tool_with_the_host_pins_file(self):
+        """agents-dpt: the findings/promotion child must see the pins its parent verified.
+
+        `lib/sinks/*` resolve `gh`/`bd` themselves. A pinned host keeps the pins behind
+        FACTORY_TOOL_PINS, so a child without that variable cannot verify the tool it is about
+        to run and fails closed — with less information than the parent that just verified the
+        same file. `trusted_tools=True` is only for those children.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fake_bd = tmp / "bd"
+            fake_bd.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_bd.chmod(0o755)
+            pins = tmp / "tools.pins.yaml"
+            pins.write_text(f"bd:\n  path: {fake_bd}\n  sha256: "
+                            f"{hashlib.sha256(fake_bd.read_bytes()).hexdigest()}\n",
+                            encoding="utf-8")
+            parent = {"PATH": tmpdir, "HOME": str(tmp), "FACTORY_TOOL_PINS": str(pins)}
+            probe = ("import sys; sys.path.insert(0, %r); "
+                     "from lib.tool_pins import resolve_tool, ToolPinError\n"
+                     "try: print('RESOLVED', resolve_tool('bd'))\n"
+                     "except ToolPinError as e: print('FAILED', e)\n") % str(ROOT)
+
+            def resolve(pins_in_child):
+                env = child_environment(parent=parent, trusted_tools=pins_in_child)
+                out = subprocess.run([sys.executable, "-c", probe], env=env, text=True,
+                                     capture_output=True, cwd=str(ROOT), timeout=60)
+                return out.stdout.strip()
+
+            self.assertEqual(resolve(True), f"RESOLVED {fake_bd}")
+            self.assertTrue(resolve(False).startswith("FAILED"),
+                            "without the flag the child must fail closed, not guess")
+            self.assertNotIn("FACTORY_TOOL_PINS", child_environment(parent=parent))
+            self.assertNotIn("FACTORY_TOOL_PINS", child_environment(engine="pi", parent=parent))
 
     def test_parent_mapping_is_read_only(self):
         source = parent_env()
