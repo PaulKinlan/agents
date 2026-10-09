@@ -27,7 +27,12 @@ class YamlParseError(ValueError):
     """Raised when a manifest uses a YAML construct this parser does not support."""
 
 
-_BLOCK_SCALAR_RE = re.compile(r"^[|>][0-9]*[+-]?$")
+# A block scalar header: `|`/`>` optionally followed by a single-digit indentation indicator
+# (1-9) and/or a chomping indicator, in EITHER order - YAML allows both `|2-` and `|-2`, and
+# the second form used to fail this regex, so a valid document raised instead of parsing
+# (agents-m8h). `|0` matches here on purpose: the parser rejects it by name, which is a better
+# error than treating the whole header as a plain scalar string.
+_BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[0-9][+-]?|[+-][0-9]?)?$")
 _FLOW_ITEM_SPLIT_RE = re.compile(r",(?![^\[\]{}]*[\]}])")
 
 
@@ -110,20 +115,56 @@ def _fold(lines: List[str]) -> str:
 
     Line breaks adjacent to more-indented lines (lines starting with leading spaces) are
     preserved as newlines rather than folded into spaces.
+
+    Derivation against PyYAML 6.0.1 (agents-m8h), because the rule for a blank line before a
+    MORE-INDENTED line is not the same as for one before an ordinary line:
+
+        a | b        -> 'a b'        line break folds to a space
+        a || b       -> 'a\nb'       one empty line contributes one newline
+        a ||| b      -> 'a\n\nb'     each empty line contributes one newline
+        a | ind      -> 'a\n  ind'   a more-indented line is never folded onto
+        a || ind     -> 'a\n\n  ind' one empty line AND the indent break
+        a ||| ind    -> 'a\n\n\n  ind'
+        a | ind | b  -> 'a\n  ind\nb' the break after a more-indented line stays a newline
+
+    The last three are why this is not simply "count the empty lines": an empty line before a
+    more-indented line yields one newline for the empty line plus one for the break it cannot
+    absorb, which is the case the previous implementation folded away.
     """
     if not lines:
         return ""
     chunks: List[str] = []
-    for i, line in enumerate(lines):
+    pending_blanks = 0
+    prev_indented = False
+    for line in lines:
         if line == "":
-            chunks.append("\n")
-        else:
-            if i > 0 and lines[i - 1] != "":
-                if line.startswith(" ") or lines[i - 1].startswith(" "):
-                    chunks.append("\n")
-                else:
-                    chunks.append(" ")
-            chunks.append(line)
+            pending_blanks += 1
+            continue
+        indented = line.startswith(" ")
+        if pending_blanks:
+            # This also covers leading empty lines: PyYAML treats an empty line before the
+            # first content line as content (`k: >` then a blank then `  a` gives '\na\n'),
+            # so the separator is computed the same way whether or not anything precedes it.
+            # Each surrounding MORE-INDENTED neighbour adds a break that cannot be absorbed:
+            # `a | ind | (blank) | b` keeps two newlines, since the break after the indented
+            # line is preserved and the empty line is a newline of its own. It is at most ONE
+            # extra break even when both neighbours are more-indented - with an empty line in
+            # between there is only one break left to preserve (PyYAML: `ind | (blank) | ind`
+            # keeps two newlines, not three). The FIRST content line gets no extra break,
+            # because there is no preceding break to preserve: with an explicit indicator that
+            # leaves leading spaces in the content, `>1` then a blank then content at 2 gives
+            # one newline, not two (PyYAML 6.0.1, agents-m8h).
+            extra = 0 if not chunks else (1 if (indented or prev_indented) else 0)
+            chunks.append("\n" * (pending_blanks + extra))
+        elif chunks:
+            chunks.append("\n" if (indented or prev_indented) else " ")
+        chunks.append(line)
+        pending_blanks = 0
+        prev_indented = indented
+    # Trailing empty lines are content only for keep chomping, which reaches here through the
+    # caller's slice for the other two styles; they keep contributing one newline each.
+    if pending_blanks:
+        chunks.append("\n" * pending_blanks)
     return "".join(chunks)
 
 
@@ -136,16 +177,48 @@ def _parse_block_scalar(
     ends_with_nl: bool = True,
 ) -> Tuple[str, int]:
     style = indicator[0]
-    chomp = "-" if indicator.endswith("-") else ("+" if indicator.endswith("+") else "")
+    # Detected by PRESENCE, not by suffix: the chomping indicator may precede the digit
+    # (`|-2`), so "ends with '-'" silently became clip chomping for that order.
+    chomp = "-" if "-" in indicator else ("+" if "+" in indicator else "")
+    # An explicit indentation indicator (`|2`, `>2`, `|2-`) fixes the content indentation
+    # relative to the parent node; it is not decoration. It was accepted by _BLOCK_SCALAR_RE
+    # and never read, so `|2` with content at 4 was parsed as content at 4 (agents-m8h).
+    # YAML allows 1-9; 0 is invalid, and PyYAML refuses it.
+    _indicator_digits = re.search(r"[0-9]+", indicator)
+    declared_indent = int(_indicator_digits.group()) if _indicator_digits else None
+    if declared_indent == 0:
+        raise YamlParseError(
+            f"YAML parse error in {path}:{i + 1}: invalid indentation indicator "
+            f"'0' in {indicator!r} (YAML allows 1-9)"
+        )
     i += 1
     n = len(lines)
     content: List[str] = []
-    base_indent: Optional[int] = None
+    # With an explicit indicator the base is known before the first content line, so a leading
+    # empty line is content and cannot postpone it (PyYAML: `|2` then a blank yields a leading
+    # newline). Without one it is detected from the first non-empty line, as before.
+    base_indent: Optional[int] = (key_indent + declared_indent) if declared_indent else None
+    # Highest indentation seen on a whitespace-only line before the base was known. PyYAML
+    # REFUSES a block whose leading empty-ish lines are more indented than the content that
+    # follows, so this is tracked to fail closed rather than to guess an indent from it.
+    leading_ws_indent = 0
 
     while i < n:
         line = lines[i]
         if line.strip() == "":
-            content.append("")
+            ind_ws = _indent(line)
+            if base_indent is None:
+                leading_ws_indent = max(leading_ws_indent, ind_ws)
+                content.append("")
+            else:
+                # A whitespace-only line can carry residual content, because the block's
+                # indent is what gets stripped: under a base of 4, a line of five spaces is
+                # one space. This holds for an INFERRED base as much as a declared one -
+                # `k: >` then content at 4 then a line of five spaces keeps that space in
+                # PyYAML, and collapsing it to "" lost it (cross-family review of
+                # agents-m8h; pre-existing, and invisible here until the sweep covered
+                # whitespace-only lines deeper than the base).
+                content.append(" " * max(ind_ws - base_indent, 0))
             i += 1
             continue
         ind = _indent(line)
@@ -153,6 +226,17 @@ def _parse_block_scalar(
             break
         if base_indent is None:
             base_indent = ind
+            if leading_ws_indent > base_indent:
+                raise YamlParseError(
+                    f"YAML parse error in {path}:{i + 1}: a whitespace-only line before the "
+                    f"block content is more indented ({leading_ws_indent}) than the content "
+                    f"it precedes ({base_indent})"
+                )
+        if declared_indent is not None and ind < base_indent:
+            raise YamlParseError(
+                f"YAML parse error in {path}:{i + 1}: line is less indented than the "
+                f"declared indentation indicator {indicator!r} requires ({declared_indent})"
+            )
         if ind >= base_indent:
             content.append(" " * (ind - base_indent) + line.lstrip(" "))
         else:

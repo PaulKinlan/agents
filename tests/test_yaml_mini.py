@@ -143,7 +143,12 @@ class TestYamlMiniBlockChomping(unittest.TestCase):
         except ImportError:
             self.skipTest("PyYAML not installed in environment")
 
-        indicators = ["|", "|-", "|+", ">", ">-", ">+"]
+        indicators = ["|", "|-", "|+", ">", ">-", ">+",
+                      # Explicit indentation indicators: no body in this matrix used to
+                      # exercise them (agents-m8h), so `|2`/`>2` were never read by anything
+                      # here. Digits are 1-2 only: 9 would make PyYAML refuse the document,
+                      # and the matrix compares against PyYAML rather than against an error.
+                      "|1", "|2", "|1-", "|2-", "|1+", "|2+", ">1", ">2", ">1-", ">2-", ">1+", ">2+"]
         bodies = [
             "  hello",
             "  hello\n",
@@ -157,6 +162,13 @@ class TestYamlMiniBlockChomping(unittest.TestCase):
             "  \n  \n",
             "\n",
             "\n\n",
+            # More-indented lines, which the matrix also never had: this is the shape that hid
+            # the folded blank-then-more-indented divergence (agents-m8h).
+            "  first line\n    more indented\n",
+            "  first line\n\n    more indented\n",
+            "  first line\n    more indented\n  second line\n",
+            "  first line\n    more indented\n\n    another\n",
+            "  first line\n\n\n    deeper\n",
         ]
 
         for ind in indicators:
@@ -166,6 +178,106 @@ class TestYamlMiniBlockChomping(unittest.TestCase):
                     expected = yaml.safe_load(doc)["key"]
                     actual = self._parse_yaml_str(doc)["key"]
                     self.assertEqual(actual, expected)
+
+
+class TestYamlMiniFoldedAndIndicatorDivergences(unittest.TestCase):
+    """The two residual PyYAML divergences (agents-m8h), and the shapes they sit among.
+
+    Both were pre-existing and both were invisible to the matrix above, for one shared
+    reason: no body in it contained a MORE-INDENTED line, and no indicator carried a digit.
+    The expectations here are hard-coded rather than taken from PyYAML, so a failure is
+    legible on a machine without PyYAML installed - which is the whole point of the module.
+    Every value was read from PyYAML 6.0.1 first, and the broader sweep that reproduced them
+    (29,058 generated documents) is what forced the three sibling rules below to be exact.
+    """
+
+    def _parse(self, content: str):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".yaml", delete=False) as f:
+            f.write(content)
+            f.flush()
+            temp_path = Path(f.name)
+        try:
+            return load_yaml(temp_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    def test_folded_blank_then_more_indented_keeps_two_newlines(self):
+        """Divergence 1: the blank line AND the preserved break, not just one of them."""
+        self.assertEqual(self._parse("k: >\n  a\n\n    ind\n")["k"], "a\n\n  ind\n")
+
+    def test_folded_sibling_shapes_are_exact(self):
+        """The rules either side of it, so the two-newline case cannot be over-applied."""
+        cases = {
+            "k: >\n  a\n  b\n": "a b\n",                  # break folds to a space
+            "k: >\n  a\n\n  b\n": "a\nb\n",               # an empty line is one newline
+            "k: >\n  a\n\n\n  b\n": "a\n\nb\n",          # one per empty line
+            "k: >\n  a\n    ind\n": "a\n  ind\n",         # indented line is not folded onto
+            "k: >\n  a\n    ind\n\n  b\n": "a\n  ind\n\nb\n",   # break after it is preserved
+            "k: >\n  a\n    ind\n\n    ind\n": "a\n  ind\n\n  ind\n",  # at most ONE extra
+        }
+        for doc, expected in cases.items():
+            with self.subTest(doc=doc):
+                self.assertEqual(self._parse(doc)["k"], expected)
+
+    def test_folded_leading_blank_line_is_content(self):
+        """An empty line before the first content line is content, not padding."""
+        self.assertEqual(self._parse("k: >\n\n  a\n")["k"], "\na\n")
+
+    def test_explicit_indentation_indicator_is_read(self):
+        """Divergence 2: `|2` fixes the content indent, so deeper indentation is content."""
+        self.assertEqual(self._parse("k: |2\n    text\n")["k"], "  text\n")
+        self.assertEqual(self._parse("k: |1\n    text\n")["k"], "   text\n")
+        self.assertEqual(self._parse("k: >2\n    text\n")["k"], "  text\n")
+        # When the indicator agrees with the first line, nothing changes.
+        self.assertEqual(self._parse("k: |2\n  text\n")["k"], "text\n")
+        # The declared indent is relative to the parent node, not to the document.
+        self.assertEqual(self._parse("m:\n  k: |2\n      text\n")["m"]["k"], "  text\n")
+        # A leading empty line is content here too: the declared indent cannot be postponed.
+        self.assertEqual(self._parse("k: |2\n\n    text\n")["k"], "\n  text\n")
+
+    def test_explicit_indentation_indicator_errors(self):
+        """`0` is invalid YAML, and content above the declared indent is an error, not a guess."""
+        from lib.yaml_mini import YamlParseError
+
+        with self.assertRaises(YamlParseError):
+            self._parse("k: |0\n  text\n")
+        with self.assertRaises(YamlParseError):
+            self._parse("k: |2\n text\n")
+
+    def test_whitespace_only_line_deeper_than_inferred_base_keeps_its_residual(self):
+        """A residual space survives even when the base indent was INFERRED.
+
+        Cross-family review of agents-m8h found this: the residual was only kept when an
+        indicator declared the indent, so `>` over content at 4 with a line of five spaces lost
+        the space PyYAML keeps. Pre-existing, and invisible until the sweep covered
+        whitespace-only lines deeper than the base.
+        """
+        self.assertEqual(self._parse("k: >\n    hello\n     \n    world\n")["k"], "hello\n \nworld\n")
+        self.assertEqual(self._parse("k: |\n    hello\n     \n    world\n")["k"], "hello\n \nworld\n")
+        self.assertEqual(self._parse("k: >+\n    hello\n     \n    world\n")["k"], "hello\n \nworld\n")
+        self.assertEqual(self._parse("k: >-\n    hello\n     \n    world\n")["k"], "hello\n \nworld")
+        # At the base there is no residual, and that must not change.
+        self.assertEqual(self._parse("k: >\n    hello\n    \n    world\n")["k"], "hello\nworld\n")
+
+    def test_leading_whitespace_only_line_more_indented_than_content_errors(self):
+        """PyYAML refuses this shape, so the parser must not invent an indent for it."""
+        from lib.yaml_mini import YamlParseError
+
+        with self.assertRaises(YamlParseError):
+            self._parse("k: >\n     \n    hello\n")
+
+    def test_indicator_order_is_either_way_round(self):
+        """YAML allows the chomping and indentation indicators in either order.
+
+        `|2-` was supported and `|-2` was not: the header regex required the digit first, so a
+        valid document was REJECTED rather than parsed. Found while probing around this fix
+        rather than from the bead, which is why it is pinned here with the rest.
+        """
+        self.assertEqual(self._parse("k: |-2\n    text\n")["k"], "  text")
+        self.assertEqual(self._parse("k: >+2\n    text\n")["k"], "  text\n")
+        self.assertEqual(self._parse("k: |-1\n    text\n")["k"], "   text")
+        # The order that already worked must keep working.
+        self.assertEqual(self._parse("k: |2-\n    text\n")["k"], "  text")
 
 
 if __name__ == "__main__":
