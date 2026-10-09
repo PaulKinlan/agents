@@ -10,6 +10,7 @@ path. `.github/workflows/` was reported missing while it existed.
 
 import importlib.machinery
 import importlib.util
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -224,3 +225,103 @@ class TestTreeDiagramParser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStationSkillScope(unittest.TestCase):
+    """A station SKILL.md documents auditing an ARBITRARY target, so its prose names the
+    target's layout as often as this repo's own files (agents-6zq).
+
+    Measured on the 2026-10-09 tree: 31 of 31 SKILL.md candidates were target-facing or not
+    paths at all, while 49 SKILL.md references that DO resolve - every station's own
+    scripts/*.py among them - would stop being checked if SKILL.md were skipped outright.
+    These tests pin both halves of that decision: the target-facing shapes are skipped, and
+    a station's own missing file is still reported.
+    """
+
+    TARGET_FACING = (
+        "```text\n"
+        "dist/\n"
+        "build/\n"
+        "src/\n"
+        "```\n"
+        "Ship `dist/`, `extension/`, `fixtures/`, `test/` and `manifest.json`.\n"
+        "Load it from `chrome://extensions` after `try/catch` around `downloadToDir()`;\n"
+        "never touch `TODO(baseline/<feature-id>)` or `scripts/*journey*.ts`.\n"
+    )
+
+    def _station(self, tmp: Path, skill_body: str) -> Path:
+        station = tmp / "agents" / "probe"
+        (station / "scripts").mkdir(parents=True)
+        (station / "scripts" / "present.py").write_text("# present\n")
+        (station / "SKILL.md").write_text(skill_body)
+        return station
+
+    def test_target_facing_references_in_a_skill_are_skipped(self):
+        """All four target-facing shapes are not claims about this repository."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._station(tmp, self.TARGET_FACING)
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            for target_facing in ("dist/", "build/", "src/", "extension/", "fixtures/",
+                                  "test/", "manifest.json", "try/catch", "chrome://extensions",
+                                  "script/*journey*.ts", "scripts/*journey*.ts"):
+                self.assertNotIn(target_facing, references)
+
+    def test_station_own_missing_script_is_still_reported(self):
+        """The guard rail: renaming a station's own script must still fail the check."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            station = self._station(
+                tmp, "Run `scripts/scan.py` to produce the report, then cite `scripts/present.py`.\n")
+
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("scripts/scan.py", references)      # missing -> real drift
+            self.assertNotIn("scripts/present.py", references)  # present -> no candidate
+
+            # Restoring the file clears the candidate, i.e. this is a real existence check.
+            (station / "scripts" / "scan.py").write_text("# restored\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertNotIn("scripts/scan.py", references)
+
+    def test_tracked_generic_directory_head_is_still_checked(self):
+        """`lib` is a generic word AND a first-party directory here: check it.
+
+        The first version of this filter tested the generic-name list before the existence
+        check and hid lib/adapters/gha.sh - the one genuine drift in this repository.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            station = self._station(tmp, "Add `lib/adapters/gha.sh` to complete the adapter set.\n")
+            (tmp / "lib" / "adapters").mkdir(parents=True)
+            (tmp / "lib" / "adapters" / "pi.sh").write_text("# pi\n")
+            subprocess.run(["git", "init", "-q", str(tmp)], check=True)
+            subprocess.run(["git", "-C", str(tmp), "add", "-A"], check=True)
+
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("lib/adapters/gha.sh", references)
+            self.assertNotIn("lib/adapters/pi.sh", references)
+
+    def test_non_skill_documents_are_unaffected(self):
+        """The filter is scoped to SKILL.md: a plan that names `dist/` is still drift."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "docs").mkdir()
+            (tmp / "docs" / "PLAN.md").write_text("Distribution lands in `dist/` and `src/`.\n")
+
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("dist/", references)
+            self.assertIn("src/", references)
+
+    def test_real_repo_skill_candidates_collapse_to_genuine_only(self):
+        """On the real tree: 31 SKILL.md candidates drop to at most the genuine ones."""
+        candidates = check_docs.scan_target(FACTORY_ROOT)
+        skill_refs = sorted({
+            c["reference"] for c in candidates
+            if c["path"].startswith("agents/") and c["path"].endswith("SKILL.md")
+        })
+        self.assertLessEqual(len(skill_refs), 1,
+                             f"target-facing SKILL.md noise returned: {skill_refs}")
+        for ref in skill_refs:
+            head = ref.split("/", 1)[0]
+            self.assertTrue((FACTORY_ROOT / head).is_dir(),
+                            f"surviving SKILL.md candidate {ref!r} is not own-facing")
