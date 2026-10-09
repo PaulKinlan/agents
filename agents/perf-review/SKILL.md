@@ -43,7 +43,7 @@ Severity must be assigned deterministically based on rule classification, the sc
 ### Determinism Invariants
 1. **Preserve Candidate Baseline Severity**: For all confirmed production performance hazards, retain the candidate's scanner-assigned `severity` (`high` or `medium`). Do not subjectively downgrade or upgrade severities across runs.
 2. **Test Fixtures & Mocks**: If candidate code is part of a unit test, mock, or benchmark fixture, classify as `severity: "info"`.
-3. **Deterministic Output Order**: Emit findings in the exact order received from `candidates`.
+3. **Deterministic Output Order**: Do not reorder findings to reflect your own priority; the dispatcher sorts the stored findings deterministically (by path, then line number, then rule id) after validation.
 
 ## Output Contract
 

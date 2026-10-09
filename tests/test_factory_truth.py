@@ -210,6 +210,24 @@ class TestLineDeltaReport(SandboxCase):
         self.box.run_agent("finder")
         self.assertIn("Solo", self.box.findings("target-delta.md"))
 
+    def test_a_schemaless_agent_emitting_a_non_dict_finding_does_not_crash_or_halt(self):
+        """agents-qw9: a schemaless agent (no output.schema) can emit a findings list of
+        non-dicts; the dispatcher's findings re-sort must tolerate it like the store does
+        (lib/findings.py skips non-dicts), never crash, still record a verdict, and not
+        halt a line (vuln-triage is an andon_station)."""
+        self.box.agent("junkfinder", json.dumps({"summary": "s", "scanned_files": 1,
+                                                  "findings": ["not-a-dict"]}))
+        self.box.agent("quiet", report())
+        self.box.line(["junkfinder", "quiet"], halt=True)
+        ok, out = self.box.run_line()
+
+        self.assertTrue(ok, "a non-dict finding must not crash or error the station:\n" + out)
+        delta = self.box.findings("target-delta.md")
+        # The junk item is skipped (not a dict), so the station passes with zero findings.
+        self.assertIn("`junkfinder` | PASS", delta)
+        self.assertIn("`quiet` | PASS", delta)
+        self.assertNotIn("SKIPPED", delta)
+
 
 class TestNoVerdictIsAnError(SandboxCase):
     """fleet-ddd, journal-mid, journal-idy, journal-wog."""

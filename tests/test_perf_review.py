@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -48,55 +49,56 @@ class TestPerfReviewScannerDeterminism(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_scanner_directory_traversal_and_tie_breaking_are_deterministic(self):
-        """Candidate ordering must be fully deterministic across runs and tie-broken by
-        (not in_recent_diff, severity != high, path, line_number, rule_id)."""
+        """Candidate ordering must be fully deterministic and independent of os.walk order.
+
+        The scanner caps inspection at 80 files, so which files it sees depends on directory
+        traversal order. It sorts dirs itself; this test reverses the walk to prove the sort —
+        not the filesystem — decides the set/order (pre-fix, the reversed walk changed the 80)."""
         mod = load_scanner_module()
 
-        # Create nested directories in non-alphabetical creation order
-        (self.repo / "sub_z").mkdir()
-        (self.repo / "sub_a").mkdir()
-        (self.repo / "sub_m").mkdir()
-
-        (self.repo / "sub_z" / "file_2.js").write_text(
-            "function z2() {\n  const w = box.offsetWidth;\n  box.style.width = w + 'px';\n}\n",
-            encoding="utf-8"
-        )
-        (self.repo / "sub_a" / "file_1.js").write_text(
-            "function a1() {\n  const h = box.offsetHeight;\n  box.style.height = h + 'px';\n}\n",
-            encoding="utf-8"
-        )
-        (self.repo / "sub_m" / "file_3.html").write_text(
-            "<!DOCTYPE html><html><head><script src='app.js'></script></head><body><img src='x.png'></body></html>\n",
-            encoding="utf-8"
-        )
-
+        # Enough files (3 x 30) to exceed the 80-file cap, across non-alphabetical dirs.
+        for d in ("sub_z", "sub_a", "sub_m"):
+            (self.repo / d).mkdir()
+            for i in range(30):
+                (self.repo / d / f"file_{i}.js").write_text(
+                    "function f() {\n  const w = box.offsetWidth;\n  box.style.width = w + 'px';\n}\n",
+                    encoding="utf-8",
+                )
         subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
         subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=self.repo, check=True)
 
-        # Make another commit touching sub_z/file_2.js so it is in recent diff
-        (self.repo / "sub_z" / "file_2.js").write_text(
-            "function z2() {\n  const w = box.offsetWidth;\n  box.style.width = (w + 1) + 'px';\n}\n",
-            encoding="utf-8"
+        # Touch one sub_z file so it is priority (recent diff) and must lead the output.
+        (self.repo / "sub_z" / "file_0.js").write_text(
+            "function f() {\n  const w = box.offsetWidth;\n  box.style.width = (w + 1) + 'px';\n}\n",
+            encoding="utf-8",
         )
-        subprocess.run(["git", "commit", "-am", "Touch file_2"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-am", "Touch file_0"], cwd=self.repo, check=True)
 
         git_ctx = mod.get_recent_git_context(self.repo)
-        self.assertIn("sub_z/file_2.js", git_ctx["changed_files"])
+        self.assertIn("sub_z/file_0.js", git_ctx["changed_files"])
 
-        # Run scan multiple times; candidate list and ordering must be 100% identical
-        first_run = mod.scan_files(self.repo, git_ctx["changed_files"])
-        for _ in range(5):
-            next_run = mod.scan_files(self.repo, git_ctx["changed_files"])
-            self.assertEqual(
-                [(c["rule_id"], c["path"], c["line_number"], c["severity"]) for c in first_run],
-                [(c["rule_id"], c["path"], c["line_number"], c["severity"]) for c in next_run],
-                "Candidate scan output must be strictly deterministic across repeated invocations"
-            )
+        normal = mod.scan_files(self.repo, git_ctx["changed_files"])
+
+        def key(run):
+            return [(c["rule_id"], c["path"], c["line_number"], c["severity"]) for c in run]
+
+        # Reversed filesystem order must not change which files are scanned or their order.
+        real_walk = mod.os.walk
+
+        def reversed_walk(top, *args, **kwargs):
+            for root, dirs, files in real_walk(top, *args, **kwargs):
+                dirs.reverse()  # in place, so the scanner's IGNORE_DIRS pruning still applies
+                yield root, dirs, files
+
+        with mock.patch.object(mod.os, "walk", reversed_walk):
+            reversed_run = mod.scan_files(self.repo, git_ctx["changed_files"])
+        self.assertEqual(key(normal), key(reversed_run),
+                         "Candidate set/order must not depend on os.walk directory order")
 
         # Touched file must appear first
-        self.assertTrue(first_run[0]["touched_in_recent_commits"])
-        self.assertEqual(first_run[0]["path"], "sub_z/file_2.js")
-        self.assertEqual(first_run[0]["severity"], "high")
+        self.assertTrue(normal[0]["touched_in_recent_commits"])
+        self.assertEqual(normal[0]["path"], "sub_z/file_0.js")
+        self.assertEqual(normal[0]["severity"], "high")
 
     def test_severity_escalation_for_recent_diff(self):
         """A medium-severity baseline rule (e.g. unoptimized media or unthrottled listener)
