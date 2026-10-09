@@ -65,6 +65,25 @@ _ENV_ACTIVE_GRACE_SECONDS = "FACTORY_RUN_ACTIVE_GRACE_SECONDS"
 
 _SECONDS_PER_DAY = 86400
 
+# Findings-directory retention (agents-0ti): the per-target evidence files under
+# ``findings/`` (delta/latest/summary markdown, append-only history and hillclimb
+# ledgers, threat-model documents) accumulate without bound. A byte budget bounds
+# the whole directory: when it is exceeded, the oldest regenerable reports are
+# pruned first, while the authoritative findings store (``<target>.json`` + its lock)
+# and the committed config (``.gitkeep``, ``suppressions.yaml``) are never touched.
+FINDINGS_RETENTION_BYTES_DEFAULT = 10 * 1024 * 1024  # 10 MiB
+_ENV_FINDINGS_RETENTION_BYTES = "FACTORY_FINDINGS_RETENTION_BYTES"
+
+# Committed or authoritative names inside ``findings/`` that retention must never prune.
+_FINDINGS_PROTECTED_NAMES = frozenset({".gitkeep", "suppressions.yaml"})
+
+# Hill-climb proposal retention (agents-0ti): ``runs/hillclimb-*/`` is a proposal
+# artifact (live disposable worktree + session.patch), not a run record, so it is
+# excluded from the run-directory count/age bound. It still needs a bound: a stale
+# proposal (crashed/abandoned) is swept once it is older than this TTL.
+HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT = 7
+_ENV_HILLCLIMB_RETENTION_AGE_DAYS = "FACTORY_HILLCLIMB_RETENTION_AGE_DAYS"
+
 
 def retention_config(env: Optional[dict] = None) -> Tuple[int, float]:
     """Return ``(retain_count, max_age_seconds)`` from the environment.
@@ -218,4 +237,161 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
         except OSError as exc:
             sys.stderr.write(f"[retention] could not remove {directory}: {exc}\n")
 
+    return removed
+
+
+def findings_retention_config(env: Optional[dict] = None) -> int:
+    """Return the findings/ byte budget from the environment.
+
+    Unset or unparseable values fall back to the bounded default (10 MiB). ``env`` is
+    injectable for tests; it defaults to ``os.environ``.
+    """
+    env = os.environ if env is None else env
+    budget = FINDINGS_RETENTION_BYTES_DEFAULT
+    raw = env.get(_ENV_FINDINGS_RETENTION_BYTES)
+    if raw is not None:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                budget = parsed
+        except ValueError:
+            pass
+    return budget
+
+
+def _findings_file_is_prunable(name: str) -> bool:
+    """True when a ``findings/`` entry is a regenerable report, not the state.
+
+    The authoritative findings store (``<target>.json``) and the machine reports
+    (``<target>-line.json``, ``<target>-bundle-baseline.json``) are rewritten in place
+    on every run, so they are bounded and must never be pruned; the same goes for the
+    store lock (``<target>.json.lock``) and the committed config. The unbounded
+    artifacts are the append-only ledgers (``.jsonl``) and the regenerable markdown
+    reports (``.md``) — those are pruned oldest-first. An unrecognised extension is
+    left alone (fail-safe: under-prune, never touch something we cannot classify).
+    """
+    if name in _FINDINGS_PROTECTED_NAMES:
+        return False
+    if name.endswith(".json") or name.endswith(".json.lock"):
+        return False
+    if name.endswith(".jsonl") or name.endswith(".md"):
+        return True
+    return False
+
+
+def prune_findings(findings_dir: Path, *, budget_bytes: Optional[int] = None,
+                   exclude: Iterable[Path] = ()) -> List[Path]:
+    """Prune the oldest regenerable findings/ reports so the directory stays bounded.
+
+    The budget bounds the *whole* ``findings/`` directory, so protected bytes (the
+    authoritative store, its lock and the committed config) count as already-spent and
+    are never removed. When the total exceeds ``budget_bytes``, the oldest prunable
+    files (by mtime, name as a deterministic tiebreak) are unlinked until the total is
+    within budget or no prunable files remain. Symlinks and non-regular files are
+    skipped, and a file in ``exclude`` is never removed. Returns the list of removed
+    files. ``budget_bytes`` defaults to the module's bounded default when ``None``.
+    """
+    budget = (FINDINGS_RETENTION_BYTES_DEFAULT if budget_bytes is None else budget_bytes)
+    exclude_resolved = {Path(p).resolve() for p in exclude}
+
+    if not findings_dir.is_dir():
+        return []
+
+    total = 0
+    candidates: List[Tuple[Path, float, int, str]] = []
+    for entry in findings_dir.iterdir():
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        try:
+            st = entry.stat()
+        except OSError as exc:
+            sys.stderr.write(f"[retention] skipping {entry}: cannot stat ({exc})\n")
+            continue
+        total += st.st_size
+        resolved = entry.resolve()
+        if resolved in exclude_resolved:
+            continue
+        if _findings_file_is_prunable(entry.name):
+            candidates.append((resolved, st.st_mtime, st.st_size, entry.name))
+
+    if total <= budget or not candidates:
+        return []
+
+    # Oldest first; the name is only a deterministic tiebreak when two files share an mtime.
+    candidates.sort(key=lambda item: (item[1], item[3]))
+
+    removed: List[Path] = []
+    for resolved, _mtime, size, _name in candidates:
+        if total <= budget:
+            break
+        try:
+            resolved.unlink()
+            total -= size
+            removed.append(resolved)
+        except OSError as exc:
+            sys.stderr.write(f"[retention] could not remove {resolved}: {exc}\n")
+    return removed
+
+
+def hillclimb_retention_ttl(env: Optional[dict] = None) -> float:
+    """Return the hill-climb proposal TTL in seconds from the environment.
+
+    Unset, unparseable or non-positive values fall back to the bounded default (7 days).
+    ``env`` is injectable for tests; it defaults to ``os.environ``.
+    """
+    env = os.environ if env is None else env
+    age_days = HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT
+    raw = env.get(_ENV_HILLCLIMB_RETENTION_AGE_DAYS)
+    if raw is not None:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                age_days = parsed
+        except ValueError:
+            pass
+    return age_days * _SECONDS_PER_DAY
+
+
+def prune_hillclimb_dirs(runs_dir: Path, *, max_age_seconds: Optional[float] = None,
+                         now: Optional[float] = None,
+                         exclude: Iterable[Path] = ()) -> List[Path]:
+    """Sweep stale ``runs/hillclimb-*/`` proposal directories.
+
+    A hill-climb proposal is a live disposable worktree plus session patch, not a run
+    record, so it is exempt from the run-directory count/age bound (a concurrent run must
+    never sweep a live proposal). It is still bounded: a proposal whose directory is older
+    than ``max_age_seconds`` (default 7 days) is a crashed/abandoned leftover and is
+    removed. Directories in ``exclude`` and directories carrying a fresh ``.active`` marker
+    are never removed; symlinks are skipped. Returns the list of removed directories.
+    """
+    now = time.time() if now is None else now
+    max_age_seconds = (HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT * _SECONDS_PER_DAY
+                       if max_age_seconds is None else max_age_seconds)
+    exclude_resolved = {Path(p).resolve() for p in exclude}
+
+    if not runs_dir.is_dir():
+        return []
+
+    removed: List[Path] = []
+    for entry in sorted(runs_dir.iterdir()):
+        if not entry.name.startswith(_HILLCLIMB_PREFIX):
+            continue
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        resolved = entry.resolve()
+        if resolved in exclude_resolved:
+            continue
+        if _marker_is_active(entry, now, ACTIVE_GRACE_SECONDS_DEFAULT):
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError as exc:
+            sys.stderr.write(f"[retention] skipping {entry}: cannot stat ({exc})\n")
+            continue
+        if max_age_seconds is not None and (now - mtime) > max_age_seconds:
+            try:
+                shutil.rmtree(entry)
+                removed.append(resolved)
+            except OSError as exc:
+                sys.stderr.write(f"[retention] could not remove {entry}: {exc}\n")
     return removed
