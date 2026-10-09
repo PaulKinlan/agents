@@ -100,7 +100,18 @@ def _parse(argv: Sequence[str]) -> Tuple[List[Tuple[int, str]], List[str]]:
             port_s, sep, path = argv[i].partition("=")
             if not sep or not path:
                 raise SystemExit(f"net_forward: bad --forward {argv[i]!r} (want PORT=PATH)")
-            forwards.append((int(port_s), path))
+            try:
+                if not (port_s.isascii() and port_s.isdigit()):
+                    raise ValueError
+                port = int(port_s)
+                if not (1 <= port <= 65535):
+                    raise ValueError
+            except ValueError:
+                raise SystemExit(
+                    f"net_forward: bad port in --forward {argv[i]!r} "
+                    f"(expected integer 1..65535, got {port_s!r})"
+                )
+            forwards.append((port, path))
         elif arg == "--":
             return forwards, list(argv[i + 1:])
         else:
