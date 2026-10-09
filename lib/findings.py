@@ -195,20 +195,17 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
         path = "unknown"
     return rule_id, path
 
-_SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-
-
 def bind_severity(item: Dict[str, Any], rule_id: Any, path: Any,
                   candidate_index: Optional[Dict[str, Any]]) -> Any:
-    """Clamp a candidate-bound finding's severity up to the scanner baseline (agents-964).
+    """Clamp a candidate-bound finding's severity to the scanner baseline (agents-964).
 
     The perf-review scanner emits a high/medium baseline per (rule, path); the triage model
-    flips medium<->low and high<->low across runs, and the temperature pin that damps that
+    drifts medium<->low and high<->low across runs, and the temperature pin that damps that
     only reaches openai-completions engines (deepseek/qwen) — pi ignores samplingParams on
-    anthropic-messages (zai/kimi). So the dispatcher enforces the baseline like it binds
-    rule_id/path: a finding bound to a candidate location is never reported BELOW its
-    baseline. A deliberate `info` (test fixture/mock, SKILL.md rule 2) is preserved, as are
-    higher severities the model chose (escalation is not a flip).
+    anthropic-messages (zai/kimi). So the dispatcher enforces the baseline exactly like it
+    binds rule_id/path: a finding bound to a candidate location takes the scanner's baseline,
+    with no downgrade or upgrade (SKILL.md invariant 1). A deliberate `info` (test
+    fixture/mock, SKILL.md rule 2) is the one exception, preserved as-is.
     """
     model_sev = item.get("severity")
     if not candidate_index or not isinstance(rule_id, str):
@@ -217,9 +214,6 @@ def bind_severity(item: Dict[str, Any], rule_id: Any, path: Any,
     if not baseline:
         return model_sev
     if isinstance(model_sev, str) and model_sev.strip().lower() == "info":
-        return model_sev
-    key = model_sev.strip().lower() if isinstance(model_sev, str) else ""
-    if _SEVERITY_ORDER.get(key, -1) >= _SEVERITY_ORDER.get(baseline, 0):
         return model_sev
     return baseline
 

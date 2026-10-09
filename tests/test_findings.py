@@ -204,16 +204,21 @@ class TestSeverityBaselineClamp(unittest.TestCase):
             },
         }
 
-    def test_bind_severity_clamps_a_downgrade_to_the_baseline(self):
+    def test_bind_severity_clamps_to_the_exact_baseline(self):
         ci = self._candidate_index()
+        # downgrade: low -> baseline
         self.assertEqual(bind_severity({"severity": "low"}, "lcp-cls-unoptimized-media", "index.html", ci), "medium")
         self.assertEqual(bind_severity({"severity": "low"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "high")
         self.assertEqual(bind_severity({"severity": "medium"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "high")
+        # upgrade (including critical) is also clamped to the baseline — no drift either way
+        self.assertEqual(bind_severity({"severity": "high"}, "lcp-cls-unoptimized-media", "index.html", ci), "medium")
+        self.assertEqual(bind_severity({"severity": "critical"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "high")
 
-    def test_bind_severity_preserves_info_critical_and_unbound(self):
+    def test_bind_severity_preserves_info_and_unbound(self):
         ci = self._candidate_index()
+        # the one exception: a fixture/mock classified info (SKILL.md rule 2) is kept
         self.assertEqual(bind_severity({"severity": "info"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "info")
-        self.assertEqual(bind_severity({"severity": "critical"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "critical")
+        # unbound (no candidate) -> model's value passes through
         self.assertEqual(bind_severity({"severity": "low"}, "nope", "x.js", ci), "low")
 
     def test_process_run_stores_the_clamped_severity(self):
