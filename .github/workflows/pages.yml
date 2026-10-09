@@ -24,6 +24,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Full history is required: the freshness step runs tools/gen_site.py, which verifies
+          # the pinned composite-action commit with `git cat-file -e <pin>^{commit}`. The default
+          # depth-1 checkout does not contain that object (the pin is several commits behind
+          # main), so the freshness step would fail on every push. (agents-36z + agents-6db;
+          # ci.yml already checks out with full history for the same reason.)
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5

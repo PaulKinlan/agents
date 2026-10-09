@@ -230,6 +230,12 @@ class PagesPublishScopeTest(unittest.TestCase):
         upload = text.split("upload-pages-artifact", 1)[1]
         self.assertIn("path: _site", upload, "the uploaded artifact must be the staged directory")
 
+    def test_workflow_fetches_full_history(self):
+        """The freshness step verifies a pinned commit with `git cat-file`, which a depth-1 clone lacks."""
+        text = WORKFLOW.read_text(encoding="utf-8")
+        checkout = text.split("actions/checkout", 1)[1].split("- name:", 1)[0]
+        self.assertIn("fetch-depth: 0", checkout, "the checkout must fetch full history for the pin check")
+
 
 if __name__ == "__main__":
     unittest.main()
