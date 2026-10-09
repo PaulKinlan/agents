@@ -41,11 +41,12 @@ from __future__ import annotations
 
 import http.client
 import os
+import posixpath
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, Iterable, Mapping, Optional, Tuple
-from urllib.parse import urlsplit
+from typing import Dict, Iterable, Mapping, Optional, Set, Tuple
+from urllib.parse import unquote, urlsplit
 
 from lib.sandbox import SUN_PATH_LIMIT
 
@@ -187,9 +188,11 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "factory-credential-broker/1.0"
     credentials: Dict[str, Optional[str]] = {}
+    allowed_providers: Optional[Set[str]] = None
 
     # --- helpers -------------------------------------------------------------
     def _respond_error(self, code: int, message: str) -> None:
+        self.close_connection = True
         body = message.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -267,13 +270,16 @@ class _Handler(BaseHTTPRequestHandler):
     # --- the broker hop ------------------------------------------------------
     def _broker(self, method: str) -> None:
         path_only, _, query = self.path.partition("?")
-        segments = [s for s in path_only.split("/") if s != ""]
+        decoded_path = posixpath.normpath(unquote(path_only))
+        segments = [s for s in decoded_path.split("/") if s != ""]
         # Expect: proxy / <provider> / <rest...>
         if len(segments) < 2 or segments[0] != "proxy":
             return self._respond_error(404, "not a broker path (expected /proxy/<provider>/...)")
-        provider = segments[1]
+        provider = segments[1].lower()
         if provider not in PROVIDERS:
             return self._respond_error(404, f"unknown provider {provider!r}")
+        if self.allowed_providers is not None and provider not in self.allowed_providers:
+            return self._respond_error(403, f"provider {provider!r} is not allowed for this run")
         rest = "/" + "/".join(segments[2:])
         if provider not in self.credentials:
             # Not configured for this provider: fail closed rather than forward the
@@ -382,10 +388,19 @@ class CredentialBroker:
     no listener leaks.
     """
 
-    def __init__(self, credentials: Mapping[str, Optional[str]]):
+    def __init__(self, credentials: Mapping[str, Optional[str]],
+                 allowed_providers: Optional[Iterable[str]] = None):
         unknown = sorted(set(credentials) - set(PROVIDERS))
         if unknown:
             raise BrokerError(f"unknown provider(s): {', '.join(unknown)}")
+        self._allowed_providers: Optional[Set[str]] = None
+        if allowed_providers is not None:
+            allowed_set = set(allowed_providers)
+            unknown_allowed = sorted(allowed_set - set(PROVIDERS))
+            if unknown_allowed:
+                raise BrokerError(f"unknown allowed provider(s): {', '.join(unknown_allowed)}")
+            self._allowed_providers = allowed_set
+
         # Keyless providers (auth "none") carry a None value: the broker forwards them
         # without a key (agents-3y2). Keyed providers carry the real key, held only here.
         self._credentials: Dict[str, Optional[str]] = dict(credentials)
@@ -399,7 +414,15 @@ class CredentialBroker:
 
     @property
     def providers(self) -> Tuple[str, ...]:
+        if self._allowed_providers is not None:
+            return tuple(p for p in self._credentials if p in self._allowed_providers)
         return tuple(self._credentials)
+
+    @property
+    def allowed_providers(self) -> Optional[Tuple[str, ...]]:
+        if self._allowed_providers is not None:
+            return tuple(sorted(self._allowed_providers))
+        return None
 
     def start(self, unix_path: Optional[str] = None,
               child_port: Optional[int] = None) -> int:
@@ -414,7 +437,8 @@ class CredentialBroker:
         if not self._credentials:
             raise BrokerError("refusing to start a broker with no credentials")
         handler = type("_BoundBrokerHandler", (_Handler,),
-                       {"credentials": dict(self._credentials)})
+                       {"credentials": dict(self._credentials),
+                        "allowed_providers": set(self._allowed_providers) if self._allowed_providers is not None else None})
         if unix_path is not None:
             if child_port is None:
                 raise BrokerError("unix_path requires child_port (the net_forward relay "
@@ -447,6 +471,10 @@ class CredentialBroker:
         """The engine-side base URL for `provider` (points at this broker). In UNIX mode
         the engine dials the net_forward relay's child_port (which forwards to the broker
         socket); in TCP mode it dials the broker's own loopback port."""
+        if provider not in PROVIDERS:
+            raise BrokerError(f"unknown provider {provider!r}")
+        if self._allowed_providers is not None and provider not in self._allowed_providers:
+            raise BrokerError(f"provider {provider!r} is not allowed for this run")
         if provider not in self._credentials:
             raise BrokerError(f"broker has no credential for {provider!r}")
         port = self._child_port if self._child_port is not None else self.port

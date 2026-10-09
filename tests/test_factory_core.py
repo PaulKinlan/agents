@@ -315,13 +315,13 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                          "the pi run is refused without bubblewrap, and brokering (agents-8h4) "
                          "applies only to a sandboxed engine")
     def test_agent_children_never_inherit_operator_credentials_brokered(self):
-        prepass, engine = self._run_probe()
-        # agents-8h4: a SANDBOXED engine never carries the operator's real model key. The
+        prepass, engine = self._run_probe(env_overrides={"FACTORY_MODEL": "anthropic/claude-3-5-sonnet"})
+        # agents-8h4 / agents-3z8: a SANDBOXED engine never carries the operator's real model key. The
         # dispatcher brokers it — the engine's environ (and so its /proc/self/environ, the leak
         # vector THREAT_MODEL §6.1 names) holds a non-secret placeholder + the localhost broker
-        # base URL, and the real key is injected host-side only. So the real values are absent.
+        # base URL, and the real key is injected host-side only. Non-allowed credentials are stripped.
         self.assertEqual(engine["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
-        self.assertEqual(engine["GEMINI_API_KEY"], PLACEHOLDER_KEY)
+        self.assertNotIn("GEMINI_API_KEY", engine)
         self.assertNotIn("sk-ant-ci", engine.values())
         self.assertNotIn("gem-ci", engine.values())
         self.assertTrue(engine["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"),

@@ -121,11 +121,13 @@ class LineSandbox:
 
         self.target.mkdir()
 
-    def run(self, engine: str = "pi"):
+    def run(self, engine: str = "pi", env_overrides=None):
         env = {
             "PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin",
             "ANTHROPIC_API_KEY": "stub-key",
         }
+        if env_overrides:
+            env.update(env_overrides)
         stdout = io.StringIO()
         with mock.patch.object(factory_cli, "FACTORY_ROOT", self.root), \
              mock.patch.dict(os.environ, env), \
@@ -458,7 +460,7 @@ class TestLineAndon(unittest.TestCase):
                 encoding="utf-8",
             )
             stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-            result, output = sandbox.run()
+            result, output = sandbox.run(env_overrides={"FACTORY_MODEL": "anthropic/claude-3-5-sonnet"})
 
             self.assertTrue(result, "sanity: the retry must recover the line")
             runs = sorted((sandbox.root / "runs").glob("flaky-*"))

@@ -2021,7 +2021,8 @@ process.stdin.on('end', () => {
         # A read-only observer: brokering applies to any sandboxed engine, no write grant needed.
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "capabilities: {}\nbudget: {max_minutes: 1}\n")
-        res = self.factory("pi", {"ANTHROPIC_API_KEY": real_key})
+        res = self.factory("pi", {"ANTHROPIC_API_KEY": real_key,
+                                  "FACTORY_MODEL": "anthropic/claude-3-5-sonnet"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         # The engine's environ holds the placeholder, never the real key.
         self.assertEqual(self.stub_line("ENVKEY:"), PLACEHOLDER_KEY)
@@ -2038,9 +2039,60 @@ process.stdin.on('end', () => {
         self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
         self.assertNotIn("env-credentials", record["not_enforced"],
                          "the actual brokered engine env must update the trusted record")
+        # agents-3z8: policy.json lists ONLY the run's effective model provider (anthropic),
+        # not an unrestricted fail-open list of all host credentials.
         self.assertEqual(record["granted"]["credential_broker"]["providers"],
-                         ["anthropic", "deepseek", "kimi", "qwen", "zai"])
+                         ["anthropic"])
         self.assertNotIn(real_key, json.dumps(record))
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_default_pi_run_brokers_only_effective_model_provider(self):
+        """agents-3z8: a default pi run's policy.json lists ONLY the effective model's provider
+        (deepseek), not an unrestricted allowlist of all host credentials."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi", {
+            "ANTHROPIC_API_KEY": "sk-ant-secret",
+            "OPENAI_API_KEY": "sk-openai-secret",
+            "GEMINI_API_KEY": "gem-secret",
+        })
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertTrue(record["granted"]["os_sandbox"]["engine_sandboxed"])
+        # Only deepseek (the DEFAULT_PI_MODEL provider) must be brokered, never all host credentials!
+        self.assertEqual(record["granted"]["credential_broker"]["providers"], ["deepseek"])
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_sandboxed_engine_cross_provider_request_returns_403(self):
+        """agents-3z8 [P2]: a sandboxed engine attempting cross-provider egress through
+        the credential broker receives HTTP 403 Forbidden inside real bubblewrap sandbox."""
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf 'POST /proxy/openai/v1/chat/completions HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Length: 2\\r\\n\\r\\n{}' >&3\n"
+            "  read -r STATUS_LINE <&3\n"
+            "  echo \"RESP_STATUS:$STATUS_LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo RESP_STATUS:UNREACHABLE\n"
+            "fi\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi", {
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "OPENAI_API_KEY": "sk-openai-secret",
+            "FACTORY_MODEL": "anthropic/claude-3-5-sonnet",
+        })
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        resp_line = self.stub_line("RESP_STATUS:")
+        self.assertIn("403", resp_line,
+                      f"cross-provider broker request inside sandbox must be 403 Forbidden, got {resp_line!r}")
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_a_sandboxed_pi_engine_gets_the_keyless_broker_provider_config(self):

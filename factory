@@ -30,7 +30,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
                                child_environment, prepass_environment)
-    from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
+    from lib.credential_broker import (CredentialBroker, PROVIDERS,
+                                  credentials_from_env, keyless_providers)
     from lib.egress_proxy import EgressProxy
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
@@ -52,7 +53,8 @@ except ImportError:
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
                                child_environment, prepass_environment)
-    from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
+    from lib.credential_broker import (CredentialBroker, PROVIDERS,
+                                  credentials_from_env, keyless_providers)
     from lib.egress_proxy import EgressProxy
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
@@ -844,6 +846,8 @@ def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
     """
     from lib.credential_broker import PLACEHOLDER_KEY
     if provider not in broker.providers or provider not in PI_PROVIDER_API:
+        # agents-3z8 [P2 latent]: fail-closed if the run's broker does not allow this provider
+        # or if the provider is not a supported keyless endpoint.
         return
     config = {
         "providers": {
@@ -1362,8 +1366,22 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     _placeholder, _base_url, secret_vars = BROKER_PROVIDERS[provider]
                     if any(var in engine_secret_vars for var in secret_vars):
                         broker_creds.setdefault(provider, None)
+                # agents-3z8: bind the broker to the specific provider configured for this run's
+                # policy so the sandboxed engine cannot use the broker as an unauthorized cross-provider
+                # egress proxy for other credentials held by the host.
+                allowed_for_run = []
+                if engine == "pi":
+                    # adapter_env["FACTORY_MODEL"] is the authoritative model set above (line 1102)
+                    effective_model = adapter_env.get("FACTORY_MODEL") or DEFAULT_PI_MODEL
+                    model_prov = effective_model.split("/", 1)[0].lower()
+                    if model_prov in PROVIDERS:
+                        allowed_for_run = [model_prov]
+                elif engine in ("deepseek", "claude", "antigravity"):
+                    engine_prov_map = {"deepseek": "deepseek", "claude": "anthropic", "antigravity": "google"}
+                    allowed_for_run = [engine_prov_map[engine]]
+
                 if broker_creds:
-                    broker = CredentialBroker(broker_creds)
+                    broker = CredentialBroker(broker_creds, allowed_providers=allowed_for_run)
                     try:
                         if egress_active:
                             broker.start(unix_path=str(broker_sock),
@@ -1377,6 +1395,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             f"the run rather than leaking it: {e}") from e
                     apply_broker_urls(
                         adapter_env, {p: broker.base_url(p) for p in broker.providers})
+                    # agents-3z8: ensure no real API keys for non-allowed providers cross into
+                    # the sandboxed engine's environment.
+                    for prov, (_placeholder, _base_url, secret_vars) in BROKER_PROVIDERS.items():
+                        if prov not in broker.providers:
+                            for var in secret_vars:
+                                adapter_env.pop(var, None)
                     # agents-854: pi ignores *_BASE_URL env vars, so the broker swap above is
                     # not enough for pi — write the broker routing into its provider config,
                     # which IS honoured. The provider is whatever the selected model names, so
