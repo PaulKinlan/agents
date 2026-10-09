@@ -129,6 +129,20 @@ class TestTreeDiagramParser(unittest.TestCase):
             self.assertIn("audits/", references)
             self.assertNotIn("PLAN.md", references)
 
+    def test_dotted_directory_name_does_not_resolve_via_file_fallback(self):
+        """[agents-vdb] A directory with a dot/extension like `audits.json/` or `audits.json`
+        must not resolve against a nested directory `docs/audits.json/` via bare-filename matching.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "docs" / "audits.json").mkdir(parents=True)
+            (tmp / "docs" / "audits.json" / "note.md").write_text("# note\n")
+            (tmp / "AGENTS.md").write_text(
+                "Versioned notes live in `audits.json/` or `audits.json`.\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("audits.json/", references)
+            self.assertIn("audits.json", references)
+
     def test_explicit_directory_path_resolves(self):
         """[agents-vdb] An explicitly qualified directory path resolves without issue."""
         with tempfile.TemporaryDirectory() as tmpdir:

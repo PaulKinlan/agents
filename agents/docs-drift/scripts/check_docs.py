@@ -173,13 +173,12 @@ def git_tracked_or_deleted(target_dir: Path, rel_path: str) -> Tuple[bool, bool]
 
 
 def _file_names(target_dir: Path) -> Set[str]:
-    """Every file and directory name under the target (outside .git), walked once."""
+    """Every regular file name under the target (outside .git), walked once."""
     key = str(target_dir)
     if key not in _NAME_INDEX_CACHE:
         names: Set[str] = set()
         for _root, dirs, files in os.walk(target_dir):
             dirs[:] = [d for d in dirs if d != ".git"]
-            names.update(dirs)
             names.update(files)
         _NAME_INDEX_CACHE[key] = names
     return _NAME_INDEX_CACHE[key]
@@ -311,7 +310,8 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     # Bare directory matching (e.g. `audits/` resolving to `docs/audits/`) was retired
     # (agents-vdb) to eliminate ambiguity (the README-root collapse was caused by this
     # heuristic misfiring). Directories must be referenced with their actual path.
-    if "/" not in clean_p and "." in clean_p and clean_p in _file_names(target_dir):
+    # A path ending in "/" is explicitly a directory reference and must never match a file.
+    if not path_str.endswith("/") and "/" not in clean_p and "." in clean_p and clean_p in _file_names(target_dir):
         return True, False
 
     return False, False
