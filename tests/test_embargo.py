@@ -18,8 +18,10 @@ from lib.embargo import (  # noqa: E402
     VALID_SEVERITIES,
     effective_severity,
     embargo_reason,
+    is_false_positive,
     normalize_severity,
     normalize_visibility,
+    reported_severity,
 )
 
 
@@ -86,6 +88,85 @@ class TestEffectiveSeverity(unittest.TestCase):
 
     def test_missing_label_on_an_ordinary_agent_is_critical(self):
         self.assertEqual(effective_severity(finding(severity=None)), "critical")
+
+
+class TestDummyCredentialFalsePositive(unittest.TestCase):
+    """Obvious test-fixture/dummy keys are false positives, not live secrets (agents-3r7)."""
+
+    DUMMY_RAW_MATCHES = [
+        "sk-ant-secret-token-1234567890",
+        "sk-ant-secret-1234567890",
+        "sk-ant-test-not-real",
+        "sk-ant-REALKEY-do-not-leak",
+        "sk-ant-REAL-DO-NOT-LEAK",
+        "sk-REAL-DO-NOT-LEAK",
+        "sk-test-placeholder",
+        "sk-abcdefghijklmnopqrstu",
+        "sk-proj-abcdefghijklmnop1234",
+        "AbCdEfGhIjKlMnOpQrStUvWxYz",
+        "sk-dont-leak-placeholder",
+        "sk-your-api-key-1234567890",
+    ]
+
+    def test_obvious_dummy_markers_are_false_positives(self):
+        for raw_match in self.DUMMY_RAW_MATCHES:
+            with self.subTest(raw_match=raw_match):
+                self.assertTrue(is_false_positive(
+                    finding(agent="secret-scan", raw_match=raw_match)))
+
+    def test_dummy_raw_match_beats_a_masked_snippet(self):
+        # The model can mask its snippet; the scanner's raw match is the faithful value.
+        self.assertTrue(is_false_positive(finding(
+            agent="secret-scan", snippet="sk-ant-***",
+            raw_match="sk-ant-secret-token-1234567890")))
+
+    def test_realistic_keys_are_not_false_positives(self):
+        realistic = [
+            "sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s",
+            "AKIAIOSFODNN7EXAMPL3",
+            "ghp_1a2B3c4D5e6F7g8H9i0Jk1Lm2Nn3Oo4Pq5Rs",
+            "sk-proj-9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+        ]
+        for raw_match in realistic:
+            with self.subTest(raw_match=raw_match):
+                self.assertFalse(is_false_positive(
+                    finding(agent="secret-scan", raw_match=raw_match)))
+
+    def test_dummy_sounding_snippet_does_not_flag_a_real_key(self):
+        # A real key on a line with a dummy-looking variable name or comment must NOT be a
+        # false positive: the marker is on the raw match, never the surrounding code line.
+        real_raw = "sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s"
+        for snippet in (
+            'secret_token = "sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s"',
+            '// DO NOT LEAK: api_key = "sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s"',
+            'placeholder_key = "sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s"',
+            'const token: Ref<Token> = "sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s"',
+        ):
+            with self.subTest(snippet=snippet[:40]):
+                self.assertFalse(is_false_positive(
+                    finding(agent="secret-scan", snippet=snippet, raw_match=real_raw)))
+
+    def test_dummy_credential_is_not_routed_critical(self):
+        for raw_match in ("sk-test-placeholder", "sk-ant-secret-token-1234567890"):
+            with self.subTest(raw_match=raw_match):
+                self.assertEqual(
+                    effective_severity(finding(agent="secret-scan", raw_match=raw_match)),
+                    "info")
+
+    def test_real_key_with_model_false_positive_still_routes_critical(self):
+        # SF-03: the model's false_positive verdict cannot demote a real key from a scanner.
+        # Reporting honours the verdict (is_false_positive -> info), but routing stays critical.
+        item = finding(agent="secret-scan",
+                       raw_match="sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s",
+                       false_positive=True, severity="info")
+        self.assertTrue(is_false_positive(item))       # the model's verdict is the reported truth
+        self.assertEqual(reported_severity(item), "info")
+        self.assertEqual(effective_severity(item), "critical")  # routing: SF-03, identity-critical
+
+    def test_dummy_credential_reports_info(self):
+        self.assertEqual(
+            reported_severity(finding(agent="secret-scan", raw_match="sk-test-placeholder")),
+            "info")
 
 
 class TestEmbargoReason(unittest.TestCase):
