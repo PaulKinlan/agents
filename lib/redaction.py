@@ -97,9 +97,23 @@ GENERIC_REMEDIATION = "Rotate the credential, remove it from source, and re-run 
 # proved it for `path`, `rule_id` and for non-string containers anywhere in the set. `state` and
 # `change` are store-controlled enums rather than model output, but they are rendered, so they are
 # coerced too; the dispatch filters that read them simply match nothing if one is malformed.
+# CHECKLIST FOR ADDING A RENDERED FIELD (agents-ag4, after a review found a real leak):
+# a field on a finding record is a publication channel by default - redact_finding copies every
+# field of the record, and the store, the delta report and the step summary are all rendered from
+# its output. Before adding one:
+#   1. add it to RENDERED_TEXT_FIELDS below, or it is copied verbatim;
+#   2. add an IDENTITY_SHAPES entry if its legitimate shape is known, with a FAIL-CLOSED EMPTY
+#      fallback rather than a placeholder a reader could mistake for a real value;
+#   3. decide explicitly whether it belongs in lib/findings.py compute_fingerprint. Model-supplied
+#      text must NOT: the fingerprint is identity (dedup, the new/fixed/regressed delta, suppression
+#      keying), so folding one in re-books every stored record;
+#   4. if it is model prose, decide whether it may be published at all. Where prose cannot be checked
+#      for an echo of a value whose shape is unknown - a credential finding, or any security-sensitive
+#      agent - it must be DROPPED, not masked. model_rule_id is the worked example; see
+#      redact_finding's two withholding branches and tests/test_model_rule_id.py.
 RENDERED_TEXT_FIELDS = (
     "agent", "title", "description", "remediation", "snippet",
-    "path", "rule_id", "severity", "suppression_reason", "line_number",
+    "path", "rule_id", "model_rule_id", "severity", "suppression_reason", "line_number",
     "state", "change",
 )
 
@@ -116,6 +130,17 @@ CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match")
 IDENTITY_SHAPES = {
     "agent": (re.compile(r"[A-Za-z0-9_.-]{1,64}"), "unknown-agent"),
     "rule": (re.compile(r"[A-Za-z0-9_.:-]{1,64}"), "unclassified"),
+    # The model's own label, treated exactly like a rule id - same shape, same fail-closed
+    # fallback - except that a refused label becomes empty rather than "unclassified": there
+    # is no label to show, and inventing one would be the thing this field exists to avoid.
+    # ACCEPTED LIMIT, stated here because this is where the shape is declared: for a credential
+    # finding and for any security-sensitive agent the label is DROPPED OUTRIGHT in
+    # redact_finding, never masked, so for those records this shape is never what saves it. The
+    # reason is that these are exactly the cases where the shape of a value cannot be known - a
+    # label under 20 characters, or one broken up by delimiters, matches this pattern and
+    # OPAQUE_RUN both while still being a secret, and a mask that cannot be proven sufficient is
+    # not a mask. The raw label stays in the model's own output in the run artifact.
+    "model_rule": (re.compile(r"[A-Za-z0-9_.:-]{1,64}"), ""),
     "path": (re.compile(r"[A-Za-z0-9_. /-]{1,200}"), "unknown"),
 }
 OPAQUE_RUN = re.compile(r"[A-Za-z0-9]{20,}")
@@ -287,7 +312,8 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
 
     # Shape-check the fields whose legitimate form is known. After masking, so a recognised
     # shape is reported as masked rather than dropped.
-    for field, kind in (("agent", "agent"), ("rule_id", "rule"), ("path", "path")):
+    for field, kind in (("agent", "agent"), ("rule_id", "rule"),
+                        ("model_rule_id", "model_rule"), ("path", "path")):
         if field in published:
             published[field] = sanitise_identity(published[field], kind)
 
@@ -298,6 +324,12 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     if credential:
         published["snippet"] = f"[redacted:{agent or 'credential'} match at {location}]"
         published["title"] = f"{rule} match at {location}"
+        # agents-ag4, review P0: a model-authored label is prose, and prose cannot be checked for
+        # an echo of a value whose shape is unknown - which is why this branch publishes derived
+        # text only. A label under 20 chars, or one broken up by delimiters, evades both the
+        # pattern mask and OPAQUE_RUN, so it must not be kept here at all. The raw label is still
+        # in the local run artifact for whoever has to rotate the credential.
+        published["model_rule_id"] = ""
         # agents-5gg: non-secret-scan agents are models, not deterministic scanners;
         # report their origin faithfully rather than attributing to a scanner.
         if agent in CREDENTIAL_AGENTS:
@@ -317,6 +349,9 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
         published["snippet"] = "[withheld]"
         published["description"] = "[withheld]"
         published["remediation"] = "[withheld]"
+        # agents-ag4, review P1: same reason - this branch withholds model prose wholesale
+        # because it can quote a secret of unrecognised shape, and a label is model prose.
+        published["model_rule_id"] = ""
 
     if "raw_match" in published:
         published["raw_match"] = (
