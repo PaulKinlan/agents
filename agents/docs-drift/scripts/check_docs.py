@@ -265,6 +265,18 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     Returns (exists, was_wildcard).
     """
     clean_p = path_str.strip()
+    # A `:line` suffix (or `:line:col`, or a `:line-line` range) is a LOCATION inside a
+    # file, not part of its name: `lib/findings.py:256` names an existing file and was
+    # reported missing purely because the suffix was treated as part of the path - the
+    # one genuine false positive in the agents-kqd3 class (agents-pxx8). Only resolution
+    # strips it: the recorded `reference` stays exactly as the document wrote it, so a
+    # genuinely missing `no/such/file.py:12` is still reported, with its suffix intact.
+    # The remainder must still look like a path, so a clock-like token (`12:30`) cannot
+    # be reduced to a prefix and resolved against a directory that happens to be named
+    # that - which would hide the reference instead of reporting it.
+    _without_location = re.sub(r"(?::\d+)+(?:-\d+)?$", "", clean_p)
+    if _without_location != clean_p and ("/" in _without_location or "." in _without_location):
+        clean_p = _without_location
     if clean_p.endswith("/"):
         clean_p = clean_p[:-1]
 
