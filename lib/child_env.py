@@ -148,13 +148,14 @@ def child_environment(
     parent: Optional[Mapping[str, str]] = None,
     broker_urls: Optional[Mapping[str, str]] = None,
     trusted_tools: bool = False,
+    sink_options: Optional[Mapping[str, object]] = None,
     proxied: bool = False,
 ) -> Dict[str, str]:
     """Build the environment for one child process by addition.
 
-    `engine` selects the model-auth class; `sink`/`github` add a GitHub token for the children
-    that legitimately talk to GitHub. `parent` defaults to os.environ and is only read, never
-    mutated.
+    `engine` selects the model-auth class; `github` adds a GitHub token (a pre-pass that
+    declares `gh`); `sink` adds credentials declared by its configured adapters.
+    `parent` defaults to os.environ and is only read, never mutated.
 
     `trusted_tools` is for the children that resolve a trusted tool THEMSELVES — the findings
     dispatch and promotion run `lib/sinks/*`, which call `lib.tool_pins.resolve_tool` for
@@ -193,11 +194,15 @@ def child_environment(
             env[UNPINNED_ALLOW_ENV] = str(source[UNPINNED_ALLOW_ENV])
 
     names = list(ENGINE_CREDENTIALS.get(engine or "", ()))
-    # agents-eyo: `github-issues` as a sink string survives only as the explicit promotion
-    # flow's sentinel (factory promote); findings no longer dispatch to public issues, so
-    # `both`/`all` (now aliases for beads) grant no GitHub token.
-    if github or (sink and any(s.strip() == "github-issues" for s in sink.split(","))):
+    # Explicit promotion grants a GitHub token; legacy both/all aliases only select beads.
+    if github:
         names.extend(GITHUB_TOKEN_VARS)
+    if sink:
+        # Each sink adapter names what its delivery needs (github-issues: a GitHub token;
+        # command: the manifest's `sink_env` list). This module never names a tracker
+        # (fleet-km8); the set for the built-in sinks is unchanged.
+        from lib.sinks import credential_env
+        names.extend(credential_env(sink, sink_options))
     for name in names:
         value = source.get(name)
         if value:

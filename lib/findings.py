@@ -14,8 +14,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -50,12 +48,12 @@ except ImportError:
 
 # Redaction removes the value from published text; the embargo decides whether a finding is
 # routed to a tracker at all. It is a separate module so the policy has one home and one test.
+from lib import sinks
 from lib.embargo import (effective_severity, embargo_reason, is_false_positive,
                          reported_severity)
 # Host-side trusted tools are resolved by absolute path + SHA-256 pin (agents-7bj); a
 # mismatch fails closed rather than executing an unverified gh/bd.
 from lib.tool_pins import ToolPinError, resolve_tool
-from lib.sinks.beads import _dispatch_beads
 from lib.sinks.github import promote_issue
 
 
@@ -732,7 +730,7 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     return publishable, held
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = None, agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, repo: Optional[str] = None, beads_dir: Optional[Path] = None) -> Dict[str, Any]:
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = None, agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, repo: Optional[str] = None, beads_dir: Optional[Path] = None, sink_options: Optional[Dict[str, Any]] = None, run_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
@@ -743,32 +741,36 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     file described only the last station and one empty station printed "Clean Delta" for the
     whole run (fleet-810). `fragment` receives this station's delta as JSON for the line.
 
+    Delivery is delegated to the adapters in lib/sinks (fleet-km8): this function owns
+    only *what* may be published (state, receipts, false positives, the embargo) and the
+    accounting. `sink_options` are the target manifest's `sink_*` settings.
+
     Returns the per-sink delivery accounting.
     """
     print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed, {stats.get('false_positive', 0)} triaged false positive")
 
-    sinks = [s.strip() for s in sink.split(",") if s.strip()]
-    # agents-eyo: findings file to beads automatically. `both`/`all` are legacy aliases for the
-    # one tracker sink that remains. Public GitHub issues are no longer a FINDINGS sink — the
-    # issue-triage station handles public INPUT issues as a separate flow (promote_issue is that
-    # flow's explicit, human-approved issue -> bead link).
-    if "both" in sinks or "all" in sinks:
-        sinks = ["beads"]
-    if "github-issues" in sinks:
+    names = sinks.expand(sink)
+    # Public issues are reserved for human-approved public input, not automatic findings.
+    if "github-issues" in names:
         raise ValueError("github-issues is no longer a findings sink: internal findings file "
                          "to beads automatically; public-input issue triage is a separate flow")
-
+    context = sinks.SinkContext(target_name=target_name, target_dir=target_dir,
+                                visibility=visibility, agent=agent, stats=dict(stats),
+                                options=dict(sink_options or {}), beads_dir=beads_dir,
+                                diagnostics_dir=run_dir or (
+                                    FACTORY_ROOT / "runs" / f"sink-{target_name}-"
+                                    f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"))
     sink_results: Dict[str, Dict[str, Any]] = {}
-    for s in sinks:
-        if s == "file":
+    for s in names:
+        adapter = sinks.get(s)
+        if adapter is not None and adapter.private:
             continue
         publishable, held = _partition_for_sink(s, processed_findings, visibility)
-        result = dict(held, eligible=len(publishable), published=0, failed=0, skipped=0,
-                      duplicate=0, note="")
-        if s == "beads":
-            result.update(_dispatch_beads(beads_dir or target_dir, publishable, visibility))
-        else:
+        result = dict(held, eligible=len(publishable), **sinks.new_result())
+        if adapter is None:
             result["note"] = f"unknown sink {s!r}: nothing published"
+        else:
+            result.update(adapter.publish(context, publishable))
         sink_results[s] = result
         print(f"[Sink {s}] published {result['published']}, failed {result['failed']}, "
               f"duplicate {result['duplicate']}, "
@@ -1089,12 +1091,21 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--visibility", choices=["public", "private"],
                         help="Explicit target visibility; missing withholds high/critical from a synced tracker")
     parser.add_argument("--repo", help="Explicit public github.com/OWNER/REPO issue destination")
+    parser.add_argument("--run-dir", help="Private station run directory for sink diagnostics")
+    parser.add_argument("--sink-option", action="append", default=[], metavar="KEY=VALUE",
+                        help="A sink_* setting from the target manifest")
     parser.add_argument("--target-dir", default=".", help="Target repository directory")
     parser.add_argument("--station-only", action="store_true",
                         help="One station of a factory line: write <target>-<agent>-delta.md, "
                              "not the run's <target>-delta.md (the line writes that)")
     parser.add_argument("--fragment", help="Write this station's delta as JSON here (for the line report)")
     args = parser.parse_args(argv)
+    sink_options = {}
+    for option in args.sink_option:
+        key, sep, value = option.partition("=")
+        if not sep or not key.startswith("sink_"):
+            parser.error("--sink-option requires sink_KEY=VALUE")
+        sink_options[key] = value
 
     if args.promote_issue:
         if not args.beads_dir or not args.repo or args.visibility != "public":
@@ -1139,6 +1150,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 station_only=args.station_only,
                 fragment=Path(args.fragment) if args.fragment else None,
                 beads_dir=Path(args.beads_dir) if args.beads_dir else None,
+                sink_options=sink_options,
+                run_dir=Path(args.run_dir) if args.run_dir else None,
             )
         finally:
             store.save()

@@ -86,12 +86,17 @@ def run_station_command(
     budget: StationBudget,
     step: str,
     check: bool = False,
+    kill_group_on_exit: bool = False,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """Run one station command under `budget`, killing its whole process group on expiry.
 
     A new session is used so the timeout reaches the engine the adapter spawned, not only the
     adapter shell. Expiry raises StationTimeout: the caller treats it as a station failure.
+
+    `kill_group_on_exit` also kills (and waits out) whatever the command left running in its
+    group when it exits normally — for a command holding delivery credentials, where a
+    lingering descendant could still act after its result was recorded (command sink).
     """
     timeout = budget.timeout_for(step)
     # `capture_output` and `input` are subprocess.run conveniences, not Popen arguments.
@@ -111,10 +116,17 @@ def run_station_command(
         except subprocess.TimeoutExpired:  # a child escaped the group and holds the pipes
             proc.kill()
             proc.communicate()
+        _wait_for_group_exit(proc.pid)
         raise StationTimeout(
             f"{budget.label}: {step} exceeded the {budget.minutes:g} min station budget; "
             f"process group killed"
         ) from None
+    if kill_group_on_exit:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # pgid == pid: the session started above
+        except (ProcessLookupError, PermissionError):
+            pass
+        _wait_for_group_exit(proc.pid)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
@@ -129,3 +141,23 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
             proc.kill()
         except ProcessLookupError:
             pass
+
+
+GROUP_EXIT_WAIT_SECONDS = 5.0
+
+
+def _wait_for_group_exit(pgid: int, limit: float = GROUP_EXIT_WAIT_SECONDS) -> None:
+    """Wait (bounded) until no process remains in group `pgid` after it was SIGKILLed.
+
+    Descendants are not our children, so they cannot be waited for directly; signal 0 to the
+    group reports whether any member is left.
+    """
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        time.sleep(0.05)

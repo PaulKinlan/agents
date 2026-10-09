@@ -37,6 +37,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              reported_severity)
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
                                prune_run_dirs, retention_config)
@@ -60,6 +61,7 @@ except ImportError:
                              reported_severity)
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
                                prune_run_dirs, retention_config)
@@ -710,24 +712,12 @@ def detect_sink(target_path: Path, target_cfg: Dict[str, Any], explicit_sink: Op
     if explicit_sink:
         return explicit_sink
 
-    # Explicit target publication policy takes precedence over generic task-tracker prose.
-    # AGENTS.md requiring bd for human work is a strong signal the target tracks work as beads,
-    # which is exactly where findings belong (agents-eyo: findings file to beads automatically).
+    # A committed manifest takes precedence over generic target guidance.
     if target_cfg.get("sink"):
         return target_cfg["sink"]
-
-    # Legacy fallback only for targets without an explicit sink declaration.
-    agents_md = target_path / "AGENTS.md"
-    if agents_md.exists():
-        content = agents_md.read_text(encoding="utf-8", errors="ignore")
-        content_lower = content.lower()
-        if (
-            "beads only" in content_lower
-            or "bd is the only" in content_lower
-            or "uses **bd**" in content_lower
-            or "use `bd` for all task tracking" in content_lower
-        ):
-            return "beads"
+    detected = sinks.detect(target_path)
+    if detected:
+        return detected
 
     # No target policy: retain a local file evidence trail.
     return "file"
@@ -1649,7 +1639,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             "--agent", agent_name,
             "--input", str(report_path),
             "--sink", sink,
-            "--target-dir", str(target_dir)
+            "--target-dir", str(target_dir),
+            "--run-dir", str(run_dir),
         ]
         fragment_path = run_dir / "delta.json"
         if station_only:
@@ -1671,9 +1662,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # them: the model's strings are untrusted, the scanner's are not (agents-nha).
         if candidates_snapshot is not None:
             findings_cmd += ["--candidates", str(candidates_file)]
+        sink_options = {k: v for k, v in target_cfg.items()
+                        if isinstance(k, str) and k.startswith("sink_")}
+        for key, value in sink_options.items():
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                findings_cmd += ["--sink-option", f"{key}={value}"]
         # The findings child resolves `bd` (and `gh`) itself through lib.sinks, so it needs the
         # same trusted-tool pin source the parent just verified against (agents-dpt).
-        dispatch_env = child_environment(sink=sink, trusted_tools=True)
+        dispatch_env = child_environment(sink=sink, sink_options=sink_options, trusted_tools=True)
         # agents-7bj: when the sink is the synced beads tracker the findings child resolves
         # `bd` by name; give it a PATH rebuilt from only that tool's install tree (plus the
         # system bin dirs a wrapped/shimmed bd's shebang needs), so it can never pick up a
@@ -2376,7 +2372,7 @@ def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     run_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     run_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
     run_parser.add_argument("--model", default=None, help="Model for the pi engine (default deepseek/deepseek-flash)")
-    run_parser.add_argument("--sink", help="Override sink (file or beads)")
+    run_parser.add_argument("--sink", help="Override sink (file, beads, command; comma-separated for several)")
     run_parser.add_argument("--visibility", choices=["public", "private"],
                             help="Explicit target visibility for a raw --target path (a named "
                                  "target's manifest wins); missing still withholds high/critical "
@@ -2388,7 +2384,7 @@ def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     line_parser.add_argument("--target", required=True, help="Target project name (from targets/) or path")
     line_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agents with")
     line_parser.add_argument("--model", default=None, help="Model for the pi engine (default deepseek/deepseek-flash)")
-    line_parser.add_argument("--sink", help="Override sink (file or beads)")
+    line_parser.add_argument("--sink", help="Override sink (file, beads, command; comma-separated for several)")
     line_parser.add_argument("--visibility", choices=["public", "private"],
                              help="Explicit target visibility for a raw --target path (a named "
                                   "target's manifest wins); missing still withholds high/critical "
@@ -2402,7 +2398,7 @@ def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     hc_parser.add_argument("--iterations", type=int, default=1, help="Number of hill-climb iterations")
     hc_parser.add_argument("--apply", action="store_true", help="Apply candidate edits in worktree, re-measure, keep wins, revert losses")
     hc_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
-    hc_parser.add_argument("--sink", help="Override sink (file or beads)")
+    hc_parser.add_argument("--sink", help="Override sink (file, beads, command; comma-separated for several)")
     hc_parser.add_argument("--visibility", choices=["public", "private"],
                            help="Explicit target visibility for a raw --target path (a named "
                                 "target's manifest wins); missing still withholds high/critical "
