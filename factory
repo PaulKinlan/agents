@@ -2340,8 +2340,8 @@ def promote_public_issue(target_name: str, issue_url: str) -> None:
     print(res.stdout.strip())
 
 
-def main():
-    parser = argparse.ArgumentParser(description="The Software Factory (factory)")
+def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog or "factory", description="The Software Factory (factory)")
     parser.add_argument("--agent", action="store_true", dest="agent_guide", help="Print machine-actionable instructions and recipes for AI agents to integrate the factory")
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to run")
 
@@ -2446,6 +2446,12 @@ def main():
     trig_p.add_argument("--target", required=True, help="Target name")
     trig_p.add_argument("--agent", required=True, help="Agent name")
     trig_p.add_argument("--platform", choices=["auto", "launchd", "systemd", "darwin", "linux"], default="auto")
+
+    return parser
+
+
+def main():
+    parser = build_parser()
 
     args = parser.parse_args()
     if getattr(args, "agent_guide", False):
