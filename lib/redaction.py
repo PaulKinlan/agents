@@ -99,7 +99,7 @@ GENERIC_REMEDIATION = "Rotate the credential, remove it from source, and re-run 
 # coerced too; the dispatch filters that read them simply match nothing if one is malformed.
 RENDERED_TEXT_FIELDS = (
     "agent", "title", "description", "remediation", "snippet",
-    "path", "rule_id", "severity", "suppression_reason", "line_number",
+    "path", "rule_id", "model_rule_id", "severity", "suppression_reason", "line_number",
     "state", "change",
 )
 
@@ -116,6 +116,10 @@ CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match")
 IDENTITY_SHAPES = {
     "agent": (re.compile(r"[A-Za-z0-9_.-]{1,64}"), "unknown-agent"),
     "rule": (re.compile(r"[A-Za-z0-9_.:-]{1,64}"), "unclassified"),
+    # The model's own label, treated exactly like a rule id - same shape, same fail-closed
+    # fallback - except that a refused label becomes empty rather than "unclassified": there
+    # is no label to show, and inventing one would be the thing this field exists to avoid.
+    "model_rule": (re.compile(r"[A-Za-z0-9_.:-]{1,64}"), ""),
     "path": (re.compile(r"[A-Za-z0-9_. /-]{1,200}"), "unknown"),
 }
 OPAQUE_RUN = re.compile(r"[A-Za-z0-9]{20,}")
@@ -287,7 +291,8 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
 
     # Shape-check the fields whose legitimate form is known. After masking, so a recognised
     # shape is reported as masked rather than dropped.
-    for field, kind in (("agent", "agent"), ("rule_id", "rule"), ("path", "path")):
+    for field, kind in (("agent", "agent"), ("rule_id", "rule"),
+                        ("model_rule_id", "model_rule"), ("path", "path")):
         if field in published:
             published[field] = sanitise_identity(published[field], kind)
 

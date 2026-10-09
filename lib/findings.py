@@ -550,7 +550,17 @@ class FindingsStore:
         for item in raw_findings:
             if not isinstance(item, dict):
                 continue
+            model_label = item.get("rule_id")
             rule_id, path = bind_candidates(item, candidate_index, target_dir)
+            # agents-ag4: when the binder refuses the model's own label (no candidate set, or a
+            # context-shaped one like vuln-discovery's), the label was simply lost to triage. Keep
+            # it in its own field, which is NOT scanner provenance and is never read as such: it
+            # is not an input to compute_fingerprint (identity) nor to the credential/security
+            # rule-hint classification (routing severity and embargo), and it is masked and
+            # shape-checked like every other rendered model string (lib/redaction.py).
+            model_rule_id = (model_label.strip()
+                             if isinstance(model_label, str) and model_label.strip()
+                             and model_label.strip() != rule_id else "")
             item["severity"] = bind_severity(item, rule_id, path, candidate_index)
             item["raw_match"] = identity_raw_match(item, rule_id, path, candidate_index)
             item["agent"] = agent
@@ -603,6 +613,10 @@ class FindingsStore:
                 "fingerprint": fp,
                 "agent": agent,
                 "rule_id": rule_id,
+                # The model's own label, kept only when the store did not accept it as the rule
+                # id - so the field means "the label we refused to trust as a rule", and is empty
+                # on the common path. Display/triage only; see the note at its computation.
+                "model_rule_id": model_rule_id,
                 "path": path,
                 "line_number": item.get("line_number"),
                 "snippet": item.get("snippet"),
@@ -994,6 +1008,9 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
                 continue
             lines.append(f"### {badge} {f['title']} (`{f['state']}`)")
             lines.append(f"- **Rule**: `{f['rule_id']}`")
+            if f.get("model_rule_id"):
+                lines.append(f"- **Model's own label** (not scanner provenance): "
+                             f"`{f['model_rule_id']}`")
             lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`")
             lines.append(f"- **Fingerprint**: `{f['fingerprint'][:16]}...`")
             lines.append(f"- **Description**: {f['description']}")
