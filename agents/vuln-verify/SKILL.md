@@ -57,8 +57,10 @@ For each candidate:
   - This is mandatory, not optional: a report that returns `verified`/`disproved` for an
     unlocatable record is REJECTED by the dispatcher (agents-0tl).
   - A finding with no single line but a real whole-repo scope ("no SECURITY.md", "no
-    dependabot config") is not unlocatable: cite the path you did read (e.g. the repository
-    root file or directory that should exist) rather than inventing a location.
+    dependabot config") is not unlocatable: cite the nearest path that EXISTS - the directory
+    the absent file belongs in (`.github/`, `scripts/`) or a file you read while checking. A
+    path that does not exist is not a location, and neither is the repository root itself
+    (`"."`), so name the real place you looked.
 
 - **DISPROVED**:
   - Assigned when *any* defense, sanitizer, auth gate, framework handler, or threat-model trust rule mitigates the issue or renders it unreachable.

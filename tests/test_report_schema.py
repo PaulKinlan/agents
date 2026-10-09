@@ -347,3 +347,14 @@ class TestUnlocatableVerdicts(unittest.TestCase):
         errors = validate_agent_report(agent_dir, cfg, self._report(verdict="definitely-fine"),
                                        target_dir=self.target)
         self.assertTrue(errors)
+
+    def test_the_repository_root_is_not_a_location_for_a_verdict(self):
+        """Review P1 (f76a368): a bare "." must not let a verdict look located."""
+        for rootish in (".", "./"):
+            violations = unlocatable_verdicts(self._report(path=rootish), self.target)
+            self.assertEqual(len(violations), 1, f"path={rootish!r} must be rejected")
+
+    def test_a_directory_location_is_accepted_for_a_verdict(self):
+        """Whole-repo findings cite the nearest EXISTING path (a directory is fine)."""
+        (self.target / ".github").mkdir()
+        self.assertEqual(unlocatable_verdicts(self._report(path=".github"), self.target), [])

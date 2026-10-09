@@ -238,3 +238,10 @@ class TestBindingNeverDestroysARealLocation(unittest.TestCase):
         finally:
             store.close()
         self.assertEqual(processed[0]["path"], "lib/bench/runner.py")
+
+    def test_the_target_root_is_not_a_location(self):
+        """Review P1 (f76a368): `relative_to` accepts the root itself, so "." would pass."""
+        (self.target / "sub").mkdir()
+        for rootish in (".", "./", "sub/..", "."):
+            _, path = bind_candidates(finding(path=rootish), self.CONTEXT_INDEX, target_dir=self.target)
+            self.assertEqual(path, "unknown", f"{rootish!r} must not count as a location")

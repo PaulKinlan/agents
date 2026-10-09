@@ -110,6 +110,11 @@ def path_resolves_in_target(path: Any, target_dir: Optional[Path]) -> bool:
         candidate.relative_to(root)
     except (OSError, ValueError):
         return False
+    if candidate == root:
+        # The root is not a location. `relative_to` accepts it, so a bare "." / "./" (or
+        # "subdir/..") would otherwise count as citing something; lib/path_security.py refuses
+        # resolve-to-target-dir for the same reason.
+        return False
     return candidate.exists()
 
 def compute_fingerprint(agent: str, rule_id: str, path: str, snippet: str) -> str:
