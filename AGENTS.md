@@ -77,7 +77,7 @@ re-withheld for that run. `browser` stays withheld until a localhost-only browse
 
 On Linux hosts with bubblewrap, the engine session and the pre-pass additionally run inside an
 OS sandbox (`lib/sandbox.py`, agents-9n7): the target read-only, the factory repo and system dirs read-only,
-everything else invisible, `$HOME` hidden. The child's executables are bound by *name* from a narrow allowlist, never as
+`$HOME` hidden (auth via env only). The child's executables are bound by *name* from a narrow allowlist, never as
 whole PATH directories, so an unrelated directory on PATH cannot leak into the read scope.
 For an engine confined only by this sandbox (pi), a host where bubblewrap cannot run **refuses**
 the run rather than degrading silently; `FACTORY_ALLOW_UNSANDBOXED=1` is the one explicit
