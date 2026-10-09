@@ -107,6 +107,10 @@ def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str
     fp, = fingerprints
     external_ref = f"factory:github.com/{repo.lower()}:{fp}"
 
+    # Lazy import: lib.sinks.github <- lib.findings would be a cycle at module import time
+    # (findings.py imports promote_issue from here), so import the store only when promotion runs.
+    from lib.findings import FindingsStore
+
     with FindingsStore(target_name=target_name) as store:
         finding = store.data["findings"].get(fp)
         if not isinstance(finding, dict) or finding.get("fingerprint") != fp:
