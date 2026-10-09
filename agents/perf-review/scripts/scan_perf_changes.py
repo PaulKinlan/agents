@@ -136,7 +136,7 @@ def scan_files(target_dir: Path, priority_files: List[str]) -> List[Dict[str, An
             all_files.append(p)
 
     for root, dirs, files in os.walk(target_dir):
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        dirs[:] = sorted([d for d in dirs if d not in IGNORE_DIRS])
         for fname in sorted(files):
             fpath = Path(root) / fname
             if fpath.suffix.lower() in CODE_EXTS and fpath not in all_files:
@@ -176,8 +176,14 @@ def scan_files(target_dir: Path, priority_files: List[str]) -> List[Dict[str, An
                 })
                 break
 
-    # Sort so findings in recently changed files appear first
-    candidates.sort(key=lambda c: (not c["touched_in_recent_commits"], c["severity"] != "high"))
+    # Sort so findings in recently changed files appear first, with deterministic tie-breakers
+    candidates.sort(key=lambda c: (
+        not c["touched_in_recent_commits"],
+        c["severity"] != "high",
+        c["path"],
+        c.get("line_number") or 0,
+        c["rule_id"],
+    ))
     return candidates
 
 
