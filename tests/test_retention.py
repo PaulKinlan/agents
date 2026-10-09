@@ -38,9 +38,15 @@ sys.path.insert(0, str(ROOT))
 from lib.retention import (  # noqa: E402
     ACTIVE_GRACE_SECONDS_DEFAULT,
     ACTIVE_MARKER_NAME,
+    FINDINGS_RETENTION_BYTES_DEFAULT,
+    HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT,
     RETAIN_AGE_DAYS_DEFAULT,
     RETAIN_COUNT_DEFAULT,
     active_grace_seconds,
+    findings_retention_config,
+    hillclimb_retention_ttl,
+    prune_findings,
+    prune_hillclimb_dirs,
     prune_run_dirs,
     retention_config,
     run_directories,
@@ -54,6 +60,23 @@ def make_dir(runs_dir: Path, name: str, mtime: float) -> Path:
     path = runs_dir / name
     path.mkdir(parents=True)
     (path / "report.json").write_text("{}\n", encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def make_finding(findings_dir: Path, name: str, mtime: float, size: int = 100) -> Path:
+    """Create a findings/ file of ``size`` bytes and pin its mtime."""
+    path = findings_dir / name
+    path.write_bytes(b"x" * size)
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def make_hillclimb(runs_dir: Path, name: str, mtime: float) -> Path:
+    """Create a hill-climb proposal directory and pin its mtime."""
+    path = runs_dir / name
+    path.mkdir(parents=True)
+    (path / "session.patch").write_text("patch\n", encoding="utf-8")
     os.utime(path, (mtime, mtime))
     return path
 
@@ -336,6 +359,176 @@ class TestFactoryHook(unittest.TestCase):
                 remaining,
                 sorted(["old-22", "old-23", "old-24", new_dir.name]),
             )
+
+
+class TestFindingsRetentionConfig(unittest.TestCase):
+    def test_default_budget_is_bounded(self):
+        self.assertGreater(FINDINGS_RETENTION_BYTES_DEFAULT, 0)
+        self.assertEqual(findings_retention_config({}), FINDINGS_RETENTION_BYTES_DEFAULT)
+
+    def test_env_override(self):
+        self.assertEqual(
+            findings_retention_config({"FACTORY_FINDINGS_RETENTION_BYTES": "2048"}), 2048)
+
+    def test_unparseable_or_non_positive_falls_back_to_default(self):
+        self.assertEqual(
+            findings_retention_config({"FACTORY_FINDINGS_RETENTION_BYTES": "many"}),
+            FINDINGS_RETENTION_BYTES_DEFAULT)
+        self.assertEqual(
+            findings_retention_config({"FACTORY_FINDINGS_RETENTION_BYTES": "0"}),
+            FINDINGS_RETENTION_BYTES_DEFAULT)
+
+
+class TestPruneFindings(unittest.TestCase):
+    def test_prunes_oldest_derived_reports_beyond_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            findings = Path(tmp)
+            old = make_finding(findings, "target-a-history.jsonl", 1000, size=1000)
+            mid = make_finding(findings, "target-a-delta.md", 2000, size=1000)
+            new = make_finding(findings, "target-b-delta.md", 3000, size=1000)
+
+            # Total 3000, budget 2500: only the oldest is pruned.
+            pruned = prune_findings(findings, budget_bytes=2500)
+
+            self.assertEqual(pruned, [old.resolve()])
+            self.assertFalse(old.exists())
+            self.assertTrue(mid.exists())
+            self.assertTrue(new.exists())
+
+    def test_authoritative_store_lock_and_committed_config_are_never_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            findings = Path(tmp)
+            protected = [
+                make_finding(findings, "target.json", 1000, size=10),
+                make_finding(findings, "target.json.lock", 1000, size=10),
+                make_finding(findings, ".gitkeep", 1000, size=10),
+                make_finding(findings, "suppressions.yaml", 1000, size=10),
+            ]
+            report = make_finding(findings, "target-delta.md", 2000, size=100)
+
+            # Budget 0: everything prunable must go, the authoritative/committed files stay.
+            pruned = prune_findings(findings, budget_bytes=0)
+
+            self.assertEqual(pruned, [report.resolve()])
+            self.assertFalse(report.exists())
+            for path in protected:
+                self.assertTrue(path.exists())
+
+    def test_machine_reports_and_ledgers_are_prunable_but_store_is_not(self):
+        # <target>-line.json and <target>-bundle-baseline.json are regenerable, but the
+        # <target>.json store is authoritative — only the derived suffixes are pruned.
+        with tempfile.TemporaryDirectory() as tmp:
+            findings = Path(tmp)
+            store = make_finding(findings, "target.json", 1000, size=10)
+            line = make_finding(findings, "target-line.json", 1000, size=100)
+            ledger = make_finding(findings, "target-hillclimb-ledger.jsonl", 1000, size=100)
+
+            pruned = prune_findings(findings, budget_bytes=0)
+
+            # .json (store and line.json) are protected; the .jsonl ledger is pruned.
+            self.assertEqual(pruned, [ledger.resolve()])
+            self.assertFalse(ledger.exists())
+            self.assertTrue(store.exists())
+            self.assertTrue(line.exists())
+
+    def test_symlinks_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            findings = base / "findings"
+            findings.mkdir()
+            outside = base / "outside.txt"
+            outside.write_text("precious\n", encoding="utf-8")
+            link = findings / "target-delta.md"
+            link.symlink_to(outside)
+            old = make_finding(findings, "target-history.jsonl", 1000, size=100)
+
+            pruned = prune_findings(findings, budget_bytes=0)
+
+            self.assertEqual(pruned, [old.resolve()])
+            self.assertTrue(link.is_symlink())
+            self.assertTrue(outside.exists())
+
+    def test_excluded_file_is_never_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            findings = Path(tmp)
+            keep = make_finding(findings, "keep-delta.md", 1000, size=100)
+            old = make_finding(findings, "old-delta.md", 2000, size=100)
+
+            pruned = prune_findings(findings, budget_bytes=0, exclude={keep})
+
+            self.assertEqual(pruned, [old.resolve()])
+            self.assertTrue(keep.exists())
+
+    def test_under_budget_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            findings = Path(tmp)
+            make_finding(findings, "a-delta.md", 1000, size=100)
+            make_finding(findings, "b-history.jsonl", 2000, size=100)
+            self.assertEqual(prune_findings(findings, budget_bytes=10**9), [])
+
+    def test_missing_findings_dir_is_a_no_op(self):
+        self.assertEqual(prune_findings(Path("/nonexistent/findings"), budget_bytes=0), [])
+
+
+class TestHillclimbRetentionTTL(unittest.TestCase):
+    def test_default_ttl_is_bounded(self):
+        self.assertGreater(HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT, 0)
+        self.assertEqual(hillclimb_retention_ttl({}),
+                         HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT * _SECONDS_PER_DAY)
+
+    def test_env_override(self):
+        self.assertEqual(hillclimb_retention_ttl({"FACTORY_HILLCLIMB_RETENTION_AGE_DAYS": "3"}),
+                         3 * _SECONDS_PER_DAY)
+
+    def test_unparseable_or_non_positive_falls_back(self):
+        self.assertEqual(hillclimb_retention_ttl({"FACTORY_HILLCLIMB_RETENTION_AGE_DAYS": "soon"}),
+                         HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT * _SECONDS_PER_DAY)
+        self.assertEqual(hillclimb_retention_ttl({"FACTORY_HILLCLIMB_RETENTION_AGE_DAYS": "0"}),
+                         HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT * _SECONDS_PER_DAY)
+
+
+class TestPruneHillclimbDirs(unittest.TestCase):
+    def test_sweeps_stale_proposals_and_keeps_recent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            stale = make_hillclimb(runs, "hillclimb-target-20260101-000000", 1000)
+            recent = make_hillclimb(runs, "hillclimb-target-20260109-000000", 2000)
+
+            pruned = prune_hillclimb_dirs(runs, now=2000, max_age_seconds=500)
+
+            self.assertEqual(pruned, [stale.resolve()])
+            self.assertFalse(stale.exists())
+            self.assertTrue(recent.exists())
+
+    def test_ttl_is_exact_at_the_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            at_boundary = make_hillclimb(runs, "hillclimb-target-x", 1500)
+
+            pruned = prune_hillclimb_dirs(runs, now=2000, max_age_seconds=500)
+
+            self.assertEqual(pruned, [])
+            self.assertTrue(at_boundary.exists())
+
+    def test_non_hillclimb_dirs_are_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            run_dir = make_dir(runs, "run-123", 1)
+
+            pruned = prune_hillclimb_dirs(runs, now=2000, max_age_seconds=1)
+
+            self.assertEqual(pruned, [])
+            self.assertTrue(run_dir.exists())
+
+    def test_excluded_proposal_is_never_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            keep = make_hillclimb(runs, "hillclimb-keep", 1000)
+
+            pruned = prune_hillclimb_dirs(runs, now=2000, max_age_seconds=500, exclude={keep})
+
+            self.assertEqual(pruned, [])
+            self.assertTrue(keep.exists())
 
 
 if __name__ == "__main__":

@@ -33,7 +33,9 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
-    from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
+    from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
+                               hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
+                               prune_run_dirs, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -52,7 +54,9 @@ except ImportError:
     from lib.embargo import is_false_positive, normalize_visibility, reported_severity
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
-    from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
+    from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
+                               hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
+                               prune_run_dirs, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -812,6 +816,11 @@ def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
                                  max_age_seconds=max_age_seconds,
                                  active_grace=active_grace, exclude={run_dir}):
         print(f"[retention] pruned old run directory: {pruned}")
+    # Hill-climb proposals are exempt from the run-directory bound (a concurrent run must
+    # never sweep a live proposal), but stale ones are swept by their own TTL (agents-0ti).
+    hillclimb_ttl = hillclimb_retention_ttl()
+    for pruned in prune_hillclimb_dirs(FACTORY_ROOT / "runs", max_age_seconds=hillclimb_ttl):
+        print(f"[retention] pruned stale hill-climb proposal: {pruned}")
     return run_dir
 
 
@@ -1748,6 +1757,11 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
             report_file = write_line_report(target_name, line_name, scorecard,
                                             findings_dir=FACTORY_ROOT / "findings")
             print(f"Line delta report written to: {report_file}")
+            # Findings/ evidence has no other retention; bound it by a byte budget once per
+            # line, after the reports are written (agents-0ti).
+            findings_budget = findings_retention_config()
+            for pruned in prune_findings(FACTORY_ROOT / "findings", budget_bytes=findings_budget):
+                print(f"[retention] pruned old findings report: {pruned}")
         except Exception as e:
             print(f"🚨 Could not write the line delta report: {e}")
             return False
