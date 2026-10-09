@@ -325,6 +325,19 @@ class TestBannerAndRecord(unittest.TestCase):
         self.assertIn("confined to the target directory",
                       "\n".join(banner_lines(policy, "claude")))
 
+    def test_the_sandboxed_banner_truthfully_states_read_scope_and_mounts(self):
+        """[agents-wqy] The enforced sandbox banner truthfully states factory repo and system dirs read-only."""
+        policy = load_policy("probe", manifest())
+        lines = banner_lines(policy, "pi", sandbox={
+            "tool": "bubblewrap",
+            "engine_sandboxed": True,
+            "engine_read_scope": "confined by the OS sandbox to the target (read-only)...",
+            "network_egress_filtered": True,
+        })
+        text = "\n".join(lines)
+        self.assertIn("factory repo and system dirs read-only", text)
+        self.assertNotIn("everything else invisible", text)
+
     def test_the_record_lists_what_is_not_enforced(self):
         policy = load_policy("probe", manifest(budget={"max_minutes": 5, "max_usd": 0.5}))
         record = policy_record(policy, "pi")

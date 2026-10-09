@@ -385,7 +385,7 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
         egress = ("network egress NOT filtered"
                   if not sandbox.get("network_egress_filtered") else "egress filtered")
         lines.append(f"  Sandbox:     enforced ({tool}): {coverage} — target read-only, "
-                     f"everything else invisible, $HOME hidden (auth via env only), "
+                     f"factory repo and system dirs read-only, $HOME hidden (auth via env only), "
                      f"private PID namespace (host /proc invisible); {egress}")
     return lines
 
