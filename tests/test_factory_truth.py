@@ -446,5 +446,54 @@ class TestPrepassArgvIsolation(unittest.TestCase):
             self.assertTrue(out.exists())
 
 
+class TestSkillsInstallHelpCount(unittest.TestCase):
+    """agents-074: the skills install help must compute its station count from
+    agents/*/agent.yaml at parser-build time, not a hardcoded literal, and must not
+    crash when agents/ is absent."""
+
+    def _skills_help(self, factory_root: Path) -> str:
+        """Build the parser against a temp factory root and return `skills --help` output."""
+        out = io.StringIO()
+        with mock.patch.object(factory_cli, "FACTORY_ROOT", factory_root):
+            with mock.patch.object(sys, "argv", ["factory", "skills", "--help"]):
+                with mock.patch("sys.stdout", out):
+                    with self.assertRaises(SystemExit) as cm:
+                        factory_cli.main()
+        self.assertEqual(cm.exception.code, 0)
+        return out.getvalue()
+
+    def test_help_count_follows_the_agents_directory(self):
+        """The rendered count must equal the number of station dirs, not a literal 22."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents = root / "agents"
+            agents.mkdir()
+            for name in ("alpha", "beta", "gamma"):
+                d = agents / name
+                d.mkdir()
+                (d / "agent.yaml").write_text(
+                    "name: x\nclass: observer\n", encoding="utf-8")
+            out = self._skills_help(root)
+            self.assertIn("Symlink all 3 factory skills", out)
+            self.assertNotIn("Symlink all 22 factory skills", out)
+
+    def test_help_renders_zero_and_does_not_crash_when_agents_is_absent(self):
+        """No agents/ dir must not crash parser build; the count renders as 0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._skills_help(Path(tmp))
+            self.assertIn("Symlink all 0 factory skills", out)
+
+    def test_help_matches_the_real_station_catalog(self):
+        """Against the real checkout the rendered count equals the actual station count."""
+        real = sum(1 for p in (ROOT / "agents").iterdir()
+                   if p.is_dir() and (p / "agent.yaml").exists())
+        res = subprocess.run([sys.executable, str(ROOT / "factory"),
+                              "skills", "--help"],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn(f"Symlink all {real} factory skills into ~/.gemini and ~/.claude",
+                      res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

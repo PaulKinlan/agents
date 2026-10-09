@@ -2406,7 +2406,22 @@ def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     # skills
     skills_parser = subparsers.add_parser("skills", help="Manage interactive CLI skills symlinks")
     skills_subs = skills_parser.add_subparsers(dest="skills_command", help="Skills action")
-    skills_subs.add_parser("install", help="Symlink all 22 factory skills into ~/.gemini and ~/.claude")
+    # agents-074: compute the station count from agents/*/agent.yaml so the help text cannot
+    # drift from the real catalog (the count was previously a hardcoded literal). The count is
+    # best-effort: if agents/ is absent the help must still render (count 0), not crash every
+    # command at parser-build time.
+    agents_dir = FACTORY_ROOT / "agents"
+    try:
+        station_count = sum(
+            1 for _p in sorted(agents_dir.iterdir())
+            if _p.is_dir() and (_p / "agent.yaml").exists()
+        )
+    except OSError:
+        station_count = 0
+    skills_subs.add_parser(
+        "install",
+        help=f"Symlink all {station_count} factory skills into ~/.gemini and ~/.claude",
+    )
 
     # schedule
     sched_parser = subparsers.add_parser("schedule", help="Manage launchd (macOS) and systemd (Linux) scheduled runs")
