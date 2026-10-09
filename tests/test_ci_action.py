@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 ACTION = ROOT / ".github" / "actions" / "factory" / "action.yml"
@@ -150,6 +151,109 @@ class TestStepSummaryRouting(unittest.TestCase):
         for name in SECRET_VARS:
             with self.subTest(name=name):
                 self.assertNotIn(name, code)
+
+
+class TestExpressionInjectionGuard(unittest.TestCase):
+    """agents-bjb: GitHub Actions script injection guard (actionlint-style check).
+
+    Untrusted inputs interpolated directly into run: script bodies via ${{ inputs.* }}
+    lead to arbitrary command execution in steps holding GH_TOKEN/model API keys.
+    All inputs must be passed via env: and quoted inside shell scripts.
+    """
+
+    def test_no_inputs_expression_in_any_action_run_body(self):
+        """No ${{ inputs.* }} expression may appear inside any run: body in .github/actions/**."""
+        action_files = sorted(
+            list((ROOT / ".github" / "actions").rglob("*.yml")) +
+            list((ROOT / ".github" / "actions").rglob("*.yaml"))
+        )
+        self.assertTrue(action_files, "expected to find action.yml files under .github/actions/")
+
+        violations = []
+        pattern = re.compile(r"\$\{\{\s*inputs\.")
+
+        for p in action_files:
+            rel = p.relative_to(ROOT)
+            content = p.read_text(encoding="utf-8")
+            data = yaml.safe_load(content)
+
+            def find_run_blocks(val, path=""):
+                runs = []
+                if isinstance(val, dict):
+                    for k, v in val.items():
+                        subpath = f"{path}.{k}" if path else k
+                        if k == "run" and isinstance(v, str):
+                            runs.append((subpath, v))
+                        else:
+                            runs.extend(find_run_blocks(v, subpath))
+                elif isinstance(val, list):
+                    for idx, item in enumerate(val):
+                        runs.extend(find_run_blocks(item, f"{path}[{idx}]"))
+                return runs
+
+            for step_path, run_body in find_run_blocks(data):
+                matches = pattern.findall(run_body)
+                if matches:
+                    violating_lines = [
+                        line.strip() for line in run_body.splitlines()
+                        if pattern.search(line)
+                    ]
+                    violations.append(
+                        f"{rel} ({step_path}): found {len(matches)} injection vector(s):\n  "
+                        + "\n  ".join(violating_lines)
+                    )
+
+        self.assertEqual(
+            violations, [],
+            "Expression injection vulnerability: ${{ inputs.* }} found in run: body:\n"
+            + "\n".join(violations)
+        )
+
+    def test_factory_action_passes_inputs_via_env(self):
+        block = step_block("Execute Factory Agent")
+        for input_var in ("TARGET_PATH", "AGENT_NAME", "ENGINE_ARG", "SINK_ARG"):
+            with self.subTest(input_var=input_var):
+                self.assertIn(f"{input_var}:", block)
+        self.assertIn('"$TARGET_PATH"', block)
+        self.assertIn('"$AGENT_NAME"', block)
+        self.assertIn('"$ENGINE_ARG"', block)
+        self.assertIn('"$SINK_ARG"', block)
+        run_part = block.split("run:")[1]
+        self.assertNotIn("${{ inputs.", run_part)
+
+    def test_artifact_name_not_interpolated_from_inputs(self):
+        """Line 147 fix: pass artifact name via env or $GITHUB_OUTPUT, not ${{ inputs.agent }}."""
+        block = step_block("Upload Full Delta Report Artifact")
+        self.assertNotIn("${{ inputs.", block)
+
+    def test_reproduction_input_injection_blocked_by_env_indirection(self):
+        """Reproduce-first: verify that direct substitution executes commands, while env indirection blocks it."""
+        with tempfile.TemporaryDirectory() as td:
+            marker_vuln = Path(td) / "vuln_marker"
+            marker_safe = Path(td) / "safe_marker"
+
+            # 1. Direct substitution in script (the expression injection vulnerability)
+            malicious_input_vuln = f'target" ; touch "{marker_vuln}" ; echo "'
+            vulnerable_script = f'TARGET_PATH="{malicious_input_vuln}"'
+            subprocess.run(["bash", "-c", vulnerable_script], capture_output=True, check=True)
+            self.assertTrue(
+                marker_vuln.exists(),
+                "Direct interpolation failed to execute injected command (reproduction failed)"
+            )
+
+            # 2. Env indirection with quoted reference (the fix)
+            malicious_input_safe = f'target" ; touch "{marker_safe}" ; echo "'
+            safe_script = 'TARGET_PATH="$TARGET_INPUT"'
+            subprocess.run(
+                ["bash", "-c", safe_script],
+                env={"TARGET_INPUT": malicious_input_safe, "PATH": os.environ.get("PATH", "")},
+                capture_output=True,
+                check=True
+            )
+            self.assertFalse(
+                marker_safe.exists(),
+                "Env indirection unexpectedly executed injected command"
+            )
 
 
 if __name__ == "__main__":

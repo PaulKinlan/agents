@@ -52,6 +52,9 @@ outputs:
   delta_report:
     description: 'Path to generated markdown delta report'
     value: ${{ steps.run-agent.outputs.delta_report }}
+  artifact_name:
+    description: 'Name of the uploaded delta report artifact'
+    value: ${{ steps.run-agent.outputs.artifact_name }}
 
 runs:
   using: 'composite'
@@ -102,12 +105,15 @@ runs:
         ANTHROPIC_API_KEY: ${{ inputs.model_api_key }}
         DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key || inputs.model_api_key }}
         DEEPSEEK_MODEL: ${{ inputs.deepseek_model }}
+        TARGET_PATH: ${{ inputs.target }}
+        AGENT_NAME: ${{ inputs.agent }}
+        ENGINE_ARG: ${{ inputs.engine }}
+        SINK_ARG: ${{ inputs.sink }}
       run: |
         set -euo pipefail
-        TARGET_PATH="${{ inputs.target }}"
-        AGENT_NAME="${{ inputs.agent }}"
-        ENGINE_ARG="${{ inputs.engine }}"
-        SINK_ARG="${{ inputs.sink }}"
+        ARTIFACT_NAME="factory-delta-report-${AGENT_NAME}"
+        echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+        echo "FACTORY_ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
         
         echo "::group::Executing Factory Agent: $AGENT_NAME"
         echo "Target directory: $TARGET_PATH"
@@ -144,6 +150,6 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: factory-delta-report-${{ inputs.agent }}
+        name: ${{ steps.run-agent.outputs.artifact_name || env.FACTORY_ARTIFACT_NAME || 'factory-delta-report' }}
         path: ${{ env.FACTORY_DIR }}/findings/
         if-no-files-found: ignore
