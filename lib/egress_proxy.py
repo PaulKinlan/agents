@@ -17,6 +17,10 @@ Enforcement:
   and is tunnelled as opaque bytes (allowlisted by the CONNECT target); plain HTTP
   arrives as an absolute-URI request and is forwarded. A host that is not allowlisted
   gets ``403`` and the dispatcher never opens a socket for it.
+* Every request must also use a permitted PORT: a bare allowlist entry permits the
+  standard web ports (80/443), and a ``host:port`` entry pins that port. A non-standard
+  port on an allowlisted host (e.g. ``CONNECT api.github.com:22`` for SSH) gets ``403``
+  (agents-cn3).
 * DNS is resolved HERE (host side), and every resolved address must be public: a name
   that resolves to loopback, private, link-local, multicast or reserved space is refused,
   so an allowlisted-but-rebinding hostname cannot pivot the proxy into the dispatcher's
@@ -39,7 +43,7 @@ import socket
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
 from lib.sandbox import SUN_PATH_LIMIT
@@ -59,23 +63,54 @@ _TUNNEL_IDLE_TIMEOUT = 120.0
 _UPSTREAM_CONNECT_TIMEOUT = 30.0
 
 
+# The standard web ports an allowlisted host may be reached on when its entry does not pin
+# one: 80 (plain HTTP) and 443 (HTTPS/CONNECT). Any other port — SSH 22, SMTP 25, an
+# alternate admin port — is refused unless the entry pins it explicitly (agents-cn3).
+_DEFAULT_PORTS = frozenset({80, 443})
+
+
+def _parse_entry(raw: str) -> Tuple[str, frozenset]:
+    """Split an allowlist entry ``host`` or ``host:port`` into ``(host, permitted_ports)``.
+
+    A bare host permits the standard web ports; a ``host:port`` entry pins exactly that
+    port. IPv6 literals (``[::1]:8443``) are handled. A malformed port falls back to the
+    bare host's default."""
+    entry = (raw or "").strip()
+    if not entry:
+        return "", _DEFAULT_PORTS
+    if entry.startswith("["):  # IPv6 literal [::1]:8443
+        host, _, rest = entry.partition("]")
+        host = host[1:]
+        port_s = rest.lstrip(":")
+    else:
+        host, sep, port_s = entry.rpartition(":")
+        if not sep:  # no colon at all: bare host
+            host, port_s = entry, ""
+    host = host.lower().rstrip(".")
+    if port_s.isdigit():
+        return host, frozenset({int(port_s)})
+    return host, _DEFAULT_PORTS
+
+
 class Allowlist:
-    """The per-run set of hostnames this proxy may reach. An entry is either an exact
-    host (``api.github.com``) or a ``*.``-prefixed suffix (``*.github.com``, matching any
-    subdomain but not the apex). Matching is case-insensitive and ignores a trailing dot,
+    """The per-run set of hostnames this proxy may reach, each with permitted ports.
+
+    An entry is either an exact host (``api.github.com``) or a ``*.``-prefixed suffix
+    (``*.github.com``, matching any subdomain but not the apex); either may pin a port
+    (``api.github.com:443``). Matching is case-insensitive and ignores a trailing dot,
     mirroring how HTTP clients normalise a Host header."""
 
     def __init__(self, hosts: Iterable[str]):
-        self._exact: set = set()
-        self._suffixes: List[str] = []
+        self._exact: Dict[str, frozenset] = {}
+        self._suffixes: List[Tuple[str, frozenset]] = []
         for raw in hosts:
-            host = (raw or "").strip().lower().rstrip(".")
+            host, ports = _parse_entry(raw)
             if not host:
                 continue
             if host.startswith("*."):
-                self._suffixes.append(host[1:])  # keep the leading dot: ".github.com"
+                self._suffixes.append((host[1:], ports))  # keep the leading dot
             else:
-                self._exact.add(host)
+                self._exact[host] = ports
 
     def allows(self, host: str) -> bool:
         host = (host or "").strip().lower().rstrip(".")
@@ -83,11 +118,23 @@ class Allowlist:
             return False
         if host in self._exact:
             return True
-        return any(host.endswith(suffix) for suffix in self._suffixes)
+        return any(host.endswith(suffix) for suffix, _ in self._suffixes)
+
+    def allows_port(self, host: str, port: int) -> bool:
+        """Whether ``port`` is permitted for an allowlisted ``host`` (agents-cn3)."""
+        host = (host or "").strip().lower().rstrip(".")
+        if not host:
+            return False
+        if host in self._exact:
+            return port in self._exact[host]
+        for suffix, ports in self._suffixes:
+            if host.endswith(suffix):
+                return port in ports
+        return False
 
     def hosts(self) -> Tuple[str, ...]:
         """The allowlist in a stable, human-readable form (for a banner or record)."""
-        return tuple(sorted(self._exact | {f"*{s}" for s in self._suffixes}))
+        return tuple(sorted(self._exact.keys() | {f"*{s}" for s, _ in self._suffixes}))
 
     def __len__(self) -> int:
         return len(self._exact) + len(self._suffixes)
@@ -193,9 +240,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         self.close_connection = True
 
     def _resolve_allowed(self, host: str, port: int) -> Optional[str]:
-        """Allowlist + SSRF gate. Returns a public IP to dial, or None (already denied)."""
+        """Allowlist + port + SSRF gate. Returns a public IP to dial, or None (already denied)."""
         if not self._allowlist.allows(host):
             self._deny(f"host not on this run's egress allowlist: {host}")
+            return None
+        if not self._allowlist.allows_port(host, port):
+            self._deny(f"port {port} not permitted for allowlisted host {host}")
             return None
         addrs = _public_addresses(host, port)
         if not addrs:

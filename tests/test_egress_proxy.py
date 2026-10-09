@@ -100,6 +100,20 @@ class AllowlistTest(unittest.TestCase):
         self.assertEqual(al.hosts(), ("*.a.com", "b.com"))
         self.assertEqual(len(al), 2)
 
+    def test_ports_default_to_standard_and_pin(self):
+        # A bare host permits the standard web ports; a host:port entry pins that port.
+        al = ep.Allowlist(["api.github.com", "custom.test:8443", "*.npmjs.org"])
+        self.assertTrue(al.allows_port("api.github.com", 443))
+        self.assertTrue(al.allows_port("api.github.com", 80))
+        self.assertFalse(al.allows_port("api.github.com", 22))   # SSH
+        self.assertFalse(al.allows_port("api.github.com", 8080))
+        self.assertTrue(al.allows_port("custom.test", 8443))
+        self.assertFalse(al.allows_port("custom.test", 443))
+        self.assertFalse(al.allows_port("custom.test", 80))
+        self.assertTrue(al.allows_port("registry.npmjs.org", 443))
+        self.assertFalse(al.allows_port("registry.npmjs.org", 25))  # SMTP
+        self.assertFalse(al.allows_port("npmjs.org", 443))  # *. does not match the apex
+
 
 class SsrfGuardTest(unittest.TestCase):
     def _addrinfo(self, ips):
@@ -224,6 +238,32 @@ class ProxyEnforcementTest(unittest.TestCase):
         finally:
             proxy.stop()
 
+    def test_connect_non_standard_port_denied(self):
+        # agents-cn3: an allowlisted host on a non-standard port (SSH/admin) must be refused.
+        proxy = ep.EgressProxy(["allowed.test"], self.path)
+        proxy.start()
+        try:
+            with mock.patch.object(ep, "_public_addresses", return_value=["127.0.0.1"]):
+                c = self._client()
+                c.sendall(b"CONNECT allowed.test:22 HTTP/1.1\r\nHost: allowed.test:22\r\n\r\n")
+                self.assertIn(b"403", _recv_some(c))
+                c.close()
+        finally:
+            proxy.stop()
+
+    def test_plain_non_standard_port_denied(self):
+        # agents-cn3: the absolute-URI path must also refuse a non-standard port.
+        proxy = ep.EgressProxy(["allowed.test"], self.path)
+        proxy.start()
+        try:
+            with mock.patch.object(ep, "_public_addresses", return_value=["127.0.0.1"]):
+                c = self._client()
+                c.sendall(b"GET http://allowed.test:25/x HTTP/1.1\r\nHost: allowed.test\r\n\r\n")
+                self.assertIn(b"403", _recv_some(c))
+                c.close()
+        finally:
+            proxy.stop()
+
     def test_connect_denied_ssrf_loopback(self):
         # An allowlisted host that resolves to loopback must be refused (rebinding guard).
         proxy = ep.EgressProxy(["rebind.test"], self.path)
@@ -246,7 +286,8 @@ class ProxyEnforcementTest(unittest.TestCase):
                          daemon=True).start()
         self.assertTrue(ready.wait(5))
         upstream_port = port_holder[0]
-        proxy = ep.EgressProxy(["upstream.test"], self.path)
+        # The mock upstream listens on a random (non-standard) port, so pin it explicitly.
+        proxy = ep.EgressProxy([f"upstream.test:{upstream_port}"], self.path)
         proxy.start()
         try:
             with mock.patch.object(ep, "_public_addresses", return_value=["127.0.0.1"]):
@@ -274,7 +315,8 @@ class ProxyEnforcementTest(unittest.TestCase):
                          daemon=True).start()
         self.assertTrue(ready.wait(5))
         upstream_port = port_holder[0]
-        proxy = ep.EgressProxy(["upstream.test"], self.path)
+        # The mock upstream listens on a random (non-standard) port, so pin it explicitly.
+        proxy = ep.EgressProxy([f"upstream.test:{upstream_port}"], self.path)
         proxy.start()
         try:
             with mock.patch.object(ep, "_public_addresses", return_value=["127.0.0.1"]):

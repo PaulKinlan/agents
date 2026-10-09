@@ -2276,7 +2276,10 @@ class TestEgressEndToEnd(unittest.TestCase):
             probe = run_dir / "probe.py"
             probe.write_text(_E2E_PROBE_SCRIPT, encoding="utf-8")
 
-            proxy = EgressProxy(["allowlisted.test"], str(run_dir / "egress-proxy.sock"))
+            # The mock upstream listens on a random (non-standard) port, so pin it in the
+            # allowlist entry (agents-cn3: a bare host permits only the standard web ports).
+            proxy = EgressProxy([f"allowlisted.test:{upstream_port}"],
+                                str(run_dir / "egress-proxy.sock"))
             proxy.start()
             child_env = {"PATH": "/usr/bin:/bin",
                          "HTTP_PROXY": "http://127.0.0.1:8385",
