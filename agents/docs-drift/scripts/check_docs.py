@@ -55,6 +55,71 @@ EXTERNAL_REPO_INDICATORS = {
 # artefacts (agents-6zq). A SKILL.md reference under `lib/`, `docs/`, `tools/` or
 # `scripts/` is a claim about THIS repo and must stay checkable - lib/adapters/gha.sh was the
 # one genuine drift found in this repository, and a wider list hid it.
+#
+# ACCEPTED LIMITATIONS OF THE SKILL.md FILTER (agents-a0d):
+# Limitations 1–4 are unreachable in current repository data, while item 5 notes a surviving
+# anatomy candidate. Each is a deliberate boundary. Do not modify filter behaviour unless
+# concrete evidence of missed drift appears.
+#
+# 1. New station referencing scripts/ before directory exists:
+#    - Bound: A commit adds agents/<new>/SKILL.md mentioning scripts/<file> before
+#      agents/<new>/scripts/ exists on disk. (doc_dir / head).is_dir() is False, so it
+#      falls through.
+#    - Why deliberate: Avoids treating arbitrary 'scripts' claims as first-party before
+#      the station's own directory structure is established on disk.
+#    - Detection criterion: List stations whose SKILL.md mentions scripts/ but have no
+#      scripts/ directory on disk, where that referenced script file is later created under
+#      a different name or never appears while the reference persists.
+#    - Fix shape if evidence appears: Treat a leading 'scripts/' in a SKILL.md as own-tree
+#      (all 22 stations follow this convention), re-testing against the 04h and 6zq guard rails.
+#
+# 2. Non-git target:
+#    - Bound: Running --target on a directory where `git -C <target> rev-parse` fails.
+#    - Why deliberate: First-party repo-root resolution consults _git_paths(target_dir, 'tracked'),
+#      which is empty without git, so skill_reference_is_checkable() falls through to False.
+#    - Detection criterion: An audit on a non-git target where a SKILL.md reference to a
+#      first-party repo path (under lib/, docs/, tools/, agents/, .github/) goes unreported.
+#    - Fix shape if evidence appears: Accept any existing non-generic directory at the
+#      repo root when the target is verified not to be a git repository via git rev-parse failure
+#      (do not check .git directory presence, as .git in git worktrees is a file).
+#
+# 3. Filenames containing parentheses:
+#    - Bound: Documents referencing real files whose names contain '()' (e.g. docs/setup(linux).md).
+#    - Why deliberate: any(c in ref for c in "()") filters out call syntax / method invocations
+#      from being parsed as paths.
+#    - Detection criterion: Inspect station skill source references (e.g.
+#      rg '`[^`]*\([^`]*\.[a-z]+' agents/*/SKILL.md) for real file paths containing parentheses
+#      that are missing on disk, because skill_reference_is_checkable() discards them before
+#      candidates can be emitted.
+#    - Fix shape if evidence appears: Only treat '()' as call syntax when not preceded by an
+#      alphanumeric character, or when not part of a valid file path string.
+#
+# 4. tests/ referenced as our own:
+#    - Bound: A station SKILL.md referencing a concrete file in this repo's own tests/
+#      (e.g. tests/test_x.py).
+#    - Why deliberate: 'test' and 'tests' are in TARGET_LAYOUT_DIR_NAMES because station
+#      prose repeatedly names test/, tests/ for audited target layouts. Removing 'tests'
+#      would re-leak ~30 false-positive candidates on every run of this repository.
+#    - Detection criterion: Grep agents/*/SKILL.md for references under tests/ naming a
+#      concrete factory test file rather than a target directory convention ('files located
+#      under test/, tests/, fixtures/').
+#    - Fix shape if evidence appears: Prefer editing the documentation to use a resolvable path
+#      (station-relative or an existing repo-relative prefix) rather than removing 'tests'
+#      from TARGET_LAYOUT_DIR_NAMES.
+#
+# 5. README.md:343 scripts/ station anatomy note:
+#    - Bound: README.md:343 names 'scripts/' with the snippet '- **scripts/**: Executable pre-pass script'.
+#    - Why deliberate: This describes the internal anatomy of a STATION (which exists 22 times
+#      under agents/*/scripts/), not of the repository root, so it is station-structure prose
+#      rather than a broken root claim. The agents-946b23e comment described it as 'does not
+#      exist at the repo root it describes', which may have mislabelled station-anatomy prose
+#      as a root path. Kept as a single real candidate per 946b23e.
+#    - Detection criterion: Scanner output reports doc-missing-file for reference 'scripts/' at
+#      README.md:343 within the station anatomy subsection, where agents/*/scripts/ exists on disk.
+#    - Fix shape if evidence appears: Revisit if triage rules classify station anatomy prose or if
+#      README.md is edited to qualify the reference (e.g. 'agents/<station>/scripts/' or inline
+#      clarification). If scanner filtering is chosen, scope suppression to identified anatomy
+#      definition lists rather than globally unblocking 'scripts/'.
 TARGET_LAYOUT_DIR_NAMES = {
     "dist", "build", "out", "output", "coverage", "generated", "bundle", "bundles",
     "test", "tests", "spec", "specs", "e2e", "fixtures", "fixture",
