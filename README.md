@@ -257,7 +257,7 @@ schedule:
 
 > [!TIP]
 > **Ad-hoc targets**: You don't have to create a YAML file to audit a project. Passing `./factory run <agent> --target /path/to/repo` automatically resolves the target name from the directory and selects `file` sink as a safe default. A raw path carries no manifest, so an ad-hoc run that files to `beads` also needs `--visibility public|private`: without it the fail-closed embargo holds every high/critical finding locally. A registered target's own `visibility` is authoritative and is never overridden by the flag.
-> The canonical version of this, including the two declarations, the relay-path sink default and the
+> The canonical version of this, including the two declarations, the raw-path sink default and the
 > log line a withheld finding prints, lives in
 > [targets/README.md](targets/README.md#declaring-visibility) — edit there first.
 
