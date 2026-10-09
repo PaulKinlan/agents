@@ -2054,6 +2054,38 @@ process.stdin.on('end', () => {
         self.assertEqual(record["granted"]["credential_broker"]["providers"], ["deepseek"])
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_sandboxed_engine_cross_provider_request_returns_403(self):
+        """agents-3z8 [P2]: a sandboxed engine attempting cross-provider egress through
+        the credential broker receives HTTP 403 Forbidden inside real bubblewrap sandbox."""
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf 'POST /proxy/openai/v1/chat/completions HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nContent-Length: 2\\r\\n\\r\\n{}' >&3\n"
+            "  read -r STATUS_LINE <&3\n"
+            "  echo \"RESP_STATUS:$STATUS_LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo RESP_STATUS:UNREACHABLE\n"
+            "fi\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi", {
+            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "OPENAI_API_KEY": "sk-openai-secret",
+            "FACTORY_MODEL": "anthropic/claude-3-5-sonnet",
+        })
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        resp_line = self.stub_line("RESP_STATUS:")
+        self.assertIn("403", resp_line,
+                      f"cross-provider broker request inside sandbox must be 403 Forbidden, got {resp_line!r}")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_a_sandboxed_pi_engine_gets_the_keyless_broker_provider_config(self):
         """agents-854: pi ignores *_BASE_URL env, so the keyless broker routing must reach it as
         a models.json in its (redirected) agent directory, bound writable into the sandbox. The
