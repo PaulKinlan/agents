@@ -24,6 +24,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Full history is required: the freshness step runs tools/gen_site.py, which verifies
+          # the pinned composite-action commit with `git cat-file -e <pin>^{commit}`. The default
+          # depth-1 checkout does not contain that object (the pin is several commits behind
+          # main), so the freshness step would fail on every push. (agents-36z + agents-6db;
+          # ci.yml already checks out with full history for the same reason.)
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,13 +45,19 @@ jobs:
             exit 1
           fi
 
+      # docs/ is a working directory: it also holds PLAN.md, DESIGN.md,
+      # INTEGRATION.md and internal audits. Publish only the reachable site, so
+      # nothing else in docs/ (now or later) can be served (agents-36z).
+      - name: Stage the published site
+        run: python3 tools/stage_site.py --source docs --out _site
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/
+          path: _site/
 
       - name: Deploy to GitHub Pages
         id: deployment
