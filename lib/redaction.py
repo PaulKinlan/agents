@@ -33,6 +33,23 @@ CREDENTIAL_AGENTS = frozenset({"secret-scan"})
 # snippet is the safe failure — the rule, location, description and remediation still ship.
 CREDENTIAL_RULE_HINTS = ("key", "secret", "token", "credential", "password", "private")
 
+# Broader than CREDENTIAL_AGENTS: agents whose findings carry raw source excerpts or model
+# prose that can quote a secret whose shape the patterns do not recognise (a DB URL with a
+# password, a JWT, a private key quoted in prose). Their snippet, description and raw context
+# are withheld at rest (see redact_for_storage) — a model is not a containment boundary, so
+# none of that prose is trusted for these (agents-4zg). lib/embargo.py's identity-critical
+# routing uses the same agent set.
+SECURITY_SENSITIVE_AGENTS = CREDENTIAL_AGENTS | frozenset({
+    "threat-model",
+    "vuln-discovery",
+    "vuln-triage",
+    "vuln-verify",
+})
+
+# Rule-id hints that mark a finding security-sensitive even when the agent is unknown. Over-
+# matching only withholds more prose, never less (agents-4zg).
+SECURITY_RULE_HINTS = CREDENTIAL_RULE_HINTS + ("tm-", "threat", "vuln", "exploit", "cve")
+
 # Kept aligned with the scanner's own suite in agents/secret-scan/scripts/scan.py, so the
 # factory masks exactly the shapes it claims to detect. Add a pattern in both places.
 PATTERNS = [
@@ -70,7 +87,7 @@ ALL_PATTERNS = BLOCK_PATTERNS + BARE_PATTERNS + PATTERNS
 # whose shape is unknown. The local run artifact keeps the model's notes for the responder.
 WITHHELD_NOTE = (
     "Published summaries withhold the matched value and the triage notes for credential "
-    "findings; both remain in the local run artifact and findings store."
+    "findings; both remain in the local run artifact."
 )
 GENERIC_REMEDIATION = "Rotate the credential, remove it from source, and re-run the scan."
 
@@ -228,6 +245,19 @@ def is_credential_finding(finding: Dict[str, Any]) -> bool:
     return any(hint in rule_id for hint in CREDENTIAL_RULE_HINTS)
 
 
+def is_security_sensitive_finding(finding: Dict[str, Any]) -> bool:
+    """True when a finding's raw material must never leave this machine unredacted.
+
+    Credentials (secret-scan or a credential rule hint) plus security findings by construction
+    (threat-model, vuln-*). For these the snippet and model prose can quote a secret whose
+    shape the patterns do not recognise, so they are withheld wholesale rather than masked.
+    """
+    if str(finding.get("agent") or "") in SECURITY_SENSITIVE_AGENTS:
+        return True
+    rule_id = str(finding.get("rule_id") or "").lower()
+    return any(hint in rule_id for hint in SECURITY_RULE_HINTS)
+
+
 def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     """Return a publishable copy of `finding` with credential-bearing text removed.
 
@@ -243,6 +273,7 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     agent = str(finding.get("agent") or "")
     literals = matched_literals(finding)
     credential = is_credential_finding(finding)
+    security = is_security_sensitive_finding(finding) and not credential
 
     # Untrusted text goes through both layers: known shapes, and the literal the scanner
     # matched wherever a model has re-quoted it. Non-strings (line numbers) pass through.
@@ -271,10 +302,18 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
             f"The deterministic scanner matched `{rule}` at `{location}`. {WITHHELD_NOTE}"
         )
         published["remediation"] = GENERIC_REMEDIATION
+    elif security:
+        # A non-credential security finding (threat-model, vuln-*): its snippet and
+        # description are model prose that can quote a secret whose shape the patterns do not
+        # recognise, so drop the raw source excerpt and the prose wholesale. The title is kept
+        # (it is the short human label the store and andon display on) — only masked.
+        published["snippet"] = "[withheld]"
+        published["description"] = "[withheld]"
+        published["remediation"] = "[withheld]"
 
     if "raw_match" in published:
         published["raw_match"] = (
-            "[redacted]" if credential else mask_literals(published["raw_match"], literals)
+            "[redacted]" if (credential or security) else mask_literals(published["raw_match"], literals)
         )
 
     return published
