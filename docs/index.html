@@ -1,19 +1,137 @@
 <!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b1020"><meta name="description" content="A local-first, schedulable fleet for software-development work. Inspect a station, compose a Line, and route findings without surrendering review.">
-<title>Software Factory | The Software Factory</title>
-<link rel="canonical" href="https://paulkinlan.github.io/agents/">
-<link rel="stylesheet" href="css/projects.css"><link rel="stylesheet" href="css/product.css"><link rel="stylesheet" href="css/factory.css">
-</head><body>
-<a class="skip-link" href="#content">Skip to content</a>
-<header class="site-header"><a class="identity" href="index.html">◈ The Software Factory</a><nav aria-label="Site"><a href="index.html" aria-current="page">Overview</a><a href="install.html">Install</a><a href="use.html">Use</a><a href="stations.html">Stations</a><a href="lines.html">Lines</a><a href="help.html">Help</a></nav></header>
-<main id="content"><div class="hero"><p class="eyebrow">Factory documentation / Software Factory</p><h1 class="page-title">Software Factory</h1><p class="lede">A local-first, schedulable fleet for software-development work. Inspect a station, compose a Line, and route findings without surrendering review.</p></div><div class="doc-layout"><nav class="side-nav" aria-label="On this page"><p class="kicker">On this page</p><ul><li><a href="#why">Use cases</a></li><li><a href="#pipeline">Pipeline</a></li><li><a href="#quickstart">Quickstart</a></li></ul></nav><div><div class="hero-grid"><div><p class="kicker">Observe · propose · optimise</p><h2>Put the repetitive work on a line.</h2><p class="lede">Run focused software-development agents on demand or in CI. Deterministic tools find candidates; isolated AI sessions judge them; the factory routes verified results to the target’s configured destination.</p><div class="cta-group"><a class="btn btn-primary" href="install.html">Install the factory →</a><a class="btn btn-secondary" href="use.html">Explore the CLI</a></div></div><aside class="hero-rail" aria-label="Pipeline summary"><p class="eyebrow">The run, at a glance</p><ol><li><strong>Pre-pass</strong> Enumerate candidate signals with tools.</li><li><strong>Engine</strong> Triage in a bounded session.</li><li><strong>Sink</strong> Dedupe and route the result.</li></ol></aside></div><section class="doc-section" id="why"><h2>What can it do?</h2><div class="card-grid"><article class="card"><p class="kicker">01 / Audit</p><h3>Find a signal</h3><p>Run a single station to investigate secrets, accessibility, dependencies, performance, documentation or other repository risks.</p><a href="stations.html">Browse stations →</a></article><article class="card"><p class="kicker">02 / Compose</p><h3>Run a Factory Line</h3><p>Sequence related stations with an Andon policy. A genuine failure or critical defect can stop downstream work; results retain an honest status.</p><a href="lines.html">Explore Lines →</a></article><article class="card"><p class="kicker">03 / Integrate</p><h3>Fit your workflow</h3><p>Use locally, install a deterministic pre-commit hook, schedule a sweep or run the composite action in GitHub Actions.</p><a href="install.html">See installation routes →</a></article><article class="card"><p class="kicker">04 / Act</p><h3>Keep humans in control</h3><p>Track findings in local files or the configured Beads tracker. Proposals are not automatic default-branch changes.</p><a href="use.html#sinks">Understand destinations →</a></article></div></section><section class="doc-section" id="pipeline"><h2>One pipeline, clear boundaries</h2><div class="flow"><ol><li><strong>Pre-pass</strong><span>Deterministic discovery supplies bounded candidate evidence.</span></li><li><strong>Engine</strong><span>An agent skill and adapter triage candidates; separate verification can disprove discoveries.</span></li><li><strong>Sink</strong><span>Fingerprint and dedupe findings, then use file or configured Beads.</span></li></ol></div><div class="callout"><strong>Andon is a stop signal, not a success metric.</strong><p>Lines record a critical defect or environment failure honestly. An incomplete station never becomes a clean result.</p></div></section><section class="doc-section" id="quickstart"><h2>Start with one station</h2><p>Python 3.9+ and an authenticated supported AI CLI are needed for model work. Start with a local file sink; add tracker routing intentionally.</p><!-- BEGIN GENERATED:quickstart -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <meta name="description" content="A local-first, schedulable fleet for software-development work. Inspect a station, compose a Line, and route findings without surrendering review.">
+  <title>Software Factory | The Software Factory</title>
+  <link rel="canonical" href="https://paulkinlan.github.io/agents/">
+  <link rel="stylesheet" href="css/projects.css">
+  <link rel="stylesheet" href="css/product.css">
+  <link rel="stylesheet" href="css/factory.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="identity" href="index.html">◈ The Software Factory</a>
+    <nav aria-label="Site">
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="install.html">Install</a>
+      <a href="use.html">Use</a>
+      <a href="stations.html">Stations</a>
+      <a href="lines.html">Lines</a>
+      <a href="help.html">Help</a>
+    </nav>
+  </header>
+  <main id="content">
+    <div class="hero">
+      <p class="eyebrow">Factory documentation / Software Factory</p>
+      <h1 class="page-title">Software Factory</h1>
+      <p class="lede">A local-first, schedulable fleet for software-development work. Inspect a station, compose a Line, and route findings without surrendering review.</p>
+    </div>
+    <div class="doc-layout">
+      <nav class="side-nav" aria-label="On this page">
+        <p class="kicker">On this page</p>
+        <ul>
+          <li><a href="#why">Use cases</a></li>
+          <li><a href="#pipeline">Pipeline</a></li>
+          <li><a href="#quickstart">Quickstart</a></li>
+        </ul>
+      </nav>
+      <div>
+        <div class="hero-grid">
+          <div>
+            <p class="kicker">Observe · propose · optimise</p>
+            <h2>Put the repetitive work on a line.</h2>
+            <p class="lede">Run focused software-development agents on demand or in CI. Deterministic tools find candidates; isolated AI sessions judge them; the factory routes verified results to the target’s configured destination.</p>
+            <div class="cta-group">
+              <a class="btn btn-primary" href="install.html">Install the factory →</a>
+              <a class="btn btn-secondary" href="use.html">Explore the CLI</a>
+            </div>
+          </div>
+          <aside class="hero-rail" aria-label="Pipeline summary">
+            <p class="eyebrow">The run, at a glance</p>
+            <ol>
+              <li><strong>Pre-pass</strong> Enumerate candidate signals with tools.</li>
+              <li><strong>Engine</strong> Triage in a bounded session.</li>
+              <li><strong>Sink</strong> Dedupe and route the result.</li>
+            </ol>
+          </aside>
+        </div>
+        <section class="doc-section" id="why">
+          <h2>What can it do?</h2>
+          <div class="card-grid">
+            <article class="card">
+              <p class="kicker">01 / Audit</p>
+              <h3>Find a signal</h3>
+              <p>Run a single station to investigate secrets, accessibility, dependencies, performance, documentation or other repository risks.</p>
+              <a href="stations.html">Browse stations →</a>
+            </article>
+            <article class="card">
+              <p class="kicker">02 / Compose</p>
+              <h3>Run a Factory Line</h3>
+              <p>Sequence related stations with an Andon policy. A genuine failure or critical defect can stop downstream work; results retain an honest status.</p>
+              <a href="lines.html">Explore Lines →</a>
+            </article>
+            <article class="card">
+              <p class="kicker">03 / Integrate</p>
+              <h3>Fit your workflow</h3>
+              <p>Use locally, install a deterministic pre-commit hook, schedule a sweep or run the composite action in GitHub Actions.</p>
+              <a href="install.html">See installation routes →</a>
+            </article>
+            <article class="card">
+              <p class="kicker">04 / Act</p>
+              <h3>Keep humans in control</h3>
+              <p>Track findings in local files or the configured Beads tracker. Proposals are not automatic default-branch changes.</p>
+              <a href="use.html#sinks">Understand destinations →</a>
+            </article>
+          </div>
+        </section>
+        <section class="doc-section" id="pipeline">
+          <h2>One pipeline, clear boundaries</h2>
+          <div class="flow">
+            <ol>
+              <li>
+                <strong>Pre-pass</strong>
+                <span>Deterministic discovery supplies bounded candidate evidence.</span>
+              </li>
+              <li>
+                <strong>Engine</strong>
+                <span>An agent skill and adapter triage candidates; separate verification can disprove discoveries.</span>
+              </li>
+              <li>
+                <strong>Sink</strong>
+                <span>Fingerprint and dedupe findings, then use file or configured Beads.</span>
+              </li>
+            </ol>
+          </div>
+          <div class="callout">
+            <strong>Andon is a stop signal, not a success metric.</strong>
+            <p>Lines record a critical defect or environment failure honestly. An incomplete station never becomes a clean result.</p>
+          </div>
+          <figure class="preview-figure">
+            <img src="factory-cli.png" alt="The Software Factory Dispatcher in action — running deterministic pre-pass, AI verification, and routing findings to Beads" width="900" height="500" loading="lazy">
+            <figcaption><strong>The Factory in action:</strong> Running deterministic pre-pass, session-auth AI adversarial verification, and routing deduplicated findings to local Beads.</figcaption>
+          </figure>
+        </section>
+        <section class="doc-section" id="quickstart">
+          <h2>Start with one station</h2>
+          <p>Python 3.9+ and an authenticated supported AI CLI are needed for model work. Start with a local file sink; add tracker routing intentionally.</p>
+<!-- BEGIN GENERATED:quickstart -->
 <pre><code>git clone https://github.com/PaulKinlan/agents.git
 cd agents
 ./install.sh
 ./factory list
 ./factory run secret-scan --target . --sink file</code></pre>
-<!-- END GENERATED:quickstart --><p><a href="install.html">Full installation steps</a> · <a href="use.html">Commands and visibility</a> · <a href="help.html">How it works under the hood</a></p></section></div></div></main>
-<footer class="site-footer"><p>The Software Factory · <a href="https://github.com/PaulKinlan/agents">Source on GitHub</a> · <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md">Integration guide</a></p></footer>
-</body></html>
+<!-- END GENERATED:quickstart -->
+          <p><a href="install.html">Full installation steps</a> · <a href="use.html">Commands and visibility</a> · <a href="help.html">How it works under the hood</a></p>
+        </section>
+      </div>
+    </div>
+  </main>
+  <footer class="site-footer">
+    <p>The Software Factory · <a href="https://github.com/PaulKinlan/agents">Source on GitHub</a> · <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md">Integration guide</a></p>
+  </footer>
+</body>
+</html>

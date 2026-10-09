@@ -1,26 +1,233 @@
 <!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b1020"><meta name="description" content="Run one station or an ordered Line. Read the result and routing policy before automating.">
-<title>Use the factory | The Software Factory</title>
-<link rel="canonical" href="https://paulkinlan.github.io/agents/use.html">
-<link rel="stylesheet" href="css/projects.css"><link rel="stylesheet" href="css/product.css"><link rel="stylesheet" href="css/factory.css">
-</head><body>
-<a class="skip-link" href="#content">Skip to content</a>
-<header class="site-header"><a class="identity" href="index.html">◈ The Software Factory</a><nav aria-label="Site"><a href="index.html">Overview</a><a href="install.html">Install</a><a href="use.html" aria-current="page">Use</a><a href="stations.html">Stations</a><a href="lines.html">Lines</a><a href="help.html">Help</a></nav></header>
-<main id="content"><div class="hero"><p class="eyebrow">Factory documentation / Use the factory</p><h1 class="page-title">Use the factory</h1><p class="lede">Run one station or an ordered Line. Read the result and routing policy before automating.</p></div><div class="doc-layout"><nav class="side-nav" aria-label="On this page"><p class="kicker">On this page</p><ul><li><a href="#agent">One station</a></li><li><a href="#line">A Line</a></li><li><a href="#sinks">Sinks & visibility</a></li><li><a href="#reference">CLI reference</a></li></ul></nav><div><section class="doc-section" id="agent"><h2>Run one station</h2><pre><code>./factory list
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <meta name="description" content="Run one station or an ordered Line. Read the result and routing policy before automating.">
+  <title>Use the factory | The Software Factory</title>
+  <link rel="canonical" href="https://paulkinlan.github.io/agents/use.html">
+  <link rel="stylesheet" href="css/projects.css">
+  <link rel="stylesheet" href="css/product.css">
+  <link rel="stylesheet" href="css/factory.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <header class="site-header">
+    <a class="identity" href="index.html">◈ The Software Factory</a>
+    <nav aria-label="Site">
+      <a href="index.html">Overview</a>
+      <a href="install.html">Install</a>
+      <a href="use.html" aria-current="page">Use</a>
+      <a href="stations.html">Stations</a>
+      <a href="lines.html">Lines</a>
+      <a href="help.html">Help</a>
+    </nav>
+  </header>
+  <main id="content">
+    <div class="hero">
+      <p class="eyebrow">Factory documentation / Use the factory</p>
+      <h1 class="page-title">Use the factory</h1>
+      <p class="lede">Run one station or an ordered Line. Read the result and routing policy before automating.</p>
+    </div>
+    <div class="doc-layout">
+      <nav class="side-nav" aria-label="On this page">
+        <p class="kicker">On this page</p>
+        <ul>
+          <li><a href="#agent">One station</a></li>
+          <li><a href="#line">A Line</a></li>
+          <li><a href="#sinks">Sinks &amp; visibility</a></li>
+          <li><a href="#reference">CLI reference</a></li>
+        </ul>
+      </nav>
+      <div>
+        <section class="doc-section" id="agent">
+          <h2>Run one station</h2>
+          <pre><code>./factory list
 ./factory run secret-scan --target . --sink file
-./factory run docs-drift --target . --engine pi --sink file</code></pre><p><code>--target</code> accepts a registered name or local directory. The engine is selected automatically unless overridden. Only choose Beads where the target has a configured destination.</p></section><section class="doc-section" id="line"><h2>Run a Line</h2><pre><code>./factory line project-audit --target . --sink file
-./factory line web-excellence --target . --sink file</code></pre><p>Stations run in declared order. Read the <a href="lines.html">Andon policies</a> before relying on a Line as a gate; an environment failure and a finding are different outcomes.</p></section><section class="doc-section" id="sinks"><h2>Sinks & visibility</h2><div class="card-grid"><article class="card"><h3>File</h3><p>Default local fallback. Review the local delta outside the published Pages site.</p></article><article class="card"><h3>Beads</h3><p>On a configured target, medium-and-above triaged findings file automatically and dedupe by fingerprint. Missing visibility withholds high/critical from the synced tracker.</p></article></div><div class="callout callout--warning"><strong>No public findings issue sink.</strong><p><code>github-issues</code> is rejected as a findings sink. The <code>issue-triage</code> station handles public input; <code>promote</code> links an approved public issue to a Beads item. Do not publish raw run evidence.</p></div><p>For ad-hoc paths, <code>--visibility public|private</code> declares routing policy; a registered target’s own declaration wins.</p></section><section class="doc-section" id="reference"><h2>CLI at a glance</h2><p>Flags below are a snapshot; the next generator must fill this block from argparse and nested command help. Run <code>./factory &lt;command&gt; --help</code> for authoritative options.</p><!-- BEGIN GENERATED:cli-reference -->
-<article class="command"><h3 id="cmd-integrate"><code>integrate</code></h3><p>Print recipes for agents and CI.</p><pre><code>./factory integrate [--agent] [--section all|github-actions|pre-commit|target|skills|agents]</code></pre></article>
-<article class="command"><h3 id="cmd-list"><code>list</code></h3><p>Show available stations.</p><pre><code>./factory list [-h]</code></pre></article>
-<article class="command"><h3 id="cmd-promote"><code>promote</code></h3><p>Create one linked bead from an approved public issue on a configured target.</p><pre><code>./factory promote --target NAME --issue URL</code></pre></article>
-<article class="command"><h3 id="cmd-run"><code>run</code></h3><p>Run a station.</p><pre><code>./factory run AGENT --target TARGET [--engine auto|pi|claude|antigravity|deepseek] [--model MODEL] [--sink file|beads] [--visibility public|private]</code></pre></article>
-<article class="command"><h3 id="cmd-line"><code>line</code></h3><p>Execute an ordered Line.</p><pre><code>./factory line LINE --target TARGET [--engine auto|pi|claude|antigravity|deepseek] [--model MODEL] [--sink file|beads] [--visibility public|private]</code></pre></article>
-<article class="command"><h3 id="cmd-hillclimb"><code>hillclimb</code></h3><p>Iterate toward a measured performance goal.</p><pre><code>./factory hillclimb --target TARGET [--metric METRIC] [--goal GOAL] [--iterations N] [--apply] [--engine ENGINE] [--sink file|beads] [--visibility public|private]</code></pre></article>
-<article class="command"><h3 id="cmd-hook"><code>hook</code></h3><p>Install a deterministic pre-commit hook.</p><pre><code>./factory hook install [--target TARGET] [--all]</code></pre></article>
-<article class="command"><h3 id="cmd-skills"><code>skills</code></h3><p>Install interactive skills links.</p><pre><code>./factory skills install</code></pre></article>
-<article class="command"><h3 id="cmd-schedule"><code>schedule</code></h3><p>Manage launchd/systemd runs.</p><pre><code>./factory schedule list|generate|install|uninstall|trigger [--target TARGET] [--agent AGENT] [--all] [--platform auto|launchd|systemd|darwin|linux|all]</code></pre></article>
-<!-- END GENERATED:cli-reference --></section></div></div></main>
-<footer class="site-footer"><p>The Software Factory · <a href="https://github.com/PaulKinlan/agents">Source on GitHub</a> · <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md">Integration guide</a></p></footer>
-</body></html>
+./factory run docs-drift --target . --engine pi --sink file</code></pre>
+          <p><code>--target</code> accepts a registered name or local directory. The engine is selected automatically unless overridden. Only choose Beads where the target has a configured destination.</p>
+        </section>
+        <section class="doc-section" id="line">
+          <h2>Run a Line</h2>
+          <pre><code>./factory line project-audit --target . --sink file
+./factory line web-excellence --target . --sink file</code></pre>
+          <p>Stations run in declared order. Read the <a href="lines.html">Andon policies</a> before relying on a Line as a gate; an environment failure and a finding are different outcomes.</p>
+        </section>
+        <section class="doc-section" id="sinks">
+          <h2>Sinks &amp; visibility</h2>
+          <div class="card-grid">
+            <article class="card">
+              <h3>File</h3>
+              <p>Default local fallback. Review the local delta outside the published Pages site.</p>
+            </article>
+            <article class="card">
+              <h3>Beads</h3>
+              <p>On a configured target, medium-and-above triaged findings file automatically and dedupe by fingerprint. Missing visibility withholds high/critical from the synced tracker.</p>
+            </article>
+          </div>
+          <div class="callout callout--warning">
+            <strong>No public findings issue sink.</strong>
+            <p><code>github-issues</code> is rejected as a findings sink. The <code>issue-triage</code> station handles public input; <code>promote</code> links an approved public issue to a Beads item. Do not publish raw run evidence.</p>
+          </div>
+          <p>For ad-hoc paths, <code>--visibility public|private</code> declares routing policy; a registered target’s own declaration wins.</p>
+        </section>
+        <section class="doc-section" id="reference">
+          <h2>CLI at a glance</h2>
+          <p>Flags below are a snapshot; the next generator must fill this block from argparse and nested command help. Run <code>./factory &lt;command&gt; --help</code> for authoritative options.</p>
+<!-- BEGIN GENERATED:cli-reference -->
+<article class="command"><h3 id="cmd-integrate"><code>integrate</code></h3><p>Print integration instructions and recipes for AI agents and CI/CD</p><pre><code>usage: ./factory integrate [-h] [--agent]
+                           [--section {all,github-actions,pre-commit,target,skills,agents}]
+
+options:
+  --agent                   Format specifically for AI agents (machine-actionable markdown)
+  --section {all,github-actions,pre-commit,target,skills,agents}
+                            Specific integration section to output</code></pre></article>
+<article class="command"><h3 id="cmd-list"><code>list</code></h3><p>List all available agents</p><pre><code>usage: ./factory list [-h]</code></pre></article>
+<article class="command"><h3 id="cmd-promote"><code>promote</code></h3><p>Promote a human-approved public issue to one linked bead</p><pre><code>usage: ./factory promote [-h] --target TARGET --issue ISSUE
+
+options:
+  --target TARGET  Configured named public target
+  --issue ISSUE    Approved public issue URL in the configured repo</code></pre></article>
+<article class="command"><h3 id="cmd-run"><code>run</code></h3><p>Run an agent against a target</p><pre><code>usage: ./factory run [-h] --target TARGET
+                     [--engine {auto,pi,claude,antigravity,deepseek}]
+                     [--model MODEL] [--sink SINK]
+                     [--visibility {public,private}]
+                     agent
+
+positional arguments:
+  agent  Name of the agent to run (e.g. secret-scan)
+
+options:
+  --target TARGET           Target project name (from targets/) or path
+  --engine {auto,pi,claude,antigravity,deepseek}
+                            Engine to execute agent with
+  --model MODEL             Model for the pi engine (default deepseek/deepseek-flash)
+  --sink SINK               Override sink (file or beads)
+  --visibility {public,private}
+                            Explicit target visibility for a raw --target path (a named target&#x27;s manifest wins); missing still withholds high/critical from a synced tracker</code></pre></article>
+<article class="command"><h3 id="cmd-line"><code>line</code></h3><p>Execute an ordered Factory Line composed of multiple stations</p><pre><code>usage: ./factory line [-h] --target TARGET
+                      [--engine {auto,pi,claude,antigravity,deepseek}]
+                      [--model MODEL] [--sink SINK]
+                      [--visibility {public,private}]
+                      line
+
+positional arguments:
+  line  Name of the line to run (e.g. project-audit)
+
+options:
+  --target TARGET           Target project name (from targets/) or path
+  --engine {auto,pi,claude,antigravity,deepseek}
+                            Engine to execute agents with
+  --model MODEL             Model for the pi engine (default deepseek/deepseek-flash)
+  --sink SINK               Override sink (file or beads)
+  --visibility {public,private}
+                            Explicit target visibility for a raw --target path (a named target&#x27;s manifest wins); missing still withholds high/critical from a synced tracker</code></pre></article>
+<article class="command"><h3 id="cmd-hillclimb"><code>hillclimb</code></h3><p>Run Class C goal-directed performance hill-climber with ledger</p><pre><code>usage: ./factory hillclimb [-h] --target TARGET [--metric METRIC]
+                           [--goal GOAL] [--iterations ITERATIONS] [--apply]
+                           [--engine {auto,pi,claude,antigravity,deepseek}]
+                           [--sink SINK] [--visibility {public,private}]
+
+options:
+  --target TARGET           Target project name or path
+  --metric METRIC           Metric to optimize (perf_hazard_score, total_gzip_bytes, custom_bench_ms)
+  --goal GOAL               Target numeric goal value
+  --iterations ITERATIONS   Number of hill-climb iterations
+  --apply                   Apply candidate edits in worktree, re-measure, keep wins, revert losses
+  --engine {auto,pi,claude,antigravity,deepseek}
+                            Engine to execute agent with
+  --sink SINK               Override sink (file or beads)
+  --visibility {public,private}
+                            Explicit target visibility for a raw --target path (a named target&#x27;s manifest wins); missing still withholds high/critical from a synced tracker</code></pre></article>
+<article class="command"><h3 id="cmd-hook"><code>hook</code></h3><p>Manage deterministic git pre-commit hooks (Rule 8 compliant)</p><pre><code>usage: ./factory hook [-h] {install} ...
+
+subcommands:
+  install  Install sub-second secret-scan pre-commit hook
+
+usage: ./factory hook install [-h] [--target TARGET] [--all]
+
+options:
+  --target TARGET  Target project name or path
+  --all            Install across all configured targets in targets/</code></pre></article>
+<article class="command"><h3 id="cmd-skills"><code>skills</code></h3><p>Manage interactive CLI skills symlinks</p><pre><code>usage: ./factory skills [-h] {install} ...
+
+subcommands:
+  install  Symlink all 22 factory skills into ~/.gemini and ~/.claude
+
+usage: ./factory skills install [-h]</code></pre></article>
+<article class="command"><h3 id="cmd-schedule"><code>schedule</code></h3><p>Manage launchd (macOS) and systemd (Linux) scheduled runs</p><pre><code>usage: ./factory schedule [-h] [--list] [--generate] [--install] [--uninstall]
+                          [--trigger] [--target TARGET] [--agent AGENT]
+                          [--all]
+                          [--platform {auto,launchd,systemd,darwin,linux,all}]
+                          {list,generate,install,uninstall,trigger} ...
+
+subcommands:
+  list       List all scheduled agents and launchd/systemd status
+  generate   Generate schedule units into schedules/
+  install    Install and load scheduled agent
+  uninstall  Unload/disable and remove scheduled agent
+  trigger    Trigger immediate run of scheduled agent
+
+options:
+  --list                    List all scheduled agents and status
+  --generate                Generate schedule unit files into schedules/
+  --install                 Install and enable scheduled agent
+  --uninstall               Disable and remove scheduled agent
+  --trigger                 Trigger immediate run of scheduled service
+  --target TARGET           Target name
+  --agent AGENT             Agent name
+  --all                     Operate on all explicitly scheduled target-agent pairs
+  --platform {auto,launchd,systemd,darwin,linux,all}
+                            Scheduler platform
+
+usage: ./factory schedule list [-h]
+                               [--platform {auto,launchd,systemd,darwin,linux}]
+
+options:
+  --platform {auto,launchd,systemd,darwin,linux}
+
+usage: ./factory schedule generate [-h] [--target TARGET] [--agent AGENT]
+                                   [--platform {auto,launchd,systemd,darwin,linux,all}]
+
+options:
+  --target TARGET           Target name
+  --agent AGENT             Agent name
+  --platform {auto,launchd,systemd,darwin,linux,all}
+
+usage: ./factory schedule install [-h] [--target TARGET] [--agent AGENT]
+                                  [--all]
+                                  [--platform {auto,launchd,systemd,darwin,linux}]
+
+options:
+  --target TARGET           Target name
+  --agent AGENT             Agent name
+  --all                     Install all explicitly scheduled target-agent pairs
+  --platform {auto,launchd,systemd,darwin,linux}
+
+usage: ./factory schedule uninstall [-h] [--target TARGET] [--agent AGENT]
+                                    [--all]
+                                    [--platform {auto,launchd,systemd,darwin,linux}]
+
+options:
+  --target TARGET           Target name
+  --agent AGENT             Agent name
+  --all                     Uninstall all scheduled target-agent pairs
+  --platform {auto,launchd,systemd,darwin,linux}
+
+usage: ./factory schedule trigger [-h] --target TARGET --agent AGENT
+                                  [--platform {auto,launchd,systemd,darwin,linux}]
+
+options:
+  --target TARGET           Target name
+  --agent AGENT             Agent name
+  --platform {auto,launchd,systemd,darwin,linux}</code></pre></article>
+<!-- END GENERATED:cli-reference -->
+        </section>
+      </div>
+    </div>
+  </main>
+  <footer class="site-footer">
+    <p>The Software Factory · <a href="https://github.com/PaulKinlan/agents">Source on GitHub</a> · <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md">Integration guide</a></p>
+  </footer>
+</body>
+</html>
