@@ -265,6 +265,20 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     Returns (exists, was_wildcard).
     """
     clean_p = path_str.strip()
+    # A `:line` suffix (or `:line:col`, or a `:line-line` range) is a LOCATION inside a
+    # file, not part of its name: `lib/findings.py:256` names an existing file and was
+    # reported missing purely because the suffix was treated as part of the path - the
+    # one genuine false positive in the agents-kqd3 class (agents-pxx8). Only resolution
+    # strips it: the recorded `reference` stays exactly as the document wrote it, so a
+    # genuinely missing `no/such/file.py:12` is still reported, with its suffix intact.
+    # The remainder must still look like a path, so a clock-like token (`12:30`) cannot
+    # be reduced to a prefix and resolved against a directory that happens to be named
+    # that - which would hide the reference instead of reporting it.
+    _without_location = re.sub(r"(?::\d+)+(?:-\d+)?$", "", clean_p)
+    _had_location = False
+    if _without_location != clean_p and ("/" in _without_location or "." in _without_location):
+        clean_p = _without_location
+        _had_location = True
     if clean_p.endswith("/"):
         clean_p = clean_p[:-1]
 
@@ -273,20 +287,28 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
         glob_pattern = re.sub(r"<[^>]+>", "*", clean_p)
         matches_root = list(target_dir.glob(glob_pattern))
         matches_doc = list(doc_dir.glob(glob_pattern))
+        if _had_location:
+            matches_root = [p for p in matches_root if p.is_file()]
+            matches_doc = [p for p in matches_doc if p.is_file()]
         return (len(matches_root) > 0 or len(matches_doc) > 0), True
 
-    # Direct path checks (doc-relative or repo-relative)
+    # Direct path checks (doc-relative or repo-relative). A reference that carried a
+    # `:line` location must resolve to a FILE: a line location cannot belong to a
+    # directory, so accepting a directory would silence a genuinely missing file -
+    # `lib/adapters:42` resolved against the DIRECTORY `lib/adapters` until the
+    # cross-family review of agents-pxx8 caught it. Without a location the existing
+    # directory-tolerant behaviour is unchanged.
     p1 = (doc_dir / clean_p).resolve()
     p2 = (target_dir / clean_p).resolve()
 
     try:
-        if p1.exists():
+        if (p1.is_file() if _had_location else p1.exists()):
             return True, False
     except Exception:
         pass
 
     try:
-        if p2.exists():
+        if (p2.is_file() if _had_location else p2.exists()):
             return True, False
     except Exception:
         pass

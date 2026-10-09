@@ -491,3 +491,88 @@ class TestMarkdownAnchorResolution(unittest.TestCase):
         self.assertEqual(integration_broken, [],
                          f"docs/INTEGRATION.md has unexpected broken anchors: {integration_broken}")
 
+
+class TestLineSuffixIsALocationNotAFilename(unittest.TestCase):
+    """`path:line` points INSIDE a file, so the FILE is what has to resolve.
+
+    Motivated by one real false positive found in the agents-kqd3 triage: this
+    repository's own docs reference `lib/findings.py:256`, and the scanner reported the
+    file as missing because `:256` was treated as part of its name. Unlike the rest of
+    that class - which is prose about the reader's project or another project's inventory
+    - this one is a genuine defect, so it is fixed (agents-pxx8).
+
+    The suffix is stripped for RESOLUTION only. Two things must stay true, and both are
+    pinned below: the recorded reference keeps the suffix the document wrote, and a
+    genuinely absent path with a suffix is still reported.
+    """
+
+    def _tree(self, tmp: Path, body: str) -> None:
+        (tmp / "lib").mkdir(parents=True)
+        (tmp / "lib" / "findings.py").write_text("# present\n")
+        (tmp / "docs").mkdir()
+        (tmp / "docs" / "PLAN.md").write_text(body)
+
+    def test_existing_file_with_a_line_suffix_resolves(self):
+        """The real case: `lib/findings.py:256` names a file that exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._tree(tmp, "The binding step lives in `lib/findings.py:256`.\n")
+            self.assertEqual(check_docs.scan_target(tmp), [])
+
+    def test_line_and_column_and_range_suffixes_resolve(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._tree(tmp, "See `lib/findings.py:256:12` and `lib/findings.py:256-260`.\n")
+            self.assertEqual(check_docs.scan_target(tmp), [])
+
+    def test_missing_file_with_a_line_suffix_is_still_reported(self):
+        """The other direction: the suffix must not make a real gap disappear."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._tree(tmp, "See `no/such/file.py:12` for the binding step.\n")
+            candidates = check_docs.scan_target(tmp)
+            self.assertEqual([c["rule_id"] for c in candidates], ["doc-missing-file"])
+            self.assertEqual([c["reference"] for c in candidates], ["no/such/file.py:12"])
+
+    def test_a_directory_with_a_line_suffix_is_still_reported(self):
+        """P1 from the cross-family review: a directory must not satisfy a FILE claim.
+
+        `lib/adapters:42` names a line inside a file. Resolving it against the existing
+        DIRECTORY `lib/adapters` silenced a genuinely missing file, which is the one
+        outcome this change must never produce.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "lib" / "adapters").mkdir(parents=True)
+            (tmp / "lib" / "adapters" / "gha.sh").write_text("# present\n")
+            (tmp / "docs").mkdir()
+            (tmp / "docs" / "PLAN.md").write_text("See `lib/adapters:42` for the hook.\n")
+            candidates = check_docs.scan_target(tmp)
+            self.assertEqual([c["rule_id"] for c in candidates], ["doc-missing-file"])
+            self.assertEqual([c["reference"] for c in candidates], ["lib/adapters:42"])
+
+    def test_a_trailing_slash_directory_with_a_line_suffix_is_still_reported(self):
+        """`lib/:12` is nonsense - a directory cannot hold a line location."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "lib").mkdir()
+            (tmp / "docs").mkdir()
+            (tmp / "docs" / "PLAN.md").write_text("See `lib/:12` for the binding.\n")
+            self.assertFalse(check_docs.path_exists_or_matches(tmp, tmp / "docs", "lib/:12")[0])
+
+    def test_a_clock_like_token_is_not_reduced_to_a_directory_name(self):
+        """Fails if the strip is careless: `12:30` must not become the directory `12`.
+
+        Tested against the resolver rather than scan_target, because a clock-like token
+        is not extracted as a reference candidate in the first place - the guard exists
+        so that a careless strip cannot turn one into an accidental resolution.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "12").mkdir()
+            (tmp / "docs").mkdir()
+            exists, _ = check_docs.path_exists_or_matches(tmp, tmp / "docs", "12:30")
+            self.assertFalse(
+                exists,
+                "a non-path token with a colon was stripped and resolved away",
+            )
