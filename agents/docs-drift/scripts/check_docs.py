@@ -191,10 +191,15 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     except Exception:
         pass
 
-    # Bare filename search across target repo
-    if "/" not in clean_p and "." in clean_p:
-        if clean_p in _file_names(target_dir):
-            return True, False
+    # Bare name search across the target repo — a FILE (`manifest.json`) or a DIRECTORY
+    # (`audits/`). A doc may name an artefact by name only when the full path is obvious
+    # in context, and the siblings resolve the same way (`PLAN.md`, `DESIGN.md` and
+    # `INTEGRATION.md` in AGENTS.md all match by name; `audits/` was reported missing
+    # purely because it has no dot in it — agents-04h). Direct doc-relative and
+    # repo-relative resolution is tried first, so this only widens the last resort and a
+    # name that exists nowhere in the repo is still reported.
+    if "/" not in clean_p and clean_p in _file_names(target_dir):
+        return True, False
 
     return False, False
 
@@ -231,8 +236,15 @@ def parse_tree_diagrams(content: str) -> List[Tuple[int, str, str]]:
                 root_name = root_m.group(1).strip()
                 has_root = True
                 stack = []
-                # Normalize ~/agents/ -> repo root
-                if root_name in ["~/agents/", "agents/", "./"]:
+                # A root line is either a repo-root alias (`~/agents/`, `./`) or a real
+                # directory named by the diagram. Only the aliases collapse to the repo
+                # root: the README's "Repository Structure" block lists `agents/`,
+                # `lines/`, `lib/` and `docs/` as SIBLING roots, so collapsing `agents/`
+                # checked its 22 children against the repo root (`secret-scan/`,
+                # `qa-station/`, …) and emitted 22 false doc-missing-file candidates on
+                # every run (agents-04h; the old code normalised `agents/` away because
+                # this repo is *named* agents, which is not what the diagram means).
+                if root_name.startswith("~") or root_name in ("./", ".", "/"):
                     stack.append((0, ""))
                 else:
                     stack.append((0, root_name))
@@ -422,6 +434,12 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
                     continue
 
                 if item_clean.startswith(("http:", "https:", "~", "/dev", "/tmp", "/etc", "/usr", "$")):
+                    continue
+                # Any other URI scheme (`file://`, `chrome://extensions`, …) names a URL, not a
+                # repository path; the old code only skipped http/https, so a doc saying the
+                # pages render from `file://` produced a "Missing Referenced File 'file://'"
+                # candidate (agents-04h).
+                if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", item_clean):
                     continue
                 if any(op in item_clean for op in ["->", "=>", "==", "!=", "<=", ">="]):
                     continue
