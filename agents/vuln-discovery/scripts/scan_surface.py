@@ -99,8 +99,8 @@ SURFACE_PATTERNS: List[Tuple[str, str, str, re.Pattern]] = [
 SELF_REFERENTIAL_SUPPRESSIONS = [
     re.compile(r"""(?:re\.compile|SURFACE_PATTERNS)\b"""),
     re.compile(r"""\b(?:rule_id|category|severity|severity_hint|description|threat_context|remediation|rationale)\s*["']?\s*:"""),
-    # agents-5gg: refusal / denial guards (raising ContainmentError, StationError, etc.)
-    re.compile(r"""\braise\s+(?:ContainmentError|StationError|PermissionError)\b"""),
+    # agents-5gg, agents-qbc: refusal / denial guards (raising ContainmentError, StationError)
+    re.compile(r"""\braise\s+(?:ContainmentError|StationError)\b"""),
 ]
 
 

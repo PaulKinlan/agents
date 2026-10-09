@@ -54,8 +54,8 @@ SELF_REFERENTIAL_SUPPRESSIONS = [
     re.compile(r"""(?:re\.compile|ENTRY_POINT_PATTERNS|SURFACE_PATTERNS)\b"""),
     re.compile(r"""\b(?:rule_id|category|severity|remediation|rationale)\s*["']?\s*:"""),
     re.compile(r"""\b(?:self\.assertEqual|self\.assertTrue|assert\s+.*(?:innerHTML|eval|fetch))"""),
-    # agents-5gg: refusal / denial guards (raising ContainmentError, StationError, etc.)
-    re.compile(r"""\braise\s+(?:ContainmentError|StationError|PermissionError)\b"""),
+    # agents-5gg, agents-qbc: refusal / denial guards (raising ContainmentError, StationError)
+    re.compile(r"""\braise\s+(?:ContainmentError|StationError)\b"""),
 ]
 
 # Chat-template markers, instruction injection tags, and role headers (including tool-call tokens)

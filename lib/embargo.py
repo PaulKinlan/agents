@@ -101,12 +101,13 @@ _DUMMY_CREDENTIAL_MARKERS = (
     re.compile(r"abcdefghijklmnop", re.IGNORECASE),
 )
 
-# Refusal and containment guard patterns (agents-5gg). A code block or snippet that raises an error
+# Refusal and containment guard patterns (agents-5gg, agents-qbc). A code block or snippet that raises an error
 # or explicitly refuses an insecure operation (e.g. `raise ContainmentError(...)`) is an
-# enforcement guard preventing an insecure mode, not an unguarded invocation. Builtin
-# exceptions like PermissionError are excluded to avoid masking application-level auth checks.
+# enforcement guard preventing an insecure mode, not an unguarded invocation. Only the factory's
+# own guard classes (`ContainmentError`, `StationError`) are treated as refusal guards; builtin
+# and application exceptions (e.g. `PermissionError`, `SecurityError`) are excluded to avoid masking auth checks.
 _REFUSAL_GUARD_PATTERNS = (
-    re.compile(r"\braise\s+(?:ContainmentError|StationError|SecurityError)\b"),
+    re.compile(r"\braise\s+(?:ContainmentError|StationError)\b"),
     re.compile(r"""(?:refusing\s+on\s+target|credentials?\s+(?:are|is)\s+never\s+brokered)""", re.IGNORECASE),
     re.compile(r"""(?:if|elif)\s+.*(?:not\s+\(?trusted|normalize_visibility).*:\s*raise\b"""),
 )
