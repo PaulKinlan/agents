@@ -103,6 +103,16 @@ class TestSurfaceScannerExclusionsAndSuppression(unittest.TestCase):
             candidates, _ = scan_surface.scan_source_files(tmp_path, None)
             self.assertEqual(len(candidates), 0, f"Expected 0 candidates due to is_scanner_file, got: {candidates}")
 
+    def test_refusal_guard_lines_suppressed(self):
+        """agents-5gg: lines raising ContainmentError, StationError, etc. are suppressed."""
+        line = "raise ContainmentError('refusing on target')"
+        self.assertTrue(scan_surface.is_self_referential_line(line))
+
+    def test_threat_model_artifact_file_excluded(self):
+        """agents-5gg: is_scanner_file excludes *-THREAT_MODEL.md files."""
+        p = Path("target-THREAT_MODEL.md")
+        self.assertTrue(scan_surface.is_scanner_file(p, str(p)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -101,6 +101,75 @@ _DUMMY_CREDENTIAL_MARKERS = (
     re.compile(r"abcdefghijklmnop", re.IGNORECASE),
 )
 
+# Refusal and containment guard patterns (agents-5gg). A code block or snippet that raises an error
+# or explicitly refuses an insecure operation (e.g. `raise ContainmentError(...)`) is an
+# enforcement guard preventing an insecure mode, not an unguarded invocation. Builtin
+# exceptions like PermissionError are excluded to avoid masking application-level auth checks.
+_REFUSAL_GUARD_PATTERNS = (
+    re.compile(r"\braise\s+(?:ContainmentError|StationError|SecurityError)\b"),
+    re.compile(r"""(?:refusing\s+on\s+target|credentials?\s+(?:are|is)\s+never\s+brokered)""", re.IGNORECASE),
+    re.compile(r"""(?:if|elif)\s+.*(?:not\s+\(?trusted|normalize_visibility).*:\s*raise\b"""),
+)
+
+_ACCEPTED_RISK_TITLE = re.compile(
+    r"\b(?:accepted\s+(?:residual\s+)?risk|intentional\s+exclusion)\b",
+    re.IGNORECASE,
+)
+
+
+def is_refusal_guard_snippet(snippet: Any) -> bool:
+    """True when snippet represents a refusal, denial, or containment enforcement guard (agents-5gg).
+
+    A guard that checks preconditions and raises an error or refuses execution
+    is an enforcement mechanism preventing an insecure mode, not an unguarded invocation.
+    """
+    if not isinstance(snippet, str):
+        return False
+    text = snippet.strip()
+    if not text:
+        return False
+    return any(p.search(text) for p in _REFUSAL_GUARD_PATTERNS)
+
+
+def match_unbrokered_claude_invocation(code: str) -> bool:
+    """Rule for unbrokered claude engine credentials (agents-5gg).
+
+    Requires positive evidence of an actual unguarded claude invocation.
+    Denial and refusal paths (e.g. raising ContainmentError, checking trusted+private)
+    must NOT trigger this rule.
+    """
+    if not isinstance(code, str):
+        return False
+    # Denial and refusal branches must NOT fire (negative case)
+    if is_refusal_guard_snippet(code):
+        return False
+    if "raise ContainmentError" in code or "refusing" in code:
+        return False
+    # Positive case: invocation of claude without the trusted-private containment guard
+    claude_invocation = bool(re.search(
+        r"""(?:engine\s*==\s*['"]claude['"]|['"]claude['"]\s*in\s*engine|adapters/claude\.sh)""",
+        code
+    ))
+    has_guard = bool(re.search(r"""(?:trusted.*private|normalize_visibility)""", code))
+    return claude_invocation and not has_guard
+
+
+def is_self_referential_artifact(path: Any, snippet: Any = "") -> bool:
+    """True when path or snippet references the threat-model station's own output artifact (agents-5gg).
+
+    The threat-model station writes `findings/<target>-THREAT_MODEL.md` as an intended local
+    evidence store; flagging its creation or existence is self-referential noise.
+    """
+    path_str = str(path or "")
+    if re.search(r"""(?:^|[/\\])findings[/\\][^/\\]+-THREAT_MODEL\.md$""", path_str):
+        return True
+    snippet_str = str(snippet or "")
+    if re.search(r"""findings[/\\][^/\\]+-THREAT_MODEL\.md""", snippet_str):
+        return True
+    if "tm_findings_file.write_text" in snippet_str:
+        return True
+    return False
+
 
 def _dummy_credential_marker(finding: Dict[str, Any]) -> bool:
     """True when the finding's raw matched value reads as an obvious dummy credential.
@@ -127,14 +196,33 @@ def is_false_positive(finding: Dict[str, Any]) -> bool:
     """Whether `finding` is a false positive for REPORTING (store, badge, delta section).
 
     The deterministic dummy marker always counts; so does the triage's own verdict and a title
-    that names a false positive. This is the human-readable truth, NOT the routing decision:
-    `effective_severity` still routes an identity-critical agent's real key as critical even
-    when the model calls it a false positive (SF-03, agents-3r7).
+    that names a false positive. Refusal/denial guards (raising ContainmentError, explicit
+    refusal branches), findings titled as accepted residual risks, unbrokered-claude findings
+    lacking positive evidence of an unguarded invocation, and the station's own generated
+    artifacts (*-THREAT_MODEL.md) are deterministically classified as false positives (agents-5gg).
+    This is the human-readable truth, NOT the routing decision: `effective_severity` still
+    routes an identity-critical agent's real key as critical even when the model calls it a
+    false positive (SF-03, agents-3r7).
     """
     if not isinstance(finding, dict):
         return False
     if _dummy_credential_marker(finding):
         return True
+    # agents-5gg: refusal/denial guards and self-referential station artifacts are false positives
+    if is_refusal_guard_snippet(finding.get("snippet")):
+        return True
+    if is_self_referential_artifact(finding.get("path"), finding.get("snippet")):
+        return True
+    title = finding.get("title")
+    if isinstance(title, str) and (_FP_TITLE.search(title) or _ACCEPTED_RISK_TITLE.search(title)):
+        return True
+    # agents-5gg: a finding claiming an unbrokered/unconfined claude key requires positive
+    # evidence of an actual unguarded invocation; if it lacks positive evidence or matches a
+    # refusal guard, it is classified as a false positive.
+    rule_or_title = f"{finding.get('rule_id') or ''} {title or ''}".lower()
+    if "claude" in rule_or_title and ("unbrokered" in rule_or_title or "unconfined" in rule_or_title):
+        if not match_unbrokered_claude_invocation(finding.get("snippet") or ""):
+            return True
     flag = finding.get("false_positive")
     if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes")):
         return True
@@ -142,9 +230,6 @@ def is_false_positive(finding: Dict[str, Any]) -> bool:
         value = finding.get(field)
         if isinstance(value, str) and value.strip().lower() in _FALSE_POSITIVE_VERDICTS:
             return True
-    title = finding.get("title")
-    if isinstance(title, str) and bool(_FP_TITLE.search(title)):
-        return True
     return False
 
 

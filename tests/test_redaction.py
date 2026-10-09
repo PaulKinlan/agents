@@ -97,6 +97,24 @@ class TestRedactionUnit(unittest.TestCase):
         redact_finding(finding)
         self.assertEqual(finding, before)
 
+    def test_non_secret_scan_credential_finding_does_not_claim_deterministic_scanner(self):
+        """agents-5gg: non-secret-scan findings are model reports, not deterministic scanners."""
+        finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-accepted-unbrokered-claude-key",
+            "path": "factory",
+            "line_number": 1053,
+            "snippet": 'f"engine \'claude\' runs without the OS filesystem sandbox"',
+            "severity": "info",
+            "title": "Accepted residual risk",
+            "description": "claude carries unbrokered credentials",
+            "remediation": "verify claude in sandbox",
+        }
+        published = redact_finding(finding)
+        self.assertNotIn("deterministic scanner", published["description"])
+        self.assertIn("The threat-model agent reported `tm-accepted-unbrokered-claude-key`",
+                      published["description"])
+
 
 class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
     """Regression cases for the factory-astra review of PR #4, which defeated the first version.

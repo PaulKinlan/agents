@@ -298,9 +298,16 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     if credential:
         published["snippet"] = f"[redacted:{agent or 'credential'} match at {location}]"
         published["title"] = f"{rule} match at {location}"
-        published["description"] = (
-            f"The deterministic scanner matched `{rule}` at `{location}`. {WITHHELD_NOTE}"
-        )
+        # agents-5gg: non-secret-scan agents are models, not deterministic scanners;
+        # report their origin faithfully rather than attributing to a scanner.
+        if agent in CREDENTIAL_AGENTS:
+            published["description"] = (
+                f"The deterministic scanner matched `{rule}` at `{location}`. {WITHHELD_NOTE}"
+            )
+        else:
+            published["description"] = (
+                f"The {agent or 'credential'} agent reported `{rule}` at `{location}`. {WITHHELD_NOTE}"
+            )
         published["remediation"] = GENERIC_REMEDIATION
     elif security:
         # A non-credential security finding (threat-model, vuln-*): its snippet and

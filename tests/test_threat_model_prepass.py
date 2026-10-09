@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agents" / "threat-model" / "scripts"))
 
 import mine_history  # noqa: E402
@@ -273,6 +274,134 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
 
             results = mine_history.scan_entry_points(tmp_path)
             self.assertEqual(len(results), 0, f"Expected 0 findings due to is_scanner_file exclusion, got: {results}")
+
+
+class TestThreatModelRefusalGuardsAndExclusions(unittest.TestCase):
+    """agents-5gg: verify refusal/denial guard handling and artifact exclusions."""
+
+    REAL_REFUSAL_SNIPPET = (
+        'if engine == "claude" and not (\n'
+        '        target_cfg.get("trusted") is True\n'
+        '        and normalize_visibility(target_cfg.get("visibility")) == "private"):\n'
+        '    raise ContainmentError(\n'
+        '        f"engine \'claude\' runs without the OS filesystem sandbox (its adapter is not "\n'
+        '        f"sandbox-verified, so its read scope is only claude\'s --restricted tool flags, "\n'
+        '        f"not a kernel boundary) and its credentials are never brokered; refusing on "\n'
+        '        f"target \'{target_name}\'. A claude run is allowed only for a target whose manifest "\n'
+        '        f"declares `trusted: true` with `visibility: private` (THREAT_MODEL.md section 7). "\n'
+        '        f"Use a sandboxed engine (pi) for public targets.")'
+    )
+
+    UNGUARDED_INVOCATION = (
+        'if engine == "claude":\n'
+        '    adapter_cmd = [str(lib_dir / "adapters" / "claude.sh"), agent_name, target_dir]\n'
+        '    run_station_command(adapter_cmd, budget, f"engine \'{engine}\'", env=adapter_env)'
+    )
+
+    def test_unbrokered_claude_real_refusal_snippet_negative_case(self):
+        """Negative case: the real refusal snippet from factory:1053 must NOT fire."""
+        from lib.embargo import match_unbrokered_claude_invocation
+        self.assertFalse(match_unbrokered_claude_invocation(self.REAL_REFUSAL_SNIPPET))
+
+    def test_unbrokered_claude_unguarded_invocation_positive_case(self):
+        """Positive case: an actual unguarded claude invocation MUST fire."""
+        from lib.embargo import match_unbrokered_claude_invocation
+        self.assertTrue(match_unbrokered_claude_invocation(self.UNGUARDED_INVOCATION))
+
+    def test_refusal_guard_snippet_detected(self):
+        """Snippets containing refusal/containment error guards are recognized."""
+        from lib.embargo import is_refusal_guard_snippet
+        self.assertTrue(is_refusal_guard_snippet(self.REAL_REFUSAL_SNIPPET))
+        self.assertTrue(is_refusal_guard_snippet("raise ContainmentError('refusing on target')"))
+        self.assertTrue(is_refusal_guard_snippet("credentials are never brokered; refusing on target"))
+        self.assertFalse(is_refusal_guard_snippet("const app = express(); app.listen(8080);"))
+
+    def test_refusal_guard_is_false_positive(self):
+        """A finding citing a refusal guard is triaged as a false positive."""
+        from lib.embargo import is_false_positive
+        finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-accepted-unbrokered-claude-key",
+            "path": "factory",
+            "line_number": 1053,
+            "snippet": self.REAL_REFUSAL_SNIPPET,
+            "title": "Unbrokered claude key",
+        }
+        self.assertTrue(is_false_positive(finding))
+
+    def test_accepted_residual_risk_title_is_false_positive(self):
+        """Findings titled as accepted residual risks are triaged as false positives."""
+        from lib.embargo import is_false_positive
+        finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-accepted-unbrokered-claude-key",
+            "path": "factory",
+            "line_number": 1053,
+            "title": "Accepted residual risk: unsandboxed/`claude` runs carry a real, unbrokered model key",
+        }
+        self.assertTrue(is_false_positive(finding))
+
+    def test_self_referential_threat_model_artifact_is_excluded(self):
+        """The station's own output artifact (findings/*-THREAT_MODEL.md) is recognized as self-referential."""
+        from lib.embargo import is_false_positive, is_self_referential_artifact
+        self.assertTrue(is_self_referential_artifact("findings/audit-target-5qe-THREAT_MODEL.md"))
+        self.assertTrue(is_self_referential_artifact("findings/target-THREAT_MODEL.md"))
+        self.assertTrue(is_self_referential_artifact("factory", "tm_findings_file.write_text(report['threat_model_markdown'])"))
+        self.assertFalse(is_self_referential_artifact("src/auth.ts"))
+
+        finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-threat-model-doc-unredacted",
+            "path": "findings/audit-target-5qe-THREAT_MODEL.md",
+            "title": "Model-generated THREAT_MODEL.md is persisted into the findings store without redaction",
+        }
+        self.assertTrue(is_false_positive(finding))
+
+    def test_mine_history_suppresses_refusal_guard_lines(self):
+        """mine_history.py suppresses lines raising ContainmentError or StationError."""
+        line = "raise ContainmentError('refusing on target')"
+        self.assertTrue(mine_history.is_self_referential_line(line))
+
+    def test_mine_history_excludes_threat_model_artifact_files(self):
+        """mine_history.py is_scanner_file excludes *-THREAT_MODEL.md."""
+        p = Path("audit-target-5qe-THREAT_MODEL.md")
+        self.assertTrue(mine_history.is_scanner_file(p, str(p)))
+
+    def test_ordinary_target_files_are_not_excluded(self):
+        """Ordinary target source files are NOT excluded by is_scanner_file."""
+        for name in ("src/model.py", "app/auth.py", "doc-THREAT_MODEL.py", "model.ts"):
+            with self.subTest(file=name):
+                p = Path(name)
+                self.assertFalse(mine_history.is_scanner_file(p, str(p)))
+
+    def test_application_permission_error_is_not_refusal_guard(self):
+        """Application code raising PermissionError is NOT a refusal guard (no over-suppression)."""
+        from lib.embargo import is_refusal_guard_snippet
+        app_snippet = 'raise PermissionError(f"user {uid} cannot access {path}")'
+        self.assertFalse(is_refusal_guard_snippet(app_snippet))
+
+    def test_unbrokered_claude_finding_requires_positive_evidence(self):
+        """A finding claiming unbrokered claude key requires positive invocation evidence."""
+        from lib.embargo import is_false_positive
+        # Without positive evidence (or with refusal snippet): marked false positive
+        refusal_finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-accepted-unbrokered-claude-key",
+            "path": "factory",
+            "snippet": self.REAL_REFUSAL_SNIPPET,
+            "title": "Unbrokered claude key",
+        }
+        self.assertTrue(is_false_positive(refusal_finding))
+
+        # With positive evidence of unguarded invocation: NOT a false positive
+        genuine_finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-unbrokered-claude-key",
+            "path": "factory",
+            "snippet": self.UNGUARDED_INVOCATION,
+            "title": "Unbrokered claude key invocation",
+        }
+        self.assertFalse(is_false_positive(genuine_finding))
 
 
 if __name__ == "__main__":

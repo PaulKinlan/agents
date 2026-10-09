@@ -99,23 +99,26 @@ SURFACE_PATTERNS: List[Tuple[str, str, str, re.Pattern]] = [
 SELF_REFERENTIAL_SUPPRESSIONS = [
     re.compile(r"""(?:re\.compile|SURFACE_PATTERNS)\b"""),
     re.compile(r"""\b(?:rule_id|category|severity|severity_hint|description|threat_context|remediation|rationale)\s*["']?\s*:"""),
+    # agents-5gg: refusal / denial guards (raising ContainmentError, StationError, etc.)
+    re.compile(r"""\braise\s+(?:ContainmentError|StationError|PermissionError)\b"""),
 ]
 
 
 def is_scanner_file(fpath: Path, rel_path: str) -> bool:
-    """Check if a file is the scanner itself or another pattern-defining scanner script.
+    """Check if a file is the scanner itself, another scanner script, or a station artifact.
 
-    Silently unscans the scanner's own file, any file named scan_surface.py, and
-    anything under agents/*/scripts/ (the factory's own scanner scripts). This is a
+    Silently unscans the scanner's own file, any file named scan_surface.py,
+    anything under agents/*/scripts/ (the factory's own scanner scripts), and
+    any generated threat model artifact (`*-THREAT_MODEL.md`, agents-5gg). This is a
     deliberate precision-over-recall choice to prevent the scanner's pattern
-    definitions from producing self-matches.
+    definitions and station outputs from producing self-matches.
     """
     try:
         if fpath.resolve() == Path(__file__).resolve():
             return True
     except Exception:
         pass
-    if fpath.name == "scan_surface.py":
+    if fpath.name == "scan_surface.py" or fpath.name.endswith("-THREAT_MODEL.md"):
         return True
     # Exclude scanner scripts in agents/*/scripts/
     parts = Path(rel_path).parts
