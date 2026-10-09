@@ -14,6 +14,7 @@ import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -119,6 +120,28 @@ class TestPrepassFixes(unittest.TestCase):
         data = json.loads(res.stdout)
         focus_candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
         self.assertEqual(len(focus_candidates), 0, f"Expected 0 missing-focus-visible-state candidates, got: {focus_candidates}")
+
+    def test_product_css_has_prefers_reduced_motion_override(self):
+        """[agents-cvm] docs/css/product.css overrides hover transforms/transitions under prefers-reduced-motion."""
+        product_css = ROOT / "docs" / "css" / "product.css"
+        self.assertTrue(product_css.exists())
+        content = product_css.read_text(encoding="utf-8")
+        self.assertIn("@media (prefers-reduced-motion: reduce)", content)
+        start = content.find("@media (prefers-reduced-motion: reduce)")
+        open_brace = content.find("{", start)
+        depth = 1
+        pos = open_brace + 1
+        while pos < len(content) and depth > 0:
+            if content[pos] == "{":
+                depth += 1
+            elif content[pos] == "}":
+                depth -= 1
+            pos += 1
+        block = content[open_brace + 1:pos - 1]
+        self.assertIn(".btn", block)
+        self.assertIn(".doc-card", block)
+        self.assertIn("transition: none", block)
+        self.assertIn("transform: none", block)
 
 
 if __name__ == "__main__":

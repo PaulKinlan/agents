@@ -340,4 +340,16 @@
       gap: 0.4rem;
     }
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    .btn,
+    .doc-card {
+      transition: none;
+    }
+
+    .btn:hover,
+    .doc-card:hover {
+      transform: none;
+    }
+  }
 }
