@@ -110,7 +110,9 @@ class Allowlist:
             if host.startswith("*."):
                 self._suffixes.append((host[1:], ports))  # keep the leading dot
             else:
-                self._exact[host] = ports
+                # Union ports across duplicate entries (e.g. host:80 + host:443), so a
+                # later entry adds a port instead of overwriting the earlier one (agents-cn3).
+                self._exact[host] = self._exact.get(host, frozenset()) | ports
 
     def allows(self, host: str) -> bool:
         host = (host or "").strip().lower().rstrip(".")
@@ -128,8 +130,8 @@ class Allowlist:
         if host in self._exact:
             return port in self._exact[host]
         for suffix, ports in self._suffixes:
-            if host.endswith(suffix):
-                return port in ports
+            if host.endswith(suffix) and port in ports:
+                return True
         return False
 
     def hosts(self) -> Tuple[str, ...]:

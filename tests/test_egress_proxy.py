@@ -114,6 +114,23 @@ class AllowlistTest(unittest.TestCase):
         self.assertFalse(al.allows_port("registry.npmjs.org", 25))  # SMTP
         self.assertFalse(al.allows_port("npmjs.org", 443))  # *. does not match the apex
 
+    def test_duplicate_host_ports_union(self):
+        # agents-cn3 review note: a second entry for the same host must ADD its port,
+        # not overwrite the first (host:80 + host:443 => both allowed).
+        al = ep.Allowlist(["example.com:80", "example.com:443"])
+        self.assertTrue(al.allows_port("example.com", 80))
+        self.assertTrue(al.allows_port("example.com", 443))
+        self.assertFalse(al.allows_port("example.com", 22))
+
+    def test_overlapping_wildcard_ports_union(self):
+        # agents-cn3 review note: allows_port must not short-circuit on the first matching
+        # suffix — an overlapping broader suffix can still permit the port.
+        al = ep.Allowlist(["*.corp.example.com:8443", "*.example.com"])
+        self.assertTrue(al.allows_port("x.corp.example.com", 8443))  # the pinned suffix
+        self.assertTrue(al.allows_port("x.corp.example.com", 80))    # the broader suffix
+        self.assertTrue(al.allows_port("x.corp.example.com", 443))
+        self.assertFalse(al.allows_port("x.corp.example.com", 22))
+
 
 class SsrfGuardTest(unittest.TestCase):
     def _addrinfo(self, ips):
