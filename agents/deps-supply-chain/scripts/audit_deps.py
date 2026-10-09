@@ -18,10 +18,20 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-IGNORE_SCAN_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "dist", "build", ".beads",
-    ".agent-state", "runs", "fixtures", "findings", "__pycache__", ".venv"
-}
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+# Exclude standard ignored directories including vendor/ (third-party vendored code)
+# and factory artifact dirs (findings, runs) to avoid scanning non-first-party dependencies.
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS
+    IGNORE_SCAN_DIRS = DEFAULT_IGNORE_DIRS | {"fixtures"}
+except ImportError:
+    IGNORE_SCAN_DIRS = {
+        ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", ".beads",
+        ".agent-state", "runs", "fixtures", "findings", "__pycache__", ".venv"
+    }
 
 SOURCE_EXTENSIONS = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py"}
 

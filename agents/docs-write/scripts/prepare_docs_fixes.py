@@ -17,12 +17,18 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
 DOCS_DRIFT_SCRIPT = FACTORY_ROOT / "agents" / "docs-drift" / "scripts" / "check_docs.py"
 
-IGNORE_DIRS = {
-    ".git", "node_modules", "vendor", "dist", "build", ".next",
-    "coverage", ".venv", "venv", "__pycache__", ".beads", "runs"
-}
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
+except ImportError:
+    IGNORE_DIRS = {
+        ".git", "node_modules", "vendor", "dist", "build", ".next",
+        "coverage", ".venv", "venv", "__pycache__", ".beads", "runs", "findings"
+    }
 
 
 def collect_repo_ground_truth(target_dir: Path) -> Dict[str, Any]:

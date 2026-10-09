@@ -14,6 +14,19 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+# Keep original skip list ("node_modules", ".git", ".beads", "venv", ".next", "dist")
+# plus factory artifact dirs ("findings", "runs") to avoid feedback loops while still
+# scanning build, coverage, and vendor logs (agents-uxt).
+try:
+    from lib.exclusions import FACTORY_ARTIFACT_DIRS
+    IGNORE_DIRS = {"node_modules", ".git", ".beads", "venv", ".next", "dist"} | FACTORY_ARTIFACT_DIRS
+except ImportError:
+    IGNORE_DIRS = {"node_modules", ".git", ".beads", "venv", ".next", "dist", "runs", "findings"}
+
 LOG_PATTERNS = ["*.log", "*error*", "*stderr*", "*stdout*", "*output*.txt"]
 STACK_TRACE_RE = re.compile(
     r"(?:(?:Error|Exception|TypeError|ReferenceError|SyntaxError|UnhandledPromiseRejection|AssertionError):[^\n]+|"
@@ -25,8 +38,7 @@ def find_logs(target_dir: Path) -> List[Path]:
     logs = []
     # 1. Search for common log files
     for root, dirs, files in os.walk(target_dir):
-        # Skip node_modules, .git, .beads, venv
-        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", ".beads", "venv", ".next", "dist")]
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
         for f in files:
             p = Path(root) / f
             if any(p.match(pattern) for pattern in LOG_PATTERNS) or f.endswith(".log"):

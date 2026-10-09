@@ -35,10 +35,16 @@ except ImportError:
 # contributes no timing (SF-06).
 BENCH_TIMEOUT_SECONDS = 300
 
-IGNORE_DIRS = {
-    ".git", "node_modules", "vendor", "dist-cache", ".venv", "venv",
-    "__pycache__", ".next", ".nuxt", "coverage", ".beads", "runs"
-}
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS
+    # Exclude findings/ and runs/ while retaining dist/ and build/, which perf-hillclimb
+    # measures as target static assets and distribution bundles.
+    IGNORE_DIRS = (DEFAULT_IGNORE_DIRS - {"dist", "build"}) | {"dist-cache"}
+except ImportError:
+    IGNORE_DIRS = {
+        ".git", "node_modules", "vendor", "dist-cache", ".venv", "venv",
+        "__pycache__", ".next", ".nuxt", "coverage", ".beads", "runs", "findings"
+    }
 
 ASSET_EXTS = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".html", ".wasm"}
 

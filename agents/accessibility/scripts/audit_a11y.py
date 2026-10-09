@@ -22,10 +22,18 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-EXCLUDE_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "vendor", ".beads", "runs", "scratch",
-    "findings", "__pycache__", ".nyc_output", "coverage", "dist", "build", ".build"
-}
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS
+    EXCLUDE_DIRS = DEFAULT_IGNORE_DIRS | {"scratch", ".build"}
+except ImportError:
+    EXCLUDE_DIRS = {
+        ".git", ".hg", ".svn", "node_modules", "vendor", ".beads", "runs", "scratch",
+        "findings", "__pycache__", ".nyc_output", "coverage", "dist", "build", ".build"
+    }
 
 HTML_EXTENSIONS = {
     ".html", ".htm", ".xhtml", ".vue", ".svelte", ".jsx", ".tsx",

@@ -16,13 +16,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
 
-IGNORE_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
-    "coverage", ".beads", ".agent-state", "runs", "fixtures", "findings",
-    "tests", "test", "__tests__",
-    "__pycache__", ".vscode", ".idea"
-}
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS
+    IGNORE_DIRS = DEFAULT_IGNORE_DIRS | {"fixtures", "tests", "test", "__tests__", ".vscode", ".idea"}
+except ImportError:
+    IGNORE_DIRS = {
+        ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build",
+        "coverage", ".beads", ".agent-state", "runs", "fixtures", "findings",
+        "tests", "test", "__tests__",
+        "__pycache__", ".vscode", ".idea"
+    }
 
 IGNORE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2",

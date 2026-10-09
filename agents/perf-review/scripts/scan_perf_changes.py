@@ -14,13 +14,21 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
-IGNORE_DIRS = {
-    ".git", "node_modules", "vendor", "dist", "build", ".next", ".nuxt",
-    "coverage", ".venv", "venv", "__pycache__", ".beads", "runs"
-}
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+try:
+    from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
+except ImportError:
+    IGNORE_DIRS = {
+        ".git", "node_modules", "vendor", "dist", "build", ".next", ".nuxt",
+        "coverage", ".venv", "venv", "__pycache__", ".beads", "runs", "findings"
+    }
 
 CODE_EXTS = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".css", ".py", ".go"}
 
