@@ -1,7 +1,7 @@
 name: web-uplift-merger
 path: /home/exedev/worktrees/web-uplift-factory
 repo: PaulKinlan/web-uplift
-beads_path: /home/exedev/worktrees/web-uplift-factory
+beads_path: /home/exedev/web-uplift
 sink: beads
 visibility: public
 agents:
