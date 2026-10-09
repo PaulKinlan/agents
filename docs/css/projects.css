@@ -93,6 +93,7 @@
 
   .project-section {
     container-type: inline-size;
+    inline-size: 100%; /* Guard against 0px collapse in content-sized flex/grid contexts */
     padding-block-end: clamp(4rem, 8vw, 7rem);
   }
 
@@ -240,7 +241,11 @@
     font-size: 0.78rem;
   }
 
-  .project-list { list-style: none; border-block-start: 1px solid var(--line); }
+  .project-list {
+    container-type: inline-size;
+    list-style: none;
+    border-block-start: 1px solid var(--line);
+  }
 
   .project-list a {
     display: grid;
