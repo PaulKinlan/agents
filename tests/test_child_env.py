@@ -169,6 +169,44 @@ class TestChildEnvironment(unittest.TestCase):
             self.assertNotIn("FACTORY_TOOL_PINS", child_environment(parent=parent))
             self.assertNotIn("FACTORY_TOOL_PINS", child_environment(engine="pi", parent=parent))
 
+    def test_proxy_and_ca_vars_not_forwarded_by_default(self):
+        # agents-5d9: a poisoned operator proxy/CA must not reach a child by default.
+        parent = parent_env(HTTP_PROXY="http://attacker:8080",
+                            HTTPS_PROXY="http://attacker:8080",
+                            ALL_PROXY="socks5://attacker:1080",
+                            NO_PROXY="",
+                            SSL_CERT_FILE="/home/operator/.certs/attacker-ca.pem",
+                            NODE_EXTRA_CA_CERTS="/home/operator/.certs/attacker-ca.pem")
+        env = child_environment(parent=parent)
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+                     "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+                     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, env)
+
+    def test_proxy_vars_forwarded_only_when_proxied(self):
+        # agents-5d9: an UNSANDBOXED child (proxied=True) inherits the operator's proxy.
+        parent = parent_env(HTTP_PROXY="http://corp-proxy:3128",
+                            HTTPS_PROXY="http://corp-proxy:3128",
+                            NO_PROXY="localhost,127.0.0.1")
+        self.assertNotIn("HTTP_PROXY", child_environment(parent=parent))
+        proxied = child_environment(parent=parent, proxied=True)
+        self.assertEqual(proxied["HTTP_PROXY"], "http://corp-proxy:3128")
+        self.assertEqual(proxied["HTTPS_PROXY"], "http://corp-proxy:3128")
+        self.assertEqual(proxied["NO_PROXY"], "localhost,127.0.0.1")
+
+    def test_ca_bundle_never_forwarded_even_when_proxied(self):
+        # agents-5d9: the operator's CA bundle is a TLS trust decision, never inherited —
+        # the child uses the system trust store regardless of `proxied`.
+        parent = parent_env(SSL_CERT_FILE="/etc/ssl/operator-ca.pem",
+                            NODE_EXTRA_CA_CERTS="/etc/ssl/operator-ca.pem")
+        for env in (child_environment(parent=parent),
+                    child_environment(parent=parent, proxied=True)):
+            with self.subTest(env=env):
+                self.assertNotIn("SSL_CERT_FILE", env)
+                self.assertNotIn("NODE_EXTRA_CA_CERTS", env)
+
     def test_parent_mapping_is_read_only(self):
         source = parent_env()
         before = dict(source)

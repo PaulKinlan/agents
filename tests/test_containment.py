@@ -335,6 +335,15 @@ class TestBannerAndRecord(unittest.TestCase):
         self.assertEqual(policy_record(policy, "claude")["not_enforced"],
                          ["os-sandbox"])
 
+    def test_the_record_documents_the_transport_trust_assumption(self):
+        # agents-5d9: policy.json records the previously-invisible ambient proxy/CA
+        # passthrough — the operator CA bundle is never forwarded, and the operator proxy
+        # reaches only unsandboxed children.
+        record = policy_record(load_policy("probe", manifest()), "pi")
+        self.assertIn("network_transport", record)
+        self.assertIn("CA bundle not forwarded", record["network_transport"]["ca_bundle"])
+        self.assertIn("only to unsandboxed children", record["network_transport"]["proxy"])
+
     def test_only_an_exercised_brokered_engine_drops_the_env_credential_residual(self):
         """Fail-on-revert: the old unconditional append falsified sandboxed broker runs."""
         policy = load_policy("probe", manifest())

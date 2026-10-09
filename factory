@@ -1061,7 +1061,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     scripts_dir = agent_dir / "scripts"
     prepass_scripts = sorted(scripts_dir.glob("*.py")) if scripts_dir.exists() else []
     prepass_script = prepass_scripts[0] if prepass_scripts else None
-    prepass_env = prepass_environment(agent_cfg)
+    prepass_env = prepass_environment(agent_cfg, proxied=not sandbox_ok)
     prepass_cmd = None
     if prepass_script and prepass_script.exists():
         prepass_cmd = _prepass_argv(prepass_script, read_dir, target_name,
@@ -1093,7 +1093,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     adapter_cmd = [str(adapter_script), agent_name, str(engine_cwd), str(skill_dir), str(run_dir)]
     # The tool policy is set here, explicitly. child_environment is an allowlist, so an
     # ambient FACTORY_TOOL_POLICY in the operator's shell never reaches the adapter.
-    adapter_env = child_environment(engine=engine)
+    adapter_env = child_environment(engine=engine,
+                                    proxied=not engine_sandboxed(engine))
     adapter_env["FACTORY_TOOL_POLICY"] = policy.tool_policy
     if engine == "pi":
         # agents-3y2: name the model explicitly so a sandboxed pi runs deepseek/deepseek-flash

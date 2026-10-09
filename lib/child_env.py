@@ -6,7 +6,9 @@ The audit's SF-04 finding is that subtraction cannot be complete — claude.sh u
 precedence variables and four more survived (agents-e3u). Every agent child now gets an
 environment built by addition:
 
-* a base allowlist of paths, locale, temp and transport settings (no secrets, no SSH agent);
+* a base allowlist of paths, locale, temp and user identity (no secrets, no SSH agent);
+* the operator's proxy vars only when the child is unsandboxed (``proxied`` flag), never its
+  CA bundle;
 * the model-auth variables of the engine being dispatched, and nothing else;
 * a GitHub token for an explicit public-issue promotion (`factory promote`, which reuses the
   `github-issues` sink name), or for a pre-pass whose agent declares `requires: [gh]`
@@ -24,22 +26,38 @@ from typing import Dict, Mapping, Optional
 from lib.credential_broker import BROKER_ENV_CONFIGS, PLACEHOLDER_KEY
 from lib.tool_pins import HOST_PINS_ENV
 
-# Paths, locale, temp and transport. Transport settings (proxies, CA bundles) are routing
-# configuration rather than identity; dropping them silently breaks every engine on a
-# corporate network, and the operator supplied them for this purpose.
+# Paths, locale, temp and user identity. Proxy and CA-bundle vars are deliberately NOT here
+# (agents-5d9): a poisoned operator env could redirect a child's traffic or point its TLS at
+# an attacker CA. Proxy vars are forwarded only via the explicit `proxied` flag (unsandboxed
+# children, PROXY_VARS below); the operator's CA bundle is never forwarded — every child uses
+# the system trust store (/etc, ro-bound into the sandbox) as its trust assumption.
 BASE_ALLOW = (
     "PATH", "HOME", "TMPDIR", "TMP", "TEMP",
     "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
     "TERM", "TZ", "USER", "LOGNAME",
     "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+)
+
+# Operator proxy/routing vars, forwarded ONLY when `proxied=True` — an unsandboxed child that
+# must reach the network the way the operator's shell does (e.g. an unsandboxed engine's model
+# call on a corporate network). Sandboxed children never inherit these: their egress is the
+# in-sandbox relay + allowlist proxy (pre-pass) or the credential broker (engine), set by the
+# dispatcher. A poisoned operator proxy must not redirect a sandboxed child (agents-5d9).
+PROXY_VARS = (
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "no_proxy", "all_proxy",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
 )
 
 # The model-auth variables each engine adapter may see. These are the engine's own credentials,
 # not the operator's: extend the tuple when a provider is wired up, and note that an unlisted
 # engine gets none (fail closed).
+#
+# Trust boundary for UNBROKERED engines (tm-unbrokered-engine-credentials, agents-5d9): a
+# sandboxed engine's keys are replaced by the broker (placeholder + loopback URL), so nothing
+# real crosses into the sandbox. An UNSANDBOXED engine (claude, or a host without bubblewrap)
+# runs as the operator on a trusted+private target and gets its own real key BY DESIGN — that
+# key is the engine's credential needed for its model call, and policy.json already records
+# `env-credentials` in not_enforced for it. Documented behaviour, not a leak.
 ENGINE_CREDENTIALS = {
     "pi": (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
@@ -85,13 +103,17 @@ def declares_requirement(agent_cfg: Mapping, tool: str) -> bool:
     return isinstance(requires, (list, tuple)) and tool in requires
 
 
-def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] = None,
+                        proxied: bool = False) -> Dict[str, str]:
     """The deterministic pre-pass env: trusted factory code, but still an added allowlist.
 
     It gets a GitHub token only when the agent declares it needs `gh` (issue-triage), never
-    just because the operator's shell had one.
+    just because the operator's shell had one. `proxied` forwards the operator's proxy vars
+    only for an UNSANDBOXED pre-pass (agents-5d9); a sandboxed pre-pass gets the relay set
+    by the dispatcher instead.
     """
-    return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent)
+    return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent,
+                             proxied=proxied)
 
 
 def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Dict[str, str]:
@@ -126,6 +148,7 @@ def child_environment(
     parent: Optional[Mapping[str, str]] = None,
     broker_urls: Optional[Mapping[str, str]] = None,
     trusted_tools: bool = False,
+    proxied: bool = False,
 ) -> Dict[str, str]:
     """Build the environment for one child process by addition.
 
@@ -140,6 +163,11 @@ def child_environment(
     strictly less information than the parent that already verified the same file (agents-dpt).
     Children that never resolve a trusted tool (engine sessions, pre-passes) get nothing extra.
 
+    `proxied` (agents-5d9) forwards the operator's proxy vars (PROXY_VARS) — only for an
+    unsandboxed child that must reach the network the way the operator's shell does. It is
+    False by default, so a sandboxed child never inherits a possibly-poisoned operator proxy.
+    The operator's CA bundle is never forwarded: every child uses the system trust store.
+
     `broker_urls` (agents-8h4) maps a provider name to the base URL of a dispatcher-run
     credential broker. For each such provider the real key vars are dropped and the engine gets
     a non-secret placeholder + the base URL, so a sandboxed engine's /proc/self/environ holds no
@@ -148,6 +176,8 @@ def child_environment(
     """
     source = os.environ if parent is None else parent
     env = {name: source[name] for name in BASE_ALLOW if name in source}
+    if proxied:
+        env.update({name: source[name] for name in PROXY_VARS if name in source})
 
     if trusted_tools and source.get(HOST_PINS_ENV):
         env[HOST_PINS_ENV] = str(source[HOST_PINS_ENV])

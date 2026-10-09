@@ -500,4 +500,13 @@ def policy_record(policy: Policy, engine: str,
     # not_enforced either way; this field never upgrades them.
     if unsandboxed_note:
         record["unsandboxed_opt_in"] = unsandboxed_note
+    # agents-5d9: record the child-transport trust assumption that was previously invisible.
+    # The operator's CA bundle is never forwarded (children use the system trust store), and
+    # the operator's proxy reaches only unsandboxed children (sandboxed children get the
+    # in-sandbox relay / broker set by the dispatcher).
+    record["network_transport"] = {
+        "ca_bundle": "operator CA bundle not forwarded; child uses the system trust store",
+        "proxy": "operator proxy env forwarded only to unsandboxed children "
+                  "(sandboxed children use the in-sandbox relay/broker)",
+    }
     return record
