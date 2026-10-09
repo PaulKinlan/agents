@@ -385,6 +385,13 @@ class FindingsStore:
                 f"findings store {self.store_file} has no 'findings' object; refusing to reset "
                 f"it silently."
             )
+        # agents-4zg: scrub records written before the store was redacted at rest. Redaction is
+        # idempotent, so already-redacted records are unchanged; a legacy store keeps its raw
+        # material out of memory, and the next save() persists the redacted copy to disk.
+        data["findings"] = {
+            fp: (redact_finding(record) if isinstance(record, dict) else record)
+            for fp, record in data["findings"].items()
+        }
         return data
 
     def _load_suppressions(self) -> Dict[str, Any]:
@@ -404,6 +411,27 @@ class FindingsStore:
             self.suppressions_file.read_text(encoding="utf-8"), str(self.suppressions_file)
         )
 
+    def _redacted_data(self) -> Dict[str, Any]:
+        """A copy of the store with every finding's raw material redacted (agents-4zg).
+
+        The store file is read-only-bound into the sandboxed engine, so it must never carry
+        raw_match / snippet / title / description / remediation for a target other than the one
+        being scanned. The in-memory record keeps the raw values (dispatch_to_sink routes on them
+        and mutates the delivery receipts), so save() writes the redacted copy rather than
+        redacting the live records in place — redact_finding copies the whole dict and masks
+        only the rendered text, so the receipts and lifecycle fields survive intact.
+        """
+        findings = self.data.get("findings")
+        if not isinstance(findings, dict):
+            return self.data
+        return {
+            **self.data,
+            "findings": {
+                fp: (redact_finding(record) if isinstance(record, dict) else record)
+                for fp, record in findings.items()
+            },
+        }
+
     def save(self):
         """Atomically persist the store: temp file + fsync + os.replace (agents-3ls).
 
@@ -411,7 +439,7 @@ class FindingsStore:
         which _load_store() would then have to treat as corruption. The temp file lives in the
         same directory so os.replace() is a same-filesystem rename, never a copy.
         """
-        payload = json.dumps(self.data, indent=2)
+        payload = json.dumps(self._redacted_data(), indent=2)
         fd, tmp_path = tempfile.mkstemp(
             dir=str(self.store_file.parent), prefix=self.store_file.name + ".", suffix=".tmp"
         )
@@ -543,6 +571,11 @@ class FindingsStore:
                 "last_seen": now,
                 "suppression_reason": suppression_reason
             }
+            # agents-4zg: the store is persisted REDACTED at save() and scrubbed at load (see
+            # _redacted_data / _load_store), so the sandboxed engine never reads raw fields. The
+            # in-memory record stays raw here and is the SAME object appended to `processed`, so
+            # the delivery receipts dispatch_to_sink mutates flow to the persisted record; save()
+            # keeps those receipts while dropping the raw text.
             self.data["findings"][fp] = finding_record
             processed.append(finding_record)
 

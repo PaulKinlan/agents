@@ -276,5 +276,114 @@ class TestRawMatchBinding(unittest.TestCase):
         self.assertIsNone(findings.identity_raw_match(item, "openai-key", "tests/x.py", ci))
 
 
+class TestStoreRedactsRawMaterialAtRest(unittest.TestCase):
+    """agents-4zg: the store is read-only-bound into the sandboxed engine, so it must not
+    hold raw credential material a run for target A could read about target B."""
+
+    def test_credential_findings_are_redacted_in_the_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FindingsStore("target-a", findings_dir=Path(tmpdir))
+            secret = "ghp_" + "A" * 36  # a GitHub PAT shape
+            item = {"rule_id": "github-pat", "path": "src/config.js", "line_number": 1,
+                    "snippet": secret, "raw_match": secret, "severity": "critical",
+                    "title": "GitHub PAT", "description": f"found {secret}",
+                    "remediation": "rotate"}
+            store.process_run("secret-scan", [item])
+            _, stats, _ = store.process_run("secret-scan", [item])  # same raw input re-runs
+            store.close()
+
+            data = json.loads((Path(tmpdir) / "target-a.json").read_text(encoding="utf-8"))
+            rec = next(iter(data["findings"].values()))
+            for field in ("raw_match", "snippet", "title", "description", "remediation"):
+                self.assertNotIn(secret, str(rec.get(field, "")), field)
+            self.assertTrue(rec.get("fingerprint"), "fingerprint (lifecycle identity) must survive")
+            # The lifecycle is stable despite the redaction: the raw-snippet fingerprint still
+            # dedupes the second identical run as unchanged, not a new finding.
+            self.assertEqual(stats["unchanged"], 1, stats)
+            self.assertEqual(len(data["findings"]), 1)
+
+    def test_non_credential_findings_keep_their_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FindingsStore("target-b", findings_dir=Path(tmpdir))
+            store.process_run("docs-drift", [{
+                "rule_id": "missing-doc", "path": "README.md", "line_number": 3,
+                "snippet": "TODO update", "severity": "low", "title": "Stale docs",
+            }])
+            store.close()
+            data = json.loads((Path(tmpdir) / "target-b.json").read_text(encoding="utf-8"))
+            rec = next(iter(data["findings"].values()))
+            self.assertEqual(rec["title"], "Stale docs")  # non-credential prose survives
+
+    def test_security_finding_prose_is_withheld_regardless_of_pattern(self):
+        """A threat-model finding can quote a secret whose shape no pattern recognises
+        (a DB URL with a password). At rest its prose and raw context are withheld wholesale,
+        never merely pattern-masked."""
+        url = "postgres://appuser:N7v8Q9r0S1t2U3v4W5x6@db.internal/app"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FindingsStore("target-c", findings_dir=Path(tmpdir))
+            store.process_run("threat-model", [{
+                "rule_id": "tm-db-auth-boundary", "path": "db/internal.py", "line_number": 3,
+                "snippet": f"  conn = '{url}'", "raw_match": None, "severity": "high",
+                "title": "DB auth boundary",
+                "description": f"The app connects as {url} with no TLS.",
+                "remediation": "Add TLS.",
+            }])
+            store.close()
+            data = json.loads((Path(tmpdir) / "target-c.json").read_text(encoding="utf-8"))
+            rec = next(iter(data["findings"].values()))
+            for field in ("raw_match", "snippet", "title", "description", "remediation"):
+                self.assertNotIn("N7v8Q9r0", str(rec.get(field, "")), field)
+
+    def test_legacy_store_is_scrubbed_on_load(self):
+        """A store written before the fix still exposes its old raw_match on disk. Loading it
+        scrubs the in-memory records, and the next save() persists the redacted copy."""
+        secret = "ghp_" + "A" * 36
+        legacy = {
+            "target": "target-legacy",
+            "findings": {"fp1": {
+                "fingerprint": "fp1", "agent": "secret-scan", "rule_id": "github-pat",
+                "path": "x.js", "line_number": 1, "snippet": secret, "raw_match": secret,
+                "severity": "critical", "title": "GitHub PAT",
+                "description": f"found {secret}", "remediation": "rotate",
+                "state": "new", "change": "new", "dispatched_sinks": [],
+                "github_issue": None, "first_seen": "x", "last_seen": "x",
+                "suppression_reason": None,
+            }},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store_file = Path(tmpdir) / "target-legacy.json"
+            store_file.write_text(json.dumps(legacy), encoding="utf-8")
+            store = FindingsStore("target-legacy", findings_dir=Path(tmpdir))
+            in_memory = next(iter(store.data["findings"].values()))
+            self.assertNotIn("A" * 36, str(in_memory), "load must scrub in-memory records")
+            store.save()
+            store.close()
+            on_disk = json.loads(store_file.read_text(encoding="utf-8"))
+            rec = next(iter(on_disk["findings"].values()))
+            self.assertNotIn("A" * 36, str(rec), "save must persist the redacted copy")
+
+    def test_delivery_receipts_persist_without_raw_fields(self):
+        """dispatch_to_sink mutates the returned finding's receipts; save() must persist those
+        receipts while still dropping the raw text (nothing raw is written back)."""
+        secret = "ghp_" + "A" * 36
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FindingsStore("target-d", findings_dir=Path(tmpdir))
+            processed, _, _ = store.process_run("secret-scan", [{
+                "rule_id": "github-pat", "path": "src/x.js", "line_number": 1,
+                "snippet": secret, "raw_match": secret, "severity": "critical",
+                "title": "GitHub PAT", "description": f"found {secret}", "remediation": "rotate",
+            }])
+            # dispatch_to_sink mutates the returned record's delivery receipts in place.
+            processed[0]["dispatched_sinks"].append("beads")
+            processed[0]["github_issue"] = 12345
+            store.save()
+            store.close()
+            on_disk = json.loads((Path(tmpdir) / "target-d.json").read_text(encoding="utf-8"))
+            saved = next(iter(on_disk["findings"].values()))
+            self.assertEqual(saved["dispatched_sinks"], ["beads"], "receipt must persist")
+            self.assertEqual(saved["github_issue"], 12345, "github_issue must persist")
+            self.assertNotIn("A" * 36, str(saved), "raw fields must stay redacted")
+
+
 if __name__ == "__main__":
     unittest.main()
