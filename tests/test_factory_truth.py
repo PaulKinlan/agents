@@ -303,6 +303,21 @@ class TestNoVerdictIsAnError(SandboxCase):
             with self.assertRaises(FileNotFoundError):
                 factory_cli.resolve_target("ghost")
 
+    def test_a_target_overlapping_the_findings_store_is_refused(self):
+        """agents-4zg round 4: a raw target whose path overlaps the findings store (equal,
+        inside, or an ancestor) is rejected at resolution, so it cannot re-expose the store
+        through its read-only bind."""
+        findings = self.box.root / "findings"
+        findings.mkdir()
+        (findings / "sub").mkdir()
+        with self.box.patched():
+            with self.assertRaises(FileNotFoundError):
+                factory_cli.resolve_target(str(findings))  # equal
+            with self.assertRaises(FileNotFoundError):
+                factory_cli.resolve_target(str(findings / "sub"))  # inside
+            with self.assertRaises(FileNotFoundError):
+                factory_cli.resolve_target(str(self.box.root))  # ancestor (contains it)
+
 
 class TestOneSeveritySource(SandboxCase):
     """journal-1kg, journal-35w, journal-y5m, journal-aaj."""

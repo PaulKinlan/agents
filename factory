@@ -615,6 +615,23 @@ def list_agents():
             print(f"{name:<20} {cls:<12} {plane:<12} {summary}")
     print("=" * 65)
 
+def _findings_store_path() -> Path:
+    """The findings store directory, resolved."""
+    return (FACTORY_ROOT / "findings").resolve()
+
+
+def _target_overlaps_findings(target: Path) -> bool:
+    """True when `target` is the findings store, inside it, or an ancestor of it.
+
+    A target whose read-only bind overlaps the findings store would overmount the sandbox's
+    findings mask and re-expose other targets' raw scanner matches (agents-4zg round 4). The
+    sandbox also masks findings last (lib/sandbox.py), so this is defence-in-depth, not the
+    only boundary.
+    """
+    findings = _findings_store_path()
+    return (target == findings or target in findings.parents or findings in target.parents)
+
+
 def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
     # A named target is a BARE name resolved under FACTORY_ROOT/targets — never a path.
     # pathlib's `/` DISCARDS the left side when the right side is absolute, so
@@ -640,12 +657,21 @@ def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
             if not cfg.get("path") or not path.is_dir():
                 raise FileNotFoundError(
                     f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which is not a directory")
+            if _target_overlaps_findings(path):
+                raise FileNotFoundError(
+                    f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which overlaps "
+                    f"the factory findings store ({_findings_store_path()}); refusing to scan a "
+                    f"raw credential store as a target")
             return name, path, cfg
 
     # Otherwise treat as path
     target_path = Path(os.path.expanduser(target_arg)).resolve()
     if not target_path.is_dir():
         raise FileNotFoundError(f"Target path or named target not found: {target_arg}")
+    if _target_overlaps_findings(target_path):
+        raise FileNotFoundError(
+            f"Target path {target_path} overlaps the factory findings store "
+            f"({_findings_store_path()}); refusing to scan a raw credential store as a target")
     name = target_path.name
     return name, target_path, {"name": name, "path": str(target_path), "sink": "file"}
 

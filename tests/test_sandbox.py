@@ -415,6 +415,25 @@ class TestSandboxLive(unittest.TestCase):
         res = self.run_inside(f"cat {other}/secret.json 2>&1; ls {self.factory}/runs")
         self.assertNotIn("another run", res.stdout)
 
+    def test_a_findings_overlapping_target_cannot_re_expose_the_store(self):
+        """agents-4zg round 4: a raw --target <factory>/findings must not overmount the mask.
+        The mask is applied after every other bind (mask last wins), so the store stays hidden
+        even when the target's own read-only bind would otherwise re-expose it."""
+        findings = self.factory / "findings"
+        findings.mkdir()
+        secret = "ghp_" + "A" * 36
+        (findings / "target-b.json").write_text(
+            '{"target":"target-b","findings":{"fp":{"raw_match":"' + secret + '"}}}',
+            encoding="utf-8")
+        # The raw target IS the findings store: its ro-bind overlaps the mask.
+        cmd = sandbox_command(["/bin/cat", str(findings / "target-b.json")],
+                              target_dir=findings, factory_root=self.factory,
+                              run_dir=self.run_dir, env=self.env, mask_findings=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, env=self.env,
+                             timeout=120, stdin=subprocess.DEVNULL)
+        self.assertNotIn("A" * 36, res.stdout, "the store was re-exposed through the target bind")
+        self.assertIn("No such file", res.stderr + res.stdout)
+
     def test_the_operator_home_is_invisible(self):
         (self.root / "sandbox-home" / ".secret").write_text("HOME SECRET", encoding="utf-8")
         real_home = Path.home()

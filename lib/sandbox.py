@@ -591,14 +591,6 @@ def sandbox_command(
     factory_runs = Path(factory) / "runs"
     if factory_runs.is_dir():
         plan.tmpfs(str(factory_runs))
-    # agents-4zg: the findings store aggregates raw scanner matches from EVERY target, so a run
-    # for target A could read target B's credentials from it. The engine session has no reason to
-    # read findings, so mask the directory for it (like runs/); the deterministic pre-pass still
-    # needs it (bundle baseline, pr-fixer, qa-station) and is trusted code, so it keeps it.
-    if mask_findings:
-        factory_findings = Path(factory) / "findings"
-        if factory_findings.is_dir():
-            plan.tmpfs(str(factory_findings))
     plan.rw_bind(runs)
 
     # agents-854: extra writable config directories the engine needs. pi's agent directory
@@ -636,6 +628,17 @@ def sandbox_command(
         else:
             plan.ro_bind(str(root))
     _executable_binds(plan, executables, child_env.get("PATH", ""), home)
+
+    # agents-4zg: the findings store aggregates raw scanner matches from EVERY target, so a run
+    # for target A could read target B's credentials from it. The engine has no reason to read
+    # findings; the deterministic pre-pass keeps it (default) for bundle baseline / pr-fixer /
+    # qa-station. Mask it LAST, after every other bind, so no later bind — including a raw target
+    # whose path overlaps the store (--target <factory>/findings) — can overmount the mask and
+    # re-expose other targets' raw matches. bwrap applies mounts in order, so last wins.
+    if mask_findings:
+        factory_findings = Path(factory) / "findings"
+        if factory_findings.is_dir():
+            plan.tmpfs(str(factory_findings))
 
     head = [bwrap, *plan.argv, "--unshare-pid", "--proc", "/proc"]
     net_forward_py = Path(factory_root) / "lib" / "net_forward.py"
