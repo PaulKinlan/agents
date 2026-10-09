@@ -57,3 +57,4 @@ See [../docs/PLAN.md](../docs/PLAN.md) §6 (pilots) and §12 (self-hosting).
 | `fauxmium.yaml` | `file` | No beads DB configured yet; local evidence only |
 | `chrome-agent-platform.yaml` | `beads` | Findings file to the project Beads DB automatically |
 | `agents.yaml` | `beads` | Self-hosting; findings file to beads, public input via issue-triage |
+| `web-uplift-merger.yaml` | `beads` | Findings file to the web-uplift Beads DB; `beads_path` is the PERSISTENT checkout (`path` is the audit worktree) |
