@@ -198,18 +198,27 @@ def _parse_block_scalar(
     # empty line is content and cannot postpone it (PyYAML: `|2` then a blank yields a leading
     # newline). Without one it is detected from the first non-empty line, as before.
     base_indent: Optional[int] = (key_indent + declared_indent) if declared_indent else None
+    # Highest indentation seen on a whitespace-only line before the base was known. PyYAML
+    # REFUSES a block whose leading empty-ish lines are more indented than the content that
+    # follows, so this is tracked to fail closed rather than to guess an indent from it.
+    leading_ws_indent = 0
 
     while i < n:
         line = lines[i]
         if line.strip() == "":
-            if declared_indent is None:
+            ind_ws = _indent(line)
+            if base_indent is None:
+                leading_ws_indent = max(leading_ws_indent, ind_ws)
                 content.append("")
             else:
-                # With a fixed indent even a whitespace-only line can carry content, because
-                # the declared indent is what gets stripped: `|1` over a line of two spaces
-                # yields one space, and over a line of one space yields nothing. PyYAML keeps
-                # that residual (agents-m8h), so collapsing the line to "" loses it.
-                content.append(" " * max(_indent(line) - base_indent, 0))
+                # A whitespace-only line can carry residual content, because the block's
+                # indent is what gets stripped: under a base of 4, a line of five spaces is
+                # one space. This holds for an INFERRED base as much as a declared one -
+                # `k: >` then content at 4 then a line of five spaces keeps that space in
+                # PyYAML, and collapsing it to "" lost it (cross-family review of
+                # agents-m8h; pre-existing, and invisible here until the sweep covered
+                # whitespace-only lines deeper than the base).
+                content.append(" " * max(ind_ws - base_indent, 0))
             i += 1
             continue
         ind = _indent(line)
@@ -217,6 +226,12 @@ def _parse_block_scalar(
             break
         if base_indent is None:
             base_indent = ind
+            if leading_ws_indent > base_indent:
+                raise YamlParseError(
+                    f"YAML parse error in {path}:{i + 1}: a whitespace-only line before the "
+                    f"block content is more indented ({leading_ws_indent}) than the content "
+                    f"it precedes ({base_indent})"
+                )
         if declared_indent is not None and ind < base_indent:
             raise YamlParseError(
                 f"YAML parse error in {path}:{i + 1}: line is less indented than the "

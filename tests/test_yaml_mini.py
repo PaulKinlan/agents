@@ -244,6 +244,28 @@ class TestYamlMiniFoldedAndIndicatorDivergences(unittest.TestCase):
         with self.assertRaises(YamlParseError):
             self._parse("k: |2\n text\n")
 
+    def test_whitespace_only_line_deeper_than_inferred_base_keeps_its_residual(self):
+        """A residual space survives even when the base indent was INFERRED.
+
+        Cross-family review of agents-m8h found this: the residual was only kept when an
+        indicator declared the indent, so `>` over content at 4 with a line of five spaces lost
+        the space PyYAML keeps. Pre-existing, and invisible until the sweep covered
+        whitespace-only lines deeper than the base.
+        """
+        self.assertEqual(self._parse("k: >\n    hello\n     \n    world\n")["k"], "hello\n \nworld\n")
+        self.assertEqual(self._parse("k: |\n    hello\n     \n    world\n")["k"], "hello\n \nworld\n")
+        self.assertEqual(self._parse("k: >+\n    hello\n     \n    world\n")["k"], "hello\n \nworld\n")
+        self.assertEqual(self._parse("k: >-\n    hello\n     \n    world\n")["k"], "hello\n \nworld")
+        # At the base there is no residual, and that must not change.
+        self.assertEqual(self._parse("k: >\n    hello\n    \n    world\n")["k"], "hello\nworld\n")
+
+    def test_leading_whitespace_only_line_more_indented_than_content_errors(self):
+        """PyYAML refuses this shape, so the parser must not invent an indent for it."""
+        from lib.yaml_mini import YamlParseError
+
+        with self.assertRaises(YamlParseError):
+            self._parse("k: >\n     \n    hello\n")
+
     def test_indicator_order_is_either_way_round(self):
         """YAML allows the chomping and indentation indicators in either order.
 
