@@ -829,6 +829,30 @@ def _prepass_argv(prepass_script: Path, read_dir: Path, target_name: str,
     return argv
 
 
+def _finding_sort_key(finding: Any) -> Tuple[str, int, str]:
+    """Deterministic findings order that tolerates junk items (agents-qw9).
+
+    Schemaless agents (no output.schema) can emit non-dict findings and non-integer
+    line_number values; the sort must not crash on them — exactly as the store skips
+    non-dicts (lib/findings.py) and the normaliser skips them (lib/report_schema.py).
+    Non-dict items sort by their string form with a zero line number, so they land
+    after real findings without raising.
+    """
+    if not isinstance(finding, dict):
+        return (str(finding), 0, "")
+    line = finding.get("line_number")
+    if isinstance(line, bool):
+        line = int(line)
+    elif isinstance(line, str):
+        try:
+            line = int(line)
+        except ValueError:
+            line = 0
+    elif not isinstance(line, int):
+        line = 0
+    return (str(finding.get("path", "")), line, str(finding.get("rule_id", "")))
+
+
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
               station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
               read_target_dir: Optional[Path] = None, model_arg: Optional[str] = None):
@@ -1437,11 +1461,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 }
 
     if isinstance(report.get("findings"), list):
-        report["findings"].sort(key=lambda f: (
-            str(f.get("path", "")),
-            f.get("line_number") or 0,
-            str(f.get("rule_id", "")),
-        ))
+        report["findings"].sort(key=_finding_sort_key)
     report_path = run_dir / "report.json"
     _write_run_artifact(report_path, json.dumps(report, indent=2))
     if not model_parse_succeeded:
