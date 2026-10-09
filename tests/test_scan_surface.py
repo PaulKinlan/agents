@@ -115,6 +115,19 @@ class TestSurfaceScannerExclusionsAndSuppression(unittest.TestCase):
         app_line = 'raise PermissionError(f"user {uid} cannot access {path}")'
         self.assertFalse(scan_surface.is_self_referential_line(app_line))
 
+        # End-to-end: a real sink combined with PermissionError must yield candidate finding
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "src"
+            src_dir.mkdir(parents=True)
+            (src_dir / "auth.py").write_text(
+                'if not allowed: exec(cmd); raise PermissionError("denied")\n',
+                encoding="utf-8"
+            )
+            candidates, _ = scan_surface.scan_source_files(tmp_path, None)
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["rule_id"], "child-process-execution")
+
     def test_threat_model_artifact_file_excluded(self):
         """agents-5gg: is_scanner_file excludes *-THREAT_MODEL.md files."""
         p = Path("target-THREAT_MODEL.md")

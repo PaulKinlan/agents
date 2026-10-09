@@ -313,8 +313,27 @@ class TestThreatModelRefusalGuardsAndExclusions(unittest.TestCase):
         from lib.embargo import is_refusal_guard_snippet
         self.assertTrue(is_refusal_guard_snippet(self.REAL_REFUSAL_SNIPPET))
         self.assertTrue(is_refusal_guard_snippet("raise ContainmentError('refusing on target')"))
+        self.assertTrue(is_refusal_guard_snippet("raise StationError('station failed')"))
         self.assertTrue(is_refusal_guard_snippet("credentials are never brokered; refusing on target"))
+        self.assertFalse(is_refusal_guard_snippet('raise SecurityError("csrf")'))
         self.assertFalse(is_refusal_guard_snippet("const app = express(); app.listen(8080);"))
+
+    def test_cross_module_refusal_guard_pattern_alignment(self):
+        """agents-qbc: verify refusal guard regexes across embargo and scanners are identical."""
+        import lib.embargo as embargo
+        sys.path.insert(0, str(ROOT / "agents" / "vuln-discovery" / "scripts"))
+        import scan_surface
+
+        # The raise pattern must be identical across all three sites to prevent drift
+        embargo_pattern = embargo._REFUSAL_GUARD_PATTERNS[0].pattern
+        mine_pattern = [p.pattern for p in mine_history.SELF_REFERENTIAL_SUPPRESSIONS
+                        if "ContainmentError" in p.pattern][0]
+        surface_pattern = [p.pattern for p in scan_surface.SELF_REFERENTIAL_SUPPRESSIONS
+                           if "ContainmentError" in p.pattern][0]
+
+        self.assertEqual(embargo_pattern, r"\braise\s+(?:ContainmentError|StationError)\b")
+        self.assertEqual(mine_pattern, r"\braise\s+(?:ContainmentError|StationError)\b")
+        self.assertEqual(surface_pattern, r"\braise\s+(?:ContainmentError|StationError)\b")
 
     def test_refusal_guard_is_false_positive(self):
         """A finding citing a refusal guard is triaged as a false positive."""
