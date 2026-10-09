@@ -102,6 +102,24 @@ class TestPrepassFixes(unittest.TestCase):
             self.assertEqual(check_docs.git_tracked_or_deleted(repo, "nope.py"), (False, False))
             self.assertEqual(check_docs.path_exists_or_matches(repo, repo, "keep.py"), (True, False))
 
+    def test_product_css_has_focus_visible_states(self):
+        """[agents-1oc] docs/css/product.css defines :focus-visible states for key interactive controls."""
+        product_css = ROOT / "docs" / "css" / "product.css"
+        self.assertTrue(product_css.exists())
+        content = product_css.read_text(encoding="utf-8")
+        self.assertIn(".breadcrumb a:focus-visible", content)
+        self.assertIn(".btn:focus-visible", content)
+        self.assertIn(".btn-primary:focus-visible", content)
+        self.assertIn(".btn-secondary:focus-visible", content)
+
+        # ui-ux scanner pre-pass produces 0 candidates
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(product_css.parent)],
+                             capture_output=True, text=True, check=True)
+        data = json.loads(res.stdout)
+        focus_candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
+        self.assertEqual(len(focus_candidates), 0, f"Expected 0 missing-focus-visible-state candidates, got: {focus_candidates}")
+
 
 if __name__ == "__main__":
     unittest.main()
