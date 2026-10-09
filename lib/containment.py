@@ -91,10 +91,23 @@ ENGINE_ENFORCEMENT: Dict[str, Dict[str, str]] = {
     },
     "deepseek": {READ_ONLY: "deepseek-api read-only payload triage"},
 }
+# Read-scope claims for engines the OS sandbox does NOT cover. Only pi is in
+# SANDBOXED_ENGINES (lib/sandbox.py): claude/antigravity/deepseek run with no kernel boundary,
+# so each of these must name its real boundary (a tool flag, a refusal, or a payload-only
+# design) and say plainly that it is NOT kernel-confined (agents-nq7). claude needs $HOME for
+# session auth (the sandbox hides it), and its --restricted/permission mode are tool flags,
+# not a kernel boundary. antigravity enforces no tool policy and is refused before it can run.
+# deepseek is payload-only, so it has no filesystem read scope to confine at all.
 ENGINE_READ_SCOPE = {
     "pi": "NOT confined: pi's read tool reaches any file the operator can read",
-    "claude": "confined to the target directory (claude --restricted)",
-    "deepseek": "confined to scanner context and payload",
+    "claude": "NOT kernel-confined: only claude's --restricted tool flags confine its file "
+              "tools to the working directory (claude is not in SANDBOXED_ENGINES — its "
+              "session auth needs $HOME, which the sandbox hides), so the target is not "
+              "sandboxed read-only and $HOME is not hidden",
+    "antigravity": "NOT kernel-confined: the antigravity adapter enforces no tool policy and "
+                   "is refused before it can run",
+    "deepseek": "NOT kernel-confined: deepseek is payload-only (the adapter passes only the "
+                "scanner context and payload, no file tools), so it has no filesystem read scope",
 }
 
 

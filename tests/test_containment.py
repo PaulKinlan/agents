@@ -322,7 +322,7 @@ class TestBannerAndRecord(unittest.TestCase):
         self.assertIn("Withheld:    browser", pi_banner)
         self.assertIn("Sandbox:     NOT enforced", pi_banner)
         self.assertIn("NOT confined", pi_banner)
-        self.assertIn("confined to the target directory",
+        self.assertIn("NOT kernel-confined",
                       "\n".join(banner_lines(policy, "claude")))
 
     def test_the_sandboxed_banner_truthfully_states_read_scope_and_mounts(self):
@@ -344,6 +344,18 @@ class TestBannerAndRecord(unittest.TestCase):
         json.dumps(record)
         self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
         self.assertEqual(record["not_enforced"], ["os-sandbox", "read-scope", "budget.max_usd"])
+
+    def test_the_unsandboxed_engine_read_scope_is_plainly_not_kernel_confined(self):
+        """agents-nq7: engines outside SANDBOXED_ENGINES must say plainly that they are NOT
+        kernel-confined — never claim "confined" as if the OS sandbox held them."""
+        policy = load_policy("probe", manifest())
+        for engine in ("claude", "antigravity", "deepseek"):
+            with self.subTest(engine=engine):
+                record = policy_record(policy, engine)
+                scope = record["granted"]["read_scope"]
+                self.assertIn("NOT kernel-confined", scope)
+                self.assertNotIn("confined to", scope)  # never claim the sandbox held it
+                self.assertIn("os-sandbox", record["not_enforced"])
         # agents-js7: the claude adapter enforces a declared cap via --max-budget-usd.
         self.assertEqual(policy_record(policy, "claude")["not_enforced"],
                          ["os-sandbox"])
