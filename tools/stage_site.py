@@ -10,7 +10,11 @@ This tool stages the reachable site — the six pages, plus every local file the
 reference, followed through CSS — into a separate output directory that the
 Pages workflow uploads instead of `docs/`. Nothing else can leak in, because the
 file set is derived from the pages themselves and every staged path must pass
-`guard()`: a publishable extension and no `audits/` component.
+`guard()`: a publishable extension, and no `audits/` component (compared
+case-insensitively, since a case-insensitive filesystem would treat `Audits/` as
+the same directory). References that try to leave the site root are refused
+rather than followed, symlinked assets are refused, and the copy step re-checks
+that each destination stays inside the output directory.
 
     python3 tools/stage_site.py --source docs --out _site
     python3 tools/stage_site.py --source docs --list
@@ -19,6 +23,7 @@ file set is derived from the pages themselves and every staged path must pass
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import sys
@@ -58,9 +63,14 @@ class StagingError(RuntimeError):
 
 
 def guard(rel: str) -> str:
-    """Refuse anything that is not a publishable site asset. Returns the path unchanged."""
+    """Refuse anything that is not a publishable site asset. Returns the path unchanged.
+
+    Directory names are compared case-insensitively: a case-insensitive filesystem
+    would make `Audits/report.html` the same directory as `audits/report.html`, so an
+    exact-case check is not a boundary.
+    """
     parts = Path(rel).parts
-    if any(part in FORBIDDEN_PARTS for part in parts):
+    if any(part.lower() in FORBIDDEN_PARTS for part in parts):
         raise StagingError(f"refusing to publish internal directory for '{rel}'")
     suffix = Path(rel).suffix.lower()
     if suffix not in PUBLISH_EXTENSIONS:
@@ -72,21 +82,33 @@ def guard(rel: str) -> str:
 
 
 def _local_reference(page_rel: str, reference: str) -> str | None:
-    """Resolve a reference found in a staged file to a source-relative path, or None if it is external."""
+    """Resolve a reference found in a staged file, or None if it is external.
+
+    Raises StagingError when a reference tries to leave the site root. The published
+    artifact is a subtree of the source directory, so a path with a `..` component can
+    never be a site asset - and on the copy side it would escape the output directory.
+    """
     reference = reference.strip()
     if not reference or _EXTERNAL.match(reference):
         return None
     reference = reference.split("#", 1)[0].split("?", 1)[0]
     if not reference:
         return None
-    base = Path(page_rel).parent
     target = Path(reference)
     if target.is_absolute():
-        # A root-absolute reference is resolved against the artifact root, which is
-        # the output directory, not the source directory.
-        return target.as_posix().lstrip("/")
-    resolved = (base / target) if str(base) != "." else target
-    return resolved.as_posix()
+        # A root-absolute reference resolves against the artifact root, which is the
+        # output directory, not the source directory.
+        raw = target.as_posix().lstrip("/")
+    else:
+        base = Path(page_rel).parent
+        raw = ((base / target) if str(base) != "." else target).as_posix()
+    normalized = os.path.normpath(raw).replace(os.sep, "/")
+    if normalized in (".", "", "..") or normalized.startswith("../") or os.path.isabs(normalized):
+        raise StagingError(
+            f"refusing to resolve '{reference}' in '{page_rel}': it points outside the site root "
+            f"(link published material to its GitHub URL instead)"
+        )
+    return normalized
 
 
 def _references(source: Path, rel: str) -> List[str]:
@@ -109,10 +131,11 @@ def _references(source: Path, rel: str) -> List[str]:
 def plan(source: Path | str = None) -> List[str]:
     """Return the sorted list of source-relative paths that make up the published site.
 
-    Every page must exist. Every local reference from a staged file must resolve to
-    a file in the source tree and must pass `guard()`.
+    Every page must exist. Every local reference from a staged file must resolve to a
+    regular file inside the source tree (no symlinks, no escapes) and must pass `guard()`.
     """
     source = Path(source) if source is not None else ROOT / "docs"
+    source_root = source.resolve()
     for page in PAGES:
         if not (source / page).is_file():
             raise StagingError(f"published page '{page}' is missing from {source}")
@@ -124,8 +147,12 @@ def plan(source: Path | str = None) -> List[str]:
             continue
         guard(rel)
         path = source / rel
+        if path.is_symlink():
+            raise StagingError(f"refusing to publish '{rel}': symlinks are not staged")
         if not path.is_file():
             raise StagingError(f"a published page references '{rel}', which does not exist in {source}")
+        if not path.resolve().is_relative_to(source_root):
+            raise StagingError(f"refusing to publish '{rel}': it resolves outside {source}")
         seen.add(rel)
         queue.extend(_references(source, rel))
     return sorted(seen)
@@ -136,10 +163,13 @@ def stage(source: Path | str = None, out: Path | str = None) -> List[str]:
     source = Path(source) if source is not None else ROOT / "docs"
     out = Path(out) if out is not None else ROOT / "_site"
     files = plan(source)
+    out_root = out.resolve()
     if out.exists():
         shutil.rmtree(out)
     for rel in files:
-        destination = out / rel
+        destination = (out / rel).resolve()
+        if not destination.is_relative_to(out_root):
+            raise StagingError(f"refusing to write '{rel}' outside {out}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source / rel, destination)
     return files
