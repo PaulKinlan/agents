@@ -79,6 +79,37 @@ class ParseTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             net_forward._parse(["--forward", "not-a-spec", "--", "true"])
 
+    def test_parse_non_numeric_port_exits(self):
+        """agents-m5r: non-numeric port raises clean SystemExit instead of ValueError."""
+        for bad in ["abc=/tmp/x", "80a=/tmp/x", "=/tmp/x", " 8080=/tmp/x"]:
+            with self.subTest(spec=bad):
+                with self.assertRaises(SystemExit) as ctx:
+                    net_forward._parse(["--forward", bad, "--", "true"])
+                self.assertIn("net_forward: bad port in --forward", str(ctx.exception))
+
+    def test_parse_out_of_range_port_exits(self):
+        """agents-m5r: out-of-range port (<= 0 or > 65535) raises clean SystemExit."""
+        for bad in ["0=/tmp/x", "-1=/tmp/x", "-8080=/tmp/x", "65536=/tmp/x", "70000=/tmp/x", "999999=/tmp/x"]:
+            with self.subTest(spec=bad):
+                with self.assertRaises(SystemExit) as ctx:
+                    net_forward._parse(["--forward", bad, "--", "true"])
+                self.assertIn("net_forward: bad port in --forward", str(ctx.exception))
+
+    def test_parse_valid_ports_and_boundaries(self):
+        """agents-m5r: ports 1..65535 are accepted."""
+        forwards, cmd = net_forward._parse([
+            "--forward", "1=/tmp/low.sock",
+            "--forward", "8080=/tmp/mid.sock",
+            "--forward", "65535=/tmp/high.sock",
+            "--", "true"
+        ])
+        self.assertEqual(forwards, [
+            (1, "/tmp/low.sock"),
+            (8080, "/tmp/mid.sock"),
+            (65535, "/tmp/high.sock"),
+        ])
+        self.assertEqual(cmd, ["true"])
+
 
 class SupervisorTest(unittest.TestCase):
     def test_propagates_child_exit_code(self):
