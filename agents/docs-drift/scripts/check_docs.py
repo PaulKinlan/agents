@@ -43,6 +43,24 @@ EXTERNAL_REPO_INDICATORS = {
     "google-github-actions/", "actions/"
 }
 
+# Bare DIRECTORY names that are too generic to resolve by name anywhere in the tree.
+# `src/`, `build/` and friends appear in nearly every project, so a document naming one
+# is almost always describing the TARGET project's layout, not this repository's; letting
+# one match a directory somewhere else would hide a moved/renamed path.
+GENERIC_DIR_NAMES = {
+    "src", "source", "sources", "script", "scripts", "test", "tests", "spec", "specs",
+    "lib", "libs", "bin", "build", "dist", "out", "output", "docs", "doc", "app",
+    "apps", "packages", "package", "assets", "public", "static", "fixtures", "fixture",
+    "extension", "extensions", "pages", "page", "tools", "config", "configs", "tmp",
+    "temp", "cache", "vendor", "node_modules", "examples", "example", "samples",
+    "screenshots", "images", "img", "components", "styles", "tests-e2e", "e2e",
+    "template", "templates", "util", "utils", "helper", "helpers", "shared", "common",
+    "include", "includes", "types", "models", "controllers", "middleware", "routes",
+    "views", "services", "service", "api", "server", "client", "web", "core",
+    "data", "db", "database", "migrations", "schemas", "schema", "locale", "locales",
+    "i18n", "hooks", "store", "state", "generated", "coverage", "logs", "log",
+}
+
 def is_ignored_doc(p: Path, target_dir: Path) -> bool:
     """Check if document file is in an ignored directory."""
     try:
@@ -85,6 +103,7 @@ def get_markdown_headings(file_path: Path) -> Set[str]:
 GIT_INDEX_TIMEOUT_SECONDS = 120
 _GIT_INDEX_CACHE: Dict[Tuple[str, str], List[str]] = {}
 _NAME_INDEX_CACHE: Dict[str, Set[str]] = {}
+_DIR_INDEX_CACHE: Dict[str, Dict[str, int]] = {}
 
 
 def _git_paths(target_dir: Path, kind: str) -> List[str]:
@@ -145,6 +164,30 @@ def _file_names(target_dir: Path) -> Set[str]:
         _NAME_INDEX_CACHE[key] = names
     return _NAME_INDEX_CACHE[key]
 
+
+def _dir_name_counts(target_dir: Path) -> Dict[str, int]:
+    """How many distinct directories carry each name (walked once, cached).
+
+    Used to keep the bare-name fallback honest: a name that occurs once is unambiguous,
+    while `scripts` (22 directories in this repo) is not, so a document naming a
+    `scripts/` directory that no longer exists where it claims is still reported.
+
+    Keys are lower-cased so `Scripts/` and `scripts/` cannot each look unique, and the
+    walk skips the same IGNORE_DIRS the scanner itself ignores - otherwise a
+    `node_modules/pkg/<name>` directory appearing or disappearing (whether dependencies
+    happen to be installed on this VM) would silently change what counts as unique.
+    """
+    key = str(target_dir)
+    if key not in _DIR_INDEX_CACHE:
+        counts: Dict[str, int] = {}
+        for _root, dirs, _files in os.walk(target_dir):
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+            for d in dirs:
+                lowered = d.lower()
+                counts[lowered] = counts.get(lowered, 0) + 1
+        _DIR_INDEX_CACHE[key] = counts
+    return _DIR_INDEX_CACHE[key]
+
 def expand_path_braces(path_str: str) -> List[str]:
     """Expands brace expressions like lib/adapters/{antigravity,claude,pi}.sh"""
     match = re.search(r"\{([^}]+)\}", path_str)
@@ -191,9 +234,21 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     except Exception:
         pass
 
-    # Bare filename search across target repo
-    if "/" not in clean_p and "." in clean_p:
-        if clean_p in _file_names(target_dir):
+    # Bare name searches. A document may name a file or directory by name alone when the
+    # full path is obvious in context, and this repo's own docs rely on it: `PLAN.md`,
+    # `DESIGN.md` and `INTEGRATION.md` in AGENTS.md all match by name, as does `audits/`
+    # (only `docs/audits/` exists) - reporting that one was the agents-04h false positive.
+    #
+    # It is deliberately narrow for directories. A bare directory name resolves only when
+    # it is unambiguously ONE directory in the whole tree and is not a generic container
+    # word. An unconditional name search hid real drift: `scripts/` occurs 22 times
+    # (`agents/*/scripts/`), so `scripts/` in README.md - which does not exist at the repo
+    # root it describes - was silently swallowed (review of 946b23e).
+    if "/" not in clean_p:
+        if "." in clean_p and clean_p in _file_names(target_dir):
+            return True, False
+        if (clean_p.lower() not in GENERIC_DIR_NAMES
+                and _dir_name_counts(target_dir).get(clean_p.lower()) == 1):
             return True, False
 
     return False, False
@@ -231,8 +286,15 @@ def parse_tree_diagrams(content: str) -> List[Tuple[int, str, str]]:
                 root_name = root_m.group(1).strip()
                 has_root = True
                 stack = []
-                # Normalize ~/agents/ -> repo root
-                if root_name in ["~/agents/", "agents/", "./"]:
+                # A root line is either a repo-root alias (`~/agents/`, `./`) or a real
+                # directory named by the diagram. Only the aliases collapse to the repo
+                # root: the README's "Repository Structure" block lists `agents/`,
+                # `lines/`, `lib/` and `docs/` as SIBLING roots, so collapsing `agents/`
+                # checked its 22 children against the repo root (`secret-scan/`,
+                # `qa-station/`, …) and emitted 22 false doc-missing-file candidates on
+                # every run (agents-04h; the old code normalised `agents/` away because
+                # this repo is *named* agents, which is not what the diagram means).
+                if root_name.startswith("~") or root_name in ("./", ".", "/"):
                     stack.append((0, ""))
                 else:
                     stack.append((0, root_name))
@@ -422,6 +484,12 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
                     continue
 
                 if item_clean.startswith(("http:", "https:", "~", "/dev", "/tmp", "/etc", "/usr", "$")):
+                    continue
+                # Any other URI scheme (`file://`, `chrome://extensions`, …) names a URL, not a
+                # repository path; the old code only skipped http/https, so a doc saying the
+                # pages render from `file://` produced a "Missing Referenced File 'file://'"
+                # candidate (agents-04h).
+                if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", item_clean):
                     continue
                 if any(op in item_clean for op in ["->", "=>", "==", "!=", "<=", ">="]):
                     continue
