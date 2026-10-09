@@ -9,7 +9,6 @@ sink dispatch (file, beads). Public GitHub issues are no longer a finding sink
 """
 
 import argparse
-import ast
 import fcntl
 import hashlib
 import json
@@ -21,12 +20,9 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
-
-# Per-station deterministic rule ids, read from the scanners' sources once per process.
-_SCANNER_RULE_ID_CACHE: Dict[str, Set[str]] = {}
 
 # The committed suppressions register. AGENTS.md's noise-control contract requires a written
 # reason in a *committed* file; the old per-target JSON was gitignored, so that contract could
@@ -80,58 +76,6 @@ def normalize_text(text: Any) -> str:
     if not isinstance(text, str):
         text = str(text)
     return re.sub(r"\s+", " ", text.strip())
-
-def known_scanner_rule_ids(agent: str) -> Set[str]:
-    """Rule ids the station's OWN deterministic scanners declare (agents-v4q).
-
-    `bind_candidates` blanks a model rule_id that is not in the run's candidate set, because a
-    model-invented scanner rule id makes a report look like the deterministic scanner found it.
-    That guard is right, but a context-shaped candidates file (vuln-discovery's single
-    threat-model entry) makes the candidate set meaningless - its `rule_ids` holds
-    `threat-model-context`, so every genuine classification the model produced was blanked too.
-
-    This is the non-fabrication check: the ids the station's own scanners actually declare, read
-    from their sources. It is deliberately PER-STATION, so a model cannot borrow another
-    station's real rule id to look deterministic, and deliberately derived rather than declared:
-    every scanner in this repo declares ids as dict literals carrying a `rule_id`
-    (11 scanners, 100 ids) or as `(id, re.compile(...))` detector tuples (secret-scan 12,
-    threat-model 5), and both shapes are read. A scanner whose ids are not declarative keeps the
-    old behaviour - its model rule_ids stay blanked rather than being trusted.
-    """
-    if agent in _SCANNER_RULE_ID_CACHE:
-        return _SCANNER_RULE_ID_CACHE[agent]
-    ids: Set[str] = set()
-    for src in sorted((FACTORY_ROOT / "agents" / agent / "scripts").glob("*.py")):
-        try:
-            tree = ast.parse(src.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, ValueError):
-            continue
-        ids |= _declared_rule_ids(tree)
-    _SCANNER_RULE_ID_CACHE[agent] = ids
-    return ids
-
-
-def _declared_rule_ids(tree: ast.AST) -> Set[str]:
-    """The rule ids a scanner source declares, in either shape it uses."""
-    ids: Set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values):
-                if (isinstance(key, ast.Constant) and key.value == "rule_id"
-                        and isinstance(value, ast.Constant) and isinstance(value.value, str)):
-                    ids.add(value.value)
-        # Detector tables shaped `("aws-access-key", re.compile(...))`, e.g. secret-scan's
-        # SECRET_PATTERNS and threat-model's history rules.
-        elts = getattr(node, "elts", None)
-        if isinstance(node, (ast.Tuple, ast.List)) and elts and len(elts) == 2:
-            first, second = elts
-            if isinstance(first, ast.Constant) and isinstance(first.value, str) \
-                    and isinstance(second, ast.Call):
-                func = second.func
-                if isinstance(func, ast.Attribute) and func.attr in ("compile", "match", "search"):
-                    ids.add(first.value)
-    return ids
-
 
 def normalize_path(path: Any) -> str:
     """The one path normalization used for fingerprints and candidate binding."""
@@ -300,8 +244,7 @@ def identity_raw_match(item: Dict[str, Any], rule_id: Any, path: Any,
     return item.get("raw_match")
 
 def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, Any]],
-                    target_dir: Optional[Path] = None,
-                    scanner_rule_ids: Optional[Set[str]] = None) -> Tuple[Any, Any]:
+                    target_dir: Optional[Path] = None) -> Tuple[Any, Any]:
     """Bind a finding's `rule_id` and `path` to the deterministic scanner's output.
 
     The triage model returns these strings, so without a contract any string it invents is
@@ -310,14 +253,16 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
     When no candidate set exists there is nothing to bind to, and the model's values pass
     through to the redaction backstop exactly as before (agents-nha).
 
-    The rule-id guard has one bounded exception (agents-v4q): when the candidate set is
-    context-shaped its `rule_ids` is meaningless (vuln-discovery's holds only
-    `threat-model-context`), so a model classification that IS real was being erased too. A rule
-    id is therefore kept when the location it is attached to resolves inside the target AND the
-    station's own scanners declare that id (`known_scanner_rule_ids`); a model-authored label
-    (`scanner-self-output-not-excluded`, `tm-*`) is not a scanner rule id and stays blanked, as
-    does any id attached to an invented location. Per-station on purpose: borrowing another
-    station's real id to look deterministic is exactly what the guard exists to stop.
+    The rule-id blanking is deliberate and was re-examined in agents-v4q. Retaining a "real" id
+    instead was tried and reverted, because no workable non-fabrication check exists: genuine ids
+    already arrive in the candidate set (measured over 18 real run outputs, the candidate index
+    kept 22 of 55 model rule_ids and an inferred scanner registry rescued 0 more), no station
+    declares a machine-readable rule registry, and inferring one from scanner sources proved
+    unfaithful in BOTH directions - it missed vuln-discovery's 9 rules (4-tuple tables) and
+    docs-drift's 3 (`x if c else y` assignments), while admitting vuln-discovery's
+    `threat-model-context` envelope constant and threat-model's 5 entry-point categories, which
+    are not finding rules. Admitting fabrications is worse than blanking them. The pins live in
+    TestRuleIdStaysBlankOnAContextShapedIndex; read that before reintroducing a registry.
 
     Binding must never destroy a REAL location (agents-0tl). A model path that resolves inside
     the target is evidence, not an invention, so it survives even when it is not a scanner
@@ -339,20 +284,11 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
     if not candidate_index:
         return rule_id, path
 
-    # One resolution, used by both guards below: a real location is what makes a model's
-    # classification credible, and what stops the path guard destroying evidence.
-    path_is_real = path_resolves_in_target(path, target_dir)
     if candidate_index["rule_ids"]:
         if not (isinstance(rule_id, str) and rule_id.strip() in candidate_index["rule_ids"]):
-            # Keep a rule id the station's own scanner declares, when the location it is attached
-            # to is real (agents-v4q). An id the station never declares, or one attached to an
-            # invented location, is still fabricated as far as the store is concerned.
-            keep_rule_id = (isinstance(rule_id, str) and rule_id.strip() in (scanner_rule_ids or set())
-                            and path_is_real)
-            if not keep_rule_id:
-                rule_id = "unclassified"
+            rule_id = "unclassified"
     if candidate_index["paths"] and normalize_path(path) not in candidate_index["paths"]:
-        if not path_is_real:
+        if not path_resolves_in_target(path, target_dir):
             path = "unknown"
     return rule_id, path
 
@@ -614,8 +550,7 @@ class FindingsStore:
         for item in raw_findings:
             if not isinstance(item, dict):
                 continue
-            rule_id, path = bind_candidates(item, candidate_index, target_dir,
-                                            known_scanner_rule_ids(agent))
+            rule_id, path = bind_candidates(item, candidate_index, target_dir)
             item["severity"] = bind_severity(item, rule_id, path, candidate_index)
             item["raw_match"] = identity_raw_match(item, rule_id, path, candidate_index)
             item["agent"] = agent

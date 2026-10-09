@@ -21,7 +21,6 @@ from lib.findings import (  # noqa: E402
     FindingsStore,
     bind_candidates,
     compute_fingerprint,
-    known_scanner_rule_ids,
     load_candidate_index,
     normalize_path,
 )
@@ -248,15 +247,27 @@ class TestBindingNeverDestroysARealLocation(unittest.TestCase):
             self.assertEqual(path, "unknown", f"{rootish!r} must not count as a location")
 
 
-class TestRuleIdParityWithABound(unittest.TestCase):
-    """agents-v4q: keep a model rule_id only when it is real, by coord's approved bound.
+class TestRuleIdStaysBlankOnAContextShapedIndex(unittest.TestCase):
+    """agents-v4q: the decision, and the evidence, so nobody re-derives it from scratch.
 
-    Condition (a) the record's path resolves inside the target, and (b) the id is one the
-    station's OWN deterministic scanners declare. A model-authored label (vuln-discovery's
-    `scanner-self-output-not-excluded`, threat-model's `tm-*`) is not a scanner rule id, so it
-    stays `unclassified` - the guard that stops a report looking like the deterministic scanner
-    found something is intact. Measured on the 18 real run outputs: 13 of 55 model rule_ids are
-    kept, 0 fabrications are, and the observed 0tl case keeps 0 of 7.
+    Coord approved keeping a model rule_id when it is real, with an explicit fallback: if no
+    workable non-fabrication check exists, keep `unclassified` and document why. No workable check
+    exists, and the evidence is:
+      * Genuine rule ids already arrive in the candidate index - that is where the pre-pass puts
+        the rules it fired, and the triage model echoes them. Measured over the 18 real run
+        outputs (untracked audit artefacts), 22 of 55 model rule_ids were kept by the baseline and
+        an inferred registry rescued 0 of the remaining 33. The measured benefit of the
+        relaxation was therefore zero, not the 13 I first reported.
+      * No station declares a machine-readable rule-id registry (report.schema.json carries only
+        prose descriptions with examples), so a registry can only be INFERRED from scanner
+        sources - and inference measured unfaithful in BOTH directions: it missed vuln-discovery's
+        9 rules (declared as 4-tuple tables) and docs-drift's 3 (`rule_id = "a" if x else "b"`
+        assignments), while admitting ids that are not finding rules at all:
+        vuln-discovery's `threat-model-context` envelope constant and threat-model's 5 entry-point
+        categories.
+    A check that admits fabrications is worse than the blanking it replaces, so the rule id stays
+    bound to the candidate index. These tests fail if a derived registry is reintroduced; they
+    point here so it is read first.
     """
 
     CONTEXT_INDEX = {"rule_ids": {"threat-model-context"}, "paths": {"THREAT_MODEL.md"}}
@@ -270,73 +281,26 @@ class TestRuleIdParityWithABound(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _bind(self, rule_id, path, agent):
-        return bind_candidates(finding(rule_id=rule_id, path=path), self.CONTEXT_INDEX,
-                              self.target, known_scanner_rule_ids(agent))
+    def test_a_context_shaped_index_keeps_the_path_but_blanks_the_rule_id(self):
+        """The path half is fixed (agents-0tl); the rule id half is deliberate."""
+        rule_id, path = bind_candidates(finding(rule_id="unhandled-url-construction",
+                                               path="lib/real.py"),
+                                       self.CONTEXT_INDEX, self.target)
+        self.assertEqual(path, "lib/real.py")
+        self.assertEqual(rule_id, "unclassified")
 
-    def test_a_declared_rule_id_with_a_real_path_is_kept(self):
-        real = sorted(known_scanner_rule_ids("docs-drift"))[0]
-        self.assertEqual(self._bind(real, "lib/real.py", "docs-drift"), (real, "lib/real.py"))
+    def test_a_rule_id_the_station_really_declares_is_still_blanked(self):
+        """Genuinely declared ids stay blanked too, because nothing can prove them: an inferred
+        registry would also admit ids that never fired (and, measured, ids that are not rules)."""
+        for declared in ("unhandled-url-construction",          # vuln-discovery 4-tuple table
+                         "doc-deleted-reference"):             # docs-drift ternary assignment
+            self.assertEqual(
+                bind_candidates(finding(rule_id=declared, path="lib/real.py"),
+                                self.CONTEXT_INDEX, self.target)[0], "unclassified")
 
-    def test_an_invented_rule_id_is_still_unclassified(self):
-        """The observed 0tl labels: not scanner rule ids, so still blanked."""
-        for invented in ("scanner-self-output-not-excluded", "path-traversal-unsanitized-relative-path"):
-            self.assertEqual(self._bind(invented, "lib/real.py", "vuln-discovery")[0], "unclassified")
-
-    def test_a_declared_rule_id_on_an_invented_path_is_unclassified(self):
-        """Condition (a) alone is not enough - the location must be real too."""
-        real = sorted(known_scanner_rule_ids("docs-drift"))[0]
-        rule_id, path = self._bind(real, "lib/invented.py", "docs-drift")
-        self.assertEqual((rule_id, path), ("unclassified", "unknown"))
-
-    def test_another_stations_rule_id_is_not_accepted(self):
-        """A model cannot borrow a real id from a different station to look deterministic."""
-        self.assertEqual("generic-api-key" in known_scanner_rule_ids("modern-web"), False)
-        self.assertEqual(self._bind("generic-api-key", "lib/real.py", "modern-web")[0], "unclassified")
-
-    def test_the_registry_reads_both_declaration_shapes(self):
-        """dict literals ('rule_id') and (id, re.compile(...)) detector tuples."""
-        self.assertIn("legacy-viewport-media-for-components", known_scanner_rule_ids("modern-web"))
-        self.assertIn("aws-access-key", known_scanner_rule_ids("secret-scan"))
-        self.assertIn("code-execution", known_scanner_rule_ids("threat-model"))
-
-    def test_the_registry_is_per_station(self):
-        self.assertIn("generic-api-key", known_scanner_rule_ids("secret-scan"))
-        self.assertNotIn("generic-api-key", known_scanner_rule_ids("docs-drift"))
-
-    def test_the_observed_0tl_case_is_unchanged_end_to_end(self):
-        """Through the store: the 7 real findings keep their PATH and stay unclassified."""
-        store = FindingsStore("v4q", findings_dir=self.target / "store")
-        try:
-            processed, _, _ = store.process_run(
-                agent="vuln-discovery",
-                raw_findings=[finding(rule_id="scanner-self-output-not-excluded",
-                                      path="lib/real.py", title="observed 0tl case")],
-                candidate_index=self.CONTEXT_INDEX,
-                target_dir=self.target,
-            )
-        finally:
-            store.close()
-        self.assertEqual(processed[0]["path"], "lib/real.py")
-        self.assertEqual(processed[0]["rule_id"], "unclassified")
-
-    def test_a_real_scanner_classification_survives_end_to_end(self):
-        """Through the store: a genuine scanner id on a real path is no longer erased."""
-        real = sorted(known_scanner_rule_ids("docs-drift"))[0]
-        store = FindingsStore("v4q2", findings_dir=self.target / "store2")
-        try:
-            processed, _, _ = store.process_run(
-                agent="docs-drift",
-                raw_findings=[finding(rule_id=real, path="lib/real.py", title="real rule id")],
-                candidate_index=self.CONTEXT_INDEX,
-                target_dir=self.target,
-            )
-        finally:
-            store.close()
-        self.assertEqual(processed[0]["rule_id"], real)
-        self.assertEqual(processed[0]["path"], "lib/real.py")
-
-    def test_no_registry_supplied_keeps_the_previous_behaviour(self):
-        """Callers that do not pass a registry get the old, conservative blanking."""
-        self.assertEqual(bind_candidates(finding(rule_id="anything", path="lib/real.py"),
-                                         self.CONTEXT_INDEX, self.target)[0], "unclassified")
+    def test_an_id_the_pre_pass_actually_fired_is_still_kept(self):
+        """The guard's real job is untouched: index membership is what makes an id credible."""
+        index = {"rule_ids": {"unhandled-url-construction"}, "paths": {"lib/real.py"}}
+        rule_id, path = bind_candidates(finding(rule_id="unhandled-url-construction",
+                                               path="lib/real.py"), index, self.target)
+        self.assertEqual((rule_id, path), ("unhandled-url-construction", "lib/real.py"))
