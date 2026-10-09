@@ -253,6 +253,17 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
     When no candidate set exists there is nothing to bind to, and the model's values pass
     through to the redaction backstop exactly as before (agents-nha).
 
+    The rule-id blanking is deliberate and was re-examined in agents-v4q. Retaining a "real" id
+    instead was tried and reverted, because no workable non-fabrication check exists: genuine ids
+    already arrive in the candidate set (measured over 18 real run outputs, the candidate index
+    kept 22 of 55 model rule_ids and an inferred scanner registry rescued 0 more), no station
+    declares a machine-readable rule registry, and inferring one from scanner sources proved
+    unfaithful in BOTH directions - it missed vuln-discovery's 9 rules (4-tuple tables) and
+    docs-drift's 3 (`x if c else y` assignments), while admitting vuln-discovery's
+    `threat-model-context` envelope constant and threat-model's 5 entry-point categories, which
+    are not finding rules. Admitting fabrications is worse than blanking them. The pins live in
+    TestRuleIdStaysBlankOnAContextShapedIndex; read that before reintroducing a registry.
+
     Binding must never destroy a REAL location (agents-0tl). A model path that resolves inside
     the target is evidence, not an invention, so it survives even when it is not a scanner
     candidate - otherwise a context-shaped candidate set (vuln-discovery's single threat-model

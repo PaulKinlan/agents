@@ -245,3 +245,62 @@ class TestBindingNeverDestroysARealLocation(unittest.TestCase):
         for rootish in (".", "./", "sub/..", "."):
             _, path = bind_candidates(finding(path=rootish), self.CONTEXT_INDEX, target_dir=self.target)
             self.assertEqual(path, "unknown", f"{rootish!r} must not count as a location")
+
+
+class TestRuleIdStaysBlankOnAContextShapedIndex(unittest.TestCase):
+    """agents-v4q: the decision, and the evidence, so nobody re-derives it from scratch.
+
+    Coord approved keeping a model rule_id when it is real, with an explicit fallback: if no
+    workable non-fabrication check exists, keep `unclassified` and document why. No workable check
+    exists, and the evidence is:
+      * Genuine rule ids already arrive in the candidate index - that is where the pre-pass puts
+        the rules it fired, and the triage model echoes them. Measured over the 18 real run
+        outputs (untracked audit artefacts), 22 of 55 model rule_ids were kept by the baseline and
+        an inferred registry rescued 0 of the remaining 33. The measured benefit of the
+        relaxation was therefore zero, not the 13 I first reported.
+      * No station declares a machine-readable rule-id registry (report.schema.json carries only
+        prose descriptions with examples), so a registry can only be INFERRED from scanner
+        sources - and inference measured unfaithful in BOTH directions: it missed vuln-discovery's
+        9 rules (declared as 4-tuple tables) and docs-drift's 3 (`rule_id = "a" if x else "b"`
+        assignments), while admitting ids that are not finding rules at all:
+        vuln-discovery's `threat-model-context` envelope constant and threat-model's 5 entry-point
+        categories.
+    A check that admits fabrications is worse than the blanking it replaces, so the rule id stays
+    bound to the candidate index. These tests fail if a derived registry is reintroduced; they
+    point here so it is read first.
+    """
+
+    CONTEXT_INDEX = {"rule_ids": {"threat-model-context"}, "paths": {"THREAT_MODEL.md"}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self.tmp.name)
+        (self.target / "lib").mkdir()
+        (self.target / "lib" / "real.py").write_text("x = 1\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_context_shaped_index_keeps_the_path_but_blanks_the_rule_id(self):
+        """The path half is fixed (agents-0tl); the rule id half is deliberate."""
+        rule_id, path = bind_candidates(finding(rule_id="unhandled-url-construction",
+                                               path="lib/real.py"),
+                                       self.CONTEXT_INDEX, self.target)
+        self.assertEqual(path, "lib/real.py")
+        self.assertEqual(rule_id, "unclassified")
+
+    def test_a_rule_id_the_station_really_declares_is_still_blanked(self):
+        """Genuinely declared ids stay blanked too, because nothing can prove them: an inferred
+        registry would also admit ids that never fired (and, measured, ids that are not rules)."""
+        for declared in ("unhandled-url-construction",          # vuln-discovery 4-tuple table
+                         "doc-deleted-reference"):             # docs-drift ternary assignment
+            self.assertEqual(
+                bind_candidates(finding(rule_id=declared, path="lib/real.py"),
+                                self.CONTEXT_INDEX, self.target)[0], "unclassified")
+
+    def test_an_id_the_pre_pass_actually_fired_is_still_kept(self):
+        """The guard's real job is untouched: index membership is what makes an id credible."""
+        index = {"rule_ids": {"unhandled-url-construction"}, "paths": {"lib/real.py"}}
+        rule_id, path = bind_candidates(finding(rule_id="unhandled-url-construction",
+                                               path="lib/real.py"), index, self.target)
+        self.assertEqual((rule_id, path), ("unhandled-url-construction", "lib/real.py"))
