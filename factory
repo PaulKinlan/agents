@@ -6,6 +6,7 @@ and CI execution planes.
 """
 
 import argparse
+import atexit
 import json
 import os
 import re
@@ -13,10 +14,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_hex
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent
 
@@ -754,6 +756,49 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     pool = with_findings or objects
     return max(pool, key=lambda o: o[0])[1]
 
+_TRANSIENT_DIRS: List[Path] = []
+_TRANSIENT_DIR_PREFIXES = ("factory-sock-", "factory-pi-")
+_TRANSIENT_DIR_MAX_AGE_SECONDS = 24 * 3600  # agents-uxs: far beyond any legitimate run lifetime
+
+
+def _cleanup_transient_dirs() -> None:
+    """Best-effort removal of every transient dir this process created (agents-uxs).
+
+    Registered with atexit so a sys.exit() or an uncaught exception between creation and the
+    normal-path cleanup still removes the dirs. SIGKILL runs no handler and no atexit — the
+    next run's _sweep_stale_transient_dirs is the backstop for that case.
+    """
+    while _TRANSIENT_DIRS:
+        shutil.rmtree(_TRANSIENT_DIRS.pop(), ignore_errors=True)
+
+
+def _sweep_stale_transient_dirs(root: Path = Path("/tmp"), now: Optional[float] = None) -> int:
+    """Reap /tmp factory transient dirs orphaned by a hard kill (agents-uxs).
+
+    A run the reaper or `timeout` SIGKILLs leaves its factory-sock-*/factory-pi-* mkdtemp dirs
+    behind (SIGKILL is not catchable). Each run therefore sweeps, at the point of creating its
+    own dirs, any same-prefix directory older than _TRANSIENT_DIR_MAX_AGE_SECONDS. Returns the
+    number of directories removed.
+    """
+    now = time.time() if now is None else now
+    removed = 0
+    for prefix in _TRANSIENT_DIR_PREFIXES:
+        for d in root.glob(f"{prefix}*"):
+            try:
+                if not d.is_dir():
+                    continue
+                if now - d.stat().st_mtime <= _TRANSIENT_DIR_MAX_AGE_SECONDS:
+                    continue
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+            except OSError:
+                continue
+    return removed
+
+
+atexit.register(_cleanup_transient_dirs)
+
+
 def _make_socket_dir() -> Path:
     """Allocate a short, private, per-run directory for the egress UNIX sockets (agents-x8l).
 
@@ -763,8 +808,10 @@ def _make_socket_dir() -> Path:
     own collision-free mktemp directory under /tmp (already 0700), kept private so a concurrent
     run can neither read nor bind them.
     """
+    _sweep_stale_transient_dirs()  # agents-uxs: reap hard-kill orphans at the point of creation
     d = Path(tempfile.mkdtemp(prefix="factory-sock-", dir="/tmp"))
     os.chmod(d, 0o700)  # mkdtemp is 0700 by default; be explicit against umask drift
+    _TRANSIENT_DIRS.append(d)
     return d
 
 
@@ -779,6 +826,7 @@ def _make_pi_config_dir() -> Path:
     """
     d = Path(tempfile.mkdtemp(prefix="factory-pi-", dir="/tmp"))
     os.chmod(d, 0o700)
+    _TRANSIENT_DIRS.append(d)
     return d
 
 
