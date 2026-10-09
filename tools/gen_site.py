@@ -74,6 +74,73 @@ def _parse_scalar(val: str, path: Path, lineno: int) -> Any:
     return v
 
 
+def _is_quote_start(raw_line: str, i: int) -> bool:
+    """True if a quote at index i begins a YAML scalar value."""
+    prefix = raw_line[:i]
+    if not prefix.strip():
+        return True
+    p = prefix.rstrip(" \t")
+    # A block list item marker: '- ' at the start of the line (modulo indentation)
+    if p.strip() == "-":
+        return True
+    # A mapping key-value separator: 'key: ' at the start of the line
+    if p.endswith(":") and re.match(r"^\s*[a-zA-Z0-9_-]+:$", p):
+        return True
+    # Flow collection items: line starts a flow sequence ('key: ['), and index i is inside '[' ... ']'
+    m = re.match(r"^\s*[a-zA-Z0-9_-]+:\s*\[", raw_line)
+    if m:
+        flow_start = m.end() - 1
+        flow_prefix = raw_line[flow_start:i]
+        if "]" not in flow_prefix and p.endswith(("[", ",")):
+            return True
+    return False
+
+
+def _strip_comment(raw_line: str) -> str:
+    """Strips a YAML trailing comment from raw_line, respecting quotes (agents-ypib).
+
+    Per YAML specification:
+    - A '#' starts a comment only at line start or when preceded by whitespace.
+    - '#' inside single- or double-quoted scalars is literal content, not a comment.
+    - Quotes only enter quote mode where a scalar value begins (at line start,
+      after ':', '[', ',', '{', or list marker '- '), so apostrophes/quotes in
+      plain unquoted scalars (e.g. "Paul's agent", "O-'Brien") do not falsely
+      suppress comment stripping.
+    """
+    in_single = False
+    in_double = False
+    escaped = False
+
+    i = 0
+    n = len(raw_line)
+    while i < n:
+        ch = raw_line[i]
+        if in_single:
+            if ch == "'":
+                if i + 1 < n and raw_line[i + 1] == "'":
+                    i += 2
+                    continue
+                in_single = False
+        elif in_double:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+        else:
+            if ch == "'" and _is_quote_start(raw_line, i):
+                in_single = True
+            elif ch == '"' and _is_quote_start(raw_line, i):
+                in_double = True
+            elif ch == "#":
+                if i == 0 or raw_line[i - 1].isspace():
+                    return raw_line[:i]
+        i += 1
+
+    return raw_line
+
+
 def load_yaml(path: Path) -> Dict[str, Any]:
     """Parse YAML manifest using stdlib-only parser that fails closed on unsupported or malformed constructs."""
     result: Dict[str, Any] = {}
@@ -82,7 +149,7 @@ def load_yaml(path: Path) -> Dict[str, Any]:
     for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if "\t" in raw_line:
             raise ValueError(f"YAML parse error in {path}:{lineno}: tabs are forbidden")
-        line = raw_line.split("#", 1)[0]
+        line = _strip_comment(raw_line)
         line_clean = line.strip()
         if not line_clean:
             continue

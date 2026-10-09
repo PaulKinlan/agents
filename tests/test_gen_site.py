@@ -268,6 +268,72 @@ capabilities:
                 load_yaml(tmp_path)
             self.assertIn("unparseable construct", str(ctx.exception))
 
+    def test_yaml_parser_comment_and_hash_handling(self):
+        """[agents-ypib] load_yaml must preserve '#' in unquoted values/URLs and quoted strings,
+        strip real comments, and fail closed on unclosed quotes.
+        """
+        from tools.gen_site import load_yaml
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir) / "test.yaml"
+
+            # 1. Unquoted '#' with no preceding space is preserved (e.g. name: foo#bar)
+            tmp_path.write_text("name: foo#bar\n", encoding="utf-8")
+            data = load_yaml(tmp_path)
+            self.assertEqual(data["name"], "foo#bar")
+
+            # 2. URL fragment survives (e.g. url: https://example.com/x#frag)
+            tmp_path.write_text("url: https://example.com/x#frag\n", encoding="utf-8")
+            data = load_yaml(tmp_path)
+            self.assertEqual(data["url"], "https://example.com/x#frag")
+
+            # 3. Real trailing comment preceded by whitespace is stripped
+            tmp_path.write_text(
+                "# Full line comment\n"
+                "   # Indented full line comment\n"
+                "cmd: run --flag=1 # real trailing comment\n"
+                "summary: Paul's agent # real comment with apostrophe in plain scalar\n"
+                "author: O-'Brien # real comment with hyphen-apostrophe in plain scalar\n"
+                "hyphen_space: Paul - 'Brien # real comment with space-hyphen-space-apostrophe\n"
+                "comma_space: Paul, 'Brien # real comment with comma-space-apostrophe\n"
+                "bracket_comma: Paul [note, 'Brien # real comment with bracket-comma-apostrophe\n"
+                "list:\n"
+                "  - item1 # comment 1\n"
+                "  - item#2 # comment 2\n",
+                encoding="utf-8",
+            )
+            data = load_yaml(tmp_path)
+            self.assertEqual(data["cmd"], "run --flag=1")
+            self.assertEqual(data["summary"], "Paul's agent")
+            self.assertEqual(data["author"], "O-'Brien")
+            self.assertEqual(data["hyphen_space"], "Paul - 'Brien")
+            self.assertEqual(data["comma_space"], "Paul, 'Brien")
+            self.assertEqual(data["bracket_comma"], "Paul [note, 'Brien")
+            self.assertEqual(data["list"], ["item1", "item#2"])
+
+            # 4. Quoted '#' values (single and double quoted) with trailing comments
+            tmp_path.write_text(
+                'double: "hello # world" # trailing\n'
+                "single: 'foo # bar' # trailing\n"
+                'only_hash: "#"\n',
+                encoding="utf-8",
+            )
+            data = load_yaml(tmp_path)
+            self.assertEqual(data["double"], "hello # world")
+            self.assertEqual(data["single"], "foo # bar")
+            self.assertEqual(data["only_hash"], "#")
+
+            # 5. Genuinely unclosed quotes must still fail closed and raise ValueError
+            tmp_path.write_text('name: "unclosed # with hash\n', encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("unclosed double quote", str(ctx.exception))
+
+            tmp_path.write_text("name: 'unclosed # with hash\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("unclosed single quote", str(ctx.exception))
+
     def test_cli_reference_derived_from_parser_with_nested_subcommands(self):
         """CLI reference must derive all 9 subcommands, nested subcommands, and per-subcommand options."""
         commands = get_cli_commands(ROOT)
