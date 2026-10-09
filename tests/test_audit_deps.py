@@ -173,7 +173,7 @@ class TestLockfileShippedArtifactDivergence(unittest.TestCase):
 
         self.assertEqual(len(divergence), 1)
         self.assertEqual(divergence[0]["type"], "coverage-gap")
-        self.assertEqual(divergence[0]["severity"], "low")
+        self.assertEqual(divergence[0]["severity"], "info")
         self.assertIn("unverified", divergence[0]["title"])
         self.assertEqual(divergence[0]["path"], "dist")
 
@@ -212,6 +212,31 @@ Requires-Dist: urllib3 == 1.26.5
                 "node_modules/lodash": {"version": "4.17.21"}
             }
         }), encoding="utf-8")
+
+        candidates, manifests = audit_deps.audit_npm(self.repo)
+        divergence = [c for c in candidates if c.get("rule_id") == "lockfile-shipped-version-divergence"]
+        self.assertEqual(len(divergence), 0)
+
+    def test_no_artifact_no_gap(self):
+        """[agents-gtq] Negative test: target without any dist/ or manifest.json emits 0 divergence candidates."""
+        (self.repo / "package.json").write_text(json.dumps({
+            "name": "plain-node-app",
+            "dependencies": {"express": "^4.18.2"}
+        }), encoding="utf-8")
+
+        candidates, manifests = audit_deps.audit_npm(self.repo)
+        divergence = [c for c in candidates if c.get("rule_id") == "lockfile-shipped-version-divergence"]
+        self.assertEqual(len(divergence), 0)
+
+    def test_empty_or_assets_only_dist_no_gap(self):
+        """[agents-gtq] dist/ directory with no bundle files or package.json does not emit spurious candidates."""
+        (self.repo / "package.json").write_text(json.dumps({
+            "name": "static-site",
+            "dependencies": {"lodash": "^4.17.21"}
+        }), encoding="utf-8")
+        dist = self.repo / "dist"
+        dist.mkdir()
+        (dist / "style.css").write_text("body { color: red; }", encoding="utf-8")
 
         candidates, manifests = audit_deps.audit_npm(self.repo)
         divergence = [c for c in candidates if c.get("rule_id") == "lockfile-shipped-version-divergence"]

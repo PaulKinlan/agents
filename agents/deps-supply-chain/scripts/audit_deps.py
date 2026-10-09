@@ -128,11 +128,11 @@ def resolve_shipped_versions_npm(target_dir: Path) -> Tuple[Dict[str, Tuple[str,
     for dname in ("dist", "build"):
         art_dir = target_dir / dname
         if art_dir.is_dir():
-            rel_art = str(art_dir.relative_to(target_dir))
-            artifact_paths.append(rel_art)
+            has_bundle_files = False
             # Check for package.json in dist/build
             dist_pkg = art_dir / "package.json"
             if dist_pkg.is_file():
+                has_bundle_files = True
                 rel_pkg = str(dist_pkg.relative_to(target_dir))
                 inspected_manifests.append(rel_pkg)
                 try:
@@ -149,6 +149,7 @@ def resolve_shipped_versions_npm(target_dir: Path) -> Tuple[Dict[str, Tuple[str,
             for root, _, files in os.walk(art_dir):
                 for f in files:
                     if f.endswith((".js", ".mjs", ".cjs")):
+                        has_bundle_files = True
                         fpath = Path(root) / f
                         try:
                             # Read first 4KB for license/version header comments
@@ -159,6 +160,10 @@ def resolve_shipped_versions_npm(target_dir: Path) -> Tuple[Dict[str, Tuple[str,
                                     shipped_versions[pkg] = (ver, str(fpath.relative_to(target_dir)))
                         except Exception:
                             pass
+
+            if has_bundle_files:
+                rel_art = str(art_dir.relative_to(target_dir))
+                artifact_paths.append(rel_art)
 
     # 2. Inspect manifest.json (Chrome extension / WebExtension)
     manifest_candidates = [
@@ -228,7 +233,7 @@ def check_shipped_artifact_divergence_npm(
         candidates.append({
             "type": "coverage-gap",
             "rule_id": "lockfile-shipped-version-divergence",
-            "severity": "low",
+            "severity": "info",
             "is_direct": False,
             "dep_type": "production",
             "title": f"Shipped artifact dependency versions unverified against lockfile ({primary_artifact})",
@@ -271,9 +276,10 @@ def check_shipped_artifact_divergence_python(
 
     dist_dir = target_dir / "dist"
     if dist_dir.is_dir():
-        artifact_paths.append("dist")
+        has_wheels = False
         for f in dist_dir.iterdir():
             if f.suffix == ".whl" and f.is_file():
+                has_wheels = True
                 rel_f = str(f.relative_to(target_dir))
                 inspected_manifests.append(rel_f)
                 try:
@@ -291,6 +297,8 @@ def check_shipped_artifact_divergence_python(
                                             shipped_versions[pkg] = (ver, rel_f)
                 except Exception:
                     pass
+        if has_wheels:
+            artifact_paths.append("dist")
 
     divergent_found = False
     for pkg, (shipped_ver, source_path) in shipped_versions.items():
@@ -321,7 +329,7 @@ def check_shipped_artifact_divergence_python(
         candidates.append({
             "type": "coverage-gap",
             "rule_id": "lockfile-shipped-version-divergence",
-            "severity": "low",
+            "severity": "info",
             "is_direct": False,
             "dep_type": "production",
             "title": f"Shipped artifact dependency versions unverified against requirements ({primary_artifact})",
