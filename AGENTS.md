@@ -170,15 +170,15 @@ credentials and prior findings.
 ### Publishing boundary
 
 `docs/` is a working directory, **not** a publish root. It holds the six generated pages and their
-assets alongside internal material — `PLAN.md`, `DESIGN.md`, `INTEGRATION.md` and `audits/` — which
+assets alongside internal material — `PLAN.md`, `DESIGN.md`, `INTEGRATION.md` and `docs/audits/` — which
 carries local paths, target references and operator detail and must not be served.
 
 The Pages workflow therefore uploads a **staged** directory built by `python3 tools/stage_site.py`,
 not `docs/`. The staged set is derived from the pages themselves (the six pages plus every local file
 they reference, followed through CSS) and every staged path must pass `guard()`: a publishable
-extension, and no `audits/` component. Adding internal notes to `docs/` is safe; linking one from a
+extension, and no `audits` path component (checked case-insensitively). Adding internal notes to `docs/` is safe; linking one from a
 page is refused rather than published. `tests/test_pages_publish_scope.py` pins this — the workflow
-uploads the staged directory, and no markdown or `audits/` file can appear in the artifact.
+uploads the staged directory, and no markdown or file with an `audits` component can appear in the artifact.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker

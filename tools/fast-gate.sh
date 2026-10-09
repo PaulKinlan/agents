@@ -51,6 +51,9 @@ while IFS= read -r f; do
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.
       mapped="$mapped tests/test_bench_runner.py tests/test_hillclimb.py"
       ;;
+    agents/docs-drift/scripts/check_docs.py)
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in

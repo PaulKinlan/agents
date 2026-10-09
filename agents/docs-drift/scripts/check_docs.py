@@ -52,8 +52,7 @@ EXTERNAL_REPO_INDICATORS = {
 }
 
 # The build/test/output containers a station's SKILL.md prose uses for the AUDITED project's
-# artefacts (agents-6zq). Deliberately NARROWER than GENERIC_DIR_NAMES, which also holds this
-# repository's own source roots: a SKILL.md reference under `lib/`, `docs/`, `tools/` or
+# artefacts (agents-6zq). A SKILL.md reference under `lib/`, `docs/`, `tools/` or
 # `scripts/` is a claim about THIS repo and must stay checkable - lib/adapters/gha.sh was the
 # one genuine drift found in this repository, and a wider list hid it.
 TARGET_LAYOUT_DIR_NAMES = {
@@ -62,24 +61,6 @@ TARGET_LAYOUT_DIR_NAMES = {
     "node_modules", "vendor", "tmp", "temp", "cache",
     "extension", "extensions", "pages", "page", "src", "source", "sources",
     "public", "static", "assets", "samples", "examples", "screenshots", "images", "img",
-}
-
-# Bare DIRECTORY names that are too generic to resolve by name anywhere in the tree.
-# `src/`, `build/` and friends appear in nearly every project, so a document naming one
-# is almost always describing the TARGET project's layout, not this repository's; letting
-# one match a directory somewhere else would hide a moved/renamed path.
-GENERIC_DIR_NAMES = {
-    "src", "source", "sources", "script", "scripts", "test", "tests", "spec", "specs",
-    "lib", "libs", "bin", "build", "dist", "out", "output", "docs", "doc", "app",
-    "apps", "packages", "package", "assets", "public", "static", "fixtures", "fixture",
-    "extension", "extensions", "pages", "page", "tools", "config", "configs", "tmp",
-    "temp", "cache", "vendor", "node_modules", "examples", "example", "samples",
-    "screenshots", "images", "img", "components", "styles", "tests-e2e", "e2e",
-    "template", "templates", "util", "utils", "helper", "helpers", "shared", "common",
-    "include", "includes", "types", "models", "controllers", "middleware", "routes",
-    "views", "services", "service", "api", "server", "client", "web", "core",
-    "data", "db", "database", "migrations", "schemas", "schema", "locale", "locales",
-    "i18n", "hooks", "store", "state", "generated", "coverage", "logs", "log",
 }
 
 def is_ignored_doc(p: Path, target_dir: Path) -> bool:
@@ -124,7 +105,6 @@ def get_markdown_headings(file_path: Path) -> Set[str]:
 GIT_INDEX_TIMEOUT_SECONDS = 120
 _GIT_INDEX_CACHE: Dict[Tuple[str, str], List[str]] = {}
 _NAME_INDEX_CACHE: Dict[str, Set[str]] = {}
-_DIR_INDEX_CACHE: Dict[str, Dict[str, int]] = {}
 
 
 def _git_paths(target_dir: Path, kind: str) -> List[str]:
@@ -174,40 +154,16 @@ def git_tracked_or_deleted(target_dir: Path, rel_path: str) -> Tuple[bool, bool]
 
 
 def _file_names(target_dir: Path) -> Set[str]:
-    """Every file and directory name under the target (outside .git), walked once."""
+    """Every regular file name under the target (outside .git), walked once."""
     key = str(target_dir)
     if key not in _NAME_INDEX_CACHE:
         names: Set[str] = set()
         for _root, dirs, files in os.walk(target_dir):
             dirs[:] = [d for d in dirs if d != ".git"]
-            names.update(dirs)
             names.update(files)
         _NAME_INDEX_CACHE[key] = names
     return _NAME_INDEX_CACHE[key]
 
-
-def _dir_name_counts(target_dir: Path) -> Dict[str, int]:
-    """How many distinct directories carry each name (walked once, cached).
-
-    Used to keep the bare-name fallback honest: a name that occurs once is unambiguous,
-    while `scripts` (22 directories in this repo) is not, so a document naming a
-    `scripts/` directory that no longer exists where it claims is still reported.
-
-    Keys are lower-cased so `Scripts/` and `scripts/` cannot each look unique, and the
-    walk skips the same IGNORE_DIRS the scanner itself ignores - otherwise a
-    `node_modules/pkg/<name>` directory appearing or disappearing (whether dependencies
-    happen to be installed on this VM) would silently change what counts as unique.
-    """
-    key = str(target_dir)
-    if key not in _DIR_INDEX_CACHE:
-        counts: Dict[str, int] = {}
-        for _root, dirs, _files in os.walk(target_dir):
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-            for d in dirs:
-                lowered = d.lower()
-                counts[lowered] = counts.get(lowered, 0) + 1
-        _DIR_INDEX_CACHE[key] = counts
-    return _DIR_INDEX_CACHE[key]
 
 def is_station_skill(rel_doc: str) -> bool:
     """True for a station's SKILL.md, which documents auditing an ARBITRARY target."""
@@ -244,18 +200,15 @@ def skill_reference_is_checkable(target_dir: Path, doc_dir: Path, ref: str) -> b
         (`lib/adapters/gha.sh`, the one genuine drift in this repository) - checkable;
       * anything else names the audited target's layout and is skipped.
 
-    The list consulted here is TARGET_LAYOUT_DIR_NAMES, NOT GENERIC_DIR_NAMES, even though
-    shape 1 was specified as the latter. GENERIC_DIR_NAMES holds every name a bare reference
-    may not be satisfied by elsewhere in the tree and includes this repository's own source
-    roots (`lib/`, `docs/`, `tools/`, `scripts/`), so applying it here is what hid
+    The list consulted here is TARGET_LAYOUT_DIR_NAMES (agents-6zq). A wider list holding
+    this repository's own source roots (`lib/`, `docs/`, `tools/`, `scripts/`) hid
     lib/adapters/gha.sh. The first attempt at shape 1 was also unreachable in effect: a bare
     `dist/` either resolves (so no candidate is produced) or its head is not a directory (so
     the fallback below rejects it anyway) - proved by sweeping 32 bare-container scenarios,
     where removing the guard changed nothing. TARGET_LAYOUT_DIR_NAMES is what station prose
     actually uses for the audited project's artefacts, and it is live: without it, a host
     repo that really contains a tracked `dist/` or `test/` directory would report
-    `dist/bundle.js` and `test/interpolate.test.js` as drift. GENERIC_DIR_NAMES keeps its own,
-    still-needed job in path_exists_or_matches().
+    `dist/bundle.js` and `test/interpolate.test.js` as drift.
     """
     if not ref:
         return False
@@ -328,22 +281,16 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     except Exception:
         pass
 
-    # Bare name searches. A document may name a file or directory by name alone when the
+    # Bare filename searches. A document may name a file by name alone when the
     # full path is obvious in context, and this repo's own docs rely on it: `PLAN.md`,
-    # `DESIGN.md` and `INTEGRATION.md` in AGENTS.md all match by name, as does `audits/`
-    # (only `docs/audits/` exists) - reporting that one was the agents-04h false positive.
+    # `DESIGN.md` and `INTEGRATION.md` in AGENTS.md all match by filename.
     #
-    # It is deliberately narrow for directories. A bare directory name resolves only when
-    # it is unambiguously ONE directory in the whole tree and is not a generic container
-    # word. An unconditional name search hid real drift: `scripts/` occurs 22 times
-    # (`agents/*/scripts/`), so `scripts/` in README.md - which does not exist at the repo
-    # root it describes - was silently swallowed (review of 946b23e).
-    if "/" not in clean_p:
-        if "." in clean_p and clean_p in _file_names(target_dir):
-            return True, False
-        if (clean_p.lower() not in GENERIC_DIR_NAMES
-                and _dir_name_counts(target_dir).get(clean_p.lower()) == 1):
-            return True, False
+    # Bare directory matching (e.g. `audits/` resolving to `docs/audits/`) was retired
+    # (agents-vdb) to eliminate ambiguity (the README-root collapse was caused by this
+    # heuristic misfiring). Directories must be referenced with their actual path.
+    # A path ending in "/" is explicitly a directory reference and must never match a file.
+    if not path_str.endswith("/") and "/" not in clean_p and "." in clean_p and clean_p in _file_names(target_dir):
+        return True, False
 
     return False, False
 
