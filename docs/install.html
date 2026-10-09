@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1020"><meta name="description" content="Pick a local session, a deterministic hook, or a pinned CI workflow. Keep authentication and target policy explicit.">
+<title>Install | The Software Factory</title>
+<link rel="canonical" href="https://paulkinlan.github.io/agents/install.html">
+<link rel="stylesheet" href="css/projects.css"><link rel="stylesheet" href="css/product.css"><link rel="stylesheet" href="css/factory.css">
+</head><body>
+<a class="skip-link" href="#content">Skip to content</a>
+<header class="site-header"><a class="identity" href="index.html">◈ The Software Factory</a><nav aria-label="Site"><a href="index.html">Overview</a><a href="install.html" aria-current="page">Install</a><a href="use.html">Use</a><a href="stations.html">Stations</a><a href="lines.html">Lines</a><a href="help.html">Help</a></nav></header>
+<main id="content"><div class="hero"><p class="eyebrow">Factory documentation / Install</p><h1 class="page-title">Install</h1><p class="lede">Pick a local session, a deterministic hook, or a pinned CI workflow. Keep authentication and target policy explicit.</p></div><div class="doc-layout"><nav class="side-nav" aria-label="On this page"><p class="kicker">On this page</p><ul><li><a href="#prerequisites">Prerequisites</a></li><li><a href="#local">Local</a></li><li><a href="#auth">Authentication</a></li><li><a href="#action">GitHub Actions</a></li><li><a href="#extras">Extras</a></li></ul></nav><div><section class="doc-section" id="prerequisites"><h2>Before you begin</h2>
+<!-- BEGIN GENERATED:install-prerequisites -->
+<ul><li>Python 3.9+ and Git.</li><li>At least one installed, authenticated AI CLI: <code>pi</code>, <code>claude</code> or <code>antigravity</code>. Engine availability and containment rules vary; check <a href="help.html#boundaries">boundaries</a>.</li><li><code>bd</code> is optional for a configured Beads sink; <code>gh</code> is optional for GitHub issue input and promotion.</li></ul>
+<!-- END GENERATED:install-prerequisites -->
+</section><section class="doc-section" id="local"><h2>Local installation</h2>
+<!-- BEGIN GENERATED:install-local -->
+<pre><code>git clone https://github.com/PaulKinlan/agents.git
+cd agents
+./install.sh
+./factory list
+./factory --agent</code></pre><p>No <code>--version</code> flag is provided. Use <code>./factory --help</code> to inspect installed commands.</p>
+<!-- END GENERATED:install-local -->
+</section><section class="doc-section" id="auth"><h2>Models & authentication</h2>
+<!-- BEGIN GENERATED:install-auth -->
+<p>Local runs reuse your authenticated CLI session. For headless action runs, supply the provider key as a GitHub Actions secret via <code>model_api_key</code> (Gemini or Anthropic); DeepSeek uses <code>deepseek_api_key</code>. Provider environment variables include <code>GEMINI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code> and <code>DEEPSEEK_API_KEY</code>. Never store keys in a workflow file or the site.</p><div class="callout callout--warning"><strong>Choose a boundary you can verify.</strong><p>On Linux, <code>pi</code> requires a working bubblewrap sandbox unless an explicitly trusted private target opts into the exceptional unsandboxed path. Do not treat an agent prompt as confinement.</p></div>
+<!-- END GENERATED:install-auth -->
+</section><section class="doc-section" id="action"><h2>GitHub Actions composite action</h2>
+<!-- BEGIN GENERATED:install-action -->
+<p>Pin both the action and fetched factory payload to reviewed 40-character commits. Give the job only the permissions it needs. The full workflow and its current pin belong in <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md">INTEGRATION.md</a>.</p><pre><code># In your workflow, after actions/checkout:
+- uses: paulkinlan/agents/.github/actions/factory@57d2a2951567973da7637b9016c0c5e67ad7a73d
+  with:
+    agent: secret-scan
+    target: '.'
+    sink: file
+    factory_ref: 57d2a2951567973da7637b9016c0c5e67ad7a73d
+    model_api_key: ${{ secrets.GEMINI_API_KEY }}</code></pre><p>Set <code>permissions: contents: read</code> by default. Use a write permission only for an approved workflow that requires it. The action uploads a full report as an authenticated artifact and uses a reduced step summary; do not copy raw report content into a public page.</p>
+<!-- END GENERATED:install-action -->
+</section><section class="doc-section" id="extras"><h2>Hooks, schedules & skills</h2>
+<!-- BEGIN GENERATED:install-extras -->
+<div class="card-grid"><article class="card"><h3>Pre-commit</h3><p>Install the fast deterministic hook. Blocking hooks do not invoke models.</p><pre><code>./factory hook install --target .</code></pre></article><article class="card"><h3>Interactive skills</h3><p>Link the factory skills into supported local CLI skill directories.</p><pre><code>./factory skills install</code></pre></article><article class="card"><h3>Recurring runs</h3><p>Inspect registered schedules before installing any.</p><pre><code>./factory schedule list</code></pre></article></div>
+<!-- END GENERATED:install-extras -->
+</section></div></div></main>
+<footer class="site-footer"><p>The Software Factory · <a href="https://github.com/PaulKinlan/agents">Source on GitHub</a> · <a href="https://github.com/PaulKinlan/agents/blob/main/docs/INTEGRATION.md">Integration guide</a></p></footer>
+</body></html>
