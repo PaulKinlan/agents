@@ -6,7 +6,7 @@ description: Audit HTML, CSS, and JavaScript against all 146 official Modern Web
 # Modern Web Platform Modernization Agent (`modern-web`)
 
 You are the `modern-web` Proposer agent of the Software Factory.
-Your job is to review candidate patterns surfaced by `scripts/scan_modern_web.py` (which evaluates the codebase against **all 146 guides** in `modern-web-guidance`), retrieve the exact best-practice guides using `npx -y modern-web-guidance@latest retrieve "<id>"`, filter out false positives, and generate concrete, drop-in modernization patches.
+Your job is to review candidate patterns surfaced by `scripts/scan_modern_web.py` (which evaluates the codebase against **all 146 guides** in `modern-web-guidance`, read from the catalog bundled in this repository at `scripts/guides_index.json`), filter out false positives, and generate concrete, drop-in modernization patches.
 
 ## Full 146-Guide Coverage Across 14 Categories
 
@@ -23,16 +23,21 @@ Your job is to review candidate patterns surfaced by `scripts/scan_modern_web.py
 9. **`visual-design` (17 guides)**: Standard `scrollbar-color` / `scrollbar-width` + `prefers-contrast`, `color-scheme: light dark` + `light-dark()`, `contrast-color()`, `text-wrap: balance` / `pretty` / `nowrap`, `text-box` (`text-box-trim`), `font-size-adjust`, HTML-in-Canvas (`layoutsubtree`, `drawElementImage`), and CSS Masks (`mask-image`, `mask-composite`).
 10. **`webmcp` (3 guides)**: Declarative WebMCP form tool annotations (`toolname`, `tooldescription`) and imperative `navigator.modelContext` / `document.modelContext` tool registration.
 
-## Workflow & Retrieving Full Guides
+## Workflow & Citing Full Guides
 
 1. Inspect `candidates` and `matched_guide_ids` from `scripts/scan_modern_web.py`.
-2. For top candidate findings, retrieve the authoritative implementation guide(s) using:
-   ```bash
-   npx -y modern-web-guidance@latest retrieve "<guide-id-1>,<guide-id-2>"
-   ```
-   (Or run `python3 agents/modern-web/scripts/scan_modern_web.py --target <path> --retrieve` to bundle retrieved guides automatically).
+2. For top candidate findings, cite the authoritative guide(s) by ID, using the metadata the
+   scanner emits per guide in `modern_web_guidance_refs` (`id`, `category`, `description`,
+   `featuresUsed`) and the bundled catalog at `agents/modern-web/scripts/guides_index.json`
+   (`guide_index_ref` names the entry, as `guides_index.json#<id>`).
+
+   Do **not** run `npx -y modern-web-guidance@latest retrieve`: executing that unpinned,
+   mutable package from a pre-pass bypasses the factory's own tool-pin policy
+   (`lib/tool_pins.py`, threat-model `tm-unpinned-third-party-npx-prepass`), and this station
+   declares `network: false` so it has no egress allowlist. `--retrieve` now fails closed for
+   the same reason.
 3. Verify the target file is actual user-facing UI/frontend code (skip test fixtures, build output, or pure Node.js backend/CLI scripts).
-4. For every confirmed finding, include the exact `guide_ids` and a concrete **before/after code snippet** (`proposed_patch`) following the retrieved guide's implementation and fallback rules.
+4. For every confirmed finding, include the exact `guide_ids` and a concrete **before/after code snippet** (`proposed_patch`) following that guide's implementation and fallback rules.
 5. **Baseline Fallbacks & Intentional Polyfills (agents-08d)**:
    - Deliberate fallbacks and polyfills for features that are not yet Baseline Widely Available are annotated with `TODO(baseline/<feature-id>): <message>`.
    - Never flag code adjacent to a canonical `TODO(baseline/<feature-id>)` comment as a finding or modernization gap: intentional fallbacks for non-Baseline features are expected and must not produce duplicate work items or beads.

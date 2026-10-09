@@ -328,3 +328,120 @@ function compute(a, b) {
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
+    """agents-9y6: the pre-pass must never execute unpinned, mutable third-party code.
+
+    `load_guides_catalog()` used to fall back to `npx --offline -y modern-web-guidance@latest
+    list` when the bundled index was missing, and `--retrieve` ran `npx -y
+    modern-web-guidance@latest retrieve` outright. Both bypass the factory's own pin policy
+    (lib/tool_pins.py pins trusted BINARIES by SHA-256; it cannot pin the `modern-web-guidance`
+    PACKAGE, so even a pinned `npx` would still fetch mutable remote code), and this station
+    declares `network: false`, so `--retrieve` could only ever time out into a swallowed
+    exception. These tests pin the fail-closed behaviour so neither path can come back.
+    """
+
+    # A pattern that reliably fires `legacy-viewport-media-for-components`, so the scan under
+    # test produces candidates and a non-empty matched_guide_ids.
+    FIRING_CSS = "@media (max-width: 600px) { .card { display: flex; } }\n"
+
+    def setUp(self):
+        self.mod = load_scanner_module()
+
+    def _refuse_any_process(self):
+        def _boom(*args, **kwargs):
+            raise AssertionError(f"pre-pass must not execute a subprocess; called with {args!r}")
+        self.mod.subprocess = type("S", (), {"run": staticmethod(_boom)})()
+        return _boom
+
+    def _repo_with_firing_css(self, tmp):
+        repo = Path(tmp)
+        (repo / "styles.css").write_text(self.FIRING_CSS, encoding="utf-8")
+        return repo
+
+    def test_bundled_catalog_loads_all_guides_without_spawning_a_process(self):
+        self._refuse_any_process()
+        catalog = self.mod.load_guides_catalog()
+        self.assertGreaterEqual(len(catalog), 146, f"expected the full 146-guide catalog, got {len(catalog)}")
+        self.assertIn("accessibility", catalog)
+        self.assertTrue(all("id" in v for v in catalog.values()))
+
+    def test_missing_bundled_catalog_fails_closed_instead_of_fetching(self):
+        self._refuse_any_process()
+        with tempfile.TemporaryDirectory() as tmp:
+            original = self.mod.BUNDLED_GUIDES_INDEX
+            self.mod.BUNDLED_GUIDES_INDEX = Path(tmp) / "does-not-exist.json"
+            try:
+                with self.assertRaises(self.mod.GuidesCatalogUnavailable) as ctx:
+                    self.mod.load_guides_catalog()
+            finally:
+                self.mod.BUNDLED_GUIDES_INDEX = original
+        self.assertIn("bundled guide catalog missing", str(ctx.exception))
+
+    def test_corrupt_or_empty_bundled_catalog_fails_closed(self):
+        self._refuse_any_process()
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "guides_index.json"
+            original = self.mod.BUNDLED_GUIDES_INDEX
+            self.mod.BUNDLED_GUIDES_INDEX = bad
+            try:
+                bad.write_text("{not json", encoding="utf-8")
+                with self.assertRaises(self.mod.GuidesCatalogUnavailable):
+                    self.mod.load_guides_catalog()
+                bad.write_text("[]", encoding="utf-8")
+                with self.assertRaises(self.mod.GuidesCatalogUnavailable):
+                    self.mod.load_guides_catalog()
+            finally:
+                self.mod.BUNDLED_GUIDES_INDEX = original
+
+    def test_retrieve_flag_fails_closed_rather_than_fetching_remote_guides(self):
+        self._refuse_any_process()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo_with_firing_css(tmp)
+            with self.assertRaises(self.mod.UnpinnedExecutionRefused) as ctx:
+                self.mod.scan_repository(repo, retrieve_guides=True)
+        message = str(ctx.exception)
+        self.assertIn("unpinned", message)
+        self.assertIn("tm-unpinned-third-party-npx-prepass", message)
+
+    def test_scan_still_works_with_the_bundled_catalog_present(self):
+        """The normal path must be unaffected: catalog present -> full scan, no process."""
+        self._refuse_any_process()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo_with_firing_css(tmp)
+            res = self.mod.scan_repository(repo, retrieve_guides=False)
+        self.assertGreaterEqual(res["catalog_total_guides"], 146)
+        self.assertEqual(res["retrieved_guides"], {})
+        self.assertGreaterEqual(len(res["candidates"]), 1, "expected the viewport-media rule to fire")
+        self.assertTrue(res["matched_guide_ids"], "a firing candidate must map to guide ids")
+
+    def test_report_never_carries_an_instruction_to_run_npx(self):
+        """The output is the engine's instruction sheet, so assert on the product."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo_with_firing_css(tmp)
+            res = self.mod.scan_repository(repo, retrieve_guides=False)
+        blob = json.dumps(res)
+        self.assertNotIn("npx", blob, "the report must not tell the engine to run npx")
+        self.assertNotIn("@latest", blob, "the report must not name a mutable package tag")
+        self.assertNotIn("retrieve_cmd", blob)
+        refs = [r for c in res["candidates"] for r in c["modern_web_guidance_refs"]]
+        self.assertTrue(refs, "expected guide refs on a firing candidate")
+        for ref in refs:
+            self.assertTrue(ref["guide_index_ref"].startswith("guides_index.json#"), ref)
+            self.assertIn("category", ref)
+
+    def test_module_has_no_process_spawning_or_command_literals(self):
+        """Source-level guard: no subprocess, and no command-shaped npx literal in the code."""
+        import ast as _ast
+        source = SCANNER_SCRIPT.read_text(encoding="utf-8")
+        tree = _ast.parse(source)
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                names = [a.name for a in node.names]
+                self.assertNotIn("subprocess", names, "the scanner must not import subprocess")
+            if isinstance(node, _ast.Name):
+                self.assertNotEqual(node.id, "subprocess", "the scanner must not reference subprocess")
+            if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+                self.assertFalse(re.match(r"^\s*(?:npx|npm)\b", node.value),
+                                 f"command-shaped literal at line {node.lineno}: {node.value!r}")
