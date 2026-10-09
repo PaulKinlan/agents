@@ -2056,6 +2056,22 @@ process.stdin.on('end', () => {
         self.assertIn("openai-completions", models)
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_the_keyless_pi_wiring_is_provider_agnostic(self):
+        """agents-854 (hub ruling): the keyless wiring is not deepseek-specific. Selecting a
+        different keyless provider (kimi, an Anthropic-style managed endpoint) must wire THAT
+        provider's broker route and api type without any change to pi.sh."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi", {"FACTORY_MODEL": "kimi/k3"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        argv = self.stub_line("ARGV:").split()
+        self.assertEqual(argv[argv.index("--model") + 1], "kimi/k3")
+        models = self.stub_line("MODELSJSON:")
+        self.assertIn("proxy/kimi", models)
+        self.assertIn("anthropic-messages", models)
+        self.assertNotIn("deepseek", models)
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_a_sandboxed_engine_has_no_route_off_its_netns(self):
         """agents-2x6 acceptance: with egress control active the engine runs under
         --unshare-net, so a dial off the sandbox must genuinely fail at the kernel, not by

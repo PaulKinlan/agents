@@ -71,6 +71,17 @@ EGRESS_PROXY_PORT = 8385
 # per run via `--model`, or via the FACTORY_MODEL environment variable.
 DEFAULT_PI_MODEL = "deepseek/deepseek-flash"
 
+# agents-854: the pi `api` type for each keyless broker provider's managed endpoint. The
+# managed zai/kimi endpoints speak Anthropic /v1/messages; deepseek/qwen speak OpenAI /v1.
+# This is DATA, not logic: a new keyless provider adds one row here (alongside its entries in
+# lib/credential_broker.PROVIDERS and ENGINE_CREDENTIALS["pi"]) — pi.sh needs no change.
+PI_PROVIDER_API = {
+    "deepseek": "openai-completions",
+    "qwen": "openai-completions",
+    "zai": "anthropic-messages",
+    "kimi": "anthropic-messages",
+}
+
 
 class StationError(RuntimeError):
     """A station failed and produced no verdict — never a clean scan (fleet-ddd, journal-idy).
@@ -728,29 +739,27 @@ def _make_pi_config_dir() -> Path:
     return d
 
 
-def _write_pi_models_json(config_dir: Path, broker) -> None:
-    """Write pi's provider override for the keyless broker (agents-854).
+def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
+    """Write pi's provider override for the keyless broker (agents-854), provider-agnostic.
 
-    Without it a sandboxed pi dials its hardcoded api.deepseek.com — keyed, and refused by the
-    --unshare-net sandbox. The override points the keyless provider at the broker, which
-    forwards host-side to the managed endpoint with no injected key; the placeholder apiKey
-    satisfies pi's non-empty check and is dropped by the broker before the upstream hop.
+    pi ignores *_BASE_URL env vars, so the broker swap alone cannot redirect a sandboxed pi:
+    its provider baseUrl is hardcoded. pi DOES honour models.json in its agent directory, so
+    the dispatcher writes an override for the SELECTED provider — baseUrl from the broker's own
+    descriptor (broker.base_url), a placeholder apiKey, and the provider's api type. Nothing
+    here is provider-specific: `provider` is whatever the station's model resolves to.
     """
     from lib.credential_broker import PLACEHOLDER_KEY
-    providers = {}
-    # Only deepseek today (the keyless BYOK default). zai/kimi/qwen use a different bundled
-    # model-id space and API type; add them here with the matching `api` value if a station
-    # ever selects one.
-    for provider in ("deepseek",):
-        if provider in broker.providers:
-            providers[provider] = {
-                "baseUrl": broker.base_url(provider),
-                "api": "openai-completions",
-                "apiKey": PLACEHOLDER_KEY,
-            }
-    if not providers:
+    if provider not in broker.providers or provider not in PI_PROVIDER_API:
         return
-    config = {"providers": providers}
+    config = {
+        "providers": {
+            provider: {
+                "baseUrl": broker.base_url(provider),
+                "api": PI_PROVIDER_API[provider],
+                "apiKey": PLACEHOLDER_KEY,
+            },
+        },
+    }
     _write_run_artifact(config_dir / "models.json", json.dumps(config))
     os.chmod(config_dir / "models.json", 0o600)
 
@@ -1239,8 +1248,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         adapter_env, {p: broker.base_url(p) for p in broker.providers})
                     # agents-854: pi ignores *_BASE_URL env vars, so the broker swap above is
                     # not enough for pi — write the broker routing into its provider config,
-                    # which IS honoured (and is read-only inside the sandbox).
-                    _write_pi_models_json(pi_config_dir, broker)
+                    # which IS honoured. The provider is whatever the selected model names, so
+                    # the next keyless provider works without touching pi.sh.
+                    _write_pi_models_json(
+                        pi_config_dir, broker, adapter_env["FACTORY_MODEL"].split("/", 1)[0])
                     # agents-2dj: only now can policy.json claim broker enforcement.
                     # The recorder checks the actual adapter env for every remaining
                     # model key and proxy credential, rather than trusting broker startup
