@@ -82,6 +82,19 @@ class TestTreeDiagramParser(unittest.TestCase):
         for expected in [".github/workflows/", ".github/actions/factory/", "lib/adapters/"]:
             self.assertIn(expected, paths)
 
+    def test_integration_md_agent_fleet_reference_scripts_exist(self):
+        """[agents-bjj] Every script listed in docs/INTEGRATION.md Section 5 exists on disk."""
+        integration_md = FACTORY_ROOT / "docs" / "INTEGRATION.md"
+        self.assertTrue(integration_md.exists())
+
+        candidates = check_docs.scan_target(FACTORY_ROOT)
+        table_candidates = [
+            c for c in candidates
+            if c["path"] == "docs/INTEGRATION.md" and c.get("reference", "").endswith(".py")
+        ]
+        self.assertEqual(len(table_candidates), 0,
+                         f"docs/INTEGRATION.md references missing scripts: {table_candidates}")
+
 
 if __name__ == "__main__":
     unittest.main()
