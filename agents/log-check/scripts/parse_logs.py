@@ -18,6 +18,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+# Exclude findings/ and runs/ via DEFAULT_IGNORE_DIRS to avoid ingesting the factory's own
+# previous execution logs or delta outputs when running against self-dogfood targets (agents-uxt).
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
 except ImportError:

@@ -145,6 +145,76 @@ class TestPrepassExclusions(unittest.TestCase):
         self.assertIn("findings", IGNORE_DIRS)
         self.assertIn("runs", IGNORE_DIRS)
 
+    def test_docs_write_does_not_scan_findings_or_runs(self):
+        """docs-write pre-pass must ignore findings/ and runs/."""
+        sys.path.insert(0, str(ROOT / "agents" / "docs-write" / "scripts"))
+        import prepare_docs_fixes
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            src_dir = target / "src"
+            src_dir.mkdir(parents=True)
+            (src_dir / "index.js").write_text("console.log('hi');\n", encoding="utf-8")
+            (target / "README.md").write_text("# Project\n", encoding="utf-8")
+
+            (target / "findings").mkdir(parents=True)
+            (target / "findings" / "delta.md").write_text("# Old delta\n", encoding="utf-8")
+
+            (target / "runs" / "r1").mkdir(parents=True)
+            (target / "runs" / "r1" / "doc.md").write_text("# Run doc\n", encoding="utf-8")
+
+            res = prepare_docs_fixes.collect_repo_ground_truth(target)
+            doc_paths = res.get("markdown_files", [])
+            self.assertEqual(doc_paths, ["README.md"])
+
+    def test_perf_review_does_not_scan_findings_or_runs(self):
+        """perf-review pre-pass must ignore findings/ and runs/."""
+        sys.path.insert(0, str(ROOT / "agents" / "perf-review" / "scripts"))
+        import scan_perf_changes
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            src_dir = target / "src"
+            src_dir.mkdir(parents=True)
+            (src_dir / "app.js").write_text("document.getElementById('test').offsetHeight;\n", encoding="utf-8")
+
+            (target / "findings").mkdir(parents=True)
+            (target / "findings" / "old.js").write_text("element.offsetWidth;\n", encoding="utf-8")
+
+            (target / "runs" / "r1").mkdir(parents=True)
+            (target / "runs" / "r1" / "leak.js").write_text("element.offsetWidth;\n", encoding="utf-8")
+
+            candidates = scan_perf_changes.scan_files(target, [])
+            for c in candidates:
+                self.assertNotIn("findings/", c["path"])
+                self.assertNotIn("runs/", c["path"])
+
+    def test_all_scanners_include_factory_artifact_dirs(self):
+        """All pre-pass scanners must have findings and runs in their effective ignore set."""
+        modules = [
+            ("agents.memory-profile.scripts.scan_memory_leaks", "IGNORE_DIRS"),
+            ("agents.resilience.scripts.scan_resilience", "IGNORE_DIRS"),
+            ("agents.ui-ux-audit.scripts.scan_ui_ux", "IGNORE_DIRS"),
+            ("agents.test-gap.scripts.find_untested", "IGNORE_DIRS"),
+            ("agents.log-check.scripts.parse_logs", "IGNORE_DIRS"),
+            ("agents.docs-write.scripts.prepare_docs_fixes", "IGNORE_DIRS"),
+            ("agents.perf-review.scripts.scan_perf_changes", "IGNORE_DIRS"),
+            ("agents.modern-web.scripts.scan_modern_web", "IGNORE_DIRS"),
+            ("agents.secret-scan.scripts.scan", "IGNORE_DIRS"),
+            ("agents.accessibility.scripts.audit_a11y", "EXCLUDE_DIRS"),
+            ("agents.deps-supply-chain.scripts.audit_deps", "IGNORE_SCAN_DIRS"),
+            ("agents.docs-drift.scripts.check_docs", "IGNORE_DIRS"),
+            ("agents.vuln-discovery.scripts.scan_surface", "IGNORE_DIRS"),
+            ("agents.threat-model.scripts.mine_history", "IGNORED_DIRS"),
+            ("lib.bench.runner", "IGNORE_DIRS"),
+        ]
+        for mod_name, attr in modules:
+            with self.subTest(module=mod_name):
+                mod = __import__(mod_name, fromlist=[attr])
+                ignore_set = getattr(mod, attr)
+                self.assertTrue(FACTORY_ARTIFACT_DIRS.issubset(ignore_set),
+                                f"{mod_name}.{attr} missing {FACTORY_ARTIFACT_DIRS - ignore_set}")
+
 
 if __name__ == "__main__":
     unittest.main()
