@@ -91,7 +91,10 @@
     padding-block: clamp(4rem, 11vw, 9rem) clamp(4rem, 8vw, 7rem);
   }
 
-  .project-section { padding-block-end: clamp(4rem, 8vw, 7rem); }
+  .project-section {
+    container-type: inline-size;
+    padding-block-end: clamp(4rem, 8vw, 7rem);
+  }
 
   .section-heading {
     display: grid;
@@ -124,6 +127,9 @@
     }
 
     .site-header nav { max-inline-size: 13rem; }
+  }
+
+  @container (max-width: 42rem) {
     .section-heading { grid-template-columns: 1fr; gap: 0.25rem; }
     .project-grid { grid-template-columns: 1fr; }
     .project-card--featured { grid-column: auto; }
@@ -242,7 +248,7 @@
   .project-list span { color: var(--muted); }
   footer a { text-underline-offset: 0.2em; }
 
-  @media (max-width: 42rem) {
+  @container (max-width: 42rem) {
     .project-list a { grid-template-columns: 1fr; gap: 0.1rem; }
   }
 

@@ -272,6 +272,18 @@ function compute(a, b) {
         self.assertEqual(result["candidates"][0]["rule_id"], "legacy-date-math-instead-of-temporal")
         self.assertEqual(len(result["known_baseline_fallbacks"]), 0)
 
+    def test_projects_css_uses_container_queries_without_legacy_viewport_media(self):
+        """[agents-2yt] projects.css uses container queries on .project-section, producing zero candidates."""
+        projects_css = ROOT / "docs" / "css" / "projects.css"
+        self.assertTrue(projects_css.exists())
+        content = projects_css.read_text(encoding="utf-8")
+        self.assertIn("container-type: inline-size", content)
+        self.assertIn("@container (max-width: 42rem)", content)
+
+        res = self.mod.scan_repository(projects_css.parent, retrieve_guides=False)
+        candidates = [c for c in res["candidates"] if c["path"].endswith("projects.css")]
+        self.assertEqual(len(candidates), 0, f"Expected 0 candidates for projects.css, got {candidates}")
+
 
 if __name__ == "__main__":
     unittest.main()
