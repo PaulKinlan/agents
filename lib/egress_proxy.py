@@ -62,6 +62,32 @@ _CHUNK = 65536
 _TUNNEL_IDLE_TIMEOUT = 120.0
 _UPSTREAM_CONNECT_TIMEOUT = 30.0
 
+# Upper bound on a forwarded request body (agents-2l7). The child controls its own
+# Content-Length, so without a cap a sandboxed process could ask this dispatcher-side
+# proxy to buffer an unbounded body and OOM the shared host. Bodies are small CLI payloads
+# (gh/npm metadata), so 1 MiB is generous; operators may raise or lower it per fleet via
+# FACTORY_EGRESS_MAX_BODY_BYTES. An oversized body is refused (413), never truncated,
+# because forwarding a partial body would risk request smuggling.
+_DEFAULT_MAX_BODY_BYTES = 1_048_576  # 1 MiB
+
+
+def _resolve_max_body_bytes() -> int:
+    """Resolve FACTORY_EGRESS_MAX_BODY_BYTES to a positive integer, else the default.
+
+    A missing, non-integer or non-positive value falls back to the safe default rather
+    than widening the limit (or crashing at import time)."""
+    raw = os.environ.get("FACTORY_EGRESS_MAX_BODY_BYTES")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_BODY_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_BODY_BYTES
+    return value if value > 0 else _DEFAULT_MAX_BODY_BYTES
+
+
+MAX_BODY_BYTES = _resolve_max_body_bytes()
+
 
 # The standard web ports an allowlisted host may be reached on when its entry does not pin
 # one: 80 (plain HTTP) and 443 (HTTPS/CONNECT). Any other port — SSH 22, SMTP 25, an
@@ -228,10 +254,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _allowlist(self) -> Allowlist:
         return self.server.allowlist  # type: ignore[attr-defined]
 
-    def _deny(self, message: str) -> None:
-        body = f"403 Forbidden: {message}\n".encode("utf-8")
+    def _deny(self, message: str, status: int = 403) -> None:
+        phrase = {400: "Bad Request", 403: "Forbidden",
+                  413: "Payload Too Large"}.get(status, "Error")
+        body = f"{status} {phrase}: {message}\n".encode("utf-8")
         try:
-            self.send_response(403)
+            self.send_response(status)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Connection", "close")
@@ -255,6 +283,48 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                        f"SSRF): {host}")
             return None
         return addrs[0]
+
+    def _read_request_body(self) -> Optional[bytes]:
+        """Return the request body to forward, or None after refusing it.
+
+        Only Content-Length bodies are forwarded; a chunked body is refused rather than
+        mis-forwarded. The declared length is parsed as RFC 7230 ``1*DIGIT`` and checked
+        against ``MAX_BODY_BYTES`` BEFORE any bytes are read, so an oversized declaration
+        is refused without allocating (agents-2l7)."""
+        length_str = self.headers.get("Content-Length")
+        if length_str is not None:
+            raw = length_str.strip()
+            # int() would silently accept "+5" -> 5 and "1_0" -> 10, so require canonical
+            # digits; keep a distinct message for a negative value.
+            if raw.startswith("-") and raw[1:].isdigit():
+                self._deny("negative Content-Length is not allowed", 400)
+                return None
+            if not raw.isdigit():
+                self._deny("invalid Content-Length header (must be an integer)", 400)
+                return None
+            length = int(raw)
+            if length > MAX_BODY_BYTES:
+                self._deny(
+                    f"request body ({length} bytes) exceeds maximum limit of "
+                    f"{MAX_BODY_BYTES} bytes", 413)
+                return None
+            if length == 0:
+                return b""
+            try:
+                body = self.rfile.read(length)
+            except OSError:
+                self._deny("failed to read request body", 400)
+                return None
+            if len(body) != length:
+                # The client ended the stream short of its declared length; forwarding the
+                # short body under the original Content-Length would desync the upstream.
+                self._deny("unexpected end of stream while reading request body", 400)
+                return None
+            return body
+        if self.headers.get("Transfer-Encoding"):
+            self._deny("chunked request bodies are not forwarded")
+            return None
+        return b""
 
     # --- CONNECT: opaque TLS tunnel -----------------------------------------
     def do_CONNECT(self):  # noqa: N802 - stdlib dispatch name
@@ -296,19 +366,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         ip = self._resolve_allowed(host, port)
         if ip is None:
             return
-        # Read the request body. Only Content-Length bodies are forwarded; a chunked
-        # request body is refused rather than mis-forwarded (the CLI tools this serves
-        # do not send one, and guessing would risk request smuggling).
-        length = self.headers.get("Content-Length")
-        if length:
-            try:
-                body = self.rfile.read(int(length))
-            except (ValueError, OSError):
-                return self._deny("bad Content-Length")
-        elif self.headers.get("Transfer-Encoding"):
-            return self._deny("chunked request bodies are not forwarded")
-        else:
-            body = b""
+        body = self._read_request_body()
+        if body is None:
+            return
         target = parts.path or "/"
         if parts.query:
             target += "?" + parts.query

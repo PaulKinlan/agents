@@ -82,6 +82,40 @@ def _recv_some(sock, n=65536, timeout=5):
         return b""
 
 
+def _capture_server(port_holder, ready, stop, received):
+    """A loopback upstream that records the whole forwarded request before replying 200."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    srv.settimeout(0.2)
+    port_holder.append(srv.getsockname()[1])
+    ready.set()
+    while not stop.is_set():
+        try:
+            conn, _ = srv.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+
+        def handle(c):
+            data = b""
+            try:
+                while True:
+                    chunk = c.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                received.append(data)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+                          b"Connection: close\r\n\r\nhello")
+            finally:
+                c.close()
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    srv.close()
+
+
 class AllowlistTest(unittest.TestCase):
     def test_exact_and_wildcard(self):
         al = ep.Allowlist(["api.github.com", "*.npmjs.org"])
@@ -353,6 +387,139 @@ class ProxyEnforcementTest(unittest.TestCase):
         finally:
             stop.set()
             proxy.stop()
+
+    def test_oversized_content_length_is_refused_413_without_reading_body(self):
+        # agents-2l7: an oversized declared Content-Length must be refused BEFORE any body
+        # bytes are read. Only headers are sent (no payload), so the old unbounded
+        # ``read(int(length))`` would block waiting for the declared bytes and this test
+        # would time out instead of seeing an immediate 413.
+        proxy = ep.EgressProxy(["allowed.test"], self.path)
+        proxy.start()
+        try:
+            with mock.patch.object(ep, "_public_addresses", return_value=["127.0.0.1"]), \
+                    mock.patch.object(ep.socket, "create_connection") as dial:
+                c = self._client()
+                req = (f"POST http://allowed.test/ HTTP/1.1\r\n"
+                       f"Host: allowed.test\r\n"
+                       f"Content-Length: {ep.MAX_BODY_BYTES + 1}\r\n\r\n")
+                c.sendall(req.encode())
+                resp = b""
+                while True:
+                    chunk = _recv_some(c)
+                    if not chunk:
+                        break
+                    resp += chunk
+                c.close()
+            self.assertIn(b"413", resp)
+            self.assertIn(b"Payload Too Large", resp)
+            dial.assert_not_called()  # no upstream socket was opened
+        finally:
+            proxy.stop()
+
+    def test_normal_body_still_forwards(self):
+        # agents-2l7 regression guard: a body within the cap must still be forwarded whole.
+        received = []
+        port_holder, ready, stop = [], threading.Event(), threading.Event()
+        threading.Thread(target=_capture_server,
+                         args=(port_holder, ready, stop, received), daemon=True).start()
+        self.assertTrue(ready.wait(5))
+        upstream_port = port_holder[0]
+        proxy = ep.EgressProxy([f"upstream.test:{upstream_port}"], self.path)
+        proxy.start()
+        try:
+            with mock.patch.object(ep, "_public_addresses", return_value=["127.0.0.1"]):
+                c = self._client()
+                body = b"hello"
+                req = (f"POST http://upstream.test:{upstream_port}/upload HTTP/1.1\r\n"
+                       f"Host: upstream.test\r\n"
+                       f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+                c.sendall(req)
+                resp = b""
+                while True:
+                    chunk = _recv_some(c)
+                    if not chunk:
+                        break
+                    resp += chunk
+                c.close()
+            self.assertIn(b"200 OK", resp)
+            self.assertIn(b"hello", resp)
+            self.assertEqual(len(received), 1)
+            self.assertIn(b"Content-Length: 5", received[0])
+            self.assertTrue(received[0].endswith(body))
+        finally:
+            stop.set()
+            proxy.stop()
+
+
+class RequestBodyParseTest(unittest.TestCase):
+    """Handler-level parse/refusal tests: prove the body cap is checked before any read."""
+
+    def _handler(self, headers):
+        handler = ep._ProxyHandler.__new__(ep._ProxyHandler)
+        handler.headers = headers
+        handler.rfile = mock.Mock()
+        handler.rfile.read.return_value = b""
+        handler.close_connection = False
+        handler._deny = mock.Mock()
+        return handler
+
+    def test_oversized_negative_and_non_integer_lengths_are_refused_without_reading(self):
+        for bad, status in (
+            (str(ep.MAX_BODY_BYTES + 1), 413),
+            ("-10", 400),
+            ("not-a-number", 400),
+        ):
+            handler = self._handler({"Content-Length": bad})
+            self.assertIsNone(handler._read_request_body())
+            handler.rfile.read.assert_not_called()
+            handler._deny.assert_called_once()
+            self.assertEqual(handler._deny.call_args[0][1], status)
+
+    def test_non_canonical_integer_forms_are_refused(self):
+        # int() would silently accept these; RFC 7230 Content-Length is 1*DIGIT.
+        for bad in ("+5", "1_0"):
+            handler = self._handler({"Content-Length": bad})
+            self.assertIsNone(handler._read_request_body())
+            handler.rfile.read.assert_not_called()
+
+    def test_valid_length_reads_exactly_and_returns_body(self):
+        handler = self._handler({"Content-Length": "5"})
+        handler.rfile.read.return_value = b"hello"
+        self.assertEqual(handler._read_request_body(), b"hello")
+        handler.rfile.read.assert_called_once_with(5)
+        handler._deny.assert_not_called()
+
+    def test_short_body_is_refused(self):
+        # A client that ends the stream short of its declared length must not be forwarded
+        # under the original (larger) Content-Length header.
+        handler = self._handler({"Content-Length": "5"})
+        handler.rfile.read.return_value = b"hi"
+        self.assertIsNone(handler._read_request_body())
+        handler._deny.assert_called_once()
+        self.assertEqual(handler._deny.call_args[0][1], 400)
+
+    def test_zero_content_length_is_empty_body(self):
+        handler = self._handler({"Content-Length": "0"})
+        self.assertEqual(handler._read_request_body(), b"")
+        handler.rfile.read.assert_not_called()
+        handler._deny.assert_not_called()
+
+    def test_chunked_is_refused_without_reading(self):
+        handler = self._handler({"Transfer-Encoding": "chunked"})
+        self.assertIsNone(handler._read_request_body())
+        handler.rfile.read.assert_not_called()
+        handler._deny.assert_called_once()
+
+
+class MaxBodyBytesResolutionTest(unittest.TestCase):
+    def test_env_override_and_safe_fallbacks(self):
+        with mock.patch.dict(os.environ, {"FACTORY_EGRESS_MAX_BODY_BYTES": "123"}):
+            self.assertEqual(ep._resolve_max_body_bytes(), 123)
+        for bad in ("not-an-int", "-5", "0"):
+            with mock.patch.dict(os.environ, {"FACTORY_EGRESS_MAX_BODY_BYTES": bad}):
+                self.assertEqual(ep._resolve_max_body_bytes(), ep._DEFAULT_MAX_BODY_BYTES)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ep._resolve_max_body_bytes(), ep._DEFAULT_MAX_BODY_BYTES)
 
 
 if __name__ == "__main__":
