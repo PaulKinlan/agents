@@ -220,22 +220,34 @@ def compute_metrics(assets: List[Dict[str, Any]]) -> Dict[str, Any]:
         "largest_assets": largest
     }
 
-def find_baseline(target_name: str, target_dir: Path, explicit_path: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Path]]:
-    candidates = []
-    if explicit_path:
-        candidates.append(Path(explicit_path))
-    candidates.append(target_dir / ".bundle-baseline.json")
-    candidates.append(target_dir / "bundle-baseline.json")
-    candidates.append(FACTORY_ROOT / "findings" / f"{target_name}-bundle-baseline.json")
+def find_baseline(target_name: str, target_dir: Path, explicit_path: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Path], Optional[str]]:
+    """Return ``(data, path, source)`` preferring the factory-owned canonical baseline.
 
-    for p in candidates:
+    Search order: an explicit ``--baseline`` path, then the canonical
+    ``FACTORY_ROOT/findings/<target>-bundle-baseline.json``, then — as a LEGACY fallback only
+    — a baseline committed inside the measured tree (``.bundle-baseline.json`` /
+    ``bundle-baseline.json``). A target-dir baseline is self-declared: the measured target
+    controls it, so it must never win over the canonical baseline, and when it is the only
+    baseline its ``target-dir`` source is surfaced so the report can say the comparison is
+    against a non-canonical, self-declared bar (agents-gog).
+    """
+    canonical = FACTORY_ROOT / "findings" / f"{target_name}-bundle-baseline.json"
+    legacy = (target_dir / ".bundle-baseline.json", target_dir / "bundle-baseline.json")
+
+    ordered: List[Tuple[Path, str]] = []
+    if explicit_path:
+        ordered.append((Path(explicit_path), "explicit"))
+    ordered.append((canonical, "findings"))
+    for p in legacy:
+        ordered.append((p, "target-dir"))
+
+    for p, source in ordered:
         if p.exists():
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                return data, p
+                return json.loads(p.read_text(encoding="utf-8")), p, source
             except Exception:
                 continue
-    return None, None
+    return None, None, None
 
 def evaluate_baseline_delta(current_metrics: Dict[str, Any], baseline_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not baseline_data:
@@ -368,8 +380,15 @@ def main():
     assets = discover_assets(target_dir)
     metrics = compute_metrics(assets)
 
-    baseline_data, baseline_file = find_baseline(target_name, target_dir, args.baseline)
+    baseline_data, baseline_file, baseline_source = find_baseline(target_name, target_dir, args.baseline)
     delta_info = evaluate_baseline_delta(metrics, baseline_data)
+    if baseline_source == "target-dir":
+        # agents-gog: a baseline read from INSIDE the measured tree is self-declared — the
+        # target controls it, so flag it rather than silently comparing against a bar it set.
+        delta_info["non_canonical_baseline"] = (
+            f"baseline read from inside the measured tree ({baseline_file.name}); a "
+            "self-declared, non-canonical baseline — the canonical "
+            f"findings/{target_name}-bundle-baseline.json takes precedence when present")
     bloat_candidates = identify_bloat_candidates(assets, delta_info)
 
     # If no baseline existed, initialize and write baseline into findings store for future runs
@@ -393,6 +412,7 @@ def main():
         "scanned_assets_count": len(assets),
         "metrics": metrics,
         "baseline": delta_info,
+        "baseline_source": baseline_source,
         "bloat_candidates": bloat_candidates,
         "top_assets": metrics["largest_assets"]
     }
