@@ -54,6 +54,9 @@ while IFS= read -r f; do
     agents/docs-drift/scripts/check_docs.py)
       mapped="$mapped tests/test_docs_drift.py"
       ;;
+    tools/gen_site.py)
+      mapped="$mapped tests/test_gen_site.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in
