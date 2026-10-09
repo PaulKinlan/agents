@@ -714,6 +714,47 @@ def _make_socket_dir() -> Path:
     return d
 
 
+def _make_pi_config_dir() -> Path:
+    """Allocate a short, private, per-run directory for pi's provider config (agents-854).
+
+    pi's deepseek base URL is hardcoded to api.deepseek.com; the only override pi honours is a
+    models.json in its agent directory (redirected there via PI_CODING_AGENT_DIR). The directory
+    is created under /tmp (0700) and bound writable into the engine sandbox (pi opens its
+    auth.json credential store for read-write even when auth comes from env); it holds no
+    secrets — only the models.json override and an empty auth.json pi may create.
+    """
+    d = Path(tempfile.mkdtemp(prefix="factory-pi-", dir="/tmp"))
+    os.chmod(d, 0o700)
+    return d
+
+
+def _write_pi_models_json(config_dir: Path, broker) -> None:
+    """Write pi's provider override for the keyless broker (agents-854).
+
+    Without it a sandboxed pi dials its hardcoded api.deepseek.com — keyed, and refused by the
+    --unshare-net sandbox. The override points the keyless provider at the broker, which
+    forwards host-side to the managed endpoint with no injected key; the placeholder apiKey
+    satisfies pi's non-empty check and is dropped by the broker before the upstream hop.
+    """
+    from lib.credential_broker import PLACEHOLDER_KEY
+    providers = {}
+    # Only deepseek today (the keyless BYOK default). zai/kimi/qwen use a different bundled
+    # model-id space and API type; add them here with the matching `api` value if a station
+    # ever selects one.
+    for provider in ("deepseek",):
+        if provider in broker.providers:
+            providers[provider] = {
+                "baseUrl": broker.base_url(provider),
+                "api": "openai-completions",
+                "apiKey": PLACEHOLDER_KEY,
+            }
+    if not providers:
+        return
+    config = {"providers": providers}
+    _write_run_artifact(config_dir / "models.json", json.dumps(config))
+    os.chmod(config_dir / "models.json", 0o600)
+
+
 def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
     """Exclusively allocate a run directory, including on a same-second collision."""
     run_dir = FACTORY_ROOT / "runs" / f"{agent_name}-{target_name}-{run_id}"
@@ -889,6 +930,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     sock_dir = _make_socket_dir()
     proxy_sock = sock_dir / "proxy.sock"
     broker_sock = sock_dir / "broker.sock"
+    pi_config_dir = _make_pi_config_dir()
 
     # Disposable per-session worktree (agents-6ce). A granted write runs the engine in a
     # throwaway git worktree under the run directory — which the OS sandbox already binds
@@ -981,13 +1023,19 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # (non-negotiable #2). FACTORY_SANDBOXED tells the adapter its session config is
         # hidden so it reports auth honestly (review P2).
         adapter_env["FACTORY_SANDBOXED"] = "1"
+        # agents-854: pi's provider base URLs are hardcoded (api.deepseek.com etc.); the only
+        # override it honours is models.json in its agent directory. Redirect that directory to
+        # the per-run config dir (bound writable below: pi needs auth.json there too) holding a
+        # broker-routed override.
+        adapter_env["PI_CODING_AGENT_DIR"] = str(pi_config_dir)
         try:
             adapter_cmd = sandbox_command(
                 adapter_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                 run_dir=run_dir, env=adapter_env,
                 executables=(engine,) + ENGINE_EXECUTABLES,
                 egress_forwards=([(EGRESS_BROKER_PORT, str(broker_sock))]
-                                 if egress_active else None))
+                                 if egress_active else None),
+                rw_binds=[str(pi_config_dir)])
         except SandboxError as e:
             raise StationError(f"{agent_name}: cannot sandbox engine '{engine}': {e}") from e
 
@@ -1091,6 +1139,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # agents-x8l: no engine ran, so the broker finally below never fires; remove the short
         # per-run socket dir here (the pre-pass proxy already stopped and unlinked its socket).
         shutil.rmtree(sock_dir, ignore_errors=True)
+        shutil.rmtree(pi_config_dir, ignore_errors=True)
         report = {
             "summary": f"Clean scan. Deterministic pre-pass found 0 candidate issues in {target_name}.",
             "scanned_files": 0,
@@ -1188,6 +1237,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             f"the run rather than leaking it: {e}") from e
                     apply_broker_urls(
                         adapter_env, {p: broker.base_url(p) for p in broker.providers})
+                    # agents-854: pi ignores *_BASE_URL env vars, so the broker swap above is
+                    # not enough for pi — write the broker routing into its provider config,
+                    # which IS honoured (and is read-only inside the sandbox).
+                    _write_pi_models_json(pi_config_dir, broker)
                     # agents-2dj: only now can policy.json claim broker enforcement.
                     # The recorder checks the actual adapter env for every remaining
                     # model key and proxy credential, rather than trusting broker startup
@@ -1258,6 +1311,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # short-circuited run may leave it without ever binding, and /tmp reaps a stray
             # empty 0700 dir harmlessly.
             shutil.rmtree(sock_dir, ignore_errors=True)
+            shutil.rmtree(pi_config_dir, ignore_errors=True)
             if worktree_dir is not None:
                 _remove_session_worktree(target_dir, worktree_dir)
         
