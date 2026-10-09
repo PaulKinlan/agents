@@ -2057,9 +2057,10 @@ process.stdin.on('end', () => {
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_the_keyless_pi_wiring_is_provider_agnostic(self):
-        """agents-854 (hub ruling): the keyless wiring is not deepseek-specific. Selecting a
+        """agents-854/agents-0ld: the keyless wiring is not deepseek-specific. Selecting a
         different keyless provider (kimi, an Anthropic-style managed endpoint) must wire THAT
-        provider's broker route and api type without any change to pi.sh."""
+        provider's broker route, api type AND model ids, so `--model kimi/k3` resolves even
+        though pi's bundled registry has no provider named `kimi` (it is `kimi-coding`)."""
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "capabilities: {}\nbudget: {max_minutes: 1}\n")
         res = self.factory("pi", {"FACTORY_MODEL": "kimi/k3"})
@@ -2070,6 +2071,10 @@ process.stdin.on('end', () => {
         self.assertIn("proxy/kimi", models)
         self.assertIn("anthropic-messages", models)
         self.assertNotIn("deepseek", models)
+        self.assertIn('"models"', models)
+        self.assertIn('"k3"', models)
+        self.assertIn('"k3-256k"', models)
+        self.assertIn('"kimi-for-coding"', models)
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_a_sandboxed_engine_has_no_route_off_its_netns(self):
