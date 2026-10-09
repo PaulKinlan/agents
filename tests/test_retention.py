@@ -414,9 +414,10 @@ class TestPruneFindings(unittest.TestCase):
             for path in protected:
                 self.assertTrue(path.exists())
 
-    def test_machine_reports_and_ledgers_are_prunable_but_store_is_not(self):
-        # <target>-line.json and <target>-bundle-baseline.json are regenerable, but the
-        # <target>.json store is authoritative — only the derived suffixes are pruned.
+    def test_store_and_machine_reports_are_protected_while_ledgers_are_prunable(self):
+        # .json files (the authoritative <target>.json store and the regenerable machine
+        # reports <target>-line.json / <target>-bundle-baseline.json) are rewritten in
+        # place, so they stay; only the append-only .jsonl ledger is pruned.
         with tempfile.TemporaryDirectory() as tmp:
             findings = Path(tmp)
             store = make_finding(findings, "target.json", 1000, size=10)
@@ -425,7 +426,7 @@ class TestPruneFindings(unittest.TestCase):
 
             pruned = prune_findings(findings, budget_bytes=0)
 
-            # .json (store and line.json) are protected; the .jsonl ledger is pruned.
+            # .json (store and machine reports) are protected; the .jsonl ledger is pruned.
             self.assertEqual(pruned, [ledger.resolve()])
             self.assertFalse(ledger.exists())
             self.assertTrue(store.exists())
