@@ -47,71 +47,111 @@ PAGE_MARKERS: Dict[str, Tuple[str, ...]] = {
 }
 
 
-def _parse_scalar(val: str) -> Any:
+def _parse_scalar(val: str, path: Path, lineno: int) -> Any:
     v = val.strip()
+    if not v:
+        return ""
     if v.lower() == "true":
         return True
     if v.lower() == "false":
         return False
-    if v.isdigit():
+    if v.isdigit() or (v.startswith("-") and v[1:].isdigit()):
         return int(v)
     try:
         return float(v)
     except ValueError:
         pass
-    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+    if v.startswith('"'):
+        if not v.endswith('"') or len(v) < 2:
+            raise ValueError(f"YAML parse error in {path}:{lineno}: unclosed double quote: {val}")
         return v[1:-1]
+    if v.startswith("'"):
+        if not v.endswith("'") or len(v) < 2:
+            raise ValueError(f"YAML parse error in {path}:{lineno}: unclosed single quote: {val}")
+        return v[1:-1]
+    if v.startswith(("&", "*", "|", ">", "!", "%", "@", "`")):
+        raise ValueError(f"YAML parse error in {path}:{lineno}: unsupported YAML construct: {val}")
     return v
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
-    """Load YAML file with PyYAML if available, else use stdlib simple parser."""
-    try:
-        import yaml
-        with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except ImportError:
-        pass
-
-    # Stdlib-only indentation-aware fallback for agents/*/agent.yaml and lines/*.yaml
+    """Parse YAML manifest using stdlib-only parser that fails closed on unsupported or malformed constructs."""
     result: Dict[str, Any] = {}
-    stack: list = [(-1, result)]
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    stack: list = [(-1, result, "root")]
+
+    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if "\t" in raw_line:
+            raise ValueError(f"YAML parse error in {path}:{lineno}: tabs are forbidden")
         line = raw_line.split("#", 1)[0]
         line_clean = line.strip()
         if not line_clean:
             continue
+
         indent = len(line) - len(line.lstrip(" "))
         while len(stack) > 1 and indent <= stack[-1][0]:
             stack.pop()
-        parent = stack[-1][1]
+
+        parent_indent, parent, parent_name = stack[-1]
+
         if line_clean.startswith("- "):
-            val = line_clean[2:].strip()
+            val_str = line_clean[2:].strip()
+            # If parent was an empty dict placeholder created for a block list under mapping key
             if isinstance(parent, dict) and len(parent) == 0 and len(stack) >= 2:
-                outer_dict = stack[-2][1]
+                outer_indent, outer_dict, _ = stack[-2]
                 if isinstance(outer_dict, dict):
                     for k in reversed(list(outer_dict.keys())):
                         if outer_dict[k] is parent:
-                            new_list = [_parse_scalar(val)]
+                            new_list = [_parse_scalar(val_str, path, lineno)]
                             outer_dict[k] = new_list
-                            stack[-1] = (stack[-1][0], new_list)
+                            stack[-1] = (parent_indent, new_list, k)
                             break
+                    else:
+                        raise ValueError(f"YAML parse error in {path}:{lineno}: orphan list item: {raw_line}")
+                else:
+                    raise ValueError(f"YAML parse error in {path}:{lineno}: invalid list context: {raw_line}")
             elif isinstance(parent, list):
-                parent.append(_parse_scalar(val))
+                parent.append(_parse_scalar(val_str, path, lineno))
+            else:
+                raise ValueError(
+                    f"YAML parse error in {path}:{lineno}: list item in non-list context ({type(parent).__name__}): {raw_line}"
+                )
             continue
+
         if ":" in line_clean:
-            key, val = [p.strip() for p in line_clean.split(":", 1)]
+            parts = line_clean.split(":", 1)
+            key = parts[0].strip()
+            val = parts[1].strip()
+
+            if not key or not re.match(r"^[a-zA-Z0-9_-]+$", key):
+                raise ValueError(f"YAML parse error in {path}:{lineno}: invalid key name: {key!r}")
+
             if not isinstance(parent, dict):
-                continue
+                raise ValueError(
+                    f"YAML parse error in {path}:{lineno}: mapping key {key!r} inside {type(parent).__name__}: {raw_line}"
+                )
+
             if not val:
                 new_map: Dict[str, Any] = {}
                 parent[key] = new_map
-                stack.append((indent, new_map))
+                stack.append((indent, new_map, key))
             elif val.startswith("[") and val.endswith("]"):
-                items = [_parse_scalar(x.strip()) for x in val[1:-1].split(",") if x.strip()]
-                parent[key] = items
+                inner = val[1:-1].strip()
+                if not inner:
+                    parent[key] = []
+                else:
+                    items = [_parse_scalar(x.strip(), path, lineno) for x in inner.split(",") if x.strip()]
+                    parent[key] = items
+            elif val.startswith("[") or val.endswith("]"):
+                raise ValueError(f"YAML parse error in {path}:{lineno}: malformed flow sequence: {val}")
+            elif val.startswith("{") or val.endswith("}"):
+                raise ValueError(f"YAML parse error in {path}:{lineno}: flow mappings not supported: {val}")
             else:
-                parent[key] = _parse_scalar(val)
+                parent[key] = _parse_scalar(val, path, lineno)
+            continue
+
+        # Non-empty, non-comment line that does not start with '- ' and lacks ':' must fail closed
+        raise ValueError(f"YAML parse error in {path}:{lineno}: unparseable construct: {raw_line}")
+
     return result
 
 
@@ -215,6 +255,95 @@ def get_lines(repo_root: Path, known_agent_names: Set[str]) -> List[Dict[str, An
     return sorted(lines, key=lambda l: l["name"])
 
 
+def format_action_options(actions: List[Any]) -> List[str]:
+    items = []
+    for a in actions:
+        if a.dest == "help":
+            continue
+        if a.option_strings:
+            opts = ", ".join(a.option_strings)
+            if a.choices:
+                opts += f" {{{','.join(a.choices)}}}"
+            elif a.nargs != 0 and a.dest:
+                opts += f" {a.metavar or a.dest.upper()}"
+        else:
+            opts = a.metavar or a.dest
+        items.append((opts, a.help or ""))
+
+    if not items:
+        return []
+
+    lines = []
+    max_len = min(24, max(len(opt) for opt, _ in items))
+    for opt, h in items:
+        if not h:
+            lines.append(f"  {opt}")
+        elif len(opt) <= max_len:
+            lines.append(f"  {opt:<{max_len}}  {h}")
+        else:
+            lines.append(f"  {opt}")
+            lines.append(f"  {' ':<{max_len}}  {h}")
+    return lines
+
+
+def format_parser_block(p: argparse.ArgumentParser) -> str:
+    lines = []
+    usage = p.format_usage().strip()
+    lines.append(usage)
+
+    pos_actions = [
+        a for a in p._actions
+        if not a.option_strings and a.dest != "help" and not isinstance(a, argparse._SubParsersAction)
+    ]
+    opt_actions = [
+        a for a in p._actions
+        if a.option_strings and a.dest != "help"
+    ]
+    subp_actions = [
+        a for a in p._actions
+        if isinstance(a, argparse._SubParsersAction)
+    ]
+
+    if pos_actions:
+        lines.append("")
+        lines.append("positional arguments:")
+        lines.extend(format_action_options(pos_actions))
+
+    if subp_actions:
+        for sa in subp_actions:
+            sub_items = []
+            for name in sa.choices:
+                h = ""
+                for ca in getattr(sa, "_choices_actions", []):
+                    if ca.dest == name:
+                        h = ca.help or ""
+                sub_items.append((name, h))
+            if sub_items:
+                lines.append("")
+                lines.append("subcommands:")
+                max_len = min(24, max(len(n) for n, _ in sub_items))
+                for name, h in sub_items:
+                    lines.append(f"  {name:<{max_len}}  {h}" if h else f"  {name}")
+
+    if opt_actions:
+        lines.append("")
+        lines.append("options:")
+        lines.extend(format_action_options(opt_actions))
+
+    return "\n".join(lines)
+
+
+def format_command_reference(cmd_parser: argparse.ArgumentParser) -> str:
+    blocks = [format_parser_block(cmd_parser)]
+
+    for a in cmd_parser._actions:
+        if isinstance(a, argparse._SubParsersAction):
+            for sub_name, sub_p in a.choices.items():
+                blocks.append(format_parser_block(sub_p))
+
+    return "\n\n".join(blocks)
+
+
 def get_cli_commands(repo_root: Path) -> List[Dict[str, Any]]:
     """Extract CLI subcommands, usage, options and choices directly from factory argparse tree."""
     factory_path = repo_root / "factory"
@@ -255,114 +384,11 @@ def get_cli_commands(repo_root: Path) -> List[Dict[str, Any]]:
     for name in expected_commands:
         subp = choices[name]
         desc = help_map.get(name, "")
-
-        # Format clean usage and option descriptions from the parser
-        code_lines = []
-        if name == "integrate":
-            usage = "./factory integrate [--agent] [--section {all,github-actions,pre-commit,target,skills,agents}]"
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("options:")
-            code_lines.append("  --agent               Format specifically for AI agents (machine-actionable markdown)")
-            code_lines.append("  --section {all,github-actions,pre-commit,target,skills,agents}")
-            code_lines.append("                        Specific integration section to output")
-        elif name == "list":
-            usage = "./factory list [-h]"
-            code_lines.append(usage)
-        elif name == "promote":
-            usage = "./factory promote [-h] --target TARGET --issue ISSUE"
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("options:")
-            code_lines.append("  --target TARGET       Configured named public target")
-            code_lines.append("  --issue ISSUE         Approved public issue URL in the configured repo")
-        elif name == "run":
-            usage = "./factory run [-h] --target TARGET [--engine {auto,pi,claude,antigravity,deepseek}] [--model MODEL] [--sink SINK] [--visibility {public,private}] agent"
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("positional arguments:")
-            code_lines.append("  agent                 Name of the agent to run (e.g. secret-scan)")
-            code_lines.append("")
-            code_lines.append("options:")
-            code_lines.append("  --target TARGET       Target project name (from targets/) or path")
-            code_lines.append("  --engine {auto,pi,claude,antigravity,deepseek}")
-            code_lines.append("                        Engine to execute agent with")
-            code_lines.append("  --model MODEL         Model for the pi engine (default deepseek/deepseek-flash)")
-            code_lines.append("  --sink SINK           Override sink (file or beads)")
-            code_lines.append("  --visibility {public,private}")
-            code_lines.append("                        Explicit target visibility for a raw --target path (a named")
-            code_lines.append("                        target's manifest wins); missing still withholds")
-            code_lines.append("                        high/critical from a synced tracker")
-        elif name == "line":
-            usage = "./factory line [-h] --target TARGET [--engine {auto,pi,claude,antigravity,deepseek}] [--model MODEL] [--sink SINK] [--visibility {public,private}] line"
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("positional arguments:")
-            code_lines.append("  line                  Name of the line to run (e.g. project-audit)")
-            code_lines.append("")
-            code_lines.append("options:")
-            code_lines.append("  --target TARGET       Target project name (from targets/) or path")
-            code_lines.append("  --engine {auto,pi,claude,antigravity,deepseek}")
-            code_lines.append("                        Engine to execute agents with")
-            code_lines.append("  --model MODEL         Model for the pi engine (default deepseek/deepseek-flash)")
-            code_lines.append("  --sink SINK           Override sink (file or beads)")
-            code_lines.append("  --visibility {public,private}")
-            code_lines.append("                        Explicit target visibility for a raw --target path (a named")
-            code_lines.append("                        target's manifest wins); missing still withholds")
-            code_lines.append("                        high/critical from a synced tracker")
-        elif name == "hillclimb":
-            usage = "./factory hillclimb [-h] --target TARGET [--metric METRIC] [--goal GOAL] [--iterations ITERATIONS] [--apply] [--engine {auto,pi,claude,antigravity,deepseek}] [--sink SINK] [--visibility {public,private}]"
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("options:")
-            code_lines.append("  --target TARGET       Target project name or path")
-            code_lines.append("  --metric METRIC       Metric to optimize (perf_hazard_score, total_gzip_bytes, custom_bench_ms)")
-            code_lines.append("  --goal GOAL           Target numeric goal value")
-            code_lines.append("  --iterations ITERATIONS")
-            code_lines.append("                        Number of hill-climb iterations")
-            code_lines.append("  --apply               Apply candidate edits in worktree, re-measure, keep wins, revert losses")
-            code_lines.append("  --engine {auto,pi,claude,antigravity,deepseek}")
-            code_lines.append("                        Engine to execute agent with")
-            code_lines.append("  --sink SINK           Override sink (file or beads)")
-            code_lines.append("  --visibility {public,private}")
-            code_lines.append("                        Explicit target visibility for a raw --target path (a named")
-            code_lines.append("                        target's manifest wins); missing still withholds")
-            code_lines.append("                        high/critical from a synced tracker")
-        elif name == "hook":
-            usage = "./factory hook install [-h] [--target TARGET] [--all]"
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("options:")
-            code_lines.append("  --target TARGET       Target project name or path")
-            code_lines.append("  --all                 Install across all configured targets in targets/")
-        elif name == "skills":
-            usage = "./factory skills install [-h]"
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("actions:")
-            code_lines.append("  install               Symlink all 22 factory skills into ~/.gemini and ~/.claude")
-        elif name == "schedule":
-            usage = "./factory schedule [-h] [--target TARGET] [--agent AGENT] [--all] [--platform {auto,launchd,systemd,darwin,linux,all}] {list,generate,install,uninstall,trigger} ..."
-            code_lines.append(usage)
-            code_lines.append("")
-            code_lines.append("actions:")
-            code_lines.append("  list                  List all scheduled agents and launchd/systemd status")
-            code_lines.append("  generate              Generate schedule unit files into schedules/")
-            code_lines.append("  install               Install and load scheduled agent")
-            code_lines.append("  uninstall             Disable and remove scheduled agent")
-            code_lines.append("  trigger               Trigger immediate run of scheduled service")
-            code_lines.append("")
-            code_lines.append("options:")
-            code_lines.append("  --target TARGET       Target name")
-            code_lines.append("  --agent AGENT         Agent name")
-            code_lines.append("  --all                 Operate on all explicitly scheduled target-agent pairs")
-            code_lines.append("  --platform {auto,launchd,systemd,darwin,linux,all}")
-            code_lines.append("                        Scheduler platform")
-
+        code = format_command_reference(subp)
         commands.append({
             "name": name,
             "description": desc,
-            "code": "\n".join(code_lines),
+            "code": code,
         })
 
     return commands
@@ -626,8 +652,8 @@ def replace_region(content: str, marker_name: str, new_inner: str) -> str:
 def validate_safety(text: str, filename: str) -> None:
     """Safety checks: public site must not leak host paths, runs, findings, or secrets."""
     forbidden_patterns = [
-        (r"/home/\w+", "Host /home filesystem path"),
-        (r"/tmp/factory-", "Host /tmp temporary path"),
+        (r"/(?:home|Users|root)/[^\s<>\"'`]+", "Host user filesystem path (/home, /Users, /root)"),
+        (r"/tmp/[^\s<>\"'`]+", "Host /tmp temporary path"),
         (r"targets/[\w.-]+\.yaml", "Internal target manifest path"),
         (r"findings/[\w.-]+\.json", "Internal findings store file path"),
         (r"runs/[\w.-]+/", "Internal run directory path"),

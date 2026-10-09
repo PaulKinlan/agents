@@ -207,7 +207,19 @@ capabilities:
         """Generator must fail closed if host paths, secrets or internal paths are rendered."""
         with self.assertRaises(ValueError) as ctx:
             validate_safety("Something pointing to /home/developer/secret.txt in docs", "test.html")
-        self.assertIn("Host /home filesystem path", str(ctx.exception))
+        self.assertIn("Host user filesystem path", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something pointing to /Users/developer/secret.txt in docs", "test.html")
+        self.assertIn("Host user filesystem path", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something pointing to /root/.ssh/id_rsa in docs", "test.html")
+        self.assertIn("Host user filesystem path", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something pointing to /tmp/scratch.txt in docs", "test.html")
+        self.assertIn("Host /tmp temporary path", str(ctx.exception))
 
         with self.assertRaises(ValueError) as ctx:
             validate_safety("Something referencing findings/target.json in docs", "test.html")
@@ -216,6 +228,82 @@ capabilities:
         with self.assertRaises(ValueError) as ctx:
             validate_safety("API token sk-1234567890abcdef1234567890abcdef in docs", "test.html")
         self.assertIn("API secret token", str(ctx.exception))
+
+    def test_yaml_parser_fails_closed_on_invalid_constructs(self):
+        """Stdlib YAML parser must fail closed on tabs, unclosed quotes, and unsupported YAML shapes."""
+        from tools.gen_site import load_yaml
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir) / "test.yaml"
+
+            # 1. Tab indentation is forbidden
+            tmp_path.write_text("name: test\n\tclass: observer\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("tabs are forbidden", str(ctx.exception))
+
+            # 2. Unclosed string quote
+            tmp_path.write_text('name: "unclosed\nclass: observer\n', encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("unclosed double quote", str(ctx.exception))
+
+            # 3. Unsupported YAML multi-line block scalar (| or >)
+            tmp_path.write_text("name: test\nsummary: |\n  Multi-line block\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("unsupported YAML construct", str(ctx.exception))
+
+            # 4. Orphan list item outside list context
+            tmp_path.write_text("name: test\n- orphan-item\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("list item in non-list context", str(ctx.exception))
+
+            # 5. Unparseable construct
+            tmp_path.write_text("name: test\nthis is not valid yaml\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("unparseable construct", str(ctx.exception))
+
+    def test_cli_reference_derived_from_parser_with_nested_subcommands(self):
+        """CLI reference must derive all 9 subcommands, nested subcommands, and per-subcommand options."""
+        commands = get_cli_commands(ROOT)
+        cmd_map = {c["name"]: c for c in commands}
+
+        # Check all 9 top-level subcommands are present
+        expected_commands = {"integrate", "list", "promote", "run", "line", "hillclimb", "hook", "skills", "schedule"}
+        self.assertEqual(set(cmd_map.keys()), expected_commands)
+
+        # Hook contains nested install subcommand
+        hook_code = cmd_map["hook"]["code"]
+        self.assertIn("./factory hook install", hook_code)
+        self.assertIn("--target TARGET", hook_code)
+        self.assertIn("--all", hook_code)
+
+        # Skills contains nested install subcommand
+        skills_code = cmd_map["skills"]["code"]
+        self.assertIn("./factory skills install", skills_code)
+
+        # Schedule contains nested subcommands and per-subcommand --platform differences
+        sched_code = cmd_map["schedule"]["code"]
+        self.assertIn("./factory schedule list", sched_code)
+        self.assertIn("./factory schedule generate", sched_code)
+        self.assertIn("./factory schedule install", sched_code)
+        self.assertIn("./factory schedule uninstall", sched_code)
+        self.assertIn("./factory schedule trigger", sched_code)
+
+        # Confirm generate includes 'all' while list does not
+        # list platform choices: {auto,launchd,systemd,darwin,linux}
+        # generate platform choices: {auto,launchd,systemd,darwin,linux,all}
+        self.assertIn("--platform {auto,launchd,systemd,darwin,linux,all}", sched_code)
+        self.assertIn("--platform {auto,launchd,systemd,darwin,linux}", sched_code)
+
+        # Verify that gen_site.py itself does not hardcode the count '22'
+        gen_site_source = (ROOT / "tools" / "gen_site.py").read_text(encoding="utf-8")
+        self.assertNotIn(" 22 ", gen_site_source)
+        self.assertNotIn('"22"', gen_site_source)
+        self.assertNotIn("'22'", gen_site_source)
 
 
 if __name__ == "__main__":
