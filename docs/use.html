@@ -57,7 +57,7 @@
           <h2>Run a Line</h2>
           <pre><code>./factory line project-audit --target . --sink file
 ./factory line web-excellence --target . --sink file</code></pre>
-          <p>Stations run in declared order. Read the <a href="lines.html">Andon policies</a> before relying on a Line as a gate; an environment failure and a finding are different outcomes.</p>
+          <p>Stations run in declared order. Read the <a href="lines.html">Andon policies</a> before relying on a Line as a gate; an environment failure and a finding are different outcomes. (To audit the software factory itself, point <code>--target</code> at a separate clean clone rather than the running checkout, which houses the active findings store.)</p>
         </section>
         <section class="doc-section" id="sinks">
           <h2>Sinks &amp; visibility</h2>

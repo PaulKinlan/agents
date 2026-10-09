@@ -155,6 +155,12 @@ Install locally by symlinking this repo into the engine's plugin directory — t
 
 This repo is itself a factory target. See PLAN §12 for what that does and does not prove.
 
+To audit the software factory itself, point `--target` at a **separate clean clone** (or run
+`./factory` from a different factory installation). Running `./factory ... --target .` from within
+the repository being audited is refused by `resolve_target`: the active checkout contains the
+runner's `findings/` store, which cannot be bound into the sandbox read scope without exposing raw
+credentials and prior findings.
+
 ### Publishing boundary
 
 `docs/` is a working directory, **not** a publish root. It holds the six generated pages and their

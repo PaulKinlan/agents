@@ -632,6 +632,16 @@ def _target_overlaps_findings(target: Path) -> bool:
     return (target == findings or target in findings.parents or findings in target.parents)
 
 
+def _self_target_hint(target: Path) -> str:
+    """Actionable guidance when an operator attempts to audit the factory from its own checkout (agents-3da)."""
+    if target.resolve() == FACTORY_ROOT.resolve():
+        return (
+            " (to audit the software factory itself, run the line from a different "
+            "factory root, or point --target at a separate clean clone)"
+        )
+    return ""
+
+
 def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
     # A named target is a BARE name resolved under FACTORY_ROOT/targets — never a path.
     # pathlib's `/` DISCARDS the left side when the right side is absolute, so
@@ -661,7 +671,8 @@ def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
                 raise FileNotFoundError(
                     f"Target '{target_arg}' ({target_yaml.name}) points at {path}, which overlaps "
                     f"the factory findings store ({_findings_store_path()}); refusing to scan a "
-                    f"raw credential store as a target")
+                    f"raw credential store as a target"
+                    + _self_target_hint(path))
             return name, path, cfg
 
     # Otherwise treat as path
@@ -671,7 +682,8 @@ def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
     if _target_overlaps_findings(target_path):
         raise FileNotFoundError(
             f"Target path {target_path} overlaps the factory findings store "
-            f"({_findings_store_path()}); refusing to scan a raw credential store as a target")
+            f"({_findings_store_path()}); refusing to scan a raw credential store as a target"
+            + _self_target_hint(target_path))
     name = target_path.name
     return name, target_path, {"name": name, "path": str(target_path), "sink": "file"}
 
