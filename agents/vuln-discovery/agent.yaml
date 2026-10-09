@@ -12,6 +12,6 @@ capabilities:
   browser: false
   requires: []
 budget:
-  max_minutes: 5
+  max_minutes: 20
 output:
   schema: report.schema.json

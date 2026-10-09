@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -68,6 +69,314 @@ def scan_code_usages(target_dir: Path, package_names: Set[str]) -> Dict[str, Lis
 
     return usage_map
 
+# A concrete version (optionally 'v'-prefixed, optionally with prerelease/build suffix).
+# Ranges, tags and specifiers ("^17 || ^18", ">=16", "latest", "workspace:*") are not versions.
+SEMVER_RE = re.compile(r"v?\d+(\.\d+)*([-+].*)?")
+
+def clean_semver(ver: Any) -> str:
+    """Normalize a concrete version string, returning "" for anything that is not one.
+
+    The divergence check compares shipped versions against installed lockfile versions
+    by equality, so a partial or invalid value must be rejected rather than normalized:
+    stripping operators turned the peer range ">=16" into "16" and the specifier
+    "^17 || ^18" into "17 || ^18", which manufactured false medium divergences against
+    the real installed version (and an empty result poisoned the baseline).
+    """
+    if not isinstance(ver, str):
+        return ""
+    cleaned = ver.strip()
+    if not SEMVER_RE.fullmatch(cleaned):
+        return ""
+    return cleaned[1:] if cleaned.startswith("v") else cleaned
+
+def get_lockfile_versions(target_dir: Path) -> Dict[str, str]:
+    """Extract resolved package versions from package-lock.json or installed node_modules."""
+    versions: Dict[str, str] = {}
+    lock_path = target_dir / "package-lock.json"
+    if lock_path.exists():
+        try:
+            data = json.loads(lock_path.read_text(encoding="utf-8"))
+            packages = data.get("packages", {})
+            for key, val in packages.items():
+                if isinstance(val, dict) and "version" in val:
+                    if key.startswith("node_modules/"):
+                        pkg_name = key[len("node_modules/"):]
+                        if "node_modules/" in pkg_name:
+                            pkg_name = pkg_name.split("node_modules/")[-1]
+                        v_clean = clean_semver(val["version"])
+                        if v_clean:
+                            versions[pkg_name] = v_clean
+            if not versions and "dependencies" in data:
+                def walk_v1(deps):
+                    for name, info in deps.items():
+                        if isinstance(info, dict):
+                            v_clean = clean_semver(info.get("version"))
+                            if v_clean:
+                                versions[name] = v_clean
+                            if isinstance(info.get("dependencies"), dict):
+                                walk_v1(info["dependencies"])
+                walk_v1(data.get("dependencies", {}))
+        except Exception:
+            pass
+
+    # Fallback to inspect node_modules directly if lockfile had no resolved versions
+    node_modules = target_dir / "node_modules"
+    if not versions and node_modules.is_dir():
+        for root, dirs, files in os.walk(node_modules):
+            if "package.json" in files:
+                pj = Path(root) / "package.json"
+                try:
+                    pdata = json.loads(pj.read_text(encoding="utf-8"))
+                    name = pdata.get("name")
+                    ver = pdata.get("version")
+                    v_clean = clean_semver(ver)
+                    if name and v_clean and name not in versions:
+                        versions[name] = v_clean
+                except Exception:
+                    pass
+    return versions
+
+def resolve_shipped_versions_npm(target_dir: Path) -> Tuple[Dict[str, Tuple[str, str]], List[str], List[str]]:
+    """Resolve (pkg -> (version, source_rel_path)) for shipped artifacts in npm projects.
+    Returns: (shipped_versions_map, inspected_manifests, artifact_paths)
+    """
+    shipped_versions: Dict[str, Tuple[str, str]] = {}
+    inspected_manifests: List[str] = []
+    artifact_paths: List[str] = []
+
+    # 1. Inspect dist/ and build/ directories
+    for dname in ("dist", "build"):
+        art_dir = target_dir / dname
+        if art_dir.is_dir():
+            has_bundle_files = False
+            # Check for package.json in dist/build
+            dist_pkg = art_dir / "package.json"
+            if dist_pkg.is_file():
+                has_bundle_files = True
+                rel_pkg = str(dist_pkg.relative_to(target_dir))
+                inspected_manifests.append(rel_pkg)
+                try:
+                    data = json.loads(dist_pkg.read_text(encoding="utf-8"))
+                    # Only installed/production dependencies: a peerDependencies entry is a
+                    # compatibility RANGE, not the version that ships, so comparing it as a
+                    # shipped version produced false divergences (e.g. peer ">=16" vs 18.2.0).
+                    deps = data.get("dependencies", {})
+                    for k, v in deps.items():
+                        v_clean = clean_semver(v)
+                        if v_clean:
+                            shipped_versions[k] = (v_clean, rel_pkg)
+                except Exception:
+                    pass
+
+            # Scan bundle header banners in JS files in dist/build
+            for root, _, files in os.walk(art_dir):
+                for f in files:
+                    if f.endswith((".js", ".mjs", ".cjs")):
+                        has_bundle_files = True
+                        fpath = Path(root) / f
+                        try:
+                            # Read first 4KB for license/version header comments
+                            content = fpath.read_text(encoding="utf-8", errors="ignore")[:4096]
+                            for m in re.finditer(r"/\*!?\s*([@\w\d_/-]+)\s+v?(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)", content):
+                                pkg, ver = m.group(1), clean_semver(m.group(2))
+                                if pkg not in shipped_versions:
+                                    shipped_versions[pkg] = (ver, str(fpath.relative_to(target_dir)))
+                        except Exception:
+                            pass
+
+            if has_bundle_files:
+                rel_art = str(art_dir.relative_to(target_dir))
+                artifact_paths.append(rel_art)
+
+    # 2. Inspect manifest.json (Chrome extension / WebExtension)
+    manifest_candidates = [
+        target_dir / "manifest.json",
+        target_dir / "dist" / "manifest.json",
+        target_dir / "src" / "manifest.json",
+        target_dir / "app" / "manifest.json",
+    ]
+    for mf in manifest_candidates:
+        if not mf.is_file():
+            continue
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        # manifest_version only exists on a WebExtension manifest; a generic manifest.json
+        # (PWA, icons, tooling) is not a shipped artifact and only added unverified noise.
+        if not isinstance(data, dict) or "manifest_version" not in data:
+            continue
+        rel_mf = str(mf.relative_to(target_dir))
+        if rel_mf not in artifact_paths:
+            artifact_paths.append(rel_mf)
+        if rel_mf not in inspected_manifests:
+            inspected_manifests.append(rel_mf)
+        deps = data.get("dependencies", {})
+        if isinstance(deps, dict):
+            for k, v in deps.items():
+                v_clean = clean_semver(v)
+                if v_clean and k not in shipped_versions:
+                    shipped_versions[k] = (v_clean, rel_mf)
+
+    return shipped_versions, inspected_manifests, artifact_paths
+
+def check_shipped_artifact_divergence_npm(
+    target_dir: Path,
+    lock_versions: Dict[str, str],
+    prod_deps: Dict[str, str]
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Check for divergence between lockfile and shipped artifact versions (agents-gtq)."""
+    candidates = []
+    shipped_versions, inspected_manifests, artifact_paths = resolve_shipped_versions_npm(target_dir)
+
+    # Only concrete versions may become the comparison baseline; a range or invalid lockfile
+    # value used to clean down to "" and flagged every real shipped version as divergent.
+    baseline_versions: Dict[str, str] = {}
+    for pkg, ver in {**prod_deps, **lock_versions}.items():
+        v_clean = clean_semver(ver)
+        if v_clean:
+            baseline_versions[pkg] = v_clean
+
+    divergent_found = False
+    for pkg, (shipped_ver, source_path) in shipped_versions.items():
+        if pkg in baseline_versions:
+            lock_ver = baseline_versions[pkg]
+            if shipped_ver != lock_ver:
+                divergent_found = True
+                candidates.append({
+                    "type": "coverage-gap",
+                    "rule_id": "lockfile-shipped-version-divergence",
+                    "package": pkg,
+                    "severity": "medium",
+                    "is_direct": pkg in prod_deps,
+                    "dep_type": "production",
+                    "title": f"Shipped artifact version diverges from lockfile for '{pkg}' ({shipped_ver} vs {lock_ver})",
+                    "description": (f"The version of '{pkg}' in the shipped artifact ({source_path}: {shipped_ver}) "
+                                    f"diverges from the audited lockfile/manifest version ({lock_ver}). "
+                                    "Security advisories evaluated against the lockfile do not match the shipped artifact."),
+                    "affected_range": shipped_ver,
+                    "imported_in_code": [],
+                    "path": source_path,
+                    "snippet": f'"{pkg}": "{shipped_ver}"',
+                    "remediation": f"Align shipped artifact dependency versions with audited lockfile version ({lock_ver})."
+                })
+
+    # If shipped build artifacts or packaging exist, but no dependency version could be resolved
+    if artifact_paths and not shipped_versions and not divergent_found:
+        primary_artifact = artifact_paths[0]
+        candidates.append({
+            "type": "coverage-gap",
+            "rule_id": "lockfile-shipped-version-divergence",
+            "severity": "info",
+            "is_direct": False,
+            "dep_type": "production",
+            "title": f"Shipped artifact dependency versions unverified against lockfile ({primary_artifact})",
+            "description": (f"The project contains shipped build artifacts or manifests ({primary_artifact}), "
+                            "but actual bundled dependency versions could not be verified against the lockfile. "
+                            "Dependency audits were evaluated against the lockfile, which may diverge from what ships."),
+            "path": primary_artifact,
+            "snippet": primary_artifact,
+            "remediation": "Export a verifiable bill of materials (SBOM) or dependency manifest for shipped artifacts."
+        })
+
+    return candidates, inspected_manifests
+
+def get_python_requirements_versions(target_dir: Path) -> Dict[str, str]:
+    """Parse pinned package versions from requirements.txt."""
+    versions: Dict[str, str] = {}
+    req_path = target_dir / "requirements.txt"
+    if req_path.is_file():
+        try:
+            for line in req_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if "==" in line and not line.startswith(("#", "-")):
+                    parts = line.split("==", 1)
+                    pkg = parts[0].strip()
+                    ver = clean_semver(parts[1].split(";")[0].strip())
+                    versions[pkg] = ver
+        except Exception:
+            pass
+    return versions
+
+def check_shipped_artifact_divergence_python(
+    target_dir: Path,
+    req_versions: Dict[str, str]
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Check for divergence between requirements.txt and Python shipped artifacts (agents-gtq)."""
+    candidates = []
+    inspected_manifests: List[str] = []
+    artifact_paths: List[str] = []
+    shipped_versions: Dict[str, Tuple[str, str]] = {}
+
+    dist_dir = target_dir / "dist"
+    if dist_dir.is_dir():
+        has_wheels = False
+        for f in dist_dir.iterdir():
+            if f.suffix == ".whl" and f.is_file():
+                has_wheels = True
+                rel_f = str(f.relative_to(target_dir))
+                inspected_manifests.append(rel_f)
+                try:
+                    with zipfile.ZipFile(f, "r") as z:
+                        for zname in z.namelist():
+                            if zname.endswith(".dist-info/METADATA"):
+                                meta = z.read(zname).decode("utf-8", errors="ignore")
+                                for mline in meta.splitlines():
+                                    if mline.startswith("Requires-Dist:"):
+                                        spec = mline[len("Requires-Dist:"):].strip()
+                                        if "==" in spec:
+                                            sparts = spec.split("==", 1)
+                                            pkg = sparts[0].strip().split()[0]
+                                            ver = clean_semver(sparts[1].split(";")[0].strip())
+                                            shipped_versions[pkg] = (ver, rel_f)
+                except Exception:
+                    pass
+        if has_wheels:
+            artifact_paths.append("dist")
+
+    divergent_found = False
+    for pkg, (shipped_ver, source_path) in shipped_versions.items():
+        if pkg in req_versions:
+            req_ver = req_versions[pkg]
+            if shipped_ver != req_ver:
+                divergent_found = True
+                candidates.append({
+                    "type": "coverage-gap",
+                    "rule_id": "lockfile-shipped-version-divergence",
+                    "package": pkg,
+                    "severity": "medium",
+                    "is_direct": True,
+                    "dep_type": "production",
+                    "title": f"Shipped artifact version diverges from requirements for '{pkg}' ({shipped_ver} vs {req_ver})",
+                    "description": (f"The version of '{pkg}' in the shipped artifact ({source_path}: {shipped_ver}) "
+                                    f"diverges from the audited requirements.txt version ({req_ver}). "
+                                    "Security advisories evaluated against requirements.txt do not match the shipped artifact."),
+                    "affected_range": shipped_ver,
+                    "imported_in_code": [],
+                    "path": source_path,
+                    "snippet": f"{pkg}=={shipped_ver}",
+                    "remediation": f"Align shipped artifact dependency versions with requirements.txt ({req_ver})."
+                })
+
+    if artifact_paths and not shipped_versions and not divergent_found:
+        primary_artifact = artifact_paths[0]
+        candidates.append({
+            "type": "coverage-gap",
+            "rule_id": "lockfile-shipped-version-divergence",
+            "severity": "info",
+            "is_direct": False,
+            "dep_type": "production",
+            "title": f"Shipped artifact dependency versions unverified against requirements ({primary_artifact})",
+            "description": (f"The project contains shipped build artifacts ({primary_artifact}), "
+                            "but actual bundled dependency versions could not be verified against requirements.txt. "
+                            "Dependency audits were evaluated against requirements.txt, which may diverge from what ships."),
+            "path": primary_artifact,
+            "snippet": primary_artifact,
+            "remediation": "Export a verifiable bill of materials (SBOM) or metadata for shipped artifacts."
+        })
+
+    return candidates, inspected_manifests
+
 def audit_npm(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Run npm audit --json and inspect package.json."""
     candidates = []
@@ -112,7 +421,15 @@ def audit_npm(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                 "remediation": f"Pin '{dep}' to an explicit semantic version range (e.g. ^x.y.z or strict version)."
             })
 
-    # 2. Run npm audit --json
+    # 2. Check for lockfile vs shipped artifact version divergence (agents-gtq)
+    lock_versions = get_lockfile_versions(target_dir)
+    divergence_candidates, shipped_manifests = check_shipped_artifact_divergence_npm(
+        target_dir, lock_versions, prod_deps
+    )
+    candidates.extend(divergence_candidates)
+    manifests.extend(shipped_manifests)
+
+    # 3. Run npm audit --json
     npm_bin = shutil.which("npm")
     raw_audit = None
     if npm_bin:
@@ -329,6 +646,14 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                         })
         except Exception:
             pass
+
+    # Check for requirements vs shipped artifact divergence (agents-gtq)
+    req_versions = get_python_requirements_versions(target_dir)
+    py_divergence_candidates, py_shipped_manifests = check_shipped_artifact_divergence_python(
+        target_dir, req_versions
+    )
+    candidates.extend(py_divergence_candidates)
+    manifests.extend(py_shipped_manifests)
 
     return candidates, manifests
 

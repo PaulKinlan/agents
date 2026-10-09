@@ -256,7 +256,9 @@ class TestPromotion(SinkFixture, unittest.TestCase):
              mock.patch.object(factory_cli, "child_environment", return_value=env) as child_env, \
              mock.patch.dict(os.environ, env, clear=True), redirect_stdout(stdout):
             factory_cli.promote_public_issue("fixture", self.issue_url)
-        child_env.assert_called_once_with(sink="github-issues")
+        # agents-dpt: the promotion child resolves gh/bd itself, so it is also built with the
+        # trusted-tool pin source (no new trust: the parent verified against the same pins).
+        child_env.assert_called_once_with(sink="github-issues", trusted_tools=True)
         self.assertEqual(json.loads(stdout.getvalue())["status"], "created")
         self.assertEqual(len(self.state()["beads"]), 1)
 

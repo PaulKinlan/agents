@@ -18,6 +18,7 @@ import typing
 from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
+from lib.child_env import child_environment
 from lib.credential_broker import PLACEHOLDER_KEY
 from lib.sandbox import sandbox_available
 
@@ -47,6 +48,18 @@ def _write_draining_report_stub(stub: Path, report_src: Path, marker: str = "") 
         encoding="utf-8",
     )
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+
+
+def _unpinned_stub_child_environment(**kwargs) -> typing.Dict[str, str]:
+    """`child_environment` plus the dev/test opt-in an unpinned stub `bd`/`gh` needs.
+
+    The findings child re-resolves its trusted tools by name under its own fail-closed pin
+    check (agents-7bj); the stub tools these tests install carry no pin, so the child needs the
+    same explicit opt-in tests/test_sinks.py gives its recorder.
+    """
+    env = child_environment(**kwargs)
+    env["FACTORY_ALLOW_UNPINNED_TOOLS"] = "1"
+    return env
 
 
 class TestDrainingReportStub(unittest.TestCase):
@@ -422,6 +435,131 @@ class TestTargetVisibility(unittest.TestCase):
             self.assertNotIn("visibility", cfg)
             self.assertNotIn("repo", cfg)
             self.assertEqual(factory_cli.detect_sink(path, cfg, None), "file")
+
+    def test_explicit_visibility_fills_a_raw_target_and_never_overrides_a_manifest(self):
+        """agents-dpt: `--visibility` is the only declaration a raw --target path can carry.
+
+        It fills a missing value, never overrides a manifest's own (so `targets/agents.yaml`
+        behaviour is intact and a declared private target cannot be widened), and omitting it
+        still leaves visibility undeclared — the fail-closed default.
+        """
+        raw = {"name": "raw", "path": "/tmp/raw", "sink": "beads"}
+        self.assertNotIn("visibility", factory_cli.apply_explicit_visibility(raw, None))
+        self.assertNotIn("visibility", factory_cli.apply_explicit_visibility(raw, "bogus"))
+        self.assertEqual(factory_cli.apply_explicit_visibility(raw, "public")["visibility"],
+                         "public")
+        self.assertEqual(factory_cli.apply_explicit_visibility(raw, "private")["visibility"],
+                         "private")
+        self.assertNotIn("visibility", raw)  # the caller's own manifest cfg is not mutated
+        declared = {"name": "agents", "path": "/tmp/agents", "sink": "beads",
+                    "visibility": "private"}
+        self.assertEqual(factory_cli.apply_explicit_visibility(declared, "public")["visibility"],
+                         "private")
+
+
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+class TestRawTargetVisibilityDispatch(unittest.TestCase):
+    """agents-dpt: `--visibility` is what carries an explicit declaration through a RAW
+    `--target` path into the findings dispatch, so the audit can file what it finds.
+
+    Without it there is no manifest to read, lib/embargo.py fail-closes and every
+    high/critical finding stays local — the self-audit's `embargoed 17, published 0`.
+    """
+
+    def _run_probe(self, visibility_arg):
+        """Run one probe station against a raw target path with the beads sink in a fresh
+        sandbox; return the (store records, recorded bd calls) it produced."""
+        temporary = tempfile.TemporaryDirectory(prefix="factory-auditvis-")
+        self.addCleanup(temporary.cleanup)
+        sandbox = Path(temporary.name)
+
+        (sandbox / "agents" / "probe" / "scripts").mkdir(parents=True)
+        (sandbox / "agents" / "probe" / "agent.yaml").write_text(
+            "name: probe\n"
+            "class: observer\n"
+            "containment: t0-readonly\n"
+            "short_circuit_empty: false\n"
+            "budget: {max_minutes: 1}\n",
+            encoding="utf-8",
+        )
+
+        report_src = sandbox / "report-src.json"
+        report_src.write_text(json.dumps({
+            "summary": "stub", "scanned_files": 1,
+            "findings": [{
+                "rule_id": "raw-visibility-probe", "path": "src/a.py", "line_number": 1,
+                "snippet": "x", "severity": "high", "title": "High finding",
+                "description": "d", "remediation": "r",
+            }],
+        }), encoding="utf-8")
+
+        (sandbox / "lib" / "adapters").mkdir(parents=True)
+        adapter = sandbox / "lib" / "adapters" / "pi.sh"
+        shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
+        adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+        for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py",
+                       "net_forward.py", "egress_proxy.py"):
+            shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
+        # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
+        shutil.copytree(FACTORY_ROOT / "lib" / "sinks", sandbox / "lib" / "sinks",
+                        dirs_exist_ok=True)
+
+        bindir = sandbox / "bin"
+        bindir.mkdir()
+        _write_draining_report_stub(bindir / "pi", report_src)
+
+        # A stub `bd` records every call beside itself (no env plumbing needed) and answers
+        # `list` (dedupe) and `create` (filing).
+        calls = bindir / "bd-calls.jsonl"
+        bd_stub = bindir / "bd"
+        bd_stub.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "log = Path(sys.argv[0]).parent / 'bd-calls.jsonl'\n"
+            "with log.open('a', encoding='utf-8') as fh:\n"
+            "    fh.write(json.dumps(args) + '\\n')\n"
+            "if args[0] == 'list':\n"
+            "    print('[]')\n"
+            "elif args[0] == 'create':\n"
+            "    print(json.dumps({'id': 'probe-1', 'status': 'open'}))\n"
+            "else:\n"
+            "    sys.exit(9)\n",
+            encoding="utf-8",
+        )
+        bd_stub.chmod(0o755)
+
+        target = sandbox / "target"
+        (target / ".beads").mkdir(parents=True)
+
+        # The stub bd is unpinned by construction, so this test declares a stub-tool
+        # environment: no host pin file (FACTORY_TOOL_PINS), plus the same dev/test opt-in
+        # tests/test_sinks.py gives its recorder (agents-7bj). Both the parent's PATH rebuild
+        # and the findings child resolve bd from PATH under those rules.
+        with mock.patch.object(factory_cli, "FACTORY_ROOT", sandbox), \
+             mock.patch.dict(os.environ,
+                             {"PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+                              "FACTORY_TOOL_PINS": str(sandbox / "no-such-pins.yaml")}), \
+             mock.patch.object(factory_cli, "child_environment",
+                               _unpinned_stub_child_environment):
+            factory_cli.run_agent("probe", str(target), engine_arg="pi",
+                                  explicit_sink="beads", visibility_arg=visibility_arg)
+
+        store = json.loads((sandbox / "findings" / "target.json").read_text(encoding="utf-8"))
+        recorded = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines()] \
+            if calls.exists() else []
+        return list(store["findings"].values()), recorded
+
+    def test_raw_target_files_with_explicit_visibility_and_embargoes_without_it(self):
+        _, filed = self._run_probe("public")
+        self.assertTrue([call for call in filed if call[0] == "create"],
+                        f"explicit --visibility public must reach the beads sink: {filed}")
+
+        records, held = self._run_probe(None)
+        self.assertEqual([record["rule_id"] for record in records], ["raw-visibility-probe"])
+        self.assertEqual([call for call in held if call[0] == "create"], [],
+                         "missing visibility must still embargo high findings from beads")
 
 
 @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)

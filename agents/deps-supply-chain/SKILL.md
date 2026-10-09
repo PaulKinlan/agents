@@ -13,7 +13,7 @@ Your job is to examine candidate security advisories, vulnerable dependencies, a
 You will receive:
 1. Target repository context and path.
 2. A JSON list of candidate issues discovered by `audit_deps.py` (`candidates`), containing:
-   - `type`: `vulnerability`, `supply-chain-risk`, or `license-risk`.
+   - `type`: `vulnerability`, `supply-chain-risk`, `license-risk`, or `coverage-gap`.
    - `package`: Package name.
    - `severity`: Scanner-assigned severity (`critical`, `high`, `medium`, `low`, `info`).
    - `is_direct`: True if directly listed in the root manifest.
@@ -48,6 +48,10 @@ Deterministic scanners flag every vulnerability in the entire dependency tree. Y
 ### 3. Supply Chain Integrity & License Risks
 - **Unpinned Wildcards**: Dependencies pinned to `*` or `latest` pose a severe supply chain risk by accepting arbitrary untested or compromised upstream releases on reinstall. Classify as `medium` or `high`.
 - **License Incompatibilities**: Aggressive copyleft licenses (GPL, AGPL) in permissive (MIT, Apache) or proprietary projects pose legal and IP distribution risks.
+
+### 4. Lockfile vs. Shipped Artifact Version Divergence (agents-gtq)
+- Deterministic scanners inspect root lockfiles (`package-lock.json`, `requirements.txt`), but shipped products may build or bundle different artifact versions (e.g. in `dist/`, `build/`, or extension `manifest.json`).
+- If a candidate with `rule_id: "lockfile-shipped-version-divergence"` or `type: "coverage-gap"` is reported, assess whether the divergence creates a security risk where the shipped artifact runs vulnerable code that was not caught or was masked by a different lockfile version, or whether shipped bundle versions remain unverified.
 
 ## Classification & Severity Criteria
 
