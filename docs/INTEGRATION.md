@@ -407,24 +407,24 @@ pi install git:github.com/PaulKinlan/agents
 | **`deps-supply-chain`** | Security | Observer | **Yes** | `audit_deps.py` (`npm audit` + AST) | For reachability | Discovers dependency CVEs and checks runtime import reachability. |
 | **`threat-model`** | Security | Observer | Local / Nightly | `mine_history.py` (git diffs + issues) | Yes | Synthesizes comprehensive trust boundary and attack surface model. |
 | **`vuln-discovery`** | Security | Observer | Local / Nightly | `scan_surface.py` | Yes | Guided attack surface exploration with high recall. |
-| **`vuln-verify`** | Security | Observer | Local | `verify_finding.py` | Yes | Independent adversarial verifier prompted strictly to disprove vulnerabilities. |
-| **`vuln-triage`** | Security | Observer | **Yes** | `cluster_findings.py` | Yes | Deduplicates findings by root cause and maps to `THREAT_MODEL.md`. |
+| **`vuln-verify`** | Security | Observer | Local | `prepare_verification.py` | Yes | Independent adversarial verifier prompted strictly to disprove vulnerabilities. |
+| **`vuln-triage`** | Security | Observer | **Yes** | `triage.py` | Yes | Deduplicates findings by root cause and maps to `THREAT_MODEL.md`. |
 | **`modern-web`** | Web Platform | Proposer | **Yes** | `scan_modern_web.py` (AST/regex) | Yes | Proposes replacements of legacy JS/CSS with native Baseline APIs (`<dialog>`, popover, container queries). |
-| **`ui-ux-audit`** | Web Platform | Proposer | **Yes** | `audit_ui.py` (DOM & CSS scanner) | Yes | Evaluates design tokens, interactive focus states, tap targets, and responsive layout. |
-| **`accessibility`** | Web Platform | Observer | **Yes** | `scan_a11y.py` (HTML validator) | For triage | Flags WCAG 2.1 AA violations (missing alt, tap sizes, contrast, landmarks). |
-| **`resilience`** | Web Platform | Proposer | **Yes** | `audit_resilience.py` | Yes | Evaluates network, offline, storage quota, and 3P failure handling. |
-| **`perf-review`** | Performance | Proposer | **Yes** | `scan_perf.py` (diff hazard scanner) | Yes | Identifies layout thrashing, sequential await waterfalls, and render-blocking scripts. |
+| **`ui-ux-audit`** | Web Platform | Proposer | **Yes** | `scan_ui_ux.py` (DOM & CSS scanner) | Yes | Evaluates design tokens, interactive focus states, tap targets, and responsive layout. |
+| **`accessibility`** | Web Platform | Observer | **Yes** | `audit_a11y.py` (HTML validator) | For triage | Flags WCAG 2.1 AA violations (missing alt, tap sizes, contrast, landmarks). |
+| **`resilience`** | Web Platform | Proposer | **Yes** | `scan_resilience.py` | Yes | Evaluates network, offline, storage quota, and 3P failure handling. |
+| **`perf-review`** | Performance | Proposer | **Yes** | `scan_perf_changes.py` (diff hazard scanner) | Yes | Identifies layout thrashing, sequential await waterfalls, and render-blocking scripts. |
 | **`bundle-size`** | Performance | Optimizer | **Yes** | `measure_bundle.py` (file sizes) | For budget advice | Enforces gzipped asset budgets and suggests dynamic import code splitting. |
-| **`perf-hillclimb`** | Performance | Optimizer | Local | `runner.py` (benchmarks) | Yes | Iterative optimization loop against numeric performance metrics. |
-| **`memory-profile`** | Performance | Optimizer | Local | `profile_memory.py` | Yes | Identifies event listener leaks, unclosed streams, and retained DOM nodes. |
-| **`test-gap`** | Testing | Proposer | **Yes** | `measure_coverage.py` | Yes | Detects untested functions and synthesizes runnable test skeletons. |
-| **`pr-fixer`** | Patching | Proposer | **Yes** | `generate_patch.py` | Yes | Generates minimal unified diff patches for active findings without pushing directly. |
-| **`issue-triage`** | Operations | Proposer | **Yes** | `fetch_issue.py` | Yes | Verifies issue reproduction steps, flags duplicates, and labels issues. |
+| **`perf-hillclimb`** | Performance | Optimizer | Local | `measure_and_context.py` (benchmarks) | Yes | Iterative optimization loop against numeric performance metrics. |
+| **`memory-profile`** | Performance | Optimizer | Local | `scan_memory_leaks.py` | Yes | Identifies event listener leaks, unclosed streams, and retained DOM nodes. |
+| **`test-gap`** | Testing | Proposer | **Yes** | `find_untested.py` | Yes | Detects untested functions and synthesizes runnable test skeletons. |
+| **`pr-fixer`** | Patching | Proposer | **Yes** | `collect_failures.py` | Yes | Generates minimal unified diff patches for active findings without pushing directly. |
+| **`issue-triage`** | Operations | Proposer | **Yes** | `fetch_issues.py` | Yes | Verifies issue reproduction steps, flags duplicates, and labels issues. |
 | **`docs-drift`** | Documentation | Observer | **Yes** | `check_docs.py` (link & tree parser) | For triage | Detects missing files, obsolete flags, and broken code references in documentation. |
-| **`docs-write`** | Documentation | Proposer | **Yes** | `diff_docs.py` | Yes | Generates exact markdown documentation patches to sync docs with code. |
-| **`release-notes`** | Operations | Proposer | **Yes** | `mine_commits.py` | Yes | Groups commits and PRs into customer-facing release notes. |
+| **`docs-write`** | Documentation | Proposer | **Yes** | `prepare_docs_fixes.py` | Yes | Generates exact markdown documentation patches to sync docs with code. |
+| **`release-notes`** | Operations | Proposer | **Yes** | `gather_commits.py` | Yes | Groups commits and PRs into customer-facing release notes. |
 | **`log-check`** | Operations | Observer | **Yes** | `parse_logs.py` | Yes | Correlates application stack traces with source lines to propose defensive fixes. |
-| **`qa-station`** | Meta | Observer | **Yes** | `audit_agents.py` | Yes | Audits agent precision, duplicate rates, and output contract compliance across the fleet. |
+| **`qa-station`** | Meta | Observer | **Yes** | `audit_factory_quality.py` | Yes | Audits agent precision, duplicate rates, and output contract compliance across the fleet. |
 
 ---
 
