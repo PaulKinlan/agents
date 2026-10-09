@@ -534,6 +534,32 @@ class TestLineSuffixIsALocationNotAFilename(unittest.TestCase):
             self.assertEqual([c["rule_id"] for c in candidates], ["doc-missing-file"])
             self.assertEqual([c["reference"] for c in candidates], ["no/such/file.py:12"])
 
+    def test_a_directory_with_a_line_suffix_is_still_reported(self):
+        """P1 from the cross-family review: a directory must not satisfy a FILE claim.
+
+        `lib/adapters:42` names a line inside a file. Resolving it against the existing
+        DIRECTORY `lib/adapters` silenced a genuinely missing file, which is the one
+        outcome this change must never produce.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "lib" / "adapters").mkdir(parents=True)
+            (tmp / "lib" / "adapters" / "gha.sh").write_text("# present\n")
+            (tmp / "docs").mkdir()
+            (tmp / "docs" / "PLAN.md").write_text("See `lib/adapters:42` for the hook.\n")
+            candidates = check_docs.scan_target(tmp)
+            self.assertEqual([c["rule_id"] for c in candidates], ["doc-missing-file"])
+            self.assertEqual([c["reference"] for c in candidates], ["lib/adapters:42"])
+
+    def test_a_trailing_slash_directory_with_a_line_suffix_is_still_reported(self):
+        """`lib/:12` is nonsense - a directory cannot hold a line location."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "lib").mkdir()
+            (tmp / "docs").mkdir()
+            (tmp / "docs" / "PLAN.md").write_text("See `lib/:12` for the binding.\n")
+            self.assertFalse(check_docs.path_exists_or_matches(tmp, tmp / "docs", "lib/:12")[0])
+
     def test_a_clock_like_token_is_not_reduced_to_a_directory_name(self):
         """Fails if the strip is careless: `12:30` must not become the directory `12`.
 
