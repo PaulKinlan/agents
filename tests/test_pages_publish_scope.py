@@ -164,10 +164,25 @@ class PagesPublishScopeTest(unittest.TestCase):
             site = make_site(Path(tmp))
             outside = Path(tmp) / "outside.png"
             outside.write_bytes(b"\x89PNG\r\n\x1a\n")
-            (site / "linked.png").write_bytes(b"")  # placeholder so the reference resolves
-            os.remove(site / "linked.png")
-            os.symlink(outside, site / "linked.png")
+            try:
+                os.symlink(outside, site / "linked.png")
+            except (OSError, NotImplementedError) as error:  # e.g. unprivileged Windows
+                self.skipTest(f"symlinks unavailable: {error}")
             (site / "index.html").write_text(PAGE_TEMPLATE.format(link="linked.png"), encoding="utf-8")
+            with self.assertRaises(StagingError):
+                plan(site)
+
+    def test_a_directory_symlink_aliasing_an_internal_directory_is_refused(self):
+        """docs/pub -> docs/audits must not become a way to publish audits/ under another name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            site = make_site(Path(tmp))
+            (site / "audits").mkdir()
+            (site / "audits" / "report.html").write_text("<html><body>internal</body></html>", encoding="utf-8")
+            try:
+                os.symlink(site / "audits", site / "pub")
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            (site / "index.html").write_text(PAGE_TEMPLATE.format(link="pub/report.html"), encoding="utf-8")
             with self.assertRaises(StagingError):
                 plan(site)
 

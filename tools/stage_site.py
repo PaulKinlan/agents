@@ -151,8 +151,12 @@ def plan(source: Path | str = None) -> List[str]:
             raise StagingError(f"refusing to publish '{rel}': symlinks are not staged")
         if not path.is_file():
             raise StagingError(f"a published page references '{rel}', which does not exist in {source}")
-        if not path.resolve().is_relative_to(source_root):
+        resolved = path.resolve()
+        if not resolved.is_relative_to(source_root):
             raise StagingError(f"refusing to publish '{rel}': it resolves outside {source}")
+        # A symlinked directory (or any other alias) can point at an internal directory, so
+        # the *resolved* path must pass the same guard as the reference that reached it.
+        guard(resolved.relative_to(source_root).as_posix())
         seen.add(rel)
         queue.extend(_references(source, rel))
     return sorted(seen)
@@ -170,6 +174,8 @@ def stage(source: Path | str = None, out: Path | str = None) -> List[str]:
         destination = (out / rel).resolve()
         if not destination.is_relative_to(out_root):
             raise StagingError(f"refusing to write '{rel}' outside {out}")
+        if (out / rel).is_symlink():
+            raise StagingError(f"refusing to write '{rel}': the output path is a symlink")
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source / rel, destination)
     return files
