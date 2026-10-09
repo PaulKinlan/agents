@@ -52,8 +52,7 @@ EXTERNAL_REPO_INDICATORS = {
 }
 
 # The build/test/output containers a station's SKILL.md prose uses for the AUDITED project's
-# artefacts (agents-6zq). Deliberately NARROWER than GENERIC_DIR_NAMES, which also holds this
-# repository's own source roots: a SKILL.md reference under `lib/`, `docs/`, `tools/` or
+# artefacts (agents-6zq). A SKILL.md reference under `lib/`, `docs/`, `tools/` or
 # `scripts/` is a claim about THIS repo and must stay checkable - lib/adapters/gha.sh was the
 # one genuine drift found in this repository, and a wider list hid it.
 TARGET_LAYOUT_DIR_NAMES = {
@@ -62,24 +61,6 @@ TARGET_LAYOUT_DIR_NAMES = {
     "node_modules", "vendor", "tmp", "temp", "cache",
     "extension", "extensions", "pages", "page", "src", "source", "sources",
     "public", "static", "assets", "samples", "examples", "screenshots", "images", "img",
-}
-
-# Bare DIRECTORY names that are too generic to resolve by name anywhere in the tree.
-# `src/`, `build/` and friends appear in nearly every project, so a document naming one
-# is almost always describing the TARGET project's layout, not this repository's; letting
-# one match a directory somewhere else would hide a moved/renamed path.
-GENERIC_DIR_NAMES = {
-    "src", "source", "sources", "script", "scripts", "test", "tests", "spec", "specs",
-    "lib", "libs", "bin", "build", "dist", "out", "output", "docs", "doc", "app",
-    "apps", "packages", "package", "assets", "public", "static", "fixtures", "fixture",
-    "extension", "extensions", "pages", "page", "tools", "config", "configs", "tmp",
-    "temp", "cache", "vendor", "node_modules", "examples", "example", "samples",
-    "screenshots", "images", "img", "components", "styles", "tests-e2e", "e2e",
-    "template", "templates", "util", "utils", "helper", "helpers", "shared", "common",
-    "include", "includes", "types", "models", "controllers", "middleware", "routes",
-    "views", "services", "service", "api", "server", "client", "web", "core",
-    "data", "db", "database", "migrations", "schemas", "schema", "locale", "locales",
-    "i18n", "hooks", "store", "state", "generated", "coverage", "logs", "log",
 }
 
 def is_ignored_doc(p: Path, target_dir: Path) -> bool:
@@ -219,18 +200,15 @@ def skill_reference_is_checkable(target_dir: Path, doc_dir: Path, ref: str) -> b
         (`lib/adapters/gha.sh`, the one genuine drift in this repository) - checkable;
       * anything else names the audited target's layout and is skipped.
 
-    The list consulted here is TARGET_LAYOUT_DIR_NAMES, NOT GENERIC_DIR_NAMES, even though
-    shape 1 was specified as the latter. GENERIC_DIR_NAMES holds every name a bare reference
-    may not be satisfied by elsewhere in the tree and includes this repository's own source
-    roots (`lib/`, `docs/`, `tools/`, `scripts/`), so applying it here is what hid
+    The list consulted here is TARGET_LAYOUT_DIR_NAMES (agents-6zq). A wider list holding
+    this repository's own source roots (`lib/`, `docs/`, `tools/`, `scripts/`) hid
     lib/adapters/gha.sh. The first attempt at shape 1 was also unreachable in effect: a bare
     `dist/` either resolves (so no candidate is produced) or its head is not a directory (so
     the fallback below rejects it anyway) - proved by sweeping 32 bare-container scenarios,
     where removing the guard changed nothing. TARGET_LAYOUT_DIR_NAMES is what station prose
     actually uses for the audited project's artefacts, and it is live: without it, a host
     repo that really contains a tracked `dist/` or `test/` directory would report
-    `dist/bundle.js` and `test/interpolate.test.js` as drift. GENERIC_DIR_NAMES keeps its own,
-    still-needed job in path_exists_or_matches().
+    `dist/bundle.js` and `test/interpolate.test.js` as drift.
     """
     if not ref:
         return False

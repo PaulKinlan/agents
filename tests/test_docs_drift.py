@@ -365,7 +365,7 @@ class TestStationSkillScope(unittest.TestCase):
     def test_own_source_roots_are_not_treated_as_target_layout(self):
         """`lib/`, `docs/` and `tools/` are this repository's own roots: still checked.
 
-        GENERIC_DIR_NAMES contains them, and using THAT list here hid lib/adapters/gha.sh -
+        A wider generic list contained them, and using that list here hid lib/adapters/gha.sh -
         the one genuine drift in this repository (review of 58f9931).
         """
         with tempfile.TemporaryDirectory() as tmpdir:
