@@ -259,6 +259,14 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
     entry, deps-supply-chain's package.json) blanks every genuine path to `unknown` and the
     finding becomes untriageable. The guard still fires on an invented path: an empty path, or
     a path that resolves nowhere, is bound to `unknown` exactly as before.
+
+    Migration note (agents-0tl, expected - not a regression): a fingerprint includes the path, so
+    preserving a real location also re-identifies records stored earlier with `path: "unknown"`.
+    The first run after this shipped reports those as new (with their real path) and the old
+    "unknown" records as fixed, and a suppression keyed to an old "unknown" fingerprint stops
+    matching. Deliberately not bridged: the transition is one-off and self-correcting, and a
+    legacy-identity shim kept forever to hide a single visible transition costs more than it
+    saves.
     """
     rule_id = item.get("rule_id") or "generic"
     path = item.get("path") or ""
