@@ -13,7 +13,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-import yaml
+
+from lib.yaml_mini import load_yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 ACTION = ROOT / ".github" / "actions" / "factory" / "action.yml"
@@ -76,7 +77,7 @@ def untrusted_expression_violations(root: Path = ROOT):
     """Every run: body under .github/actions/** that interpolates an untrusted context."""
     violations = []
     for p in action_files(root):
-        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+        data = load_yaml(p)
         for step_path, body in _run_blocks(data):
             offending = [line.strip() for line in body.splitlines()
                          if UNTRUSTED_RUN_EXPRESSION.search(line)]

@@ -536,9 +536,8 @@ class TestLineAndon(unittest.TestCase):
 
     def test_vuln_discovery_budget_is_at_least_twenty_minutes(self):
         """agents-7ms: vuln-discovery agent.yaml budget.max_minutes must be >= 20."""
-        import yaml
         agent_yaml = ROOT / "agents" / "vuln-discovery" / "agent.yaml"
-        cfg = yaml.safe_load(agent_yaml.read_text(encoding="utf-8"))
+        cfg = factory_cli.load_yaml_simple(agent_yaml)
         max_minutes = cfg.get("budget", {}).get("max_minutes")
         self.assertIsNotNone(max_minutes)
         self.assertGreaterEqual(float(max_minutes), 20.0)
