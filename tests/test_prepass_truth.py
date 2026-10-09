@@ -292,6 +292,7 @@ class TestPrepassFixes(unittest.TestCase):
             ":focus:not(:focus-visible, .kb-focus) { outline: none; }\n.btn:hover { color: red; }",
             ":focus:not(.kb-focus, :focus-visible) { outline: none; }\n.btn:hover { color: red; }",
             ":focus:NOT(:focus-visible, .kb-focus) { outline: none; }\n.btn:hover { color: red; }",
+            '[class*=":focus-visible"] { color: red; }\n.btn:hover { color: red; }',
             "a:focus:not(:focus-visible) { outline: 0; }\n.link:hover { color: red; }",
         ]
         for snippet in test_reset_cases:
@@ -324,6 +325,7 @@ class TestPrepassFixes(unittest.TestCase):
             ":focus:not(:focus-visible) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
             ":focus:not(\n  :focus-visible\n) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
             ":focus:not(:focus-visible, .kb) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
+            '.x::after { content: ":not("; }\n.btn:focus-visible { outline: 2px solid blue; }\n.card { color: rgb(0, 0, 0); }',
         ]
 
         for sel in chained_selectors:
