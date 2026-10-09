@@ -39,6 +39,84 @@ def step_block(name: str) -> str:
     raise AssertionError(f"step not found: {name}")
 
 
+# The narrow guard agents-bjb shipped first, kept so the gap it left is pinned by a test:
+# it misses `${{ inputs['target'] }}` (index syntax) and `${{ INPUTS.target }}` (context
+# namespaces are case-insensitive).
+NARROW_INPUTS_PATTERN = re.compile(r"\$\{\{\s*inputs\.")
+
+# Any untrusted context interpolated into a run: body is a script-injection vector:
+# `inputs` is caller-supplied for a composite action, and `github`/`matrix` can carry
+# attacker-influenced text (github.event.*, a strategy `include` value). Context names are
+# case-insensitive and a reference may use dot or index syntax, hence the loose match.
+UNTRUSTED_RUN_EXPRESSION = re.compile(r"\$\{\{\s*(?:github|matrix|inputs)\b", re.IGNORECASE)
+
+
+def action_files(root: Path = ROOT):
+    """Every composite-action definition under .github/actions/**."""
+    actions = root / ".github" / "actions"
+    return sorted(list(actions.rglob("*.yml")) + list(actions.rglob("*.yaml")))
+
+
+def _run_blocks(val, path=""):
+    runs = []
+    if isinstance(val, dict):
+        for k, v in val.items():
+            subpath = f"{path}.{k}" if path else k
+            if k == "run" and isinstance(v, str):
+                runs.append((subpath, v))
+            else:
+                runs.extend(_run_blocks(v, subpath))
+    elif isinstance(val, list):
+        for idx, item in enumerate(val):
+            runs.extend(_run_blocks(item, f"{path}[{idx}]"))
+    return runs
+
+
+def untrusted_expression_violations(root: Path = ROOT):
+    """Every run: body under .github/actions/** that interpolates an untrusted context."""
+    violations = []
+    for p in action_files(root):
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+        for step_path, body in _run_blocks(data):
+            offending = [line.strip() for line in body.splitlines()
+                         if UNTRUSTED_RUN_EXPRESSION.search(line)]
+            if offending:
+                violations.append(
+                    f"{p.relative_to(root)} ({step_path}):\n  " + "\n  ".join(offending))
+    return violations
+
+
+def artifact_name_script() -> str:
+    """The artifact-name lines of the Execute Factory Agent run body, verbatim."""
+    lines = step_block("Execute Factory Agent").split("run:")[1].splitlines()
+    start = next(i for i, line in enumerate(lines) if "ARTIFACT_NAME=" in line)
+    end = next(i for i, line in enumerate(lines) if "::group::" in line)
+    return "\n".join(lines[start:end])
+
+
+def parse_env_entries(text: str) -> dict:
+    """Parse the `NAME=value` / `NAME<<DELIM` ... `DELIM` format GitHub reads from
+    $GITHUB_ENV and $GITHUB_OUTPUT, into the variables the runner would set."""
+    entries = {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if "<<EOF" in line:
+            name = line.split("<<EOF", 1)[0]
+            value = []
+            while i < len(lines) and lines[i] != "EOF":
+                value.append(lines[i])
+                i += 1
+            i += 1
+            entries[name] = "\n".join(value)
+        elif line.strip():
+            name, _, value = line.partition("=")
+            entries[name] = value
+    return entries
+
+
 class TestActionPinning(unittest.TestCase):
     def test_factory_ref_default_is_a_full_commit_sha(self):
         self.assertRegex(pinned_sha(), r"^[0-9a-f]{40}$")
@@ -154,60 +232,59 @@ class TestStepSummaryRouting(unittest.TestCase):
 
 
 class TestExpressionInjectionGuard(unittest.TestCase):
-    """agents-bjb: GitHub Actions script injection guard (actionlint-style check).
+    """agents-bjb: GitHub Actions script injection guard.
 
-    Untrusted inputs interpolated directly into run: script bodies via ${{ inputs.* }}
+    Untrusted contexts interpolated directly into run: script bodies via ${{ ... }}
     lead to arbitrary command execution in steps holding GH_TOKEN/model API keys.
     All inputs must be passed via env: and quoted inside shell scripts.
+
+    actionlint is not vendored in this repo, so the scan below is the guard.
     """
 
-    def test_no_inputs_expression_in_any_action_run_body(self):
-        """No ${{ inputs.* }} expression may appear inside any run: body in .github/actions/**."""
-        action_files = sorted(
-            list((ROOT / ".github" / "actions").rglob("*.yml")) +
-            list((ROOT / ".github" / "actions").rglob("*.yaml"))
-        )
-        self.assertTrue(action_files, "expected to find action.yml files under .github/actions/")
+    def _assert_guard_flags(self, run_body: str):
+        """The scan must report a violation for this run: body, and the narrow
+        `inputs.`-only pattern it replaced must have let it through."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            action = root / ".github" / "actions" / "probe" / "action.yml"
+            action.parent.mkdir(parents=True)
+            action.write_text(
+                "name: probe\nruns:\n  using: composite\n  steps:\n"
+                "    - name: probe step\n      shell: bash\n      run: |\n"
+                + "\n".join(f"        {line}" for line in run_body.splitlines()) + "\n",
+                encoding="utf-8",
+            )
+            violations = untrusted_expression_violations(root)
+        self.assertFalse(
+            NARROW_INPUTS_PATTERN.search(run_body),
+            f"the pre-fix pattern was supposed to miss this form: {run_body!r}")
+        self.assertTrue(violations, f"guard missed an injection vector: {run_body!r}")
 
-        violations = []
-        pattern = re.compile(r"\$\{\{\s*inputs\.")
-
-        for p in action_files:
-            rel = p.relative_to(ROOT)
-            content = p.read_text(encoding="utf-8")
-            data = yaml.safe_load(content)
-
-            def find_run_blocks(val, path=""):
-                runs = []
-                if isinstance(val, dict):
-                    for k, v in val.items():
-                        subpath = f"{path}.{k}" if path else k
-                        if k == "run" and isinstance(v, str):
-                            runs.append((subpath, v))
-                        else:
-                            runs.extend(find_run_blocks(v, subpath))
-                elif isinstance(val, list):
-                    for idx, item in enumerate(val):
-                        runs.extend(find_run_blocks(item, f"{path}[{idx}]"))
-                return runs
-
-            for step_path, run_body in find_run_blocks(data):
-                matches = pattern.findall(run_body)
-                if matches:
-                    violating_lines = [
-                        line.strip() for line in run_body.splitlines()
-                        if pattern.search(line)
-                    ]
-                    violations.append(
-                        f"{rel} ({step_path}): found {len(matches)} injection vector(s):\n  "
-                        + "\n  ".join(violating_lines)
-                    )
-
+    def test_no_untrusted_expression_in_any_action_run_body(self):
+        """No ${{ inputs... }}, ${{ github. }} or ${{ matrix. }} expression may appear
+        inside any run: body in .github/actions/**."""
+        self.assertTrue(action_files(), "expected action.yml files under .github/actions/")
+        violations = untrusted_expression_violations()
         self.assertEqual(
             violations, [],
-            "Expression injection vulnerability: ${{ inputs.* }} found in run: body:\n"
-            + "\n".join(violations)
-        )
+            "Untrusted ${{ ... }} expression in a run: body (script-injection vector):\n"
+            + "\n".join(violations))
+
+    def test_guard_flags_indexed_input_reference(self):
+        """`${{ inputs['target'] }}` — index syntax the narrow `inputs.` pattern missed."""
+        self._assert_guard_flags("TARGET='${{ inputs['target'] }}'")
+
+    def test_guard_flags_case_insensitive_input_context(self):
+        """`${{ INPUTS.target }}` — context names are case-insensitive, so `INPUTS`
+        resolves to the same caller-supplied input the narrow pattern never saw."""
+        self._assert_guard_flags("TARGET='${{ INPUTS.target }}'")
+
+    def test_guard_flags_untrusted_github_and_matrix_contexts(self):
+        """A context-agnostic scan: `github.event.*` carries attacker-controlled text
+        (issue titles, PR bodies) and a strategy `include` value reaches `matrix`
+        verbatim."""
+        self._assert_guard_flags("TITLE='${{ github.event.issue.title }}'")
+        self._assert_guard_flags("VALUE='${{ matrix.value }}'")
 
     def test_factory_action_passes_inputs_via_env(self):
         block = step_block("Execute Factory Agent")
@@ -225,6 +302,47 @@ class TestExpressionInjectionGuard(unittest.TestCase):
         """Line 147 fix: pass artifact name via env or $GITHUB_OUTPUT, not ${{ inputs.agent }}."""
         block = step_block("Upload Full Delta Report Artifact")
         self.assertNotIn("${{ inputs.", block)
+
+    def test_a_newline_in_agent_cannot_add_a_second_env_entry(self):
+        """agents-bjb review P2: ARTIFACT_NAME is written to $GITHUB_OUTPUT/$GITHUB_ENV,
+        which are newline-delimited, so an unsanitised AGENT_NAME containing a newline
+        appends a second, attacker-chosen variable to the step environment. The landed
+        form strips the name and writes it with the heredoc delimiter."""
+        injected = "delta\nINJECTED_SECRET=x"
+
+        # Reproduction: the naive write really does add a second entry, so the assertion
+        # below cannot pass for the wrong reason.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / "env"
+            env_file.write_text("", encoding="utf-8")
+            subprocess.run(
+                ["bash", "-c", 'echo "FACTORY_ARTIFACT_NAME=$AGENT_NAME" >> "$GITHUB_ENV"'],
+                env={**os.environ, "GITHUB_ENV": str(env_file), "AGENT_NAME": injected},
+                check=True, capture_output=True, timeout=30)
+            self.assertEqual(
+                list(parse_env_entries(env_file.read_text(encoding="utf-8"))),
+                ["FACTORY_ARTIFACT_NAME", "INJECTED_SECRET"],
+                "reproduction failed: the naive newline-delimited write was supposed to inject")
+
+        # The landed form, run from the action's own lines.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = Path(tmpdir) / "output"
+            env_file = Path(tmpdir) / "env"
+            out_file.write_text("", encoding="utf-8")
+            env_file.write_text("", encoding="utf-8")
+            res = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\n" + artifact_name_script()],
+                env={**os.environ, "GITHUB_OUTPUT": str(out_file), "GITHUB_ENV": str(env_file),
+                     "AGENT_NAME": injected},
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            env_entries = parse_env_entries(env_file.read_text(encoding="utf-8"))
+            out_entries = parse_env_entries(out_file.read_text(encoding="utf-8"))
+            self.assertEqual(list(env_entries), ["FACTORY_ARTIFACT_NAME"])
+            self.assertEqual(list(out_entries), ["artifact_name"])
+            self.assertNotIn("\n", env_entries["FACTORY_ARTIFACT_NAME"])
+            self.assertTrue(
+                env_entries["FACTORY_ARTIFACT_NAME"].startswith("factory-delta-report-"))
 
     def test_reproduction_input_injection_blocked_by_env_indirection(self):
         """Reproduce-first: verify that direct substitution executes commands, while env indirection blocks it."""

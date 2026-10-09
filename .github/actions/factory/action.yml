@@ -111,10 +111,23 @@ runs:
         SINK_ARG: ${{ inputs.sink }}
       run: |
         set -euo pipefail
-        ARTIFACT_NAME="factory-delta-report-${AGENT_NAME}"
-        echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
-        echo "FACTORY_ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
-        
+        # AGENT_NAME is caller-supplied. $GITHUB_OUTPUT/$GITHUB_ENV are newline-delimited
+        # (`NAME=value` per line, or `NAME<<DELIM` ... `DELIM`), so a raw newline in the
+        # agent name would append a second, attacker-chosen variable to the step's
+        # environment. Keep the name to the characters upload-artifact accepts, and write
+        # it with the heredoc form, which a stray newline cannot break.
+        ARTIFACT_NAME="factory-delta-report-$(printf '%s' "$AGENT_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+        {
+          echo "artifact_name<<EOF"
+          echo "$ARTIFACT_NAME"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo "FACTORY_ARTIFACT_NAME<<EOF"
+          echo "$ARTIFACT_NAME"
+          echo "EOF"
+        } >> "$GITHUB_ENV"
+
         echo "::group::Executing Factory Agent: $AGENT_NAME"
         echo "Target directory: $TARGET_PATH"
         echo "Engine: $ENGINE_ARG"
