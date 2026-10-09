@@ -43,6 +43,19 @@ EXTERNAL_REPO_INDICATORS = {
     "google-github-actions/", "actions/"
 }
 
+# The build/test/output containers a station's SKILL.md prose uses for the AUDITED project's
+# artefacts (agents-6zq). Deliberately NARROWER than GENERIC_DIR_NAMES, which also holds this
+# repository's own source roots: a SKILL.md reference under `lib/`, `docs/`, `tools/` or
+# `scripts/` is a claim about THIS repo and must stay checkable - lib/adapters/gha.sh was the
+# one genuine drift found in this repository, and a wider list hid it.
+TARGET_LAYOUT_DIR_NAMES = {
+    "dist", "build", "out", "output", "coverage", "generated", "bundle", "bundles",
+    "test", "tests", "spec", "specs", "e2e", "fixtures", "fixture",
+    "node_modules", "vendor", "tmp", "temp", "cache",
+    "extension", "extensions", "pages", "page", "src", "source", "sources",
+    "public", "static", "assets", "samples", "examples", "screenshots", "images", "img",
+}
+
 # Bare DIRECTORY names that are too generic to resolve by name anywhere in the tree.
 # `src/`, `build/` and friends appear in nearly every project, so a document naming one
 # is almost always describing the TARGET project's layout, not this repository's; letting
@@ -223,9 +236,18 @@ def skill_reference_is_checkable(target_dir: Path, doc_dir: Path, ref: str) -> b
         (`lib/adapters/gha.sh`, the one genuine drift in this repository) - checkable;
       * anything else names the audited target's layout and is skipped.
 
-    The generic-name list is applied only to a bare container reference (`dist/`,
-    `fixtures/`), which is the shape that can collide when a host repo happens to contain a
-    target-typical build directory.
+    The list consulted here is TARGET_LAYOUT_DIR_NAMES, NOT GENERIC_DIR_NAMES, even though
+    shape 1 was specified as the latter. GENERIC_DIR_NAMES holds every name a bare reference
+    may not be satisfied by elsewhere in the tree and includes this repository's own source
+    roots (`lib/`, `docs/`, `tools/`, `scripts/`), so applying it here is what hid
+    lib/adapters/gha.sh. The first attempt at shape 1 was also unreachable in effect: a bare
+    `dist/` either resolves (so no candidate is produced) or its head is not a directory (so
+    the fallback below rejects it anyway) - proved by sweeping 32 bare-container scenarios,
+    where removing the guard changed nothing. TARGET_LAYOUT_DIR_NAMES is what station prose
+    actually uses for the audited project's artefacts, and it is live: without it, a host
+    repo that really contains a tracked `dist/` or `test/` directory would report
+    `dist/bundle.js` and `test/interpolate.test.js` as drift. GENERIC_DIR_NAMES keeps its own,
+    still-needed job in path_exists_or_matches().
     """
     if not ref:
         return False
@@ -235,15 +257,19 @@ def skill_reference_is_checkable(target_dir: Path, doc_dir: Path, ref: str) -> b
         return False                                     # 3. template / placeholder
     if any(c in ref for c in "()"):
         return False                                     # 2. call syntax, not a path
-    if "/" not in ref:
+    # removeprefix, NOT lstrip: lstrip("./") is a character set and ate the dot of
+    # `.github/workflows/ci.yml`, so that head became "github" and a genuine first-party
+    # claim was silently skipped (review of 58f9931).
+    clean = ref.removeprefix("./")
+    if "/" not in clean:
         # A bare name is not a repo-relative claim, and the resolver's own name index
         # already covers the case where a sibling with that name exists.
         return False
-    if ref.endswith("/") and ref.rstrip("/").split("/")[-1].lower() in GENERIC_DIR_NAMES:
-        return False                                     # 1. a bare generic container name
-    head = ref.lstrip("./").split("/", 1)[0]
+    head = clean.split("/", 1)[0]
     if (doc_dir / head).is_dir():
         return True                                      # the station's own directory
+    if head.lower() in TARGET_LAYOUT_DIR_NAMES:
+        return False                                     # 1. the audited target's layout
     return ((target_dir / head).is_dir()
             and _indexed(_git_paths(target_dir, "tracked"), head))
 

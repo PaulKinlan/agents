@@ -312,6 +312,84 @@ class TestStationSkillScope(unittest.TestCase):
             self.assertIn("dist/", references)
             self.assertIn("src/", references)
 
+    def _git_repo(self, tmp: Path) -> None:
+        subprocess.run(["git", "init", "-q", str(tmp)], check=True)
+        subprocess.run(["git", "-C", str(tmp), "add", "-A"], check=True)
+
+    def test_dot_prefixed_directory_is_not_stripped(self):
+        """`.github/` must keep its dot: lstrip("./") turned the head into "github".
+
+        Review of 58f9931: a genuine first-party claim about `.github/workflows/...` was
+        silently skipped because lstrip treats its argument as a character set.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._station(tmp, "The workflow lives at `.github/workflows/nightly.yml`.\n")
+            (tmp / ".github" / "workflows").mkdir(parents=True)
+            (tmp / ".github" / "workflows" / "ci.yml").write_text("# ci\n")
+            self._git_repo(tmp)
+
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn(".github/workflows/nightly.yml", references)
+            self.assertNotIn(".github/workflows/ci.yml", references)
+
+    def test_qualified_path_with_generic_last_component_is_checkable(self):
+        """`agents/x/scripts/` is not a "bare container" just because it ends in scripts/.
+
+        Review of 58f9931: the old test looked at the LAST component, so any qualified path
+        ending in a generic name was discarded before its prefix was ever considered. The
+        station deliberately has no scripts/ directory, so the reference is genuinely
+        missing and the only question is whether it is checkable.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            station = tmp / "agents" / "probe"
+            station.mkdir(parents=True)
+            (station / "SKILL.md").write_text("The pre-pass lives in `agents/probe/scripts/`.\n")
+            self._git_repo(tmp)
+
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("agents/probe/scripts/", references)
+
+    def test_target_layout_container_is_skipped_even_when_it_exists(self):
+        """The target-layout guard is LIVE: without it a host with a real dist/ reports noise.
+
+        A bare `dist/` would resolve, so the live case is a file inside a container that
+        exists here but belongs to the audited project's layout. Deleting the guard makes
+        this test fail (that guard was unreachable before the 58f9931 review, which is why
+        it could be removed with no test failing).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._station(tmp, "Score the shipped bundle in `dist/bundle.js` and `test/x.test.js`.\n")
+            (tmp / "dist").mkdir()
+            (tmp / "dist" / "shipped.js").write_text("// shipped\n")
+            (tmp / "test").mkdir()
+            (tmp / "test" / "real.test.js").write_text("// real\n")
+            self._git_repo(tmp)
+
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertNotIn("dist/bundle.js", references)
+            self.assertNotIn("test/x.test.js", references)
+
+    def test_own_source_roots_are_not_treated_as_target_layout(self):
+        """`lib/`, `docs/` and `tools/` are this repository's own roots: still checked.
+
+        GENERIC_DIR_NAMES contains them, and using THAT list here hid lib/adapters/gha.sh -
+        the one genuine drift in this repository (review of 58f9931).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._station(tmp, "The adapter lives at `lib/adapters/gha.sh`; see `docs/PLAN.md`.\n")
+            (tmp / "lib" / "adapters").mkdir(parents=True)
+            (tmp / "lib" / "adapters" / "pi.sh").write_text("# pi\n")
+            (tmp / "docs").mkdir()
+            (tmp / "docs" / "PLAN.md").write_text("# plan\n")
+            self._git_repo(tmp)
+
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("lib/adapters/gha.sh", references)
+
     def test_real_repo_skill_candidates_collapse_to_genuine_only(self):
         """On the real tree: 31 SKILL.md candidates drop to at most the genuine ones."""
         candidates = check_docs.scan_target(FACTORY_ROOT)
