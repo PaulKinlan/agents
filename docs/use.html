@@ -16,12 +16,17 @@
   <header class="site-header">
     <a class="identity" href="index.html">◈ The Software Factory</a>
     <nav aria-label="Site">
-      <a href="index.html">Overview</a>
-      <a href="install.html">Install</a>
-      <a href="use.html" aria-current="page">Use</a>
-      <a href="stations.html">Stations</a>
-      <a href="lines.html">Lines</a>
-      <a href="help.html">Help</a>
+      <details class="site-menu">
+        <summary>Menu <span aria-hidden="true">·</span> <span class="site-menu-here">Use</span></summary>
+        <ul>
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="install.html">Install</a></li>
+          <li><a href="use.html" aria-current="page">Use</a></li>
+          <li><a href="stations.html">Stations</a></li>
+          <li><a href="lines.html">Lines</a></li>
+          <li><a href="help.html">Help</a></li>
+        </ul>
+      </details>
     </nav>
   </header>
   <main id="content">
@@ -74,7 +79,7 @@
         </section>
         <section class="doc-section" id="reference">
           <h2>CLI at a glance</h2>
-          <p>Flags below are a snapshot; the next generator must fill this block from argparse and nested command help. Run <code>./factory &lt;command&gt; --help</code> for authoritative options.</p>
+          <p>Each block below is generated from the factory’s own argument parser on every build, including nested subcommands. Wide usage lines scroll sideways inside their block. Run <code>./factory &lt;command&gt; --help</code> for the options installed on your machine.</p>
 <!-- BEGIN GENERATED:cli-reference -->
 <article class="command"><h3 id="cmd-integrate"><code>integrate</code></h3><p>Print integration instructions and recipes for AI agents and CI/CD</p><pre><code>usage: ./factory integrate [-h] [--agent]
                            [--section {all,github-actions,pre-commit,target,skills,agents}]
