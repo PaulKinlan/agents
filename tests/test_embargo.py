@@ -155,11 +155,13 @@ class TestDummyCredentialFalsePositive(unittest.TestCase):
 
     def test_real_key_with_model_false_positive_still_routes_critical(self):
         # SF-03: the model's false_positive verdict cannot demote a real key from a scanner.
+        # Reporting honours the verdict (is_false_positive -> info), but routing stays critical.
         item = finding(agent="secret-scan",
                        raw_match="sk-ant-api03-7xK9mP2qR5tV8wY3zB6nH1jL4cF0dG7s",
                        false_positive=True, severity="info")
-        self.assertFalse(is_false_positive(item))
-        self.assertEqual(effective_severity(item), "critical")
+        self.assertTrue(is_false_positive(item))       # the model's verdict is the reported truth
+        self.assertEqual(reported_severity(item), "info")
+        self.assertEqual(effective_severity(item), "critical")  # routing: SF-03, identity-critical
 
     def test_dummy_credential_reports_info(self):
         self.assertEqual(

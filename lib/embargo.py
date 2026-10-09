@@ -124,20 +124,17 @@ def _is_identity_critical(finding: Dict[str, Any]) -> bool:
 
 
 def is_false_positive(finding: Dict[str, Any]) -> bool:
-    """Whether `finding` is a false positive for reporting and routing.
+    """Whether `finding` is a false positive for REPORTING (store, badge, delta section).
 
-    The deterministic dummy marker always counts. For identity-critical agents
-    (credential/vulnerability scanners), the triage's own verdict never counts: identity
-    cannot be overridden by a model that misclassifies a real key committed in a test file
-    (SF-03, agents-3r7). For ordinary agents, the triage's explicit verdict and a title that
-    names a false positive count too.
+    The deterministic dummy marker always counts; so does the triage's own verdict and a title
+    that names a false positive. This is the human-readable truth, NOT the routing decision:
+    `effective_severity` still routes an identity-critical agent's real key as critical even
+    when the model calls it a false positive (SF-03, agents-3r7).
     """
     if not isinstance(finding, dict):
         return False
     if _dummy_credential_marker(finding):
         return True
-    if _is_identity_critical(finding):
-        return False
     flag = finding.get("false_positive")
     if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes")):
         return True
@@ -180,11 +177,12 @@ def effective_severity(finding: Dict[str, Any]) -> str:
     (SF-03, agents-3r7). Ordinary agents keep their normalised label; their triaged false
     positives route `info`.
     """
+    if _dummy_credential_marker(finding):
+        return "info"
+    if _is_identity_critical(finding):
+        return "critical"
     if is_false_positive(finding):
         return "info"
-    agent = finding.get("agent")
-    if isinstance(agent, str) and agent.strip() in IDENTITY_CRITICAL_AGENTS:
-        return "critical"
     return normalize_severity(finding.get("severity"))
 
 
