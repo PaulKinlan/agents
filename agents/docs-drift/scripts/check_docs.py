@@ -54,6 +54,11 @@ GENERIC_DIR_NAMES = {
     "extension", "extensions", "pages", "page", "tools", "config", "configs", "tmp",
     "temp", "cache", "vendor", "node_modules", "examples", "example", "samples",
     "screenshots", "images", "img", "components", "styles", "tests-e2e", "e2e",
+    "template", "templates", "util", "utils", "helper", "helpers", "shared", "common",
+    "include", "includes", "types", "models", "controllers", "middleware", "routes",
+    "views", "services", "service", "api", "server", "client", "web", "core",
+    "data", "db", "database", "migrations", "schemas", "schema", "locale", "locales",
+    "i18n", "hooks", "store", "state", "generated", "coverage", "logs", "log",
 }
 
 def is_ignored_doc(p: Path, target_dir: Path) -> bool:
@@ -166,14 +171,20 @@ def _dir_name_counts(target_dir: Path) -> Dict[str, int]:
     Used to keep the bare-name fallback honest: a name that occurs once is unambiguous,
     while `scripts` (22 directories in this repo) is not, so a document naming a
     `scripts/` directory that no longer exists where it claims is still reported.
+
+    Keys are lower-cased so `Scripts/` and `scripts/` cannot each look unique, and the
+    walk skips the same IGNORE_DIRS the scanner itself ignores - otherwise a
+    `node_modules/pkg/<name>` directory appearing or disappearing (whether dependencies
+    happen to be installed on this VM) would silently change what counts as unique.
     """
     key = str(target_dir)
     if key not in _DIR_INDEX_CACHE:
         counts: Dict[str, int] = {}
         for _root, dirs, _files in os.walk(target_dir):
-            dirs[:] = [d for d in dirs if d != ".git"]
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             for d in dirs:
-                counts[d] = counts.get(d, 0) + 1
+                lowered = d.lower()
+                counts[lowered] = counts.get(lowered, 0) + 1
         _DIR_INDEX_CACHE[key] = counts
     return _DIR_INDEX_CACHE[key]
 
@@ -237,7 +248,7 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
         if "." in clean_p and clean_p in _file_names(target_dir):
             return True, False
         if (clean_p.lower() not in GENERIC_DIR_NAMES
-                and _dir_name_counts(target_dir).get(clean_p) == 1):
+                and _dir_name_counts(target_dir).get(clean_p.lower()) == 1):
             return True, False
 
     return False, False

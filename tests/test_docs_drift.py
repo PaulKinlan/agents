@@ -146,6 +146,44 @@ class TestTreeDiagramParser(unittest.TestCase):
             references = {c["reference"] for c in check_docs.scan_target(tmp)}
             self.assertIn("src/", references)
 
+    def test_uniqueness_does_not_depend_on_installed_dependencies(self):
+        """A name must not stop being unique because node_modules happens to be present.
+
+        The walk skips the directories the scanner itself ignores, so resolution cannot
+        change between a clean checkout and one with dependencies installed (review of
+        0b9e460).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "docs" / "audits").mkdir(parents=True)
+            (tmp / "node_modules" / "pkg" / "audits").mkdir(parents=True)
+            (tmp / "README.md").write_text("Internal notes live in `audits/`.\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertNotIn("audits/", references)
+
+    def test_case_variants_cannot_each_look_unique(self):
+        """`Audits/` and `audits/` are one ambiguous name, not two unique ones.
+
+        The count is keyed on the lower-cased name so a document cannot resolve its
+        `audits/` against one case variant while the other is what it meant.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "Audits").mkdir()
+            (tmp / "legacy" / "audits").mkdir(parents=True)
+            (tmp / "README.md").write_text("Internal notes live in `audits/`.\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertIn("audits/", references)
+
+    def test_unique_non_generic_directory_still_resolves(self):
+        """The intended case: exactly one `audits/` anywhere resolves the name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "docs" / "audits").mkdir(parents=True)
+            (tmp / "README.md").write_text("Internal notes live in `audits/`.\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertNotIn("audits/", references)
+
     def test_uri_schemes_are_not_paths(self):
         """`file://` and `chrome://extensions` are URLs, not repository paths."""
         with tempfile.TemporaryDirectory() as tmpdir:
