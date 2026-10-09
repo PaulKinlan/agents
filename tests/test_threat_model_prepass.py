@@ -367,6 +367,42 @@ class TestThreatModelRefusalGuardsAndExclusions(unittest.TestCase):
         p = Path("audit-target-5qe-THREAT_MODEL.md")
         self.assertTrue(mine_history.is_scanner_file(p, str(p)))
 
+    def test_ordinary_target_files_are_not_excluded(self):
+        """Ordinary target source files are NOT excluded by is_scanner_file."""
+        for name in ("src/model.py", "app/auth.py", "doc-THREAT_MODEL.py", "model.ts"):
+            with self.subTest(file=name):
+                p = Path(name)
+                self.assertFalse(mine_history.is_scanner_file(p, str(p)))
+
+    def test_application_permission_error_is_not_refusal_guard(self):
+        """Application code raising PermissionError is NOT a refusal guard (no over-suppression)."""
+        from lib.embargo import is_refusal_guard_snippet
+        app_snippet = 'raise PermissionError(f"user {uid} cannot access {path}")'
+        self.assertFalse(is_refusal_guard_snippet(app_snippet))
+
+    def test_unbrokered_claude_finding_requires_positive_evidence(self):
+        """A finding claiming unbrokered claude key requires positive invocation evidence."""
+        from lib.embargo import is_false_positive
+        # Without positive evidence (or with refusal snippet): marked false positive
+        refusal_finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-accepted-unbrokered-claude-key",
+            "path": "factory",
+            "snippet": self.REAL_REFUSAL_SNIPPET,
+            "title": "Unbrokered claude key",
+        }
+        self.assertTrue(is_false_positive(refusal_finding))
+
+        # With positive evidence of unguarded invocation: NOT a false positive
+        genuine_finding = {
+            "agent": "threat-model",
+            "rule_id": "tm-unbrokered-claude-key",
+            "path": "factory",
+            "snippet": self.UNGUARDED_INVOCATION,
+            "title": "Unbrokered claude key invocation",
+        }
+        self.assertFalse(is_false_positive(genuine_finding))
+
 
 if __name__ == "__main__":
     unittest.main()

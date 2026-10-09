@@ -173,10 +173,11 @@ def is_test_or_fixture_path(rel_path: str, fname: str) -> bool:
 def is_scanner_file(fpath: Path, rel_path: str) -> bool:
     """Check if file is a pattern-defining scanner script or scanner output.
 
-    TRADE-OFF (agents-bcz P2-5): Silently unscans any files under `agents/*/scripts/`
-    and any file named `mine_history.py`. If a target repository ships production code
-    under those paths, it will be excluded. This is a deliberate precision-over-recall
-    choice to prevent the scanner's own pattern definitions from generating self-matches.
+    TRADE-OFF (agents-bcz P2-5, agents-5gg): Silently unscans any files under `agents/*/scripts/`,
+    any file named `mine_history.py`, and any generated threat model artifact (`*-THREAT_MODEL.md`).
+    If a target repository ships production code under those paths, it will be excluded. This is
+    a deliberate precision-over-recall choice to prevent the scanner's own pattern definitions and
+    station-generated output artifacts from generating self-matches.
     """
     try:
         if fpath.resolve() == Path(__file__).resolve():

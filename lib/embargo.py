@@ -103,15 +103,16 @@ _DUMMY_CREDENTIAL_MARKERS = (
 
 # Refusal and containment guard patterns (agents-5gg). A code block or snippet that raises an error
 # or explicitly refuses an insecure operation (e.g. `raise ContainmentError(...)`) is an
-# enforcement guard preventing an insecure mode, not an unguarded invocation.
+# enforcement guard preventing an insecure mode, not an unguarded invocation. Builtin
+# exceptions like PermissionError are excluded to avoid masking application-level auth checks.
 _REFUSAL_GUARD_PATTERNS = (
-    re.compile(r"\braise\s+(?:ContainmentError|StationError|PermissionError|SecurityError)\b"),
+    re.compile(r"\braise\s+(?:ContainmentError|StationError|SecurityError)\b"),
     re.compile(r"""(?:refusing\s+on\s+target|credentials?\s+(?:are|is)\s+never\s+brokered)""", re.IGNORECASE),
     re.compile(r"""(?:if|elif)\s+.*(?:not\s+\(?trusted|normalize_visibility).*:\s*raise\b"""),
 )
 
 _ACCEPTED_RISK_TITLE = re.compile(
-    r"\b(?:accepted\s+(?:residual\s+)?risk|intentional\s+exclusion|by[- ]design)\b",
+    r"\b(?:accepted\s+(?:residual\s+)?risk|intentional\s+exclusion)\b",
     re.IGNORECASE,
 )
 
@@ -195,9 +196,13 @@ def is_false_positive(finding: Dict[str, Any]) -> bool:
     """Whether `finding` is a false positive for REPORTING (store, badge, delta section).
 
     The deterministic dummy marker always counts; so does the triage's own verdict and a title
-    that names a false positive. This is the human-readable truth, NOT the routing decision:
-    `effective_severity` still routes an identity-critical agent's real key as critical even
-    when the model calls it a false positive (SF-03, agents-3r7).
+    that names a false positive. Refusal/denial guards (raising ContainmentError, explicit
+    refusal branches), findings titled as accepted residual risks, unbrokered-claude findings
+    lacking positive evidence of an unguarded invocation, and the station's own generated
+    artifacts (*-THREAT_MODEL.md) are deterministically classified as false positives (agents-5gg).
+    This is the human-readable truth, NOT the routing decision: `effective_severity` still
+    routes an identity-critical agent's real key as critical even when the model calls it a
+    false positive (SF-03, agents-3r7).
     """
     if not isinstance(finding, dict):
         return False
@@ -211,6 +216,13 @@ def is_false_positive(finding: Dict[str, Any]) -> bool:
     title = finding.get("title")
     if isinstance(title, str) and (_FP_TITLE.search(title) or _ACCEPTED_RISK_TITLE.search(title)):
         return True
+    # agents-5gg: a finding claiming an unbrokered/unconfined claude key requires positive
+    # evidence of an actual unguarded invocation; if it lacks positive evidence or matches a
+    # refusal guard, it is classified as a false positive.
+    rule_or_title = f"{finding.get('rule_id') or ''} {title or ''}".lower()
+    if "claude" in rule_or_title and ("unbrokered" in rule_or_title or "unconfined" in rule_or_title):
+        if not match_unbrokered_claude_invocation(finding.get("snippet") or ""):
+            return True
     flag = finding.get("false_positive")
     if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes")):
         return True

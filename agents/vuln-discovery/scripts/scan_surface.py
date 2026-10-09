@@ -105,12 +105,13 @@ SELF_REFERENTIAL_SUPPRESSIONS = [
 
 
 def is_scanner_file(fpath: Path, rel_path: str) -> bool:
-    """Check if a file is the scanner itself or another pattern-defining scanner script.
+    """Check if a file is the scanner itself, another scanner script, or a station artifact.
 
-    Silently unscans the scanner's own file, any file named scan_surface.py, and
-    anything under agents/*/scripts/ (the factory's own scanner scripts). This is a
+    Silently unscans the scanner's own file, any file named scan_surface.py,
+    anything under agents/*/scripts/ (the factory's own scanner scripts), and
+    any generated threat model artifact (`*-THREAT_MODEL.md`, agents-5gg). This is a
     deliberate precision-over-recall choice to prevent the scanner's pattern
-    definitions from producing self-matches.
+    definitions and station outputs from producing self-matches.
     """
     try:
         if fpath.resolve() == Path(__file__).resolve():
