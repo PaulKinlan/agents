@@ -153,8 +153,10 @@ class ModelRuleIdTestCase(unittest.TestCase):
         self.assertIn("model_rule", IDENTITY_SHAPES)
 
     def test_a_malformed_label_falls_back_to_no_label(self):
+        # docs-drift, not vuln-discovery: a security agent drops the label unconditionally, which
+        # would make this loop pass for valid and invalid labels alike (review P2).
         for bad in ("no spaces allowed", "a" * 40, "with\nnewline", "semi;colon"):
-            redacted = redact_finding({"agent": "vuln-discovery", "rule_id": "unclassified",
+            redacted = redact_finding({"agent": "docs-drift", "rule_id": "unclassified",
                                        "model_rule_id": bad})
             self.assertEqual(redacted["model_rule_id"], "", f"{bad!r} should not survive")
         good = redact_finding({"agent": "docs-drift", "rule_id": "unclassified",
@@ -176,8 +178,11 @@ class ModelRuleIdTestCase(unittest.TestCase):
 
     # --- and it is actually shown to triage, which is the point ----------------------------
     def test_the_delta_report_shows_the_label_as_not_scanner_provenance(self):
+        """docs-drift, because this must exercise the rendered output of a station that actually
+        publishes labels: for a security agent redact_finding blanks the field before rendering,
+        so rendering the raw in-memory record would prove nothing (review P2)."""
         from lib.findings import _render_delta_report
-        record, _ = self.run_store()
+        record, _ = self.run_store(agent="docs-drift")
         report = _render_delta_report("t", [record], STATS, [])
         self.assertIn(REFUSED_LABEL, report)
         self.assertIn("not scanner provenance", report)

@@ -558,6 +558,16 @@ class FindingsStore:
             # is not an input to compute_fingerprint (identity) nor to the credential/security
             # rule-hint classification (routing severity and embargo), and it is masked and
             # shape-checked like every other rendered model string (lib/redaction.py).
+            #
+            # ACCEPTED LIMIT, stated at the field because this is where it is created: for a
+            # security-sensitive station this value does not reach published output at all -
+            # redact_finding DROPS it for credential findings and for SECURITY_SENSITIVE_AGENTS,
+            # and it is dropped rather than masked because those are the cases where the shape of a
+            # value cannot be known, so no mask can be proven sufficient. That is why the labels
+            # this bead was opened for - vuln-discovery's - are NOT surfaced: they survive in the
+            # model's own output in the run artifact, for whoever is doing the local triage. The
+            # feature's benefit is therefore limited to stations whose prose may be published, and
+            # that limitation is deliberate rather than a gap (coord decision, agents-ag4).
             model_rule_id = (model_label.strip()
                              if isinstance(model_label, str) and model_label.strip()
                              and model_label.strip() != rule_id else "")
