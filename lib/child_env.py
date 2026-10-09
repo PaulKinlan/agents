@@ -24,7 +24,7 @@ from collections.abc import Mapping as MappingABC
 from typing import Dict, Mapping, Optional
 
 from lib.credential_broker import BROKER_ENV_CONFIGS, PLACEHOLDER_KEY
-from lib.tool_pins import HOST_PINS_ENV
+from lib.tool_pins import HOST_PINS_ENV, UNPINNED_ALLOW_ENV
 
 # Paths, locale, temp and user identity. Proxy and CA-bundle vars are deliberately NOT here
 # (agents-5d9): a poisoned operator env could redirect a child's traffic or point its TLS at
@@ -161,7 +161,11 @@ def child_environment(
     `gh`/`bd`. On a pinned host the pins live behind `FACTORY_TOOL_PINS`, and without that
     variable such a child cannot verify the tool it is about to execute and fails closed, with
     strictly less information than the parent that already verified the same file (agents-dpt).
-    Children that never resolve a trusted tool (engine sessions, pre-passes) get nothing extra.
+    The same child also needs the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in
+    (agents-7ua): it is a run-scoped widening the parent already applied when it resolved the
+    tool, and without it the child's own `resolve_tool` fails closed even though the parent just
+    resolved the same binary. Children that never resolve a trusted tool (engine sessions,
+    pre-passes) get nothing extra.
 
     `proxied` (agents-5d9) forwards the operator's proxy vars (PROXY_VARS) — only for an
     unsandboxed child that must reach the network the way the operator's shell does. It is
@@ -179,8 +183,14 @@ def child_environment(
     if proxied:
         env.update({name: source[name] for name in PROXY_VARS if name in source})
 
-    if trusted_tools and source.get(HOST_PINS_ENV):
-        env[HOST_PINS_ENV] = str(source[HOST_PINS_ENV])
+    if trusted_tools:
+        if source.get(HOST_PINS_ENV):
+            env[HOST_PINS_ENV] = str(source[HOST_PINS_ENV])
+        # agents-7ua: the unpinned-tools opt-in is the same run-scoped decision as the pins
+        # file above — forward it so the sink/promotion child resolves the tool under the same
+        # rule the parent just used, never a stricter one that makes it fail closed spuriously.
+        if source.get(UNPINNED_ALLOW_ENV):
+            env[UNPINNED_ALLOW_ENV] = str(source[UNPINNED_ALLOW_ENV])
 
     names = list(ENGINE_CREDENTIALS.get(engine or "", ()))
     # agents-eyo: `github-issues` as a sink string survives only as the explicit promotion

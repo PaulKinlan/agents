@@ -51,6 +51,12 @@ CONFIG_PATH = FACTORY_ROOT / "tools.yaml"
 # fail-closed); a malformed file raises instead of being ignored.
 HOST_PINS_ENV = "FACTORY_TOOL_PINS"
 
+# The explicit dev/test opt-in that restores by-name resolution for an unpinned trusted tool.
+# `_unpinned_allowed` reads it, and lib.child_env forwards it to the children that resolve a
+# trusted tool themselves (findings dispatch, promotion) so a run that opted in parent-side does
+# not fail its sink child closed (agents-7ua).
+UNPINNED_ALLOW_ENV = "FACTORY_ALLOW_UNPINNED_TOOLS"
+
 # Host-side tools the factory must resolve + pin before it trusts them.
 # `bd`/`git` are the findings store and the worktree/admin; `gh` fetches issues and drives
 # promotion; `semgrep`/`gitleaks` and `node`/`npm`/`npx` are the pre-pass scanners.
@@ -59,7 +65,7 @@ TRUSTED_TOOLS: Tuple[str, ...] = ("gh", "bd", "git", "semgrep", "gitleaks", "nod
 def _unpinned_allowed() -> bool:
     """The explicit, auditable dev/test opt-in: resolves unpinned trusted tools by name
     (PATH order). Real runs must pin every trusted tool in tools.yaml or fail closed."""
-    return os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS", "").strip().lower() in (
+    return os.environ.get(UNPINNED_ALLOW_ENV, "").strip().lower() in (
         "1", "true", "yes", "on",
     )
 
@@ -175,7 +181,7 @@ def _require_pin(name: str, entry: Dict[str, str]) -> None:
     if entry.get("sha256") is None and not _unpinned_allowed():
         raise ToolPinError(
             f"trusted tool {name!r} is not pinned (no {name}.sha256 in tools.yaml nor the "
-            f"{HOST_PINS_ENV} host file); pin it, or set FACTORY_ALLOW_UNPINNED_TOOLS=1 to "
+            f"{HOST_PINS_ENV} host file); pin it, or set {UNPINNED_ALLOW_ENV}=1 to "
             "opt out explicitly for a dev/test run")
 
 
