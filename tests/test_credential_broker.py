@@ -12,6 +12,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -506,6 +507,112 @@ class TestUnixSocketMode(BrokerTestBase):
 
     def test_keyless_providers_are_the_managed_byok_endpoints(self):
         self.assertEqual(cb.keyless_providers(), ("deepseek", "zai", "kimi", "qwen"))
+
+
+class TestBodyBoundAndBudget(BrokerTestBase):
+    """agents-wwd: declared-length-only cap, shared aggregate budget, and error hygiene."""
+
+    def setUp(self):
+        super().setUp()
+        cb._aggregate_body_bytes = 0  # isolate each test from any prior reservation leak
+
+    @staticmethod
+    def _raw_send(port, request_bytes):
+        s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        s.sendall(request_bytes)
+        return s
+
+    def test_non_canonical_content_length_is_rejected(self):
+        """agents-wwd: int() would accept '1_0' -> 10 and '+5' -> 5; both must be rejected."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        for bad in ("1_0", "+5", "0x10", "1e3", "1.0"):
+            status, _, body = _client_request(
+                broker.port, "POST", "/proxy/anthropic/v1/messages",
+                headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": bad},
+                body=None)
+            self.assertEqual(status, 400, bad)
+            self.assertIn(b"invalid content-length", body.lower(), bad)
+            self.assertEqual(_FakeHTTPSConnection.calls, [], bad)
+
+    def test_error_responses_declare_connection_close(self):
+        """agents-wwd: a 413 that left the body unread must tell the client to close."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        status, headers, _ = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": cb.PLACEHOLDER_KEY,
+                     "content-length": str(cb.MAX_BROKER_BODY_BYTES + 1)},
+            body=None)
+        self.assertEqual(status, 413)
+        self.assertEqual(headers.get("Connection"), "close")
+
+    def test_declared_length_bounds_the_read_not_the_actual_body(self):
+        """agents-wwd: an under-declared body is read to exactly the declared length.
+
+        The deleted `total_read` counter could never fire because read(n) is bounded by the
+        declared length; this proves the bound directly: Content-Length: 5 with 12 bytes on
+        the wire forwards only the first 5.
+        """
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        s = self._raw_send(
+            broker.port,
+            b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
+            b"Host: localhost\r\nContent-Length: 5\r\n\r\nhelloEXTRA")
+        status_line = s.makefile("rb").readline()
+        s.close()
+        self.assertEqual(status_line.split()[1], b"200")
+        self.assertEqual(_FakeHTTPSConnection.calls[0]["body"], b"hello")  # exactly the declared 5
+
+    def test_absent_content_length_body_is_not_read(self):
+        """agents-wwd: a body sent with no Content-Length (and not chunked) is not read."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        s = self._raw_send(
+            broker.port,
+            b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
+            b"Host: localhost\r\n\r\n{\"ignored\": true}")
+        status_line = s.makefile("rb").readline()
+        s.close()
+        self.assertEqual(status_line.split()[1], b"200")
+        self.assertIsNone(_FakeHTTPSConnection.calls[0]["body"])
+
+    def test_aggregate_body_budget_refuses_an_overrun(self):
+        """agents-wwd: a body under the per-request cap but over the aggregate is 413'd."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        with mock.patch.object(cb, "MAX_BROKER_AGGREGATE_BODY_BYTES", 10):
+            status, _, body = _client_request(
+                broker.port, "POST", "/proxy/anthropic/v1/messages",
+                headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json"},
+                body=b"x" * 20)
+            self.assertEqual(status, 413)
+            self.assertIn(b"aggregate", body.lower())
+            self.assertEqual(_FakeHTTPSConnection.calls, [])
+        self.assertEqual(cb._aggregate_body_bytes, 0)
+
+    def test_aggregate_budget_is_shared_across_concurrent_requests(self):
+        """agents-wwd: two in-flight bodies summing over the aggregate -> the second is 413'd."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        with mock.patch.object(cb, "MAX_BROKER_AGGREGATE_BODY_BYTES", 100):
+            # Request 1 declares 60 bytes and holds them in-flight (never finishing the body),
+            # so its 60 bytes stay reserved while request 2 tries to reserve another 60.
+            s1 = self._raw_send(
+                broker.port,
+                b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
+                b"Host: localhost\r\nContent-Length: 60\r\n\r\n")
+            deadline = time.time() + 5
+            while cb._aggregate_body_bytes < 60 and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(cb._aggregate_body_bytes, 60)
+            status, _, body = _client_request(
+                broker.port, "POST", "/proxy/anthropic/v1/messages",
+                headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": "60"},
+                body=None)
+            self.assertEqual(status, 413)
+            self.assertIn(b"aggregate", body.lower())
+            s1.close()
+            # closing request 1 makes its blocked read fail, releasing its 60-byte reservation
+            deadline = time.time() + 5
+            while cb._aggregate_body_bytes > 0 and time.time() < deadline:
+                time.sleep(0.05)
+        self.assertEqual(cb._aggregate_body_bytes, 0)
 
 
 if __name__ == "__main__":

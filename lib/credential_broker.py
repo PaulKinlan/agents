@@ -58,10 +58,20 @@ __all__ = [
     "BrokerError",
     "BrokerPayloadTooLarge",
     "MAX_BROKER_BODY_BYTES",
+    "MAX_BROKER_AGGREGATE_BODY_BYTES",
     "PLACEHOLDER_KEY",
 ]
 
-MAX_BROKER_BODY_BYTES = 32 * 1024 * 1024  # 32 MiB hard limit (agents-ce2)
+MAX_BROKER_BODY_BYTES = 32 * 1024 * 1024  # 32 MiB per-request hard limit (agents-ce2)
+# agents-wwd: the per-request cap alone lets N concurrent connections each hold 32 MiB of
+# in-flight body => N x 32 MiB RSS via ThreadingHTTPServer. A shared budget bounds the sum.
+MAX_BROKER_AGGREGATE_BODY_BYTES = 64 * 1024 * 1024  # 64 MiB aggregate across in-flight bodies
+
+# agents-wwd: aggregate in-flight body reservation, shared across every request thread of
+# every broker instance in the process. Each read reserves its declared length and releases
+# it in a finally, so the sum of declared lengths can never exceed the aggregate budget.
+_aggregate_body_bytes = 0
+_aggregate_lock = threading.Lock()
 
 
 class BrokerError(RuntimeError):
@@ -194,6 +204,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            # agents-wwd: a 413/400 that rejected an unread or oversized body must tell the
+            # client the connection is closing, else a keep-alive client would re-send onto a
+            # stream whose unread bytes are still queued.
+            self.send_header("Connection", "close")
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -201,31 +216,49 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
     def _read_request_body(self) -> Optional[bytes]:
+        global _aggregate_body_bytes
         length_str = self.headers.get("Content-Length")
         if length_str is not None:
-            try:
-                length = int(length_str.strip())
-            except ValueError:
-                self.close_connection = True
-                raise BrokerError("invalid Content-Length header (must be an integer)")
-            if length < 0:
+            length_raw = length_str.strip()
+            # agents-wwd: RFC 7230 Content-Length is 1*DIGIT. Reject non-canonical forms
+            # (int() would silently accept "1_0" -> 10 and "+5" -> 5); keep the distinct
+            # message for a negative value.
+            if length_raw.startswith("-") and length_raw[1:].isdigit():
                 self.close_connection = True
                 raise BrokerError("negative Content-Length header is not allowed")
+            if not length_raw.isdigit():
+                self.close_connection = True
+                raise BrokerError("invalid Content-Length header (must be an integer)")
+            length = int(length_raw)
             if length > MAX_BROKER_BODY_BYTES:
                 self.close_connection = True
                 raise BrokerPayloadTooLarge(
                     f"request body ({length} bytes) exceeds maximum limit of {MAX_BROKER_BODY_BYTES} bytes"
                 )
 
+            # agents-wwd: reserve this request's declared length against the shared aggregate
+            # budget BEFORE reading, so N concurrent near-cap bodies cannot sum to N x 32 MiB.
+            with _aggregate_lock:
+                if _aggregate_body_bytes + length > MAX_BROKER_AGGREGATE_BODY_BYTES:
+                    self.close_connection = True
+                    raise BrokerPayloadTooLarge("aggregate in-flight request body budget exceeded")
+                _aggregate_body_bytes += length
+
             try:
                 # Add a timeout so a stalled engine connection cannot pin the daemon thread
+                # (agents-wwd: this is per-read, not a total deadline — a trickling client can
+                # still hold the thread one read at a time; the broker is localhost-only and
+                # dies with the run, so that slowloris shape is accepted).
                 old_timeout = self.connection.gettimeout()
                 self.connection.settimeout(15.0)
                 try:
                     chunks = []
                     remaining = length
-                    total_read = 0
                     chunk_size = 64 * 1024
+                    # agents-wwd: the body cap is the declared Content-Length checked above —
+                    # `remaining` counts down to exactly `length` and read(n) never over-reads,
+                    # so no independent byte counter is needed (the old `total_read` counter
+                    # was unreachable dead code).
                     while remaining > 0:
                         to_read = min(remaining, chunk_size)
                         chunk = self.rfile.read(to_read)
@@ -233,12 +266,6 @@ class _Handler(BaseHTTPRequestHandler):
                             self.close_connection = True
                             raise BrokerError("unexpected end of stream while reading request body")
                         chunks.append(chunk)
-                        total_read += len(chunk)
-                        if total_read > MAX_BROKER_BODY_BYTES:
-                            self.close_connection = True
-                            raise BrokerPayloadTooLarge(
-                                f"request body stream exceeded limit of {MAX_BROKER_BODY_BYTES} bytes"
-                            )
                         remaining -= len(chunk)
                     return b"".join(chunks)
                 finally:
@@ -248,6 +275,9 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError as e:
                 self.close_connection = True
                 raise BrokerError(f"failed to read request body: {e}") from e
+            finally:
+                with _aggregate_lock:
+                    _aggregate_body_bytes -= length
         # A chunked request body from the engine is not expected (SDKs send
         # Content-Length); refuse rather than guess.
         if (self.headers.get("Transfer-Encoding") or "").lower() == "chunked":
