@@ -2406,7 +2406,16 @@ def main():
     # skills
     skills_parser = subparsers.add_parser("skills", help="Manage interactive CLI skills symlinks")
     skills_subs = skills_parser.add_subparsers(dest="skills_command", help="Skills action")
-    skills_subs.add_parser("install", help="Symlink all 22 factory skills into ~/.gemini and ~/.claude")
+    # agents-074: compute the station count from agents/*/agent.yaml so the help text cannot
+    # drift from the real catalog (the count was previously a hardcoded literal).
+    station_count = sum(
+        1 for _p in sorted((FACTORY_ROOT / "agents").iterdir())
+        if _p.is_dir() and (_p / "agent.yaml").exists()
+    )
+    skills_subs.add_parser(
+        "install",
+        help=f"Symlink all {station_count} factory skills into ~/.gemini and ~/.claude",
+    )
 
     # schedule
     sched_parser = subparsers.add_parser("schedule", help="Manage launchd (macOS) and systemd (Linux) scheduled runs")

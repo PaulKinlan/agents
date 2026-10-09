@@ -446,5 +446,20 @@ class TestPrepassArgvIsolation(unittest.TestCase):
             self.assertTrue(out.exists())
 
 
+class TestSkillsInstallHelpCount(unittest.TestCase):
+    """agents-074: the skills install help must compute its station count from
+    agents/*/agent.yaml, not a hardcoded literal, so it cannot drift from the catalog."""
+
+    def test_skills_install_help_reports_the_real_station_count(self):
+        real = sum(1 for p in (ROOT / "agents").iterdir()
+                   if p.is_dir() and (p / "agent.yaml").exists())
+        res = subprocess.run([sys.executable, str(ROOT / "factory"),
+                              "skills", "--help"],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn(f"Symlink all {real} factory skills into ~/.gemini and ~/.claude",
+                      res.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
