@@ -26,12 +26,17 @@ visibility: public
 ```
 
 A **hand-run against a raw path** loads no manifest, so declare it on the command line —
-the same declaration a scheduled run makes, accepted by `run`, `line` and `hc`:
+the same declaration a scheduled run makes, accepted by `run`, `line` and `hillclimb`:
 
 ```bash
-factory run docs-drift --target /path/to/project --visibility public
-factory line project-audit --target /path/to/project --visibility public
+factory run docs-drift --target /path/to/project --sink beads --visibility public
+factory line project-audit --target /path/to/project --sink beads --visibility public
 ```
+
+`--sink beads` is part of the recipe, not decoration: a raw path defaults to the `file` sink,
+which is local evidence and is never embargoed, so no tracker is involved and nothing needs a
+declaration. Both halves are required — `--sink beads` selects the synced tracker and
+`--visibility` authorises publication to it.
 
 Without a declaration `lib/embargo.py` fail-closes: **high and critical findings are withheld**
 from the synced tracker. The run still succeeds (exit 0) and the local delta report still lists

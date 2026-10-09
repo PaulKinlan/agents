@@ -122,8 +122,9 @@ explicitly configured `beads_path`.
 > (agents-eyo). Public GitHub issues are exclusively for public-input triage. Missing/invalid
 > target `visibility` withholds high/critical findings from the synced beads tracker (`embargo_reason`).
 > A hand-run declares it the same way a scheduled run does — `visibility: public` in
-> `targets/<name>.yaml`, or `--visibility public` on `factory run|line|hc` when `--target` is a raw
-> path (a raw path loads no manifest, so the flag is the only declaration). See
+> `targets/<name>.yaml`, or `--visibility public` on `factory run|line|hillclimb` when `--target` is a raw
+> path (a raw path loads no manifest, so the flag is the only declaration; a raw path also
+> defaults to the `file` sink, so `--sink beads` is what selects a synced tracker). See
 > [targets/README.md](targets/README.md#declaring-visibility), including what a withheld finding
 > looks like in the log.
 > `--sink github-issues` is rejected for findings. For public-input issues, once human triage
