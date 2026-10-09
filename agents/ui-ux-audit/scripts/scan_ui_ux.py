@@ -106,8 +106,10 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
     def defines_focus_visible_rule(css_text: str) -> bool:
         # Strip comments so comments like /* TODO: add :focus-visible rings */ don't match
         clean_text = re.sub(r'/\*.*?\*/', '', css_text, flags=re.DOTALL)
-        # Match :focus-visible when followed by selector combinators, pseudo-classes, or delimiters before a rule block {
-        return bool(re.search(r':focus-visible(?:\b|(?=[.:,\s>[\]()+~{]))(?=[^;{}]*\{)', clean_text))
+        # Strip :not(:focus-visible) reset idioms (handling arbitrary whitespace/newlines and case)
+        clean_text = re.sub(r':not\(\s*:focus-visible\s*\)', '', clean_text, flags=re.IGNORECASE)
+        # Match :focus-visible followed by a selector boundary leading to a rule block {
+        return bool(re.search(r':focus-visible(?=[\s,{:.\[>+~)]|$)(?=[^;{}]*\{)', clean_text))
 
     def has_focus_visible_coverage(fpath: Path, content: str) -> bool:
         # 1. The file itself contains a real :focus-visible rule
