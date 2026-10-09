@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -347,13 +348,22 @@ class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
     FIRING_CSS = "@media (max-width: 600px) { .card { display: flex; } }\n"
 
     def setUp(self):
+        # Patch the REAL process entry points - not `self.mod.subprocess` - BEFORE the module is
+        # loaded, so a reintroduced `from subprocess import run` binds the guarded object and any
+        # execution attempt raises instead of running. Review finding P2-1 on 9f5a54e: patching
+        # the module attribute missed `from subprocess import run` completely.
+        for target in (
+            "subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call",
+            "subprocess.check_output", "os.system", "os.popen", "os.spawnv", "os.execv",
+        ):
+            patcher = mock.patch(target, new=self._refuse)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.mod = load_scanner_module()
 
-    def _refuse_any_process(self):
-        def _boom(*args, **kwargs):
-            raise AssertionError(f"pre-pass must not execute a subprocess; called with {args!r}")
-        self.mod.subprocess = type("S", (), {"run": staticmethod(_boom)})()
-        return _boom
+    @staticmethod
+    def _refuse(*args, **kwargs):
+        raise AssertionError(f"pre-pass must not execute a process; called with {args!r}")
 
     def _repo_with_firing_css(self, tmp):
         repo = Path(tmp)
@@ -361,14 +371,12 @@ class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
         return repo
 
     def test_bundled_catalog_loads_all_guides_without_spawning_a_process(self):
-        self._refuse_any_process()
         catalog = self.mod.load_guides_catalog()
         self.assertGreaterEqual(len(catalog), 146, f"expected the full 146-guide catalog, got {len(catalog)}")
         self.assertIn("accessibility", catalog)
         self.assertTrue(all("id" in v for v in catalog.values()))
 
     def test_missing_bundled_catalog_fails_closed_instead_of_fetching(self):
-        self._refuse_any_process()
         with tempfile.TemporaryDirectory() as tmp:
             original = self.mod.BUNDLED_GUIDES_INDEX
             self.mod.BUNDLED_GUIDES_INDEX = Path(tmp) / "does-not-exist.json"
@@ -380,7 +388,6 @@ class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
         self.assertIn("bundled guide catalog missing", str(ctx.exception))
 
     def test_corrupt_or_empty_bundled_catalog_fails_closed(self):
-        self._refuse_any_process()
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "guides_index.json"
             original = self.mod.BUNDLED_GUIDES_INDEX
@@ -395,8 +402,21 @@ class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
             finally:
                 self.mod.BUNDLED_GUIDES_INDEX = original
 
+    def test_truncated_bundled_catalog_fails_closed(self):
+        """Review finding P2-3: a one-entry catalog must not pass as success."""
+        with tempfile.TemporaryDirectory() as tmp:
+            truncated = Path(tmp) / "guides_index.json"
+            truncated.write_text('[{"id": "accessibility"}]', encoding="utf-8")
+            original = self.mod.BUNDLED_GUIDES_INDEX
+            self.mod.BUNDLED_GUIDES_INDEX = truncated
+            try:
+                with self.assertRaises(self.mod.GuidesCatalogUnavailable) as ctx:
+                    self.mod.load_guides_catalog()
+            finally:
+                self.mod.BUNDLED_GUIDES_INDEX = original
+        self.assertIn("incomplete", str(ctx.exception))
+
     def test_retrieve_flag_fails_closed_rather_than_fetching_remote_guides(self):
-        self._refuse_any_process()
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo_with_firing_css(tmp)
             with self.assertRaises(self.mod.UnpinnedExecutionRefused) as ctx:
@@ -407,7 +427,6 @@ class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
 
     def test_scan_still_works_with_the_bundled_catalog_present(self):
         """The normal path must be unaffected: catalog present -> full scan, no process."""
-        self._refuse_any_process()
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo_with_firing_css(tmp)
             res = self.mod.scan_repository(repo, retrieve_guides=False)
@@ -431,17 +450,49 @@ class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
             self.assertTrue(ref["guide_index_ref"].startswith("guides_index.json#"), ref)
             self.assertIn("category", ref)
 
+    def test_the_process_guard_would_catch_a_reintroduction(self):
+        """Meta-test (review P2-1): a guard that cannot fail is not a guard. Reintroduce
+        `from subprocess import run` in a scratch module and require that calling it raises."""
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp) / "reintroduced.py"
+            scratch.write_text(
+                "from subprocess import run\n"
+                "def go():\n"
+                "    return run(['npx', '--version'])\n",
+                encoding="utf-8",
+            )
+            loader = importlib.machinery.SourceFileLoader("reintroduced", str(scratch))
+            spec = importlib.util.spec_from_loader("reintroduced", loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            with self.assertRaises(AssertionError):
+                mod.go()
+
     def test_module_has_no_process_spawning_or_command_literals(self):
-        """Source-level guard: no subprocess, and no command-shaped npx literal in the code."""
+        """Source-level guard: no process module, and no command-shaped npx literal."""
         import ast as _ast
         source = SCANNER_SCRIPT.read_text(encoding="utf-8")
         tree = _ast.parse(source)
+        forbidden_modules = ("subprocess", "pty", "multiprocessing")
+        from_os_forbidden = {"system", "popen", "spawnv", "spawnl", "spawnvp", "spawnve",
+                             "execv", "execve", "execvp", "execvpe"}
         for node in _ast.walk(tree):
-            if isinstance(node, (_ast.Import, _ast.ImportFrom)):
-                names = [a.name for a in node.names]
-                self.assertNotIn("subprocess", names, "the scanner must not import subprocess")
+            if isinstance(node, _ast.Import):
+                for alias in node.names:
+                    self.assertNotIn(alias.name, forbidden_modules,
+                                     f"forbidden import at line {node.lineno}")
+            if isinstance(node, _ast.ImportFrom):
+                # Review finding P2-1: `from subprocess import run` puts 'run' in node.names and
+                # never the module, so the module must be checked explicitly.
+                self.assertNotIn(getattr(node, "module", None), forbidden_modules,
+                                 f"forbidden import-from at line {node.lineno}")
+                if getattr(node, "module", None) == "os":
+                    for alias in node.names:
+                        self.assertNotIn(alias.name, from_os_forbidden,
+                                         f"forbidden os import at line {node.lineno}")
             if isinstance(node, _ast.Name):
-                self.assertNotEqual(node.id, "subprocess", "the scanner must not reference subprocess")
+                self.assertNotIn(node.id, forbidden_modules,
+                                 f"forbidden name at line {node.lineno}")
             if isinstance(node, _ast.Constant) and isinstance(node.value, str):
                 self.assertFalse(re.match(r"^\s*(?:npx|npm)\b", node.value),
                                  f"command-shaped literal at line {node.lineno}: {node.value!r}")

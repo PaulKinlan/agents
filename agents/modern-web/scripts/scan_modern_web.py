@@ -48,6 +48,12 @@ SCRIPT_EXTS = {".js", ".mjs", ".ts", ".jsx", ".tsx", ".vue", ".svelte"}
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLED_GUIDES_INDEX = SCRIPT_DIR / "guides_index.json"
 
+# The bundled index is this scanner's ground truth: the repository ships all 146 guides and
+# tests/test_factory_core.py asserts that >= 146 are mapped to rules, so a smaller catalog
+# means the file was truncated or corrupted. Review finding P2-3 on 9f5a54e: a one-entry JSON
+# satisfied the old "not catalog" check, so truncation passed as success.
+EXPECTED_MIN_GUIDES = 146
+
 
 class GuidesCatalogUnavailable(RuntimeError):
     """The bundled 146-guide catalog is missing, unreadable or empty (fail closed)."""
@@ -1134,10 +1140,12 @@ def load_guides_catalog() -> Dict[str, Dict[str, Any]]:
     for item in items if isinstance(items, list) else []:
         if isinstance(item, dict) and "id" in item:
             catalog[item["id"]] = item
-    if not catalog:
+    if len(catalog) < EXPECTED_MIN_GUIDES:
         raise GuidesCatalogUnavailable(
-            f"bundled guide catalog is empty or malformed: {BUNDLED_GUIDES_INDEX}. "
-            "Fail closed rather than scanning without guide coverage."
+            f"bundled guide catalog is incomplete: {BUNDLED_GUIDES_INDEX} yielded "
+            f"{len(catalog)} guides, expected at least {EXPECTED_MIN_GUIDES}. Fail closed "
+            "rather than scanning against a truncated catalog: the coverage numbers in the "
+            "report would otherwise look plausible while most guides go unchecked."
         )
     return catalog
 
@@ -1245,7 +1253,7 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
         # fetch mutable remote code with no pin. It cannot even work in a contained run: this
         # station declares no network tool (agent.yaml `requires: []`, `network: false`), so
         # lib/containment.egress_allowlist() is empty and the sandbox is unshared - the call
-        # could only time out into the swallowed exception below. The bundled index carries
+        # could only ever fail its egress or hit the 15s timeout. The bundled index carries
         # each guide's category/description/featuresUsed; guide bodies are not fetched here.
         raise UnpinnedExecutionRefused(
             "--retrieve needs 'modern-web-guidance@latest' over the network, which the factory "
