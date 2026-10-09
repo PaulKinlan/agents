@@ -30,7 +30,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 IGNORE_DIRS = {
     ".git", "node_modules", "vendor", "dist", "build", ".next", ".nuxt",
@@ -44,6 +44,253 @@ SCRIPT_EXTS = {".js", ".mjs", ".ts", ".jsx", ".tsx", ".vue", ".svelte"}
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLED_GUIDES_INDEX = SCRIPT_DIR / "guides_index.json"
+
+# Regular expression matching baseline TODO annotations inside comments (agents-08d):
+# Matches TODO(baseline/<feature-id>) when preceded by a comment delimiter:
+# //, /*, {/*, <!--, or * (multi-line comment lines).
+BASELINE_COMMENT_RE = re.compile(
+    r"(?://|/\*|\{/\*|<!--|\*)\s*TODO\s*\(\s*baseline/([a-zA-Z0-9_.-]+)\s*\)",
+    re.IGNORECASE
+)
+
+# Pinned mapping from rule_id to canonical web-features IDs / BCD keys (agents-08d).
+# Strict, explicit allowlist — no fuzzy token derivation or startswith matching.
+PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
+    # Popover API & CSS Anchor Positioning
+    "legacy-tooltip-popover-anchor": {
+        "anchor-positioning",
+        "css-anchor-positioning",
+        "popover",
+    },
+    # Dialog closedby
+    "legacy-custom-modal": {
+        "dialog-closedby",
+        "closedby",
+        "html.elements.dialog.closedby",
+        "api.htmldialogelement.closedby",
+    },
+    # Temporal API (Date math)
+    "legacy-date-math-instead-of-temporal": {
+        "temporal",
+        "temporal-plaindate",
+        "plaindate",
+        "temporal-instant",
+        "temporal-zoneddatetime",
+        "temporal-duration",
+        "javascript.builtins.temporal",
+    },
+    # Scheduler API (yield / postTask)
+    "legacy-settimeout-zero-task-yielding": {
+        "scheduler-yield",
+        "scheduler.yield",
+        "api.scheduler.yield",
+        "scheduler-api",
+    },
+    # View Transitions API
+    "legacy-view-swap-without-view-transitions": {
+        "view-transitions",
+        "view-transition",
+        "startviewtransition",
+    },
+    # Atomic DOM reparenting (moveBefore)
+    "dom-reparenting-without-movebefore": {
+        "movebefore",
+        "movebefore()",
+        "api.node.movebefore",
+    },
+    # Scroll snap & events
+    "scroll-snap-without-snap-events-or-initial-target": {
+        "scroll-snap",
+        "scrollsnapchange",
+        "scroll-initial-target",
+    },
+    # Native form controls accent-color
+    "custom-checkbox-radio-without-accent-color": {
+        "accent-color",
+    },
+    # Invoker Commands (commandfor)
+    "imperative-button-toggle-without-invoker-commands": {
+        "invoker-commands",
+        "commandfor",
+    },
+    # Beacon fetchLater
+    "legacy-unload-beacon-instead-of-fetchlater": {
+        "fetchlater",
+        "api.fetchlater",
+    },
+    # Starting style & discrete display animations
+    "discrete-display-animation-without-starting-style": {
+        "starting-style",
+        "@starting-style",
+        "transition-behavior",
+    },
+    # Native scrollend event
+    "debounced-scroll-instead-of-scrollend": {
+        "scrollend",
+    },
+    # Text wrap balance / pretty
+    "headings-missing-text-wrap-balance-or-pretty": {
+        "text-wrap",
+        "text-wrap-balance",
+        "text-wrap-pretty",
+    },
+    # Form validation pseudo-classes (:user-valid / :user-invalid)
+    "legacy-form-validation-classes": {
+        "user-valid",
+        "user-invalid",
+        ":user-valid",
+        ":user-invalid",
+    },
+    "a11y-aria-invalid-unsynced": {
+        "user-valid",
+        "user-invalid",
+        ":user-valid",
+        ":user-invalid",
+    },
+    # Relational pseudo-classes (:has / :not)
+    "legacy-js-parent-or-child-state-styling": {
+        "has",
+        ":has()",
+    },
+    # Container Size & Style Queries
+    "legacy-viewport-media-for-components": {
+        "container-queries",
+        "@container",
+    },
+    "legacy-variant-classes-without-style-queries": {
+        "container-style-queries",
+        "style-queries",
+    },
+    # Light-dark color function
+    "dark-mode-media-without-light-dark": {
+        "light-dark",
+        "light-dark()",
+    },
+    # Field-sizing content
+    "legacy-textarea-auto-resize-js": {
+        "field-sizing",
+        "field-sizing-content",
+    },
+    # Content-visibility
+    "missing-content-visibility-on-sections": {
+        "content-visibility",
+        "content-visibility-auto",
+    },
+    # Fetchpriority
+    "missing-fetchpriority-or-lazy-img": {
+        "fetchpriority",
+        "fetchpriority-high",
+    },
+    # Speculation Rules
+    "navigation-links-without-speculation-rules": {
+        "speculation-rules",
+        "speculationrules",
+    },
+    # Interest Invokers
+    "hover-focus-tooltip-without-interest-invokers": {
+        "interest-invokers",
+        "interestfor",
+    },
+    # Linear easing function
+    "cubic-bezier-spring-instead-of-linear-easing": {
+        "linear-easing",
+        "linear-easing-function",
+        "linear()",
+    },
+    # Scroll-driven animations
+    "legacy-scroll-listener-animation": {
+        "scroll-driven-animations",
+        "animation-timeline",
+    },
+    # Custom Highlight API
+    "dom-wrapping-text-highlight-instead-of-custom-highlights": {
+        "custom-highlights",
+        "custom-highlight-api",
+        "css.highlights",
+    },
+    # CSS Masks
+    "overlay-fade-or-cutout-without-css-masks": {
+        "masks",
+        "css-masks",
+        "masking",
+        "mask-image",
+    },
+    # Font-size-adjust
+    "font-face-missing-font-size-adjust": {
+        "font-size-adjust",
+    },
+    # Sanitizer API
+    "unsafe-innerhtml-without-sanitizer-api": {
+        "sanitizer-api",
+        "sethtml",
+        "element.sethtml",
+    },
+    # WebAuthn & Signal API
+    "auth-flow-without-passkeys-or-signal-api": {
+        "passkeys",
+        "webauthn",
+        "signal-api",
+    },
+    # Long Animation Frames (LoAF)
+    "performance-observer-missing-loaf-inp": {
+        "long-animation-frames",
+        "loaf",
+    },
+    # Interpolate-size & calc-size
+    "legacy-max-height-intrinsic-animation": {
+        "interpolate-size",
+        "calc-size",
+        "calc-size()",
+    },
+}
+
+
+def normalize_feature_key(s: str) -> str:
+    return s.lower().strip()
+
+
+def rule_matches_baseline_feature(rule_id: str, feature_id: str) -> bool:
+    """Check if a rule matches a canonical feature ID via pinned allowlist lookup."""
+    f_clean = normalize_feature_key(feature_id)
+    candidate_keys = {f_clean}
+    if "." in f_clean:
+        parts = f_clean.split(".")
+        candidate_keys.add(parts[-1])
+        if len(parts) >= 2:
+            candidate_keys.add(f"{parts[-2]}-{parts[-1]}")
+            candidate_keys.add(f"{parts[-2]}.{parts[-1]}")
+            no_ns = [p for p in parts if p not in ("api", "html", "javascript", "builtins", "elements")]
+            if no_ns:
+                candidate_keys.add("-".join(no_ns))
+    alt_keys = {re.sub(r"[^a-z0-9]+", "-", k).strip("-") for k in candidate_keys}
+    all_keys = candidate_keys | alt_keys
+    rule_keys = PINNED_RULE_CANONICAL_IDS.get(rule_id, set())
+    return bool(all_keys & rule_keys)
+
+
+def extract_baseline_annotations(lines: List[str]) -> List[Tuple[int, str]]:
+    """Extract (line_number, feature_id) annotations from comment contexts."""
+    annotations: List[Tuple[int, str]] = []
+    for idx, line in enumerate(lines, start=1):
+        for m in BASELINE_COMMENT_RE.finditer(line):
+            annotations.append((idx, m.group(1).strip()))
+    return annotations
+
+
+def is_in_fallback_window(annot_line: int, line_no: int, lines: List[str], window_before: int = 3, window_after: int = 15) -> bool:
+    """Determine if line_no is part of the fallback implementation adjacent to annot_line."""
+    if line_no == annot_line:
+        return True
+    if not (annot_line - window_before <= line_no <= annot_line + window_after):
+        return False
+    if line_no > annot_line:
+        gap_lines = lines[annot_line:line_no - 1]
+    else:
+        gap_lines = lines[line_no:annot_line - 1]
+    blank_count = sum(1 for gl in gap_lines if not gl.strip())
+    if blank_count >= 2:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +1088,7 @@ def load_guides_catalog() -> Dict[str, Dict[str, Any]]:
 def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str, Any]:
     catalog = load_guides_catalog()
     candidates: List[Dict[str, Any]] = []
+    known_baseline_fallbacks: List[Dict[str, Any]] = []
     scanned_files = 0
     matched_guide_ids: Set[str] = set()
 
@@ -850,7 +1098,7 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
         covered_guides.update(r.get("guide_ids", []))
 
     for root, dirs, files in os.walk(target_dir):
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
+        dirs[:] = sorted([d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")])
         for fname in sorted(files):
             fpath = Path(root) / fname
             ext = fpath.suffix.lower()
@@ -868,6 +1116,9 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
             rel_path = str(fpath.relative_to(target_dir))
             lines = content.splitlines()
 
+            # Extract baseline annotations from comments in this file (agents-08d)
+            baseline_annotations = extract_baseline_annotations(lines)
+
             for rule in RULES:
                 if ext not in rule["exts"]:
                     continue
@@ -878,6 +1129,22 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
                     start_pos = match.start()
                     line_no = content.count("\n", 0, start_pos) + 1
                     snippet_line = lines[line_no - 1].strip() if 0 <= line_no - 1 < len(lines) else match.group(0)[:120]
+
+                    # Check if this candidate falls within an annotated fallback window for this rule
+                    is_known_fallback = False
+                    for annot_line, feat in baseline_annotations:
+                        if is_in_fallback_window(annot_line, line_no, lines) and rule_matches_baseline_feature(rule["rule_id"], feat):
+                            is_known_fallback = True
+                            known_baseline_fallbacks.append({
+                                "feature_id": feat,
+                                "rule_id": rule["rule_id"],
+                                "path": rel_path,
+                                "line_number": line_no,
+                                "annotation_line": annot_line
+                            })
+                            break
+                    if is_known_fallback:
+                        continue
 
                     guide_ids = rule.get("guide_ids", [])
                     matched_guide_ids.update(guide_ids)
@@ -906,6 +1173,13 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
                     })
                     break  # One representative match per rule per file to keep signal-to-noise high
 
+    candidates.sort(key=lambda c: (
+        c["severity"] != "high",
+        c["path"],
+        c.get("line_number") or 0,
+        c["rule_id"],
+    ))
+
     retrieved_markdown: Dict[str, str] = {}
     if retrieve_guides and matched_guide_ids:
         top_ids = sorted(matched_guide_ids)[:10]
@@ -927,6 +1201,8 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
         "guides_covered_by_rules": len(covered_guides),
         "matched_guide_count": len(matched_guide_ids),
         "matched_guide_ids": sorted(matched_guide_ids),
+        "known_baseline_fallbacks": known_baseline_fallbacks,
+        "known_baseline_fallback_count": len(known_baseline_fallbacks),
         "candidates": candidates,
         "retrieved_guides": retrieved_markdown
     }
