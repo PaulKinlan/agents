@@ -106,23 +106,34 @@ def _split_mapping_entry(stripped: str, path: Path, lineno: int) -> Tuple[str, O
 
 
 def _fold(lines: List[str]) -> str:
-    """Fold a ``>`` block scalar: single line breaks become spaces, blank lines stay."""
-    paragraphs: List[str] = []
-    current: List[str] = []
-    for line in lines:
+    """Fold a ``>`` block scalar: single line breaks become spaces, blank lines become newlines.
+
+    Line breaks adjacent to more-indented lines (lines starting with leading spaces) are
+    preserved as newlines rather than folded into spaces.
+    """
+    if not lines:
+        return ""
+    chunks: List[str] = []
+    for i, line in enumerate(lines):
         if line == "":
-            if current:
-                paragraphs.append(" ".join(current))
-                current = []
-            continue
-        current.append(line)
-    if current:
-        paragraphs.append(" ".join(current))
-    return "\n".join(paragraphs)
+            chunks.append("\n")
+        else:
+            if i > 0 and lines[i - 1] != "":
+                if line.startswith(" ") or lines[i - 1].startswith(" "):
+                    chunks.append("\n")
+                else:
+                    chunks.append(" ")
+            chunks.append(line)
+    return "".join(chunks)
 
 
 def _parse_block_scalar(
-    lines: List[str], i: int, key_indent: int, indicator: str, path: Path
+    lines: List[str],
+    i: int,
+    key_indent: int,
+    indicator: str,
+    path: Path,
+    ends_with_nl: bool = True,
 ) -> Tuple[str, int]:
     style = indicator[0]
     chomp = "-" if indicator.endswith("-") else ("+" if indicator.endswith("+") else "")
@@ -134,8 +145,7 @@ def _parse_block_scalar(
     while i < n:
         line = lines[i]
         if line.strip() == "":
-            if base_indent is not None:
-                content.append("")
+            content.append("")
             i += 1
             continue
         ind = _indent(line)
@@ -149,18 +159,44 @@ def _parse_block_scalar(
             content.append(" " * max(ind - base_indent, 0) + line.strip())
         i += 1
 
-    value = "\n".join(content) if style == "|" else _fold(content)
+    last_line_has_nl = ends_with_nl if i >= n else True
+
+    has_non_blank = any(l != "" for l in content)
+    if not has_non_blank:
+        if chomp == "+":
+            n_nl = len(content) if last_line_has_nl else max(len(content) - 1, 0)
+            return "\n" * n_nl, i
+        return "", i
+
+    last_nb_idx = max(idx for idx, l in enumerate(content) if l != "")
+
     if chomp == "-":
-        value = value.rstrip("\n")
+        active_lines = content[:last_nb_idx + 1]
+        val = "\n".join(active_lines) if style == "|" else _fold(active_lines)
+        return val, i
     elif chomp == "+":
-        value = value + "\n" if content else ""
+        val = "\n".join(content) if style == "|" else _fold(content)
+        if last_line_has_nl:
+            val += "\n"
+        return val, i
     else:
-        value = value.rstrip("\n") + "\n" if content else ""
-    return value, i
+        # Clip chomping: keep content up to last non-blank line,
+        # with final newline if the last non-blank line had a newline.
+        active_lines = content[:last_nb_idx + 1]
+        val = "\n".join(active_lines) if style == "|" else _fold(active_lines)
+        last_nb_had_nl = (last_nb_idx < len(content) - 1) or last_line_has_nl
+        if last_nb_had_nl:
+            val += "\n"
+        return val, i
 
 
 def _parse_map_into(
-    lines: List[str], i: int, indent: int, target: Dict[str, Any], path: Path
+    lines: List[str],
+    i: int,
+    indent: int,
+    target: Dict[str, Any],
+    path: Path,
+    ends_with_nl: bool = True,
 ) -> int:
     while True:
         i = _skip_blank_and_comment(lines, i)
@@ -189,17 +225,23 @@ def _parse_map_into(
                 target[key] = None
                 i = child_i
                 continue
-            child, i = _parse_block(lines, child_i, child_indent, path)
+            child, i = _parse_block(lines, child_i, child_indent, path, ends_with_nl)
             target[key] = child
             continue
         if _BLOCK_SCALAR_RE.match(val):
-            target[key], i = _parse_block_scalar(lines, i, indent, val, path)
+            target[key], i = _parse_block_scalar(lines, i, indent, val, path, ends_with_nl)
             continue
         target[key] = _parse_scalar(val, path, i + 1)
         i += 1
 
 
-def _parse_seq(lines: List[str], i: int, indent: int, path: Path) -> Tuple[List[Any], int]:
+def _parse_seq(
+    lines: List[str],
+    i: int,
+    indent: int,
+    path: Path,
+    ends_with_nl: bool = True,
+) -> Tuple[List[Any], int]:
     result: List[Any] = []
     while True:
         i = _skip_blank_and_comment(lines, i)
@@ -229,7 +271,7 @@ def _parse_seq(lines: List[str], i: int, indent: int, path: Path) -> Tuple[List[
                 result.append(None)
                 i = child_i
                 continue
-            child, i = _parse_block(lines, child_i, child_indent, path)
+            child, i = _parse_block(lines, child_i, child_indent, path, ends_with_nl)
             result.append(child)
             continue
 
@@ -242,20 +284,20 @@ def _parse_seq(lines: List[str], i: int, indent: int, path: Path) -> Tuple[List[
                 if child_i < len(lines):
                     child_indent = _indent(lines[child_i])
                     if child_indent > indent:
-                        child, i = _parse_block(lines, child_i, child_indent, path)
+                        child, i = _parse_block(lines, child_i, child_indent, path, ends_with_nl)
                         item[key] = child
-                        i = _parse_map_into(lines, i, key_indent, item, path)
+                        i = _parse_map_into(lines, i, key_indent, item, path, ends_with_nl)
                         result.append(item)
                         continue
                 item[key] = None
                 i += 1
             elif _BLOCK_SCALAR_RE.match(val):
-                item[key], i = _parse_block_scalar(lines, i, key_indent, val, path)
+                item[key], i = _parse_block_scalar(lines, i, key_indent, val, path, ends_with_nl)
             else:
                 item[key] = _parse_scalar(val, path, i + 1)
                 i += 1
             result.append(item)
-            i = _parse_map_into(lines, i, key_indent, item, path)
+            i = _parse_map_into(lines, i, key_indent, item, path, ends_with_nl)
             continue
 
         result.append(_parse_scalar(remainder, path, i + 1))
@@ -275,7 +317,13 @@ def _is_mapping_remainder(remainder: str) -> bool:
     return False
 
 
-def _parse_block(lines: List[str], i: int, indent: int, path: Path) -> Tuple[Any, int]:
+def _parse_block(
+    lines: List[str],
+    i: int,
+    indent: int,
+    path: Path,
+    ends_with_nl: bool = True,
+) -> Tuple[Any, int]:
     i = _skip_blank_and_comment(lines, i)
     if i >= len(lines):
         return {}, i
@@ -287,19 +335,21 @@ def _parse_block(lines: List[str], i: int, indent: int, path: Path) -> Tuple[Any
             f"(expected {indent})"
         )
     if line.strip().startswith("- "):
-        return _parse_seq(lines, i, indent, path)
+        return _parse_seq(lines, i, indent, path, ends_with_nl)
     result: Dict[str, Any] = {}
-    i = _parse_map_into(lines, i, indent, result, path)
+    i = _parse_map_into(lines, i, indent, result, path, ends_with_nl)
     return result, i
 
 
 def load_yaml(path: Union[Path, str]) -> Any:
     """Parse a YAML document from ``path`` using the supported subset, fail-closed."""
     path = Path(path)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if any("\t" in line for line in lines):
+    text = path.read_text(encoding="utf-8")
+    if "\t" in text:
         raise YamlParseError(f"YAML parse error in {path}: tabs are forbidden")
-    value, i = _parse_block(lines, 0, 0, path)
+    ends_with_nl = text.endswith(("\n", "\r"))
+    lines = text.splitlines()
+    value, i = _parse_block(lines, 0, 0, path, ends_with_nl)
     trailing = _skip_blank_and_comment(lines, i)
     if trailing < len(lines):
         raise YamlParseError(
