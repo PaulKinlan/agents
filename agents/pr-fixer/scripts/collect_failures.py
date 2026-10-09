@@ -10,10 +10,15 @@ unified diffs (`proposed_patches`).
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(FACTORY_ROOT))
+
+from lib.path_security import resolve_within_target  # noqa: E402
+
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
 
@@ -36,8 +41,8 @@ def load_active_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
         if rec.get("status") in {"wontfix", "fixed"}:
             continue
         rel_path = rec.get("path", "")
-        fpath = target_dir / rel_path
-        if not rel_path or not fpath.exists() or not fpath.is_file():
+        fpath = resolve_within_target(target_dir, rel_path)
+        if not rel_path or not fpath or not fpath.exists() or not fpath.is_file():
             continue
 
         line_no = int(rec.get("line_number") or 1)

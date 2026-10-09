@@ -50,6 +50,11 @@ class TestVerifierPriming(unittest.TestCase):
         script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
         script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, script)
+        # prepare_verification.py now imports the shared path-confinement helper; the sandbox
+        # mirrors the real repo layout so the script's FACTORY_ROOT resolves to this tree.
+        helper = sandbox / "lib" / "path_security.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -217,6 +222,11 @@ class TestPathConfinement(unittest.TestCase):
         script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
         script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, script)
+        # prepare_verification.py now imports the shared path-confinement helper; the sandbox
+        # mirrors the real repo layout so the script's FACTORY_ROOT resolves to this tree.
+        helper = sandbox / "lib" / "path_security.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
