@@ -238,5 +238,43 @@ class TestSeverityBaselineClamp(unittest.TestCase):
                 store.close()
 
 
+class TestRawMatchBinding(unittest.TestCase):
+    """The scanner's raw_match is indexed and bound for deterministic dummy detection (agents-3r7)."""
+
+    def _index(self, candidates):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "candidates.json"
+            path.write_text(json.dumps({"candidates": candidates}), encoding="utf-8")
+            return findings.load_candidate_index(path)
+
+    def test_raw_match_is_indexed_and_bound_by_location(self):
+        ci = self._index([{
+            "rule_id": "openai-key", "path": "tests/x.py", "line_number": 62,
+            "snippet": 'output = "No API key found for sk-ant-secret-token-1234567890"',
+            "raw_match": "sk-ant-secret-token-1234567890",
+        }])
+        item = {"rule_id": "openai-key", "path": "tests/x.py", "line_number": 62}
+        self.assertEqual(
+            findings.identity_raw_match(item, "openai-key", "tests/x.py", ci),
+            "sk-ant-secret-token-1234567890")
+
+    def test_raw_match_falls_back_when_line_number_drifts(self):
+        ci = self._index([{
+            "rule_id": "openai-key", "path": "tests/x.py", "line_number": 62,
+            "snippet": 'key = "sk-test-placeholder"',
+            "raw_match": "sk-test-placeholder",
+        }])
+        item = {"rule_id": "openai-key", "path": "tests/x.py", "line_number": 61}
+        self.assertEqual(
+            findings.identity_raw_match(item, "openai-key", "tests/x.py", ci),
+            "sk-test-placeholder")
+
+    def test_raw_match_is_none_without_a_scanner_candidate(self):
+        # An empty candidate list means no deterministic pre-pass: the raw match is absent.
+        ci = self._index([])
+        item = {"rule_id": "openai-key", "path": "tests/x.py", "line_number": 62}
+        self.assertIsNone(findings.identity_raw_match(item, "openai-key", "tests/x.py", ci))
+
+
 if __name__ == "__main__":
     unittest.main()

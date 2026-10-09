@@ -97,38 +97,46 @@ _DUMMY_CREDENTIAL_MARKERS = (
     re.compile(r"secret[ _-]?token", re.IGNORECASE),
     re.compile(r"your[ _-]?api[ _-]?key", re.IGNORECASE),
     re.compile(r"\bsk-test-", re.IGNORECASE),
-    re.compile(r"<[^>\s]{0,40}(?:token|key|secret)[^>\s]{0,40}>", re.IGNORECASE),
     re.compile(r"(?:0123456789|1234567890|9876543210)"),
     re.compile(r"abcdefghijklmnop", re.IGNORECASE),
 )
 
 
 def _dummy_credential_marker(finding: Dict[str, Any]) -> bool:
-    """True when the finding's candidate value reads as an obvious dummy credential.
+    """True when the finding's raw matched value reads as an obvious dummy credential.
 
-    The scanner's raw match is the most faithful source (the exact matched value); the snippet
-    is the fallback (the surrounding code line the triage model quoted). Both are checked so a
-    model that masks the snippet cannot defeat the deterministic signal.
+    Only the scanner's raw match (the exact matched token) is inspected, never the surrounding
+    code line: the markers can otherwise match a variable name (``secret_token``), a comment
+    (``// do not leak``) or a type annotation (``<Token>``) on a line whose key is real
+    (agents-3r7 review). A finding with no raw match therefore never fires this deterministic
+    path — the model's own false-positive verdict still does for ordinary agents.
     """
-    for field in ("raw_match", "snippet", "value", "match"):
-        value = finding.get(field)
-        if isinstance(value, str):
-            text = value.strip()
-            if text and any(marker.search(text) for marker in _DUMMY_CREDENTIAL_MARKERS):
-                return True
-    return False
+    value = finding.get("raw_match")
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return bool(text) and any(marker.search(text) for marker in _DUMMY_CREDENTIAL_MARKERS)
+
+
+def _is_identity_critical(finding: Dict[str, Any]) -> bool:
+    agent = finding.get("agent")
+    return isinstance(agent, str) and agent.strip() in IDENTITY_CRITICAL_AGENTS
 
 
 def is_false_positive(finding: Dict[str, Any]) -> bool:
-    """Whether the triage that produced `finding` declared it a false positive.
+    """Whether `finding` is a false positive for reporting and routing.
 
-    Explicit fields win (`false_positive: true`, or a verdict-like field naming one); failing
-    that, a title that says the item *is* a false positive ("... is a false positive (comment,
-    not a network call)") counts, while "not a false positive" does not. Last, a deterministic
-    dummy-credential marker on the value/snippet (placeholder, do-not-leak, a sequential key
-    body) marks an obvious test fixture as a false positive without the model's say-so.
+    The deterministic dummy marker always counts. For identity-critical agents
+    (credential/vulnerability scanners), the triage's own verdict never counts: identity
+    cannot be overridden by a model that misclassifies a real key committed in a test file
+    (SF-03, agents-3r7). For ordinary agents, the triage's explicit verdict and a title that
+    names a false positive count too.
     """
     if not isinstance(finding, dict):
+        return False
+    if _dummy_credential_marker(finding):
+        return True
+    if _is_identity_critical(finding):
         return False
     flag = finding.get("false_positive")
     if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes")):
@@ -140,7 +148,7 @@ def is_false_positive(finding: Dict[str, Any]) -> bool:
     title = finding.get("title")
     if isinstance(title, str) and bool(_FP_TITLE.search(title)):
         return True
-    return _dummy_credential_marker(finding)
+    return False
 
 
 def reported_severity(finding: Dict[str, Any]) -> str:
@@ -166,10 +174,11 @@ def effective_severity(finding: Dict[str, Any]) -> str:
     fail-closed routing value. Displaying it made identity-critical agents' info-level and
     false-positive verdicts read CRITICAL (journal-1kg, journal-aaj).
 
-    Security-sensitive agents are critical on identity, so a model that labels a leaked key —
-    or an understated vulnerability — `low` cannot authorise its publication. A false positive
-    is the one exception: a dummy key is not a key, so a triaged or deterministic false
-    positive is never routed critical whatever the agent class (agents-3r7).
+    A deterministic dummy credential (a placeholder body, not a key at all) routes `info`.
+    Otherwise a security-sensitive agent is critical on identity — a model that labels a real
+    leaked key `low`, `info`, or even `false positive` cannot authorise its publication
+    (SF-03, agents-3r7). Ordinary agents keep their normalised label; their triaged false
+    positives route `info`.
     """
     if is_false_positive(finding):
         return "info"

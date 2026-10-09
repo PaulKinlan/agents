@@ -119,6 +119,7 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     # The scanner's raw match per location, so deterministic dummy detection can see the exact
     # matched value even when the triage model masks its snippet (agents-3r7).
     raw_matches_at: Dict[Tuple[str, str, Any], str] = {}
+    raw_matches_in: Dict[Tuple[str, str], List[str]] = {}
     # The scanner's baseline severity per (rule, path), so a triage model's severity flip can
     # be clamped back to the deterministic pre-pass (agents-964).
     severities: Dict[Tuple[str, str], str] = {}
@@ -140,7 +141,11 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
                 snippets_in[key].append(snippet)
         raw_match = candidate.get("raw_match")
         if isinstance(rule_id, str) and path and isinstance(raw_match, str) and raw_match.strip():
-            raw_matches_at[(rule_id.strip(), path, candidate.get("line_number"))] = raw_match
+            key = (rule_id.strip(), path)
+            raw_matches_at[key + (candidate.get("line_number",),)] = raw_match
+            raw_matches_in.setdefault(key, [])
+            if raw_match not in raw_matches_in[key]:
+                raw_matches_in[key].append(raw_match)
         severity = candidate.get("severity")
         if isinstance(rule_id, str) and path and isinstance(severity, str) and severity.strip():
             severities.setdefault((rule_id.strip(), path), severity.strip().lower())
@@ -149,7 +154,7 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
         return None
     return {"rule_ids": rule_ids, "paths": paths,
             "snippets_at": snippets_at, "snippets_in": snippets_in,
-            "raw_matches_at": raw_matches_at,
+            "raw_matches_at": raw_matches_at, "raw_matches_in": raw_matches_in,
             "severities": severities}
 
 
@@ -191,11 +196,17 @@ def identity_raw_match(item: Dict[str, Any], rule_id: Any, path: Any,
     """
     if not candidate_index or not isinstance(rule_id, str):
         return item.get("raw_match")
+    key = (rule_id.strip(), normalize_path(path))
     at = candidate_index.get("raw_matches_at", {})
     line = item.get("line_number")
-    matched = at.get((rule_id.strip(), normalize_path(path), line))
+    matched = at.get(key + (line,))
     if matched is not None:
         return matched
+    # Line-number drift fallback (like identity_snippet): when a (rule, path) has a single
+    # unambiguous candidate match, use it even if the model shifted the line number.
+    options = candidate_index.get("raw_matches_in", {}).get(key, [])
+    if len(options) == 1:
+        return options[0]
     return item.get("raw_match")
 
 def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, Any]]) -> Tuple[Any, Any]:
@@ -451,6 +462,7 @@ class FindingsStore:
             rule_id, path = bind_candidates(item, candidate_index)
             item["severity"] = bind_severity(item, rule_id, path, candidate_index)
             item["raw_match"] = identity_raw_match(item, rule_id, path, candidate_index)
+            item["agent"] = agent
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
