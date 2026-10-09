@@ -17,6 +17,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+# Exclude standard ignored directories including vendor/ (third-party vendored code)
+# and factory artifact dirs (findings, runs) from test coverage deficit calculations.
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
 except ImportError:

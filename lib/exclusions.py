@@ -15,9 +15,11 @@ FACTORY_ARTIFACT_DIRS: Set[str] = {
 }
 
 # Standard build, package, vcs, cache, and artifact directories ignored by scanners.
-# Note: bundle-size (agents/bundle-size/scripts/measure_bundle.py) deliberately retains
-# a private EXCLUDE_DIRS omitting 'dist' and 'build' because measuring built distribution
-# artifacts is its primary function; do not replace bundle-size's set with DEFAULT_IGNORE_DIRS.
+# Note: Consumers that measure built distribution artifacts and bundle outputs (such as
+# bundle-size in agents/bundle-size/scripts/measure_bundle.py and perf-hillclimb via
+# lib/bench/runner.py) must retain 'dist' and 'build' in their walked asset sets;
+# runner.py subtracts {"dist", "build"} from DEFAULT_IGNORE_DIRS, while bundle-size
+# retains a private EXCLUDE_DIRS without dist/build.
 DEFAULT_IGNORE_DIRS: Set[str] = {
     ".git",
     ".hg",

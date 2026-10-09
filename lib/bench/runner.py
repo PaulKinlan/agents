@@ -37,7 +37,9 @@ BENCH_TIMEOUT_SECONDS = 300
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS
-    IGNORE_DIRS = DEFAULT_IGNORE_DIRS | {"dist-cache"}
+    # Exclude findings/ and runs/ while retaining dist/ and build/, which perf-hillclimb
+    # measures as target static assets and distribution bundles.
+    IGNORE_DIRS = (DEFAULT_IGNORE_DIRS - {"dist", "build"}) | {"dist-cache"}
 except ImportError:
     IGNORE_DIRS = {
         ".git", "node_modules", "vendor", "dist-cache", ".venv", "venv",

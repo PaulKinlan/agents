@@ -18,15 +18,14 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
-# Exclude findings/ and runs/ via DEFAULT_IGNORE_DIRS to avoid ingesting the factory's own
-# previous execution logs or delta outputs when running against self-dogfood targets (agents-uxt).
+# Keep original skip list ("node_modules", ".git", ".beads", "venv", ".next", "dist")
+# plus factory artifact dirs ("findings", "runs") to avoid feedback loops while still
+# scanning build, coverage, and vendor logs (agents-uxt).
 try:
-    from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
+    from lib.exclusions import FACTORY_ARTIFACT_DIRS
+    IGNORE_DIRS = {"node_modules", ".git", ".beads", "venv", ".next", "dist"} | FACTORY_ARTIFACT_DIRS
 except ImportError:
-    IGNORE_DIRS = {
-        ".git", "node_modules", "vendor", "dist", "build", ".next", ".nuxt",
-        "coverage", ".venv", "venv", "__pycache__", ".beads", "runs", "findings"
-    }
+    IGNORE_DIRS = {"node_modules", ".git", ".beads", "venv", ".next", "dist", "runs", "findings"}
 
 LOG_PATTERNS = ["*.log", "*error*", "*stderr*", "*stdout*", "*output*.txt"]
 STACK_TRACE_RE = re.compile(

@@ -139,11 +139,30 @@ class TestPrepassExclusions(unittest.TestCase):
             log_names = [p.name for p in found_logs]
             self.assertEqual(log_names, ["app.log"])
 
-    def test_bench_runner_ignores_findings_and_runs(self):
-        """lib/bench/runner.py IGNORE_DIRS must include findings and runs."""
-        from lib.bench.runner import IGNORE_DIRS
+    def test_bench_runner_ignores_findings_and_runs_but_retains_dist_and_build(self):
+        """lib/bench/runner.py IGNORE_DIRS must include findings/runs but retain dist/build for perf-hillclimb."""
+        from lib.bench.runner import IGNORE_DIRS, measure_target
         self.assertIn("findings", IGNORE_DIRS)
         self.assertIn("runs", IGNORE_DIRS)
+        self.assertNotIn("dist", IGNORE_DIRS)
+        self.assertNotIn("build", IGNORE_DIRS)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "src").mkdir()
+            (target / "src" / "app.js").write_text("console.log('src');\n")
+            (target / "dist").mkdir()
+            (target / "dist" / "bundle.js").write_text("console.log('dist bundle');\n")
+            (target / "build").mkdir()
+            (target / "build" / "out.js").write_text("console.log('build out');\n")
+
+            (target / "findings").mkdir()
+            (target / "findings" / "report.js").write_text("console.log('findings');\n")
+            (target / "runs" / "r1").mkdir(parents=True)
+            (target / "runs" / "r1" / "leak.js").write_text("console.log('runs');\n")
+
+            metrics = measure_target(target)
+            self.assertEqual(metrics.get("asset_count"), 3)
 
     def test_docs_write_does_not_scan_findings_or_runs(self):
         """docs-write pre-pass must ignore findings/ and runs/."""
