@@ -527,6 +527,7 @@ def sandbox_command(
     env: Optional[Dict[str, str]] = None,
     executables: Sequence[str] = (),
     egress_forwards: Optional[Sequence[Tuple[int, str]]] = None,
+    rw_binds: Sequence[str] = (),
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
 
@@ -590,6 +591,14 @@ def sandbox_command(
     if factory_runs.is_dir():
         plan.tmpfs(str(factory_runs))
     plan.rw_bind(runs)
+
+    # agents-854: extra writable config directories the engine needs. pi's agent directory
+    # (PI_CODING_AGENT_DIR) holds BOTH its models.json provider override AND its auth.json
+    # credential store, and pi opens auth.json for read-write even when auth comes from env, so
+    # the directory must be writable. It is factory-controlled, per-run, and holds no secrets
+    # (models.json + an empty auth.json), so writability does not weaken containment.
+    for path in rw_binds:
+        plan.rw_bind(path)
 
     # agents-x8l: egress sockets may live outside run_dir (a short per-run dir under /tmp,
     # because run_dir embeds the worktree path and can exceed AF_UNIX's sun_path limit). Bind

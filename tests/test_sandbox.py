@@ -68,11 +68,12 @@ class TestSandboxCommandShape(unittest.TestCase):
         self.run_dir = self.factory / "runs" / "run1"
         self.run_dir.mkdir(parents=True)
 
-    def build(self, env=None, inner=("/bin/true",), executables=(), egress_forwards=None):
+    def build(self, env=None, inner=("/bin/true",), executables=(), egress_forwards=None,
+              rw_binds=()):
         return sandbox_command(
             list(inner), target_dir=self.target, factory_root=self.factory,
             run_dir=self.run_dir, env=env if env is not None else {"PATH": "/usr/bin:/bin"},
-            executables=executables, egress_forwards=egress_forwards,
+            executables=executables, egress_forwards=egress_forwards, rw_binds=rw_binds,
         )
 
     def test_target_is_bound_read_only_and_run_dir_writable(self):
@@ -158,6 +159,17 @@ class TestSandboxCommandShape(unittest.TestCase):
         rw = dict(_pairs(argv, "--bind"))
         self.assertEqual(rw.get(os.path.realpath(sock_dir)), os.path.realpath(sock_dir),
                          "the socket's parent dir must be rw-bound into the sandbox")
+
+    def test_rw_binds_are_bound_writable(self):
+        # agents-854: pi's agent dir (PI_CODING_AGENT_DIR) must be writable inside the sandbox
+        # (pi opens its auth.json credential store read-write even when auth comes from env),
+        # so extra config directories are rw-bound, not read-only.
+        cfg_dir = Path(tempfile.mkdtemp(prefix="factory-pi-test-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, cfg_dir, True)
+        argv = self.build(rw_binds=[str(cfg_dir)])
+        rw = dict(_pairs(argv, "--bind"))
+        self.assertEqual(rw.get(os.path.realpath(cfg_dir)), os.path.realpath(cfg_dir),
+                         "the config dir must be rw-bound into the sandbox")
 
     def test_nothing_outside_the_allowlist_is_bound(self):
         """Every ro/rw bind source is the factory root, the target, the run dir, a system

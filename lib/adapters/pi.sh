@@ -64,7 +64,14 @@ echo "[pi adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 # sandbox — FACTORY_ALLOW_UNSANDBOXED trusted-target mode, or a host without bubblewrap —
 # pi falls back to its own ~/.pi session configuration. Report whichever is actually true.
 if [ -n "${FACTORY_SANDBOXED:-}" ]; then
-  echo "[pi adapter] Auth: ANTHROPIC_API_KEY env (sandboxed; ~/.pi session config not mounted)"
+  # agents-854: report the ACTUAL auth channel, not a hardcoded provider. The keyless BYOK path
+  # (deepseek) authenticates through the broker — base URL + placeholder key + a models.json
+  # override — not ANTHROPIC_API_KEY. A keyed provider uses its own <NAME>_API_KEY env instead.
+  if [ -n "${DEEPSEEK_BASE_URL:-}" ]; then
+    echo "[pi adapter] Auth: keyless broker (DEEPSEEK_BASE_URL + placeholder key; sandboxed, ~/.pi not mounted)"
+  else
+    echo "[pi adapter] Auth: env API keys only (sandboxed; ~/.pi session config not mounted)"
+  fi
 else
   echo "[pi adapter] Auth: pi session configuration (~/.pi)"
 fi

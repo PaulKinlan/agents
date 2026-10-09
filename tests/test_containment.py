@@ -798,6 +798,10 @@ class TestDispatcher(unittest.TestCase):
             # allowlist, which is exactly the point.
             "CANARY_PATH=$(cat canary-path.txt 2>/dev/null || echo /nonexistent)\n"
             "echo \"CANARY:$(cat \"$CANARY_PATH\" 2>&1 | head -1)\"\n"
+            # agents-854: expose pi's agent-dir redirect and the provider override the
+            # dispatcher wrote into it, so the test can assert the keyless wiring end to end.
+            "echo \"AGENTDIR:${PI_CODING_AGENT_DIR:-unset}\"\n"
+            "echo \"MODELSJSON:$(cat \"${PI_CODING_AGENT_DIR:-/nonexistent}/models.json\" 2>/dev/null || echo none)\"\n"
             "cat >/dev/null\n" + STUB_REPORT,
             encoding="utf-8",
         )
@@ -2028,6 +2032,28 @@ process.stdin.on('end', () => {
         self.assertEqual(record["granted"]["credential_broker"]["providers"],
                          ["anthropic", "deepseek", "kimi", "qwen", "zai"])
         self.assertNotIn(real_key, json.dumps(record))
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_sandboxed_pi_engine_gets_the_keyless_broker_provider_config(self):
+        """agents-854: pi ignores *_BASE_URL env, so the keyless broker routing must reach it as
+        a models.json in its (redirected) agent directory, bound writable into the sandbox. The
+        dispatcher wires PI_CODING_AGENT_DIR + FACTORY_MODEL and writes the provider override."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        # The adapter names the keyless model explicitly (not pi's Anthropic default).
+        argv = self.stub_line("ARGV:").split()
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "deepseek/deepseek-flash")
+        # The agent directory is redirected to a per-run config dir…
+        agent_dir = self.stub_line("AGENTDIR:")
+        self.assertTrue(agent_dir.startswith("/tmp/factory-pi-"), agent_dir)
+        # …which holds the broker-routed provider override, readable inside the sandbox.
+        models = self.stub_line("MODELSJSON:")
+        self.assertIn("proxy/deepseek", models)
+        self.assertIn("factory-broker-placeholder", models)
+        self.assertIn("openai-completions", models)
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_a_sandboxed_engine_has_no_route_off_its_netns(self):
