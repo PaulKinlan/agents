@@ -1,0 +1,18 @@
+name: web-uplift-merger
+path: /home/exedev/worktrees/web-uplift-factory
+repo: PaulKinlan/web-uplift
+beads_path: /home/exedev/worktrees/web-uplift-factory
+sink: beads
+visibility: public
+agents:
+  - secret-scan
+  - threat-model
+  - vuln-discovery
+  - vuln-verify
+  - vuln-triage
+  - deps-supply-chain
+  - modern-web
+  - ui-ux-audit
+  - perf-review
+  - docs-drift
+  - qa-station
