@@ -200,6 +200,44 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         status, _, _ = _client_request(broker.port, "GET", "/healthz")
         self.assertEqual(status, 404)
 
+    def test_content_length_above_cap_returns_413_without_forwarding_upstream(self):
+        """agents-ce2: request body with Content-Length above 32 MiB returns 413 without reading into memory or forwarding."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        oversized = cb.MAX_BROKER_BODY_BYTES + 1024
+        # Send headers with Content-Length > 32 MiB, but no massive payload body
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json",
+                     "content-length": str(oversized)},
+            body=None)
+        self.assertEqual(status, 413)
+        self.assertIn(b"exceeds", body.lower())
+        self.assertEqual(_FakeHTTPSConnection.calls, [], "oversized request must NEVER be forwarded upstream")
+
+    def test_negative_content_length_returns_400_without_forwarding(self):
+        """agents-ce2: negative Content-Length is rejected as 400 Bad Request."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json",
+                     "content-length": "-10"},
+            body=None)
+        self.assertEqual(status, 400)
+        self.assertIn(b"negative", body.lower())
+        self.assertEqual(_FakeHTTPSConnection.calls, [])
+
+    def test_invalid_content_length_returns_400_without_forwarding(self):
+        """agents-ce2: non-integer Content-Length is rejected as 400 Bad Request."""
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json",
+                     "content-length": "not-a-number"},
+            body=None)
+        self.assertEqual(status, 400)
+        self.assertIn(b"invalid content-length", body.lower())
+        self.assertEqual(_FakeHTTPSConnection.calls, [])
+
     def test_base_url_shape(self):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         self.assertEqual(broker.base_url("anthropic"),
@@ -313,6 +351,27 @@ class TestLifecycle(unittest.TestCase):
             handler._read_request_body()
 
         self.assertTrue(handler.close_connection)
+
+    def test_read_request_body_payload_too_large_sets_close_connection(self):
+        # agents-ce2: body exceeding MAX_BROKER_BODY_BYTES raises BrokerPayloadTooLarge and sets close_connection = True.
+        handler = cb._Handler.__new__(cb._Handler)
+        handler.headers = {"Content-Length": str(cb.MAX_BROKER_BODY_BYTES + 1)}
+        handler.close_connection = False
+
+        with self.assertRaises(cb.BrokerPayloadTooLarge):
+            handler._read_request_body()
+
+        self.assertTrue(handler.close_connection)
+
+    def test_read_request_body_defensive_integer_parse(self):
+        # agents-ce2: non-integer or negative Content-Length raises BrokerError and sets close_connection = True.
+        for bad in ("bad-length", "12.34", "-1", "-1000"):
+            handler = cb._Handler.__new__(cb._Handler)
+            handler.headers = {"Content-Length": bad}
+            handler.close_connection = False
+            with self.assertRaises(cb.BrokerError):
+                handler._read_request_body()
+            self.assertTrue(handler.close_connection)
 
 
 class TestChildEnvBrokerComposition(BrokerTestBase):
