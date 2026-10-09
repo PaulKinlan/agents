@@ -36,7 +36,7 @@ Your job is to review candidate patterns surfaced by `scripts/scan_modern_web.py
 5. **Baseline Fallbacks & Intentional Polyfills (agents-08d)**:
    - Deliberate fallbacks and polyfills for features that are not yet Baseline Widely Available are annotated with `TODO(baseline/<feature-id>): <message>`.
    - Never flag code adjacent to a canonical `TODO(baseline/<feature-id>)` comment as a finding or modernization gap: intentional fallbacks for non-Baseline features are expected and must not produce duplicate work items or beads.
-   - Fallback window suppression applies to the immediate contiguous block adjacent to the annotation without blank line separations; distant code or separate functions in the file remain independently evaluated.
+   - Fallback window suppression applies to the immediate contiguous block adjacent to the annotation (tolerating at most one blank line between the annotation comment and code, but disallowing multi-blank separations that mark distinct top-level declarations); distant code or separate functions in the file remain independently evaluated.
 
 ## Output Contract
 

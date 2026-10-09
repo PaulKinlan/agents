@@ -166,6 +166,18 @@ PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
         "light-dark",
         "light-dark()",
     },
+    # Customizable <select> (appearance: base-select)
+    "legacy-custom-select-dropdown": {
+        "select-customizable",
+        "customizable-select",
+        "appearance: base-select",
+    },
+    # Container Scroll-State Queries (sticky header / scroll shadow)
+    "sticky-or-scroll-shadow-js-instead-of-scroll-state-queries": {
+        "scroll-state-queries",
+        "container-scroll-state-queries",
+        "scroll-state",
+    },
     # Field-sizing content
     "legacy-textarea-auto-resize-js": {
         "field-sizing",
@@ -268,11 +280,34 @@ def rule_matches_baseline_feature(rule_id: str, feature_id: str) -> bool:
     return bool(all_keys & rule_keys)
 
 
+def is_in_string_literal(line: str, pos: int) -> bool:
+    """Check if character index `pos` in `line` is inside a string literal (quoted region)."""
+    in_quote = None
+    escaped = False
+    for ch in line[:pos]:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if in_quote:
+            if ch == in_quote:
+                in_quote = None
+        else:
+            if ch in ('"', "'", '`'):
+                in_quote = ch
+    return in_quote is not None
+
+
 def extract_baseline_annotations(lines: List[str]) -> List[Tuple[int, str]]:
     """Extract (line_number, feature_id) annotations from comment contexts."""
     annotations: List[Tuple[int, str]] = []
     for idx, line in enumerate(lines, start=1):
         for m in BASELINE_COMMENT_RE.finditer(line):
+            # Verify the comment delimiter is not inside a string literal (agents-gq4)
+            if is_in_string_literal(line, m.start()):
+                continue
             annotations.append((idx, m.group(1).strip()))
     return annotations
 
