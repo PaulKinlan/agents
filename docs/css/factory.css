@@ -88,7 +88,7 @@
 
   /* Section rhythm: one even vertical step between sections, a hairline between them, headings on a short ramp. */
   .content-section { padding-block: var(--space-5) var(--space-6); border: 0; }
-  .content-section h2, .doc-section h2 { max-inline-size: 32ch; font-size: var(--step-h2); line-height: 1.2; letter-spacing: -.025em; }
+  .content-section h2, .doc-section h2 { max-inline-size: 32ch; font-size: var(--step-h2); line-height: 1.2; letter-spacing: -.025em; text-wrap: balance; }
   .content-section .section-intro { max-inline-size: 64ch; margin-block-end: var(--space-4); font-size: 1rem; }
   .doc-section { padding-block: var(--space-5); border-block-end: 1px solid var(--doc-hairline); }
   .doc-section:first-child { padding-block-start: 0; }
@@ -128,7 +128,7 @@
   .station-legend .is-observer { color: var(--accent-2); background: var(--tint-observer); }
   .station-legend .is-proposer { color: var(--accent); background: var(--tint-proposer); }
   .station-legend .is-optimizer { color: var(--accent-3); background: var(--tint-optimizer); }
-  .station { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-3) 0; overflow: hidden; border-block-start: 3px solid var(--accent-2); }
+  .station { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-3) 0; overflow: clip; border-block-start: 3px solid var(--accent-2); }
   .station h3 { font-family: var(--mono); font-size: 1.02rem; letter-spacing: -.01em; overflow-wrap: anywhere; }
   .station > p { font-size: .92rem; line-height: 1.5; }
   .station-grid .station[data-class="optimizer"] { border-block-start-color: var(--accent-3); }
@@ -200,7 +200,7 @@
   .command h3 code, .meta code { padding: 0; background: none; }
 
   /* Lines: itinerary with zero-padded stop numbers, policy in a raised band at the foot. */
-  .line-card { display: flex; flex-direction: column; gap: var(--space-2); padding-block-end: 0; overflow: hidden; border-block-start: 3px solid var(--accent); }
+  .line-card { display: flex; flex-direction: column; gap: var(--space-2); padding-block-end: 0; overflow: clip; border-block-start: 3px solid var(--accent); }
   .line-card h3 { font-family: var(--mono); font-size: 1.2rem; }
   .line-card h4 { margin: var(--space-2) 0 0; color: var(--muted); font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .line-card ol { margin: 0; padding: 0; list-style: none; columns: 2; column-gap: var(--space-4); counter-reset: stop; }
