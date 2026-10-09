@@ -33,6 +33,10 @@ Your job is to review candidate patterns surfaced by `scripts/scan_modern_web.py
    (Or run `python3 agents/modern-web/scripts/scan_modern_web.py --target <path> --retrieve` to bundle retrieved guides automatically).
 3. Verify the target file is actual user-facing UI/frontend code (skip test fixtures, build output, or pure Node.js backend/CLI scripts).
 4. For every confirmed finding, include the exact `guide_ids` and a concrete **before/after code snippet** (`proposed_patch`) following the retrieved guide's implementation and fallback rules.
+5. **Baseline Fallbacks & Intentional Polyfills (agents-08d)**:
+   - Deliberate fallbacks and polyfills for features that are not yet Baseline Widely Available are annotated with `TODO(baseline/<feature-id>): <message>`.
+   - Never flag code adjacent to a canonical `TODO(baseline/<feature-id>)` comment as a finding or modernization gap: intentional fallbacks for non-Baseline features are expected and must not produce duplicate work items or beads.
+   - Fallback window suppression applies to the immediate contiguous block adjacent to the annotation without blank line separations; distant code or separate functions in the file remain independently evaluated.
 
 ## Output Contract
 
