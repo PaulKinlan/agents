@@ -69,9 +69,25 @@ def scan_code_usages(target_dir: Path, package_names: Set[str]) -> Dict[str, Lis
 
     return usage_map
 
-def clean_semver(ver: str) -> str:
-    """Normalize a version string by stripping leading operators or 'v' prefix."""
-    return re.sub(r"^[^\d]*", "", str(ver).strip())
+# A concrete version (optionally 'v'-prefixed, optionally with prerelease/build suffix).
+# Ranges, tags and specifiers ("^17 || ^18", ">=16", "latest", "workspace:*") are not versions.
+SEMVER_RE = re.compile(r"v?\d+(\.\d+)*([-+].*)?")
+
+def clean_semver(ver: Any) -> str:
+    """Normalize a concrete version string, returning "" for anything that is not one.
+
+    The divergence check compares shipped versions against installed lockfile versions
+    by equality, so a partial or invalid value must be rejected rather than normalized:
+    stripping operators turned the peer range ">=16" into "16" and the specifier
+    "^17 || ^18" into "17 || ^18", which manufactured false medium divergences against
+    the real installed version (and an empty result poisoned the baseline).
+    """
+    if not isinstance(ver, str):
+        return ""
+    cleaned = ver.strip()
+    if not SEMVER_RE.fullmatch(cleaned):
+        return ""
+    return cleaned[1:] if cleaned.startswith("v") else cleaned
 
 def get_lockfile_versions(target_dir: Path) -> Dict[str, str]:
     """Extract resolved package versions from package-lock.json or installed node_modules."""
@@ -87,13 +103,16 @@ def get_lockfile_versions(target_dir: Path) -> Dict[str, str]:
                         pkg_name = key[len("node_modules/"):]
                         if "node_modules/" in pkg_name:
                             pkg_name = pkg_name.split("node_modules/")[-1]
-                        versions[pkg_name] = clean_semver(val["version"])
+                        v_clean = clean_semver(val["version"])
+                        if v_clean:
+                            versions[pkg_name] = v_clean
             if not versions and "dependencies" in data:
                 def walk_v1(deps):
                     for name, info in deps.items():
                         if isinstance(info, dict):
-                            if "version" in info:
-                                versions[name] = clean_semver(info["version"])
+                            v_clean = clean_semver(info.get("version"))
+                            if v_clean:
+                                versions[name] = v_clean
                             if isinstance(info.get("dependencies"), dict):
                                 walk_v1(info["dependencies"])
                 walk_v1(data.get("dependencies", {}))
@@ -102,7 +121,7 @@ def get_lockfile_versions(target_dir: Path) -> Dict[str, str]:
 
     # Fallback to inspect node_modules directly if lockfile had no resolved versions
     node_modules = target_dir / "node_modules"
-    if node_modules.is_dir():
+    if not versions and node_modules.is_dir():
         for root, dirs, files in os.walk(node_modules):
             if "package.json" in files:
                 pj = Path(root) / "package.json"
@@ -110,8 +129,9 @@ def get_lockfile_versions(target_dir: Path) -> Dict[str, str]:
                     pdata = json.loads(pj.read_text(encoding="utf-8"))
                     name = pdata.get("name")
                     ver = pdata.get("version")
-                    if name and ver and name not in versions:
-                        versions[name] = clean_semver(ver)
+                    v_clean = clean_semver(ver)
+                    if name and v_clean and name not in versions:
+                        versions[name] = v_clean
                 except Exception:
                     pass
     return versions
@@ -137,7 +157,10 @@ def resolve_shipped_versions_npm(target_dir: Path) -> Tuple[Dict[str, Tuple[str,
                 inspected_manifests.append(rel_pkg)
                 try:
                     data = json.loads(dist_pkg.read_text(encoding="utf-8"))
-                    deps = {**data.get("dependencies", {}), **data.get("peerDependencies", {})}
+                    # Only installed/production dependencies: a peerDependencies entry is a
+                    # compatibility RANGE, not the version that ships, so comparing it as a
+                    # shipped version produced false divergences (e.g. peer ">=16" vs 18.2.0).
+                    deps = data.get("dependencies", {})
                     for k, v in deps.items():
                         v_clean = clean_semver(v)
                         if v_clean:
@@ -173,22 +196,27 @@ def resolve_shipped_versions_npm(target_dir: Path) -> Tuple[Dict[str, Tuple[str,
         target_dir / "app" / "manifest.json",
     ]
     for mf in manifest_candidates:
-        if mf.is_file():
-            rel_mf = str(mf.relative_to(target_dir))
-            if rel_mf not in artifact_paths:
-                artifact_paths.append(rel_mf)
-            if rel_mf not in inspected_manifests:
-                inspected_manifests.append(rel_mf)
-            try:
-                data = json.loads(mf.read_text(encoding="utf-8"))
-                deps = data.get("dependencies", {})
-                if isinstance(deps, dict):
-                    for k, v in deps.items():
-                        v_clean = clean_semver(v)
-                        if v_clean and k not in shipped_versions:
-                            shipped_versions[k] = (v_clean, rel_mf)
-            except Exception:
-                pass
+        if not mf.is_file():
+            continue
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        # manifest_version only exists on a WebExtension manifest; a generic manifest.json
+        # (PWA, icons, tooling) is not a shipped artifact and only added unverified noise.
+        if not isinstance(data, dict) or "manifest_version" not in data:
+            continue
+        rel_mf = str(mf.relative_to(target_dir))
+        if rel_mf not in artifact_paths:
+            artifact_paths.append(rel_mf)
+        if rel_mf not in inspected_manifests:
+            inspected_manifests.append(rel_mf)
+        deps = data.get("dependencies", {})
+        if isinstance(deps, dict):
+            for k, v in deps.items():
+                v_clean = clean_semver(v)
+                if v_clean and k not in shipped_versions:
+                    shipped_versions[k] = (v_clean, rel_mf)
 
     return shipped_versions, inspected_manifests, artifact_paths
 
@@ -201,7 +229,13 @@ def check_shipped_artifact_divergence_npm(
     candidates = []
     shipped_versions, inspected_manifests, artifact_paths = resolve_shipped_versions_npm(target_dir)
 
-    baseline_versions = {**{k: clean_semver(v) for k, v in prod_deps.items()}, **lock_versions}
+    # Only concrete versions may become the comparison baseline; a range or invalid lockfile
+    # value used to clean down to "" and flagged every real shipped version as divergent.
+    baseline_versions: Dict[str, str] = {}
+    for pkg, ver in {**prod_deps, **lock_versions}.items():
+        v_clean = clean_semver(ver)
+        if v_clean:
+            baseline_versions[pkg] = v_clean
 
     divergent_found = False
     for pkg, (shipped_ver, source_path) in shipped_versions.items():
