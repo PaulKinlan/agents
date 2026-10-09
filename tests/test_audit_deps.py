@@ -200,6 +200,52 @@ Requires-Dist: urllib3 == 1.26.5
         self.assertIn("2.28.0 vs 2.25.1", divergence[0]["title"])
         self.assertIn("sample-1.0.0-py3-none-any.whl", divergence[0]["path"])
 
+    def test_python_prefix_specifier_does_not_emit_divergence(self):
+        """[agents-nna] A requirements prefix-match ('foo == 1.*') must not become an empty baseline.
+
+        Mirrors the npm null-version test: an empty cleaned semver must be dropped, not stored
+        as '' and then compared against a real shipped version (false medium divergence).
+        """
+        (self.repo / "requirements.txt").write_text("foo == 1.*\n", encoding="utf-8")
+
+        dist = self.repo / "dist"
+        dist.mkdir()
+        whl = dist / "sample-1.0.0-py3-none-any.whl"
+        with zipfile.ZipFile(whl, "w") as z:
+            z.writestr("sample-1.0.0.dist-info/METADATA", """Metadata-Version: 2.1
+Name: sample
+Version: 1.0.0
+Requires-Dist: foo == 1.0.0
+""")
+
+        candidates, _ = audit_deps.audit_python(self.repo)
+        divergence = [c for c in candidates if c.get("rule_id") == "lockfile-shipped-version-divergence"]
+        self.assertEqual(divergence, [])
+
+    def test_python_wheel_non_concrete_version_does_not_emit_medium_divergence(self):
+        """[agents-nna] A wheel Requires-Dist that is not a concrete version must not be stored.
+
+        Without the guard, shipped_versions[pkg] = ('', rel) compares '' against the real
+        requirements version and emits a false medium divergence; with it, only the info
+        coverage-gap (version unverified) remains.
+        """
+        (self.repo / "requirements.txt").write_text("foo==1.0.0\n", encoding="utf-8")
+
+        dist = self.repo / "dist"
+        dist.mkdir()
+        whl = dist / "sample-1.0.0-py3-none-any.whl"
+        with zipfile.ZipFile(whl, "w") as z:
+            z.writestr("sample-1.0.0.dist-info/METADATA", """Metadata-Version: 2.1
+Name: sample
+Version: 1.0.0
+Requires-Dist: foo == 1.*
+""")
+
+        candidates, _ = audit_deps.audit_python(self.repo)
+        medium = [c for c in candidates if c.get("rule_id") == "lockfile-shipped-version-divergence"
+                  and c.get("severity") == "medium"]
+        self.assertEqual(medium, [])
+
     def test_peer_dependency_range_not_treated_as_shipped_version(self):
         """[agents-gtq review P2] A peerDependencies RANGE is not the shipped version.
 

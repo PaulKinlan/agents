@@ -293,7 +293,8 @@ def get_python_requirements_versions(target_dir: Path) -> Dict[str, str]:
                     parts = line.split("==", 1)
                     pkg = parts[0].strip()
                     ver = clean_semver(parts[1].split(";")[0].strip())
-                    versions[pkg] = ver
+                    if ver:  # agents-nna: never store an empty semver (e.g. a 'foo == 1.*' prefix)
+                        versions[pkg] = ver
         except Exception:
             pass
     return versions
@@ -328,7 +329,8 @@ def check_shipped_artifact_divergence_python(
                                             sparts = spec.split("==", 1)
                                             pkg = sparts[0].strip().split()[0]
                                             ver = clean_semver(sparts[1].split(";")[0].strip())
-                                            shipped_versions[pkg] = (ver, rel_f)
+                                            if ver:  # agents-nna: never store an empty semver
+                                                shipped_versions[pkg] = (ver, rel_f)
                 except Exception:
                     pass
         if has_wheels:
