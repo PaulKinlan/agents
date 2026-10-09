@@ -43,6 +43,19 @@ EXTERNAL_REPO_INDICATORS = {
     "google-github-actions/", "actions/"
 }
 
+# The build/test/output containers a station's SKILL.md prose uses for the AUDITED project's
+# artefacts (agents-6zq). Deliberately NARROWER than GENERIC_DIR_NAMES, which also holds this
+# repository's own source roots: a SKILL.md reference under `lib/`, `docs/`, `tools/` or
+# `scripts/` is a claim about THIS repo and must stay checkable - lib/adapters/gha.sh was the
+# one genuine drift found in this repository, and a wider list hid it.
+TARGET_LAYOUT_DIR_NAMES = {
+    "dist", "build", "out", "output", "coverage", "generated", "bundle", "bundles",
+    "test", "tests", "spec", "specs", "e2e", "fixtures", "fixture",
+    "node_modules", "vendor", "tmp", "temp", "cache",
+    "extension", "extensions", "pages", "page", "src", "source", "sources",
+    "public", "static", "assets", "samples", "examples", "screenshots", "images", "img",
+}
+
 # Bare DIRECTORY names that are too generic to resolve by name anywhere in the tree.
 # `src/`, `build/` and friends appear in nearly every project, so a document naming one
 # is almost always describing the TARGET project's layout, not this repository's; letting
@@ -187,6 +200,79 @@ def _dir_name_counts(target_dir: Path) -> Dict[str, int]:
                 counts[lowered] = counts.get(lowered, 0) + 1
         _DIR_INDEX_CACHE[key] = counts
     return _DIR_INDEX_CACHE[key]
+
+def is_station_skill(rel_doc: str) -> bool:
+    """True for a station's SKILL.md, which documents auditing an ARBITRARY target."""
+    return rel_doc.startswith("agents/") and rel_doc.endswith("SKILL.md")
+
+
+def skill_reference_is_checkable(target_dir: Path, doc_dir: Path, ref: str) -> bool:
+    """Decide whether a MISSING path in a station SKILL.md is a claim about THIS repo.
+
+    A station's SKILL.md describes how the station audits a target project, so its prose
+    names the target's layout as often as this repository's own files. Measured on the
+    2026-10-09 tree (agents-6zq): 31 of the 31 SKILL.md candidates were target-facing or
+    not paths at all, while 49 SKILL.md references that DO resolve - every station's own
+    scripts/*.py among them - would stop being checked if SKILL.md were skipped entirely.
+    So the four target-facing shapes are skipped rather than the file:
+
+      1. a generic container name (`dist/`, `tests/`, `fixtures/`, `src/`, ...);
+      2. a prose token with no path shape (`try/catch`, `downloadToDir()`);
+      3. a template or placeholder (`<feature-id>`, `scripts/*journey*.ts`);
+      4. a code fragment (newline, quote or brace).
+
+    Everything else is checked, and the key that keeps the station's own files reportable
+    is that a surviving reference needs a directory prefix that exists relative to the
+    station or the repo root - so renaming agents/docs-drift/scripts/check_docs.py still
+    fails the check (`scripts` is a real directory next to the SKILL.md).
+
+    Precedence was settled by measuring, not taste, because the first two versions of this
+    filter each hid a genuine reference:
+
+      * a head that is a directory NEXT TO the SKILL.md is the station's own tree
+        (`scripts/scan.py`, `report.schema.json`) - always checkable, even though `scripts`
+        is also a generic word;
+      * a head that is a TRACKED directory at the repo root is first-party
+        (`lib/adapters/gha.sh`, the one genuine drift in this repository) - checkable;
+      * anything else names the audited target's layout and is skipped.
+
+    The list consulted here is TARGET_LAYOUT_DIR_NAMES, NOT GENERIC_DIR_NAMES, even though
+    shape 1 was specified as the latter. GENERIC_DIR_NAMES holds every name a bare reference
+    may not be satisfied by elsewhere in the tree and includes this repository's own source
+    roots (`lib/`, `docs/`, `tools/`, `scripts/`), so applying it here is what hid
+    lib/adapters/gha.sh. The first attempt at shape 1 was also unreachable in effect: a bare
+    `dist/` either resolves (so no candidate is produced) or its head is not a directory (so
+    the fallback below rejects it anyway) - proved by sweeping 32 bare-container scenarios,
+    where removing the guard changed nothing. TARGET_LAYOUT_DIR_NAMES is what station prose
+    actually uses for the audited project's artefacts, and it is live: without it, a host
+    repo that really contains a tracked `dist/` or `test/` directory would report
+    `dist/bundle.js` and `test/interpolate.test.js` as drift. GENERIC_DIR_NAMES keeps its own,
+    still-needed job in path_exists_or_matches().
+    """
+    if not ref:
+        return False
+    if any(c in ref for c in '\n"\'{}\\'):
+        return False                                     # 4. code fragment
+    if any(c in ref for c in "<>*"):
+        return False                                     # 3. template / placeholder
+    if any(c in ref for c in "()"):
+        return False                                     # 2. call syntax, not a path
+    # removeprefix, NOT lstrip: lstrip("./") is a character set and ate the dot of
+    # `.github/workflows/ci.yml`, so that head became "github" and a genuine first-party
+    # claim was silently skipped (review of 58f9931).
+    clean = ref.removeprefix("./")
+    if "/" not in clean:
+        # A bare name is not a repo-relative claim, and the resolver's own name index
+        # already covers the case where a sibling with that name exists.
+        return False
+    head = clean.split("/", 1)[0]
+    if (doc_dir / head).is_dir():
+        return True                                      # the station's own directory
+    if head.lower() in TARGET_LAYOUT_DIR_NAMES:
+        return False                                     # 1. the audited target's layout
+    return ((target_dir / head).is_dir()
+            and _indexed(_git_paths(target_dir, "tracked"), head))
+
 
 def expand_path_braces(path_str: str) -> List[str]:
     """Expands brace expressions like lib/adapters/{antigravity,claude,pi}.sh"""
@@ -360,6 +446,9 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
             continue
 
         rel_doc = str(doc_path.relative_to(target_dir))
+        # A station SKILL.md documents auditing an arbitrary target, so its prose is
+        # filtered by skill_reference_is_checkable() below (agents-6zq).
+        check_skill_paths = is_station_skill(rel_doc)
         doc_dir = doc_path.parent
         try:
             content = doc_path.read_text(encoding="utf-8", errors="ignore")
@@ -375,6 +464,9 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
             for exp_p in expanded:
                 exists, _ = path_exists_or_matches(target_dir, doc_dir, exp_p)
                 if not exists:
+                    if check_skill_paths and not skill_reference_is_checkable(
+                            target_dir, doc_dir, exp_p):
+                        continue
                     _, was_deleted = git_tracked_or_deleted(target_dir, exp_p)
                     rule_id = "doc-deleted-reference" if was_deleted else "doc-missing-file"
                     candidates.append({
@@ -511,6 +603,9 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
                     for exp_p in expanded_paths:
                         exists, is_wc = path_exists_or_matches(target_dir, doc_dir, exp_p)
                         if not exists:
+                            if check_skill_paths and not skill_reference_is_checkable(
+                                    target_dir, doc_dir, exp_p):
+                                continue
                             _, was_deleted = git_tracked_or_deleted(target_dir, exp_p)
                             rule_id = "doc-deleted-reference" if was_deleted else "doc-missing-file"
                             candidates.append({
