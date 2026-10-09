@@ -81,7 +81,7 @@ class ParseTest(unittest.TestCase):
 
     def test_parse_non_numeric_port_exits(self):
         """agents-m5r: non-numeric port raises clean SystemExit instead of ValueError."""
-        for bad in ["abc=/tmp/x", "80a=/tmp/x", "=/tmp/x", " 8080=/tmp/x"]:
+        for bad in ["abc=/tmp/x", "80a=/tmp/x", "=/tmp/x", " 8080=/tmp/x", "²=/tmp/x", "８０=/tmp/x"]:
             with self.subTest(spec=bad):
                 with self.assertRaises(SystemExit) as ctx:
                     net_forward._parse(["--forward", bad, "--", "true"])

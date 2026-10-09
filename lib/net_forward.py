@@ -101,7 +101,7 @@ def _parse(argv: Sequence[str]) -> Tuple[List[Tuple[int, str]], List[str]]:
             if not sep or not path:
                 raise SystemExit(f"net_forward: bad --forward {argv[i]!r} (want PORT=PATH)")
             try:
-                if not port_s.isdigit():
+                if not (port_s.isascii() and port_s.isdigit()):
                     raise ValueError
                 port = int(port_s)
                 if not (1 <= port <= 65535):
