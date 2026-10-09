@@ -58,11 +58,11 @@ class _Marker:
 
 
 class LineSandbox:
-    def __init__(self, root: Path, halt: bool, stations) -> None:
+    def __init__(self, root: Path, halt: bool, stations, andon_stations=None) -> None:
         self.root = root
         self.target = root / "target"
         self.bin = root / "bin"
-        self._build(halt, stations)
+        self._build(halt, stations, andon_stations)
 
     @property
     def marker(self):
@@ -80,14 +80,16 @@ class LineSandbox:
             encoding="utf-8",
         )
 
-    def _build(self, halt: bool, stations) -> None:
+    def _build(self, halt: bool, stations, andon_stations=None) -> None:
         self._agent("okprobe")
         self._agent("failprobe")
         (self.root / "lines").mkdir()
         station_lines = "".join(f"  - {station}\n" for station in stations)
+        andon_line = f"andon_stations: {json.dumps(andon_stations)}\n" if andon_stations is not None else ""
         (self.root / "lines" / "testline.yaml").write_text(
             "name: testline\n"
             f"andon_halt_on_failure: {'true' if halt else 'false'}\n"
+            f"{andon_line}"
             "stations:\n"
             f"{station_lines}",
             encoding="utf-8",
@@ -143,8 +145,8 @@ class LineSandbox:
 
 
 class TestLineAndon(unittest.TestCase):
-    def _sandbox(self, tmpdir: str, halt: bool, stations) -> LineSandbox:
-        sandbox = LineSandbox(Path(tmpdir), halt=halt, stations=stations)
+    def _sandbox(self, tmpdir: str, halt: bool, stations, andon_stations=None) -> LineSandbox:
+        sandbox = LineSandbox(Path(tmpdir), halt=halt, stations=stations, andon_stations=andon_stations)
         shutil.copyfile(ROOT / "factory", sandbox.root / "factory")
         (sandbox.root / "factory").chmod(0o755)
         return sandbox
@@ -476,6 +478,68 @@ class TestLineAndon(unittest.TestCase):
             # Each per-attempt broker UNIX socket is gone. Do not claim that binding
             # 127.0.0.1:8384 on the HOST proves the relay's child-facing port is free:
             # the relay listened in a separate --unshare-net namespace.
+
+    def test_non_gated_station_timeout_degrades_and_continues_not_halts(self):
+        """agents-7ms: a station timeout in a non-gate station must NOT halt the line and skip
+        downstream stations. It records TIMEOUT, marks the line INCOMPLETE (fails), and downstream
+        stations continue running."""
+        from lib.budget import StationTimeout
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["timeoutprobe", "okprobe"],
+                                    andon_stations=["secret-scan", "vuln-triage"])
+
+            def fake_run_agent(agent_name, *a, **k):
+                if agent_name == "timeoutprobe":
+                    raise StationTimeout("timeoutprobe: engine 'pi' exceeded 5 min budget; killed")
+                return {"report": {"summary": "ok", "findings": [], "scanned_files": 1},
+                        "fragment": None, "run_dir": tmpdir}
+
+            with mock.patch.object(factory_cli, "run_agent", side_effect=fake_run_agent):
+                result, output = sandbox.run()
+
+            self.assertFalse(result, "a line with a timed-out station must report failure (INCOMPLETE)")
+            self.assertIn("INCOMPLETE", output)
+            self.assertNotIn("HALTED", output)
+            self.assertNotIn("SKIPPED", output)
+            self.assertIn("timeoutprobe", output)
+            self.assertIn("TIMEOUT", output)
+            self.assertIn("TIMED OUT", output)
+            self.assertIn("okprobe", output)
+            self.assertIn("PASS", output)
+
+    def test_gated_station_timeout_halts_the_line(self):
+        """agents-7ms: a station timeout in an explicit Andon gate station MUST halt the line."""
+        from lib.budget import StationTimeout
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["gatetimeout", "okprobe"],
+                                    andon_stations=["gatetimeout"])
+
+            def fake_run_agent(agent_name, *a, **k):
+                if agent_name == "gatetimeout":
+                    raise StationTimeout("gatetimeout: engine 'pi' exceeded budget; killed")
+                return {"report": {"summary": "ok", "findings": [], "scanned_files": 1},
+                        "fragment": None, "run_dir": tmpdir}
+
+            with mock.patch.object(factory_cli, "run_agent", side_effect=fake_run_agent):
+                result, output = sandbox.run()
+
+            self.assertFalse(result, "a halted line must report failure")
+            self.assertIn("HALTED", output)
+            self.assertIn("gatetimeout", output)
+            self.assertIn("TIMEOUT", output)
+            self.assertIn("okprobe", output)
+            self.assertIn("SKIPPED", output)
+
+    def test_vuln_discovery_budget_is_at_least_twenty_minutes(self):
+        """agents-7ms: vuln-discovery agent.yaml budget.max_minutes must be >= 20."""
+        import yaml
+        agent_yaml = ROOT / "agents" / "vuln-discovery" / "agent.yaml"
+        cfg = yaml.safe_load(agent_yaml.read_text(encoding="utf-8"))
+        max_minutes = cfg.get("budget", {}).get("max_minutes")
+        self.assertIsNotNone(max_minutes)
+        self.assertGreaterEqual(float(max_minutes), 20.0)
 
 
 if __name__ == "__main__":

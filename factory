@@ -1685,6 +1685,24 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
             scorecard.append({"station": st_agent, "status": "ERROR", "findings_count": None,
                               "criticals": None, "error": f"no verdict after repair-retry: {e}"})
             # No break: fall through to the next station.
+        except StationTimeout as e:
+            # A station exceeded its declared budget (agents-7ms).
+            # If the station is an Andon gate, halt the line; otherwise record TIMEOUT
+            # and CONTINUE so downstream independent stations are not starved.
+            # The line is marked INCOMPLETE and fails, never reading as clean PASS.
+            station_gated = ("*" in andon_stations) or (st_agent in andon_stations)
+            if halt_on_failure and station_gated:
+                print(f"\n🚨 [ANDON CORD PULLED] Gate station '{st_agent}' timed out: {e}")
+                scorecard.append({"station": st_agent, "status": "TIMEOUT", "findings_count": None,
+                                  "criticals": None, "error": str(e)})
+                line_halted = True
+                break
+            else:
+                print(f"\n  ⏱️ [timeout] Station '{st_agent}' timed out: {e}")
+                print(f"     Marking it TIMEOUT and CONTINUING; the line is INCOMPLETE, not halted.")
+                scorecard.append({"station": st_agent, "status": "TIMEOUT", "findings_count": None,
+                                  "criticals": None, "error": str(e)})
+                # No break: fall through to the next station.
         except SystemExit as e:
             # A station that fails closed calls sys.exit (run_agent does it when an adapter
             # produces no model output). SystemExit is not an Exception, so without this branch
@@ -1737,6 +1755,10 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         if env_fails:
             print(f"🚨 {len(env_fails)} station(s) encountered ENVIRONMENT FAILURE (adapter auth): "
                   f"{', '.join(sc['station'] for sc in env_fails)}.\n")
+        timeouts = [sc for sc in scorecard if sc["status"] == "TIMEOUT"]
+        if timeouts:
+            print(f"⏱️  {len(timeouts)} station(s) TIMED OUT: "
+                  f"{', '.join(sc['station'] for sc in timeouts)}.\n")
         other_errored = [sc for sc in errored if sc["status"] != "ENV_FAILURE"]
         if other_errored:
             print(f"⚠️  {len(other_errored)} station(s) produced no verdict: "
