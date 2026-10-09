@@ -21,3 +21,7 @@ stations:
 # available (non-negotiable #3). Pin per station when it is:
 # station_engines:
 #   vuln-verify: claude
+#
+# To audit the software factory itself, point --target at a separate clean clone (or run from
+# a different factory root). Scanning the running checkout is refused because it overlaps
+# the factory findings store.

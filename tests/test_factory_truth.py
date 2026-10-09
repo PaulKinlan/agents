@@ -304,19 +304,51 @@ class TestNoVerdictIsAnError(SandboxCase):
                 factory_cli.resolve_target("ghost")
 
     def test_a_target_overlapping_the_findings_store_is_refused(self):
-        """agents-4zg round 4: a raw target whose path overlaps the findings store (equal,
-        inside, or an ancestor) is rejected at resolution, so it cannot re-expose the store
-        through its read-only bind."""
+        """agents-4zg round 4, agents-3da: a raw target whose path overlaps the findings store
+        (equal, inside, or an ancestor) is rejected at resolution, so it cannot re-expose the store
+        through its read-only bind. When targeting the factory root itself, the refusal includes
+        actionable guidance."""
         findings = self.box.root / "findings"
         findings.mkdir()
         (findings / "sub").mkdir()
         with self.box.patched():
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaises(FileNotFoundError) as ctx_eq:
                 factory_cli.resolve_target(str(findings))  # equal
-            with self.assertRaises(FileNotFoundError):
+            self.assertIn("refusing to scan a raw credential store as a target", str(ctx_eq.exception))
+            self.assertNotIn("to audit the software factory itself", str(ctx_eq.exception))
+
+            with self.assertRaises(FileNotFoundError) as ctx_in:
                 factory_cli.resolve_target(str(findings / "sub"))  # inside
-            with self.assertRaises(FileNotFoundError):
-                factory_cli.resolve_target(str(self.box.root))  # ancestor (contains it)
+            self.assertIn("refusing to scan a raw credential store as a target", str(ctx_in.exception))
+            self.assertNotIn("to audit the software factory itself", str(ctx_in.exception))
+
+            # Ancestor that merely contains the findings directory (not the factory root itself)
+            with self.assertRaises(FileNotFoundError) as ctx_anc:
+                factory_cli.resolve_target(str(self.box.root.parent))  # ancestor containing findings
+            self.assertIn("refusing to scan a raw credential store as a target", str(ctx_anc.exception))
+            self.assertNotIn("to audit the software factory itself", str(ctx_anc.exception))
+
+            # Self-target case: running against the factory root itself carries actionable guidance
+            with self.assertRaises(FileNotFoundError) as ctx_self:
+                factory_cli.resolve_target(str(self.box.root))  # self-target
+            self.assertIn("refusing to scan a raw credential store as a target", str(ctx_self.exception))
+            self.assertIn(
+                "to audit the software factory itself, run the line from a different factory root, or point --target at a separate clean clone",
+                str(ctx_self.exception),
+            )
+
+            # Named target pointing to the factory root also carries actionable guidance
+            (self.box.root / "targets").mkdir(exist_ok=True)
+            (self.box.root / "targets" / "self_target.yaml").write_text(
+                f"name: self_target\npath: {self.box.root}\n", encoding="utf-8"
+            )
+            with self.assertRaises(FileNotFoundError) as ctx_named:
+                factory_cli.resolve_target("self_target")
+            self.assertIn("refusing to scan a raw credential store as a target", str(ctx_named.exception))
+            self.assertIn(
+                "to audit the software factory itself, run the line from a different factory root, or point --target at a separate clean clone",
+                str(ctx_named.exception),
+            )
 
 
 class TestOneSeveritySource(SandboxCase):
