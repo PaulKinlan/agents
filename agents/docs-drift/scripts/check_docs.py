@@ -124,7 +124,6 @@ def get_markdown_headings(file_path: Path) -> Set[str]:
 GIT_INDEX_TIMEOUT_SECONDS = 120
 _GIT_INDEX_CACHE: Dict[Tuple[str, str], List[str]] = {}
 _NAME_INDEX_CACHE: Dict[str, Set[str]] = {}
-_DIR_INDEX_CACHE: Dict[str, Dict[str, int]] = {}
 
 
 def _git_paths(target_dir: Path, kind: str) -> List[str]:
@@ -185,29 +184,6 @@ def _file_names(target_dir: Path) -> Set[str]:
         _NAME_INDEX_CACHE[key] = names
     return _NAME_INDEX_CACHE[key]
 
-
-def _dir_name_counts(target_dir: Path) -> Dict[str, int]:
-    """How many distinct directories carry each name (walked once, cached).
-
-    Used to keep the bare-name fallback honest: a name that occurs once is unambiguous,
-    while `scripts` (22 directories in this repo) is not, so a document naming a
-    `scripts/` directory that no longer exists where it claims is still reported.
-
-    Keys are lower-cased so `Scripts/` and `scripts/` cannot each look unique, and the
-    walk skips the same IGNORE_DIRS the scanner itself ignores - otherwise a
-    `node_modules/pkg/<name>` directory appearing or disappearing (whether dependencies
-    happen to be installed on this VM) would silently change what counts as unique.
-    """
-    key = str(target_dir)
-    if key not in _DIR_INDEX_CACHE:
-        counts: Dict[str, int] = {}
-        for _root, dirs, _files in os.walk(target_dir):
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-            for d in dirs:
-                lowered = d.lower()
-                counts[lowered] = counts.get(lowered, 0) + 1
-        _DIR_INDEX_CACHE[key] = counts
-    return _DIR_INDEX_CACHE[key]
 
 def is_station_skill(rel_doc: str) -> bool:
     """True for a station's SKILL.md, which documents auditing an ARBITRARY target."""
@@ -328,22 +304,15 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     except Exception:
         pass
 
-    # Bare name searches. A document may name a file or directory by name alone when the
+    # Bare filename searches. A document may name a file by name alone when the
     # full path is obvious in context, and this repo's own docs rely on it: `PLAN.md`,
-    # `DESIGN.md` and `INTEGRATION.md` in AGENTS.md all match by name, as does `audits/`
-    # (only `docs/audits/` exists) - reporting that one was the agents-04h false positive.
+    # `DESIGN.md` and `INTEGRATION.md` in AGENTS.md all match by filename.
     #
-    # It is deliberately narrow for directories. A bare directory name resolves only when
-    # it is unambiguously ONE directory in the whole tree and is not a generic container
-    # word. An unconditional name search hid real drift: `scripts/` occurs 22 times
-    # (`agents/*/scripts/`), so `scripts/` in README.md - which does not exist at the repo
-    # root it describes - was silently swallowed (review of 946b23e).
-    if "/" not in clean_p:
-        if "." in clean_p and clean_p in _file_names(target_dir):
-            return True, False
-        if (clean_p.lower() not in GENERIC_DIR_NAMES
-                and _dir_name_counts(target_dir).get(clean_p.lower()) == 1):
-            return True, False
+    # Bare directory matching (e.g. `audits/` resolving to `docs/audits/`) was retired
+    # (agents-vdb) to eliminate ambiguity (the README-root collapse was caused by this
+    # heuristic misfiring). Directories must be referenced with their actual path.
+    if "/" not in clean_p and "." in clean_p and clean_p in _file_names(target_dir):
+        return True, False
 
     return False, False
 

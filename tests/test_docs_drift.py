@@ -108,28 +108,42 @@ class TestTreeDiagramParser(unittest.TestCase):
         references = {c["reference"] for c in candidates}
         for agent_dir in ("secret-scan/", "threat-model/", "vuln-triage/", "qa-station/"):
             self.assertNotIn(agent_dir, references)
-        # The context-relative directory name from AGENTS.md/CLAUDE.md resolves by name
-        # (`docs/audits/` exists), like its siblings PLAN.md/DESIGN.md/INTEGRATION.md.
-        self.assertNotIn("audits/", references)
+        # The explicit path docs/audits/ from AGENTS.md/CLAUDE.md resolves directly.
+        self.assertNotIn("docs/audits/", references)
 
-    def test_context_relative_directory_resolves_by_name(self):
-        """A directory named without its parent resolves when that name exists in the repo."""
+    def test_bare_directory_fallback_is_retired(self):
+        """[agents-vdb] Bare directory names do NOT resolve by name lookup alone.
+
+        A document referencing a bare directory name (e.g. `audits/`) when only a nested
+        directory exists (`docs/audits/`) must be reported as missing; documents must
+        name the actual path.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             (tmp / "docs" / "audits").mkdir(parents=True)
             (tmp / "docs" / "audits" / "note.md").write_text("# note\n")
+            (tmp / "docs" / "PLAN.md").write_text("# plan\n")
             (tmp / "AGENTS.md").write_text(
                 "Internal material: `PLAN.md` and `audits/` live in docs.\n")
             references = {c["reference"] for c in check_docs.scan_target(tmp)}
-            self.assertNotIn("audits/", references)
+            self.assertIn("audits/", references)
+            self.assertNotIn("PLAN.md", references)
+
+    def test_explicit_directory_path_resolves(self):
+        """[agents-vdb] An explicitly qualified directory path resolves without issue."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "docs" / "audits").mkdir(parents=True)
+            (tmp / "docs" / "audits" / "note.md").write_text("# note\n")
+            (tmp / "docs" / "PLAN.md").write_text("# plan\n")
+            (tmp / "AGENTS.md").write_text(
+                "Internal material: `PLAN.md` and `docs/audits/` live in docs.\n")
+            references = {c["reference"] for c in check_docs.scan_target(tmp)}
+            self.assertNotIn("docs/audits/", references)
+            self.assertNotIn("PLAN.md", references)
 
     def test_ambiguous_directory_name_is_still_reported(self):
-        """The guard rail for the name fallback: `scripts/` is ambiguous, so drift survives.
-
-        This is the drift the review of 946b23e caught: an unconditional name search let a
-        `scripts/` reference match `agents/*/scripts/` and silenced a claim about a
-        directory that does not exist at the level the document describes.
-        """
+        """The guard rail: `scripts/` does not exist at root, so drift survives."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             for agent in ("alpha", "beta"):
@@ -146,44 +160,6 @@ class TestTreeDiagramParser(unittest.TestCase):
             (tmp / "README.md").write_text("Sources live in `src/`.\n")
             references = {c["reference"] for c in check_docs.scan_target(tmp)}
             self.assertIn("src/", references)
-
-    def test_uniqueness_does_not_depend_on_installed_dependencies(self):
-        """A name must not stop being unique because node_modules happens to be present.
-
-        The walk skips the directories the scanner itself ignores, so resolution cannot
-        change between a clean checkout and one with dependencies installed (review of
-        0b9e460).
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            (tmp / "docs" / "audits").mkdir(parents=True)
-            (tmp / "node_modules" / "pkg" / "audits").mkdir(parents=True)
-            (tmp / "README.md").write_text("Internal notes live in `audits/`.\n")
-            references = {c["reference"] for c in check_docs.scan_target(tmp)}
-            self.assertNotIn("audits/", references)
-
-    def test_case_variants_cannot_each_look_unique(self):
-        """`Audits/` and `audits/` are one ambiguous name, not two unique ones.
-
-        The count is keyed on the lower-cased name so a document cannot resolve its
-        `audits/` against one case variant while the other is what it meant.
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            (tmp / "Audits").mkdir()
-            (tmp / "legacy" / "audits").mkdir(parents=True)
-            (tmp / "README.md").write_text("Internal notes live in `audits/`.\n")
-            references = {c["reference"] for c in check_docs.scan_target(tmp)}
-            self.assertIn("audits/", references)
-
-    def test_unique_non_generic_directory_still_resolves(self):
-        """The intended case: exactly one `audits/` anywhere resolves the name."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            (tmp / "docs" / "audits").mkdir(parents=True)
-            (tmp / "README.md").write_text("Internal notes live in `audits/`.\n")
-            references = {c["reference"] for c in check_docs.scan_target(tmp)}
-            self.assertNotIn("audits/", references)
 
     def test_uri_schemes_are_not_paths(self):
         """`file://` and `chrome://extensions` are URLs, not repository paths."""
