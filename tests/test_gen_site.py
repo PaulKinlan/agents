@@ -12,10 +12,12 @@ from tools.gen_site import (
     ROOT,
     DOCS,
     PAGE_MARKERS,
+    ACTION_PIN,
     generate_all,
     get_agents,
     get_lines,
     get_cli_commands,
+    render_install_action,
     replace_region,
     validate_safety,
 )
@@ -304,6 +306,22 @@ capabilities:
         self.assertNotIn(" 22 ", gen_site_source)
         self.assertNotIn('"22"', gen_site_source)
         self.assertNotIn("'22'", gen_site_source)
+
+    def test_action_pin_verification(self):
+        """Action pin must exist in git history and bogus pins must fail closed."""
+        from unittest.mock import patch
+
+        # Real pin exists in git and renders successfully
+        content = render_install_action(ROOT)
+        self.assertIn(f"paulkinlan/agents/.github/actions/factory@{ACTION_PIN}", content)
+        self.assertIn(f"factory_ref: {ACTION_PIN}", content)
+
+        # Bogus 40-character hex sha that does not exist in repository history
+        bogus_sha = "0123456789abcdef0123456789abcdef01234567"
+        with patch("tools.gen_site.ACTION_PIN", bogus_sha):
+            with self.assertRaises(ValueError) as ctx:
+                render_install_action(ROOT)
+            self.assertIn(f"Action pin commit {bogus_sha} not found in repository history", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ Generates and updates the designated regions in docs/*.html from
 repository declarations (agents/*/agent.yaml, lines/*.yaml, factory CLI tree,
 and installation contracts).
 
-Stdlib-only Python 3 (PyYAML used if present, with a stdlib fallback parser).
+Stdlib-only Python 3 (stdlib-only fail-closed YAML parser; no external dependencies).
 Follows docs/DESIGN.md.
 """
 
@@ -453,7 +453,12 @@ def render_install_auth() -> str:
 def render_install_action(repo_root: Path) -> str:
     """Render GENERATED:install-action with pinned commit and input contract."""
     # Verify commit exists in git
-    res = subprocess.run(["git", "rev-parse", "--verify", ACTION_PIN], cwd=repo_root, capture_output=True, text=True)
+    res = subprocess.run(
+        ["git", "cat-file", "-e", f"{ACTION_PIN}^{{commit}}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
     if res.returncode != 0:
         raise ValueError(f"Action pin commit {ACTION_PIN} not found in repository history")
 
