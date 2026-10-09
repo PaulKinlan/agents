@@ -21,6 +21,7 @@ from lib.findings import (  # noqa: E402
     FindingsStore,
     bind_candidates,
     compute_fingerprint,
+    known_scanner_rule_ids,
     load_candidate_index,
     normalize_path,
 )
@@ -245,3 +246,97 @@ class TestBindingNeverDestroysARealLocation(unittest.TestCase):
         for rootish in (".", "./", "sub/..", "."):
             _, path = bind_candidates(finding(path=rootish), self.CONTEXT_INDEX, target_dir=self.target)
             self.assertEqual(path, "unknown", f"{rootish!r} must not count as a location")
+
+
+class TestRuleIdParityWithABound(unittest.TestCase):
+    """agents-v4q: keep a model rule_id only when it is real, by coord's approved bound.
+
+    Condition (a) the record's path resolves inside the target, and (b) the id is one the
+    station's OWN deterministic scanners declare. A model-authored label (vuln-discovery's
+    `scanner-self-output-not-excluded`, threat-model's `tm-*`) is not a scanner rule id, so it
+    stays `unclassified` - the guard that stops a report looking like the deterministic scanner
+    found something is intact. Measured on the 18 real run outputs: 13 of 55 model rule_ids are
+    kept, 0 fabrications are, and the observed 0tl case keeps 0 of 7.
+    """
+
+    CONTEXT_INDEX = {"rule_ids": {"threat-model-context"}, "paths": {"THREAT_MODEL.md"}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self.tmp.name)
+        (self.target / "lib").mkdir()
+        (self.target / "lib" / "real.py").write_text("x = 1\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _bind(self, rule_id, path, agent):
+        return bind_candidates(finding(rule_id=rule_id, path=path), self.CONTEXT_INDEX,
+                              self.target, known_scanner_rule_ids(agent))
+
+    def test_a_declared_rule_id_with_a_real_path_is_kept(self):
+        real = sorted(known_scanner_rule_ids("docs-drift"))[0]
+        self.assertEqual(self._bind(real, "lib/real.py", "docs-drift"), (real, "lib/real.py"))
+
+    def test_an_invented_rule_id_is_still_unclassified(self):
+        """The observed 0tl labels: not scanner rule ids, so still blanked."""
+        for invented in ("scanner-self-output-not-excluded", "path-traversal-unsanitized-relative-path"):
+            self.assertEqual(self._bind(invented, "lib/real.py", "vuln-discovery")[0], "unclassified")
+
+    def test_a_declared_rule_id_on_an_invented_path_is_unclassified(self):
+        """Condition (a) alone is not enough - the location must be real too."""
+        real = sorted(known_scanner_rule_ids("docs-drift"))[0]
+        rule_id, path = self._bind(real, "lib/invented.py", "docs-drift")
+        self.assertEqual((rule_id, path), ("unclassified", "unknown"))
+
+    def test_another_stations_rule_id_is_not_accepted(self):
+        """A model cannot borrow a real id from a different station to look deterministic."""
+        self.assertEqual("generic-api-key" in known_scanner_rule_ids("modern-web"), False)
+        self.assertEqual(self._bind("generic-api-key", "lib/real.py", "modern-web")[0], "unclassified")
+
+    def test_the_registry_reads_both_declaration_shapes(self):
+        """dict literals ('rule_id') and (id, re.compile(...)) detector tuples."""
+        self.assertIn("legacy-viewport-media-for-components", known_scanner_rule_ids("modern-web"))
+        self.assertIn("aws-access-key", known_scanner_rule_ids("secret-scan"))
+        self.assertIn("code-execution", known_scanner_rule_ids("threat-model"))
+
+    def test_the_registry_is_per_station(self):
+        self.assertIn("generic-api-key", known_scanner_rule_ids("secret-scan"))
+        self.assertNotIn("generic-api-key", known_scanner_rule_ids("docs-drift"))
+
+    def test_the_observed_0tl_case_is_unchanged_end_to_end(self):
+        """Through the store: the 7 real findings keep their PATH and stay unclassified."""
+        store = FindingsStore("v4q", findings_dir=self.target / "store")
+        try:
+            processed, _, _ = store.process_run(
+                agent="vuln-discovery",
+                raw_findings=[finding(rule_id="scanner-self-output-not-excluded",
+                                      path="lib/real.py", title="observed 0tl case")],
+                candidate_index=self.CONTEXT_INDEX,
+                target_dir=self.target,
+            )
+        finally:
+            store.close()
+        self.assertEqual(processed[0]["path"], "lib/real.py")
+        self.assertEqual(processed[0]["rule_id"], "unclassified")
+
+    def test_a_real_scanner_classification_survives_end_to_end(self):
+        """Through the store: a genuine scanner id on a real path is no longer erased."""
+        real = sorted(known_scanner_rule_ids("docs-drift"))[0]
+        store = FindingsStore("v4q2", findings_dir=self.target / "store2")
+        try:
+            processed, _, _ = store.process_run(
+                agent="docs-drift",
+                raw_findings=[finding(rule_id=real, path="lib/real.py", title="real rule id")],
+                candidate_index=self.CONTEXT_INDEX,
+                target_dir=self.target,
+            )
+        finally:
+            store.close()
+        self.assertEqual(processed[0]["rule_id"], real)
+        self.assertEqual(processed[0]["path"], "lib/real.py")
+
+    def test_no_registry_supplied_keeps_the_previous_behaviour(self):
+        """Callers that do not pass a registry get the old, conservative blanking."""
+        self.assertEqual(bind_candidates(finding(rule_id="anything", path="lib/real.py"),
+                                         self.CONTEXT_INDEX, self.target)[0], "unclassified")
