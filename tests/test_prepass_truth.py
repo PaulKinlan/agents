@@ -139,9 +139,15 @@ class TestPrepassFixes(unittest.TestCase):
             pos += 1
         block = content[open_brace + 1:pos - 1]
         self.assertIn(".btn", block)
-        self.assertIn(".doc-card", block)
         self.assertIn("transition: none", block)
         self.assertIn("transform: none", block)
+
+    def test_product_css_doc_card_has_no_hover_lift(self):
+        """[agents-7nh] docs/css/product.css does not style non-interactive .doc-card with a link-like hover lift."""
+        product_css = ROOT / "docs" / "css" / "product.css"
+        self.assertTrue(product_css.exists())
+        content = product_css.read_text(encoding="utf-8")
+        self.assertNotIn(".doc-card:hover", content)
 
 
 if __name__ == "__main__":

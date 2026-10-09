@@ -312,13 +312,6 @@
     border: 1px solid var(--line);
     border-radius: 0.5rem;
     background: var(--surface);
-    text-decoration: none;
-    transition: transform 120ms ease, border-color 120ms ease;
-  }
-
-  .doc-card:hover {
-    transform: translateY(-2px);
-    border-color: var(--accent);
   }
 
   .doc-card h4 {
@@ -342,13 +335,11 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .btn,
-    .doc-card {
+    .btn {
       transition: none;
     }
 
-    .btn:hover,
-    .doc-card:hover {
+    .btn:hover {
       transform: none;
     }
   }
