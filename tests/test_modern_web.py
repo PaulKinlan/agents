@@ -234,5 +234,44 @@ function Menu() {
         self.assertEqual(len(result["known_baseline_fallbacks"]), 2)
 
 
+    def test_pinned_canonical_ids_select_and_scroll_state_queries(self):
+        """[agents-gq4 item 1] Verify select-customizable and scroll-state-queries pinned canonical IDs."""
+        # 1. select-customizable
+        (self.repo / "custom_select.html").write_text("""
+<!-- TODO(baseline/select-customizable): Fallback select -->
+<div role="listbox">
+  <div role="option">Option 1</div>
+</div>
+""", encoding="utf-8")
+
+        # 2. scroll-state-queries
+        (self.repo / "sticky.css").write_text("""
+/* TODO(baseline/scroll-state-queries): Container scroll-state fallback */
+.is-stuck {
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+""", encoding="utf-8")
+
+        result = self.mod.scan_repository(self.repo, retrieve_guides=False)
+        self.assertEqual(len(result["candidates"]), 0)
+        self.assertEqual(len(result["known_baseline_fallbacks"]), 2)
+        features = {f["feature_id"] for f in result["known_baseline_fallbacks"]}
+        self.assertEqual(features, {"select-customizable", "scroll-state-queries"})
+
+    def test_marker_after_double_slash_inside_string_literal_not_collected(self):
+        """[agents-gq4 item 3] A marker after // inside a string literal must not be treated as an annotation."""
+        (self.repo / "string_slash_slash.js").write_text("""
+const url_hint = 'see https://example.com // TODO(baseline/temporal)';
+function compute(a, b) {
+  return new Date(b) - new Date(a);
+}
+""", encoding="utf-8")
+
+        result = self.mod.scan_repository(self.repo, retrieve_guides=False)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["rule_id"], "legacy-date-math-instead-of-temporal")
+        self.assertEqual(len(result["known_baseline_fallbacks"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
