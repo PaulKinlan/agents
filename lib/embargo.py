@@ -5,8 +5,8 @@
 and credential/vulnerability-agent identity as critical for routing. `embargo_reason` withholds
 high/critical when visibility is missing or invalid: the synced beads tracker is a shared
 surface, so missing visibility must not silently file a high/critical bead. `dispatch_to_sink`
-and `_dispatch_beads` (lib/findings.py) apply the embargo; public GitHub issues are no longer a
-finding sink (agents-eyo) — public input is triaged separately, and `promote_issue` is the
+(lib/findings.py) and the beads adapter (lib/sinks/beads.py) apply the embargo; public GitHub issues
+are no longer a finding sink (agents-eyo) — public input is triaged separately, and `promote_issue` is the
 explicit, human-approved issue -> bead link. `lib/redaction.py` masks published values; raw
 evidence stays in the local store/artifacts.
 """
