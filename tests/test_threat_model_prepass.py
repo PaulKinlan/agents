@@ -358,9 +358,16 @@ class TestThreatModelRefusalGuardsAndExclusions(unittest.TestCase):
         self.assertTrue(is_false_positive(finding))
 
     def test_mine_history_suppresses_refusal_guard_lines(self):
-        """mine_history.py suppresses lines raising ContainmentError or StationError."""
-        line = "raise ContainmentError('refusing on target')"
-        self.assertTrue(mine_history.is_self_referential_line(line))
+        """agents-5gg: mine_history.py suppresses lines raising ContainmentError or StationError."""
+        self.assertTrue(mine_history.is_self_referential_line("raise ContainmentError('refusing on target')"))
+        self.assertTrue(mine_history.is_self_referential_line("raise StationError('station failed')"))
+
+    def test_mine_history_does_not_suppress_permission_error_lines(self):
+        """agents-qbc: mine_history.py must NOT suppress lines raising builtin PermissionError."""
+        line = "raise PermissionError('human triage approval missing')"
+        self.assertFalse(mine_history.is_self_referential_line(line))
+        app_line = 'raise PermissionError(f"user {uid} cannot access {path}")'
+        self.assertFalse(mine_history.is_self_referential_line(app_line))
 
     def test_mine_history_excludes_threat_model_artifact_files(self):
         """mine_history.py is_scanner_file excludes *-THREAT_MODEL.md."""

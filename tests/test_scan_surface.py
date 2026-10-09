@@ -104,9 +104,16 @@ class TestSurfaceScannerExclusionsAndSuppression(unittest.TestCase):
             self.assertEqual(len(candidates), 0, f"Expected 0 candidates due to is_scanner_file, got: {candidates}")
 
     def test_refusal_guard_lines_suppressed(self):
-        """agents-5gg: lines raising ContainmentError, StationError, etc. are suppressed."""
-        line = "raise ContainmentError('refusing on target')"
-        self.assertTrue(scan_surface.is_self_referential_line(line))
+        """agents-5gg: lines raising ContainmentError or StationError are suppressed."""
+        self.assertTrue(scan_surface.is_self_referential_line("raise ContainmentError('refusing on target')"))
+        self.assertTrue(scan_surface.is_self_referential_line("raise StationError('station failed')"))
+
+    def test_permission_error_lines_not_suppressed(self):
+        """agents-qbc: lines raising builtin PermissionError are NOT suppressed."""
+        line = "raise PermissionError('human triage approval missing')"
+        self.assertFalse(scan_surface.is_self_referential_line(line))
+        app_line = 'raise PermissionError(f"user {uid} cannot access {path}")'
+        self.assertFalse(scan_surface.is_self_referential_line(app_line))
 
     def test_threat_model_artifact_file_excluded(self):
         """agents-5gg: is_scanner_file excludes *-THREAT_MODEL.md files."""
