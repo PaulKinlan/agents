@@ -91,7 +91,11 @@
     padding-block: clamp(4rem, 11vw, 9rem) clamp(4rem, 8vw, 7rem);
   }
 
-  .project-section { padding-block-end: clamp(4rem, 8vw, 7rem); }
+  .project-section {
+    container-type: inline-size;
+    inline-size: 100%; /* Guard against 0px collapse in content-sized flex/grid contexts */
+    padding-block-end: clamp(4rem, 8vw, 7rem);
+  }
 
   .section-heading {
     display: grid;
@@ -124,6 +128,18 @@
     }
 
     .site-header nav { max-inline-size: 13rem; }
+  }
+
+  /* Baseline fallback for browsers without container query support */
+  @supports not (container-type: inline-size) {
+    @media (max-width: 42rem) {
+      .section-heading { grid-template-columns: 1fr; gap: 0.25rem; }
+      .project-grid { grid-template-columns: 1fr; }
+      .project-card--featured { grid-column: auto; }
+    }
+  }
+
+  @container (max-width: 42rem) {
     .section-heading { grid-template-columns: 1fr; gap: 0.25rem; }
     .project-grid { grid-template-columns: 1fr; }
     .project-card--featured { grid-column: auto; }
@@ -225,7 +241,11 @@
     font-size: 0.78rem;
   }
 
-  .project-list { list-style: none; border-block-start: 1px solid var(--line); }
+  .project-list {
+    container-type: inline-size;
+    list-style: none;
+    border-block-start: 1px solid var(--line);
+  }
 
   .project-list a {
     display: grid;
@@ -242,7 +262,14 @@
   .project-list span { color: var(--muted); }
   footer a { text-underline-offset: 0.2em; }
 
-  @media (max-width: 42rem) {
+  /* Baseline fallback for browsers without container query support */
+  @supports not (container-type: inline-size) {
+    @media (max-width: 42rem) {
+      .project-list a { grid-template-columns: 1fr; gap: 0.1rem; }
+    }
+  }
+
+  @container (max-width: 42rem) {
     .project-list a { grid-template-columns: 1fr; gap: 0.1rem; }
   }
 

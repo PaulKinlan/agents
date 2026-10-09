@@ -15,6 +15,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -271,6 +272,58 @@ function compute(a, b) {
         self.assertEqual(len(result["candidates"]), 1)
         self.assertEqual(result["candidates"][0]["rule_id"], "legacy-date-math-instead-of-temporal")
         self.assertEqual(len(result["known_baseline_fallbacks"]), 0)
+
+    def test_projects_css_uses_container_queries_without_legacy_viewport_media(self):
+        """[agents-2yt] projects.css uses container queries on .project-section and .project-list,
+        with only page chrome (.site-header) remaining under viewport media queries."""
+        projects_css = ROOT / "docs" / "css" / "projects.css"
+        self.assertTrue(projects_css.exists())
+        content = projects_css.read_text(encoding="utf-8")
+
+        # 1. Verify container contexts are established on hosting wrapper and standalone list
+        self.assertRegex(content, r"\.project-section\s*\{[^}]*container-type:\s*inline-size")
+        self.assertRegex(content, r"\.project-list\s*\{[^}]*container-type:\s*inline-size")
+
+        # 2. Verify component rules are enclosed under @container blocks
+        self.assertIn("@container (max-width: 42rem)", content)
+        container_blocks = []
+        for match in re.finditer(r"@container\s*\(max-width:\s*42rem\)\s*\{", content):
+            start = match.end()
+            depth = 1
+            pos = start
+            while pos < len(content) and depth > 0:
+                if content[pos] == "{":
+                    depth += 1
+                elif content[pos] == "}":
+                    depth -= 1
+                pos += 1
+            container_blocks.append(content[start:pos - 1])
+
+        self.assertGreaterEqual(len(container_blocks), 1)
+        container_text = " ".join(container_blocks)
+        self.assertIn(".section-heading", container_text)
+        self.assertIn(".project-grid", container_text)
+        self.assertIn(".project-card--featured", container_text)
+        self.assertIn(".project-list a", container_text)
+
+        # 3. Verify exactly ONE viewport-based width query exists outside of @supports fallbacks,
+        # and that it styles ONLY page chrome (.site-header)
+        no_comments = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+        no_supports = re.sub(r"@supports[^{]+\{(?:[^{}]+|\{(?:[^{}]+|\{[^{}]*\})*\})*\}", "", no_comments, flags=re.DOTALL)
+        viewport_media_matches = re.findall(r"@media\s*\(\s*(?:min|max)-width[^{]+\{([^{}]+(?:\{[^{}]*\}[^{}]*)*)\}", no_supports)
+        self.assertEqual(len(viewport_media_matches), 1,
+                         f"Expected exactly 1 viewport width @media query, got: {viewport_media_matches}")
+        media_body = viewport_media_matches[0]
+        self.assertIn(".site-header", media_body)
+        self.assertNotIn(".section-heading", media_body)
+        self.assertNotIn(".project-grid", media_body)
+        self.assertNotIn(".project-card--featured", media_body)
+        self.assertNotIn(".project-list", media_body)
+
+        # 4. Scanner produces zero candidate warnings
+        res = self.mod.scan_repository(projects_css.parent, retrieve_guides=False)
+        candidates = [c for c in res["candidates"] if c["path"].endswith("projects.css")]
+        self.assertEqual(len(candidates), 0, f"Expected 0 candidates for projects.css, got {candidates}")
 
 
 if __name__ == "__main__":
