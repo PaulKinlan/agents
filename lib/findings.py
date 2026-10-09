@@ -543,7 +543,14 @@ class FindingsStore:
                 "last_seen": now,
                 "suppression_reason": suppression_reason
             }
-            self.data["findings"][fp] = finding_record
+            # agents-4zg: the findings store is read-only-bound into the sandboxed engine (the
+            # whole factory root is mounted read-only and only `runs/` is masked), so a run for
+            # target A could read target B's raw credential material from this store. Persist the
+            # REDACTED copy: raw_match / snippet / title / description / remediation are masked at
+            # rest; the raw bytes stay in the per-run artifact (candidates.json / model_output.txt),
+            # which is masked from other runs. The fingerprint was computed from the RAW snippet
+            # above, so the lifecycle stays stable.
+            self.data["findings"][fp] = redact_finding(finding_record)
             processed.append(finding_record)
 
         # 2. Check for findings previously detected by this agent that are now missing (fixed)

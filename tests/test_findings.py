@@ -276,5 +276,44 @@ class TestRawMatchBinding(unittest.TestCase):
         self.assertIsNone(findings.identity_raw_match(item, "openai-key", "tests/x.py", ci))
 
 
+class TestStoreRedactsRawMaterialAtRest(unittest.TestCase):
+    """agents-4zg: the store is read-only-bound into the sandboxed engine, so it must not
+    hold raw credential material a run for target A could read about target B."""
+
+    def test_credential_findings_are_redacted_in_the_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FindingsStore("target-a", findings_dir=Path(tmpdir))
+            secret = "ghp_" + "A" * 36  # a GitHub PAT shape
+            item = {"rule_id": "github-pat", "path": "src/config.js", "line_number": 1,
+                    "snippet": secret, "raw_match": secret, "severity": "critical",
+                    "title": "GitHub PAT", "description": f"found {secret}",
+                    "remediation": "rotate"}
+            store.process_run("secret-scan", [item])
+            _, stats, _ = store.process_run("secret-scan", [item])  # same raw input re-runs
+            store.close()
+
+            data = json.loads((Path(tmpdir) / "target-a.json").read_text(encoding="utf-8"))
+            rec = next(iter(data["findings"].values()))
+            for field in ("raw_match", "snippet", "title", "description", "remediation"):
+                self.assertNotIn(secret, str(rec.get(field, "")), field)
+            self.assertTrue(rec.get("fingerprint"), "fingerprint (lifecycle identity) must survive")
+            # The lifecycle is stable despite the redaction: the raw-snippet fingerprint still
+            # dedupes the second identical run as unchanged, not a new finding.
+            self.assertEqual(stats["unchanged"], 1, stats)
+            self.assertEqual(len(data["findings"]), 1)
+
+    def test_non_credential_findings_keep_their_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FindingsStore("target-b", findings_dir=Path(tmpdir))
+            store.process_run("docs-drift", [{
+                "rule_id": "missing-doc", "path": "README.md", "line_number": 3,
+                "snippet": "TODO update", "severity": "low", "title": "Stale docs",
+            }])
+            store.close()
+            data = json.loads((Path(tmpdir) / "target-b.json").read_text(encoding="utf-8"))
+            rec = next(iter(data["findings"].values()))
+            self.assertEqual(rec["title"], "Stale docs")  # non-credential prose survives
+
+
 if __name__ == "__main__":
     unittest.main()
