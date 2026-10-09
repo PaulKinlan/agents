@@ -45,8 +45,8 @@
           },
           "verdict": {
             "type": "string",
-            "enum": ["verified", "disproved"],
-            "description": "Verification verdict: 'verified' (genuine risk) or 'disproved' (false positive / mitigated)."
+            "enum": ["verified", "disproved", "unverifiable"],
+            "description": "Verification verdict: 'verified' (genuine risk), 'disproved' (false positive / mitigated), or 'unverifiable' (the claim cannot be adjudicated because no location in the target could be identified - state the location you need instead of guessing). 'verified' and 'disproved' require a resolvable location; the report is rejected otherwise (agents-0tl)."
           },
           "confidence": {
             "type": "string",

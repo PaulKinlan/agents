@@ -26,7 +26,12 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent
 import sys
 sys.path.insert(0, str(FACTORY_ROOT))
 
-from lib.report_schema import declared_schema, validate, validate_agent_report  # noqa: E402
+from lib.report_schema import (  # noqa: E402
+    declared_schema,
+    unlocatable_verdicts,
+    validate,
+    validate_agent_report,
+)
 from lib.sandbox import sandbox_available  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader("factory_cli", str(FACTORY_ROOT / "factory"))
@@ -259,3 +264,97 @@ class TestDispatcherSchemaGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnlocatableVerdicts(unittest.TestCase):
+    """agents-0tl (D): a verifier cannot adjudicate a record it cannot locate.
+
+    On the 2026-10-09 dogfood audit vuln-verify returned verdict 'disproved' with confidence
+    'high' for four records whose location was 'unknown' - and one of them was real (the
+    memory-profile findings/ exclusion, now fixed as agents-uxt). Nothing rejected that, and the
+    schema's enum did not even offer an honest alternative, so 'unverifiable' is now legal and
+    the other two verdicts require a resolvable location.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target = Path(self.tmp.name)
+        (self.target / "lib").mkdir()
+        (self.target / "lib" / "real.py").write_text("x = 1\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _report(self, **entry):
+        base = {"rule_id": "r", "path": "lib/real.py", "line_number": 1,
+                "verdict": "disproved", "confidence": "high", "reasoning": "why"}
+        base.update(entry)
+        return {"summary": "s", "target": "t", "verifications": [base], "findings": []}
+
+    def test_a_located_record_can_still_be_disproved(self):
+        """The normal case must keep working - this fix must not blunt real verification."""
+        self.assertEqual(unlocatable_verdicts(self._report(), self.target), [])
+
+    def test_unknown_path_cannot_be_disproved(self):
+        violations = unlocatable_verdicts(self._report(path="unknown"), self.target)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("no resolvable location", violations[0])
+
+    def test_disproved_without_any_path_is_a_violation(self):
+        for missing in ({"path": "unknown"}, {"path": ""}, {"path": None}):
+            violations = unlocatable_verdicts(self._report(**missing), self.target)
+            self.assertEqual(len(violations), 1, f"path={missing.get('path')!r} must be rejected")
+            self.assertIn("unverifiable", violations[0])
+        # The key absent entirely, rather than set to a placeholder.
+        report = self._report()
+        report["verifications"][0].pop("path")
+        violations = unlocatable_verdicts(report, self.target)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("unverifiable", violations[0])
+
+    def test_verified_without_a_location_is_also_a_violation(self):
+        """You cannot verify what you cannot point at either - only 'unverifiable' is honest."""
+        violations = unlocatable_verdicts(self._report(path="unknown", verdict="verified"), self.target)
+        self.assertEqual(len(violations), 1)
+
+    def test_unverifiable_is_accepted_without_a_location(self):
+        self.assertEqual(unlocatable_verdicts(self._report(path="unknown", verdict="unverifiable"), self.target), [])
+
+    def test_a_nonexistent_path_is_not_a_location(self):
+        violations = unlocatable_verdicts(self._report(path="lib/invented.py"), self.target)
+        self.assertEqual(len(violations), 1)
+
+    def test_without_a_target_only_placeholder_paths_are_unlocatable(self):
+        """No target to resolve against: do not reject a claim on a path we cannot check."""
+        self.assertEqual(unlocatable_verdicts(self._report(path="lib/real.py"), None), [])
+        self.assertEqual(len(unlocatable_verdicts(self._report(path="unknown"), None)), 1)
+
+    def test_reports_without_verifications_are_untouched(self):
+        self.assertEqual(unlocatable_verdicts({"findings": [{"path": "x"}]}, self.target), [])
+
+    def test_the_real_schema_now_allows_unverifiable_and_the_rule_fires_through_it(self):
+        agent_dir = FACTORY_ROOT / "agents" / "vuln-verify"
+        cfg = {"output": {"schema": "report.schema.json"}}
+        good = self._report(path="unknown", verdict="unverifiable")
+        self.assertEqual(validate_agent_report(agent_dir, cfg, good, target_dir=self.target), [])
+        bad = self._report(path="unknown", verdict="disproved")
+        errors = validate_agent_report(agent_dir, cfg, bad, target_dir=self.target)
+        self.assertTrue(errors and any("unverifiable" in e for e in errors), errors)
+
+    def test_the_shipped_schema_rejects_a_verdict_outside_the_enum(self):
+        agent_dir = FACTORY_ROOT / "agents" / "vuln-verify"
+        cfg = {"output": {"schema": "report.schema.json"}}
+        errors = validate_agent_report(agent_dir, cfg, self._report(verdict="definitely-fine"),
+                                       target_dir=self.target)
+        self.assertTrue(errors)
+
+    def test_the_repository_root_is_not_a_location_for_a_verdict(self):
+        """Review P1 (f76a368): a bare "." must not let a verdict look located."""
+        for rootish in (".", "./"):
+            violations = unlocatable_verdicts(self._report(path=rootish), self.target)
+            self.assertEqual(len(violations), 1, f"path={rootish!r} must be rejected")
+
+    def test_a_directory_location_is_accepted_for_a_verdict(self):
+        """Whole-repo findings cite the nearest EXISTING path (a directory is fine)."""
+        (self.target / ".github").mkdir()
+        self.assertEqual(unlocatable_verdicts(self._report(path=".github"), self.target), [])

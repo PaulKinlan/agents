@@ -21,6 +21,8 @@ from collections.abc import Mapping as MappingABC
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from lib.findings import path_resolves_in_target
+
 _TYPE_CHECKS = {
     # bool is a subclass of int in Python, but never in JSON Schema.
     "object": lambda v: isinstance(v, dict),
@@ -107,12 +109,61 @@ def declared_schema(agent_dir: Path, agent_cfg: MappingABC) -> Optional[Dict[str
     return schema
 
 
-def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any) -> Optional[List[str]]:
+def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List[str]:
+    """A verifier must not adjudicate a record it cannot locate (agents-0tl).
+
+    `vuln-verify` returns `verifications[]` entries carrying a `path` and a `verdict`. Nothing
+    used to stop a model returning `verdict: "disproved"` with `confidence: "high"` for a
+    record whose location was `unknown` - observed on the 2026-10-09 dogfood audit, where four
+    such records were "disproved" with no location and one of them (the memory-profile
+    findings/ exclusion) turned out to be real and is now fixed. A verifier that cannot point
+    at the code cannot disprove a claim about it, and it cannot verify one either: the only
+    honest verdict for an unlocatable record is `unverifiable`, which asks for the location
+    instead of inventing a conclusion.
+
+    Returns a violation per offending entry (empty when the report is fine). A record is
+    locatable when its `path` names an existing entry inside `target_dir`; when no target is
+    supplied only an explicitly missing/placeholder path is treated as unlocatable.
+    """
+    violations: List[str] = []
+    if not isinstance(report, dict):
+        return violations
+    verifications = report.get("verifications")
+    if not isinstance(verifications, list):
+        return violations
+    for i, entry in enumerate(verifications):
+        if not isinstance(entry, dict):
+            continue
+        verdict = entry.get("verdict")
+        if verdict not in ("verified", "disproved"):
+            continue
+        raw_path = entry.get("path")
+        placeholder = (not isinstance(raw_path, str) or not raw_path.strip()
+                       or raw_path.strip().lower() in ("unknown", "unclassified"))
+        # With no target to resolve against, only an explicitly missing/placeholder path is
+        # treated as unlocatable: the rule is about refusing to adjudicate a record that has no
+        # location, not about rejecting a path string we merely cannot check.
+        unresolvable = placeholder or (target_dir is not None
+                                       and not path_resolves_in_target(raw_path, target_dir))
+        if unresolvable:
+            violations.append(
+                f"$.verifications[{i}].verdict: {verdict!r} is not available for a record with "
+                f"no resolvable location (path={raw_path!r}); the only honest verdict is "
+                f"'unverifiable' - cite a location inside the target or ask for one"
+            )
+    return violations
+
+
+def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
+                          target_dir: Optional[Path] = None) -> Optional[List[str]]:
     """Validate a model report against the agent's declared schema.
 
     Returns a list of violations (empty when the report conforms), or None when the agent
     declares no output schema and there is nothing to check against. A declared schema that
     cannot be loaded is returned as a violation so the dispatcher fails closed.
+
+    Cross-field rules the schema cannot express are applied on top (agents-0tl): a verdict
+    about a location must have a location.
     """
     try:
         schema = declared_schema(agent_dir, agent_cfg)
@@ -120,7 +171,7 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any) -
         return [f"$: {exc}"]
     if schema is None:
         return None
-    return validate(report, schema)
+    return validate(report, schema) + unlocatable_verdicts(report, target_dir)
 
 
 # ---------------------------------------------------------------------------------------------

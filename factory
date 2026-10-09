@@ -1583,7 +1583,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # The output contract is the deterministic half of the agent (SF-07): a report
             # that violates it is treated exactly like unparseable output — the store never
             # sees it, so no finding transitions on half-formed data.
-            schema_errors = validate_agent_report(agent_dir, agent_cfg, report)
+            schema_errors = validate_agent_report(agent_dir, agent_cfg, report, target_dir=target_dir)
             if schema_errors:
                 model_parse_succeeded = False
                 rejected = report.get("findings") if isinstance(report.get("findings"), list) else []
