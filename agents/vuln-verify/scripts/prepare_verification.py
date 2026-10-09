@@ -106,9 +106,28 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
     return []
 
 
+def _resolve_within_target(target_dir: Path, rel_path: str) -> Optional[Path]:
+    """Resolve a candidate location and require it to stay inside the target directory.
+
+    ``rel_path`` comes from the findings store / run-dir report, i.e. it is authored by a model
+    and must not be trusted (agents-075). ``Path.resolve()`` follows symlinks, so a symlink
+    inside the target that points outside is refused rather than followed out of scope.
+    """
+    root = target_dir.resolve()
+    try:
+        resolved = (target_dir / rel_path).resolve()
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_relative_to(root):
+        return None
+    return resolved
+
+
 def load_file_context(target_dir: Path, rel_path: str, line_number: Optional[int]) -> Dict[str, Any]:
     """Read source file and extract rich window around candidate line."""
-    filepath = target_dir / rel_path
+    filepath = _resolve_within_target(target_dir, rel_path)
+    if filepath is None:
+        return {"error": f"Refusing to read path outside target directory: {rel_path}", "lines": []}
     if not filepath.exists():
         return {"error": f"File not found: {rel_path}", "lines": []}
 

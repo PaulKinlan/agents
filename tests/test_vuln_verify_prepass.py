@@ -8,6 +8,7 @@ tests drive the real pre-pass script in a sandbox and assert those strings never
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -201,6 +202,100 @@ class TestVerifierPriming(unittest.TestCase):
 
             self.assertEqual(bundle["candidate_count"], 1)
             self._assert_no_conclusions(bundle)
+
+
+class TestPathConfinement(unittest.TestCase):
+    """agents-075: a store/run-dir supplied path must never read outside the target.
+
+    The sandbox keeps this from being a kernel-level escape inside the bubblewrap, but on the
+    unsandboxed path (non-Linux, or FACTORY_ALLOW_UNSANDBOXED=1) this pre-pass runs as the
+    operator, so confinement must be enforced here rather than delegated to the sandbox.
+    """
+
+    def _sandbox(self, tmp: Path):
+        sandbox = tmp / "sandbox"
+        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        target = sandbox / "target"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "app.js").write_text(
+            "const el = document.body;\nel.innerHTML = user;\n", encoding="utf-8")
+        return sandbox, target
+
+    def _candidate(self, path, line_number=1):
+        return {
+            "fingerprint": "f" * 64,
+            "agent": "vuln-discovery",
+            "rule_id": "dom-injection-sink",
+            "path": path,
+            "line_number": line_number,
+            "snippet": "x",
+        }
+
+    def _run(self, sandbox: Path, target: Path, candidates) -> dict:
+        out = sandbox / "out.json"
+        findings_file = sandbox / "findings.json"
+        findings_file.write_text(json.dumps({"findings": candidates}), encoding="utf-8")
+        cmd = [sys.executable,
+               str(sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"),
+               "--target", str(target), "--output", str(out),
+               "--findings", str(findings_file)]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    def _source_context(self, bundle: dict) -> dict:
+        self.assertEqual(bundle["candidate_count"], 1)
+        return bundle["candidates"][0]["source_context"]
+
+    def test_traversal_path_is_refused_without_reading_outside(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            outside = sandbox / "canary.txt"
+            outside.write_text("CANARY-SECRET-DO-NOT-READ\n", encoding="utf-8")
+
+            bundle = self._run(sandbox, target, [self._candidate("../canary.txt")])
+
+            ctx = self._source_context(bundle)
+            self.assertIn("outside target directory", ctx["error"])
+            self.assertNotIn("CANARY-SECRET-DO-NOT-READ", json.dumps(bundle))
+
+    def test_absolute_path_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            secret = sandbox / "secret.txt"
+            secret.write_text("ABSOLUTE-SECRET\n", encoding="utf-8")
+
+            bundle = self._run(sandbox, target, [self._candidate(str(secret))])
+
+            ctx = self._source_context(bundle)
+            self.assertIn("outside target directory", ctx["error"])
+            self.assertNotIn("ABSOLUTE-SECRET", json.dumps(bundle))
+
+    def test_symlink_pointing_outside_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            outside = sandbox / "linked-secret.txt"
+            outside.write_text("LINKED-SECRET\n", encoding="utf-8")
+            link = target / "src" / "evil-link"
+            os.symlink(outside, link)
+
+            bundle = self._run(sandbox, target, [self._candidate("src/evil-link")])
+
+            ctx = self._source_context(bundle)
+            self.assertIn("outside target directory", ctx["error"])
+            self.assertNotIn("LINKED-SECRET", json.dumps(bundle))
+
+    def test_normal_in_target_path_still_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+
+            bundle = self._run(sandbox, target, [self._candidate("src/app.js", line_number=2)])
+
+            ctx = self._source_context(bundle)
+            self.assertNotIn("error", ctx)
+            self.assertIn("el.innerHTML = user;", ctx["context_snippet"])
 
 
 if __name__ == "__main__":
