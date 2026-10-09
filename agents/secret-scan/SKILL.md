@@ -17,7 +17,7 @@ You will be given:
 ## Triage Instructions
 
 1. **Evaluate Context**:
-   - **Test Fixture / Mock**: Files located in `test/`, `tests/`, `fixtures/`, `scripts/*journey*.ts`, or containing clear dummy markers (`dummy`, `fake`, `example`, `dont-paint`, `0000`, `fixture-`, `invalid`) are benign test artifacts. Do NOT classify them as high or critical leaks unless they expose real production infrastructure credentials.
+   - **Test Fixture / Mock**: Files located in `test/`, `tests/`, `fixtures/`, `scripts/*journey*.ts`, or containing clear dummy markers (`dummy`, `fake`, `example`, `dont-paint`, `0000`, `fixture-`, `invalid`, `placeholder`, `do-not-leak`, `not-real`, `secret-token`, `sk-test-`, sequential digit runs like `1234567890`, or a sequential alphabet body like `abcdefghijklmnop`) are benign test artifacts. Mark them `false_positive: true` with severity `info`. Do NOT classify them as high or critical leaks unless they expose real production infrastructure credentials.
    - **Documentation / Examples**: Markdown files or config templates using standard example strings (e.g. `YOUR_API_KEY`, `<token>`) are benign info.
    - **Real Leaked Credentials**: Committed live API keys, AWS access keys, GitHub personal access tokens, or private keys in production code, `.env` files, or deploy scripts.
 
@@ -38,8 +38,9 @@ You will be given:
          "rule_id": "generic-api-key",
          "path": "path/to/file",
          "line_number": 123,
-         "snippet": "const apiKey = '...';",
+         "snippet": "const apiKey = 'sk-test-placeholder';",
          "severity": "info",
+         "false_positive": true,
          "title": "Benign Test Fixture Credential",
          "description": "Mock API key used in test probe to verify secret redaction logic.",
          "remediation": "No action required; verify it remains excluded from production bundles."
@@ -47,4 +48,6 @@ You will be given:
      ]
    }
    ```
+   Set `"false_positive": true` on every finding that is a test fixture, placeholder, or
+   dummy key, so it is recorded as evidence (not work) and never routed as a live secret.
    Output ONLY valid JSON or enclose it within a single ```json ``` block.

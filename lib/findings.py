@@ -116,6 +116,9 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     # the triage model chose to quote the line this time (fleet-oed).
     snippets_at: Dict[Tuple[str, str, Any], str] = {}
     snippets_in: Dict[Tuple[str, str], List[str]] = {}
+    # The scanner's raw match per location, so deterministic dummy detection can see the exact
+    # matched value even when the triage model masks its snippet (agents-3r7).
+    raw_matches_at: Dict[Tuple[str, str, Any], str] = {}
     # The scanner's baseline severity per (rule, path), so a triage model's severity flip can
     # be clamped back to the deterministic pre-pass (agents-964).
     severities: Dict[Tuple[str, str], str] = {}
@@ -131,10 +134,13 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
         snippet = candidate.get("snippet")
         if isinstance(rule_id, str) and path and isinstance(snippet, str) and snippet.strip():
             key = (rule_id.strip(), path)
-            snippets_at[key + (candidate.get("line_number"),)] = snippet
+            snippets_at[key + (candidate.get("line_number",),)] = snippet
             snippets_in.setdefault(key, [])
             if snippet not in snippets_in[key]:
                 snippets_in[key].append(snippet)
+        raw_match = candidate.get("raw_match")
+        if isinstance(rule_id, str) and path and isinstance(raw_match, str) and raw_match.strip():
+            raw_matches_at[(rule_id.strip(), path, candidate.get("line_number"))] = raw_match
         severity = candidate.get("severity")
         if isinstance(rule_id, str) and path and isinstance(severity, str) and severity.strip():
             severities.setdefault((rule_id.strip(), path), severity.strip().lower())
@@ -143,6 +149,7 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
         return None
     return {"rule_ids": rule_ids, "paths": paths,
             "snippets_at": snippets_at, "snippets_in": snippets_in,
+            "raw_matches_at": raw_matches_at,
             "severities": severities}
 
 
@@ -173,6 +180,23 @@ def identity_snippet(item: Dict[str, Any], rule_id: Any, path: Any,
         if len(matching) == 1:
             return matching[0]
     return model_snippet
+
+def identity_raw_match(item: Dict[str, Any], rule_id: Any, path: Any,
+                       candidate_index: Optional[Dict[str, Any]]) -> Any:
+    """The scanner's raw match for a finding's location, for deterministic dummy detection.
+
+    The model may mask or truncate the snippet it reports, so a dummy marker on the exact
+    matched value must come from the scanner, not the model. Falls back to the model's own
+    ``raw_match`` (or None) when no scanner candidate binds to this location (agents-3r7).
+    """
+    if not candidate_index or not isinstance(rule_id, str):
+        return item.get("raw_match")
+    at = candidate_index.get("raw_matches_at", {})
+    line = item.get("line_number")
+    matched = at.get((rule_id.strip(), normalize_path(path), line))
+    if matched is not None:
+        return matched
+    return item.get("raw_match")
 
 def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, Any]]) -> Tuple[Any, Any]:
     """Bind a finding's `rule_id` and `path` to the deterministic scanner's output.
@@ -426,6 +450,7 @@ class FindingsStore:
                 continue
             rule_id, path = bind_candidates(item, candidate_index)
             item["severity"] = bind_severity(item, rule_id, path, candidate_index)
+            item["raw_match"] = identity_raw_match(item, rule_id, path, candidate_index)
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
@@ -478,6 +503,7 @@ class FindingsStore:
                 "path": path,
                 "line_number": item.get("line_number"),
                 "snippet": item.get("snippet"),
+                "raw_match": item.get("raw_match"),
                 # Two severities, never conflated (journal-1kg, journal-y5m):
                 # `severity` is what the triage said — the one value the report, the store
                 # and the line's andon count; a missing/unknown label is `unclassified`, a
@@ -487,7 +513,10 @@ class FindingsStore:
                 # (agents-94f). Displaying the routing value made every unlabelled or
                 # false-positive finding read CRITICAL.
                 "severity": reported_severity(item),
-                "routing_severity": effective_severity({"agent": agent, "severity": item.get("severity")}),
+                "routing_severity": effective_severity({"agent": agent, "severity": item.get("severity"),
+                                                         "false_positive": false_positive,
+                                                         "raw_match": item.get("raw_match"),
+                                                         "snippet": item.get("snippet")}),
                 "false_positive": false_positive,
                 "title": item.get("title", ""),
                 "description": item.get("description", ""),

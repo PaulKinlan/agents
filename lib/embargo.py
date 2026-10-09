@@ -83,13 +83,50 @@ _FALSE_POSITIVE_VERDICTS = frozenset({
 _VERDICT_FIELDS = ("verdict", "triage_verdict", "triage", "disposition", "classification", "status")
 _FP_TITLE = re.compile(r"(?<!not a )(?<!not )(?<!no )\bfalse[- ]positive\b", re.IGNORECASE)
 
+# Obvious dummy/placeholder credential markers (agents-3r7). A candidate whose snippet or raw
+# match carries one of these is a test fixture or example, not a live credential: every marker
+# is a word or sequence a real key never contains (a real key is random base-58/62, never
+# "placeholder", "do-not-leak", a sequential digit run, or the alphabet in order). They are
+# deliberately narrow so real-key detection is never weakened — a genuine leaked key that
+# happens to sit in a test file still matches none of them.
+_DUMMY_CREDENTIAL_MARKERS = (
+    re.compile(r"placeholder", re.IGNORECASE),
+    re.compile(r"do[ _-]?not[ _-]?leak", re.IGNORECASE),
+    re.compile(r"dont[ _-]?leak", re.IGNORECASE),
+    re.compile(r"not[ _-]?real", re.IGNORECASE),
+    re.compile(r"secret[ _-]?token", re.IGNORECASE),
+    re.compile(r"your[ _-]?api[ _-]?key", re.IGNORECASE),
+    re.compile(r"\bsk-test-", re.IGNORECASE),
+    re.compile(r"<[^>\s]{0,40}(?:token|key|secret)[^>\s]{0,40}>", re.IGNORECASE),
+    re.compile(r"(?:0123456789|1234567890|9876543210)"),
+    re.compile(r"abcdefghijklmnop", re.IGNORECASE),
+)
+
+
+def _dummy_credential_marker(finding: Dict[str, Any]) -> bool:
+    """True when the finding's candidate value reads as an obvious dummy credential.
+
+    The scanner's raw match is the most faithful source (the exact matched value); the snippet
+    is the fallback (the surrounding code line the triage model quoted). Both are checked so a
+    model that masks the snippet cannot defeat the deterministic signal.
+    """
+    for field in ("raw_match", "snippet", "value", "match"):
+        value = finding.get(field)
+        if isinstance(value, str):
+            text = value.strip()
+            if text and any(marker.search(text) for marker in _DUMMY_CREDENTIAL_MARKERS):
+                return True
+    return False
+
 
 def is_false_positive(finding: Dict[str, Any]) -> bool:
     """Whether the triage that produced `finding` declared it a false positive.
 
     Explicit fields win (`false_positive: true`, or a verdict-like field naming one); failing
     that, a title that says the item *is* a false positive ("... is a false positive (comment,
-    not a network call)") counts, while "not a false positive" does not.
+    not a network call)") counts, while "not a false positive" does not. Last, a deterministic
+    dummy-credential marker on the value/snippet (placeholder, do-not-leak, a sequential key
+    body) marks an obvious test fixture as a false positive without the model's say-so.
     """
     if not isinstance(finding, dict):
         return False
@@ -101,7 +138,9 @@ def is_false_positive(finding: Dict[str, Any]) -> bool:
         if isinstance(value, str) and value.strip().lower() in _FALSE_POSITIVE_VERDICTS:
             return True
     title = finding.get("title")
-    return isinstance(title, str) and bool(_FP_TITLE.search(title))
+    if isinstance(title, str) and bool(_FP_TITLE.search(title)):
+        return True
+    return _dummy_credential_marker(finding)
 
 
 def reported_severity(finding: Dict[str, Any]) -> str:
@@ -128,8 +167,12 @@ def effective_severity(finding: Dict[str, Any]) -> str:
     false-positive verdicts read CRITICAL (journal-1kg, journal-aaj).
 
     Security-sensitive agents are critical on identity, so a model that labels a leaked key —
-    or an understated vulnerability — `low` cannot authorise its publication.
+    or an understated vulnerability — `low` cannot authorise its publication. A false positive
+    is the one exception: a dummy key is not a key, so a triaged or deterministic false
+    positive is never routed critical whatever the agent class (agents-3r7).
     """
+    if is_false_positive(finding):
+        return "info"
     agent = finding.get("agent")
     if isinstance(agent, str) and agent.strip() in IDENTITY_CRITICAL_AGENTS:
         return "critical"
