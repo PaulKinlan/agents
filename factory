@@ -28,7 +28,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
                                child_environment, prepass_environment)
-    from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
+    from lib.credential_broker import (CredentialBroker, PROVIDERS,
+                                  credentials_from_env, keyless_providers)
     from lib.egress_proxy import EgressProxy
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
@@ -50,7 +51,8 @@ except ImportError:
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
                                child_environment, prepass_environment)
-    from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
+    from lib.credential_broker import (CredentialBroker, PROVIDERS,
+                                  credentials_from_env, keyless_providers)
     from lib.egress_proxy import EgressProxy
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
@@ -1312,8 +1314,26 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     _placeholder, _base_url, secret_vars = BROKER_PROVIDERS[provider]
                     if any(var in engine_secret_vars for var in secret_vars):
                         broker_creds.setdefault(provider, None)
+                # agents-3z8: bind the broker to the specific provider configured for this run
+                # so the sandboxed engine cannot use the broker as an unauthorized cross-provider
+                # egress proxy for other credentials held by the host.
+                allowed_for_run = None
+                if "FACTORY_ALLOWED_PROVIDERS" in os.environ:
+                    allowed_for_run = [p.strip() for p in os.environ["FACTORY_ALLOWED_PROVIDERS"].split(",") if p.strip()]
+                elif model_arg:
+                    model_prov = model_arg.split("/", 1)[0]
+                    if model_prov in PROVIDERS:
+                        allowed_for_run = [model_prov]
+                elif agent_cfg.get("model"):
+                    model_prov = str(agent_cfg["model"]).split("/", 1)[0]
+                    if model_prov in PROVIDERS:
+                        allowed_for_run = [model_prov]
+                elif engine in ("deepseek", "claude", "antigravity"):
+                    engine_prov_map = {"deepseek": "deepseek", "claude": "anthropic", "antigravity": "google"}
+                    allowed_for_run = [engine_prov_map[engine]]
+
                 if broker_creds:
-                    broker = CredentialBroker(broker_creds)
+                    broker = CredentialBroker(broker_creds, allowed_providers=allowed_for_run)
                     try:
                         if egress_active:
                             broker.start(unix_path=str(broker_sock),

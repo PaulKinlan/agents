@@ -207,6 +207,54 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         with self.assertRaises(cb.BrokerError):
             broker.base_url("openai")  # no credential brokered for it
 
+    def test_cross_provider_request_is_rejected_with_403(self):
+        """agents-3z8: a broker restricted to allowed_providers rejects requests to other providers with 403."""
+        # Host holds both Anthropic and OpenAI keys, but this run is restricted to anthropic
+        broker = cb.CredentialBroker(
+            {"anthropic": REAL["anthropic"], "openai": REAL["openai"]},
+            allowed_providers=["anthropic"],
+        )
+        broker.start()
+        self.addCleanup(broker.stop)
+
+        # 1. Allowed provider request succeeds
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
+        self.assertEqual(_FakeHTTPSConnection.calls[0]["host"], "api.anthropic.com")
+
+        # 2. Cross-provider request to openai is rejected with 403
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/openai/chat/completions",
+            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertIn(b"not allowed for this run", body)
+        # Verify OpenAI was NEVER forwarded upstream
+        self.assertEqual(len(_FakeHTTPSConnection.calls), 1, "cross-provider request must not be forwarded")
+
+    def test_disallowed_provider_base_url_raises_broker_error(self):
+        """agents-3z8: base_url for a disallowed provider raises BrokerError."""
+        broker = cb.CredentialBroker(
+            {"anthropic": REAL["anthropic"], "openai": REAL["openai"]},
+            allowed_providers=["anthropic"],
+        )
+        broker.start()
+        self.addCleanup(broker.stop)
+        self.assertEqual(broker.providers, ("anthropic",))
+        self.assertIn("/proxy/anthropic", broker.base_url("anthropic"))
+        with self.assertRaises(cb.BrokerError) as ctx:
+            broker.base_url("openai")
+        self.assertIn("not allowed for this run", str(ctx.exception))
+
+    def test_unknown_allowed_provider_rejected_at_construction(self):
+        """agents-3z8: declaring an unrecognised provider in allowed_providers raises BrokerError."""
+        with self.assertRaises(cb.BrokerError):
+            cb.CredentialBroker({"anthropic": REAL["anthropic"]}, allowed_providers=["non-existent-provider"])
+
 
 class TestStreaming(BrokerTestBase):
     def test_an_sse_body_is_streamed_back_whole(self):
@@ -405,6 +453,26 @@ class TestUnixSocketMode(BrokerTestBase):
         self.assertEqual(call["host"], "api.anthropic.com")
         self.assertEqual(call["headers"]["x-api-key"], REAL["anthropic"])
         self.assertNotIn(REAL["anthropic"].encode(), body)
+
+    def test_unix_listener_rejects_cross_provider_requests_with_403(self):
+        """agents-3z8: unix socket broker rejects cross-provider requests with 403."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = os.path.join(d, "broker.sock")
+        broker = cb.CredentialBroker(
+            {"anthropic": REAL["anthropic"], "openai": REAL["openai"]},
+            allowed_providers=["anthropic"],
+        )
+        broker.start(unix_path=sock, child_port=8384)
+        self.addCleanup(broker.stop)
+
+        status, _, body = _unix_client_request(
+            sock, "POST", "/proxy/openai/chat/completions",
+            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertIn(b"not allowed for this run", body)
+        self.assertEqual(_FakeHTTPSConnection.calls, [])
 
     def test_unix_mode_requires_child_port(self):
         d = tempfile.mkdtemp()
