@@ -72,12 +72,22 @@ def is_ignored_doc(p: Path, target_dir: Path) -> bool:
         return False
 
 def slugify_heading(heading: str) -> str:
-    """Converts a markdown heading text into a GitHub anchor slug."""
+    r"""Converts a markdown heading text into a GitHub anchor slug.
+
+    Follows GitHub's anchor slugification algorithm (agents-8xc4):
+    1. Lowercase and strip leading/trailing whitespace.
+    2. Strip markdown link markup [text](url) to text.
+    3. Strip markdown formatting characters (`*_#).
+    4. Strip punctuation ([^\w\s-]), including '&', which leaves adjacent spaces.
+    5. Replace EACH whitespace character with a hyphen, preserving consecutive
+       hyphens (e.g. 'A & B' -> 'a  b' -> 'a--b') as GitHub does.
+    6. Strip leading and trailing hyphens.
+    """
     text = heading.strip().lower()
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     text = re.sub(r"[`*_#]", "", text)
     text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"[\s]+", "-", text)
+    text = re.sub(r"\s", "-", text)
     return text.strip("-")
 
 def get_markdown_headings(file_path: Path) -> Set[str]:

@@ -393,3 +393,101 @@ class TestStationSkillScope(unittest.TestCase):
             head = ref.split("/", 1)[0]
             self.assertTrue((FACTORY_ROOT / head).is_dir(),
                             f"surviving SKILL.md candidate {ref!r} is not own-facing")
+
+
+class TestMarkdownAnchorResolution(unittest.TestCase):
+    """Anchor slug generation and broken anchor reporting (agents-8xc4).
+
+    GitHub strips punctuation (including '&') leaving adjacent spaces, then converts
+    each space to a hyphen, yielding double hyphens ('--') for '&' headings.
+    Tests verify both directions:
+      1. '&' headings resolve correctly without false positives.
+      2. Genuinely broken anchors are still reported as doc-broken-anchor.
+    """
+
+    def test_slugify_heading_preserves_double_hyphen_for_ampersand(self):
+        cases = [
+            ("3. Target Enrolment Plane (Local Fleet & Scheduler)",
+             "3-target-enrolment-plane-local-fleet--scheduler"),
+            ("Recipe A: Pull Request & Push Quality Gate",
+             "recipe-a-pull-request--push-quality-gate"),
+            ("1.1 Action Inputs & Outputs",
+             "11-action-inputs--outputs"),
+            ("1.2 Required Permissions & Secrets",
+             "12-required-permissions--secrets"),
+            ("1.3 Security & Public Disclosure Guardrails",
+             "13-security--public-disclosure-guardrails"),
+            ("5. Agent Fleet Reference & CI Compatibility",
+             "5-agent-fleet-reference--ci-compatibility"),
+            ("The Software Factory — Integration & Automation Guide",
+             "the-software-factory--integration--automation-guide"),
+        ]
+        for heading, expected_slug in cases:
+            with self.subTest(heading=heading):
+                self.assertEqual(check_docs.slugify_heading(heading), expected_slug)
+
+    def test_ampersand_heading_anchor_resolves_without_false_positive(self):
+        """A same-document link to an '&' heading generates a double-hyphen anchor and resolves."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "doc.md").write_text(
+                "# Title\n\n"
+                "See [Fleet & Scheduler](#local-fleet--scheduler) or "
+                "[Recipe A](#recipe-a-pull-request--push-quality-gate).\n\n"
+                "## Local Fleet & Scheduler\n\n"
+                "Content here.\n\n"
+                "### Recipe A: Pull Request & Push Quality Gate\n\n"
+                "Recipe details.\n"
+            )
+            candidates = check_docs.scan_target(tmp)
+            broken = [c for c in candidates if c["rule_id"] == "doc-broken-anchor"]
+            self.assertEqual(broken, [], f"Unexpected broken anchor candidates: {broken}")
+
+    def test_genuinely_broken_anchor_is_still_reported(self):
+        """The guard rail: an anchor that truly does not exist in the document must be reported."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "doc.md").write_text(
+                "# Title\n\n"
+                "Broken link: [Missing](#does-not-exist).\n"
+                "Single-hyphen mismatch: [Wrong](#local-fleet-scheduler).\n\n"
+                "## Local Fleet & Scheduler\n\n"
+                "Content.\n"
+            )
+            candidates = check_docs.scan_target(tmp)
+            broken = [c for c in candidates if c["rule_id"] == "doc-broken-anchor"]
+            broken_refs = {c["reference"] for c in broken}
+            self.assertIn("#does-not-exist", broken_refs)
+            self.assertIn("#local-fleet-scheduler", broken_refs)
+            self.assertEqual(len(broken), 2)
+
+    def test_cross_document_ampersand_anchor_resolves_and_broken_reported(self):
+        """Cross-document links to '&' headings resolve when valid and report when broken."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "target.md").write_text(
+                "# Target Document\n\n"
+                "## Target Enrolment Plane (Local Fleet & Scheduler)\n\n"
+                "Body.\n"
+            )
+            (tmp / "caller.md").write_text(
+                "# Caller\n\n"
+                "Valid link: [Enrolment](target.md#target-enrolment-plane-local-fleet--scheduler).\n"
+                "Broken link: [Bogus](target.md#broken-section).\n"
+            )
+            candidates = check_docs.scan_target(tmp)
+            broken = [c for c in candidates if c["rule_id"] == "doc-broken-anchor"]
+            self.assertEqual(len(broken), 1)
+            self.assertEqual(broken[0]["reference"], "target.md#broken-section")
+            self.assertEqual(broken[0]["path"], "caller.md")
+
+    def test_integration_md_real_tree_anchors_all_resolve(self):
+        """All section anchors in the real docs/INTEGRATION.md resolve with 0 broken-anchor candidates."""
+        candidates = check_docs.scan_target(FACTORY_ROOT)
+        integration_broken = [
+            c for c in candidates
+            if c["path"] == "docs/INTEGRATION.md" and c["rule_id"] == "doc-broken-anchor"
+        ]
+        self.assertEqual(integration_broken, [],
+                         f"docs/INTEGRATION.md has unexpected broken anchors: {integration_broken}")
+
