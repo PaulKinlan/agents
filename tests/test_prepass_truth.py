@@ -220,6 +220,59 @@ class TestPrepassFixes(unittest.TestCase):
             self.assertEqual(focus_candidates[0]["severity"], "high")
             self.assertEqual(focus_candidates[0]["path"], "bad.css")
 
+    def test_scan_ui_ux_flags_sibling_stylesheet_not_co_loaded_with_baseline(self):
+        """[agents-p9u review P1/P2] When HTML pages exist, a stylesheet loaded on a page without
+        the baseline (or an unlinked orphan) must STILL be flagged even if a sibling defines :focus-visible."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            css_dir = tmp_path / "css"
+            css_dir.mkdir()
+
+            (css_dir / "base.css").write_text("a:focus-visible { outline: 2px solid green; }", encoding="utf-8")
+            (css_dir / "widgetA.css").write_text(".widgetA:hover { color: red; }", encoding="utf-8")
+            (css_dir / "widgetB.css").write_text(".widgetB:hover { color: blue; }", encoding="utf-8")
+            (css_dir / "orphan.css").write_text(".orphan:hover { color: yellow; }", encoding="utf-8")
+
+            # pageA co-loads base.css + widgetA.css
+            (tmp_path / "pageA.html").write_text(
+                '<link rel="stylesheet" href="/css/base.css">\n<link rel="stylesheet" href="/css/widgetA.css">',
+                encoding="utf-8",
+            )
+            # pageB loads ONLY widgetB.css (baseline is NOT loaded here!)
+            (tmp_path / "pageB.html").write_text(
+                '<link rel="stylesheet" href="/css/widgetB.css">',
+                encoding="utf-8",
+            )
+
+            res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                 capture_output=True, text=True, check=True)
+            data = json.loads(res.stdout)
+            candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
+            flagged_paths = {c["path"] for c in candidates}
+
+            # widgetA is covered by base.css on pageA -> MUST NOT be flagged
+            self.assertNotIn("css/widgetA.css", flagged_paths)
+            # widgetB is NOT covered on pageB -> MUST be flagged
+            self.assertIn("css/widgetB.css", flagged_paths)
+            # orphan is not loaded on any page -> MUST be flagged
+            self.assertIn("css/orphan.css", flagged_paths)
+
+    def test_scan_ui_ux_comment_mentioning_focus_visible_does_not_exempt(self):
+        """[agents-p9u review P2] Comments mentioning :focus-visible must not act as a rule and exempt files."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "base.css").write_text("/* TODO: add :focus-visible rings */\n.btn { color: white; }", encoding="utf-8")
+            (tmp_path / "component.css").write_text(".link:hover { color: red; }", encoding="utf-8")
+
+            res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                 capture_output=True, text=True, check=True)
+            data = json.loads(res.stdout)
+            candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["path"], "component.css")
+
 
 if __name__ == "__main__":
     unittest.main()

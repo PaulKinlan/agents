@@ -90,10 +90,9 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
                         if cand2 in all_css_files:
                             matched = cand2
                         else:
-                            for p in all_css_files:
-                                if raw_href.endswith(p.name):
-                                    matched = p
-                                    break
+                            name_matches = [p for p in all_css_files if p.name == Path(raw_href).name]
+                            if len(name_matches) == 1:
+                                matched = name_matches[0]
                     if matched:
                         loaded_on_page.add(matched)
 
@@ -104,18 +103,27 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
             if has_inline_focus:
                 co_loaded_map[p].add(html_path)
 
+    def defines_focus_visible_rule(css_text: str) -> bool:
+        # Strip comments so comments like /* TODO: add :focus-visible rings */ don't match
+        clean_text = re.sub(r'/\*.*?\*/', '', css_text, flags=re.DOTALL)
+        return bool(re.search(r':focus-visible\s*[,{]', clean_text))
+
     def has_focus_visible_coverage(fpath: Path, content: str) -> bool:
-        # 1. The file itself contains a :focus-visible rule
-        if ":focus-visible" in content:
+        # 1. The file itself contains a real :focus-visible rule
+        if defines_focus_visible_rule(content):
             return True
 
         # 2. Any stylesheet co-loaded on the same HTML page defines :focus-visible
         co_loaded = co_loaded_map.get(fpath, set())
         for co_p in co_loaded:
-            if ":focus-visible" in file_contents.get(co_p, ""):
+            if defines_focus_visible_rule(file_contents.get(co_p, "")):
                 return True
 
-        # 3. If scanning a CSS directory without HTML page links, check if any sibling stylesheet defines baseline :focus-visible
+        # 3. If HTML pages exist, do not assume unlinked or differently-bundled sibling stylesheets share coverage
+        if html_files:
+            return False
+
+        # 4. If scanning a standalone CSS directory without HTML page links, check if any sibling stylesheet defines baseline :focus-visible
         for sibling in fpath.parent.glob("*.css"):
             if sibling != fpath:
                 sib_content = file_contents.get(sibling)
@@ -124,7 +132,7 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
                         sib_content = sibling.read_text(encoding="utf-8", errors="ignore")
                     except Exception:
                         sib_content = ""
-                if sib_content and re.search(r'(?:\*|a|button|input|:root|\b[a-zA-Z0-9_-]+)\s*:focus-visible\b', sib_content):
+                if sib_content and defines_focus_visible_rule(sib_content):
                     return True
 
         return False
