@@ -61,7 +61,7 @@ class TestYamlMiniBlockChomping(unittest.TestCase):
         self.assertEqual(res["script"], "echo first\necho second\n\n\n")
 
     def test_action_yml_parity_with_pyyaml(self):
-        """If PyYAML is installed, load_yaml on action.yml must be byte-identical to safe_load."""
+        """If PyYAML is installed, load_yaml on action.yml must produce identical data structure to safe_load."""
         try:
             import yaml
         except ImportError:
@@ -89,6 +89,11 @@ class TestYamlMiniBlockChomping(unittest.TestCase):
         doc3 = "key: >+\n  first line\n\n  second line\n\n"
         res3 = self._parse_yaml_str(doc3)
         self.assertEqual(res3["key"], "first line\nsecond line\n\n")
+
+        # More-indented lines are preserved with newlines rather than folded into spaces
+        doc4 = "key: >\n  first line\n    indented line\n  second line\n"
+        res4 = self._parse_yaml_str(doc4)
+        self.assertEqual(res4["key"], "first line\n  indented line\nsecond line\n")
 
     def test_case2_blank_only_scalar_keep_chomping(self):
         """Case 2 (agents-4me): blank-only '|+' and '>+' scalars preserve newlines vs '' for clip/strip."""

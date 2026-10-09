@@ -106,7 +106,11 @@ def _split_mapping_entry(stripped: str, path: Path, lineno: int) -> Tuple[str, O
 
 
 def _fold(lines: List[str]) -> str:
-    """Fold a ``>`` block scalar: single line breaks become spaces, blank lines become newlines."""
+    """Fold a ``>`` block scalar: single line breaks become spaces, blank lines become newlines.
+
+    Line breaks adjacent to more-indented lines (lines starting with leading spaces) are
+    preserved as newlines rather than folded into spaces.
+    """
     if not lines:
         return ""
     chunks: List[str] = []
@@ -115,7 +119,10 @@ def _fold(lines: List[str]) -> str:
             chunks.append("\n")
         else:
             if i > 0 and lines[i - 1] != "":
-                chunks.append(" ")
+                if line.startswith(" ") or lines[i - 1].startswith(" "):
+                    chunks.append("\n")
+                else:
+                    chunks.append(" ")
             chunks.append(line)
     return "".join(chunks)
 
