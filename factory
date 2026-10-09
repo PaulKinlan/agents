@@ -1179,7 +1179,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 executables=(engine,) + ENGINE_EXECUTABLES,
                 egress_forwards=([(EGRESS_BROKER_PORT, str(broker_sock))]
                                  if egress_active else None),
-                rw_binds=[str(pi_config_dir)])
+                rw_binds=[str(pi_config_dir)],
+                mask_findings=True)
         except SandboxError as e:
             raise StationError(f"{agent_name}: cannot sandbox engine '{engine}': {e}") from e
 

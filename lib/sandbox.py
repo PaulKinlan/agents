@@ -528,6 +528,7 @@ def sandbox_command(
     executables: Sequence[str] = (),
     egress_forwards: Optional[Sequence[Tuple[int, str]]] = None,
     rw_binds: Sequence[str] = (),
+    mask_findings: bool = False,
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
 
@@ -590,6 +591,14 @@ def sandbox_command(
     factory_runs = Path(factory) / "runs"
     if factory_runs.is_dir():
         plan.tmpfs(str(factory_runs))
+    # agents-4zg: the findings store aggregates raw scanner matches from EVERY target, so a run
+    # for target A could read target B's credentials from it. The engine session has no reason to
+    # read findings, so mask the directory for it (like runs/); the deterministic pre-pass still
+    # needs it (bundle baseline, pr-fixer, qa-station) and is trusted code, so it keeps it.
+    if mask_findings:
+        factory_findings = Path(factory) / "findings"
+        if factory_findings.is_dir():
+            plan.tmpfs(str(factory_findings))
     plan.rw_bind(runs)
 
     # agents-854: extra writable config directories the engine needs. pi's agent directory

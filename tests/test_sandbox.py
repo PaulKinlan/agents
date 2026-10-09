@@ -69,11 +69,12 @@ class TestSandboxCommandShape(unittest.TestCase):
         self.run_dir.mkdir(parents=True)
 
     def build(self, env=None, inner=("/bin/true",), executables=(), egress_forwards=None,
-              rw_binds=()):
+              rw_binds=(), mask_findings=False):
         return sandbox_command(
             list(inner), target_dir=self.target, factory_root=self.factory,
             run_dir=self.run_dir, env=env if env is not None else {"PATH": "/usr/bin:/bin"},
             executables=executables, egress_forwards=egress_forwards, rw_binds=rw_binds,
+            mask_findings=mask_findings,
         )
 
     def test_target_is_bound_read_only_and_run_dir_writable(self):
@@ -91,6 +92,19 @@ class TestSandboxCommandShape(unittest.TestCase):
         tmpfs = [argv[i + 1] for i, a in enumerate(argv) if a == "--tmpfs"]
         self.assertIn(str(self.factory / "runs"), tmpfs,
                       "other runs' raw scanner artifacts must not be readable")
+
+    def test_findings_are_masked_only_when_requested(self):
+        """agents-4zg: the engine's sandbox masks the findings store (cross-target credentials),
+        while the pre-pass (trusted deterministic code) keeps it for bundle/pr-fixer/qa-station."""
+        (self.factory / "findings").mkdir()
+        masked = self.build(mask_findings=True)
+        tmpfs = [masked[i + 1] for i, a in enumerate(masked) if a == "--tmpfs"]
+        self.assertIn(str(self.factory / "findings"), tmpfs,
+                      "the engine's sandbox must mask the findings store")
+        default = self.build()
+        tmpfs_default = [default[i + 1] for i, a in enumerate(default) if a == "--tmpfs"]
+        self.assertNotIn(str(self.factory / "findings"), tmpfs_default,
+                         "the pre-pass sandbox keeps the findings store by default")
 
     def test_home_roots_are_tmpfs_never_binds(self):
         argv = self.build(env={"PATH": "/usr/bin:/bin", "HOME": "/home/someuser"})
