@@ -47,11 +47,16 @@ while IFS= read -r f; do
       # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, and layering.
       mapped="$mapped tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py"
       ;;
+    lib/bench/*.py)
+      # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.
+      mapped="$mapped tests/test_bench_runner.py tests/test_hillclimb.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in
-        scheduler) t="tests/test_schedules.py" ;;
-        *)         t="tests/test_${name}.py" ;;
+        scheduler)  t="tests/test_schedules.py" ;;
+        exclusions) t="tests/test_prepass_exclusions.py" ;;
+        *)          t="tests/test_${name}.py" ;;
       esac
       if [ -f "$t" ]; then
         mapped="$mapped $t"
