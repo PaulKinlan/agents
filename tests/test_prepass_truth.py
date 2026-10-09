@@ -289,6 +289,9 @@ class TestPrepassFixes(unittest.TestCase):
             ":focus:not(\n    :focus-visible) { outline: none; }\n.btn:hover { color: red; }",
             ":focus:NOT(:focus-visible) { outline: none; }\n.btn:hover { color: red; }",
             ":focus:not(\n  :FOCUS-VISIBLE\n) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:not(:focus-visible, .kb-focus) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:not(.kb-focus, :focus-visible) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:NOT(:focus-visible, .kb-focus) { outline: none; }\n.btn:hover { color: red; }",
             "a:focus:not(:focus-visible) { outline: 0; }\n.link:hover { color: red; }",
         ]
         for snippet in test_reset_cases:
@@ -315,8 +318,12 @@ class TestPrepassFixes(unittest.TestCase):
             ".card:focus-visible .child { outline: 2px solid green; }",
             ".card:focus-visible[data-active] { outline: 2px solid green; }",
             ".card:focus-visible.active { outline: 2px solid green; }",
+            ".card:focus-visible#hero { outline: 2px solid green; }",
+            "a:FOCUS-VISIBLE { outline: 2px solid green; }",
+            "a:Focus-Visible { outline: 2px solid green; }",
             ":focus:not(:focus-visible) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
             ":focus:not(\n  :focus-visible\n) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
+            ":focus:not(:focus-visible, .kb) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
         ]
 
         for sel in chained_selectors:
