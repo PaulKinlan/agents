@@ -18,6 +18,8 @@ credentials.json
 
 # Local engine state
 .agent-state/
+# Staged Pages artifact (tools/stage_site.py) — build output, never committed
+_site/
 node_modules/
 __pycache__/
 .DS_Store
