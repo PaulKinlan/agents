@@ -45,7 +45,7 @@ import posixpath
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Mapping, Optional, Set, Tuple
 from urllib.parse import unquote, urlsplit
 
 from lib.sandbox import SUN_PATH_LIMIT
