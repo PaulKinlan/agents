@@ -116,6 +116,9 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     # the triage model chose to quote the line this time (fleet-oed).
     snippets_at: Dict[Tuple[str, str, Any], str] = {}
     snippets_in: Dict[Tuple[str, str], List[str]] = {}
+    # The scanner's baseline severity per (rule, path), so a triage model's severity flip can
+    # be clamped back to the deterministic pre-pass (agents-964).
+    severities: Dict[Tuple[str, str], str] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
@@ -132,11 +135,15 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
             snippets_in.setdefault(key, [])
             if snippet not in snippets_in[key]:
                 snippets_in[key].append(snippet)
+        severity = candidate.get("severity")
+        if isinstance(rule_id, str) and path and isinstance(severity, str) and severity.strip():
+            severities.setdefault((rule_id.strip(), path), severity.strip().lower())
 
     if not rule_ids and not paths:
         return None
     return {"rule_ids": rule_ids, "paths": paths,
-            "snippets_at": snippets_at, "snippets_in": snippets_in}
+            "snippets_at": snippets_at, "snippets_in": snippets_in,
+            "severities": severities}
 
 
 def identity_snippet(item: Dict[str, Any], rule_id: Any, path: Any,
@@ -187,6 +194,28 @@ def bind_candidates(item: Dict[str, Any], candidate_index: Optional[Dict[str, An
     if candidate_index["paths"] and normalize_path(path) not in candidate_index["paths"]:
         path = "unknown"
     return rule_id, path
+
+def bind_severity(item: Dict[str, Any], rule_id: Any, path: Any,
+                  candidate_index: Optional[Dict[str, Any]]) -> Any:
+    """Clamp a candidate-bound finding's severity to the scanner baseline (agents-964).
+
+    The perf-review scanner emits a high/medium baseline per (rule, path); the triage model
+    drifts medium<->low and high<->low across runs, and the temperature pin that damps that
+    only reaches openai-completions engines (deepseek/qwen) — pi ignores samplingParams on
+    anthropic-messages (zai/kimi). So the dispatcher enforces the baseline exactly like it
+    binds rule_id/path: a finding bound to a candidate location takes the scanner's baseline,
+    with no downgrade or upgrade (SKILL.md invariant 1). A deliberate `info` (test
+    fixture/mock, SKILL.md rule 2) is the one exception, preserved as-is.
+    """
+    model_sev = item.get("severity")
+    if not candidate_index or not isinstance(rule_id, str):
+        return model_sev
+    baseline = candidate_index.get("severities", {}).get((rule_id.strip(), normalize_path(path)))
+    if not baseline:
+        return model_sev
+    if isinstance(model_sev, str) and model_sev.strip().lower() == "info":
+        return model_sev
+    return baseline
 
 def _strip_yaml_comment(line: str) -> str:
     """Cut a YAML comment without touching a '#' inside a quoted scalar."""
@@ -396,6 +425,7 @@ class FindingsStore:
             if not isinstance(item, dict):
                 continue
             rule_id, path = bind_candidates(item, candidate_index)
+            item["severity"] = bind_severity(item, rule_id, path, candidate_index)
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
