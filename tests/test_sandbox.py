@@ -352,6 +352,8 @@ class TestSandboxRecord(unittest.TestCase):
             self.assertTrue(record["engine_sandboxed"])
             self.assertTrue(record["prepass_sandboxed"])
             self.assertIn("confined by the OS sandbox to the target", record["engine_read_scope"])
+            self.assertIn("factory repository (with runs/ and findings/ masked)", record["engine_read_scope"])
+            self.assertIn("ambient $HOME", record["engine_read_scope"])
             self.assertFalse(record["network_egress_filtered"])
             self.assertTrue(engine_sandboxed(engine))
 

@@ -249,10 +249,10 @@ def sandbox_record(engine: str, egress_filtered: bool = False) -> Optional[Dict[
         "tool": TOOL,
         "engine_sandboxed": engine in SANDBOXED_ENGINES,
         "prepass_sandboxed": True,
-        "engine_read_scope": ("confined by the OS sandbox to the target (read-only) plus "
-                              "the factory runtime, the engine's own install tree and "
-                              "system dirs; the operator's home, credentials, other runs "
-                              "and the rest of the host filesystem are invisible"
+        "engine_read_scope": ("confined by the OS sandbox to the target (read-only) plus the factory repository "
+                              "(with runs/ and findings/ masked), the engine's install tree and system dirs "
+                              "(/usr, /etc); ambient $HOME (ssh, cloud credentials), other runs and the rest of "
+                              "the host filesystem are invisible"
                               if engine in SANDBOXED_ENGINES else None),
         "network_egress_filtered": egress_filtered,
         "notes": ["host /proc invisible (private PID namespace); the engine's own "
