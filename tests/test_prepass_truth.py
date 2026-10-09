@@ -279,8 +279,31 @@ class TestPrepassFixes(unittest.TestCase):
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["path"], "component.css")
 
+    def test_scan_ui_ux_focus_not_focus_visible_does_not_exempt(self):
+        """[agents-ifv] :focus:not(:focus-visible) reset pattern must not count as focus-visible coverage."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        test_reset_cases = [
+            ":focus:not(:focus-visible) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:not( :focus-visible) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:not(  :focus-visible) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:not(\n    :focus-visible) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:NOT(:focus-visible) { outline: none; }\n.btn:hover { color: red; }",
+            ":focus:not(\n  :FOCUS-VISIBLE\n) { outline: none; }\n.btn:hover { color: red; }",
+            "a:focus:not(:focus-visible) { outline: 0; }\n.link:hover { color: red; }",
+        ]
+        for snippet in test_reset_cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                (tmp_path / "style.css").write_text(snippet, encoding="utf-8")
+                res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                     capture_output=True, text=True, check=True)
+                data = json.loads(res.stdout)
+                candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
+                self.assertEqual(len(candidates), 1, f"Snippet should not have counted as coverage: {snippet}")
+                self.assertEqual(candidates[0]["path"], "style.css")
+
     def test_scan_ui_ux_recognizes_chained_and_combinator_focus_visible_selectors(self):
-        """[agents-vml] scan_ui_ux recognizes chained pseudo-classes, combinators, and pseudo-elements
+        """[agents-ifv / agents-vml] scan_ui_ux recognizes chained pseudo-classes, combinators, and pseudo-elements
         on :focus-visible selectors (.card:focus-visible:hover, .btn:focus-visible::after, :is(...))."""
         script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
         chained_selectors = [
@@ -292,19 +315,20 @@ class TestPrepassFixes(unittest.TestCase):
             ".card:focus-visible .child { outline: 2px solid green; }",
             ".card:focus-visible[data-active] { outline: 2px solid green; }",
             ".card:focus-visible.active { outline: 2px solid green; }",
+            ":focus:not(:focus-visible) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
+            ":focus:not(\n  :focus-visible\n) { outline: none; }\n.btn:focus-visible { outline: 2px solid blue; }",
         ]
 
         for sel in chained_selectors:
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
-                # Stylesheet defines hover and only this chained focus-visible selector
                 (tmp_path / "style.css").write_text(f".btn:hover {{ color: red; }}\n{sel}", encoding="utf-8")
                 res = subprocess.run([sys.executable, str(script), "--target", tmp],
                                      capture_output=True, text=True, check=True)
                 data = json.loads(res.stdout)
                 focus_candidates = [c for c in data["candidates"] if c["rule_id"] == "missing-focus-visible-state"]
                 self.assertEqual(len(focus_candidates), 0,
-                                 f"Failed to recognize chained selector {sel!r}: got {focus_candidates}")
+                                 f"Failed to recognize valid focus selector {sel!r}: got {focus_candidates}")
 
 
 if __name__ == "__main__":
