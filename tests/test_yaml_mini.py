@@ -244,6 +244,19 @@ class TestYamlMiniFoldedAndIndicatorDivergences(unittest.TestCase):
         with self.assertRaises(YamlParseError):
             self._parse("k: |2\n text\n")
 
+    def test_indicator_order_is_either_way_round(self):
+        """YAML allows the chomping and indentation indicators in either order.
+
+        `|2-` was supported and `|-2` was not: the header regex required the digit first, so a
+        valid document was REJECTED rather than parsed. Found while probing around this fix
+        rather than from the bead, which is why it is pinned here with the rest.
+        """
+        self.assertEqual(self._parse("k: |-2\n    text\n")["k"], "  text")
+        self.assertEqual(self._parse("k: >+2\n    text\n")["k"], "  text\n")
+        self.assertEqual(self._parse("k: |-1\n    text\n")["k"], "   text")
+        # The order that already worked must keep working.
+        self.assertEqual(self._parse("k: |2-\n    text\n")["k"], "  text")
+
 
 if __name__ == "__main__":
     unittest.main()

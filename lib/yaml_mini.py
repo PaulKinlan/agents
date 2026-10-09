@@ -27,7 +27,12 @@ class YamlParseError(ValueError):
     """Raised when a manifest uses a YAML construct this parser does not support."""
 
 
-_BLOCK_SCALAR_RE = re.compile(r"^[|>][0-9]*[+-]?$")
+# A block scalar header: `|`/`>` optionally followed by a single-digit indentation indicator
+# (1-9) and/or a chomping indicator, in EITHER order - YAML allows both `|2-` and `|-2`, and
+# the second form used to fail this regex, so a valid document raised instead of parsing
+# (agents-m8h). `|0` matches here on purpose: the parser rejects it by name, which is a better
+# error than treating the whole header as a plain scalar string.
+_BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[0-9][+-]?|[+-][0-9]?)?$")
 _FLOW_ITEM_SPLIT_RE = re.compile(r",(?![^\[\]{}]*[\]}])")
 
 
@@ -172,7 +177,9 @@ def _parse_block_scalar(
     ends_with_nl: bool = True,
 ) -> Tuple[str, int]:
     style = indicator[0]
-    chomp = "-" if indicator.endswith("-") else ("+" if indicator.endswith("+") else "")
+    # Detected by PRESENCE, not by suffix: the chomping indicator may precede the digit
+    # (`|-2`), so "ends with '-'" silently became clip chomping for that order.
+    chomp = "-" if "-" in indicator else ("+" if "+" in indicator else "")
     # An explicit indentation indicator (`|2`, `>2`, `|2-`) fixes the content indentation
     # relative to the parent node; it is not decoration. It was accepted by _BLOCK_SCALAR_RE
     # and never read, so `|2` with content at 4 was parsed as content at 4 (agents-m8h).
