@@ -20,14 +20,17 @@ Audits HTML, CSS, SCSS, JS, TS, JSX, TSX, Vue, and Svelte files against the full
 
 Each rule deterministically detects legacy frontend patterns or missing Baseline Web
 Platform capabilities and maps them directly to the authoritative guide IDs in
-`modern-web-guidance` (retrievable via `npx -y modern-web-guidance@latest retrieve <id>`).
+`modern-web-guidance`. The catalog of those IDs is **bundled in this repository**
+(`scripts/guides_index.json`, all 146 guides) and is the only source used: the scanner never
+invokes the guidance package over the network, because that would mean executing unpinned,
+mutable third-party code (`@latest`) from a pre-pass (threat-model
+`tm-unpinned-third-party-npx-prepass`; the pin policy is lib/tool_pins.py).
 """
 
 import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -44,6 +47,20 @@ SCRIPT_EXTS = {".js", ".mjs", ".ts", ".jsx", ".tsx", ".vue", ".svelte"}
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLED_GUIDES_INDEX = SCRIPT_DIR / "guides_index.json"
+
+# The bundled index is this scanner's ground truth: the repository ships all 146 guides and
+# tests/test_factory_core.py asserts that >= 146 are mapped to rules, so a smaller catalog
+# means the file was truncated or corrupted. Review finding P2-3 on 9f5a54e: a one-entry JSON
+# satisfied the old "not catalog" check, so truncation passed as success.
+EXPECTED_MIN_GUIDES = 146
+
+
+class GuidesCatalogUnavailable(RuntimeError):
+    """The bundled 146-guide catalog is missing, unreadable or empty (fail closed)."""
+
+
+class UnpinnedExecutionRefused(RuntimeError):
+    """The pre-pass was asked to execute unpinned third-party code over the network."""
 
 # Regular expression matching baseline TODO annotations inside comments (agents-08d):
 # Matches TODO(baseline/<feature-id>) when preceded by a comment delimiter:
@@ -1091,32 +1108,45 @@ RULES: List[Dict[str, Any]] = [
 
 
 def load_guides_catalog() -> Dict[str, Dict[str, Any]]:
-    """Load the 146-guide modern-web-guidance catalog from bundled JSON or live CLI."""
+    """Load the 146-guide modern-web-guidance catalog from the bundled JSON index.
+
+    The bundled index is the ONLY source. This used to fall back to
+    `npx --offline -y modern-web-guidance@latest list`, i.e. executing unpinned, mutable
+    third-party code from a pre-pass, which bypasses the factory's own pin policy
+    (lib/tool_pins.py; lib/sandbox.py binds only pinned tools). The fallback could only ever
+    fire when the bundled file was missing or corrupt - a broken install - and would then
+    paper over it by running that code.
+
+    It now fails closed instead: a missing or unusable bundled index raises, because the
+    guide catalog is the scanner's ground truth for coverage and silently scanning without
+    it produces a report that looks complete while checking nothing.
+    """
+    if not BUNDLED_GUIDES_INDEX.exists():
+        raise GuidesCatalogUnavailable(
+            f"bundled guide catalog missing: {BUNDLED_GUIDES_INDEX}. The modern-web pre-pass "
+            "refuses to fetch a catalog by executing unpinned remote code "
+            "(threat-model tm-unpinned-third-party-npx-prepass); restore the file "
+            "(agents/modern-web/scripts/guides_index.json, 146 guides) from the repository."
+        )
+    try:
+        items = json.loads(BUNDLED_GUIDES_INDEX.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise GuidesCatalogUnavailable(
+            f"bundled guide catalog is unreadable: {BUNDLED_GUIDES_INDEX} ({exc}). "
+            "Fail closed rather than scanning without guide coverage."
+        ) from exc
+
     catalog: Dict[str, Dict[str, Any]] = {}
-
-    if BUNDLED_GUIDES_INDEX.exists():
-        try:
-            items = json.loads(BUNDLED_GUIDES_INDEX.read_text(encoding="utf-8"))
-            for item in items:
-                if isinstance(item, dict) and "id" in item:
-                    catalog[item["id"]] = item
-        except Exception:
-            pass
-
-    # If bundled index was missing, fall back to querying `npx --offline modern-web-guidance list`
-    if not catalog:
-        try:
-            res = subprocess.run(
-                ["npx", "--offline", "-y", "modern-web-guidance@latest", "list"],
-                capture_output=True, text=True, timeout=5
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                for item in json.loads(res.stdout):
-                    if isinstance(item, dict) and "id" in item:
-                        catalog[item["id"]] = item
-        except Exception:
-            pass
-
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and "id" in item:
+            catalog[item["id"]] = item
+    if len(catalog) < EXPECTED_MIN_GUIDES:
+        raise GuidesCatalogUnavailable(
+            f"bundled guide catalog is incomplete: {BUNDLED_GUIDES_INDEX} yielded "
+            f"{len(catalog)} guides, expected at least {EXPECTED_MIN_GUIDES}. Fail closed "
+            "rather than scanning against a truncated catalog: the coverage numbers in the "
+            "report would otherwise look plausible while most guides go unchecked."
+        )
     return catalog
 
 
@@ -1189,7 +1219,9 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
                             "category": catalog.get(gid, {}).get("category", ""),
                             "description": catalog.get(gid, {}).get("description", ""),
                             "featuresUsed": catalog.get(gid, {}).get("featuresUsed", []),
-                            "retrieve_cmd": f"npx -y modern-web-guidance@latest retrieve {gid}"
+                            # Emitted so the engine can cite the guide WITHOUT being told to run
+                            # unpinned remote code: the catalog is bundled in this repository.
+                            "guide_index_ref": f"{BUNDLED_GUIDES_INDEX.name}#{gid}"
                         }
                         for gid in guide_ids
                     ]
@@ -1217,16 +1249,18 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
 
     retrieved_markdown: Dict[str, str] = {}
     if retrieve_guides and matched_guide_ids:
-        top_ids = sorted(matched_guide_ids)[:10]
-        try:
-            res = subprocess.run(
-                ["npx", "-y", "modern-web-guidance@latest", "retrieve", ",".join(top_ids)],
-                capture_output=True, text=True, timeout=15
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                retrieved_markdown["combined_guides"] = res.stdout[:12000]
-        except Exception:
-            pass
+        # Fail closed. This used to run `npx -y modern-web-guidance@latest retrieve ...`, i.e.
+        # fetch mutable remote code with no pin. It cannot even work in a contained run: this
+        # station declares no network tool (agent.yaml `requires: []`, `network: false`), so
+        # lib/containment.egress_allowlist() is empty and the sandbox is unshared - the call
+        # could only ever fail its egress or hit the 15s timeout. The bundled index carries
+        # each guide's category/description/featuresUsed; guide bodies are not fetched here.
+        raise UnpinnedExecutionRefused(
+            "--retrieve needs 'modern-web-guidance@latest' over the network, which the factory "
+            "refuses to execute unpinned (threat-model tm-unpinned-third-party-npx-prepass; "
+            "lib/tool_pins.py). This station also declares network:false, so it has no egress "
+            "allowlist. Use the bundled catalog metadata instead."
+        )
 
     return {
         "target": target_dir.name,
@@ -1247,18 +1281,25 @@ def main():
     parser = argparse.ArgumentParser(description="Modern Web Guidance deterministic scanner (146 guides)")
     parser.add_argument("--target", required=True, help="Target repository directory")
     parser.add_argument("--output", help="Output JSON path")
-    parser.add_argument("--retrieve", action="store_true", help="Also run `npx modern-web-guidance retrieve` for matched guide IDs")
+    parser.add_argument("--retrieve", action="store_true", help="Refused: guide retrieval would execute unpinned remote code (see UnpinnedExecutionRefused)")
     args = parser.parse_args()
 
     target_dir = Path(args.target).resolve()
-    result = scan_repository(target_dir, retrieve_guides=args.retrieve)
+    try:
+        result = scan_repository(target_dir, retrieve_guides=args.retrieve)
+    except (GuidesCatalogUnavailable, UnpinnedExecutionRefused) as exc:
+        # Fail closed, and say why in one line rather than dumping a traceback: this is a
+        # policy refusal or a broken install, not an internal crash.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     out = json.dumps(result, indent=2)
 
     if args.output:
         Path(args.output).write_text(out, encoding="utf-8")
     else:
         print(out)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
