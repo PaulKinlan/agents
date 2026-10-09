@@ -503,7 +503,7 @@ plane something concrete to attach to. I'd fold that into phase 3.
 ├── lines/
 │   └── project-audit.yaml         # ordered composition + andon rules
 ├── lib/
-│   ├── adapters/{antigravity,claude,pi,gha}.sh
+│   ├── adapters/{antigravity,claude,deepseek,pi}.sh
 │   ├── findings.py                # fingerprint · dedupe · state machine
 │   └── bench/                     # Class C harnesses
 ├── targets/<project>.yaml         # which agents run against what

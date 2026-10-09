@@ -19,7 +19,7 @@ You will be given:
 1. **Evaluate Context & Filter False Positives**:
    - **External Target Descriptions**: Documents describing external repos (e.g. `chrome-agent-platform`, `fauxmium`) or mentioning their internal harnesses (such as `a11y-audit.ts`, `beads`, `refs/dolt/data`) are discussing external targets, not files expected in this repo. Downgrade or filter these unless they claim the file lives locally.
    - **Example & Template Patterns**: Triage rules mentioning standard test directories (`test/`, `tests/`, `fixtures/`, `dist/`) or wildcard patterns (`scripts/*journey*.ts`) are guidance for scanners, not missing codebase files.
-   - **Historical Architecture vs Active Reality**: In design plans (e.g. `docs/PLAN.md`), architectural layout diagrams that list files not yet implemented (such as `lib/bench/`, `lib/adapters/gha.sh`, `lines/project-audit.yaml`, `.github/workflows/`) are genuine specification drift if the document presents them as the repo layout without noting their planned status.
+   - **Historical Architecture vs Active Reality**: In design plans (e.g. `docs/PLAN.md`), architectural layout diagrams that name a path which does not exist on disk are genuine specification drift when the document presents them as the repo layout without noting their planned status.
 
 2. **Evaluate Semantic Drift**:
    - **Outdated Status Claims**: E.g., if `README.md` asserts "No agents implemented yet", but multiple agents are implemented in `agents/`, this is significant documentation drift.
@@ -44,11 +44,11 @@ You will be given:
          "rule_id": "doc-spec-drift",
          "path": "docs/PLAN.md",
          "line_number": 504,
-         "snippet": "│   ├── adapters/{antigravity,claude,pi,gha}.sh",
+         "snippet": "│   ├── adapters/{existing-a,existing-b,<new-engine>}.sh",
          "severity": "medium",
-         "title": "Specification Drift: Missing gha.sh Adapter",
-         "description": "docs/PLAN.md specifies lib/adapters/gha.sh as part of the repo layout, but only antigravity.sh, claude.sh, and pi.sh exist.",
-         "remediation": "Implement lib/adapters/gha.sh or annotate it in docs/PLAN.md as planned for a future phase."
+         "title": "Specification Drift: Missing Adapter",
+         "description": "docs/PLAN.md presents lib/adapters/<new-engine>.sh as part of the repo layout, but no such script exists on disk.",
+         "remediation": "Implement the adapter or annotate the layout entry in docs/PLAN.md as planned for a future phase."
        }
      ]
    }
