@@ -30,7 +30,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                child_environment, prepass_environment)
     from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
     from lib.egress_proxy import EgressProxy
-    from lib.embargo import is_false_positive, normalize_visibility, reported_severity
+    from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
+                             reported_severity)
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
     from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
@@ -49,7 +50,8 @@ except ImportError:
                                child_environment, prepass_environment)
     from lib.credential_broker import CredentialBroker, credentials_from_env, keyless_providers
     from lib.egress_proxy import EgressProxy
-    from lib.embargo import is_false_positive, normalize_visibility, reported_severity
+    from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
+                             reported_severity)
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
     from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
     from lib.retention import ACTIVE_MARKER_NAME, active_grace_seconds, prune_run_dirs, retention_config
@@ -639,6 +641,25 @@ def resolve_target(target_arg: str) -> Tuple[str, Path, Dict[str, Any]]:
     name = target_path.name
     return name, target_path, {"name": name, "path": str(target_path), "sink": "file"}
 
+def apply_explicit_visibility(target_cfg: Dict[str, Any],
+                             explicit_visibility: Optional[str]) -> Dict[str, Any]:
+    """Fold an operator's explicit `--visibility` into a target's configuration (agents-dpt).
+
+    A raw `--target <path>` loads no manifest, so nothing states the target's visibility and
+    lib/embargo.py fail-closes on it: every high/critical finding is withheld from the synced
+    beads tracker, which is why the factory's own audit filed nothing. `--visibility
+    public|private` is the operator's explicit declaration for exactly that case.
+
+    A manifest's own valid `visibility` is authoritative and is never changed by the flag, so
+    `targets/<name>.yaml` behaviour is intact and the flag can never widen a declared private
+    target. With no flag nothing is added, so missing visibility still embargoes.
+    """
+    if explicit_visibility not in VALID_VISIBILITIES:
+        return target_cfg
+    if target_cfg.get("visibility") in VALID_VISIBILITIES:
+        return target_cfg
+    return {**target_cfg, "visibility": explicit_visibility}
+
 def detect_sink(target_path: Path, target_cfg: Dict[str, Any], explicit_sink: Optional[str]) -> str:
     if explicit_sink:
         return explicit_sink
@@ -855,7 +876,8 @@ def _finding_sort_key(finding: Any) -> Tuple[str, int, str]:
 
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
               station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
-              read_target_dir: Optional[Path] = None, model_arg: Optional[str] = None):
+              read_target_dir: Optional[Path] = None, model_arg: Optional[str] = None,
+              visibility_arg: Optional[str] = None):
     agent_dir = FACTORY_ROOT / "agents" / agent_name
     agent_yaml = agent_dir / "agent.yaml"
     skill_dir = agent_dir
@@ -873,6 +895,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # dispatch share it, and expiry is a station failure rather than a clean scan.
     budget = budget_for(agent_cfg, label=agent_name)
     target_name, target_dir, target_cfg = resolve_target(target_arg)
+    # agents-dpt: a raw --target path carries no manifest, so `--visibility` is the only way an
+    # explicit declaration reaches the findings dispatch; a manifest's own value still wins.
+    target_cfg = apply_explicit_visibility(target_cfg, visibility_arg)
     # read_dir is the tree the engine and pre-pass actually read. run_hillclimb passes its
     # accumulated disposable worktree here (P2-2, agents-nei) so a later proposal inspects the
     # kept edits instead of re-proposing against the operator's unchanged checkout. The engine
@@ -1573,7 +1598,8 @@ def count_criticals(findings: Any) -> int:
 
 def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str,
                                   explicit_sink: Optional[str],
-                                  model_arg: Optional[str] = None) -> Any:
+                                  model_arg: Optional[str] = None,
+                                  visibility_arg: Optional[str] = None) -> Any:
     """Run one station, giving a no-verdict PLUMBING failure ONE bounded repair-retry (agents-noo).
 
     A GENUINE failure — a StationError that is not a NoVerdictError (a failed pre-pass or engine)
@@ -1584,7 +1610,7 @@ def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str
     degrades the station to ERROR and continues the line as INCOMPLETE rather than halting."""
     try:
         return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True,
-                         model_arg=model_arg)
+                         model_arg=model_arg, visibility_arg=visibility_arg)
     except NoVerdictError as e:
         print(f"\n  🔧 [repair-retry] Station '{st_agent}' produced no verdict: {e}")
         print(f"     Retrying ONCE, telling the model its previous output was rejected...")
@@ -1592,11 +1618,12 @@ def run_station_with_repair_retry(st_agent: Any, target_arg: str, st_engine: str
                 f"ONLY one valid JSON object that validates against the declared report schema — "
                 f"no prose, no code fences, no tool calls.")
         return run_agent(st_agent, target_arg, st_engine, explicit_sink, station_only=True,
-                         repair_hint=hint, attempt=2, model_arg=model_arg)
+                         repair_hint=hint, attempt=2, model_arg=model_arg,
+                         visibility_arg=visibility_arg)
 
 
 def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
-             model_arg: Optional[str] = None):
+             model_arg: Optional[str] = None, visibility_arg: Optional[str] = None):
     line_yaml = FACTORY_ROOT / "lines" / f"{line_name}.yaml"
     if not line_yaml.exists():
         sys.stderr.write(f"Factory line '{line_name}' not found in {FACTORY_ROOT / 'lines'}\n")
@@ -1637,7 +1664,7 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         print(f"\n▶ [Station {idx}/{len(stations)}] Commencing: {st_agent} [{st_engine}] -- {st_summary}")
         try:
             res = run_station_with_repair_retry(st_agent, target_arg, st_engine, explicit_sink,
-                                                 model_arg=model_arg)
+                                                 model_arg=model_arg, visibility_arg=visibility_arg)
             report = res.get("report", {}) if res else {}
             findings = [f for f in report.get("findings", []) if isinstance(f, dict) and not is_false_positive(f)]
             criticals = count_criticals(findings)
@@ -1763,7 +1790,8 @@ def run_hillclimb(
     iterations: int = 1,
     apply_edits: bool = False,
     engine_arg: str = "auto",
-    explicit_sink: Optional[str] = None
+    explicit_sink: Optional[str] = None,
+    visibility_arg: Optional[str] = None
 ) -> bool:
     """Run the Class C perf hill-climber. Returns True when the run completed (proposals
     recorded, or kept edits persisted as a patch proposal); returns False when --apply could
@@ -1862,7 +1890,7 @@ def run_hillclimb(
             # snippet. The engine policy stays read-only (run_agent resolves the optimizer's
             # read-only grant); only the READ scope moves.
             res = run_agent("perf-hillclimb", target_arg, engine_arg, explicit_sink,
-                            read_target_dir=worktree_dir)
+                            read_target_dir=worktree_dir, visibility_arg=visibility_arg)
             report = res.get("report", {}) if res else {}
             steps = report.get("hillclimb_steps", [])
 
@@ -2198,6 +2226,10 @@ def main():
     run_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
     run_parser.add_argument("--model", default=None, help="Model for the pi engine (default deepseek/deepseek-flash)")
     run_parser.add_argument("--sink", help="Override sink (file or beads)")
+    run_parser.add_argument("--visibility", choices=["public", "private"],
+                            help="Explicit target visibility for a raw --target path (a named "
+                                 "target's manifest wins); missing still withholds high/critical "
+                                 "from a synced tracker")
 
     # line
     line_parser = subparsers.add_parser("line", help="Execute an ordered Factory Line composed of multiple stations")
@@ -2206,6 +2238,10 @@ def main():
     line_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agents with")
     line_parser.add_argument("--model", default=None, help="Model for the pi engine (default deepseek/deepseek-flash)")
     line_parser.add_argument("--sink", help="Override sink (file or beads)")
+    line_parser.add_argument("--visibility", choices=["public", "private"],
+                             help="Explicit target visibility for a raw --target path (a named "
+                                  "target's manifest wins); missing still withholds high/critical "
+                                  "from a synced tracker")
 
     # hillclimb
     hc_parser = subparsers.add_parser("hillclimb", help="Run Class C goal-directed performance hill-climber with ledger")
@@ -2216,6 +2252,10 @@ def main():
     hc_parser.add_argument("--apply", action="store_true", help="Apply candidate edits in worktree, re-measure, keep wins, revert losses")
     hc_parser.add_argument("--engine", default="auto", choices=["auto", "pi", "claude", "antigravity", "deepseek"], help="Engine to execute agent with")
     hc_parser.add_argument("--sink", help="Override sink (file or beads)")
+    hc_parser.add_argument("--visibility", choices=["public", "private"],
+                           help="Explicit target visibility for a raw --target path (a named "
+                                "target's manifest wins); missing still withholds high/critical "
+                                "from a synced tracker")
 
     # hook
     hook_parser = subparsers.add_parser("hook", help="Manage deterministic git pre-commit hooks (Rule 8 compliant)")
@@ -2282,10 +2322,12 @@ def main():
         promote_public_issue(args.target, args.issue)
     elif args.command == "run":
         run_agent(agent_name=args.agent, target_arg=args.target, engine_arg=args.engine,
-                  explicit_sink=args.sink, model_arg=getattr(args, "model", None))
+                  explicit_sink=args.sink, model_arg=getattr(args, "model", None),
+                  visibility_arg=args.visibility)
     elif args.command == "line":
         if not run_line(line_name=args.line, target_arg=args.target, engine_arg=args.engine,
-                        explicit_sink=args.sink, model_arg=getattr(args, "model", None)):
+                        explicit_sink=args.sink, model_arg=getattr(args, "model", None),
+                        visibility_arg=args.visibility):
             sys.exit(1)
     elif args.command == "hillclimb":
         if not run_hillclimb(
@@ -2295,7 +2337,8 @@ def main():
             iterations=args.iterations,
             apply_edits=args.apply,
             engine_arg=args.engine,
-            explicit_sink=args.sink
+            explicit_sink=args.sink,
+            visibility_arg=args.visibility
         ):
             sys.exit(1)
     elif args.command == "hook":

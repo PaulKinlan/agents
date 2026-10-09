@@ -256,7 +256,7 @@ schedule:
 | `schedule` | Optional schedule overrides per agent (seconds or clock time) | `interval: 86400` or `hour: 3, minute: 0` |
 
 > [!TIP]
-> **Ad-hoc targets**: You don't have to create a YAML file to audit a project. Passing `./factory run <agent> --target /path/to/repo` automatically resolves the target name from the directory and selects `file` sink as a safe default.
+> **Ad-hoc targets**: You don't have to create a YAML file to audit a project. Passing `./factory run <agent> --target /path/to/repo` automatically resolves the target name from the directory and selects `file` sink as a safe default. A raw path carries no manifest, so an ad-hoc run that files to `beads` also needs `--visibility public|private`: without it the fail-closed embargo holds every high/critical finding locally. A registered target's own `visibility` is authoritative and is never overridden by the flag.
 
 ---
 
