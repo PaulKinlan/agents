@@ -1314,18 +1314,22 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     _placeholder, _base_url, secret_vars = BROKER_PROVIDERS[provider]
                     if any(var in engine_secret_vars for var in secret_vars):
                         broker_creds.setdefault(provider, None)
-                # agents-3z8: bind the broker to the specific provider configured for this run
-                # so the sandboxed engine cannot use the broker as an unauthorized cross-provider
-                # egress proxy for other credentials held by the host.
+                # agents-3z8: bind the broker to the specific provider configured for this run's
+                # policy (station manifest or command-line model grant) so the sandboxed engine
+                # cannot use the broker as an unauthorized cross-provider egress proxy for other
+                # credentials held by the host. Ambient environment variables must never widen it.
                 allowed_for_run = None
-                if "FACTORY_ALLOWED_PROVIDERS" in os.environ:
-                    allowed_for_run = [p.strip() for p in os.environ["FACTORY_ALLOWED_PROVIDERS"].split(",") if p.strip()]
+                manifest_providers = agent_cfg.get("allowed_providers") or agent_cfg.get("providers")
+                if manifest_providers:
+                    if isinstance(manifest_providers, str):
+                        manifest_providers = [p.strip() for p in manifest_providers.split(",") if p.strip()]
+                    allowed_for_run = [p.lower() for p in manifest_providers if p.lower() in PROVIDERS]
                 elif model_arg:
-                    model_prov = model_arg.split("/", 1)[0]
+                    model_prov = model_arg.split("/", 1)[0].lower()
                     if model_prov in PROVIDERS:
                         allowed_for_run = [model_prov]
                 elif agent_cfg.get("model"):
-                    model_prov = str(agent_cfg["model"]).split("/", 1)[0]
+                    model_prov = str(agent_cfg["model"]).split("/", 1)[0].lower()
                     if model_prov in PROVIDERS:
                         allowed_for_run = [model_prov]
                 elif engine in ("deepseek", "claude", "antigravity"):

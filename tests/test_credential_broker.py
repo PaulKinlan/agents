@@ -217,7 +217,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         broker.start()
         self.addCleanup(broker.stop)
 
-        # 1. Allowed provider request succeeds
+        # 1. Allowed provider request succeeds (positive case)
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
             headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": "2"},
@@ -225,16 +225,93 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         self.assertEqual(status, 200)
         self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
         self.assertEqual(_FakeHTTPSConnection.calls[0]["host"], "api.anthropic.com")
+        self.assertEqual(_FakeHTTPSConnection.calls[0]["headers"]["x-api-key"], REAL["anthropic"])
 
-        # 2. Cross-provider request to openai is rejected with 403
+        # 2. Cross-provider request to openai is rejected with 403 (negative case)
+        # Assert clean denial: 403 status, no credentials returned or leaked in body, no upstream call
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/openai/chat/completions",
             headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
-        # Verify OpenAI was NEVER forwarded upstream
+        self.assertNotIn(REAL["openai"].encode(), body)
+        self.assertNotIn(REAL["anthropic"].encode(), body)
         self.assertEqual(len(_FakeHTTPSConnection.calls), 1, "cross-provider request must not be forwarded")
+
+    def test_path_traversal_and_encoding_cannot_widen_provider_restriction(self):
+        """agents-3z8: path traversal and URL-encoding tricks cannot bypass provider restriction."""
+        broker = cb.CredentialBroker(
+            {"anthropic": REAL["anthropic"], "openai": REAL["openai"]},
+            allowed_providers=["anthropic"],
+        )
+        broker.start()
+        self.addCleanup(broker.stop)
+
+        # Path traversal attempting to reach openai via allowed anthropic prefix
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/anthropic/../openai/chat/completions",
+            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertIn(b"not allowed for this run", body)
+        self.assertEqual(len(_FakeHTTPSConnection.calls), 0)
+
+        # URL-encoded provider name (%6f%70%65%6e%61%69 == openai)
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/%6f%70%65%6e%61%69/chat/completions",
+            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertIn(b"not allowed for this run", body)
+        self.assertEqual(len(_FakeHTTPSConnection.calls), 0)
+
+        # Case variation (/proxy/OpenAI/...)
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/OpenAI/chat/completions",
+            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertIn(b"not allowed for this run", body)
+        self.assertEqual(len(_FakeHTTPSConnection.calls), 0)
+
+        # Double-slash normalization (/proxy//openai/...)
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy//openai/chat/completions",
+            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertIn(b"not allowed for this run", body)
+        self.assertEqual(len(_FakeHTTPSConnection.calls), 0)
+
+    def test_request_headers_cannot_widen_provider_restriction(self):
+        """agents-3z8: request headers cannot manipulate or widen provider selection."""
+        broker = cb.CredentialBroker(
+            {"anthropic": REAL["anthropic"], "openai": REAL["openai"]},
+            allowed_providers=["anthropic"],
+        )
+        broker.start()
+        self.addCleanup(broker.stop)
+
+        # Client sends custom headers attempting to steer to openai
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={
+                "x-api-key": cb.PLACEHOLDER_KEY,
+                "x-provider": "openai",
+                "x-forwarded-host": "api.openai.com",
+                "host": "api.openai.com",
+                "content-length": "2",
+            },
+            body=b"{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
+        # Verify host and headers strictly follow the allowed provider (anthropic)
+        call = _FakeHTTPSConnection.calls[0]
+        self.assertEqual(call["host"], "api.anthropic.com")
+        self.assertEqual(call["headers"]["x-api-key"], REAL["anthropic"])
+        self.assertNotIn("authorization", [k.lower() for k in call["headers"]])
+        self.assertNotIn(REAL["openai"].encode(), body)
 
     def test_disallowed_provider_base_url_raises_broker_error(self):
         """agents-3z8: base_url for a disallowed provider raises BrokerError."""

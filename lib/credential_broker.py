@@ -41,11 +41,12 @@ from __future__ import annotations
 
 import http.client
 import os
+import posixpath
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Iterable, Mapping, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from lib.sandbox import SUN_PATH_LIMIT
 
@@ -230,11 +231,12 @@ class _Handler(BaseHTTPRequestHandler):
     # --- the broker hop ------------------------------------------------------
     def _broker(self, method: str) -> None:
         path_only, _, query = self.path.partition("?")
-        segments = [s for s in path_only.split("/") if s != ""]
+        decoded_path = posixpath.normpath(unquote(path_only))
+        segments = [s for s in decoded_path.split("/") if s != ""]
         # Expect: proxy / <provider> / <rest...>
         if len(segments) < 2 or segments[0] != "proxy":
             return self._respond_error(404, "not a broker path (expected /proxy/<provider>/...)")
-        provider = segments[1]
+        provider = segments[1].lower()
         if provider not in PROVIDERS:
             return self._respond_error(404, f"unknown provider {provider!r}")
         if self.allowed_providers is not None and provider not in self.allowed_providers:
