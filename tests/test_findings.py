@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from lib import findings
-from lib.findings import FindingsStore, StoreFileError
+from lib.findings import FindingsStore, StoreFileError, bind_severity
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 
@@ -185,6 +185,50 @@ class TestConcurrentWriters(unittest.TestCase):
                 findings = store.data["findings"]
                 self.assertEqual(len(findings), 2)
                 self.assertEqual({f["agent"] for f in findings.values()}, {"writer-a", "writer-b"})
+            finally:
+                store.close()
+
+
+class TestSeverityBaselineClamp(unittest.TestCase):
+    """agents-964: a candidate-bound finding is never reported BELOW the scanner's baseline."""
+
+    def _candidate_index(self):
+        return {
+            "rule_ids": {"lcp-cls-unoptimized-media", "layout-thrashing-forced-reflow"},
+            "paths": {"index.html", "src/a.js"},
+            "snippets_at": {},
+            "snippets_in": {},
+            "severities": {
+                ("lcp-cls-unoptimized-media", "index.html"): "medium",
+                ("layout-thrashing-forced-reflow", "src/a.js"): "high",
+            },
+        }
+
+    def test_bind_severity_clamps_a_downgrade_to_the_baseline(self):
+        ci = self._candidate_index()
+        self.assertEqual(bind_severity({"severity": "low"}, "lcp-cls-unoptimized-media", "index.html", ci), "medium")
+        self.assertEqual(bind_severity({"severity": "low"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "high")
+        self.assertEqual(bind_severity({"severity": "medium"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "high")
+
+    def test_bind_severity_preserves_info_critical_and_unbound(self):
+        ci = self._candidate_index()
+        self.assertEqual(bind_severity({"severity": "info"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "info")
+        self.assertEqual(bind_severity({"severity": "critical"}, "layout-thrashing-forced-reflow", "src/a.js", ci), "critical")
+        self.assertEqual(bind_severity({"severity": "low"}, "nope", "x.js", ci), "low")
+
+    def test_process_run_stores_the_clamped_severity(self):
+        ci = self._candidate_index()
+        with tempfile.TemporaryDirectory() as d:
+            store = FindingsStore("t", findings_dir=Path(d))
+            try:
+                processed, _, _ = store.process_run(
+                    "perf-review",
+                    [{"rule_id": "lcp-cls-unoptimized-media", "path": "index.html",
+                      "line_number": 5, "snippet": "<img>", "severity": "low",
+                      "title": "t", "description": "d"}],
+                    candidate_index=ci,
+                )
+                self.assertEqual(processed[0]["severity"], "medium")
             finally:
                 store.close()
 
