@@ -157,19 +157,20 @@ class ModelRuleIdTestCase(unittest.TestCase):
             redacted = redact_finding({"agent": "vuln-discovery", "rule_id": "unclassified",
                                        "model_rule_id": bad})
             self.assertEqual(redacted["model_rule_id"], "", f"{bad!r} should not survive")
-        good = redact_finding({"agent": "vuln-discovery", "rule_id": "unclassified",
+        good = redact_finding({"agent": "docs-drift", "rule_id": "unclassified",
                                "model_rule_id": "unhandled-url-construction"})
         self.assertEqual(good["model_rule_id"], "unhandled-url-construction")
 
     def test_the_persisted_store_carries_the_redacted_label(self):
-        self.run_store(item=finding(rule_id="unhandled-url-construction"))
-        persisted = json.loads((self.store_dir / "vuln-discovery.json").read_text())
+        """For an ordinary station - a security-sensitive one is covered below, and drops it."""
+        self.run_store(agent="docs-drift", item=finding(rule_id="unhandled-url-construction"))
+        persisted = json.loads((self.store_dir / "docs-drift.json").read_text())
         record = next(iter(persisted["findings"].values()))
         self.assertEqual(record["model_rule_id"], "unhandled-url-construction")
 
     def test_the_persisted_store_does_not_carry_a_malformed_label(self):
-        self.run_store(item=finding(rule_id="no spaces allowed here"))
-        persisted = json.loads((self.store_dir / "vuln-discovery.json").read_text())
+        self.run_store(agent="docs-drift", item=finding(rule_id="no spaces allowed here"))
+        persisted = json.loads((self.store_dir / "docs-drift.json").read_text())
         record = next(iter(persisted["findings"].values()))
         self.assertEqual(record["model_rule_id"], "")
 
@@ -191,3 +192,107 @@ class ModelRuleIdTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelRuleIdSecurityTestCase(unittest.TestCase):
+    """The review's P0/P1: a model-authored label is prose, and prose is not published for
+    credential or security-sensitive findings - so the label must not be either.
+
+    These are the tests whose absence let the first version through: 12 green tests, and a
+    credential finding that rewritten its title to scanner text while still carrying the raw
+    secret in the label.
+    """
+
+    SECRET = "token_xyz_987654321"   # under 20 chars, delimiter-broken: evades OPAQUE_RUN
+
+    def test_a_credential_finding_does_not_publish_the_labels_text(self):
+        redacted = redact_finding({
+            "agent": "secret-scan", "rule_id": "unclassified", "model_rule_id": self.SECRET,
+            "path": "config.py", "line_number": 10, "title": "t", "description": "d",
+            "snippet": f"SECRET = {self.SECRET}", "raw_match": f"SECRET = {self.SECRET}",
+        })
+        self.assertEqual(redacted["model_rule_id"], "")
+        self.assertNotIn(self.SECRET, json.dumps(redacted))
+
+    def test_a_security_sensitive_finding_does_not_publish_the_labels_text(self):
+        redacted = redact_finding({
+            "agent": "vuln-discovery", "rule_id": "unclassified", "model_rule_id": self.SECRET,
+            "path": "server.py", "line_number": 42, "title": "t",
+            "description": f"found {self.SECRET}", "snippet": f"connect(pass={self.SECRET})",
+        })
+        self.assertEqual(redacted["model_rule_id"], "")
+        self.assertNotIn(self.SECRET, json.dumps(redacted))
+
+    def test_a_known_pattern_secret_is_masked_even_for_an_ordinary_agent(self):
+        """Defence in depth: the drop rule covers credential/security agents, masking covers the
+        rest. A recognised key shape is masked wherever it appears, label included."""
+        redacted = redact_finding({"agent": "docs-drift", "rule_id": "unclassified",
+                                   "model_rule_id": "sk-proj-abcdefghijklmnopqrstuvwxyz012345",
+                                   "path": "README.md", "line_number": 1})
+        self.assertNotIn("sk-proj-abcdefghijklmnopqrstuvwxyz012345", json.dumps(redacted))
+
+    def test_an_ordinary_finding_keeps_its_label(self):
+        """...and the feature still works where the threat model allows model prose."""
+        redacted = redact_finding({"agent": "docs-drift", "rule_id": "unclassified",
+                                   "model_rule_id": "doc-broken-link", "path": "README.md",
+                                   "line_number": 1, "title": "t", "description": "d",
+                                   "snippet": "s"})
+        self.assertEqual(redacted["model_rule_id"], "doc-broken-link")
+
+    def test_the_persisted_store_never_carries_a_security_label(self):
+        """End-to-end, because the store file is TRACKED in this repo: a leak here is published."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            (target / "lib").mkdir(parents=True)
+            (target / "lib" / "real.py").write_text("x = 1\n")
+            store = FindingsStore("vuln-discovery", findings_dir=root / "findings")
+            try:
+                store.process_run(
+                    agent="vuln-discovery",
+                    raw_findings=[finding(rule_id=self.SECRET, path="lib/real.py")],
+                    candidate_index=CONTEXT_INDEX, target_dir=target,
+                )
+            finally:
+                store.close()
+            persisted = (root / "findings" / "vuln-discovery.json").read_text()
+            self.assertNotIn(self.SECRET, persisted)
+
+    def test_the_fingerprint_survives_a_changed_label_between_runs(self):
+        """Review P2: the earlier additivity test replayed an identical label, so it would pass
+        even if the field were folded into the fingerprint. A model's wording drifts; identity
+        must not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            (target / "lib").mkdir(parents=True)
+            (target / "lib" / "real.py").write_text("x = 1\n")
+            store = FindingsStore("docs-drift", findings_dir=root / "findings")
+            try:
+                kwargs = dict(agent="docs-drift", candidate_index=CONTEXT_INDEX, target_dir=target)
+                first, s1, _ = store.process_run(
+                    raw_findings=[finding(rule_id="doc-broken-link", path="lib/real.py")], **kwargs)
+                second, s2, _ = store.process_run(
+                    raw_findings=[finding(rule_id="doc-deleted-reference", path="lib/real.py")],
+                    **kwargs)
+                first_record, second_record = first[0], second[0]
+            finally:
+                store.close()
+            self.assertEqual(s1["new"], 1)
+            self.assertEqual((s2["new"], s2["fixed"], s2["regressed"]), (0, 0, 0))
+            self.assertEqual(s2["unchanged"], 1)
+            self.assertEqual(first_record["fingerprint"], second_record["fingerprint"])
+            self.assertEqual(first_record["model_rule_id"], "doc-broken-link")
+            self.assertEqual(second_record["model_rule_id"], "doc-deleted-reference")
+
+    def test_the_unchanged_section_shows_the_label(self):
+        from lib.findings import _render_delta_report
+        record = {"fingerprint": "f" * 64, "agent": "docs-drift", "rule_id": "unclassified",
+                  "model_rule_id": "doc-broken-link", "path": "README.md", "line_number": 1,
+                  "title": "t", "description": "d", "snippet": "s", "severity": "low",
+                  "routing_severity": "low", "state": "new", "change": "unchanged"}
+        report = _render_delta_report("t", [record], {"new": 0, "regressed": 0, "fixed": 0,
+                                                      "unchanged": 1, "suppressed": 0,
+                                                      "false_positive": 0}, [])
+        self.assertIn("doc-broken-link", report)
+        self.assertIn("not scanner provenance", report)

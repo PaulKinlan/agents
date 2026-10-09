@@ -303,6 +303,12 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     if credential:
         published["snippet"] = f"[redacted:{agent or 'credential'} match at {location}]"
         published["title"] = f"{rule} match at {location}"
+        # agents-ag4, review P0: a model-authored label is prose, and prose cannot be checked for
+        # an echo of a value whose shape is unknown - which is why this branch publishes derived
+        # text only. A label under 20 chars, or one broken up by delimiters, evades both the
+        # pattern mask and OPAQUE_RUN, so it must not be kept here at all. The raw label is still
+        # in the local run artifact for whoever has to rotate the credential.
+        published["model_rule_id"] = ""
         # agents-5gg: non-secret-scan agents are models, not deterministic scanners;
         # report their origin faithfully rather than attributing to a scanner.
         if agent in CREDENTIAL_AGENTS:
@@ -322,6 +328,9 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
         published["snippet"] = "[withheld]"
         published["description"] = "[withheld]"
         published["remediation"] = "[withheld]"
+        # agents-ag4, review P1: same reason - this branch withholds model prose wholesale
+        # because it can quote a secret of unrecognised shape, and a label is model prose.
+        published["model_rule_id"] = ""
 
     if "raw_match" in published:
         published["raw_match"] = (

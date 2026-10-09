@@ -1037,7 +1037,12 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
             if reduced(f):
                 lines.append(f"- {badge} `{f['rule_id']}` (`{f['path']}:{f.get('line_number', '?')}`)")
                 continue
-            lines.append(f"- {badge} **{f['title']}** (`{f['path']}:{f.get('line_number', '?')}`)")
+            line = f"- {badge} **{f['title']}** (`{f['path']}:{f.get('line_number', '?')}`)"
+            if f.get("model_rule_id"):
+                # A finding is 'unchanged' for every run after its first, so without this the
+                # label would be visible exactly once (agents-ag4, review P2).
+                line += f" — model's own label (not scanner provenance): `{f['model_rule_id']}`"
+            lines.append(line)
         lines.append("")
 
     if false_positives:
