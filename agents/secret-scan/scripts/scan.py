@@ -19,6 +19,8 @@ from pathlib import Path
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+
 from lib.redaction import stdout_safe_report  # noqa: E402
 
 # Built-in high-confidence regex patterns for when gitleaks is not installed
@@ -190,7 +192,12 @@ def main():
     if candidates is None:
         candidates = scan_with_builtin(target_dir)
 
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     result = {
+        **artefact_scheme_fields(),
         "target": str(target_dir),
         "scanner": "gitleaks" if shutil.which("gitleaks") else "builtin-regex",
         "candidate_count": len(candidates),

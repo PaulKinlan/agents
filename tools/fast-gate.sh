@@ -59,7 +59,8 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_bench_runner.py tests/test_hillclimb.py"
       ;;
     agents/docs-drift/scripts/check_docs.py)
-      mapped="$mapped tests/test_docs_drift.py"
+      # agents-q0mt: also emits candidate ids now; the exclusion suite drives this script.
+      mapped="$mapped tests/test_docs_drift.py tests/test_prepass_exclusions.py"
       ;;
     agents/vuln-triage/scripts/triage.py)
       mapped="$mapped tests/test_vuln_triage_prepass.py"
@@ -81,6 +82,25 @@ while IFS= read -r f; do
       # suite plus the shared helper's property tests, which are what fail if the id stops being
       # deterministic or starts moving with the model's prose.
       mapped="$mapped tests/test_scan_surface.py tests/test_candidate_identity.py"
+      ;;
+    agents/secret-scan/scripts/scan.py)
+      # The secret pre-pass. Both producer paths (gitleaks and the builtin fallback) meet at one
+      # artefact assembly point, so the candidate-identity conversion is one call (agents-q0mt).
+      mapped="$mapped tests/test_secret_scanner.py"
+      ;;
+    agents/modern-web/scripts/scan_modern_web.py)
+      # agents-q0mt: the station now emits a candidate id; its own suite plus the pre-pass
+      # exclusion suite, which exercises this script directly.
+      mapped="$mapped tests/test_modern_web.py tests/test_prepass_exclusions.py"
+      ;;
+    agents/deps-supply-chain/scripts/audit_deps.py)
+      # agents-q0mt: emits candidate ids; the pre-pass exclusion suite exercises it too.
+      mapped="$mapped tests/test_audit_deps.py tests/test_prepass_exclusions.py"
+      ;;
+    agents/ui-ux-audit/scripts/scan_ui_ux.py)
+      # agents-q0mt: emits candidate ids; this station's output is pinned as the pre-pass truth
+      # fixture, and the exclusion suite drives it directly.
+      mapped="$mapped tests/test_prepass_truth.py tests/test_prepass_exclusions.py"
       ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
