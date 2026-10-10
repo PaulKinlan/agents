@@ -167,8 +167,9 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
 _EXECUTION_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:Promise\.(?:all|allSettled|race)|asyncio\.gather)\b"
     r"|(?:run|execute|call|dispatch|await|start)\b[^.;\n]*?\b(?:concurrently|in\s+parallel|simultaneously|at\s+the\s+same\s+time)\b"
-    r"|\b(?:concurrent|parallel|simultaneous)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?)\b"
-    r"|\bparallelize\s+(?:the\s+)?(?:loop|await|calls?|passes|execution|tasks?)\b",
+    r"|\b(?:concurrent|parallel|simultaneous)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?)\b"
+    r"|\bparallel(?:ize|izing|ization)\b"
+    r"|\b(?:worker\s+pool|thread\s+pool|web\s+worker|worker_threads)\b",
     re.IGNORECASE
 )
 

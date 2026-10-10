@@ -234,6 +234,13 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertTrue(is_concurrency_recommendation(f8))
 
+        # Reviewer P1 finding: parallelize with worker pool
+        f9 = {
+            "rule_id": "custom-rule",
+            "remediation": "Parallelize model inferences with a worker pool."
+        }
+        self.assertTrue(is_concurrency_recommendation(f9))
+
     def test_detects_reentrancy_precondition_or_evidence(self):
         """Identify whether finding already carries backend evidence or precondition."""
         without_precondition = {"remediation": "Replace loop with Promise.all"}
