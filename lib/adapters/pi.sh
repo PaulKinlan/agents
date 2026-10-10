@@ -48,7 +48,12 @@ case "$TOOL_POLICY" in
   # NO kernel boundary. That is misuse, not a supported caller — every production path
   # (CLI, line, hillclimb, the CI action, the scheduler) converges on run_agent — and
   # tests/test_containment.py pins it as a misuse regression test, not a trust mechanism.
-  worktree-write) POLICY_FLAGS=(--tools read,grep,find,ls,edit,write --no-extensions --no-approve) ;;
+  worktree-write)
+    POLICY_FLAGS=(--tools read,grep,find,ls,edit,write --no-extensions --no-approve)
+    if [ -z "${FACTORY_SANDBOXED:-}" ]; then
+      echo "[pi adapter] Warning: tool policy 'worktree-write' accepted without sandbox verification; direct invocation is unsandboxed and caller is responsible for filesystem boundaries." >&2
+    fi
+    ;;
   *)
     echo "[pi adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
     exit 3

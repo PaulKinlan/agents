@@ -670,6 +670,13 @@ class TestAdapters(unittest.TestCase):
                     "(delivery, not exit 0)")
                 self.assertIn("--no-extensions", argv)
                 self.assertIn("--no-approve", argv)
+                if extra:
+                    self.assertNotIn("Warning: tool policy 'worktree-write'", res.stderr,
+                                     "sandboxed factory run must not emit direct-invocation warning")
+                else:
+                    self.assertIn("Warning: tool policy 'worktree-write' accepted without sandbox verification", res.stderr,
+                                  "direct invocation with write policy must warn on stderr (agents-enrb)")
+                    self.assertIn("caller is responsible", res.stderr)
         source = (ROOT / "lib" / "adapters" / "pi.sh").read_text(encoding="utf-8")
         self.assertNotIn(
             "/proc/self/uid_map", source,
