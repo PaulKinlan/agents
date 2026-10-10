@@ -367,5 +367,6 @@ if [ -z "$files" ]; then
 fi
 
 modules="$(printf '%s\n' $files | sed 's#/#.#g; s#\.py$##' | tr '\n' ' ' | sed 's/ *$//')"
-echo "fast-gate: base=$BASE; running: python3 -m unittest $modules"
-python3 -m unittest $modules
+echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
+python3 -u -m unittest $modules
+echo "fast-gate: passed: $files"

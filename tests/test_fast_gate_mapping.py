@@ -231,6 +231,12 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("install.sh", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
+    def test_fast_gate_invokes_unbuffered_unittest_and_reports_passed(self):
+        """tools/fast-gate.sh must run python3 with -u to unbuffer stdout/stderr and emit completion marker (agents-7zts)."""
+        content = FAST_GATE.read_text(encoding="utf-8")
+        self.assertIn("python3 -u -m unittest", content)
+        self.assertIn('echo "fast-gate: passed: $files"', content)
+
 
 if __name__ == "__main__":
     unittest.main()
