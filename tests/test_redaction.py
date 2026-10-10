@@ -534,6 +534,24 @@ class TestStationStdoutChannelIsStructural(unittest.TestCase):
     missed different subsets of the same leak. So the assertion is POSITIVE and structural -
     parse each script's AST and require a call to the helper - rather than forbidding
     particular print strings, which is the check that kept missing sites.
+
+    Presence alone is not enough (agents-h0mb review, P1): a station that calls the helper
+    only inside `if args.output:` and raw-prints in the `else:` satisfies a presence check
+    while still leaking on the no-output path. So the test asserts the two-part property
+    that makes the no-output stdout channel PROVABLY the helper's:
+
+    1. UNCONDITIONAL ROUTING - an emit_station_result call that is not nested under any
+       conditional or short-circuiting construct (if/while/for/try/match, ternary,
+       boolean operator, comprehension), so no sibling branch can route around it.
+    2. STDOUT EXCLUSIVITY - no other stdout emission anywhere in the script: no print()
+       without file=sys.stderr, no reference to sys.stdout, no pprint (whose default
+       stream is stdout). With the helper as the ONLY writer to stdout, whatever reaches
+       the terminal on the no-output path is the redacted report by construction.
+
+    Together these hold against the whole mutation family, not one spelling: removing the
+    call fails (1), conditioning it on --output fails (1), raw-printing the result on any
+    path fails (2), and aliasing or wrapping the helper so no direct unconditional call
+    remains also fails (1).
     """
 
     # Scripts that accept --output but have NO stdout result path at all: --output is
@@ -558,30 +576,115 @@ class TestStationStdoutChannelIsStructural(unittest.TestCase):
                 scripts[str(path.relative_to(ROOT))] = source
         return scripts
 
+    # A helper call nested under any of these has a sibling execution path that does NOT
+    # reach it - which is exactly the leak shape (helper under `if args.output:`, raw print
+    # in the `else:`). BoolOp covers the `args.output and emit(...)` short-circuit spelling;
+    # comprehensions execute zero times on an empty iterable. TryStar/Match are guarded for
+    # older interpreters. `with` is unconditional, so it is deliberately absent.
+    _CONDITIONAL_ANCESTORS = tuple(cls for cls in (
+        ast.If, ast.While, ast.For, ast.AsyncFor, ast.Try, ast.BoolOp, ast.IfExp,
+        ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+        getattr(ast, "TryStar", None), getattr(ast, "Match", None),
+    ) if cls is not None)
+
     @staticmethod
-    def _calls_helper(source: str) -> bool:
-        for node in ast.walk(ast.parse(source)):
+    def _is_helper_call(node) -> bool:
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "emit_station_result":
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "emit_station_result":
+            return True
+        return False
+
+    @classmethod
+    def _calls_helper_unconditionally(cls, source: str) -> bool:
+        """True iff the script contains a call to emit_station_result that no conditional,
+        loop, short-circuit, or comprehension guards - so the call executes on EVERY path
+        through its enclosing scope, the no-output path included."""
+        tree = ast.parse(source)
+
+        def visit(node, conditioned):
+            if isinstance(node, ast.Call) and cls._is_helper_call(node) and not conditioned:
+                return True
+            return any(
+                visit(child, conditioned or isinstance(node, cls._CONDITIONAL_ANCESTORS))
+                for child in ast.iter_child_nodes(node)
+            )
+
+        return visit(tree, False)
+
+    @staticmethod
+    def _stdout_emission_sites(source: str):
+        """Every site that can write to stdout WITHOUT going through the helper: a print()
+        whose file= is absent or is not sys.stderr, any reference to sys.stdout (covers
+        sys.stdout.write/writelines, json.dump(..., sys.stdout), sys.stdout.fileno()), and
+        any pprint call (pprint's default stream is stdout)."""
+        tree = ast.parse(source)
+        sites = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr == "stdout"
+                    and isinstance(node.value, ast.Name) and node.value.id == "sys"):
+                sites.append(f"sys.stdout reference at line {node.lineno}")
             if isinstance(node, ast.Call):
                 func = node.func
-                if isinstance(func, ast.Name) and func.id == "emit_station_result":
-                    return True
-                if isinstance(func, ast.Attribute) and func.attr == "emit_station_result":
-                    return True
-        return False
+                if isinstance(func, ast.Name) and func.id == "print":
+                    file_kw = next((k for k in node.keywords if k.arg == "file"), None)
+                    stderr = (file_kw is not None
+                              and isinstance(file_kw.value, ast.Attribute)
+                              and file_kw.value.attr == "stderr"
+                              and isinstance(file_kw.value.value, ast.Name)
+                              and file_kw.value.value.id == "sys")
+                    if not stderr:
+                        sites.append(f"print() without file=sys.stderr at line {node.lineno}")
+                if isinstance(func, ast.Name) and func.id == "pprint":
+                    sites.append(f"pprint() (default stream is stdout) at line {node.lineno}")
+                if isinstance(func, ast.Attribute) and func.attr == "pprint":
+                    sites.append(f"pprint.pprint() (default stream is stdout) at line {node.lineno}")
+        return sites
 
     def test_every_output_script_routes_its_result_through_the_helper(self):
         """Load-bearing: point one station back at a raw print (e.g. revert
         accessibility/scripts/audit_a11y.py's main() to `print(json.dumps(result, indent=2))`)
         and this fails with `AssertionError: Lists differ:
         ['agents/accessibility/scripts/audit_a11y.py'] != []` naming the unconverted script.
+
+        Load-bearing against the CONDITIONAL-ROUTING mutant too (agents-h0mb review, P1):
+        rewrite a converted station to call the helper only inside `if args.output:` and
+        raw-print in the `else:` and this fails the same way, because the remaining helper
+        call is conditional and no longer counts.
         """
         scripts = self._output_scripts()
         self.assertTrue(scripts, "no --output scripts found - the enumeration itself is broken")
         missing = [rel for rel, source in scripts.items()
-                   if rel not in self.STDOUT_RESULT_EXCEPTIONS and not self._calls_helper(source)]
+                   if rel not in self.STDOUT_RESULT_EXCEPTIONS
+                   and not self._calls_helper_unconditionally(source)]
         self.assertEqual(missing, [],
-                         "station CLIs with --output that do not call emit_station_result: "
-                         + ", ".join(missing))
+                         "station CLIs with --output and no UNCONDITIONAL emit_station_result "
+                         "call (a call nested under if/try/loops/short-circuits leaves a path "
+                         "that routes around the helper): " + ", ".join(missing))
+
+    def test_no_output_script_emits_to_stdout_outside_the_helper(self):
+        """The exclusivity half of the property: since NO station script writes to stdout by
+        any other spelling, the no-output stdout content can only be the helper's redacted
+        report.
+
+        Load-bearing: add `print(json.dumps(result, indent=2))` alongside (not instead of)
+        the helper call in any converted station and this fails naming the print site - the
+        shape a presence-only check can never catch.
+        """
+        scripts = self._output_scripts()
+        self.assertTrue(scripts, "no --output scripts found - the enumeration itself is broken")
+        offenders = {}
+        for rel, source in scripts.items():
+            if rel in self.STDOUT_RESULT_EXCEPTIONS:
+                continue  # excepted scripts print a one-line summary, never result JSON
+            sites = self._stdout_emission_sites(source)
+            if sites:
+                offenders[rel] = sites
+        self.assertEqual(offenders, {},
+                         "station CLIs writing to stdout outside emit_station_result "
+                         "(route summaries through the helper's summary= instead): "
+                         + "; ".join(f"{rel}: {sites}" for rel, sites in offenders.items()))
 
     def test_exception_list_is_exact_current_and_reasoned(self):
         """An exception must still exist, still handle --output, still carry a reason, and
@@ -592,7 +695,7 @@ class TestStationStdoutChannelIsStructural(unittest.TestCase):
             self.assertIn(rel, scripts,
                           f"exception {rel} no longer handles --output - remove it or the rule changed")
             self.assertTrue(reason.strip(), f"exception {rel} must state its reason")
-            self.assertFalse(self._calls_helper(scripts[rel]),
+            self.assertFalse(self._calls_helper_unconditionally(scripts[rel]),
                              f"{rel} calls the helper AND is excepted - drop the stale exception")
 
 
