@@ -6,6 +6,9 @@ Validates:
 2. Every lib/*.py module resolves to test files that actually exist.
 3. Every test file in tests/ is reachable by at least one source file mapping (no orphan suites).
 4. tools/fast-gate.sh itself maps to this verification suite.
+5. agents-9nir: the ignore list is deliberate - ignored docs/config-only paths still fall
+   back quietly, and any changed file matching NEITHER a mapping arm NOR the ignore list
+   FAILS LOUDLY, naming the file, even when other changed files do map.
 """
 
 import os
@@ -17,13 +20,19 @@ ROOT = Path(__file__).resolve().parent.parent
 FAST_GATE = ROOT / "tools" / "fast-gate.sh"
 
 
-def resolve_fast_gate(changed_files: list[str]) -> list[str]:
-    """Execute tools/fast-gate.sh with simulated changed files and extract mapped suites."""
+def run_fast_gate(changed_files: list[str]) -> subprocess.CompletedProcess:
+    """Execute tools/fast-gate.sh with simulated changed files and return the raw result."""
     diff_text = "\n".join(changed_files)
     env = os.environ.copy()
     env["GIT_CHANGED"] = diff_text
     env["FAST_GATE_DRY_RUN"] = "1"
-    res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True, check=True)
+    return subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+
+
+def resolve_fast_gate(changed_files: list[str]) -> list[str]:
+    """Execute tools/fast-gate.sh with simulated changed files and extract mapped suites."""
+    res = run_fast_gate(changed_files)
+    res.check_returncode()
     return res.stdout.strip().split()
 
 
@@ -118,6 +127,50 @@ class TestFastGateMapping(unittest.TestCase):
         """Changing tools/fast-gate.sh must run this verification test."""
         mapped = resolve_fast_gate(["tools/fast-gate.sh"])
         self.assertIn("tests/test_fast_gate_mapping.py", mapped)
+
+    # --- agents-9nir: the ignore list is deliberate, and "no arm" fails loudly ----------
+
+    def test_readme_maps_to_docs_drift(self):
+        """README.md is the one markdown file a suite pins by content (its tree diagram)."""
+        mapped = resolve_fast_gate(["README.md"])
+        self.assertIn("tests/test_docs_drift.py", mapped, "README.md consumer suite omitted (agents-9nir)")
+
+    def test_github_paths_map_to_ci_suites(self):
+        """.github/** is consumed by the CI-action contract and the pages publish scope suites."""
+        for path in (".github/workflows/ci.yml", ".github/actions/factory/action.yml"):
+            with self.subTest(path=path):
+                mapped = resolve_fast_gate([path])
+                self.assertIn("tests/test_ci_action.py", mapped, f"{path}: CI action contract omitted (agents-9nir)")
+                self.assertIn("tests/test_pages_publish_scope.py", mapped, f"{path}: publish scope omitted (agents-9nir)")
+
+    def test_committed_suppressions_register_maps_to_suppressions_suite(self):
+        """findings/suppressions.yaml is read directly by tests/test_suppressions.py."""
+        mapped = resolve_fast_gate(["findings/suppressions.yaml"])
+        self.assertIn("tests/test_suppressions.py", mapped, "suppressions register contract omitted (agents-9nir)")
+
+    def test_ignored_docs_and_vcs_metadata_fall_back_quietly(self):
+        """Ignore-list paths resolve to nothing and exit 0, so the real run takes the smoke fallback quietly."""
+        for path in ("AGENTS.md", "agents/vuln-verify/README.md", "reports/factory-security-audit.md", ".gitignore"):
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertEqual(res.returncode, 0, f"{path}: ignored path must not fail (agents-9nir): {res.stderr}")
+                self.assertEqual(res.stdout.strip(), "", f"{path}: ignored path must map to no suite (agents-9nir)")
+
+    def test_unmatched_file_fails_loudly_naming_the_file(self):
+        """A changed file matching neither a mapping arm nor the ignore list must fail and name itself."""
+        for path in ("agents/vuln-verify/agent.yaml", "targets/voicebox.yaml"):
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertNotEqual(res.returncode, 0, f"{path}: unmatched file must fail loudly (agents-9nir)")
+                self.assertIn(path, res.stderr, f"{path}: the failure must name the unmatched file (agents-9nir)")
+                self.assertIn("no mapping arm", res.stderr)
+
+    def test_unmatched_file_fails_even_when_other_files_map(self):
+        """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
+        res = run_fast_gate(["lib/sandbox.py", "targets/voicebox.yaml"])
+        self.assertNotEqual(res.returncode, 0, "unmatched file masked by a mapped sibling (agents-9nir)")
+        self.assertIn("targets/voicebox.yaml", res.stderr, "the failure must name the unmatched file")
+        self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
 
 if __name__ == "__main__":

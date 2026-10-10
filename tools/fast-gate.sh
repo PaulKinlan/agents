@@ -11,8 +11,10 @@
 #   1. changed test files vs the base branch (default origin/main) run as-is;
 #   2. changed lib/*.py map to tests/test_<name>.py (scheduler -> test_schedules.py), and
 #      the `factory` dispatcher maps to the core + truth harnesses;
-#   3. anything else (docs, config, tools, …) falls back to a bounded smoke subset
-#      (tests/test_factory_core.py).
+#   3. changed paths on the explicit ignore list (each a deliberate case arm with a
+#      reason, agents-9nir) fall back to a bounded smoke subset
+#      (tests/test_factory_core.py); a changed file matching NEITHER a mapping arm NOR
+#      the ignore list fails loudly, named - a file nobody has mapped must be seen.
 #
 # A changed lib module whose mapped test file is absent exits non-zero. Override the base
 # branch with GIT_BASE=<ref> (used by tests).
@@ -33,6 +35,7 @@ changed="${GIT_CHANGED:-$(git diff --name-only "$BASE"...HEAD 2>/dev/null || tru
 
 run=""
 mapped=""
+unmatched=""
 
 while IFS= read -r f; do
   [ -z "$f" ] && continue
@@ -213,8 +216,60 @@ while IFS= read -r f; do
         exit 1
       fi
       ;;
+    README.md)
+      # The one markdown file a suite pins by CONTENT: tests/test_docs_drift.py reads the
+      # committed README and asserts its tree diagram resolves the governance paths
+      # (test_repository_readme_resolves_its_governance_paths). Every other *.md is prose
+      # and is ignored below.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
+    .github/*)
+      # CI definitions. tests/test_ci_action.py pins the committed .github/actions/**
+      # (action.yml parse plus the untrusted-context guard over every run: body);
+      # tests/test_pages_publish_scope.py reads the committed workflows/pages.yml. No
+      # suite can EXECUTE a workflow, so this union is the bounded approximation.
+      mapped="$mapped tests/test_ci_action.py tests/test_pages_publish_scope.py"
+      ;;
+    findings/suppressions.yaml)
+      # The committed suppressions register; tests/test_suppressions.py reads it directly
+      # (ROOT / "findings" / SUPPRESSIONS_FILENAME), so a change here is a contract change.
+      mapped="$mapped tests/test_suppressions.py"
+      ;;
+    # --- Ignore list (agents-9nir) -----------------------------------------------------
+    # RULE: an ignore must be a DELIBERATE CASE ARM WITH A REASON, never a default.
+    # "No arm" used to mean two different things - a considered exclusion and an
+    # oversight - and they were indistinguishable, so every unmatched file was silently
+    # masked by the smoke fallback below and the verdict read PASS for an unrelated
+    # suite. The *) arm at the bottom fails loudly and NAMES any file no arm claims;
+    # the smoke fallback after the loop is for ignored docs/config-only changes ONLY.
+    # To exempt a path, add an arm here with the reason it needs no suite.
+    *.md)
+      # Prose documentation. No suite executes prose; docs/*.md never reaches here (the
+      # docs/* arm above maps it to the docs suites) and README.md is mapped above
+      # because a suite pins its content.
+      ;;
+    .gitignore)
+      # VCS metadata, consumed only by git itself. Tests mention .gitignore only as
+      # fixtures they write into tmp targets (test_containment.py, test_hillclimb.py).
+      ;;
+    *)
+      unmatched="$unmatched $f"
+      ;;
   esac
 done <<< "$changed"
+
+# Loud failure (agents-9nir): a changed file that matches neither a mapping arm nor the
+# ignore list is exactly the case that must be seen - name every such file and fail,
+# rather than quietly running tests/test_factory_core.py and reporting PASS for an
+# unrelated suite. This must run before the dry-run print so tests exercise it too.
+if [ -n "$unmatched" ]; then
+  echo "fast-gate: FAIL: changed file(s) match no mapping arm and no ignore-list arm:" >&2
+  for u in $unmatched; do
+    echo "fast-gate:   $u" >&2
+  done
+  echo "fast-gate: add a case arm mapping each file to its suite, or a deliberate ignore arm with a reason (agents-9nir)" >&2
+  exit 1
+fi
 
 # Union, dedupe, deterministic order.
 files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort || true)"
@@ -225,7 +280,8 @@ if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
   exit 0
 fi
 
-# Fall back to a bounded smoke subset when nothing maps (docs-only / config-only / new tools).
+# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
+# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
 if [ -z "$files" ]; then
   files="tests/test_factory_core.py"
 fi
