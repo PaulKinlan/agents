@@ -94,7 +94,7 @@ class TestStationTrustedToolPins(unittest.TestCase):
                              env=env, capture_output=True, text=True)
 
         self.assertEqual(res.returncode, 2, f"expected exit 2 on pin failure, got {res.returncode}")
-        self.assertIn("Error: npm is present but cannot be authenticated", res.stderr)
+        self.assertIn("Error: npm cannot be authenticated", res.stderr)
         self.assertFalse((self.tmp / "fake_npm.log").exists(), "unauthenticated npm was executed")
 
     def test_deps_supply_chain_handles_genuinely_absent_npm(self):
@@ -196,6 +196,48 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         self.assertEqual(res.returncode, 0, f"expected exit 0, got {res.returncode}: {res.stderr}")
         self.assertTrue((self.tmp / "fake_npm.log").exists(), "authenticated npm should have run")
+
+    def test_deps_supply_chain_refuses_malformed_pins_file(self):
+        """deps-supply-chain must exit 2 loudly on malformed pins file rather than treating npm as absent (agents-syhp)."""
+        pins = self._pins_file("npm:\n  path: /nonexistent/npm\n")
+
+        env = os.environ.copy()
+        env["PATH"] = str(self.fakebin)
+        env["FACTORY_TOOL_PINS"] = str(pins)
+        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        pkg = self.target / "package.json"
+        pkg.write_text('{"name": "test", "dependencies": {"foo": "1.0.0"}}\n')
+
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 2, f"expected exit 2 on malformed pins file, got {res.returncode}")
+        self.assertIn("Error: npm cannot be authenticated", res.stderr)
+
+    def test_perf_review_runs_sandboxed_under_sandbox_command_with_home_pins(self):
+        """sandboxed pre-pass wrap must bind host pins file so child can authenticate tools (agents-ebm7)."""
+        from lib.sandbox import sandbox_command, sandbox_available
+        from lib.child_env import prepass_environment
+
+        if not sandbox_available():
+            self.skipTest("bubblewrap sandbox not available on this host")
+
+        subprocess.run(["git", "init", "-q", str(self.target)], check=True)
+        run_dir = self.tmp / "run"
+        run_dir.mkdir()
+
+        child_env = prepass_environment({"capabilities": {"requires": ["git"]}})
+        script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
+        inner = [sys.executable, str(script), "--target", str(self.target)]
+        cmd = sandbox_command(
+            inner, target_dir=str(self.target), factory_root=str(ROOT),
+            run_dir=str(run_dir), env=child_env, executables=["git"]
+        )
+
+        res = subprocess.run(cmd, env=child_env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"sandboxed run failed: {res.returncode}: {res.stderr}")
 
 
 if __name__ == "__main__":

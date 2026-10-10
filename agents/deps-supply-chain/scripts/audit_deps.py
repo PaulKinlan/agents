@@ -32,14 +32,16 @@ def _npm_binary() -> Optional[str]:
 
     npm is a trusted tool (lib/tool_pins.TRUSTED_TOOLS), so an npm PRESENT on PATH that the
     pin cannot authenticate is a loud failure — never a silent fallback or execution from
-    unverified PATH order (agents-01qd). A genuinely ABSENT npm returns None.
+    unverified PATH order (agents-01qd). A genuinely ABSENT npm returns None, but any other
+    pin or configuration failure (mismatch, unpinned, malformed pins file) exits 2 (agents-syhp).
     """
     try:
         return resolve_tool("npm")
     except ToolPinError as e:
-        if shutil.which("npm") is None:
+        msg = str(e)
+        if "could not be resolved on PATH" in msg and shutil.which("npm") is None:
             return None
-        sys.stderr.write(f"Error: npm is present but cannot be authenticated: {e}\n")
+        sys.stderr.write(f"Error: npm cannot be authenticated: {e}\n")
         sys.exit(2)
 
 # Exclude standard ignored directories including vendor/ (third-party vendored code)
