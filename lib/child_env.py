@@ -161,14 +161,15 @@ def child_environment(
 
     `trusted_tools` is for the children that resolve a trusted tool THEMSELVES — the findings
     dispatch and promotion run `lib/sinks/*`, which call `lib.tool_pins.resolve_tool` for
-    `gh`/`bd`. On a pinned host the pins live behind `FACTORY_TOOL_PINS`, and without that
+    `gh`/`bd`, and pre-pass scripts that authenticate their own tools (`git`, `npm`, agents-01qd).
+    On a pinned host the pins live behind `FACTORY_TOOL_PINS`, and without that
     variable such a child cannot verify the tool it is about to execute and fails closed, with
     strictly less information than the parent that already verified the same file (agents-dpt).
     The same child also needs the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in
     (agents-7ua): it is a run-scoped widening the parent already applied when it resolved the
     tool, and without it the child's own `resolve_tool` fails closed even though the parent just
-    resolved the same binary. Children that never resolve a trusted tool (engine sessions,
-    pre-passes) get nothing extra.
+    resolved the same binary. Children that never resolve a trusted tool (engine sessions)
+    get nothing extra.
 
     `proxied` (agents-5d9) forwards the operator's proxy vars (PROXY_VARS) — only for an
     unsandboxed child that must reach the network the way the operator's shell does. It is

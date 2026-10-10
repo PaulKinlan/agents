@@ -102,8 +102,13 @@ class TestStationTrustedToolPins(unittest.TestCase):
         empty_bin = self.tmp / "empty_bin"
         empty_bin.mkdir()
 
+        # Pin npm with sha256 but NO path so resolve_tool checks PATH (empty_bin),
+        # genuinely raising 'could not be resolved on PATH' rather than finding a host-pinned path.
+        pins = self._pins_file(f"npm:\n  sha256: {'0' * 64}\n")
+
         env = os.environ.copy()
         env["PATH"] = str(empty_bin)
+        env["FACTORY_TOOL_PINS"] = str(pins)
         env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
         pkg = self.target / "package.json"
@@ -114,7 +119,9 @@ class TestStationTrustedToolPins(unittest.TestCase):
                              env=env, capture_output=True, text=True)
 
         self.assertEqual(res.returncode, 0, f"expected exit 0 when npm is absent, got {res.returncode}")
-        self.assertNotIn("Error: npm is present", res.stderr)
+        self.assertNotIn("Error: npm cannot be authenticated", res.stderr)
+        # Verify that npm audit was not attempted: no 'npm-audit-unavailable' coverage gap candidate
+        self.assertNotIn("npm-audit-unavailable", res.stdout)
 
     def test_prepass_child_environment_forwards_tool_pins(self):
         """prepass_environment must forward FACTORY_TOOL_PINS and FACTORY_ALLOW_UNPINNED_TOOLS (agents-qbl8)."""
@@ -218,26 +225,57 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
     def test_perf_review_runs_sandboxed_under_sandbox_command_with_home_pins(self):
         """sandboxed pre-pass wrap must bind host pins file so child can authenticate tools (agents-ebm7)."""
+        import hashlib
+        import shutil
         from lib.sandbox import sandbox_command, sandbox_available
         from lib.child_env import prepass_environment
 
         if not sandbox_available():
             self.skipTest("bubblewrap sandbox not available on this host")
 
+        real_git = shutil.which("git")
+        if not real_git:
+            self.skipTest("git is not installed on this host")
+
+        # Test controls its own fixture under $HOME (which bubblewrap tmpfs hides by default).
+        # We write a valid pins file for git into $HOME, proving sandbox_command explicitly
+        # mounts the host pins file read-only over the sandbox's /home tmpfs.
+        git_sha = hashlib.sha256(Path(real_git).read_bytes()).hexdigest()
+        home_pins = Path.home() / f".test-pins-{os.getpid()}.yaml"
+        try:
+            home_pins.write_text(f"git:\n  path: {real_git}\n  sha256: {git_sha}\n", encoding="utf-8")
+        except OSError as e:
+            self.skipTest(f"cannot create test pins fixture under $HOME: {e}")
+
         subprocess.run(["git", "init", "-q", str(self.target)], check=True)
         run_dir = self.tmp / "run"
         run_dir.mkdir()
 
-        child_env = prepass_environment({"capabilities": {"requires": ["git"]}})
-        script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
-        inner = [sys.executable, str(script), "--target", str(self.target)]
-        cmd = sandbox_command(
-            inner, target_dir=str(self.target), factory_root=str(ROOT),
-            run_dir=str(run_dir), env=child_env, executables=["git"]
-        )
+        orig_pins = os.environ.get("FACTORY_TOOL_PINS")
+        orig_unpinned = os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS")
+        try:
+            os.environ["FACTORY_TOOL_PINS"] = str(home_pins)
+            os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+            child_env = prepass_environment({"capabilities": {"requires": ["git"]}})
+            script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
+            inner = [sys.executable, str(script), "--target", str(self.target)]
+            cmd = sandbox_command(
+                inner, target_dir=str(self.target), factory_root=str(ROOT),
+                run_dir=str(run_dir), env=child_env, executables=["git"]
+            )
 
-        res = subprocess.run(cmd, env=child_env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, f"sandboxed run failed: {res.returncode}: {res.stderr}")
+            res = subprocess.run(cmd, env=child_env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"sandboxed run failed: {res.returncode}: {res.stderr}")
+        finally:
+            if orig_pins is not None:
+                os.environ["FACTORY_TOOL_PINS"] = orig_pins
+            else:
+                os.environ.pop("FACTORY_TOOL_PINS", None)
+            if orig_unpinned is not None:
+                os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = orig_unpinned
+            else:
+                os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+            home_pins.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
