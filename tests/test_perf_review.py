@@ -607,6 +607,25 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes2))
         self.assertIn("proposed_fix_diff", report2["findings"][0])
 
+    def test_mixed_direction_removes_promise_all_but_recommends_concurrency(self):
+        """Reviewer P1 finding: diff removing Promise.all while remediation recommends worker pool concurrency is guarded."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "bottleneck",
+                    "path": "src/infer.ts",
+                    "line_number": 30,
+                    "remediation": "Use a worker pool to parallelize model inference across available cores.",
+                    "proposed_fix_diff": "--- a/infer.ts\n+++ b/infer.ts\n@@ -1,2 +1,2 @@\n- await Promise.all(models.map(m => m.run()));\n+ pool.dispatch(models);",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        finding = report["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding)
+        self.assertIn("Code patch withheld", finding["remediation"])
+
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
         original_remediation = (
