@@ -95,7 +95,11 @@ from lib.sinks.github import promote_issue
 DELTA_KEYS = ("new", "regressed", "fixed", "unchanged", "suppressed", "false_positive",
               # Not a table column: a one-time identity re-key count, announced as its own banner so
               # a migration wave cannot be read as discoveries (agents-x9my step 2, agents-1ukp).
-              "migrated")
+              "migrated",
+              # Not a table column: a subset counter beside `fixed` (which remains the total).
+              # Counts disappearances of rows with no stable anchor (identity_source outside
+              # IDENTITY_STABLE_SOURCES), announced as a banner under the counts table (agents-6r8y).
+              "fixed_unanchored")
 
 def normalize_text(text: Any) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting.
@@ -341,6 +345,23 @@ IDENTITY_SOURCES = (
 IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
                            "unmatched-rule-location-unique", "unmatched-rule-path-unique",
                            "candidate-id")
+
+
+def is_unanchored_finding(finding: Dict[str, Any]) -> bool:
+    """Whether a finding has NO stable scanner anchor (identity rests on model prose).
+
+    A finding whose identity_source is outside IDENTITY_STABLE_SOURCES is unanchored.
+    Neither it, nor model-snippet, nor no-candidate-index is sufficient to close on a Fixed line.
+    Factored single predicate used by both the migration path and the delta path (agents-6r8y).
+
+    NOTE ON OPTION E (agents-6r8y): Recomputing anchors at disappearance against this run's
+    candidate index is DEFERRED, not rejected. As documented at lines 807-813, a looser
+    agent+path match at disappearance would risk silently absorbing a genuinely new finding at a
+    location an older row had left, trading a visible wave for an invisible one. The marker
+    tracks the last-observed anchor stability without inventing speculative re-bindings.
+    """
+    source = finding.get("identity_source")
+    return bool(not source or source not in IDENTITY_STABLE_SOURCES)
 
 
 def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
@@ -1057,6 +1078,11 @@ class FindingsStore:
                     existing["state"] = "fixed"
                     existing["fixed_at"] = now
                     delta_stats["fixed"] += 1
+                    # `fixed` is the TOTAL number of findings that left the active set.
+                    # `fixed_unanchored` is a SUBSET counter beside it (not a subtraction) counting
+                    # disappearances of rows with no stable anchor (agents-6r8y).
+                    if is_unanchored_finding(existing):
+                        delta_stats["fixed_unanchored"] += 1
                     fixed_items.append(existing)
 
         # This store was written by an older identity binding, so the rows it retires may be RE-KEYS
@@ -1069,7 +1095,7 @@ class FindingsStore:
         if self.identity_scheme_from < IDENTITY_SCHEME:
             delta_stats["migrated"] += sum(
                 1 for row in fixed_items
-                if row.get("identity_source") not in IDENTITY_STABLE_SOURCES)
+                if is_unanchored_finding(row))
         self.data["identity_scheme"] = IDENTITY_SCHEME
 
         self.save()
@@ -1360,6 +1386,25 @@ def _migration_note(stats: Dict[str, int]) -> List[str]:
     ]
 
 
+def _unanchored_fixed_note(stats: Dict[str, int]) -> List[str]:
+    """The banner note for resolved findings that had no stable scanner anchor.
+
+    `fixed` counts the total number of findings that left the active set; this note reports the
+    subset whose identity rested on model prose rather than scanner candidates, so triagers know
+    their disappearance is not evidence on its own. (agents-6r8y)
+    """
+    unanchored = int(stats.get("fixed_unanchored", 0) or 0)
+    if unanchored <= 0:
+        return []
+    total_fixed = int(stats.get("fixed", 0) or 0)
+    return [
+        f"> **Unanchored disappearances**: {unanchored} of {total_fixed} finding(s) that left the "
+        "active set had no stable anchor, so their disappearance is unattributed and not evidence "
+        "of a fix on its own. (agents-6r8y)",
+        "",
+    ]
+
+
 def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
                          fixed_items: List[Dict[str, Any]], *, step_summary: bool = False,
                          sink_results: Optional[Dict[str, Any]] = None,
@@ -1433,6 +1478,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append("")
 
     lines += _migration_note(stats)
+    lines += _unanchored_fixed_note(stats)
 
     if stations is not None:
         lines.append("## Stations")

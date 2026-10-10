@@ -770,8 +770,133 @@ class TestIdentityAttribution(unittest.TestCase):
                 td, [self._finding(rule_id="model-invented-label", snippet="wording this time")], ci)
 
             self.assertEqual((stats["new"], stats["fixed"], stats["migrated"]), (1, 2, 1), stats)
+            self.assertEqual(stats["fixed_unanchored"], 1, "rekey row has model-snippet identity so it is unanchored")
             self.assertIn("Identity migration (one-time)",
                           findings._render_delta_report("target", processed, stats, fixed))
+            self.assertIn("1 of 2 finding(s) that left the active set had no stable anchor",
+                          findings._render_delta_report("target", processed, stats, fixed))
+
+    def test_fixed_unanchored_counter_and_banner_both_directions(self):
+        """Option C (agents-6r8y): fixed keeps total count; fixed_unanchored is a subset counter beside it.
+
+        An anchored disappearance leaves fixed_unanchored at 0 and renders no banner.
+        An unanchored disappearance increments fixed_unanchored and renders the one-sentence banner.
+        """
+        agent = "vuln-discovery"
+        base = {"severity": "high", "title": "t", "description": "d", "remediation": "r",
+                "state": "new", "change": "unchanged",
+                "first_seen": "2026-01-01T00:00:00+00:00",
+                "last_seen": "2026-01-01T00:00:00+00:00"}
+
+        # Direction 1: Anchored disappearance only
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            fp = findings.compute_fingerprint(agent=agent, rule_id="scanner-rule",
+                                              path="a.py", snippet="scanner text")
+            row = {fp: dict(base, fingerprint=fp, agent=agent, rule_id="scanner-rule",
+                            path="a.py", line_number=2, snippet="scanner text",
+                            identity_source="candidate-exact")}
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": row}), encoding="utf-8")
+
+            # Finding disappears
+            processed, stats, fixed = self._run(td, [], ci)
+            self.assertEqual(stats["fixed"], 1, "fixed must count the total disappearances")
+            self.assertEqual(stats["fixed_unanchored"], 0, "anchored disappearance leaves counter at 0")
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertNotIn("Unanchored disappearances", report)
+
+        # Direction 2: Unanchored disappearance only
+        with tempfile.TemporaryDirectory() as td:
+            fp = findings.compute_fingerprint(agent=agent, rule_id="unclassified",
+                                              path="b.py", snippet="model wording")
+            row = {fp: dict(base, fingerprint=fp, agent=agent, rule_id="unclassified",
+                            path="b.py", line_number=5, snippet="model wording",
+                            identity_source="model-snippet")}
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": row}), encoding="utf-8")
+
+            # Finding disappears
+            processed, stats, fixed = self._run(td, [], None)
+            self.assertEqual(stats["fixed"], 1, "fixed keeps current meaning as total")
+            self.assertEqual(stats["fixed_unanchored"], 1, "unanchored disappearance increments subset counter")
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("Unanchored disappearances", report)
+            self.assertIn("> **Unanchored disappearances**: 1 of 1 finding(s) that left the active set", report)
+
+        # Direction 3: Mixed disappearances (2 unanchored, 1 anchored = 3 total)
+        with tempfile.TemporaryDirectory() as td:
+            fp_anchored = findings.compute_fingerprint(agent=agent, rule_id="scanner-rule",
+                                                      path="a.py", snippet="scanner text")
+            fp_unanchored1 = findings.compute_fingerprint(agent=agent, rule_id="unclassified",
+                                                         path="b.py", snippet="wording 1")
+            fp_unanchored2 = findings.compute_fingerprint(agent=agent, rule_id="unclassified",
+                                                         path="c.py", snippet="wording 2")
+            rows = {
+                fp_anchored: dict(base, fingerprint=fp_anchored, agent=agent, rule_id="scanner-rule",
+                                  path="a.py", line_number=2, snippet="scanner text",
+                                  identity_source="candidate-exact"),
+                fp_unanchored1: dict(base, fingerprint=fp_unanchored1, agent=agent, rule_id="unclassified",
+                                     path="b.py", line_number=5, snippet="wording 1",
+                                     identity_source="model-snippet"),
+                fp_unanchored2: dict(base, fingerprint=fp_unanchored2, agent=agent, rule_id="unclassified",
+                                     path="c.py", line_number=8, snippet="wording 2",
+                                     identity_source="no-candidate-index"),
+            }
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": rows}), encoding="utf-8")
+
+            # All disappear
+            processed, stats, fixed = self._run(td, [], ci)
+            self.assertEqual(stats["fixed"], 3, "total fixed is 3")
+            self.assertEqual(stats["fixed_unanchored"], 2, "unanchored subset counter is 2")
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("> **Unanchored disappearances**: 2 of 3 finding(s) that left the active set", report)
+
+    def _check_process_run_shared_predicate(self, process_run_source: str):
+        """Shared verification helper for drift and mutation checks."""
+        self.assertIn("is_unanchored_finding(existing)", process_run_source,
+                      "delta path must call is_unanchored_finding(existing)")
+        self.assertIn("is_unanchored_finding(row)", process_run_source,
+                      "migration path must call is_unanchored_finding(row)")
+        self.assertNotIn("not in IDENTITY_STABLE_SOURCES", process_run_source,
+                         "process_run must not contain inlined predicate copies")
+
+    def test_the_predicate_for_unanchored_rows_is_factored_and_shared(self):
+        """The drift check: both the delta and migration paths must use the factored predicate.
+
+        Two spellings of one rule is the defect we spent today removing. Both call sites
+        (delta retirement and migration re-key counting) must call is_unanchored_finding.
+        """
+        # 1. Behavior over closed vocabulary
+        for src in findings.IDENTITY_SOURCES:
+            unanchored = findings.is_unanchored_finding({"identity_source": src})
+            if src in findings.IDENTITY_STABLE_SOURCES:
+                self.assertFalse(unanchored, f"{src} is in IDENTITY_STABLE_SOURCES and must be anchored")
+            else:
+                self.assertTrue(unanchored, f"{src} is not in IDENTITY_STABLE_SOURCES and must be unanchored")
+        self.assertTrue(findings.is_unanchored_finding({}))
+        self.assertTrue(findings.is_unanchored_finding({"identity_source": None}))
+
+        # 2. Structural assertion against FindingsStore.process_run
+        import inspect
+        src = inspect.getsource(findings.FindingsStore.process_run)
+        self._check_process_run_shared_predicate(src)
+
+    def test_inlining_the_unanchored_predicate_fails_the_drift_check(self):
+        """Mutation test: inlining an inline copy of the predicate into process_run must fail the drift check."""
+        import inspect
+        real_src = inspect.getsource(findings.FindingsStore.process_run)
+        mutated_src = real_src.replace(
+            "is_unanchored_finding(existing)",
+            'existing.get("identity_source") not in findings.IDENTITY_STABLE_SOURCES'
+        )
+        with self.assertRaises(AssertionError):
+            self._check_process_run_shared_predicate(mutated_src)
 
     def test_the_emitted_candidate_id_is_copied_where_a_rule_bound_the_candidate(self):
         """agents-q0mt: identity is COPIED from the station's id, not re-derived from text.
