@@ -4,7 +4,8 @@
 Pre-pass scanner that inspects a target directory for high-entropy tokens,
 API keys, private keys, and credentials.
 Uses gitleaks if available, otherwise runs a deterministic regex suite.
-Outputs raw candidate matches as JSON to stdout or a designated output file.
+stdout carries the redacted report (reader keys and counts only); --output writes the raw
+local record of candidate matches.
 """
 
 import argparse
@@ -176,7 +177,7 @@ def main():
     parser = argparse.ArgumentParser(description="Deterministic scanner for secret-scan agent")
     parser.add_argument("pos_target", nargs="?", help="Optional positional target directory")
     parser.add_argument("--target", help="Target directory to scan")
-    parser.add_argument("--output", help="Path to write JSON candidates to (default: stdout)")
+    parser.add_argument("--output", help="Path to write the raw local JSON record to (default: stdout, which redacts matched values)")
     args = parser.parse_args()
 
     raw_target = args.target or args.pos_target

@@ -143,7 +143,7 @@ def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
 def main():
     parser = argparse.ArgumentParser(description="Deterministic issue fetcher for issue-triage agent")
     parser.add_argument("--target", required=True, help="Target repository path")
-    parser.add_argument("--output", help="Path to write JSON output to (default: stdout)")
+    parser.add_argument("--output", help="Path to write the raw local JSON record to (default: stdout, which redacts matched values)")
     args = parser.parse_args()
 
     target_dir = Path(args.target).resolve()
