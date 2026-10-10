@@ -410,10 +410,22 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                 with self.subTest(child=child, name=name):
                     self.assertNotIn(name, env)
         self.assertNotIn("ANTHROPIC_API_KEY", prepass)
-        
-        # When unsandboxed, the engine gets the real key directly (no broker),
-        # so we ensure it gets the model key but NOT the unrelated ones.
-        self.assertEqual(engine["ANTHROPIC_API_KEY"], "sk-ant-ci")
+
+        # agents-28nn round 6: the broker starts on EVERY path when the run holds a real
+        # key, so an UNSANDBOXED engine is now brokered too — it carries a non-secret
+        # placeholder + the broker's loopback base URL for the run's provider, and the
+        # operator's raw keys never reach its environ (the leak the round closed; the
+        # old assertion here — "unsandboxed gets the real key directly, no broker" —
+        # encoded exactly that leak).
+        self.assertEqual(engine["DEEPSEEK_API_KEY"], PLACEHOLDER_KEY)
+        self.assertTrue(engine["DEEPSEEK_BASE_URL"].startswith("http://127.0.0.1:"),
+                        engine.get("DEEPSEEK_BASE_URL"))
+        # The harm the finding named: the raw keys must not appear anywhere in the
+        # child's environment — neither under their own names nor any other.
+        self.assertNotIn("ANTHROPIC_API_KEY", engine)
+        self.assertNotIn("GEMINI_API_KEY", engine)
+        self.assertNotIn("sk-ant-ci", engine.values())
+        self.assertNotIn("gem-ci", engine.values())
 
     @unittest.skipUnless(sandbox_available(),
                          "the pi run is refused without bubblewrap, and brokering (agents-8h4) "
