@@ -164,18 +164,37 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
 # _OrtRun mutex, WebGPU compute passes, or transactional handles) crash the application.
 # ---------------------------------------------------------------------------------------------
 
-_CONCURRENCY_PATTERN = re.compile(
-    r"\b(?:Promise\.(?:all|allSettled)|asyncio\.gather|in\s+parallel|parallel(?:ize|izing|ization)?|parallel\s+execution|concurrent(?:ly)?|concurrent\s+execution|overlap(?:ping)?|simultaneous(?:ly)?|at\s+the\s+same\s+time)\b",
+_EXECUTION_CONCURRENCY_PATTERN = re.compile(
+    r"\b(?:Promise\.(?:all|allSettled|race)|asyncio\.gather)\b"
+    r"|(?:run|execute|call|dispatch|await|start)\b[^.;\n]*?\b(?:concurrently|in\s+parallel|simultaneously|at\s+the\s+same\s+time)\b"
+    r"|\b(?:concurrent|parallel|simultaneous)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?)\b"
+    r"|\bparallelize\s+(?:the\s+)?(?:loop|await|calls?|passes|execution|tasks?)\b",
+    re.IGNORECASE
+)
+
+# Exclude non-execution asset downloads / stylesheet preloading
+_ASSET_CONCURRENCY_EXCLUSIONS = re.compile(
+    r"\b(?:<link\b|@import|stylesheet|preload|prefetch|html\s+parsing|download\s+styles?|fetchpriority)\b",
+    re.IGNORECASE
+)
+
+_CONDITIONAL_REENTRANCY_PATTERN = re.compile(
+    r"\b(?:precondition:?\s*verify\s+backend\s+reentrancy|if\s+[^.;\n]{1,80}?\b(?:is\s+reentrant|is\s+thread[- ]safe|supports?\s+concurrency|supports?\s+concurrent|tolerates?\s+overlap))\b",
+    re.IGNORECASE
+)
+
+_SERIAL_FALLBACK_PATTERN = re.compile(
+    r"\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use)?\s*(?:serial(?:ly)?|sequentially)\b|\bpreserve\s+serial\b|\bkeep\s+serial\b",
     re.IGNORECASE
 )
 
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
-    r"\b(?:is\s+reentrant|supports?\s+(?:concurrency|concurrent|overlap)|tolerates?\s+overlap|is\s+thread[- ]safe|threadsafe\s+backend)\b",
+    r"\b(?:backend\s+is\s+(?:proven\s+)?reentrant|runtime\s+is\s+(?:proven\s+)?reentrant|is\s+proven\s+reentrant|is\s+known\s+to\s+be\s+reentrant|backend\s+is\s+thread[- ]safe|runtime\s+is\s+thread[- ]safe)\b",
     re.IGNORECASE
 )
 
-_CONDITIONAL_PRECONDITION_PATTERN = re.compile(
-    r"(?:\bif\s+(?:the\s+)?(?:runtime|backend|it|this|execution)\b|\bif\s+(?:supported|reentrant)\b|\bprecondition\b|\bverify\s+(?:the\s+)?(?:runtime|backend|reentrancy)\b)",
+_NEGATION_PATTERN = re.compile(
+    r"\b(?:not|no|never|does\s+not|doesn't|cannot|can't|unsupported|non-reentrant|lacks?)\b",
     re.IGNORECASE
 )
 
@@ -185,23 +204,30 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     if not isinstance(finding, dict):
         return False
     rule_id = str(finding.get("rule_id", "")).strip().lower()
+    category = str(finding.get("category", "")).strip().lower()
     if rule_id == "sequential-await-waterfall":
         return True
+    if rule_id == "render-blocking-head-asset" or "lcp" in category or "cls" in category:
+        return False
+
     text = " ".join([
         str(finding.get("title", "")),
         str(finding.get("description", "")),
         str(finding.get("remediation", "")),
         str(finding.get("proposed_fix_diff", "")),
     ])
-    return bool(_CONCURRENCY_PATTERN.search(text))
+    if _ASSET_CONCURRENCY_EXCLUSIONS.search(text) and not re.search(r"\b(?:Promise\.(?:all|allSettled)|asyncio\.gather)\b", text):
+        return False
+    return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
 
 
 def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
-    """Return True if the remediation is explicitly conditional or cites positive evidence.
+    """Return True if the remediation is properly conditional with a serial fallback
+    or cites proven positive evidence that the specific backend supports concurrency.
 
     Negative statements (e.g. stating in description that a runtime is non-reentrant or has
-    a mutex while still recommending concurrency) do NOT qualify as a preconditioned
-    recommendation (agents-vorw / hub fleet-4inv).
+    a mutex while still recommending concurrency) or conditional suggestions without a serial
+    fallback do NOT qualify as a preconditioned recommendation (agents-vorw / hub fleet-4inv).
     """
     if not isinstance(finding, dict):
         return False
@@ -209,20 +235,18 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     if not remediation:
         return False
 
-    # Positive evidence in remediation that this backend is reentrant / thread-safe / tolerates overlap
-    if _POSITIVE_EVIDENCE_PATTERN.search(remediation):
-        if not re.search(r"\b(?:not\s+reentrant|not\s+thread[- ]safe|non-reentrant)\b", remediation, re.IGNORECASE):
-            return True
+    has_negation = bool(_NEGATION_PATTERN.search(remediation))
 
-    # Explicit conditional precondition ("IF <runtime> is reentrant... otherwise serial...")
-    has_condition = bool(_CONDITIONAL_PRECONDITION_PATTERN.search(remediation))
-    has_alternative = bool(re.search(
-        r"\b(?:otherwise|serial|sequential(?:ly)?|keep\s+serial|preserve\s+serial)\b",
-        remediation,
-        re.IGNORECASE
-    ))
-    if has_condition and has_alternative:
+    # Case 1: Conditional advice with explicit serial fallback
+    has_condition = bool(_CONDITIONAL_REENTRANCY_PATTERN.search(remediation))
+    has_fallback = bool(_SERIAL_FALLBACK_PATTERN.search(remediation))
+    if has_condition and has_fallback:
         return True
+
+    # Case 2: Proven positive evidence (must not be conditional, and must not contain negations)
+    if not has_negation and not re.search(r"\b(?:if|whether|assuming)\b", remediation, re.IGNORECASE):
+        if _POSITIVE_EVIDENCE_PATTERN.search(remediation):
+            return True
 
     return False
 

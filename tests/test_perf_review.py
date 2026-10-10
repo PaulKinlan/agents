@@ -217,6 +217,14 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         f6 = {"rule_id": "custom-rule", "remediation": "Run checks at the same time"}
         self.assertTrue(is_concurrency_recommendation(f6))
 
+        # Reviewer P2 finding: CSS @import and stylesheet preloading must NOT be flagged as execution concurrency
+        f7 = {
+            "rule_id": "render-blocking-head-asset",
+            "category": "LCP / FCP",
+            "remediation": "Replace CSS @import chains with parallel <link rel=\"stylesheet\"> tags"
+        }
+        self.assertFalse(is_concurrency_recommendation(f7))
+
     def test_detects_reentrancy_precondition_or_evidence(self):
         """Identify whether finding already carries backend evidence or precondition."""
         without_precondition = {"remediation": "Replace loop with Promise.all"}
@@ -228,14 +236,26 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertTrue(has_reentrancy_precondition(with_precondition))
 
         with_evidence = {
-            "remediation": "Node.js fetch is thread-safe and reentrant; use Promise.all."
+            "remediation": "The Node.js fs backend is proven reentrant and thread-safe; use Promise.all."
         }
         self.assertTrue(has_reentrancy_precondition(with_evidence))
 
         with_conditional_mutex = {
-            "remediation": "IF the backend does not use a non-reentrant mutex, use Promise.all; otherwise preserve serial execution."
+            "remediation": "IF the runtime is reentrant, use Promise.all; otherwise preserve serial execution."
         }
         self.assertTrue(has_reentrancy_precondition(with_conditional_mutex))
+
+        # Reviewer P1 finding: negative remediation mentioning "not support" must NOT pass as positive evidence
+        negative_remediation = {
+            "remediation": "ONNX backend does not support concurrent calls; use Promise.all."
+        }
+        self.assertFalse(has_reentrancy_precondition(negative_remediation))
+
+        # Reviewer P1 finding: conditional advice WITHOUT serial fallback must NOT pass
+        conditional_without_fallback = {
+            "remediation": "IF backend is reentrant, use Promise.all"
+        }
+        self.assertFalse(has_reentrancy_precondition(conditional_without_fallback))
 
         # Reviewer counterexample P1: description mentions mutex / non-reentrant, but remediation still suggests concurrency
         unsafe_description_bypass = {
