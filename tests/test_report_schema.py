@@ -263,6 +263,66 @@ class TestDispatcherSchemaGate(unittest.TestCase):
             self.assertEqual(record["severity"], "low")
 
 
+
+class TestPathlessVerificationRecord(unittest.TestCase):
+    """agents-nhpb: a pathless candidate is valid input, and the contract must say so."""
+
+    def _schema(self):
+        return json.loads(
+            (FACTORY_ROOT / "agents" / "vuln-verify" / "report.schema.json").read_text(encoding="utf-8"))
+
+    def test_a_null_path_unverifiable_record_validates(self):
+        """The scanner can emit a candidate with no location, which is a normal output of this
+        station's own pipeline rather than a threat - so refusing the report protects nothing and
+        kills the station on data it exists to report on. unlocatable_verdicts already decides that
+        the only honest verdict for such a record is 'unverifiable'; the schema nevertheless typed
+        path as a string, so a model echoing the bundle's null failed validation, which the
+        dispatcher treats exactly like unparseable output.
+
+        Load-bearing: with path narrowed back to "string" this fails on the path property ("None is
+        not of type 'string'") and not on the verdict rule - the report is otherwise complete.
+        """
+        report = {
+            "summary": "one candidate had no location",
+            "target": "example-owner/example-repo",
+            "verifications": [{
+                "rule_id": "hardcoded-credential",
+                "path": None,
+                "line_number": None,
+                "verdict": "unverifiable",
+                "confidence": "low",
+                "reasoning": "the scanner emitted no location, so the claim cannot be adjudicated",
+            }],
+            "findings": [],
+        }
+        self.assertEqual(validate(report, self._schema()), [])
+
+    def test_the_widening_did_not_open_a_hole_for_verified_findings(self):
+        """The widening is narrow on purpose: only the verifications[] entry may be pathless.
+
+        A record in findings[] claims to have survived adversarial testing, and this station may not
+        adjudicate what it cannot point at - so a null path there is still a contract violation.
+        Without this, "widen path" could be read as license to accept any pathless output at all.
+        """
+        report = {
+            "summary": "x",
+            "target": "example-owner/example-repo",
+            "verifications": [],
+            "findings": [{
+                "rule_id": "hardcoded-credential",
+                "path": None,
+                "line_number": 4,
+                "snippet": "s",
+                "severity": "high",
+                "title": "t",
+                "description": "d",
+                "remediation": "r",
+            }],
+        }
+        errors = validate(report, self._schema())
+        self.assertTrue(any("path" in e for e in errors),
+                        f"a verified finding with no path must still be refused, got {errors}")
+
 if __name__ == "__main__":
     unittest.main()
 

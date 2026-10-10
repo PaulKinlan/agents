@@ -36,8 +36,8 @@
             "description": "Identifier of the evaluated vulnerability rule or hypothesis."
           },
           "path": {
-            "type": "string",
-            "description": "Relative file path of the candidate finding."
+            "type": ["string", "null"],
+            "description": "Relative file path of the candidate finding, or null when the scanner produced the candidate with no location at all. A pathless candidate is VALID INPUT - a normal output of this station's own pipeline - and the only honest verdict for it is 'unverifiable': scope the model's report rather than dying on data the station exists to report on. Widened beside line_number, which carries the same null for the same reason (agents-fy26); the findings[] path below stays a string, because a record that claims a verdict must have a location (agents-nhpb)."
           },
           "line_number": {
             "type": ["integer", "null"],
