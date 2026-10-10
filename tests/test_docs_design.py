@@ -2,6 +2,7 @@
 
 from collections import Counter
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import re
 import unittest
@@ -76,6 +77,21 @@ class DocsDesignTest(unittest.TestCase):
         self.assertEqual(set(station_ids), {path.parent.name for path in (ROOT / "agents").glob("*/agent.yaml")})
         self.assertEqual(set(line_ids), {path.stem for path in (ROOT / "lines").glob("*.yaml")})
         self.assertEqual(Counter(command_ids), Counter("integrate list promote run line hillclimb hook skills schedule".split()))
+
+    def test_pages_have_valid_speculation_rules(self):
+        """All public documentation pages must carry moderate-eagerness speculation rules (agents-74qx et al)."""
+        for filename in PAGES:
+            with self.subTest(page=filename):
+                page = DOCS / filename
+                content = page.read_text(encoding="utf-8")
+                self.assertIn('<script type="speculationrules">', content)
+                match = re.search(r'<script type="speculationrules">\s*(\{.*?\})\s*</script>', content, re.DOTALL)
+                self.assertIsNotNone(match, f"Missing or malformed speculationrules block in {filename}")
+                rules = json.loads(match.group(1))
+                self.assertIn("prerender", rules)
+                self.assertEqual(len(rules["prerender"]), 1)
+                self.assertEqual(rules["prerender"][0]["where"], {"href_matches": "/*"})
+                self.assertEqual(rules["prerender"][0]["eagerness"], "moderate")
 
 
 if __name__ == "__main__":
