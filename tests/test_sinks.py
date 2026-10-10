@@ -624,5 +624,107 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertFalse(any(c["tool"] == "gh" for c in self.calls()))
 
 
+class TestGithubIssuesPinBoundary(unittest.TestCase):
+    """agents-28nn round 2 (finding 1 census): lib/sinks/github_issues.py resolved gh by
+    `shutil.which(\"gh\")` — PATH order — while gh IS in TRUSTED_TOOLS, so the pin machinery
+    was never consulted and a PATH-planted gh would file issues with this sink's GitHub
+    token. The sink now resolves gh through lib.tool_pins.resolve_tool and fails CLOSED BUT
+    NAMED (nothing filed, the note says why) when gh cannot be authenticated.
+
+    The behaviour-mutation proof: reverting the sink to `shutil.which(\"gh\")` makes the
+    first and third tests fail — the planted fake executes (its invocation log appears) and
+    the refusal note is never set.
+    """
+
+    FAKE = ('#!/bin/sh\n'
+            'echo ran >> "$FAKE_GH_LOG"\n'
+            'echo https://example.invalid/issues/1\n'
+            'exit 0\n')
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-gh-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.fake_dir = self.root / "fakebin"
+        self.fake_dir.mkdir()
+        self.fake_log = self.root / "fake-gh-ran"
+        self.fake_gh = self.fake_dir / "gh"
+        self.fake_gh.write_text(self.FAKE, encoding="utf-8")
+        self.fake_gh.chmod(0o755)
+        self.pins = self.root / "tools.pins.yaml"
+        self._saved = {k: os.environ.get(k)
+                       for k in ("PATH", "FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS",
+                                 "FAKE_GH_LOG")}
+        self.addCleanup(self._restore_env)
+        # The module-level dev/test opt-in this file sets for its stub tools is exactly
+        # what these properties pin, so it comes OFF for this class.
+        os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        os.environ["FAKE_GH_LOG"] = str(self.fake_log)
+        self.finding = dict(SAMPLE, state="new", agent="probe",
+                            fingerprint=compute_fingerprint("lint", SAMPLE["rule_id"],
+                                                            SAMPLE["path"],
+                                                            SAMPLE["snippet"]))
+
+    def _restore_env(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _plant_fake_first_on_path(self):
+        os.environ["PATH"] = f"{self.fake_dir}{os.pathsep}{self._saved['PATH']}"
+
+    def _dispatch(self):
+        from lib.sinks.github_issues import _dispatch_github
+        return _dispatch_github("probe", self.target, [self.finding], visibility="public")
+
+    def test_a_path_planted_fake_gh_is_refused_before_it_executes(self):
+        """THE HOLE, CLOSED: a sha256-only pin (resolution still follows PATH order, so the
+        fake IS the resolved candidate) fails the hash check — nothing is filed, the note
+        names the cause, and the fake's log proves it never ran."""
+        self.pins.write_text("gh:\n  sha256: " + "0" * 64 + "\n", encoding="utf-8")
+        self._plant_fake_first_on_path()
+        result = self._dispatch()
+        self.assertEqual(result["published"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertIn("unverified", result["note"])
+        self.assertFalse(self.fake_log.exists(),
+                         "the unauthenticated gh must be refused BEFORE it executes")
+
+    def test_a_full_pin_runs_the_configured_gh_not_the_path_order_winner(self):
+        """The positive direction: with path+sha256 pinned, the configured binary runs even
+        when a different fake wins PATH order — resolution follows the pin, not the PATH."""
+        from lib.tool_pins import sha256_file
+        decoy_dir = self.root / "decoybin"
+        decoy_dir.mkdir()
+        decoy_log = self.root / "decoy-gh-ran"
+        decoy = decoy_dir / "gh"
+        decoy.write_text('#!/bin/sh\necho ran >> "' + str(decoy_log) + '"\nexit 0\n',
+                         encoding="utf-8")
+        decoy.chmod(0o755)
+        self.pins.write_text(f"gh:\n  path: {self.fake_gh}\n"
+                             f"  sha256: {sha256_file(self.fake_gh)}\n", encoding="utf-8")
+        os.environ["PATH"] = f"{decoy_dir}{os.pathsep}{self._saved['PATH']}"
+        result = self._dispatch()
+        self.assertEqual(result["published"], 1, result)
+        self.assertTrue(self.fake_log.exists(), "the pinned gh must be the one that runs")
+        self.assertFalse(decoy_log.exists(), "the PATH-order winner must not run")
+
+    def test_an_unpinned_gh_files_nothing_and_says_why(self):
+        """Fail closed AND named: no pin anywhere, no opt-in — the sink files nothing and
+        the note records the cause rather than reading like a missing binary."""
+        self.pins.write_text("", encoding="utf-8")
+        self._plant_fake_first_on_path()
+        result = self._dispatch()
+        self.assertEqual(result["published"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertIn("not pinned", result["note"])
+        self.assertFalse(self.fake_log.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
