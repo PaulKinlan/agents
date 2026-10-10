@@ -152,8 +152,8 @@ a committed suppressions file.
 | | invocation | skills | tool policy flags (factory runs) |
 |---|---|---|---|
 | `antigravity` | headless conversation API | plugin dir / symlink into the engine config dir | refused: agentapi has no tool controls |
-| `claude` | `claude -p` | `--append-system-prompt-file` in factory runs, because the Skill tool is withheld; `factory skills install` links them into `~/.claude/skills` for interactive use | read-only: `--restricted --tools Read,Grep,Glob --strict-mcp-config`. A write declaration always downgrades to read-only at runtime (claude is not OS-sandbox-verified, so it never receives worktree-write; the adapter's Edit,Write arm exists but is never taken) |
-| `pi` | `pi -p` | `--skill` | read-only: `--tools read,grep,find,ls --no-extensions --no-approve` · worktree-write adds `edit,write` (confined by the OS sandbox: the worktree is read-write, the target read-only) |
+| `claude` | `claude -p` | `--append-system-prompt-file` in factory runs, because the Skill tool is withheld; `factory skills install` links them into `~/.claude/skills` for interactive use | read-only: `--restricted --tools Read,Grep,Glob --strict-mcp-config`. A write declaration always downgrades to read-only at runtime (claude is not OS-sandbox-verified, so it never receives worktree-write; a direct invocation of claude.sh with worktree-write is refused exit 3 before launching the engine) |
+| `pi` | `pi -p` | `--skill` | read-only: `--tools read,grep,find,ls --no-extensions --no-approve` · in factory runs, worktree-write adds `edit,write` confined by the dispatcher's OS sandbox (the worktree is read-write, the target read-only; a direct invocation of pi.sh accepts the policy unsandboxed and warns on stderr) |
 
 Install locally by symlinking this repo into the engine's plugin directory — the same pattern as
 `web-resilience-plugin`.
