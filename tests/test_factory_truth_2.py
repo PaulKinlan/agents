@@ -110,6 +110,41 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual([f["rule_id"] for f in store["findings"].values()], ["TM-1"])
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_concurrency_recommendation_is_guarded_with_reentrancy_precondition_end_to_end(self):
+        """agents-vorw: unchecked concurrency recommendation must be guarded with reentrancy precondition end-to-end."""
+        findings = [{
+            "rule_id": "sequential-await-waterfall",
+            "path": "src/onnx_session.ts",
+            "line_number": 15,
+            "snippet": "for (const e of exercises) await e.run();",
+            "severity": "high",
+            "title": "Exercise Forward Pass Waterfall",
+            "description": "Sequential await inside loop",
+            "remediation": "Replace with await Promise.all(exercises.map(e => e.run()))",
+        }]
+        report = {
+            "summary": "Perf review report",
+            "target": "target",
+            "findings": findings
+        }
+        self.schema_agent("perf-review", json.dumps(report))
+        res = self.box.run_agent("perf-review")
+        stored_finding = res["report"]["findings"][0]
+        self.assertTrue(stored_finding["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
+        self.assertIn("ONNX Runtime _OrtRun", stored_finding["remediation"])
+        self.assertIn("otherwise preserve serial execution", stored_finding["remediation"])
+
+        # Must be recorded in normalised_fields.json
+        norm_file = res["run_dir"] / "normalised_fields.json"
+        self.assertTrue(norm_file.exists())
+        self.assertIn("enforced reentrancy precondition", norm_file.read_text())
+
+        # Must be persisted in the findings store with the precondition
+        store = json.loads((self.box.root / "findings" / "target.json").read_text())
+        persisted = list(store["findings"].values())[0]
+        self.assertTrue(persisted["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_existing_target_threat_model_is_preserved_when_markdown_omitted(self):
         """agents-tawg: when agent returns summary + findings without threat_model_markdown,
         target's authoritative THREAT_MODEL.md is synced to findings store."""

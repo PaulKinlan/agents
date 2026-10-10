@@ -73,15 +73,19 @@ while IFS= read -r f; do
       # The proposer's pre-pass: unknown lines must not reach int() (agents-fy26).
       mapped="$mapped tests/test_pr_fixer_prepass.py"
       ;;
+    agents/perf-review/scripts/scan_perf_changes.py)
+      mapped="$mapped tests/test_perf_review.py"
+      ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in
-        scheduler)  t="tests/test_schedules.py" ;;
-        exclusions) t="tests/test_prepass_exclusions.py" ;;
-        *)          t="tests/test_${name}.py" ;;
+        scheduler)     t="tests/test_schedules.py" ;;
+        exclusions)    t="tests/test_prepass_exclusions.py" ;;
+        report_schema) t="tests/test_factory_truth_2.py" ;;
+        *)             t="tests/test_${name}.py" ;;
       esac
       if [ -f "$t" ]; then
         mapped="$mapped $t"
