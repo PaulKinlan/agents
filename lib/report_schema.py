@@ -166,8 +166,8 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
 
 _EXECUTION_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:Promise\.(?:all|allSettled|race)|asyncio\.gather)\b"
-    r"|(?:run|execute|call|dispatch|await|start)\b[^.;\n]*?\b(?:concurrently|in\s+parallel|simultaneously|at\s+the\s+same\s+time)\b"
-    r"|\b(?:concurrent|parallel|simultaneous)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?)\b"
+    r"|(?:run|execute|call|dispatch|await|start|issue|send|use)\b[^.;\n]*?\b(?:concurrently|in\s+parallel|simultaneously|at\s+the\s+same\s+time)\b"
+    r"|\b(?:concurrent|parallel|simultaneous)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?|requests?|fetches|queries)\b"
     r"|\bparallel(?:ize|izing|ization)\b"
     r"|\b(?:worker\s+pool|thread\s+pool|web\s+worker|worker_threads)\b",
     re.IGNORECASE
@@ -266,8 +266,8 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
     """Ensure a concurrency recommendation carries its reentrancy precondition.
 
     If the finding recommends concurrency without citing backend evidence or stating
-    a reentrancy precondition, wrap/prepend the remediation and description with the
-    explicit precondition so applying it will not crash on non-reentrant runtimes
+    a reentrancy precondition, wrap/prepend the remediation, description, and proposed_fix_diff
+    with the explicit precondition so applying it will not crash on non-reentrant runtimes
     (agents-vorw / hub fleet-4inv).
     """
     if not is_concurrency_recommendation(finding) or has_reentrancy_precondition(finding):
@@ -290,6 +290,16 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
         finding["description"] = (
             desc + "\n[Precondition Note: Concurrency advice requires verified backend reentrancy; if the runtime is non-reentrant, serial execution must be preserved.]"
         )
+
+    # Condition proposed_fix_diff so automated patch application is guarded
+    diff = str(finding.get("proposed_fix_diff", "")).strip()
+    if diff and "reentrancy" not in diff.lower():
+        comment_header = "// Precondition: verify backend reentrancy before applying; if non-reentrant, preserve serial execution.\n"
+        if diff.startswith("+") or diff.startswith("-"):
+            finding["proposed_fix_diff"] = f"+ {comment_header}" + diff
+        else:
+            finding["proposed_fix_diff"] = f"{comment_header}" + diff
+
     return f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
 
 
