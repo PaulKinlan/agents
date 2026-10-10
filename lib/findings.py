@@ -607,6 +607,12 @@ class FindingsStore:
         self.legacy_suppressions_file = self.findings_dir / f"{target_name}.suppressions.json"
         self.read_only = read_only
         self._lock_timeout = self._resolve_lock_timeout(lock_timeout)
+        # CAUTION for whoever adds a WRITE path to the register: suppressions_file is a SINGLE file
+        # shared by every target, while the lock below is PER-TARGET. Such a change must take its own
+        # lock (SUPPRESSIONS_FILENAME + ".lock") around the register read-modify-write, ordering
+        # STORE LOCK FIRST, REGISTER LOCK SECOND - never a store lock while holding the register lock.
+        # A second lock inside this window is where a self-deadlock would come from (agents-ynjh).
+        # Read-only today, so nothing here needs it yet (agents-5ttl).
         # Advisory lock held across the whole load -> mutate -> save window (agents-3ls).
         # Concurrent factory processes (scheduled timer, manual run, CI) each do a
         # read-modify-write; without a lock the last writer wins and silently drops the
