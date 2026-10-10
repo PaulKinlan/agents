@@ -178,18 +178,25 @@ _ASSET_CONCURRENCY_EXCLUSIONS = re.compile(
     re.IGNORECASE
 )
 
+# Named backend evidence: must name a specific known-reentrant backend/API and cite overlap support
+_NAMED_BACKEND_PATTERN = re.compile(
+    r"\b(?:node(?:\.js)?|fetch|http|network|read-only\s+i/o|fs(?:\.promises)?|libuv|threadpool|stateless\s+api)\b",
+    re.IGNORECASE
+)
+
 _CONDITIONAL_REENTRANCY_PATTERN = re.compile(
     r"\b(?:precondition:?\s*verify\s+backend\s+reentrancy|if\s+[^.;\n]{1,80}?\b(?:is\s+reentrant|is\s+thread[- ]safe|supports?\s+concurrency|supports?\s+concurrent|tolerates?\s+overlap))\b",
     re.IGNORECASE
 )
 
 _SERIAL_FALLBACK_PATTERN = re.compile(
-    r"\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use)?\s*(?:serial(?:ly)?|sequentially)\b|\bpreserve\s+serial\b|\bkeep\s+serial\b",
+    r"\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequentially)\b"
+    r"|\b(?:preserve|keep|maintain)\s+(?:documented\s+)?(?:serial|sequential)\b",
     re.IGNORECASE
 )
 
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
-    r"\b(?:backend\s+is\s+(?:proven\s+)?reentrant|runtime\s+is\s+(?:proven\s+)?reentrant|is\s+proven\s+reentrant|is\s+known\s+to\s+be\s+reentrant|backend\s+is\s+thread[- ]safe|runtime\s+is\s+thread[- ]safe)\b",
+    r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
     re.IGNORECASE
 )
 
@@ -204,30 +211,32 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     if not isinstance(finding, dict):
         return False
     rule_id = str(finding.get("rule_id", "")).strip().lower()
-    category = str(finding.get("category", "")).strip().lower()
     if rule_id == "sequential-await-waterfall":
         return True
-    if rule_id == "render-blocking-head-asset" or "lcp" in category or "cls" in category:
+    if rule_id == "render-blocking-head-asset":
         return False
 
-    text = " ".join([
-        str(finding.get("title", "")),
-        str(finding.get("description", "")),
-        str(finding.get("remediation", "")),
-        str(finding.get("proposed_fix_diff", "")),
-    ])
-    if _ASSET_CONCURRENCY_EXCLUSIONS.search(text) and not re.search(r"\b(?:Promise\.(?:all|allSettled)|asyncio\.gather)\b", text):
+    remediation = str(finding.get("remediation", ""))
+    diff = str(finding.get("proposed_fix_diff", ""))
+    # If remediation or fix diff specifically recommends execution concurrency, it is an execution concurrency finding
+    if _EXECUTION_CONCURRENCY_PATTERN.search(remediation) or _EXECUTION_CONCURRENCY_PATTERN.search(diff):
+        return True
+
+    # Otherwise check title and description, excluding pure asset/stylesheet loading
+    if _ASSET_CONCURRENCY_EXCLUSIONS.search(remediation) and not _EXECUTION_CONCURRENCY_PATTERN.search(remediation):
         return False
+
+    text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
     return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
 
 
 def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     """Return True if the remediation is properly conditional with a serial fallback
-    or cites proven positive evidence that the specific backend supports concurrency.
+    or names a specific backend with cited evidence that it tolerates overlap.
 
-    Negative statements (e.g. stating in description that a runtime is non-reentrant or has
-    a mutex while still recommending concurrency) or conditional suggestions without a serial
-    fallback do NOT qualify as a preconditioned recommendation (agents-vorw / hub fleet-4inv).
+    Negative statements, bare assertions ('backend is reentrant' without naming the backend),
+    or conditional suggestions without a serial fallback do NOT qualify as a preconditioned
+    recommendation (agents-vorw / hub fleet-4inv).
     """
     if not isinstance(finding, dict):
         return False
@@ -243,9 +252,10 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     if has_condition and has_fallback:
         return True
 
-    # Case 2: Proven positive evidence (must not be conditional, and must not contain negations)
+    # Case 2: Named backend citing proven evidence of overlap tolerance
+    # Must name the specific backend, cite positive evidence, have no negation, and not be hypothetical
     if not has_negation and not re.search(r"\b(?:if|whether|assuming)\b", remediation, re.IGNORECASE):
-        if _POSITIVE_EVIDENCE_PATTERN.search(remediation):
+        if _NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation):
             return True
 
     return False
