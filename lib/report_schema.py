@@ -207,10 +207,14 @@ _NEGATION_PATTERN = re.compile(
 )
 
 
-_SERIAL_RESTORATION_PATTERN = re.compile(
-    r"\b(?:restore|prefer|keep|enforce|switch\s+to)\s+(?:documented\s+)?serial\b|"
-    r"\breplac(?:e|ing)\s+(?:Promise\.all|concurrency|parallel(?:ism)?)\s+with\s+(?:serial|sequential)\b|"
-    r"\bremove\s+(?:Promise\.all|concurrency|parallel(?:ism)?)\b",
+_STOP_CONCURRENCY_PATTERN = re.compile(
+    r"\b(?:stop|avoid|do\s+not|don't|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from)\s+"
+    r"(?:using\s+)?(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism)?)\b",
+    re.IGNORECASE
+)
+
+_ADVOCATES_SERIAL_PATTERN = re.compile(
+    r"\b(?:restore|prefer|keep|enforce|switch\s+to|use|run|execute|process|dispatch|await)\b[^.;\n]{0,40}?\b(?:serial(?:ly)?|sequential(?:ly)?|in\s+series|one\s+(?:by|at\s+a)\s+time)\b",
     re.IGNORECASE
 )
 
@@ -226,27 +230,38 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     remediation = str(finding.get("remediation", ""))
     diff = str(finding.get("proposed_fix_diff", ""))
     added_diff = ""
+    removed_diff = ""
     if diff:
         added_diff = "\n".join(
             line[1:] for line in diff.splitlines()
             if line.startswith("+") and not line.startswith("+++")
+        )
+        removed_diff = "\n".join(
+            line[1:] for line in diff.splitlines()
+            if line.startswith("-") and not line.startswith("---")
         )
 
     # If added diff lines specifically introduce concurrency, it is a concurrency recommendation
     if _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
         return True
 
-    # Strip pure serial restoration clauses (e.g. "replacing Promise.all with sequential for-of")
-    # before checking if the remaining remediation text recommends concurrency (Reviewer P1 & P2).
-    remaining_remediation = _SERIAL_RESTORATION_PATTERN.sub(" ", remediation)
-
-    if _EXECUTION_CONCURRENCY_PATTERN.search(remaining_remediation):
-        return True
-
-    if _SERIAL_RESTORATION_PATTERN.search(remediation):
+    # If diff removes concurrency to restore serial execution, it is NOT a concurrency recommendation
+    if _EXECUTION_CONCURRENCY_PATTERN.search(removed_diff) and not _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
         return False
 
-    # 3. Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above.
+    # Classify the direction of the remediation: strip negative cessation clauses (e.g. "stop using Promise.all")
+    # and serial advocacy clauses (e.g. "run tasks sequentially") to check if remaining text advocates concurrency.
+    stripped_remediation = _STOP_CONCURRENCY_PATTERN.sub(" ", remediation)
+    stripped_remediation = _ADVOCATES_SERIAL_PATTERN.sub(" ", stripped_remediation)
+    has_serial_direction = bool(_STOP_CONCURRENCY_PATTERN.search(remediation) or _ADVOCATES_SERIAL_PATTERN.search(remediation))
+    has_remaining_concurrency = bool(_EXECUTION_CONCURRENCY_PATTERN.search(stripped_remediation))
+
+    if has_remaining_concurrency:
+        return True
+    if has_serial_direction:
+        return False
+
+    # Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above.
     if rule_id == "render-blocking-head-asset":
         return False
     if _ASSET_CONCURRENCY_EXCLUSIONS.search(remediation):
