@@ -14,16 +14,38 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-def load_threat_model(target_name: str, target_dir: Path) -> str:
+def load_threat_model(target_name: str, target_dir: Path, output_file: Optional[Path] = None) -> Tuple[str, str]:
     # 1. Local target THREAT_MODEL.md
     local_tm = target_dir / "THREAT_MODEL.md"
     if local_tm.exists():
-        return local_tm.read_text(encoding="utf-8")
-    # 2. Findings stored THREAT_MODEL.md
+        try:
+            return local_tm.read_text(encoding="utf-8", errors="replace"), str(local_tm.resolve())
+        except OSError:
+            pass
+    # 2. Docs THREAT_MODEL.md
+    docs_tm = target_dir / "docs" / "THREAT_MODEL.md"
+    if docs_tm.exists():
+        try:
+            return docs_tm.read_text(encoding="utf-8", errors="replace"), str(docs_tm.resolve())
+        except OSError:
+            pass
+    # 3. Findings stored THREAT_MODEL.md
     store_tm = FACTORY_ROOT / "findings" / f"{target_name}-THREAT_MODEL.md"
     if store_tm.exists():
-        return store_tm.read_text(encoding="utf-8")
-    return "No THREAT_MODEL.md found. Treat all external inputs as untrusted."
+        try:
+            text = store_tm.read_text(encoding="utf-8", errors="replace")
+            # Inside the sandbox, findings/ is masked. Copy to run directory so the agent can read it!
+            if output_file is not None:
+                try:
+                    copied_tm = output_file.parent / "THREAT_MODEL.md"
+                    copied_tm.write_text(text, encoding="utf-8")
+                    return text, str(copied_tm.resolve())
+                except OSError:
+                    pass
+            return text, str(store_tm.resolve())
+        except OSError:
+            pass
+    return "No THREAT_MODEL.md found. Treat all external inputs as untrusted.", ""
 
 def gather_findings(target_name: str) -> List[Dict[str, Any]]:
     findings = []
@@ -154,16 +176,32 @@ def main():
 
     target_path = Path(args.target).resolve()
     target_name = target_path.name
+    output_path = Path(args.output).resolve() if args.output else None
 
-    threat_model_text = load_threat_model(target_name, target_path)
+    threat_model_text, tm_path = load_threat_model(target_name, target_path, output_file=output_path)
     active_findings = gather_findings(target_name)
     clusters = cluster_deterministic(active_findings)
+
+    MAX_TM_SUMMARY_BYTES = 3000
+    raw_tm_bytes = threat_model_text.encode("utf-8")
+    if len(raw_tm_bytes) > MAX_TM_SUMMARY_BYTES:
+        truncated_text = raw_tm_bytes[:MAX_TM_SUMMARY_BYTES].decode("utf-8", errors="ignore")
+        kept_bytes = len(truncated_text.encode("utf-8"))
+        threat_model_summary = (
+            f"[THREAT_MODEL.md summarised: showing first {kept_bytes} of {len(raw_tm_bytes)} bytes. "
+            f"Full document available to read via file: {tm_path or 'THREAT_MODEL.md'}]\n"
+            + truncated_text
+            + f"\n\n... [TRUNCATED: remaining {len(raw_tm_bytes) - kept_bytes} bytes omitted. Read {tm_path or 'THREAT_MODEL.md'} with read tool.]"
+        )
+    else:
+        threat_model_summary = threat_model_text
 
     payload = {
         "target": target_name,
         "total_active_findings": len(active_findings),
         "cluster_count": len(clusters),
-        "threat_model_summary": threat_model_text[:3000],
+        "threat_model_summary": threat_model_summary,
+        "threat_model_file": tm_path or None,
         "clusters": clusters
     }
 

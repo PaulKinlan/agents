@@ -63,6 +63,25 @@ class TestStationBudget(unittest.TestCase):
         self.assertEqual(budget_for({}).minutes, DEFAULT_MAX_MINUTES)
         self.assertEqual(budget_for({"budget": "5"}).minutes, DEFAULT_MAX_MINUTES)
 
+    def test_budget_for_explicit_override_and_env_var(self):
+        import os
+        # Explicit override takes top precedence
+        self.assertEqual(budget_for({"budget": {"max_minutes": 5}}, override_minutes=25).minutes, 25)
+        self.assertEqual(budget_for({}, override_minutes="12.5").minutes, 12.5)
+
+        # FACTORY_BUDGET_MINUTES overrides agent.yaml when override_minutes is not set
+        orig = os.environ.get("FACTORY_BUDGET_MINUTES")
+        try:
+            os.environ["FACTORY_BUDGET_MINUTES"] = "30"
+            self.assertEqual(budget_for({"budget": {"max_minutes": 5}}).minutes, 30)
+            # Explicit override still beats env var
+            self.assertEqual(budget_for({"budget": {"max_minutes": 5}}, override_minutes=10).minutes, 10)
+        finally:
+            if orig is not None:
+                os.environ["FACTORY_BUDGET_MINUTES"] = orig
+            else:
+                os.environ.pop("FACTORY_BUDGET_MINUTES", None)
+
 
 class TestRunStationCommand(unittest.TestCase):
     def test_a_fast_command_is_returned_unchanged(self):

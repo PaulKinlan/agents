@@ -74,11 +74,29 @@ class StationBudget:
             ) from None
 
 
-def budget_for(agent_cfg: Dict[str, Any], label: str = "station") -> StationBudget:
-    """Build a station budget from a parsed agent.yaml mapping."""
-    budget_cfg = agent_cfg.get("budget") if isinstance(agent_cfg, dict) else None
-    max_minutes = budget_cfg.get("max_minutes") if isinstance(budget_cfg, dict) else None
-    return StationBudget(max_minutes, label=label)
+def budget_for(
+    agent_cfg: Dict[str, Any],
+    label: str = "station",
+    override_minutes: Optional[Any] = None,
+) -> StationBudget:
+    """Build a station budget from a parsed agent.yaml mapping or explicit override.
+
+    Order of precedence:
+    1. Explicit override_minutes (from CLI, line configuration, or caller)
+    2. FACTORY_BUDGET_MINUTES environment variable
+    3. agent_cfg.get("budget", {}).get("max_minutes")
+    4. DEFAULT_MAX_MINUTES (5.0)
+    """
+    minutes = None
+    if override_minutes is not None:
+        minutes = _positive_minutes(override_minutes)
+    if minutes is None and "FACTORY_BUDGET_MINUTES" in os.environ:
+        minutes = _positive_minutes(os.environ["FACTORY_BUDGET_MINUTES"])
+    if minutes is None and isinstance(agent_cfg, dict):
+        budget_cfg = agent_cfg.get("budget")
+        if isinstance(budget_cfg, dict):
+            minutes = _positive_minutes(budget_cfg.get("max_minutes"))
+    return StationBudget(minutes, label=label)
 
 
 def run_station_command(

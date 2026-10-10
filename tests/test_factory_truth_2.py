@@ -110,6 +110,74 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual([f["rule_id"] for f in store["findings"].values()], ["TM-1"])
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_existing_target_threat_model_is_preserved_when_markdown_omitted(self):
+        """agents-tawg: when agent returns summary + findings without threat_model_markdown,
+        target's authoritative THREAT_MODEL.md is synced to findings store."""
+        target_dir = self.box.target
+        (target_dir / "THREAT_MODEL.md").write_text("# Target Authoritative TM\nSection 1...\n", encoding="utf-8")
+        report = {"summary": "s", "target": "target", "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        self.assertEqual(res["report"]["summary"], "s")
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertTrue(store_tm.exists())
+        self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Target Authoritative TM\nSection 1...\n")
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_findings_store_only_threat_model_is_preserved_on_maintenance_run(self):
+        """agents-tawg: when an existing threat model lives only in findings store,
+        a maintenance run that returns summary + findings preserves it and does not overwrite it."""
+        target_dir = self.box.target
+        for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md"]:
+            if cand.exists():
+                cand.unlink()
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        store_tm.parent.mkdir(parents=True, exist_ok=True)
+        store_tm.write_text("# Prior Established Threat Model\nStrict Invariants...", encoding="utf-8")
+
+        report = {"summary": "Routine maintenance audit", "target": "target", "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        self.assertEqual(res["report"]["summary"], "Routine maintenance audit")
+        self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Prior Established Threat Model\nStrict Invariants...")
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_bootstrap_without_threat_model_synthesizes_initial_document(self):
+        """agents-tawg: when bootstrapping a target without THREAT_MODEL.md,
+        factory synthesizes a provisional 7-section document from summary and findings."""
+        target_dir = self.box.target
+        for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md",
+                     self.box.root / "findings" / "target-THREAT_MODEL.md"]:
+            if cand.exists():
+                cand.unlink()
+        findings = [{
+            "rule_id": "tm-open-socket",
+            "path": "server.py",
+            "line_number": 10,
+            "snippet": "listen(0.0.0.0)",
+            "severity": "high",
+            "title": "Unauthenticated external listener",
+            "description": "Listens on all interfaces without authentication",
+            "remediation": "Bind to loopback"
+        }]
+        report = {"summary": "Initial audit of server architecture", "target": "target", "findings": findings}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertTrue(store_tm.exists())
+        content = store_tm.read_text(encoding="utf-8")
+        self.assertIn("# THREAT MODEL: target (Provisional Bootstrap Baseline)", content)
+        self.assertIn("## 1. System Overview & Architecture", content)
+        self.assertIn("## 2. Trust Boundaries & Actors", content)
+        self.assertIn("## 3. Explicitly Trusted (Non-Threats)", content)
+        self.assertIn("## 4. Untrusted Attack Surfaces", content)
+        self.assertIn("## 5. Bug-Shape Hints from History", content)
+        self.assertIn("## 6. Security Invariants for Auditors", content)
+        self.assertIn("## 7. Explicit Exclusions (Wontfix / Accepted Risks)", content)
+        self.assertIn("Initial audit of server architecture", content)
+        self.assertIn("Unauthenticated external listener", content)
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_prompt_carries_the_declared_schema(self):
         self.schema_agent("threat-model", tm_output([]))
         res = self.box.run_agent("threat-model")

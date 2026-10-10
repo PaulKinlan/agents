@@ -393,6 +393,60 @@ def extract_project_metadata(target_dir: Path, nonce: Optional[str] = None) -> D
     return meta
 
 
+def discover_threat_model(target_dir: Path, output_file: Optional[Path] = None) -> Dict[str, Any]:
+    """Locate existing threat model document in target or findings store without embedding bytes."""
+    target_name = target_dir.name
+    candidates = [
+        target_dir / "THREAT_MODEL.md",
+        target_dir / "docs" / "THREAT_MODEL.md",
+        FACTORY_ROOT / "findings" / f"{target_name}-THREAT_MODEL.md",
+    ]
+    for c in candidates:
+        if c.exists():
+            try:
+                tm_size = c.stat().st_size
+                # If the threat model is inside findings/, copy it to the run dir so sandboxed engine can read it
+                if "findings" in c.parts:
+                    if output_file is not None:
+                        out_tm = output_file.parent / "THREAT_MODEL.md"
+                        out_tm.write_text(c.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+                        out_resolved = str(out_tm.resolve())
+                        return {
+                            "present": True,
+                            "file": out_resolved,
+                            "size_bytes": tm_size,
+                            "note": f"Existing threat model found ({tm_size} bytes in findings store; copied to {out_resolved}). Use read tool to inspect it directly."
+                        }
+                    resolved = str(c.resolve())
+                    return {
+                        "present": True,
+                        "file": resolved,
+                        "size_bytes": tm_size,
+                        "note": f"Existing threat model found ({tm_size} bytes at {resolved}). Use read tool to inspect it directly."
+                    }
+                else:
+                    resolved = str(c.resolve())
+                    try:
+                        rel = str(c.relative_to(target_dir))
+                    except ValueError:
+                        rel = resolved
+                    return {
+                        "present": True,
+                        "file": resolved,
+                        "relative_path": rel,
+                        "size_bytes": tm_size,
+                        "note": f"Existing threat model found ({tm_size} bytes at {resolved}). Use read tool to inspect it directly."
+                    }
+            except Exception:
+                pass
+    return {
+        "present": False,
+        "file": None,
+        "size_bytes": 0,
+        "note": "No existing THREAT_MODEL.md found in target or findings store."
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Mine project history and architecture for threat modeling")
     parser.add_argument("--target-dir", "--target", dest="target_dir", required=True, help="Target repository directory")
@@ -417,6 +471,8 @@ def main():
     entry_points = scan_entry_points(target_dir, nonce=nonce)
 
     meta = extract_project_metadata(target_dir, nonce=nonce)
+    output_path = Path(args.output).resolve() if args.output else None
+    threat_model_info = discover_threat_model(target_dir, output_file=output_path)
 
     candidate_ids = (
         [ep["id"] for ep in entry_points[:40] if "id" in ep]
@@ -428,6 +484,7 @@ def main():
         "target": target_dir.name,
         "evidence_nonce": nonce,
         "system_instruction": SYSTEM_INSTRUCTION.format(nonce=nonce),
+        "threat_model": threat_model_info,
         "metadata": meta,
         "git_fixes_count": len(git_fixes),
         "git_security_fixes": git_fixes[:25],

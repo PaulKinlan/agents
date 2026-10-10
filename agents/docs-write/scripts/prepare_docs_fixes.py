@@ -100,8 +100,20 @@ def main():
     ground_truth = collect_repo_ground_truth(target_dir)
     readme_excerpt = ""
     readme_path = target_dir / "README.md"
+    MAX_README_BYTES = 3500
     if readme_path.exists():
-        readme_excerpt = readme_path.read_text(encoding="utf-8", errors="ignore")[:3500]
+        raw_readme = readme_path.read_text(encoding="utf-8", errors="ignore")
+        raw_bytes = raw_readme.encode("utf-8")
+        if len(raw_bytes) > MAX_README_BYTES:
+            truncated = raw_bytes[:MAX_README_BYTES].decode("utf-8", errors="ignore")
+            kept_bytes = len(truncated.encode("utf-8"))
+            readme_excerpt = (
+                f"[README.md summarised: showing first {kept_bytes} of {len(raw_bytes)} bytes. Read README.md for full document.]\n"
+                + truncated
+                + f"\n\n... [TRUNCATED: remaining {len(raw_bytes) - kept_bytes} bytes omitted]"
+            )
+        else:
+            readme_excerpt = raw_readme
 
     payload = {
         "target": target_dir.name,
