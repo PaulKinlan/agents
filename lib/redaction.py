@@ -299,13 +299,19 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     the notes stay in the local run artifact for whoever has to rotate the credential.
     """
     published = dict(finding)
-    # The candidate id is an INTERNAL identity key, and it is a digest of the matched text itself,
-    # so publishing it hands out a confirmation oracle: anyone holding it together with the rule,
-    # path and ordinal could test a guess at the line the scanner matched - and for a credential
-    # finding, a guess at the credential. It is scanner-owned rather than model prose, so this is
-    # not a masking case under the checklist; it is withheld outright, the same shape as
-    # model_rule_id's withholding branches (agents-p8og). The id stays in the LOCAL store, which is
-    # where the second-order stations read it, and is never a publication channel.
+    # The candidate id is an INTERNAL identity key, scanner-owned rather than model prose, so this is
+    # not a masking case under the checklist - it is withheld outright, the same shape as
+    # model_rule_id's withholding branches (agents-p8og). It stays in the LOCAL store, where the
+    # second-order stations read it, and is never a publication channel.
+    #
+    # WHY IT GOES, and this is HYGIENE, NOT SECRECY (coord's channel standard, agents-qslz): a
+    # published consumer has no use for an internal key, and this channel's readers are not among its
+    # consumers. Withholding it does NOT protect the match. For a row bound by its candidate id the
+    # PUBLISHED fingerprint is sha256(agent:rule:path:candidate_id) - a digest of this same value,
+    # printed right beside the same rule and path - so that oracle is already public and anyone can
+    # test a guess against it without ever seeing the id. Removing a rawer digest that no reader of
+    # this channel needs is harm reduction; it is not containment, and the next reader must not
+    # reason from it as though it were.
     published.pop("candidate_id", None)
     agent = str(finding.get("agent") or "")
     literals = matched_literals(finding)
@@ -378,9 +384,11 @@ def redact_for_storage(finding: Dict[str, Any]) -> Dict[str, Any]:
 
     There are two boundaries and they are not the same one:
       * `redact_finding` protects everything that LEAVES this machine (tracker sinks, the delta
-        report, the step summary, scanner stdout). `candidate_id` is withheld there, because it is a
-        digest of the matched text: anyone holding it with the rule, path and ordinal can test a
-        guess at the matched line, and for a credential finding a guess at the credential.
+        report, scanner stdout - the last through `stdout_safe_report`, a separate function, NOT
+        through `redact_finding`). `candidate_id` is withheld there as HYGIENE rather than secrecy:
+        a published consumer has no use for an internal identity key, and withholding it protects
+        nothing, because for an id-bound row the published fingerprint is a digest of that same id
+        (agents-qslz, per coord's channel standard).
       * this function protects the store AT REST. The store is local and gitignored, and it is the
         only place a second-order station can read a candidate's emitted identity, so the id has to
         survive here or the persistence is pointless.
@@ -404,9 +412,17 @@ def redact_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def stdout_safe_report(report: Any) -> Any:
     """Return a publishable copy of a scanner candidate report.
 
-    Candidate match fields are dropped wholesale rather than pattern-masked: this output
-    goes to a terminal or a CI log, which has no way to be un-published. The raw values
-    remain in the file written by `--output`, which is the local record.
+    The channel carries the keys its readers need and nothing else (agents-qslz): a terminal or CI
+    log consumes rule, path, location and severity, and has no consumer for the internal
+    `candidate_id`, so that key is dropped wholesale rather than pattern-masked - it is a 16-hex
+    digest and matches no secret pattern. The raw values remain in the file written by `--output`.
+
+    THIS CHANNEL IS NOT SAFE AND MUST NOT BE READ AS HIDING THE MATCH. It drops the matched text
+    and the internal key, and it PRINTS THE FINGERPRINT - which for an identity-bound row is
+    sha256(agent:rule:path:candidate_id), a digest derived from the matched text and published by
+    design because it is the operational correlation key. So what this function removes is a rawer
+    digest that no reader here needs; it is harm reduction, not containment, and anyone reasoning
+    about this output as though the match were hidden would be reasoning from the wrong premise.
     """
     if isinstance(report, list):
         return [stdout_safe_report(item) for item in report]
