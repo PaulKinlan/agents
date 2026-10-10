@@ -11,8 +11,10 @@
 #   1. changed test files vs the base branch (default origin/main) run as-is;
 #   2. changed lib/*.py map to tests/test_<name>.py (scheduler -> test_schedules.py), and
 #      the `factory` dispatcher maps to the core + truth harnesses;
-#   3. anything else (docs, config, tools, …) falls back to a bounded smoke subset
-#      (tests/test_factory_core.py).
+#   3. changed paths on the explicit ignore list (each a deliberate case arm with a
+#      reason, agents-9nir) fall back to a bounded smoke subset
+#      (tests/test_factory_core.py); a changed file matching NEITHER a mapping arm NOR
+#      the ignore list fails loudly, named - a file nobody has mapped must be seen.
 #
 # A changed lib module whose mapped test file is absent exits non-zero. Override the base
 # branch with GIT_BASE=<ref> (used by tests).
@@ -33,6 +35,7 @@ changed="${GIT_CHANGED:-$(git diff --name-only "$BASE"...HEAD 2>/dev/null || tru
 
 run=""
 mapped=""
+unmatched=""
 
 while IFS= read -r f; do
   [ -z "$f" ] && continue
@@ -200,8 +203,10 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_fast_gate_mapping.py"
       ;;
     docs/*)
-      # Documentation pages snapshot and publishing scope (agents-vt7w).
-      mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py"
+      # Documentation pages snapshot and publishing scope (agents-vt7w). tests/test_docs_drift.py
+      # pins docs/INTEGRATION.md by content (its Section 5 script table at :191 and its section
+      # anchors at :485-492), so it belongs in this union (agents-9nir review).
+      mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py tests/test_docs_drift.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"
@@ -217,8 +222,121 @@ while IFS= read -r f; do
         exit 1
       fi
       ;;
+    README.md)
+      # The one markdown file a suite pins by CONTENT: tests/test_docs_drift.py reads the
+      # committed README and asserts its tree diagram resolves the governance paths
+      # (test_repository_readme_resolves_its_governance_paths). Every other *.md is prose
+      # and is ignored below.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
+    .github/*)
+      # CI definitions. tests/test_ci_action.py pins the committed .github/actions/**
+      # (action.yml parse plus the untrusted-context guard over every run: body);
+      # tests/test_pages_publish_scope.py reads the committed workflows/pages.yml. No
+      # suite can EXECUTE a workflow, so this union is the bounded approximation.
+      mapped="$mapped tests/test_ci_action.py tests/test_pages_publish_scope.py"
+      ;;
+    findings/suppressions.yaml)
+      # The committed suppressions register; tests/test_suppressions.py reads it directly
+      # (ROOT / "findings" / SUPPRESSIONS_FILENAME), so a change here is a contract change.
+      mapped="$mapped tests/test_suppressions.py"
+      ;;
+    agents/*/SKILL.md)
+      # The docs-drift scanner os.walk()s every committed .md outside IGNORE_DIRS
+      # (agents/docs-drift/scripts/check_docs.py:466-478) and its real-tree suite pins the
+      # agents/*/SKILL.md candidate set by count (tests/test_docs_drift.py:384-394). A path
+      # grep cannot see this consumer - a walker consumes a CLASS of paths (agents-9nir review).
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
+    agents/*/agent.yaml)
+      # Station manifests are read off the real tree: tests/test_docs_design.py:77 globs
+      # agents/*/agent.yaml to check stations.html, and tests/test_containment.py:300 globs
+      # them for the credential-grant drift guard (agents-9nir review).
+      mapped="$mapped tests/test_docs_design.py tests/test_containment.py"
+      ;;
+    lines/*.yaml)
+      # Line manifests are read off the real tree: tests/test_docs_design.py:78 globs
+      # lines/*.yaml to check lines.html (agents-9nir review).
+      mapped="$mapped tests/test_docs_design.py"
+      ;;
+    tools.yaml)
+      # Runtime tool pins. lib/tool_pins.py reads the committed file at CONFIG_PATH when
+      # FACTORY_TOOL_PINS is unset, and tests/test_child_env.py's resolve probes run against
+      # the real repo WITHOUT the override, so the committed contents are asserted (a bd pin
+      # would flip the fail-closed expectation); tests/test_tool_pins.py is the pins contract.
+      mapped="$mapped tests/test_tool_pins.py tests/test_child_env.py"
+      ;;
+    targets/*.yaml)
+      # Target inventory. lib/scheduler.py:140-144 GLOBS FACTORY_ROOT/"targets"/*.yaml, and
+      # tests/test_schedules.py:200-213 and :311-360 spawn the REAL factory (FACTORY_ROOT is
+      # derived from __file__, unmockable) as `schedule generate/list/--install --target
+      # voicebox --agent secret-scan`, asserting "Generated (launchd):" - so the committed
+      # targets/voicebox.yaml is load-bearing for that suite. Consumed WITHOUT BEING NAMED:
+      # a subprocess with a default glob, invisible to a grep of the test file (agents-9nir
+      # review round 2).
+      mapped="$mapped tests/test_schedules.py"
+      ;;
+    reports/*.md)
+      # Generated audit reports. reports/ is NOT in DEFAULT_IGNORE_DIRS (lib/exclusions.py:23-43
+      # excludes findings/ and runs/ via FACTORY_ARTIFACT_DIRS at :11-15, not reports/), so the
+      # docs-drift scanner DOES walk these files, and the real-tree fleet-resolution assertions
+      # (tests/test_docs_drift.py:101-113) bind any walked .md that names a bare agent directory.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
+    # --- Ignore list (agents-9nir) -----------------------------------------------------
+    # RULE: an ignore must be a DELIBERATE CASE ARM WITH A REASON, never a default.
+    # "No arm" used to mean two different things - a considered exclusion and an
+    # oversight - and they were indistinguishable, so every unmatched file was silently
+    # masked by the smoke fallback below and the verdict read PASS for an unrelated
+    # suite. The *) arm at the bottom fails loudly and NAMES any file no arm claims;
+    # the smoke fallback after the loop is for ignored docs/config-only changes ONLY.
+    # To exempt a path, add an arm here with the reason it needs no suite.
+    # WARNING, learned the hard way (agents-9nir review, three instances in one bead): a
+    # path grep cannot prove a path class is consumer-free, because a file can be consumed
+    # WITHOUT BEING NAMED - by a WALKER (agents/*/SKILL.md via check_docs.py's os.walk),
+    # by a GLOB (targets/*.yaml via lib/scheduler.py:140-144), and by a SUBPROCESS WITH A
+    # DEFAULT PATH (tools.yaml via lib/tool_pins.py:46 read in test_child_env.py's probes).
+    # So the reason in an ignore arm must record the SEARCH PERFORMED AND ITS RESULT,
+    # never a judgement about who reads the path - a judgement is unfalsifiable, and that
+    # is what made the original canvas `*.md` ignore arm's reason false.
+    .beads/*)
+      # The scanner never sees these: it skips dot dirs and .beads is in DEFAULT_IGNORE_DIRS
+      # (lib/exclusions.py:23-43). Search performed: every .beads reference in tests mkdirs
+      # its own tmp fixture (test_bd_json_contract.py:64, test_factory_core.py:537,
+      # test_sinks.py:88, test_store_lock_timeout.py:273) - none reads the committed files.
+      ;;
+    findings/*.md)
+      # findings/ is in FACTORY_ARTIFACT_DIRS (lib/exclusions.py:11-15), so the docs-drift
+      # scanner never walks it; and findings/* is gitignored (only .gitkeep and
+      # suppressions.yaml are force-tracked), so this arm only fires on a force-added file.
+      ;;
+    *.gitkeep)
+      # Empty placeholders keeping otherwise-gitignored dirs (findings/, lines/,
+      # schedules/) tracked. lib/retention.py:78 protects findings/.gitkeep by name, but
+      # no suite reads the committed files (test_retention.py uses tmp fixtures).
+      ;;
+    .gitignore)
+      # VCS metadata, consumed only by git itself. Tests mention .gitignore only as
+      # fixtures they write into tmp targets (test_containment.py, test_hillclimb.py).
+      ;;
+    *)
+      unmatched="$unmatched $f"
+      ;;
   esac
 done <<< "$changed"
+
+# Loud failure (agents-9nir): a changed file that matches neither a mapping arm nor the
+# ignore list is exactly the case that must be seen - name every such file and fail,
+# rather than quietly running tests/test_factory_core.py and reporting PASS for an
+# unrelated suite. This must run before the dry-run print so tests exercise it too.
+if [ -n "$unmatched" ]; then
+  echo "fast-gate: FAIL: changed file(s) match no mapping arm and no ignore-list arm:" >&2
+  for u in $unmatched; do
+    echo "fast-gate:   $u" >&2
+  done
+  echo "fast-gate: add a case arm mapping each file to its suite, or a deliberate ignore arm with a reason (agents-9nir)" >&2
+  exit 1
+fi
 
 # Union, dedupe, deterministic order.
 files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort || true)"
@@ -229,7 +347,8 @@ if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
   exit 0
 fi
 
-# Fall back to a bounded smoke subset when nothing maps (docs-only / config-only / new tools).
+# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
+# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
 if [ -z "$files" ]; then
   files="tests/test_factory_core.py"
 fi
