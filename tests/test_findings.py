@@ -790,6 +790,9 @@ class TestIdentityAttribution(unittest.TestCase):
             self._finding(snippet="el.innerHTML = user"), "scanner-rule", "a.py", ci)
         second = findings.identity_snippet_binding(
             self._finding(snippet="the line assigns innerHTML here"), "scanner-rule", "a.py", ci)
+        # Equality alone would pass if BOTH runs fell back to the same unstable key, so the
+        # mechanism is asserted before the stability it is supposed to provide (review finding).
+        self.assertEqual((first[0], first[1]), ("abc123def456abcd", "candidate-id"))
         self.assertEqual(first, second)
 
     def test_a_prose_selected_candidate_does_not_borrow_the_stable_name(self):
@@ -899,6 +902,10 @@ class TestIdentityAttribution(unittest.TestCase):
             _, stats4, _ = self._run(td, [self._finding(
                 rule_id="invented", path="docs/a.md", line_number=10, snippet="quote three")], ci)
             self.assertEqual(stats4["migrated"], 0, stats4)          # and gone
+            # "gone" has to mean the store was STAMPED, not merely that this run had nothing to
+            # retire: without the stamp every later run would re-announce the wave (review finding).
+            self.assertEqual(json.loads(store_file.read_text()).get("identity_scheme"),
+                             findings.IDENTITY_SCHEME)
             self.assertNotIn("313b2133ae08c979", store_file.read_text(),
                              "the raw id must not be persisted: the fingerprint carries identity")
 
