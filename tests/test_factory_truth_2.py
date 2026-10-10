@@ -245,7 +245,9 @@ class TestFieldAliases(SchemaAgentCase):
             self.box.run_agent("threat-model")
         err_msg = str(caught.exception)
         self.assertIn("length 16385 exceeds maxLength 16384", err_msg)
-        run_dir = next((self.box.root / "runs").iterdir())
+        # runs/ also holds the retention pointer README.md (agents-dm8n round 2);
+        # the run directory is the only DIRECTORY there.
+        run_dir = next(d for d in (self.box.root / "runs").iterdir() if d.is_dir())
         schema_errs = json.loads((run_dir / "schema_errors.json").read_text())
         self.assertTrue(any("length 16385 exceeds maxLength 16384" in e for e in schema_errs))
         store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
@@ -305,7 +307,9 @@ class TestGenuineRejection(SchemaAgentCase):
             self.box.run_agent("threat-model")
         message = str(caught.exception)
         self.assertIn("3 finding(s) were in the rejected report", message)
-        run_dir = next((self.box.root / "runs").iterdir())
+        # runs/ also holds the retention pointer README.md (agents-dm8n round 2);
+        # the run directory is the only DIRECTORY there.
+        run_dir = next(d for d in (self.box.root / "runs").iterdir() if d.is_dir())
         self.assertEqual(len(json.loads((run_dir / "rejected_report.json").read_text())["findings"]), 3)
         self.assertTrue(json.loads((run_dir / "schema_errors.json").read_text()))
 

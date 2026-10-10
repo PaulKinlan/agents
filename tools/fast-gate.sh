@@ -78,6 +78,16 @@ while IFS= read -r f; do
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
       mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_adapter_auth_failure.py tests/test_line_andon.py tests/test_prompt_exposure.py tests/test_transient_dirs.py"
+      # agents-dm8n round 2: the deleter that escaped round 1 lived in FACTORY (the failed
+      # --apply proposal_run_dir rmtree at :2102), not in lib/retention.py - so a factory
+      # change must run the two suites that pin deletion under the runs root.
+      # SEARCH PERFORMED: `grep -n "shutil\.rmtree(\|\.unlink(\|os\.remove(\|os\.unlink("
+      # factory` enumerates every deletion site in the dispatcher; tests/test_retention.py's
+      # TestRunRootDeletionInventory holds that enumeration and fails on any drift, and
+      # tests/test_hillclimb.py is the only suite that drives the run_hillclimb --apply
+      # failure path end-to-end (its test_worktree_creation_failure_after_add_is_cleaned_up
+      # now asserts the tombstone lands). Neither was reachable from this arm before.
+      mapped="$mapped tests/test_retention.py tests/test_hillclimb.py"
       ;;
     lib/sinks/*.py)
       # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, layering, and adapter registry/commands.
