@@ -139,7 +139,21 @@ RENDERED_TEXT_FIELDS = (
 # drop is SECRECY: stdout carries no fingerprint, so the id is the only digest of the match in the
 # payload. On the sink and report channels the same drop is hygiene, because the fingerprint is
 # published there (see the module docstring for the per-channel rule).
-CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match", "candidate_id")
+#
+# context_snippet belongs here too (agents-dd0w): it is vuln-verify's window of RAW SOURCE LINES
+# (prepare_verification.py), which is a copy of the matched text by construction - a confirmation
+# oracle, exactly like the snippet it sits beside. MASKING IS THE WRONG DEFENCE FOR IT: masking says
+# "we probably recognise the secret when we see it", and the third review proved that defence false
+# with a matched value no pattern recognises, which mask_text passed through verbatim at depth. The
+# rule on this channel is not a key list though - it is the PROPERTY below: any field that CONTAINS
+# the matched text is dropped or redacted, whatever it is called (see stdout_safe_report).
+CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match", "candidate_id", "context_snippet")
+
+# The subset of CANDIDATE_MATCH_FIELDS whose VALUE is the matched text itself, and therefore the
+# source of the literals the recursion redacts by. candidate_id is a digest of the matched text,
+# not the text, so nothing can be found by searching for it; context_snippet CONTAINS the matched
+# text but is not itself the value the scanner matched.
+MATCHED_TEXT_FIELDS = ("snippet", "raw_match")
 
 
 # Identity fields (`agent`, `rule_id`, `path`) are rendered, and they reach this layer as
@@ -431,7 +445,39 @@ def redact_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [redact_finding(f) for f in findings]
 
 
-def stdout_safe_report(report: Any) -> Any:
+def _stdout_matched_text(report: Any) -> set:
+    """The matched values this report carries, collected ONCE at the top level (agents-dd0w).
+
+    Every dict node's `snippet`/`raw_match` string is text the scanner matched, wherever in the
+    payload that dict sits (a report is candidates-in-dicts-in-lists at any depth). Each value is
+    collected verbatim, and matched_literals() adds the token-level derivations, so a nested field
+    quoting only the bare value out of an assignment-shaped snippet is covered too. The result is
+    what the recursion redacts BY at every depth: the policy is a property of what a string HOLDS,
+    not of what its key is called - a name list is the enumeration defect this branch exists to
+    remove.
+
+    The 8-character floor is matched_literals' own trade-off, kept for the same reason: a snippet
+    shorter than that ("x") would redact every string on the channel, and a value that small is not
+    a credential a scanner matched.
+    """
+    literals = set()
+    stack = [report]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for field in MATCHED_TEXT_FIELDS:
+                value = node.get(field)
+                if isinstance(value, str) and len(value.strip()) >= 8:
+                    literals.add(value.strip())
+            if any(field in node for field in MATCHED_TEXT_FIELDS):
+                literals.update(matched_literals(node))
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return {literal for literal in literals if isinstance(literal, str) and len(literal) >= 8}
+
+
+def stdout_safe_report(report: Any, _literals: Optional[set] = None) -> Any:
     """Return a publishable copy of a scanner candidate report.
 
     The channel carries the keys its readers need and nothing else (agents-qslz): a terminal or CI
@@ -457,9 +503,23 @@ def stdout_safe_report(report: Any) -> Any:
     `source_context`, a nested dict whose `context_snippet` is raw source lines, and those
     lines are exactly where the matched secret sits. Passing a container through unchanged
     redacted the flat fields while the nested copy of the same text left verbatim.
+
+    And the drop is enforced as a PROPERTY, not a key list (agents-dd0w, third review): the
+    matched values are collected from the whole payload once (see _stdout_matched_text), and at
+    EVERY depth any string that equals or contains one of them has the value redacted out of it.
+    A name list is the exact enumeration defect this branch exists to remove - the third review
+    leaked a matched value no pattern recognises through a nested string, because pattern-masking
+    was all a nested copy of the matched text had. So a nested field nobody named is covered by
+    what it HOLDS, not what it is called; masking remains only as the outer layer for text that
+    carries none of the matched values.
     """
+    if _literals is None:
+        # Top-level call: collect the matched values from the WHOLE payload once, so the
+        # property holds at every depth below, including for a bare list of candidates.
+        _literals = _stdout_matched_text(report)
+
     if isinstance(report, list):
-        return [stdout_safe_report(item) for item in report]
+        return [stdout_safe_report(item, _literals) for item in report]
     if not isinstance(report, dict):
         return report
 
@@ -468,15 +528,20 @@ def stdout_safe_report(report: Any) -> Any:
         if key in CANDIDATE_MATCH_FIELDS:
             safe[key] = "[redacted]"
         elif isinstance(value, str):
-            safe[key] = mask_text(value)
+            # Pattern masking first (the outer layer for credential-SHAPED text), then the
+            # property: any occurrence of a value this report matched is redacted out of the
+            # string whatever shape the value has. A string equal to a matched value becomes
+            # exactly "[redacted:value]".
+            safe[key] = mask_literals(mask_text(value), _literals)
         else:
             # Containers recurse with the SAME policy at every depth (agents-h0mb) - this is
             # also what covers the `candidates` list, which the top isinstance branch maps
             # through this same function. Scalars (ints, bools, None) are not containers and
             # pass through untouched. No nested key is deliberately left raw: anything not in
-            # CANDIDATE_MATCH_FIELDS is still masked string-by-string, and a nested key that
-            # ever needs a raw passthrough must say why in a comment right beside the branch.
-            safe[key] = stdout_safe_report(value)
+            # CANDIDATE_MATCH_FIELDS is still masked string-by-string AND literal-redacted, and
+            # a nested key that ever needs a raw passthrough must say why in a comment right
+            # beside the branch.
+            safe[key] = stdout_safe_report(value, _literals)
     return safe
 
 

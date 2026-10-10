@@ -586,6 +586,113 @@ class TestStdoutChannelRedactsAtEveryDepth(unittest.TestCase):
                          "the key is [redacted:aws-access-key]")
 
 
+# Assembled at runtime, like CREDENTIAL above: a literal in this file would be reported as a
+# candidate by the factory's own secret-scan pre-pass on every run. NO pattern in lib/redaction
+# recognises this shape - no vendor prefix, no assignment context - and that is the point of the
+# canary: it is a matched value the masker cannot see (agents-dd0w). The previous round's canary
+# was AWS-shaped, which mask_text recognises, so it could not see the masker's blind spot.
+UNKNOWN_SHAPE_CANARY = "qz8x" + "k2m9" * 5 + "w7vd"
+
+
+class TestStdoutChannelDropsAnythingContainingTheMatchedText(unittest.TestCase):
+    """agents-dd0w (P1, third review): the stdout drop is a PROPERTY, not a key list.
+
+    The leak this guards: a matched value NO pattern recognises reached stdout verbatim through
+    `source_context.context_snippet` - vuln-verify's raw source lines, a copy of the matched text
+    by construction. The nested dict was recursed, but the nested STRING was only pattern-masked,
+    and mask_text passes through every shape it does not know. Two rules now hold instead:
+
+    1. `context_snippet` is a confirmation oracle, so it is DROPPED wholesale at every depth,
+       exactly like snippet / raw_match / candidate_id - masking is the wrong defence for a field
+       whose content IS the match.
+    2. The recursion enforces the general rule as a property: the report's matched values are
+       collected once at the top level, and at EVERY depth any string that equals or contains one
+       of them has the value redacted out of it - so a nested field nobody named is covered by
+       what it HOLDS, not by what it is called.
+
+    The assertions are on the SERIALIZED output, because that is the assertion that would have
+    caught the leak where per-key assertions on the flat fields did not.
+
+    Load-bearing: revert the property enforcement in stdout_safe_report (restore
+    `safe[key] = mask_text(value)` in the string branch) and
+    test_a_string_containing_the_match_is_redacted_at_every_depth fails with the raw canary
+    present in the serialized output while `snippet` in that same payload still reads
+    [redacted] - the leak is the unnamed nested copy, not the named fields. Remove
+    "context_snippet" from CANDIDATE_MATCH_FIELDS and the context_snippet assertion fails the
+    same way, because no pattern recognises the canary.
+    """
+
+    def test_the_canary_matches_no_pattern(self):
+        """The premise of the whole class: if any pattern recognised this value, every assertion
+        below could be satisfied by adding one more pattern - the enumeration defect again."""
+        from lib.redaction import ALL_PATTERNS, mask_text
+
+        self.assertEqual(mask_text(UNKNOWN_SHAPE_CANARY), UNKNOWN_SHAPE_CANARY)
+        self.assertEqual([name for name, pattern in ALL_PATTERNS
+                          if pattern.search(UNKNOWN_SHAPE_CANARY)], [])
+
+    def test_a_string_containing_the_match_is_redacted_at_every_depth_whatever_its_name(self):
+        from lib.redaction import stdout_safe_report
+
+        canary = UNKNOWN_SHAPE_CANARY
+        report = {
+            "candidates": [{
+                "rule_id": "custom-scanner-rule", "path": "src/app.js", "line_number": 3,
+                "snippet": canary, "raw_match": canary, "candidate_id": "0123456789abcdef",
+                "source_context": {
+                    "file": "src/app.js", "line": 3,
+                    # The confirmation oracle: a copy of the matched source text (dropped by name).
+                    "context_snippet": "// confidential: " + canary,
+                    # dict in list in dict, under a name nobody listed: property-only coverage.
+                    "lines": [{"number": 3, "text": "prefix " + canary + " suffix"}],
+                    # A nested key NAMED like a match field: dropped by name at depth.
+                    "snippet": canary,
+                    # A field EQUAL to the matched value under an unremarkable name.
+                    "echo": canary,
+                },
+            }],
+        }
+        safe = stdout_safe_report(report)
+
+        serialized = json.dumps(safe)
+        self.assertNotIn(canary, serialized,
+                         "a matched value no pattern recognises reached the stdout channel")
+        ctx = safe["candidates"][0]["source_context"]
+        self.assertEqual(ctx["context_snippet"], "[redacted]")
+        self.assertEqual(ctx["snippet"], "[redacted]")
+        self.assertEqual(ctx["echo"], "[redacted:value]")
+        self.assertEqual(ctx["lines"][0]["text"], "prefix [redacted:value] suffix")
+        # The channel stays usable: structure and fields bearing none of the match survive.
+        self.assertEqual(ctx["file"], "src/app.js")
+        self.assertEqual(ctx["lines"][0]["number"], 3)
+        self.assertEqual(safe["candidates"][0]["rule_id"], "custom-scanner-rule")
+        self.assertEqual(safe["candidates"][0]["line_number"], 3)
+
+    def test_the_raw_record_keeps_the_value_and_stdout_does_not(self):
+        """The channel split itself: --output keeps the raw value (a human needs it to rotate
+        the credential); stdout and stderr never carry it."""
+        import contextlib
+        import io
+
+        from lib.redaction import emit_station_result
+
+        canary = UNKNOWN_SHAPE_CANARY
+        result = {"candidates": [{"snippet": canary,
+                                  "source_context": {"context_snippet": "// " + canary}}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "raw.json"
+            emit_station_result(result, str(out))
+            self.assertIn(canary, out.read_text(encoding="utf-8"),
+                          "the raw local record lost the value a human needs to rotate it")
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            emit_station_result(result, None)
+        self.assertNotIn(canary, stdout.getvalue())
+        self.assertNotIn(canary, stderr.getvalue())
+
+
 class TestStationStdoutChannelIsStructural(unittest.TestCase):
     """agents-qslz: EVERY station CLI that accepts --output must route its result through
     lib.redaction.emit_station_result - the helper next to stdout_safe_report above.

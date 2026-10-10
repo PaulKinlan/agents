@@ -717,6 +717,11 @@ class TestPathlessCandidates(unittest.TestCase):
 # tests/test_redaction.py).
 SOURCE_LINE_CANARY = "AKIA" + "CANARYNESTED0001"  # matches the aws-access-key shape, not a live secret
 
+# The third review's shape (agents-dd0w): a value NO pattern in lib/redaction recognises. The AWS
+# canary above matches the masker, so it cannot see the masker's blind spot - the leak reached a
+# third round precisely because the acceptance canary matched the mechanism under test.
+UNKNOWN_SHAPE_LINE_CANARY = "qz8x" + "k2m9" * 5 + "w7vd"
+
 
 class TestStdoutCarriesNoRawSourceLines(unittest.TestCase):
     """A no-output run must not carry raw SOURCE LINES to stdout (agents-h0mb).
@@ -790,6 +795,66 @@ class TestStdoutCarriesNoRawSourceLines(unittest.TestCase):
                 capture_output=True, text=True, timeout=60)
             self.assertEqual(res2.returncode, 0, res2.stderr)
             self.assertIn(SOURCE_LINE_CANARY, out.read_text(encoding="utf-8"),
+                          "the canary never entered the bundle at all; the stdout assertion is vacuous")
+
+    def test_no_output_run_drops_a_source_line_canary_no_pattern_recognises(self):
+        """agents-dd0w: the AWS-shaped canary above exercises the MASKER; this one cannot,
+        because mask_text passes it through untouched. Only the wholesale drop of
+        context_snippet keeps it off stdout - the finding's snippet below deliberately does
+        NOT contain the canary, so the contains-the-matched-text property cannot be what
+        saves it either. What is asserted here is exactly the third review's repro, driven
+        through the real station.
+
+        Load-bearing: remove "context_snippet" from CANDIDATE_MATCH_FIELDS in lib/redaction.py
+        and this fails with the raw canary present on stdout, while the AWS-shaped test above
+        still passes - a canary shaped for the masker cannot see the masker's blind spot.
+        """
+        sys.path.insert(0, str(ROOT))
+        from lib.redaction import ALL_PATTERNS, mask_text
+
+        # The premise: no pattern recognises the canary, so masking alone cannot stop it.
+        self.assertEqual(mask_text(UNKNOWN_SHAPE_LINE_CANARY), UNKNOWN_SHAPE_LINE_CANARY)
+        self.assertEqual([name for name, pattern in ALL_PATTERNS
+                          if pattern.search(UNKNOWN_SHAPE_LINE_CANARY)], [])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            # Rewrite the target source so the canary - not the AWS shape - sits on a source
+            # line inside the candidate's context window.
+            (target / "src" / "app.js").write_text(
+                "const el = document.body;\n"
+                "el.innerHTML = user;\n"
+                f'const KEY = "{UNKNOWN_SHAPE_LINE_CANARY}";\n',
+                encoding="utf-8")
+            findings_file = sandbox / "findings.json"
+            findings_file.write_text(json.dumps({"findings": [{
+                "fingerprint": "f" * 64,
+                "agent": "vuln-discovery",
+                "rule_id": "dom-injection-sink",
+                "path": "src/app.js",
+                "line_number": 2,
+                # NOT the canary: the only route to the bundle is source_context.context_snippet.
+                "snippet": "el.innerHTML = user;",
+            }]}), encoding="utf-8")
+
+            script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+            res = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file)],  # no --output: stdout is the channel under test
+                capture_output=True, text=True, timeout=60)
+
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertNotIn(UNKNOWN_SHAPE_LINE_CANARY, res.stdout,
+                             "a source line carrying a value no pattern recognises reached stdout "
+                             "through source_context on the no-output path")
+            # Non-vacuous: the canary really did enter the bundle, proven via --output.
+            out = sandbox / "raw.json"
+            res2 = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file), "--output", str(out)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(res2.returncode, 0, res2.stderr)
+            self.assertIn(UNKNOWN_SHAPE_LINE_CANARY, out.read_text(encoding="utf-8"),
                           "the canary never entered the bundle at all; the stdout assertion is vacuous")
 
 
