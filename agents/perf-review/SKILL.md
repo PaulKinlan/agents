@@ -18,7 +18,13 @@ Your mission is to examine recent code changes (`recent_commits`, `recently_chan
    - **Largest Contentful Paint (LCP)**: Flag render-blocking `<script>` or `@import` declarations in `<head>`, missing `fetchpriority="high"` on primary hero images, or sequential client-side fetches delaying initial render. (Consult `debug-optimize-lcp` principles where applicable).
    - **Interaction to Next Paint (INP)**: Flag forced synchronous layouts (`offsetWidth`, `getBoundingClientRect` interleaved with DOM writes), expensive synchronous JSON serialization, or unthrottled event handlers on main thread.
    - **Cumulative Layout Shift (CLS)**: Flag `<img>`, `<video>`, or dynamic containers injected without explicit dimensions (`width`/`height` or `aspect-ratio`).
-   - **Async Waterfalls (`sequential-await-waterfall`)**: Flag `await` inside `for`/`while` loops where independent I/O calls can be parallelized with `Promise.all()`.
+   - **Async Waterfalls (`sequential-await-waterfall`)**:
+     - Flag `await` inside `for`/`while` loops where independent I/O calls can be parallelized.
+     - **MANDATORY CONCURRENCY PRECONDITION**: Many runtimes are NON-REENTRANT. For example, ONNX Runtime Web wasm execution provider has a module-level mutex around `_OrtRun` that throws "Session already started" across sessions; WebGPU command encoders cannot record concurrently; database handles and hardware devices often forbid overlapping calls. Recommending concurrency on a non-reentrant runtime causes fatal crashes.
+     - Any concurrency recommendation (`Promise.all`, `asyncio.gather`, parallelization, overlapping execution) MUST either:
+       1. Name the backend and cite evidence that it supports concurrent calls (e.g. stateless network fetch, read-only file I/O); OR
+       2. Explicitly state the reentrancy precondition in `remediation`: "Precondition: Verify backend reentrancy before applying. IF the underlying runtime/backend is reentrant and thread-safe (verify it does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve documented serial execution."
+     - If the code operates on ML model sessions, WASM modules, GPU queues, hardware handles, or database transactions, default to preserving serial execution unless concurrent support is explicitly proven.
 
 3. **Always Provide Concrete Fixes**:
    - Do not just describe the issue. For every finding, write a concrete `remediation` AND a `proposed_fix_diff` (unified diff or exact replacement block) that resolves the bottleneck without altering functional behavior.
