@@ -467,5 +467,144 @@ class TestUnknownLineNumbers(unittest.TestCase):
             self.assertIn("TypeError", res.stderr)
 
 
+class TestPathlessCandidates(unittest.TestCase):
+    """agents-nhpb (coord ruling): a candidate with no path is COUNTED and MARKED, never dropped.
+
+    A pathless record used to be filtered out of the bundle silently, so the station reported
+    "nothing to verify" for a candidate it declined to look at - indistinguishable, to a reader,
+    from "looked at and clean". That is the same class as the silently sliced document and the
+    dropped line number removed earlier the same day. The bundle now keeps the candidate, the
+    report states the count, and the reason is machine-readable (`location_present: false`), so no
+    downstream reader has to infer it from prose.
+    """
+
+    def _sandbox(self, tmp: Path):
+        sandbox = tmp / "sandbox"
+        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        helper = sandbox / "lib" / "path_security.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        target = sandbox / "target"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "app.js").write_text(
+            "const el = document.body;\nel.innerHTML = user;\n", encoding="utf-8")
+        return sandbox, target
+
+    def _candidate(self, **overrides):
+        candidate = {
+            "fingerprint": "f" * 64,
+            "agent": "vuln-discovery",
+            "rule_id": "dom-injection-sink",
+            "path": "src/app.js",
+            "line_number": 2,
+            "snippet": "el.innerHTML = user;",
+        }
+        candidate.update(overrides)
+        return candidate
+
+    def _store(self, sandbox: Path, findings: list):
+        (sandbox / "findings").mkdir(exist_ok=True)
+        (sandbox / "findings" / "target.json").write_text(
+            json.dumps({"findings": {f"{i:064x}": f for i, f in enumerate(findings)}}),
+            encoding="utf-8")
+
+    def _run(self, sandbox: Path, target: Path, findings_file=None) -> dict:
+        out = sandbox / "out.json"
+        cmd = [sys.executable,
+               str(sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"),
+               "--target", str(target), "--output", str(out)]
+        if findings_file is not None:
+            cmd += ["--findings", str(findings_file)]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_a_pathless_candidate_is_counted_and_marked_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            pathless = self._candidate(path=None, line_number=None)
+            self._store(sandbox, [self._candidate(), pathless])
+
+            bundle = self._run(sandbox, target)
+
+            self.assertEqual(bundle["candidate_count"], 2)
+            self.assertEqual(bundle["unlocatable_count"], 1)
+            marked = [c for c in bundle["candidates"] if c.get("location_present") is False]
+            self.assertEqual(len(marked), 1)
+            self.assertIsNone(marked[0]["path"])
+            self.assertIsNone(marked[0]["line_number"])
+            self.assertTrue(marked[0]["line_number_unknown"])
+            self.assertEqual(marked[0]["rule_id"], "dom-injection-sink")
+
+    def test_a_pathless_candidate_carries_no_discovery_conclusions(self):
+        """Keeping the candidate must not prime the verifier with the discovery model's words."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            pathless = self._candidate(path=None, line_number=None)
+            pathless.update(CONCLUSIONS)
+            self._store(sandbox, [pathless])
+
+            bundle = self._run(sandbox, target)
+
+            self.assertEqual(bundle["unlocatable_count"], 1)
+            serialized = json.dumps(bundle)
+            for key, value in CONCLUSIONS.items():
+                with self.subTest(conclusion=key):
+                    self.assertNotIn(value, serialized)
+                    self.assertNotIn(key, serialized)
+
+    def test_a_store_of_only_pathless_candidates_does_not_fall_through(self):
+        """It must not go looking at an older run and lose the count, which would report "nothing
+        to verify" for candidates sitting in the store."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            self._store(sandbox, [self._candidate(path=None, line_number=None)])
+
+            bundle = self._run(sandbox, target)
+
+            self.assertEqual(bundle["candidate_count"], 1)
+            self.assertEqual(bundle["unlocatable_count"], 1)
+
+    def test_a_pathless_candidate_from_a_run_artefact_is_counted_too(self):
+        """The second source reaches the same conclusion, and an unknown path must not cost the
+        candidate its emitted id on the way through."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            run_dir = sandbox / "runs" / f"vuln-discovery-{target.name}-20260101-000000"
+            run_dir.mkdir(parents=True)
+            (run_dir / "candidates.json").write_text(json.dumps({"candidates": [
+                {"rule_id": "dom-injection-sink", "snippet": "el.innerHTML = user;",
+                 "candidate_id": "c6cab6881fc8535e"},
+            ]}), encoding="utf-8")
+
+            bundle = self._run(sandbox, target)
+
+            self.assertEqual(bundle["candidate_count"], 1)
+            self.assertEqual(bundle["unlocatable_count"], 1)
+            marked = bundle["candidates"][0]
+            self.assertFalse(marked["location_present"])
+            self.assertEqual(marked["candidate_id"], "c6cab6881fc8535e")
+
+    def test_a_findings_file_of_only_pathless_candidates_is_not_replaced_by_the_store(self):
+        """The `and not unlocatable` guard: a findings file that yields no LOCATED candidate must
+        not send the station on to the store, which would swap one source's findings for another's."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            self._store(sandbox, [self._candidate()])  # a LOCATED candidate the station must NOT use
+            findings_file = sandbox / "input.json"
+            findings_file.write_text(json.dumps({"findings": [
+                self._candidate(path=None, line_number=None),
+            ]}), encoding="utf-8")
+
+            bundle = self._run(sandbox, target, findings_file=findings_file)
+
+            self.assertEqual(bundle["candidate_count"], 1,
+                             "the store's finding replaced the findings file's")
+            self.assertEqual(bundle["unlocatable_count"], 1)
+            self.assertIsNone(bundle["candidates"][0]["path"])
+
+
 if __name__ == "__main__":
     unittest.main()
