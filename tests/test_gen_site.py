@@ -195,11 +195,15 @@ capabilities:
             pages = generate_all(fake_root, fake_root / "docs")
             stations_html = pages["stations.html"]
 
-            # Must NOT contain raw script tag or unescaped HTML tag
+            # Must NOT contain raw hostile script tag or unescaped HTML tag
+            self.assertNotIn('<script>alert("xss")</script>', stations_html)
+            self.assertNotIn("<script>alert", stations_html)
             self.assertNotIn("<script>", stations_html)
-            self.assertNotIn("</script>", stations_html)
-            parsed = parse_page(stations_html)
-            self.assertNotIn("script", parsed.tags, "DOM contains injected <script> tag!")
+
+            # Any script tags in stations.html must be legitimate speculation rules, not injected scripts
+            script_tags = re.findall(r'<script\b([^>]*)>', stations_html)
+            for attrs in script_tags:
+                self.assertIn('type="speculationrules"', attrs)
 
             # Must contain escaped text
             self.assertIn("&lt;script&gt;", stations_html)

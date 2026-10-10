@@ -10,6 +10,16 @@
   <link rel="stylesheet" href="css/projects.css">
   <link rel="stylesheet" href="css/product.css">
   <link rel="stylesheet" href="css/factory.css">
+  <script type="speculationrules">
+  {
+    "prerender": [
+      {
+        "where": { "href_matches": "/*" },
+        "eagerness": "moderate"
+      }
+    ]
+  }
+  </script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
@@ -97,6 +107,7 @@ options:
 <article class="command"><h3 id="cmd-run"><code>run</code></h3><p>Run an agent against a target</p><pre><code>usage: ./factory run [-h] --target TARGET
                      [--engine {auto,pi,claude,antigravity,deepseek}]
                      [--model MODEL] [--sink SINK]
+                     [--budget-minutes BUDGET_MINUTES]
                      [--visibility {public,private}]
                      agent
 
@@ -108,12 +119,15 @@ options:
   --engine {auto,pi,claude,antigravity,deepseek}
                             Engine to execute agent with
   --model MODEL             Model for the pi engine (default deepseek/deepseek-flash)
-  --sink SINK               Override sink (file or beads)
+  --sink SINK               Override sink (file, beads, command; comma-separated for several)
+  --budget-minutes BUDGET_MINUTES
+                            Override station budget deadline in minutes
   --visibility {public,private}
                             Explicit target visibility for a raw --target path (a named target&#x27;s manifest wins); missing still withholds high/critical from a synced tracker</code></pre></article>
 <article class="command"><h3 id="cmd-line"><code>line</code></h3><p>Execute an ordered Factory Line composed of multiple stations</p><pre><code>usage: ./factory line [-h] --target TARGET
                       [--engine {auto,pi,claude,antigravity,deepseek}]
                       [--model MODEL] [--sink SINK]
+                      [--budget-minutes BUDGET_MINUTES]
                       [--visibility {public,private}]
                       line
 
@@ -125,7 +139,9 @@ options:
   --engine {auto,pi,claude,antigravity,deepseek}
                             Engine to execute agents with
   --model MODEL             Model for the pi engine (default deepseek/deepseek-flash)
-  --sink SINK               Override sink (file or beads)
+  --sink SINK               Override sink (file, beads, command; comma-separated for several)
+  --budget-minutes BUDGET_MINUTES
+                            Override station budget deadline in minutes for all stations in the line
   --visibility {public,private}
                             Explicit target visibility for a raw --target path (a named target&#x27;s manifest wins); missing still withholds high/critical from a synced tracker</code></pre></article>
 <article class="command"><h3 id="cmd-hillclimb"><code>hillclimb</code></h3><p>Run Class C goal-directed performance hill-climber with ledger</p><pre><code>usage: ./factory hillclimb [-h] --target TARGET [--metric METRIC]
@@ -141,7 +157,7 @@ options:
   --apply                   Apply candidate edits in worktree, re-measure, keep wins, revert losses
   --engine {auto,pi,claude,antigravity,deepseek}
                             Engine to execute agent with
-  --sink SINK               Override sink (file or beads)
+  --sink SINK               Override sink (file, beads, command; comma-separated for several)
   --visibility {public,private}
                             Explicit target visibility for a raw --target path (a named target&#x27;s manifest wins); missing still withholds high/critical from a synced tracker</code></pre></article>
 <article class="command"><h3 id="cmd-hook"><code>hook</code></h3><p>Manage deterministic git pre-commit hooks (Rule 8 compliant)</p><pre><code>usage: ./factory hook [-h] {install} ...
