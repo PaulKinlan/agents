@@ -38,13 +38,34 @@ inspection and pruned on a later run — never while it is being written.
 
 Pruned-directory tombstones (agents-dm8n): beads cite run directories by path as
 evidence, and a prune used to delete the target of such a citation with nothing
-joining the two — the citation then dangled. ``prune_run_dirs`` therefore appends
-one JSON tombstone line per removed directory to ``runs/pruned.jsonl`` (name,
-absolute path, reason ``age``|``count``, UTC timestamp) at the moment of removal,
-so a citation to a pruned run directory resolves to an explanation instead of a
-missing path. The ledger is a plain append-only file, never swept (pruning only
-removes directories), and it is written by the prune itself — no caller has to
-remember to record anything.
+joining the two — the citation then dangled. Every removal of a run directory
+therefore goes through ``remove_recorded``, the single recorded-removal choke
+point: it deletes the directory AND appends one JSON tombstone line to
+``retention-ledger.jsonl`` BESIDE the runs root (not inside it), so a citation to
+a pruned run directory resolves to an explanation instead of a missing path.
+
+The harm a tombstone answers is "a cited FILE cannot be resolved" — a citation
+points at a file inside a run directory — so the tombstone records at file
+granularity: the exact list of files that disappeared with the removal. A removal
+that fails PART WAY (e.g. a permission bound leaves the directory present but its
+contents deleted) cannot satisfy the record falsely: the tombstone is written
+with ``outcome: "partial"`` listing exactly the files that were lost, computed as
+the pre-removal file set minus the post-removal file set. A removal that fails
+without losing anything writes nothing: a tombstone must never claim a loss that
+did not happen.
+
+The ledger lives at ``<factory root>/retention-ledger.jsonl`` — beside the runs
+root, outside every swept subtree (the automatic prune only removes run
+directories, and a human clearing ``runs/`` to reclaim disk cannot reach it). A
+tombstone answers a question a BEAD asks, and beads outlive the run root, so the
+record must outlive the thing it explains. Discovery runs from the citation
+side: ``runs/README.md`` (written by the prune, never swept — it is a regular
+file, not a run directory) points a reader standing on a dead citation at the
+ledger, and the repository README's retention section is the fallback when the
+run root itself was cleared. The ledger is a plain append-only file, written by
+the removal itself — no caller has to remember to record anything, and
+tests/test_retention.py's deletion-inventory guard fails the gate if any other
+deletion primitive appears in the shipped source without being enumerated.
 """
 
 import json
@@ -74,12 +95,40 @@ ACTIVE_MARKER_NAME = ".active"
 ACTIVE_GRACE_SECONDS_DEFAULT = 3600  # one hour: comfortably above any station budget
 _ENV_ACTIVE_GRACE_SECONDS = "FACTORY_RUN_ACTIVE_GRACE_SECONDS"
 
-# The pruned-directory tombstone ledger (agents-dm8n): one append-only JSON line per
-# removed run directory, written by prune_run_dirs itself at the moment of removal.
-# It lives directly under ``runs/`` as a regular file, so run_directories never
-# yields it and no prune can sweep it; a bead citation to a pruned run directory
-# resolves here to "pruned at T because <reason>" instead of dangling.
-PRUNE_LOG_NAME = "pruned.jsonl"
+# The pruned-directory tombstone ledger (agents-dm8n): one append-only JSON line
+# per removal, written by remove_recorded itself at the moment of removal. It
+# lives BESIDE the runs root (``runs/../retention-ledger.jsonl``, i.e. the
+# factory root), never inside it: the automatic prune only sweeps run
+# directories, and a HUMAN clearing ``runs/`` to reclaim disk must not take the
+# record with the evidence — a tombstone answers a question a bead asks, and
+# beads outlive the run root, so the record must outlive the thing it explains.
+LEDGER_NAME = "retention-ledger.jsonl"
+
+# Discovery from the citation side (agents-dm8n round 2): a reader who followed a
+# bead citation into ``runs/`` and found the path dead is standing HERE, not in
+# the source. This pointer file, maintained by the prune, says where the
+# explanations live. It is a regular file, so run_directories never yields it and
+# the automatic prune can never sweep it; a human clear of the run root removes
+# it, and the repository README's retention section is the fallback for that case
+# (the pointer is rewritten on the next run).
+RUNS_POINTER_NAME = "README.md"
+
+_RUNS_POINTER_TEXT = """\
+# runs/ — transient run directories
+
+Run directories under here are pruned by bounded retention (count and age — see
+`lib/retention.py`); do not treat any path under here as permanent.
+
+**Following a dead citation?** A bead or report citing `runs/<dir>/<file>` that
+no longer exists: every removal is tombstoned in `../retention-ledger.jsonl`
+(beside this directory, at the factory root — it survives a full clear of
+`runs/` precisely so the record outlives the evidence). Search that ledger for
+the directory name: each line records the directory, the reason (`age`/`count`/
+`apply-worktree-failure`), the UTC time, the outcome (`removed` or `partial`),
+and the exact list of files that disappeared with it. If this whole `runs/`
+directory was cleared and this pointer is new, see the repository README's
+\"Run Artifact Retention\" section — the ledger itself is never inside `runs/`.
+"""
 
 _SECONDS_PER_DAY = 86400
 
@@ -186,31 +235,128 @@ def _marker_is_active(directory: Path, now: float, grace: float) -> bool:
     return (now - st.st_mtime) < grace
 
 
-def _record_pruned_directories(runs_dir: Path, removed: List[Tuple[Path, str]],
-                               now: float) -> None:
-    """Append one tombstone line per removed run directory to ``runs/pruned.jsonl``.
+def retention_ledger_path(runs_dir: Path) -> Path:
+    """The tombstone ledger for ``runs_dir``: BESIDE the runs root, never inside it.
 
-    This is the annotation half of agents-dm8n, written at the boundary that performs
-    the deletion: every directory this prune actually removed gets a durable record
-    (name, absolute path, reason ``age``|``count``, UTC timestamp), so a bead
-    citation to a pruned run directory resolves to an explanation. Only directories
-    whose ``rmtree`` succeeded are recorded — a tombstone must never claim a removal
-    that did not happen. A write failure warns on stderr and does not abort the
-    prune: retention bounds secret-bearing artifacts, so a full disk must not turn
-    the ledger into a reason to keep them.
+    The record must outlive the thing it explains (agents-dm8n round 2): inside
+    ``runs/`` the ledger survived the automatic prune but not a human clearing the
+    run root to reclaim disk — the deletion that actually happens. Beside the root
+    it survives both, and beads (which ask the question a tombstone answers)
+    outlive the run root.
     """
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    return runs_dir.parent / LEDGER_NAME
+
+
+def _snapshot_files(root: Path) -> set:
+    """Relative POSIX paths of every regular file and symlink under ``root``.
+
+    Best-effort: an unreadable subdirectory contributes nothing (os.walk's
+    onerror skips it). That is sound for the removal record because the same
+    walk produces the pre- and post-removal snapshots — and what the walk cannot
+    read, ``rmtree`` cannot remove either (both must read a directory to affect
+    its contents), so the recorded loss equals the actual loss in exactly the
+    universe either tool can reach. Symlinks are recorded as leaf entries, never
+    followed.
+    """
+    entries = set()
+    if not root.is_dir() or root.is_symlink():
+        return entries
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        for name in filenames:
+            entries.add((base / name).relative_to(root).as_posix())
+        for name in dirnames:
+            if (base / name).is_symlink():
+                entries.add((base / name).relative_to(root).as_posix())
+    return entries
+
+
+def _append_tombstone(ledger: Path, record: dict) -> None:
+    """Append one tombstone line to the ledger; a write failure warns, never aborts.
+
+    Retention bounds secret-bearing artifacts, so a full disk must not turn the
+    ledger into a reason to keep them — the removal has already happened either
+    way, and a warning on stderr beats stranding the bytes.
+    """
     try:
-        with open(runs_dir / PRUNE_LOG_NAME, "a", encoding="utf-8") as handle:
-            for directory, reason in removed:
-                handle.write(json.dumps({
-                    "name": directory.name,
-                    "path": str(directory),
-                    "pruned_at": stamp,
-                    "reason": reason,
-                }, sort_keys=True) + "\n")
+        with open(ledger, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
     except OSError as exc:
-        sys.stderr.write(f"[retention] could not write {runs_dir / PRUNE_LOG_NAME}: {exc}\n")
+        sys.stderr.write(f"[retention] could not write {ledger}: {exc}\n")
+
+
+def _ensure_runs_pointer(runs_dir: Path) -> None:
+    """Write ``runs/README.md`` (the citation-side discovery pointer) if absent.
+
+    Best-effort and never fatal: the pointer helps a reader standing on a dead
+    citation find the ledger; it is not itself the record.
+    """
+    pointer = runs_dir / RUNS_POINTER_NAME
+    try:
+        if not pointer.exists():
+            pointer.write_text(_RUNS_POINTER_TEXT, encoding="utf-8")
+    except OSError as exc:
+        sys.stderr.write(f"[retention] could not write {pointer}: {exc}\n")
+
+
+def remove_recorded(directory: Path, *, reason: str,
+                    now: Optional[float] = None) -> bool:
+    """Remove ``directory`` (a direct child of a runs root) and record what vanished.
+
+    THE recorded-removal choke point (agents-dm8n round 2): the only sanctioned
+    way to delete a citation-bearing directory under the runs root. The record
+    follows the behaviour because they are the same code path — and
+    tests/test_retention.py's deletion-inventory guard fails the gate if any
+    other deletion primitive appears in the shipped source without being
+    enumerated there, so a FUTURE deleter cannot bypass this function silently.
+
+    The record is at FILE granularity, in the harm's own terms: the tombstone
+    lists exactly the files that disappeared (the pre-removal file set minus the
+    post-removal file set), so a bead citation to a FILE inside the directory
+    resolves to an explanation. Three outcomes:
+
+    - ``removed``: the directory is gone. Tombstone lists everything it held.
+    - ``partial``: the removal failed part way (e.g. a permission bound) — the
+      directory survives but some contents are gone. Tombstone lists exactly the
+      lost files with ``outcome: "partial"``, so the loss is VISIBLE instead of
+      silently satisfying a directory-level check (the round-1 defect: the
+      directory survived, so "directories removed == directories tombstoned"
+      held while the cited file was already destroyed).
+    - ``failed``: nothing disappeared. NO tombstone — the record must never
+      claim a loss that did not happen.
+
+    Returns True only when the directory is gone. Refuses symlinks and missing
+    directories (warns, returns False): the choke point never follows a link out
+    of the runs root and never records a removal of something that was not there.
+    """
+    now = time.time() if now is None else now
+    directory = Path(directory)
+    if directory.is_symlink() or not directory.is_dir():
+        sys.stderr.write(f"[retention] refusing to remove {directory}: "
+                         "not a real directory\n")
+        return False
+    before = _snapshot_files(directory)
+    try:
+        shutil.rmtree(directory)
+    except OSError as exc:
+        sys.stderr.write(f"[retention] could not remove {directory}: {exc}\n")
+    after = _snapshot_files(directory) if directory.is_dir() else set()
+    disappeared = sorted(before - after)
+    if directory.is_dir():
+        outcome = "partial" if disappeared else "failed"
+    else:
+        outcome = "removed"
+    if outcome == "failed":
+        return False
+    _append_tombstone(retention_ledger_path(directory.parent), {
+        "name": directory.name,
+        "path": str(directory),
+        "pruned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "reason": reason,
+        "outcome": outcome,
+        "files": disappeared,
+    })
+    return outcome == "removed"
 
 
 def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
@@ -226,9 +372,13 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
     ``active_grace`` seconds) are skipped entirely, so a concurrent run cannot sweep
     a still-running directory. Returns the list of directories that were removed.
 
-    Every directory actually removed is recorded as a tombstone line in
-    ``runs_dir / pruned.jsonl`` (agents-dm8n), so a citation to a pruned run
-    directory resolves to an explanation rather than dangling.
+    Every removal goes through ``remove_recorded`` (agents-dm8n): each directory
+    actually removed — and each removal that failed PART WAY, losing files but
+    leaving the directory — is recorded as a tombstone line in the ledger BESIDE
+    the runs root (``retention_ledger_path``), at file granularity, so a citation
+    to a pruned run directory (or to a file inside one) resolves to an explanation
+    rather than dangling. Only fully removed directories are returned; a partial
+    removal is recorded with ``outcome: "partial"`` and retried by a later prune.
 
     ``now`` is injectable for deterministic TTL tests; it defaults to the current
     wall-clock time. ``retain``, ``max_age_seconds`` and ``active_grace`` default to
@@ -239,6 +389,11 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
     max_age_seconds = (RETAIN_AGE_DAYS_DEFAULT * _SECONDS_PER_DAY
                        if max_age_seconds is None else max_age_seconds)
     active_grace = ACTIVE_GRACE_SECONDS_DEFAULT if active_grace is None else active_grace
+
+    # The citation-side discovery pointer (agents-dm8n round 2): a reader standing
+    # on a dead citation inside runs/ finds the way to the ledger from here.
+    if runs_dir.is_dir():
+        _ensure_runs_pointer(runs_dir)
 
     exclude_resolved = {Path(p).resolve() for p in exclude}
 
@@ -282,20 +437,16 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
         overflow = survivors[: len(survivors) - retain]
         pruned.extend((r, "count") for r in overflow)
 
-    removed: List[Tuple[Path, str]] = []
+    removed: List[Path] = []
     for directory, reason in pruned:
-        try:
-            shutil.rmtree(directory)
-            removed.append((directory, reason))
-        except OSError as exc:
-            sys.stderr.write(f"[retention] could not remove {directory}: {exc}\n")
+        # The record IS the behaviour (agents-dm8n): remove_recorded deletes and
+        # tombstones in one code path, per directory, at the moment of removal —
+        # so the explanation cannot drift from the deletion, and a partial removal
+        # is recorded at file granularity instead of passing a directory-level check.
+        if remove_recorded(directory, reason=reason, now=now):
+            removed.append(directory)
 
-    # The tombstone ledger records only removals that actually happened, so a
-    # citation never resolves to a tombstone for a directory that still exists.
-    if removed:
-        _record_pruned_directories(runs_dir, removed, now)
-
-    return [path for path, _ in removed]
+    return removed
 
 
 def findings_retention_config(env: Optional[dict] = None) -> int:

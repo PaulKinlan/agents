@@ -18,10 +18,15 @@ accumulate without bound. These tests pin the retention contract:
   contents (non-directory files);
 - the ``factory`` ``create_run_dir`` hook actually applies the policy and marks the
   new run active (so removing the hook fails the suite);
-- every directory a prune removes is recorded as a tombstone line in
-  ``runs/pruned.jsonl`` and nothing else is (agents-dm8n): the set of directories
-  that disappear equals the set of explanations written, so a bead citation to a
-  pruned run directory resolves instead of dangling.
+- every removal under the runs root goes through ``remove_recorded`` and is
+  tombstoned at FILE granularity in ``retention-ledger.jsonl`` BESIDE the runs
+  root (agents-dm8n round 2): the set of FILES that disappear equals the set of
+  files the ledger records, a PARTIAL removal (directory survives, contents
+  destroyed) is recorded with ``outcome: "partial"`` instead of passing a
+  directory-level check, and the ledger survives a human clearing ``runs/``;
+- every deletion primitive in the shipped source is enumerated in the deletion
+  inventory below (coord's third-deleter test): a deleter this suite does not
+  know about fails the gate rather than slipping past the record.
 """
 
 import contextlib
@@ -46,20 +51,30 @@ from lib.retention import (  # noqa: E402
     ACTIVE_MARKER_NAME,
     FINDINGS_RETENTION_BYTES_DEFAULT,
     HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT,
-    PRUNE_LOG_NAME,
+    LEDGER_NAME,
     RETAIN_AGE_DAYS_DEFAULT,
     RETAIN_COUNT_DEFAULT,
+    RUNS_POINTER_NAME,
     active_grace_seconds,
     findings_retention_config,
     hillclimb_retention_ttl,
     prune_findings,
     prune_hillclimb_dirs,
     prune_run_dirs,
+    remove_recorded,
     retention_config,
+    retention_ledger_path,
     run_directories,
 )
 
 _SECONDS_PER_DAY = 86400
+
+
+def make_runs(tmp: str) -> Path:
+    """The runs root inside a tmp tree, so the ledger lands inside the tmp tree."""
+    runs = Path(tmp) / "runs"
+    runs.mkdir()
+    return runs
 
 
 def make_dir(runs_dir: Path, name: str, mtime: float) -> Path:
@@ -88,13 +103,33 @@ def make_hillclimb(runs_dir: Path, name: str, mtime: float) -> Path:
     return path
 
 
+def snapshot_files(root: Path) -> set:
+    """Relative POSIX paths of every regular file and symlink under ``root``.
+
+    The test-side snapshot is written independently of lib/retention's (os.walk
+    here, same contract: never follow symlinks), so the property compares two
+    implementations of "what is here" rather than one against itself.
+    """
+    seen = set()
+    if not root.is_dir() or root.is_symlink():
+        return seen
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        for name in filenames:
+            seen.add((base / name).relative_to(root).as_posix())
+        for name in dirnames:
+            if (base / name).is_symlink():
+                seen.add((base / name).relative_to(root).as_posix())
+    return seen
+
+
 def read_tombstones(runs_dir: Path) -> list:
-    """Return the tombstone records in ``runs/pruned.jsonl`` (empty when absent)."""
-    log = runs_dir / PRUNE_LOG_NAME
-    if not log.exists():
+    """Return the tombstone records in the ledger BESIDE ``runs_dir`` (empty when absent)."""
+    ledger = retention_ledger_path(runs_dir)
+    if not ledger.exists():
         return []
     return [json.loads(line)
-            for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+            for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 class TestRetentionConfig(unittest.TestCase):
@@ -125,7 +160,7 @@ class TestRetentionConfig(unittest.TestCase):
 class TestCountBound(unittest.TestCase):
     def test_keeps_newest_n_and_prunes_the_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             dirs = [make_dir(runs, f"run-{i:02d}", 1000 + i) for i in range(5)]
 
             pruned = prune_run_dirs(runs, now=2000, retain=2,
@@ -139,7 +174,7 @@ class TestCountBound(unittest.TestCase):
 
     def test_default_prune_is_bounded_by_retain_count(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             total = RETAIN_COUNT_DEFAULT + 3
             # Distinct, recent mtimes (all within the default TTL) so only the
             # count bound fires.
@@ -157,7 +192,7 @@ class TestCountBound(unittest.TestCase):
 class TestAgeBound(unittest.TestCase):
     def test_ttl_prunes_older_than_the_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             old = make_dir(runs, "old-run", 1000)
             recent = make_dir(runs, "recent-run", 2000)
 
@@ -170,7 +205,7 @@ class TestAgeBound(unittest.TestCase):
 
     def test_ttl_is_deterministic_and_exact_at_the_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             at_boundary = make_dir(runs, "at-boundary", 1500)
 
             # age == max_age_seconds exactly: kept (prune only when strictly older).
@@ -182,16 +217,19 @@ class TestAgeBound(unittest.TestCase):
 class TestPruneTombstones(unittest.TestCase):
     """agents-dm8n: a pruned run directory resolves to an explanation, not a gap.
 
-    The property, pinned at the boundary that delivers it (prune_run_dirs): the set
-    of directories a prune makes disappear EQUALS the set of tombstone records it
-    writes. A prune that deletes without recording fails the equality from one side;
-    a prune that records without deleting fails it from the other. The ledger lives
-    at ``runs/pruned.jsonl`` and is itself never swept.
+    The property, pinned at the boundary that delivers it (prune_run_dirs via the
+    remove_recorded choke point): the set of directories a prune makes disappear
+    EQUALS the set of directories tombstoned with ``outcome: "removed"``. A prune
+    that deletes without recording fails the equality from one side; a prune that
+    records without deleting fails it from the other (both demonstrated by
+    mutating the behaviour; see the round-2 bead comment for the failure counts).
+    The ledger lives BESIDE the runs root (``retention_ledger_path``), never
+    inside it.
     """
 
     def test_disappeared_directories_equal_tombstoned_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             now = 1_700_000_000.0
             dirs = [make_dir(runs, f"agent-target-202610{i:02d}-000000", now - 100 + i)
                     for i in range(6)]
@@ -209,6 +247,7 @@ class TestPruneTombstones(unittest.TestCase):
             self.assertEqual({t["name"] for t in tombstones}, disappeared)
             self.assertEqual(len(tombstones), len(disappeared))
             for tombstone in tombstones:
+                self.assertEqual(tombstone["outcome"], "removed")
                 self.assertEqual(tombstone["reason"], "count")
                 self.assertEqual(tombstone["path"],
                                  str((runs / tombstone["name"]).resolve()))
@@ -217,7 +256,7 @@ class TestPruneTombstones(unittest.TestCase):
 
     def test_age_bound_removals_carry_the_age_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             old = make_dir(runs, "agent-target-20260901-000000", 1000)
             make_dir(runs, "agent-target-20261010-000000", 2000)
 
@@ -231,7 +270,7 @@ class TestPruneTombstones(unittest.TestCase):
 
     def test_a_failed_removal_leaves_no_tombstone(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             now = 1_700_000_000.0
             dirs = [make_dir(runs, f"run-{i:02d}", now - 100 + i) for i in range(4)]
             failing = dirs[0].resolve()
@@ -250,15 +289,46 @@ class TestPruneTombstones(unittest.TestCase):
                                         max_age_seconds=float("inf"))
 
             self.assertTrue(failing.exists())
+            # The simulated failure deletes NOTHING, so the tombstone ledger must
+            # claim no loss for it (a record of a loss that did not happen would
+            # satisfy the equality falsely from the other side).
             tombstones = read_tombstones(runs)
-            # No tombstone may claim a removal that did not happen.
             self.assertEqual({t["name"] for t in tombstones},
                              {d.name for d in pruned})
             self.assertNotIn(failing.name, {t["name"] for t in tombstones})
 
-    def test_tombstones_accumulate_across_prunes_and_the_log_is_never_swept(self):
+    def test_a_removal_that_deletes_but_raises_is_still_recorded(self):
+        # rmtree can remove the directory and STILL raise (e.g. a late error on a
+        # parent handle). The record must follow the BEHAVIOUR - the directory is
+        # gone - not the exception.
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            doomed = make_dir(runs, "doomed", now - 100)
+            real_rmtree = shutil.rmtree
+
+            def delete_then_raise(path, *args, **kwargs):
+                real_rmtree(path, *args, **kwargs)
+                raise OSError("simulated late failure after deletion")
+
+            fake_shutil = mock.Mock(wraps=shutil)
+            fake_shutil.rmtree = delete_then_raise
+            with mock.patch("lib.retention.shutil", fake_shutil), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                pruned = prune_run_dirs(runs, now=now, retain=10**9,
+                                        max_age_seconds=50)
+
+            self.assertFalse(doomed.exists())
+            self.assertEqual(pruned, [doomed.resolve()])
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            self.assertEqual(tombstones[0]["name"], doomed.name)
+            self.assertEqual(tombstones[0]["outcome"], "removed")
+            self.assertEqual(tombstones[0]["files"], ["report.json"])
+
+    def test_tombstones_accumulate_across_prunes_and_the_ledger_is_never_inside_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
             now = 1_700_000_000.0
             first = [make_dir(runs, f"first-{i}", now - 200 + i) for i in range(3)]
             prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
@@ -266,32 +336,462 @@ class TestPruneTombstones(unittest.TestCase):
             prune_run_dirs(runs, now=now + 10, retain=1,
                            max_age_seconds=float("inf"))
 
-            log = runs / PRUNE_LOG_NAME
-            self.assertTrue(log.is_file())
+            ledger = retention_ledger_path(runs)
+            self.assertTrue(ledger.is_file())
             tombstoned = {t["name"] for t in read_tombstones(runs)}
-            # Explanations from BOTH prunes survive: resolvability is durable, and
-            # the ledger (a regular file, not a run directory) is never swept.
+            # Explanations from BOTH prunes survive: resolvability is durable.
             self.assertTrue({d.name for d in first[:2]} <= tombstoned)
             self.assertTrue({d.name for d in second[:2]} <= tombstoned)
             self.assertEqual(first[2].name not in tombstoned, first[2].exists())
-            self.assertIn(PRUNE_LOG_NAME, {p.name for p in runs.iterdir()})
+            # The ledger is BESIDE the runs root, never inside it: nothing under
+            # runs/ is the record, so no clear of the run root can take it.
+            self.assertNotIn(LEDGER_NAME, {p.name for p in runs.iterdir()})
+            self.assertEqual(ledger.parent, runs.parent)
 
     def test_a_prune_that_removes_nothing_writes_no_tombstone(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             make_dir(runs, "only-run", 1000)
 
             pruned = prune_run_dirs(runs, now=2000, retain=5,
                                     max_age_seconds=float("inf"))
 
             self.assertEqual(pruned, [])
-            self.assertFalse((runs / PRUNE_LOG_NAME).exists())
+            self.assertFalse(retention_ledger_path(runs).exists())
+
+
+class TestFileGranularityTombstones(unittest.TestCase):
+    """agents-dm8n round 2, finding 1: the harm is "a cited FILE cannot be
+    resolved", so the property is asserted in the harm's own terms - the set of
+    FILES that disappear equals the set of files the ledger records - and a
+    partial removal (the directory survives while its contents are destroyed)
+    is recorded, not invisible.
+    """
+
+    def test_disappeared_files_equal_recorded_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            doomed_age = make_dir(runs, "agent-target-20260901-000000", 1000)
+            (doomed_age / "nested").mkdir()
+            (doomed_age / "nested" / "evidence.txt").write_text("cited\n",
+                                                                encoding="utf-8")
+            doomed_count = [make_dir(runs, f"agent-target-2026101{i}-000000",
+                                     now - 50 + i) for i in range(3)]
+            for d in doomed_count:
+                (d / "model_output.txt").write_text("output\n", encoding="utf-8")
+            keep = make_dir(runs, "agent-target-20261010-900000", now)
+            (keep / "model_output.txt").write_text("keep\n", encoding="utf-8")
+            # Writing files bumps the directory mtime; re-pin AFTER populating so
+            # the injected clock drives the age/count bounds deterministically.
+            os.utime(doomed_age, (1000, 1000))
+            for i, d in enumerate(doomed_count):
+                os.utime(d, (now - 50 + i, now - 50 + i))
+            os.utime(keep, (now, now))
+
+            before = {d.name: snapshot_files(d)
+                      for d in (doomed_age, *doomed_count, keep)}
+
+            pruned = prune_run_dirs(runs, now=now, retain=1, max_age_seconds=5000)
+
+            self.assertEqual(set(pruned),
+                             {doomed_age.resolve()}
+                             | {d.resolve() for d in doomed_count})
+            # THE property, at file granularity, both directions at once: every
+            # file that disappeared is recorded against exactly its directory,
+            # and no recorded file still exists.
+            tombstones = {t["name"]: t for t in read_tombstones(runs)}
+            self.assertEqual(set(tombstones),
+                             {doomed_age.name} | {d.name for d in doomed_count})
+            for name, held in before.items():
+                if name == keep.name:
+                    continue
+                self.assertEqual(tombstones[name]["files"], sorted(held),
+                                 f"tombstone for {name} must list exactly the "
+                                 "files the directory held")
+                self.assertEqual(tombstones[name]["outcome"], "removed")
+                for rel in held:
+                    self.assertFalse((runs / name / rel).exists())
+            # The survivor's files exist and appear in NO tombstone.
+            self.assertNotIn(keep.name, tombstones)
+            self.assertEqual(snapshot_files(keep), before[keep.name])
+            recorded = {f for t in tombstones.values() for f in t["files"]}
+            disappeared = {f for name, held in before.items() if name != keep.name
+                           for f in held}
+            self.assertEqual(recorded, disappeared)
+
+    def test_partial_removal_is_recorded_in_the_harms_own_terms(self):
+        # The reviewer's constructed attack (agents-dm8n round 2, finding 1): a
+        # permission bound makes rmtree delete the directory's CONTENTS and then
+        # fail, leaving the directory present. A directory-level equality holds
+        # in exactly this case (nothing disappeared at directory granularity)
+        # while the cited file is gone. The record must answer at file
+        # granularity: the lost files are tombstoned with outcome "partial".
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root ignores the permission bound this attack relies on")
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            doomed = make_dir(runs, "agent-target-20261001-000000", 1000)
+            (doomed / "evidence.txt").write_text("cited\n", encoding="utf-8")
+            locked = doomed / "locked"
+            locked.mkdir()
+            (locked / "inner.txt").write_text("stuck\n", encoding="utf-8")
+            # r-x: the walk can LIST the contents (so they are in the snapshot),
+            # but unlink of inner.txt needs write on locked/ and is denied.
+            locked.chmod(0o500)
+            # Writing files bumped the directory mtime; re-pin so the age bound fires.
+            os.utime(doomed, (1000, 1000))
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    pruned = prune_run_dirs(runs, now=now, retain=10**9,
+                                            max_age_seconds=50)
+
+                # The directory SURVIVED, so it is not returned as pruned and no
+                # tombstone may claim it was removed...
+                self.assertTrue(doomed.exists())
+                self.assertEqual(pruned, [])
+                # ...but the files that were destroyed are recorded, in the harm's
+                # own terms: a bead citing runs/<dir>/evidence.txt resolves to
+                # "lost in a partial removal at T", not to a silent gap.
+                tombstones = read_tombstones(runs)
+                self.assertEqual(len(tombstones), 1)
+                tombstone = tombstones[0]
+                self.assertEqual(tombstone["name"], doomed.name)
+                self.assertEqual(tombstone["outcome"], "partial")
+                self.assertEqual(tombstone["files"],
+                                 ["evidence.txt", "report.json"])
+                self.assertFalse((doomed / "evidence.txt").exists())
+                self.assertFalse((doomed / "report.json").exists())
+                self.assertTrue((doomed / "locked" / "inner.txt").exists())
+
+                # The survivor is retried by a later prune (it still matches the
+                # age bound); once the operator clears the permission bound the
+                # removal completes and the REMAINING files are recorded too. The
+                # failed rmtree bumped the directory mtime; re-pin it so the age
+                # bound still fires against the injected clock.
+                locked.chmod(0o700)
+                os.utime(doomed, (1000, 1000))
+                pruned = prune_run_dirs(runs, now=now + 10, retain=10**9,
+                                        max_age_seconds=50)
+                self.assertEqual(pruned, [doomed.resolve()])
+                self.assertFalse(doomed.exists())
+                final = read_tombstones(runs)[-1]
+                self.assertEqual(final["outcome"], "removed")
+                self.assertEqual(final["files"], ["locked/inner.txt"])
+            finally:
+                if locked.exists():
+                    locked.chmod(0o700)
+
+    def test_remove_recorded_refuses_a_symlink_and_a_missing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "precious.txt").write_text("keep me\n", encoding="utf-8")
+            link = runs / "run-link"
+            link.symlink_to(outside, target_is_directory=True)
+
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertFalse(remove_recorded(link, reason="age"))
+                self.assertFalse(remove_recorded(runs / "never-existed",
+                                                 reason="age"))
+
+            self.assertTrue((outside / "precious.txt").exists())
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(retention_ledger_path(runs).exists())
+
+
+class TestLedgerPlacement(unittest.TestCase):
+    """agents-dm8n round 2, finding 3: the record must outlive the thing it
+    explains - a tombstone answers a question a BEAD asks, and beads outlive the
+    run root. The ledger therefore lives BESIDE the runs root, where neither the
+    automatic prune nor a human clearing the run root can reach it; and a reader
+    standing on a dead citation finds the way from the citation side via
+    runs/README.md.
+    """
+
+    def test_the_ledger_survives_a_human_clear_of_the_run_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs = root / "runs"
+            runs.mkdir()
+            now = 1_700_000_000.0
+            dirs = [make_dir(runs, f"agent-target-2026100{i}-000000", now - 100 + i)
+                    for i in range(3)]
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+
+            ledger = retention_ledger_path(runs)
+            self.assertEqual(ledger, root / LEDGER_NAME)
+            self.assertTrue(ledger.is_file())
+            tombstoned = {t["name"]: t for t in read_tombstones(runs)}
+            self.assertEqual(set(tombstoned), {d.name for d in dirs[:2]})
+
+            # The human prune: clear the run root to reclaim disk, pointer and all.
+            for entry in runs.iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            self.assertEqual(list(runs.iterdir()), [])
+
+            # The record outlives the thing it explains.
+            self.assertTrue(ledger.is_file())
+            survivors = {t["name"]: t for t in read_tombstones(runs)}
+            self.assertEqual(survivors, tombstoned)
+            # And a dead citation still resolves: a bead citing
+            # runs/<dir>/report.json finds the file named in the tombstone.
+            for name, tombstone in survivors.items():
+                self.assertIn("report.json", tombstone["files"])
+
+    def test_the_pointer_stands_where_a_dead_citation_leads_and_is_never_swept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            for i in range(3):
+                make_dir(runs, f"run-{i}", now - 100 + i)
+
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+
+            # A reader who followed a bead citation into runs/ and found the path
+            # dead is standing HERE: the pointer names the ledger and says how to
+            # resolve the citation from it.
+            pointer = runs / RUNS_POINTER_NAME
+            self.assertTrue(pointer.is_file())
+            text = pointer.read_text(encoding="utf-8")
+            self.assertIn(LEDGER_NAME, text)
+            self.assertIn("../" + LEDGER_NAME, text)
+
+            # The pointer is a regular file, so the automatic prune can never
+            # sweep it (run_directories yields directories only) - it survives
+            # every subsequent prune untouched.
+            first_bytes = pointer.read_bytes()
+            for i in range(3):
+                make_dir(runs, f"later-{i}", now - 50 + i)
+            prune_run_dirs(runs, now=now + 10, retain=1,
+                           max_age_seconds=float("inf"))
+            self.assertTrue(pointer.is_file())
+            self.assertEqual(pointer.read_bytes(), first_bytes)
+            self.assertNotIn(pointer.name,
+                             {d.name for d in run_directories(runs)})
+
+
+class TestFailedApplyRemovalGoesThroughTheChokePoint(unittest.TestCase):
+    """agents-dm8n round 2, finding 2: factory's failed --apply cleanup deletes
+    runs/hillclimb-<target>-<run_id> OUTSIDE prune_run_dirs. The record must
+    follow the behaviour: that removal routes through remove_recorded, the same
+    choke point the prune uses. The end-to-end pin (a real failed --apply writes
+    the tombstone) lives in tests/test_hillclimb.py; this is the static pin that
+    the routing cannot be reverted without this suite failing.
+    """
+
+    def test_factory_routes_the_proposal_dir_removal_through_remove_recorded(self):
+        source = (ROOT / "factory").read_text(encoding="utf-8")
+        self.assertIn("remove_recorded(proposal_run_dir", source)
+        self.assertNotIn("shutil.rmtree(proposal_run_dir", source)
+
+
+# --- The deletion inventory (coord's third-deleter test, agents-dm8n round 2) ---
+#
+# The record cannot follow a deleter nobody enumerated, so EVERY deletion
+# primitive in the shipped source is listed here with a disposition:
+#   RECORDED - the deletion IS the recorded-removal choke point (remove_recorded
+#              in lib/retention.py); the record and the behaviour are one path.
+#   NAMED    - deliberately NOT recorded, with the reason on record (never a
+#              judgement without the search behind it). A NAMED path under the
+#              runs root names what it deletes and why a bead citation can never
+#              point at it; a NAMED path outside the runs root says where it is.
+# A deleter added anywhere in the shipped source without an inventory entry fails
+# the suite and NAMES the site; an entry whose site is removed fails too, so the
+# inventory cannot drift from the code in either direction.
+
+_PY_DELETION_PATTERNS = ("shutil.rmtree(", "os.unlink(", "os.remove(",
+                         ".unlink(", "rm -rf", "rm -fr")
+_SH_DELETION_PATTERNS = ("rm -rf", "rm -fr")
+
+_DELETION_INVENTORY = (
+    # (relpath, line substring, expected count, disposition, reason)
+    ("factory", "tmp_file.unlink(missing_ok=True)", 2, "NAMED",
+     "session.patch.tmp, the atomic-replace sibling of the run's own session.patch in the "
+     "keep-edit flow (agents-nei): a transient write artifact created and removed within one "
+     "run, never settled evidence; whatever survives to a prune is covered by the run "
+     "directory's file-granularity tombstone."),
+    ("factory", "path.unlink(missing_ok=True)", 1, "NAMED",
+     "_write_run_artifact: removes a symlink a session may have planted at an artifact path "
+     "before rewriting it (agents-5bn) - it deletes a planted NAME and the artifact is "
+     "rewritten immediately after, so no settled state is lost."),
+    ("factory", "shutil.rmtree(worktree_dir, ignore_errors=True)", 1, "NAMED",
+     "_remove_session_worktree: discards the disposable git worktree INSIDE a run/proposal "
+     "dir (agents-6ce). It holds a checkout of the TARGET, not run evidence; the dm8n census "
+     "(bd export, 243 issues) found no bead citing a worktree path."),
+    ("factory", "shutil.rmtree(_TRANSIENT_DIRS.pop(), ignore_errors=True)", 1, "NAMED",
+     "_cleanup_transient_dirs: per-run socket/config dirs under /tmp (factory-sock-*, "
+     "factory-pi-*), outside the runs root (agents-x8l)."),
+    ("factory", "shutil.rmtree(d, ignore_errors=True)", 1, "NAMED",
+     "_sweep_stale_transient_dirs: the same /tmp transient dirs, orphaned by a hard kill "
+     "(agents-uxs); outside the runs root."),
+    ("factory", "shutil.rmtree(sock_dir, ignore_errors=True)", 2, "NAMED",
+     "the per-run egress socket dir under /tmp (agents-x8l); outside the runs root."),
+    ("factory", "shutil.rmtree(pi_config_dir, ignore_errors=True)", 2, "NAMED",
+     "the per-run pi provider-config dir under /tmp (agents-854): holds no secrets; outside "
+     "the runs root."),
+    ("factory", '(run_dir / "session.patch").unlink(missing_ok=True)', 3, "NAMED",
+     "the run's own session.patch during the keep/discard flow while the run is live and "
+     "unsettled (agents-nei, agents-5bn): a discarded patch never became evidence and a kept "
+     "one is rewritten by the same flow. A bead citing a patch discarded mid-run would "
+     "dangle - named here as a known unrecorded path rather than claimed complete."),
+    ("factory", '(run_dir / "session.patch.tmp").unlink(missing_ok=True)', 1, "NAMED",
+     "clears a pre-placed session.patch.tmp name before the engine runs (agents-5bn "
+     "symlink defense); a planted name, not evidence."),
+    ("factory", "(run_dir / ACTIVE_MARKER_NAME).unlink(missing_ok=True)", 1, "NAMED",
+     "the run's own .active liveness marker at successful completion (agents-ped): a "
+     "prune-guard signal, never evidence."),
+    ("factory", "gemini_skills_link.unlink()", 1, "NAMED",
+     "factory install: replaces the ~/.gemini skills symlink; operator home, outside the "
+     "runs root."),
+    ("factory", "dest.unlink()", 1, "NAMED",
+     "factory install: replaces per-skill symlinks under ~/.pi, ~/.claude and ~/.agents; "
+     "outside the runs root."),
+    ("lib/retention.py", "shutil.rmtree(directory)", 1, "RECORDED",
+     "remove_recorded IS the recorded-removal choke point (agents-dm8n round 2): the "
+     "deletion and its file-granularity tombstone are one code path, and every removal of a "
+     "citation-bearing directory under the runs root goes through it."),
+    ("lib/retention.py", "resolved.unlink()", 1, "NAMED",
+     "prune_findings: findings/ report pruning under its own byte budget (agents-0ti). "
+     "Findings files are not run evidence; the dm8n census found no bead citing them, and "
+     "coord's scope for this bead excludes findings tombstoning."),
+    ("lib/retention.py", "shutil.rmtree(entry)", 1, "NAMED",
+     "prune_hillclimb_dirs: sweeps STALE runs/hillclimb-*/ proposal dirs (agents-0ti). The "
+     "dm8n census (bd export, 243 issues) found no bead citing a hillclimb dir and coord's "
+     "scope excludes hillclimb tombstoning - named here so the exclusion is a decision on "
+     "record, not an oversight. If hillclimb dirs ever become citable evidence, this entry "
+     "must become RECORDED."),
+    ("lib/credential_broker.py", "os.unlink(unix_path)", 2, "NAMED",
+     "the credential broker's UNIX socket files under the per-run /tmp dir (agents-x8l); "
+     "outside the runs root."),
+    ("lib/egress_proxy.py", "os.unlink(self.socket_path)", 2, "NAMED",
+     "the egress proxy's UNIX socket file under the per-run /tmp dir (agents-x8l); outside "
+     "the runs root."),
+    ("lib/findings.py", "os.unlink(tmp_path)", 1, "NAMED",
+     "the findings store's atomic-replace temp file; a write artifact, not evidence."),
+    ("lib/findings.py", "fragment.unlink(missing_ok=True)", 1, "NAMED",
+     "the findings fragment temp name before an atomic replace; a planted directory fails "
+     "closed instead - no settled state is deleted."),
+    ("lib/sandbox.py", "token_path.unlink()", 1, "NAMED",
+     "the sandbox's per-invocation token file; outside the runs root."),
+    ("lib/scheduler.py", "dest_path.unlink(missing_ok=True)", 1, "NAMED",
+     "launchd plist replacement under ~/Library/LaunchAgents; outside the runs root."),
+    ("lib/scheduler.py", "dest_service.unlink(missing_ok=True)", 1, "NAMED",
+     "systemd unit replacement under ~/.config/systemd; outside the runs root."),
+    ("lib/scheduler.py", "dest_timer.unlink(missing_ok=True)", 1, "NAMED",
+     "systemd timer replacement under ~/.config/systemd; outside the runs root."),
+    ("lib/scheduler.py", "dest_path.unlink()", 1, "NAMED",
+     "launchd plist removal on schedule uninstall; outside the runs root."),
+    ("lib/scheduler.py", "dest_service.unlink()", 1, "NAMED",
+     "systemd unit removal on schedule uninstall; outside the runs root."),
+    ("lib/scheduler.py", "dest_timer.unlink()", 1, "NAMED",
+     "systemd timer removal on schedule uninstall; outside the runs root."),
+    ("tools/stage_site.py", "shutil.rmtree(out)", 1, "NAMED",
+     "replaces the staged Pages _site/ output directory; build output, outside the runs root."),
+    ("agents/docs-write/scripts/prepare_docs_fixes.py", "os.unlink(drift_out)", 1, "NAMED",
+     "docs-write's own temp output inside its tmp workspace; outside the runs root."),
+    (".github/actions/factory/fetch_factory.sh", 'rm -rf "$DEST"', 1, "NAMED",
+     "the CI action replacing its own checked-out DEST in the runner workspace; never the "
+     "operator's factory tree."),
+)
+
+
+def _scanned_sources(root: Path):
+    """Every shipped source file that could harbour a deleter (tests excluded)."""
+    candidates = [root / "factory"]
+    for sub in ("lib", "tools", "agents"):
+        candidates += sorted((root / sub).rglob("*.py"))
+    candidates += sorted(p for p in root.rglob("*.sh")
+                         if "tests" not in p.relative_to(root).parts)
+    github = root / ".github"
+    candidates += sorted(github.rglob("*.yml")) + sorted(github.rglob("*.yaml"))
+    skip = {".git", ".beads", "node_modules", "_site", "__pycache__"}
+    for path in candidates:
+        if any(part in skip for part in path.parts):
+            continue
+        yield path.relative_to(root).as_posix(), path
+
+
+def _deletion_sites(root: Path) -> list:
+    """(relpath, stripped line) for every deletion-primitive line in shipped source."""
+    sites = []
+    for rel, path in _scanned_sources(root):
+        patterns = (_SH_DELETION_PATTERNS
+                    if path.suffix in {".sh", ".yml", ".yaml"}
+                    else _PY_DELETION_PATTERNS)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if any(pattern in stripped for pattern in patterns):
+                sites.append((rel, stripped))
+    return sites
+
+
+def _inventory_errors(sites: list) -> list:
+    """Every way the deletion inventory can drift from the source, as failure lines."""
+    errors = []
+    used = [0] * len(_DELETION_INVENTORY)
+    for rel, line in sites:
+        matches = [i for i, (path, substring, _count, _disp, _reason)
+                   in enumerate(_DELETION_INVENTORY)
+                   if path == rel and substring in line]
+        if not matches:
+            errors.append(
+                f"unenumerated deletion site: {rel}: {line} — route citation-bearing "
+                "removals through lib.retention.remove_recorded, or add a NAMED "
+                "inventory entry with the search behind it")
+        for i in matches:
+            used[i] += 1
+    for i, (path, substring, expected, disposition, _reason) in enumerate(
+            _DELETION_INVENTORY):
+        if used[i] != expected:
+            errors.append(
+                f"stale inventory entry: {path} {substring!r} is {disposition} for "
+                f"{expected} site(s) but matched {used[i]}")
+        if disposition == "RECORDED" and path != "lib/retention.py":
+            errors.append(
+                f"RECORDED entry outside the choke-point module: {path} {substring!r}")
+    return errors
+
+
+class TestRunRootDeletionInventory(unittest.TestCase):
+    """Coord's third-deleter test (agents-dm8n round 2): the fix must survive a
+    deleter we have NOT found. The recording choke point cannot be bypassed
+    silently because this inventory enumerates every deletion primitive in the
+    shipped source; a new one fails the gate and is named, in the full gate
+    always and in the fast gate for any factory or lib change (the factory arm
+    maps here - see tools/fast-gate.sh).
+    """
+
+    def test_every_deletion_primitive_in_the_shipped_source_is_enumerated(self):
+        self.assertEqual(_inventory_errors(_deletion_sites(ROOT)), [])
+
+    def test_an_unenumerated_deleter_fails_the_inventory_and_is_named(self):
+        sites = _deletion_sites(ROOT) + [
+            ("factory", "shutil.rmtree(some_new_path, ignore_errors=True)")]
+        errors = _inventory_errors(sites)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("shutil.rmtree(some_new_path", errors[0])
+        self.assertIn("factory", errors[0])
+
+    def test_a_deleter_removed_without_updating_the_inventory_fails(self):
+        sites = [(rel, line) for rel, line in _deletion_sites(ROOT)
+                 if "session.patch.tmp" not in line]
+        errors = _inventory_errors(sites)
+        self.assertTrue(any("session.patch.tmp" in error for error in errors),
+                        f"the stale entry must be named: {errors}")
 
 
 class TestInProgressSafety(unittest.TestCase):
     def test_excluded_run_is_never_pruned(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             in_progress = make_dir(runs, "in-progress", 1)  # ancient mtime
             old = make_dir(runs, "old", 2)
 
@@ -328,7 +828,7 @@ class TestSymlinkAndUnexpectedContents(unittest.TestCase):
 
     def test_non_directory_files_are_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             log = runs / "schedule-secret-scan.stdout.log"
             log.write_text("stdout\n", encoding="utf-8")
             old = make_dir(runs, "old-run", 1)
@@ -344,7 +844,7 @@ class TestSymlinkAndUnexpectedContents(unittest.TestCase):
         # runs/hillclimb-<target>-<run_id>, not a literal "worktrees" dir. Skipping only
         # the phantom name masked this and let the live proposal be swept mid-run.
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             proposal = runs / "hillclimb-fauxmium-20260101-000000"
             proposal.mkdir()
             old = make_dir(runs, "old-run", 1)
@@ -372,6 +872,12 @@ class TestSymlinkAndUnexpectedContents(unittest.TestCase):
             self.assertFalse(old.exists())
             self.assertTrue((outside / "precious.txt").exists())
             self.assertEqual(pruned, [old.resolve()])
+            # The symlink itself is recorded in the tombstone's file list: it was
+            # part of what disappeared with the directory.
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            self.assertEqual(sorted(tombstones[0]["files"]),
+                             ["escape", "report.json"])
 
     def test_missing_runs_dir_is_a_no_op(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -383,7 +889,7 @@ class TestSymlinkAndUnexpectedContents(unittest.TestCase):
 class TestActiveRunGuard(unittest.TestCase):
     def test_fresh_active_marker_protects_a_long_running_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             # The run dir itself is ancient (so the age bound alone would prune it),
             # but its marker is fresh: a concurrent run must not sweep it.
             active = make_dir(runs, "active-run", 1)
@@ -402,7 +908,7 @@ class TestActiveRunGuard(unittest.TestCase):
 
     def test_stale_active_marker_is_swept(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             stale = make_dir(runs, "stale-run", 1)
             marker = stale / ACTIVE_MARKER_NAME
             marker.write_text("active\n", encoding="utf-8")
@@ -417,7 +923,7 @@ class TestActiveRunGuard(unittest.TestCase):
 
     def test_non_regular_file_marker_does_not_count_as_active(self):
         with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp)
+            runs = make_runs(tmp)
             fake = make_dir(runs, "fake-active", 1)
             (fake / ACTIVE_MARKER_NAME).mkdir()  # a directory is not a marker
             os.utime(fake, (1, 1))
@@ -485,9 +991,14 @@ class TestFactoryHook(unittest.TestCase):
                 sorted(["old-22", "old-23", "old-24", new_dir.name]),
             )
             # The production hook delivers the tombstones too (agents-dm8n): every
-            # directory this prune removed resolves to an explanation.
-            tombstoned = {t["name"] for t in read_tombstones(runs)}
-            self.assertEqual(tombstoned, {f"old-{i:02d}" for i in range(22)})
+            # directory this prune removed resolves to an explanation, at file
+            # granularity, in the ledger BESIDE the runs root.
+            tombstoned = {t["name"]: t for t in read_tombstones(runs)}
+            self.assertEqual(set(tombstoned), {f"old-{i:02d}" for i in range(22)})
+            for tombstone in tombstoned.values():
+                self.assertEqual(tombstone["outcome"], "removed")
+                self.assertEqual(tombstone["files"], ["report.json"])
+            self.assertEqual(retention_ledger_path(runs), root / LEDGER_NAME)
 
 
 class TestFindingsRetentionConfig(unittest.TestCase):

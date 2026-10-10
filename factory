@@ -40,7 +40,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
-                               prune_run_dirs, retention_config)
+                               prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -64,7 +64,7 @@ except ImportError:
     from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
-                               prune_run_dirs, retention_config)
+                               prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record)
@@ -2099,7 +2099,12 @@ def run_hillclimb(
             # pure add-failure (nothing was created) skips the noisy remove attempt.
             if worktree_dir.exists():
                 _remove_session_worktree(target_dir, worktree_dir)
-            shutil.rmtree(proposal_run_dir, ignore_errors=True)
+            # agents-dm8n round 2 (review finding 2): this removal deletes under the runs
+            # root OUTSIDE prune_run_dirs, so it must go through the same recorded-removal
+            # choke point - a bare rmtree here was a deleter the tombstone ledger could not
+            # see. remove_recorded tombstones the removal (and any partial loss, at file
+            # granularity) in the ledger beside the runs root.
+            remove_recorded(proposal_run_dir, reason="apply-worktree-failure")
             return _record_blocked(f"cannot create the disposable apply worktree: {e}")
 
     baseline = measure_target(target_dir)

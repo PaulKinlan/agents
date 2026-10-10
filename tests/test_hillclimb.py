@@ -431,6 +431,19 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         worktrees = target / ".git" / "worktrees"
         self.assertEqual(list(worktrees.glob("*")) if worktrees.exists() else [], [])
         self.assertEqual(list((self.tmp / "factory-root" / "runs").glob("hillclimb-*")), [])
+        # agents-dm8n round 2 (finding 2): the removal of the failed proposal dir goes
+        # through the recorded-removal choke point, so even this non-prune deletion under
+        # the runs root leaves a tombstone in the ledger BESIDE the runs root.
+        from lib.retention import LEDGER_NAME
+        ledger = self.tmp / "factory-root" / LEDGER_NAME
+        self.assertTrue(ledger.is_file())
+        tombstones = [json.loads(line)
+                      for line in ledger.read_text(encoding="utf-8").splitlines()
+                      if line.strip()]
+        self.assertEqual(len(tombstones), 1)
+        self.assertTrue(tombstones[0]["name"].startswith("hillclimb-target-"))
+        self.assertEqual(tombstones[0]["reason"], "apply-worktree-failure")
+        self.assertEqual(tombstones[0]["outcome"], "removed")
 
     def test_second_iteration_reads_accumulated_worktree(self):
         # P2-2: a later proposal must be generated against the accumulated worktree (which

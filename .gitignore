@@ -1,5 +1,8 @@
 # Run artifacts — transcripts, raw scanner output, benchmark traces
 runs/
+# The retention tombstone ledger (agents-dm8n): local, append-only, per-VM state
+# explaining every removal under runs/; lives at the root so clearing runs/ cannot take it
+/retention-ledger.jsonl
 schedules/*.plist
 schedules/*.service
 schedules/*.timer

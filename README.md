@@ -442,13 +442,28 @@ symlinks are never followed (and are left in place); non-directory files such as
 scheduler's `schedule-*.stdout.log` and the hill-climb `runs/hillclimb-<target>-<run_id>/`
 proposal directories are never swept (they are proposals, not run records). If a run
 crashes mid-way, its partial directory is still the newest entry and survives that pass;
-it is pruned on a later run once it is old enough or falls past the count bound. Every
-removal is recorded as it happens: `prune_run_dirs` appends one JSON tombstone line per
-removed directory to `runs/pruned.jsonl` (name, path, reason `age`/`count`, UTC
-timestamp), so a reference to a pruned run directory — e.g. a bead citing
-`runs/<agent>-<target>-<run_id>/candidates.json` as evidence — resolves to "pruned at T,
-and why" instead of a missing path. The ledger is a plain append-only file and is never
-swept. See `lib/retention.py` for the exact policy.
+it is pruned on a later run once it is old enough or falls past the count bound.
+
+**Every removal under `runs/` is tombstoned, at file granularity, beside the runs root.**
+All removals of citation-bearing directories — the prune's, and the failed `--apply`
+cleanup that deletes `runs/hillclimb-<target>-<run_id>/` when the disposable worktree
+cannot be created — go through one recorded-removal choke point
+(`lib/retention.py::remove_recorded`), which appends one JSON tombstone line per removal
+to **`retention-ledger.jsonl` at the factory root** (never inside `runs/`): directory
+name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome,
+and **the exact list of files that disappeared**. A citation is to a *file* — e.g. a bead
+citing `runs/<agent>-<target>-<run_id>/candidates.json` as evidence — so the record counts
+files: a removal that fails *part way* (the directory survives but contents are destroyed)
+is tombstoned with `outcome: "partial"` and the lost files named, rather than passing a
+directory-level check while the evidence is gone. The ledger lives outside the prunable
+subtree because the record must outlive the thing it explains: it survives the automatic
+prune *and* a human clearing `runs/` to reclaim disk, and beads — which ask the question a
+tombstone answers — outlive the run root. `runs/README.md` (written by the prune, never
+swept) points a reader standing on a dead citation at the ledger; if `runs/` itself was
+cleared, this section is the fallback. Note plainly: the ledger explains removals from the
+moment it exists — it **cannot recover what was already lost** before that, and a
+tombstone must never be read as having reclaimed an older citation. See
+`lib/retention.py` for the exact policy.
 
 **Active-run guard** — a concurrently running `factory` (e.g. a scheduled scan) must
 never sweep another process's still-running run directory, even when many fast runs
@@ -500,6 +515,7 @@ lib/
 targets/                           # Target project configurations (YAML)
 findings/                          # Local findings store, latest delta reports, history, ledgers
 runs/                              # Detailed run transcripts and raw model logs (gitignored)
+retention-ledger.jsonl             # Tombstone of every removal under runs/ (gitignored; survives clearing runs/)
 schedules/                         # Generated launchd plists (gitignored)
 docs/
 ├── INTEGRATION.md                 # Agent and CI/CD integration guide
