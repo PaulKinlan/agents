@@ -252,8 +252,10 @@ class TestStationTrustedToolPins(unittest.TestCase):
         run_dir.mkdir()
 
         orig_pins = os.environ.get("FACTORY_TOOL_PINS")
+        orig_unpinned = os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS")
         try:
             os.environ["FACTORY_TOOL_PINS"] = str(home_pins)
+            os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
             child_env = prepass_environment({"capabilities": {"requires": ["git"]}})
             script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
             inner = [sys.executable, str(script), "--target", str(self.target)]
@@ -269,6 +271,10 @@ class TestStationTrustedToolPins(unittest.TestCase):
                 os.environ["FACTORY_TOOL_PINS"] = orig_pins
             else:
                 os.environ.pop("FACTORY_TOOL_PINS", None)
+            if orig_unpinned is not None:
+                os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = orig_unpinned
+            else:
+                os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
             home_pins.unlink(missing_ok=True)
 
 
