@@ -41,10 +41,10 @@ class StoreFileError(ValueError):
     """
 
 try:  # imported as lib.findings (root on sys.path), or run as a script (lib/ on it)
-    from lib.redaction import redact_finding
+    from lib.redaction import redact_finding, redact_for_storage
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
-    from lib.redaction import redact_finding
+    from lib.redaction import redact_finding, redact_for_storage
 
 # Redaction removes the value from published text; the embargo decides whether a finding is
 # routed to a tracker at all. It is a separate module so the policy has one home and one test.
@@ -639,8 +639,10 @@ class FindingsStore:
         # agents-4zg: scrub records written before the store was redacted at rest. Redaction is
         # idempotent, so already-redacted records are unchanged; a legacy store keeps its raw
         # material out of memory, and the next save() persists the redacted copy to disk.
+        # redact_for_storage, not redact_finding: the store keeps `candidate_id` on purpose, while
+        # every PUBLISHED surface drops it (agents-p8og).
         data["findings"] = {
-            fp: (redact_finding(record) if isinstance(record, dict) else record)
+            fp: (redact_for_storage(record) if isinstance(record, dict) else record)
             for fp, record in data["findings"].items()
         }
         return data
@@ -678,7 +680,7 @@ class FindingsStore:
         return {
             **self.data,
             "findings": {
-                fp: (redact_finding(record) if isinstance(record, dict) else record)
+                fp: (redact_for_storage(record) if isinstance(record, dict) else record)
                 for fp, record in findings.items()
             },
         }
@@ -851,16 +853,16 @@ class FindingsStore:
                 # vocabulary, never read out of `item`, so a report cannot claim provenance it
                 # does not have; see IDENTITY_SOURCES for the classification and the checklist.
                 "identity_source": identity_source,
-                # The station's own emitted identity, persisted so a SECOND-ORDER station that
-                # rebuilds records from the store can carry it forward instead of reconstructing
-                # what the scanner already knew (agents-p8og, coord ruling: PERSIST). Scanner-owned
-                # and never model input, so under the checklist it is copied VERBATIM (step 1) and
-                # deliberately NOT added to RENDERED_TEXT_FIELDS: nothing renders it. It is already
-                # an input to compute_fingerprint because it IS the identity payload wherever it was
-                # used, which is why persisting it needs no scheme bump - the fingerprint for the
-                # same inputs is byte-identical before and after, and a test pins that.
-                # None, not a made-up value, when nothing bound: an invented id would look like
-                # provenance.
+                # The scanner's own id for the candidate at this location, persisted so a
+                # SECOND-ORDER station that rebuilds records from the store can carry it forward
+                # instead of reconstructing what the scanner already knew (agents-p8og, coord
+                # ruling: PERSIST). Written only when the id IS the key this fingerprint used,
+                # because `identity_source` records which key that was and agents-q0mt deliberately
+                # does NOT use the id when the model's prose selected the candidate - so a field
+                # claiming otherwise would describe a binding that never happened. None when nothing
+                # bound: an invented id would look like provenance. Scanner-owned and never model
+                # input, so under the checklist it is copied VERBATIM (step 1) and deliberately NOT
+                # added to RENDERED_TEXT_FIELDS: nothing renders it.
                 "candidate_id": identity_snip if identity_source == "candidate-id" else None,
                 "agent": agent,
                 "rule_id": rule_id,

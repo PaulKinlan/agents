@@ -20,6 +20,7 @@ from unittest import mock
 from lib import findings
 from lib.candidate_identity import assign_candidate_ids
 from lib.findings import FindingsStore, StoreFileError, bind_severity
+from lib.redaction import redact_finding, redact_for_storage
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 
@@ -908,8 +909,21 @@ class TestIdentityAttribution(unittest.TestCase):
             # retire: without the stamp every later run would re-announce the wave (review finding).
             self.assertEqual(json.loads(store_file.read_text()).get("identity_scheme"),
                              findings.IDENTITY_SCHEME)
-            self.assertNotIn("313b2133ae08c979", store_file.read_text(),
-                             "the raw id must not be persisted: the fingerprint carries identity")
+            # agents-p8og REVERSED the first half of what this line asserted, deliberately and with
+            # a ruling behind it: the id IS persisted now, so a second-order station can carry it.
+            # What has to stay true is WHY the old assertion existed - identity is carried by the
+            # FINGERPRINT, so persisting the id must not introduce a second, competing identity, nor
+            # collapse two findings onto one. Asserted by matching fingerprints against the shared
+            # id rather than by the id's absence, and the scheme stamp above still says no re-key.
+            stored = json.loads(store_file.read_text())
+            carried = [r for r in stored["findings"].values()
+                       if r.get("candidate_id") == "313b2133ae08c979"]
+            self.assertTrue(carried, "the id should be persisted for second-order stations")
+            for row in carried:
+                self.assertNotEqual(row["fingerprint"], row["candidate_id"],
+                                    "the id must not BE the identity: the fingerprint carries it")
+            self.assertEqual(len({r["fingerprint"] for r in carried}), len(carried),
+                             "one candidate id must not collapse distinct findings onto one identity")
 
     def test_a_non_scalar_line_number_cannot_crash_the_run(self):
         """The redaction contract is fail-closed, not crash (agents-q0mt).
@@ -955,6 +969,45 @@ class TestIdentityAttribution(unittest.TestCase):
         self.assertEqual(row["fingerprint"],
                          findings.compute_fingerprint("vuln-discovery", "unclassified", "a.py",
                                                       "c6cab6881fc8535e"))
+
+    def test_the_record_persists_the_id_on_disk_and_through_a_reload(self):
+        """The P1 a cross-family review caught in the first version of this branch.
+
+        process_run returns the IN-MEMORY record while save() writes the at-rest copy, so an
+        assertion on `processed[0]` proved nothing about persistence - which is exactly how the id
+        came to be stripped on the way to disk with the suite still green. Assert what PERSISTS.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text", "candidate_id": "c6cab6881fc8535e"}])
+        with tempfile.TemporaryDirectory() as td:
+            store = FindingsStore("target", findings_dir=Path(td))
+            store.process_run("vuln-discovery", [self._finding(
+                rule_id="invented", path="a.py", line_number=2, snippet="re-worded freely")],
+                candidate_index=ci)
+            store.close()
+
+            on_disk = json.loads((Path(td) / "target.json").read_text(encoding="utf-8"))
+            written = next(iter(on_disk["findings"].values()))
+            self.assertEqual(written["candidate_id"], "c6cab6881fc8535e",
+                             "the id did not reach disk, so no second-order station can read it")
+            self.assertEqual(written["fingerprint"],
+                             findings.compute_fingerprint("vuln-discovery", "unclassified", "a.py",
+                                                          "c6cab6881fc8535e"))
+
+            # And it survives the load path, which scrubs records a second time on the way in.
+            reopened = FindingsStore("target", findings_dir=Path(td))
+            reloaded = next(iter(reopened.data["findings"].values()))
+            reopened.close()
+            self.assertEqual(reloaded["candidate_id"], "c6cab6881fc8535e")
+
+    def test_the_storage_and_publication_boundaries_are_distinct(self):
+        """Storage KEEPS the id; publication DROPS it. If these ever collapse into one function
+        again, both halves break silently - once the store keeps nothing, once the confirmation
+        oracle is published - and this is the test that says which is which."""
+        row = dict(self._finding(), fingerprint="f" * 64, identity_source="candidate-id",
+                   candidate_id="c6cab6881fc8535e", state="new", change="new")
+        self.assertNotIn("candidate_id", redact_finding(row))
+        self.assertEqual(redact_for_storage(row)["candidate_id"], "c6cab6881fc8535e")
 
     def test_a_finding_with_no_emitted_id_persists_none_rather_than_inventing_one(self):
         """An invented id would look like provenance, which is worse than an empty field."""
@@ -1002,12 +1055,11 @@ class TestIdentityAttribution(unittest.TestCase):
         The id stays in the LOCAL store, where the second-order stations read it; it is not a
         publication channel. Same shape as model_rule_id's withholding branches.
         """
-        from lib.redaction import redact_finding
+        from lib.redaction import redact_finding, redact_for_storage
 
         row = dict(self._finding(), fingerprint="f" * 64, identity_source="candidate-id",
                    candidate_id="c6cab6881fc8535e", state="new", change="new")
         self.assertNotIn("candidate_id", redact_finding(row))
-
     def test_persisting_the_id_does_not_bump_the_identity_scheme(self):
         """Coord's condition 3: if no migration is needed, say so explicitly - and pin it.
 

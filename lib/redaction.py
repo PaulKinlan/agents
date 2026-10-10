@@ -369,6 +369,30 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     return published
 
 
+def redact_for_storage(finding: Dict[str, Any]) -> Dict[str, Any]:
+    """The at-rest scrubber: `redact_finding` PLUS what the LOCAL store must keep (agents-p8og).
+
+    There are two boundaries and they are not the same one:
+      * `redact_finding` protects everything that LEAVES this machine (tracker sinks, the delta
+        report, the step summary, scanner stdout). `candidate_id` is withheld there, because it is a
+        digest of the matched text: anyone holding it with the rule, path and ordinal can test a
+        guess at the matched line, and for a credential finding a guess at the credential.
+      * this function protects the store AT REST. The store is local and gitignored, and it is the
+        only place a second-order station can read a candidate's emitted identity, so the id has to
+        survive here or the persistence is pointless.
+
+    Collapsing the two was a real defect, caught in review: putting the drop in `redact_finding`
+    also stripped the id on the way TO DISK, because save() calls this path - so the branch stored
+    nothing and every test that asserted the in-memory return value still passed. Hence a named
+    function: the two policies can now differ on purpose and each has a test, which is also what the
+    comment at the top of this module has referred to since agents-4zg without ever having it.
+    """
+    stored = redact_finding(finding)
+    if finding.get("candidate_id"):
+        stored["candidate_id"] = finding["candidate_id"]
+    return stored
+
+
 def redact_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [redact_finding(f) for f in findings]
 
