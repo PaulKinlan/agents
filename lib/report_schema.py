@@ -208,7 +208,7 @@ _NEGATION_PATTERN = re.compile(
 _STOP_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:stop|avoid|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from|do\s+not|don't|never)\s+"
     r"(?:(?:use|using|the|a)\s+)?"
-    r"(?:(?:run|running|execute|executing|dispatch|dispatching|call|calling|process|processing)\b[^.;\n]*?\b(?:in\s+parallel|concurrently|simultaneously)|"
+    r"(?:(?:run|running|execute|executing|dispatch|dispatching|call|calling|process|processing)\s+(?:(?!(?:serially|sequential|in\s+series|but)\b)[a-zA-Z0-9_.-]+\s+){0,3}(?:in\s+parallel|concurrently|simultaneously)|"
     r"Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism|iz(?:e|ing|ation))?|overlap(?:ping)?|(?:a\s+)?worker\s+pools?|(?:a\s+)?pool\s+of\s+workers?|thread\s+pools?)\b",
     re.IGNORECASE
 )
@@ -501,9 +501,14 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     if not remediation:
         return False
 
-    # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1)
+    # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
+    # The entire fallback branch must preserve serial execution and must not advocate concurrency.
     if _STRUCTURED_PRECONDITION_PATTERN.search(remediation):
-        return True
+        otherwise_parts = re.split(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
+        if len(otherwise_parts) >= 2:
+            fallback_branch = otherwise_parts[-1]
+            if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_branch):
+                return True
 
     # Case 2: Named backend citing proven evidence of overlap tolerance
     if has_proven_backend_evidence(finding):

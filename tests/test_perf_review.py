@@ -318,6 +318,12 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(inverted_condition))
 
+        # Reviewer P1 finding: fallback branch advocating concurrency for another operation must NOT pass
+        fallback_advocating_concurrency = {
+            "remediation": "If backend is reentrant, use Promise.all for fetch; otherwise keep serial setup but run inference concurrently"
+        }
+        self.assertFalse(has_reentrancy_precondition(fallback_advocating_concurrency))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
@@ -725,6 +731,20 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes6 = normalize_report(report6)
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes6))
         self.assertIn("proposed_fix_diff", report6["findings"][0])
+
+    def test_negated_serial_with_affirmative_parallel_is_concurrency_recommendation(self):
+        """Reviewer P1 finding: 'Do not run model inference serially but run it in parallel' must be guarded."""
+        finding = {
+            "rule_id": "concurrency-hazard",
+            "path": "src/infer.ts",
+            "line_number": 70,
+            "remediation": "Do not run model inference serially but run it in parallel."
+        }
+        self.assertTrue(is_concurrency_recommendation(finding))
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
 
     def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
         """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""
