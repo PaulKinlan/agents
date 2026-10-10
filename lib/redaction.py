@@ -295,6 +295,14 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     the notes stay in the local run artifact for whoever has to rotate the credential.
     """
     published = dict(finding)
+    # The candidate id is an INTERNAL identity key, and it is a digest of the matched text itself,
+    # so publishing it hands out a confirmation oracle: anyone holding it together with the rule,
+    # path and ordinal could test a guess at the line the scanner matched - and for a credential
+    # finding, a guess at the credential. It is scanner-owned rather than model prose, so this is
+    # not a masking case under the checklist; it is withheld outright, the same shape as
+    # model_rule_id's withholding branches (agents-p8og). The id stays in the LOCAL store, which is
+    # where the second-order stations read it, and is never a publication channel.
+    published.pop("candidate_id", None)
     agent = str(finding.get("agent") or "")
     literals = matched_literals(finding)
     credential = is_credential_finding(finding)

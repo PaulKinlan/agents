@@ -6,6 +6,7 @@ empty (which re-books every prior finding as new), and concurrent factory proces
 other's findings via last-writer-wins read-modify-write.
 """
 
+import hashlib
 import json
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
@@ -17,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from lib import findings
+from lib.candidate_identity import assign_candidate_ids
 from lib.findings import FindingsStore, StoreFileError, bind_severity
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
@@ -934,6 +936,85 @@ class TestIdentityAttribution(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             processed, _, _ = self._run(td, [self._finding(line_number=["nope"])], ci)
         self.assertEqual(processed[0]["identity_source"], "candidate-id")
+
+    def test_the_record_persists_the_id_the_binder_used_without_changing_identity(self):
+        """agents-p8og: the id is persisted for second-order stations, and identity does NOT move.
+
+        The no-scheme-bump claim, evidenced rather than asserted: the fingerprint for the same
+        inputs is byte-identical with the id persisted, because the id was ALREADY the identity
+        payload. Persisting it adds a field; it re-keys nothing.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text", "candidate_id": "c6cab6881fc8535e"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [self._finding(
+                rule_id="invented", path="a.py", line_number=2, snippet="re-worded freely")], ci)
+        row = processed[0]
+        self.assertEqual(row["candidate_id"], "c6cab6881fc8535e")
+        self.assertEqual(row["identity_source"], "candidate-id")
+        self.assertEqual(row["fingerprint"],
+                         findings.compute_fingerprint("vuln-discovery", "unclassified", "a.py",
+                                                      "c6cab6881fc8535e"))
+
+    def test_a_finding_with_no_emitted_id_persists_none_rather_than_inventing_one(self):
+        """An invented id would look like provenance, which is worse than an empty field."""
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [self._finding()], ci)
+        self.assertIsNone(processed[0]["candidate_id"])
+
+    def test_a_secret_in_the_matched_text_cannot_be_recovered_from_the_stored_id(self):
+        """agents-p8og condition 1: the persisted id must not become a vector for the matched text.
+
+        The id is a TRUNCATED SHA-256 over rule id, path, matched text AND ordinal, NUL-separated, so
+        it is not a function of the secret alone. Tested in the two ways that are actually testable:
+        the raw secret never appears in the store, and the SAME secret at two locations produces two
+        DIFFERENT ids - so a rainbow table built over candidate secrets is not enough to test a
+        guess, without also guessing the rule, the path and the ordinal.
+        """
+        secret = "ghp_" + "A" * 36
+        cands = [{"rule_id": "github-pat", "path": "a.py", "line_number": 1,
+                  "snippet": secret, "raw_match": secret},
+                 {"rule_id": "github-pat", "path": "b.py", "line_number": 1,
+                  "snippet": secret, "raw_match": secret}]
+        assign_candidate_ids(cands)
+        ci = self._index(cands)
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [
+                self._finding(rule_id="invented", path="a.py", line_number=1, snippet="wording"),
+                self._finding(rule_id="invented", path="b.py", line_number=1, snippet="wording"),
+            ], ci)
+            store_text = (Path(td) / "target.json").read_text(encoding="utf-8")
+        ids = [r["candidate_id"] for r in processed]
+        self.assertTrue(all(ids), "the ids were not persisted at all")
+        self.assertNotEqual(ids[0], ids[1],
+                            "one secret in two places gave one id - the id is a function of the "
+                            "secret alone, so it is a confirmation oracle")
+        self.assertNotIn(secret, store_text)
+        # Not the digest of the secret by itself either: the scanner-owned context is an input.
+        secret_only = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
+        self.assertNotIn(secret_only, ids)
+
+    def test_the_persisted_id_is_never_published(self):
+        """A digest of the matched text is a confirmation oracle, so it is withheld from output.
+
+        The id stays in the LOCAL store, where the second-order stations read it; it is not a
+        publication channel. Same shape as model_rule_id's withholding branches.
+        """
+        from lib.redaction import redact_finding
+
+        row = dict(self._finding(), fingerprint="f" * 64, identity_source="candidate-id",
+                   candidate_id="c6cab6881fc8535e", state="new", change="new")
+        self.assertNotIn("candidate_id", redact_finding(row))
+
+    def test_persisting_the_id_does_not_bump_the_identity_scheme(self):
+        """Coord's condition 3: if no migration is needed, say so explicitly - and pin it.
+
+        3 is the value agents-q0mt landed. A future bump must consciously update this test, which is
+        the point: a re-key wave is announced BEFORE it lands, never discovered afterwards.
+        """
+        self.assertEqual(findings.IDENTITY_SCHEME, 3)
 
     def test_every_source_in_the_vocabulary_is_reachable(self):
         """EXACT equality, not a subset check: a source that can never be emitted is a defect.

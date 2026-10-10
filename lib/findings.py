@@ -851,6 +851,17 @@ class FindingsStore:
                 # vocabulary, never read out of `item`, so a report cannot claim provenance it
                 # does not have; see IDENTITY_SOURCES for the classification and the checklist.
                 "identity_source": identity_source,
+                # The station's own emitted identity, persisted so a SECOND-ORDER station that
+                # rebuilds records from the store can carry it forward instead of reconstructing
+                # what the scanner already knew (agents-p8og, coord ruling: PERSIST). Scanner-owned
+                # and never model input, so under the checklist it is copied VERBATIM (step 1) and
+                # deliberately NOT added to RENDERED_TEXT_FIELDS: nothing renders it. It is already
+                # an input to compute_fingerprint because it IS the identity payload wherever it was
+                # used, which is why persisting it needs no scheme bump - the fingerprint for the
+                # same inputs is byte-identical before and after, and a test pins that.
+                # None, not a made-up value, when nothing bound: an invented id would look like
+                # provenance.
+                "candidate_id": identity_snip if identity_source == "candidate-id" else None,
                 "agent": agent,
                 "rule_id": rule_id,
                 # The model's own label, kept only when the store did not accept it as the rule
