@@ -245,10 +245,16 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
         that module. So this patches resolve_tool and asserts the catch turns StoreBusyError into a
         clean exit 2 rather than letting it escape. Load-bearing: without the promote-path catch the
         exception propagates and this fails on StoreBusyError instead of SystemExit.
+
+        BOTH tools that path resolves are intercepted, gh and bd, because github.py:83 resolves them
+        on its first line: a host with no bd pin (and no bd on PATH) otherwise failed HERE, on a
+        ToolPinError for a tool this test never means to run. That failed loudly rather than wrongly,
+        but it made the harness unportable to a host whose pin state is not this one's.
         """
         import contextlib
         import io
         import json as _json
+        import shutil
         from unittest import mock
 
         import lib.sinks.github as ghmod
@@ -265,6 +271,16 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
         fake_bin = Path(tempfile.mkdtemp())
         beads_dir = Path(tempfile.mkdtemp())
         (beads_dir / ".beads").mkdir()
+        bd = fake_bin / "bd"
+        bd.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "if 'list' in sys.argv:\n"
+            "    print(json.dumps([]))\n"
+            "else:\n"
+            "    sys.exit('fake bd: unexpected call on the promote path')\n",
+            encoding="utf-8")
+        bd.chmod(0o755)
         gh = fake_bin / "gh"
         gh.write_text(
             "#!/usr/bin/env python3\n"
@@ -282,7 +298,11 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
         gh.chmod(0o755)
 
         def fake_resolve(name, *args, **kwargs):
-            return str(gh) if name == "gh" else real_resolve_tool(name, *args, **kwargs)
+            if name == "gh":
+                return str(gh)
+            if name == "bd":
+                return str(bd)
+            return real_resolve_tool(name, *args, **kwargs)
 
         holder = FindingsStore(target, lock_timeout=0)  # this process holds the store lock
         try:
@@ -304,3 +324,4 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
                 lock_file.unlink(missing_ok=True)
             except OSError:
                 pass
+            shutil.rmtree(fake_bin, ignore_errors=True)
