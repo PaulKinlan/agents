@@ -265,7 +265,9 @@ export FACTORY_TOOL_PINS="$HOME/.config/factory/tools.pins.yaml"
 printf 'gh:\n  path: %s\n  sha256: %s\n' "$(command -v gh)" "$(sha256sum "$(command -v gh)" | cut -d' ' -f1)"
 ```
 
-Semantics: an **unset** `FACTORY_TOOL_PINS`, or a path that does not exist, leaves the repo pins unchanged (still fail-closed); a **malformed** host file raises rather than being silently ignored. The only way to run with unpinned tools is the explicit dev/test opt-in `FACTORY_ALLOW_UNPINNED_TOOLS=1` (never the default).
+Semantics: an **unset** `FACTORY_TOOL_PINS`, or a path that does not exist, leaves the repo pins unchanged (still fail-closed); a **malformed** host file raises rather than being silently ignored. The pins read is bounded (agents-28nn round 3): a non-regular file (FIFO, device, socket), an over-bound file, or one that grows while being read is refused with the cause named BEFORE any unbounded allocation. The generator resolves each tool — and its own hasher — by explicit per-directory filesystem tests against the confined lookup dirs, never `command -v` (exported shell functions answer it before the filesystem), and refuses to emit a non-absolute path. The only way to run with unpinned tools is the explicit dev/test opt-in `FACTORY_ALLOW_UNPINNED_TOOLS=1` (never the default).
+
+A trusted tool named in a target manifest's `sink_command` or a `--bench-cmd` is routed through the pin the same way (`pin_trusted_argv`): the pinned binary runs, or nothing does and the note says why (agents-28nn round 3).
 
 Consumers already satisfy this:
 - **Composite action** (`.github/actions/factory`): a *Generate Tool Pins* step runs `tools/generate-tool-pins.sh` on the runner and exports `FACTORY_TOOL_PINS`, so downstream `factory run <agent>` calls work without any repo edit.
