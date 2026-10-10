@@ -393,10 +393,12 @@ class TestIdentityAttribution(unittest.TestCase):
     """Every row records WHICH KEY produced its fingerprint (agents-x9my).
 
     A fingerprint is sha256(agent:rule id:path:snippet), and the snippet half falls back to the
-    model's re-quoted prose whenever the scanner candidate cannot be bound - which is exactly when
-    the model's own rule id was refused and blanked to "unclassified", because bind_candidates runs
-    BEFORE the identity lookup and the lookup is keyed on the rule id. Re-wording the prose then
-    books the SAME unchanged finding as both new and fixed in one run.
+    model's re-quoted prose whenever the scanner candidate cannot be bound. The cause is NOT the
+    order the binder runs in - it is that the rule-keyed lookups need the model to echo the
+    scanner's rule id, which it usually does not (28% of rows in the real store carry the blanked
+    label "unclassified"). Re-wording the prose then books the SAME unchanged finding as both new
+    and fixed in one run, which step 2 stopped by binding identity to the candidate at the finding's
+    LOCATION when that location is unambiguous.
 
     Recording the key is what makes a "Fixed" line falsifiable: without it an operator cannot tell a
     real fix from a reword, which is why the teams reading these reports concluded that nothing may
@@ -469,13 +471,12 @@ class TestIdentityAttribution(unittest.TestCase):
         self.assertIn("`candidate-exact`\n", report)
         self.assertNotIn("`candidate-exact` (reword-unstable", report)
 
-    def test_an_untrusted_rule_id_is_recorded_as_prose_identity(self):
-        """A model-invented label cannot bind a candidate, so identity rests on prose.
+    def test_an_untrusted_rule_id_binds_by_location(self):
+        """Step 2: a label that bind nothing no longer drags identity back to the model's prose.
 
-        CORRECTED after review: this is NOT an execution-ordering bug. bind_candidates blanks the
-        label to "unclassified", but the lookup misses either way, because the candidate index is
-        keyed by the SCANNER's rule id - calling the lookup with the model's own unbound label
-        misses too. What is missing is a rule-agnostic (path) fallback, which is step 2.
+        The rule-keyed lookups need the model to echo the scanner's rule id. When it does not, the
+        scanner candidate is still identifiable by LOCATION, and binding to it keeps identity off
+        the model's wording - which is what makes the fingerprint survive re-wording.
         """
         ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
                            "snippet": "scanner text"}])
@@ -485,7 +486,68 @@ class TestIdentityAttribution(unittest.TestCase):
 
             record = processed[0]
             self.assertEqual(record["rule_id"], "unclassified")
+            self.assertEqual(record["identity_source"], "unmatched-rule-location-unique")
+            self.assertEqual(record["snippet"], "model wording one")
+
+    def test_an_untraceable_location_still_falls_back_to_prose(self):
+        """The honest limit: with nothing unambiguous to bind to, identity IS the model's prose.
+
+        Two candidates at one path, neither matching the line the model named, leave no candidate
+        that can be shown to be the right one - so the row keeps the model's snippet and says so.
+        Binding to one of them anyway would be a guess presented as provenance.
+        """
+        ci = self._index([
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "snippet": "alpha"},
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "snippet": "beta"},
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record = self._run(td, [self._finding(rule_id="model-invented-label", line_number=99)],
+                               ci)[0][0]
             self.assertEqual(record["identity_source"], "model-snippet")
+
+    def test_the_location_fallback_is_refused_when_the_run_has_two_findings_at_that_path(self):
+        """The run-level guard, and the reason it exists: a collapse LOSES a finding.
+
+        Two rows sharing a path and a blanked rule label would be handed the same scanner snippet,
+        get the same fingerprint, and one would be dropped as a duplicate of the other. Refusing
+        the fallback keeps both, each on its own prose, which is the old behaviour applied only
+        where it is needed.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [
+                self._finding(rule_id="invented-a", snippet="first claim about the sink"),
+                self._finding(rule_id="invented-b", snippet="second claim about the sink"),
+            ], ci)
+
+            self.assertEqual(len(processed), 2, "both findings must survive")
+            self.assertEqual([r["identity_source"] for r in processed],
+                             ["model-snippet", "model-snippet"])
+            self.assertNotEqual(processed[0]["fingerprint"], processed[1]["fingerprint"])
+
+    def test_a_stable_location_beats_the_model_text_when_both_could_bind(self):
+        """Preference order: prefer the binding the model's wording cannot change.
+
+        With two candidates under one rule, the model's prose could pick either one - which is how
+        a re-wording moved a fingerprint. Where the model's own line points at exactly one
+        candidate, that is a sharper and stabler statement, so it wins over the text match.
+        """
+        ci = self._index([
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "snippet": "alpha"},
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "snippet": "beta gamma"},
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record = self._run(td, [self._finding(rule_id="invented", line_number=2,
+                                                  snippet="quotes beta gamma")], ci)[0][0]
+            self.assertEqual(record["identity_source"], "unmatched-rule-location-unique")
+            # The stored snippet stays the MODEL's text; what changed is which candidate the
+            # fingerprint was computed from, so assert the fingerprint against "alpha".
+            self.assertEqual(record["snippet"], "quotes beta gamma")
+            self.assertEqual(
+                record["fingerprint"],
+                findings.compute_fingerprint(agent="vuln-discovery", rule_id="unclassified",
+                                             path="a.py", snippet="alpha"))
 
     def test_a_trusted_rule_id_binds_and_is_recorded(self):
         ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
@@ -511,20 +573,108 @@ class TestIdentityAttribution(unittest.TestCase):
             self.assertEqual(processed[0]["identity_source"], "no-candidate-index")
 
     def test_the_delta_attributes_a_fixed_row_to_its_key(self):
-        """A Fixed line that cannot be attributed is unfalsifiable, which is the whole complaint."""
+        """A Fixed line that cannot be attributed is unfalsifiable, which is the whole complaint.
+
+        The row has to disappear for real here: step 2 made re-wording stop producing a Fixed line
+        at all, so a test that relied on the re-wording would now only be testing that the fix is in
+        place (test_the_found_scenario_no_longer_costs_a_new_and_fixed_pair does that).
+        """
         ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
                            "snippet": "scanner text"}])
         with tempfile.TemporaryDirectory() as td:
             self._run(td, [self._finding(rule_id="model-invented-label",
                                          snippet="wording one")], ci)
             processed, stats, fixed = self._run(
-                td, [self._finding(rule_id="model-invented-label",
-                                   snippet="completely reworded prose")], ci)
+                td, [self._finding(rule_id="model-invented-label", path="other.py")], ci)
 
             self.assertEqual(len(fixed), 1)
             report = findings._render_delta_report("target", processed, stats, fixed)
             self.assertIn("## Resolved in this Run (Fixed)", report)
-            self.assertIn("identity: `model-snippet`", report)
+            self.assertIn("identity: `unmatched-rule-location-unique`", report)
+
+    def test_the_found_scenario_no_longer_costs_a_new_and_fixed_pair(self):
+        """THE acceptance case, reproduced as it was found (agents-x9my step 2).
+
+        Same unchanged location, prose re-worded between runs, model rule label that binds nothing:
+        one finding was booked New and the row before it Fixed, on a byte-identical file. The
+        fingerprint must now be identical across the two runs and the second run must report
+        `unchanged`, which is the exact assertion the reviewer and the hub asked for.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "src/app.js", "line_number": 2,
+                           "snippet": "document.write(userInput)"}])
+        run1 = self._finding(rule_id="model-invented-label", path="src/app.js",
+                             snippet="document.write(userInput) is a DOM sink")
+        run2 = self._finding(rule_id="model-invented-label", path="src/app.js",
+                             snippet="the DOM sink is document.write(userInput)")
+        with tempfile.TemporaryDirectory() as td:
+            first, s1, fixed1 = self._run(td, [run1], ci)
+            second, s2, fixed2 = self._run(td, [run2], ci)
+
+            self.assertEqual(first[0]["fingerprint"], second[0]["fingerprint"])
+            self.assertEqual((s2["new"], s2["fixed"], s2["unchanged"]), (0, 0, 1), s2)
+            self.assertEqual((s1["new"], len(fixed1), len(fixed2)), (1, 0, 0))
+
+    def _store_with_older_scheme(self, td, agent: str, **finding):
+        """A store as an older identity binding left it: no scheme stamp, prose-keyed row."""
+        item = self._finding(**finding)
+        old_fp = findings.compute_fingerprint(agent=agent, rule_id="unclassified",
+                                             path=item["path"], snippet=item["snippet"])
+        record = dict(item, fingerprint=old_fp, agent=agent, rule_id="unclassified",
+                      state="new", change="unchanged", first_seen="2026-01-01T00:00:00+00:00",
+                      last_seen="2026-01-01T00:00:00+00:00")
+        store_file = Path(td) / "target.json"
+        store_file.write_text(json.dumps({"target": "target", "findings": {old_fp: record}}),
+                              encoding="utf-8")
+        return old_fp
+
+    def test_a_store_from_an_older_binding_announces_the_re_key_once(self):
+        """The wave is BOOKKEEPING and the delta must say so, once, or triage reads it as findings.
+
+        A store written before the identity binding changed holds its rows under keys derived from
+        the model's wording. The run that re-keys them produces a new+fixed wave on an unchanged
+        file, so the delta carries a banner naming it as a migration - and the store is stamped, so
+        the NEXT run is an ordinary one and does not repeat it.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            self._store_with_older_scheme(td, "vuln-discovery",
+                                          rule_id="model-invented-label", snippet="wording one")
+            processed, stats, fixed = self._run(
+                td, [self._finding(rule_id="model-invented-label", snippet="wording one")], ci)
+
+            self.assertEqual(stats["migrated"], 1, stats)
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("Identity migration (one-time)", report)
+            self.assertIn("BOOKKEEPING, not findings", report)
+            self.assertIn("Do not triage", report)
+            stored = json.loads((Path(td) / "target.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["identity_scheme"], findings.IDENTITY_SCHEME)
+
+            # The second run is ordinary: the stamp means there is nothing left to re-key.
+            again, s2, _ = self._run(
+                td, [self._finding(rule_id="model-invented-label", snippet="wording one")], ci)
+            self.assertEqual(s2["migrated"], 0, s2)
+            self.assertNotIn("Identity migration",
+                             findings._render_delta_report("target", again, s2, []))
+
+    def test_a_fresh_store_never_claims_a_migration(self):
+        """Nothing was re-keyed, so nothing may be announced as re-keyed."""
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, stats, fixed = self._run(
+                td, [self._finding(rule_id="invented")], ci)
+            self.assertEqual(stats["migrated"], 0, stats)
+            self.assertNotIn("Identity migration",
+                             findings._render_delta_report("target", processed, stats, fixed))
+
+    def test_the_fresh_store_is_stamped_with_its_binding(self):
+        """A store written by this code says so, which is what makes the next bump detectable."""
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, [self._finding()], None)
+            stored = json.loads((Path(td) / "target.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["identity_scheme"], findings.IDENTITY_SCHEME)
 
     def test_every_source_in_the_vocabulary_is_reachable(self):
         """EXACT equality, not a subset check: a source that can never be emitted is a defect.
@@ -548,6 +698,10 @@ class TestIdentityAttribution(unittest.TestCase):
                  ambiguous),                                                # similar-by-model-snippet
                 (self._finding(line_number=99, snippet="nothing like it"), ambiguous),  # model-snippet
                 (self._finding(), None),                                    # no-candidate-index
+                # The location fallbacks need a label that binds nothing, or the rule-keyed
+                # lookups answer first and these are unreachable.
+                (self._finding(rule_id="invented"), single),                 # location-unique
+                (self._finding(rule_id="invented", line_number=99), single),  # path-unique
             ]
             for item, index in cases:
                 observed.add(self._run(td, [item], index)[0][0]["identity_source"])
