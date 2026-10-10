@@ -419,6 +419,25 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertNotIn("proposed_fix_diff", finding4)
         self.assertIn("Code patch withheld", finding4["remediation"])
 
+        # Case E: Reviewer counterexample - incidental stateless I/O in comment does not qualify non-stateless awaited operation
+        report5 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/jobs.ts",
+                    "line_number": 30,
+                    "snippet": "// fetch(url) in comment\nfor (const job of jobs) await job.run();",
+                    "remediation": "The Node.js fetch backend is proven reentrant and thread-safe; use Promise.all.",
+                    "proposed_fix_diff": "--- a/jobs.ts\n+++ b/jobs.ts\n@@ -1,2 +1,2 @@\n- for (const job of jobs) await job.run();\n+ await Promise.all(jobs.map(job => job.run()));",
+                }
+            ]
+        }
+        notes5 = normalize_report(report5)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes5))
+        finding5 = report5["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding5)
+        self.assertIn("Code patch withheld", finding5["remediation"])
+
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
         original_remediation = (
