@@ -27,11 +27,12 @@ accumulate without bound. These tests pin the retention contract:
 - every deletion primitive in the shipped source is enumerated in the deletion
   inventory below (coord's third-deleter test): a deleter this suite does not
   know about fails the gate rather than slipping past the record.
-- the record tells the truth about its own limits (agents-dm8n round 3): the
-  discovery text states the ledger is per-VM local state and every tombstone
-  names the machine that wrote it; the record reads as best-effort about the
-  removal window (a file created during it cannot be listed); and symlinks are
-  recorded with their targets, with outside-tree targets explicitly NOT covered.
+- the record tells the truth about its own limits (agents-dm8n rounds 3-4): the
+  discovery text states the ledger records only removals made through it and
+  names NO machine (a container hostname reads as a stable identity while
+  meaning none); the record reads as best-effort about the removal window (a
+  file created during it cannot be listed); and symlinks are recorded with
+  their targets, with outside-tree targets explicitly NOT covered.
 """
 
 import contextlib
@@ -41,7 +42,6 @@ import io
 import json
 import os
 import shutil
-import socket
 import sys
 import tempfile
 import time
@@ -583,17 +583,19 @@ class TestLedgerPlacement(unittest.TestCase):
                              {d.name for d in run_directories(runs)})
 
 
-class TestCrossVMLedgerTruth(unittest.TestCase):
-    """agents-dm8n round 3, finding 1 (P1): a bead is SYNCED and readable from
-    any VM, but the ledger is per-VM local state. A reader on another VM who
-    follows a dead citation and finds no tombstone must be TOLD that ledgers
-    are per-VM - otherwise "no record here" reads as "the citation was
-    invented". The fix is the document telling the truth about what it is, so
-    these tests assert the TEXT (the failure was that a reader is misled, not
-    that a mechanism is wrong) and that every tombstone names its machine.
+class TestLedgerLocalityTruth(unittest.TestCase):
+    """agents-dm8n round 3, finding 1 (P1), reshaped by round 4, finding 4
+    (P2): a bead is SYNCED and readable from any VM, but the ledger records
+    only removals made through it. Round 3 named the machine on every line
+    (``host``), but inside an ephemeral container the hostname is a random ID
+    that reads as a stable machine identity while meaning none - a claim
+    STRONGER than the record can stand behind. So the record's honest noun is
+    THIS LEDGER: it records only its own removals, and names no machine. These
+    tests assert the TEXT (the failure was that a reader is misled, not that a
+    mechanism is wrong) and that no tombstone carries a machine identity.
     """
 
-    def test_the_pointer_states_the_ledger_is_local_to_the_pruning_machine(self):
+    def test_the_pointer_states_the_ledger_records_only_its_own_removals(self):
         with tempfile.TemporaryDirectory() as tmp:
             runs = make_runs(tmp)
             now = 1_700_000_000.0
@@ -602,19 +604,23 @@ class TestCrossVMLedgerTruth(unittest.TestCase):
             prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
 
             text = (runs / RUNS_POINTER_NAME).read_text(encoding="utf-8")
-            self.assertIn("LOCAL TO THE MACHINE THAT PRUNED", text)
+            self.assertIn("records only removals made through it", text)
+            self.assertIn("THIS LEDGER", text)
             self.assertIn("NOT that the run never existed", text)
-            self.assertIn("`host`", text)
+            # The record names no machine: a `host` field would read as a
+            # stable machine identity while meaning none in a container.
+            self.assertNotIn("`host`", text)
 
-    def test_the_readme_states_the_ledger_is_per_vm(self):
+    def test_the_readme_states_the_ledger_is_local_and_names_no_machine(self):
         # Normalize wrapping: the assertion is about what the TEXT says, not
         # where its lines break.
         content = " ".join(
             (ROOT / "README.md").read_text(encoding="utf-8").split())
-        self.assertIn("local to the machine that pruned", content)
+        self.assertIn("only removals made through it", content)
         self.assertIn("not that the run never existed", content)
+        self.assertIn("names no machine", content)
 
-    def test_every_tombstone_names_the_machine_that_pruned(self):
+    def test_no_tombstone_carries_a_machine_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             runs = make_runs(tmp)
             now = 1_700_000_000.0
@@ -624,7 +630,11 @@ class TestCrossVMLedgerTruth(unittest.TestCase):
 
             tombstones = read_tombstones(runs)
             self.assertEqual(len(tombstones), 1)
-            self.assertEqual(tombstones[0]["host"], socket.gethostname())
+            # Round 3 asserted the opposite (host == socket.gethostname());
+            # the mutation both ways is the point of this bead's history: a
+            # record must not claim more than it knows, and a container
+            # hostname is not a knowable machine identity.
+            self.assertNotIn("host", tombstones[0])
 
 
 class TestRemovalWindowClaim(unittest.TestCase):

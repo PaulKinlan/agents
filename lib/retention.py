@@ -56,11 +56,14 @@ did not happen.
 
 The record tells the truth about its own limits (agents-dm8n round 3):
 
-- The ledger is LOCAL TO THE MACHINE THAT PRUNED. Beads sync across VMs; the
-  ledger does not. A cited directory with no tombstone in THIS machine's ledger
-  means this machine did not remove it — not that the run never existed — so
-  every tombstone names the machine that wrote it (``host``) and the discovery
-  documents say the per-VM rule out loud.
+- The ledger records ONLY removals made through it. Beads sync across VMs and
+  containers; the ledger does not — it is local to the filesystem that holds
+  it. A cited directory with no tombstone in THIS ledger was not removed by a
+  prune writing to it — not that the run never existed. The ledger names no
+  machine (agents-dm8n round 4, finding 4): inside an ephemeral container a
+  hostname is a random ID that reads as a stable machine identity while
+  meaning none, so the honest noun is "this ledger" — all the record can
+  stand behind.
 - The file list is a pre-removal snapshot and CANNOT be complete in principle:
   a file created inside the directory after the snapshot and before the removal
   finishes is destroyed without ever being observed, and no snapshot ordering
@@ -92,7 +95,6 @@ deletion primitive appears in the shipped source without being enumerated.
 import json
 import os
 import shutil
-import socket
 import stat
 import sys
 import time
@@ -147,14 +149,15 @@ no longer exists: every removal is tombstoned in `../retention-ledger.jsonl`
 `runs/` precisely so the record outlives the evidence). Search that ledger for
 the directory name: each line records the directory, the reason (`age`/`count`/
 `apply-worktree-failure`), the UTC time, the outcome (`removed` or `partial`),
-the machine that did the pruning (`host`), and the exact list of files that
-disappeared with it.
+and the exact list of files that disappeared with it.
 
-**The ledger is LOCAL TO THE MACHINE THAT PRUNED.** Beads sync across VMs; this
-ledger does not. A cited directory with no tombstone in THIS machine's ledger
-means this machine did not remove it — NOT that the run never existed. Check
-the ledger on the machine the citation names; the `host` field on each
-tombstone says which machine wrote it.
+**This ledger records only removals made through it.** Beads sync across VMs
+and containers; this ledger does not — it is local to the filesystem that
+holds it. A cited directory with no tombstone in THIS ledger was not removed
+by a prune writing to it — NOT that the run never existed. The ledger
+deliberately names no machine: inside an ephemeral container a hostname is a
+random ID that reads as a stable machine identity while meaning none, so the
+honest noun is THIS LEDGER — all the record can stand behind.
 
 **What a line does and does not claim.** `files` is the pre-removal snapshot
 and the line says so (`record_scope`): a file created inside the directory
@@ -409,12 +412,15 @@ def remove_recorded(directory: Path, *, reason: str,
     - ``failed``: nothing disappeared. NO tombstone — the record must never
       claim a loss that did not happen.
 
-    Every tombstone also names the machine that pruned (``host``: the ledger is
-    per-VM local state while a bead is synced, so a reader on another VM must
-    be able to tell which machine's ledger explains a removal), states its own
-    scope (``record_scope``: the file list is best-effort — a file created
-    DURING the removal window is destroyed without ever being observed and
-    cannot be listed), and records each disappeared symlink with its target
+    Every tombstone states what the record can stand behind and no more: the
+    ledger is local state that records only removals made through it (beads
+    sync across VMs and containers; the ledger does not), so it names NO
+    machine — inside an ephemeral container a hostname is a random ID that
+    reads as a stable identity while meaning none (agents-dm8n round 4,
+    finding 4). Every tombstone also states its own scope (``record_scope``:
+    the file list is best-effort — a file created DURING the removal window is
+    destroyed without ever being observed and cannot be listed), and records
+    each disappeared symlink with its target
     (``symlinks``): a link whose target lived outside the removed tree is
     marked ``outside_tree`` — its contents were NOT removed and are NOT covered
     by the record.
@@ -457,7 +463,6 @@ def remove_recorded(directory: Path, *, reason: str,
         "pruned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
         "reason": reason,
         "outcome": outcome,
-        "host": socket.gethostname(),
         "files": disappeared,
         "symlinks": disappeared_symlinks,
         "record_scope": RECORD_SCOPE,

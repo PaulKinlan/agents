@@ -451,7 +451,7 @@ cannot be created — go through one recorded-removal choke point
 (`lib/retention.py::remove_recorded`), which appends one JSON tombstone line per removal
 to **`retention-ledger.jsonl` at the factory root** (never inside `runs/`): directory
 name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome,
-the pruning machine (`host`), every disappeared symlink with its target (`symlinks`),
+every disappeared symlink with its target (`symlinks`),
 and **the exact list of files that disappeared**. A citation is to a *file* — e.g. a bead
 citing `runs/<agent>-<target>-<run_id>/candidates.json` as evidence — so the record counts
 files: a removal that fails *part way* (the directory survives but contents are destroyed)
@@ -461,10 +461,12 @@ subtree because the record must outlive the thing it explains: it survives the a
 prune *and* a human clearing `runs/` to reclaim disk, and beads — which ask the question a
 tombstone answers — outlive the run root. `runs/README.md` (written by the prune, never
 swept) points a reader standing on a dead citation at the ledger; if `runs/` itself was
-cleared, this section is the fallback. The ledger is **local to the machine that
-pruned**: beads sync across VMs, the ledger does not — so a cited directory with no
-tombstone in THIS machine's ledger means *this machine did not remove it*, not that the
-run never existed; the `host` field on each line names the machine that wrote it. The
+cleared, this section is the fallback. The ledger records **only removals made
+through it**: beads sync across VMs and containers, the ledger does not — so a cited
+directory with no tombstone in this ledger was not removed by a prune writing to it,
+not that the run never existed. The ledger names no machine: inside an ephemeral
+container a hostname is a random ID that reads as a stable machine identity while
+meaning none, so the honest noun is *this ledger* — all the record can stand behind. The
 record also reads as best-effort where it is best-effort: `files` is the pre-removal
 snapshot (stated on every line as `record_scope`), and a file created inside the
 directory *during* the removal window may be destroyed without being listed — the
