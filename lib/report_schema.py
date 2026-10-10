@@ -207,6 +207,14 @@ _NEGATION_PATTERN = re.compile(
 )
 
 
+_SERIAL_RESTORATION_PATTERN = re.compile(
+    r"\b(?:restore|prefer|keep|enforce|switch\s+to)\s+(?:documented\s+)?serial\b|"
+    r"\breplac(?:e|ing)\s+(?:Promise\.all|concurrency|parallel(?:ism)?)\s+with\s+(?:serial|sequential)\b|"
+    r"\bremove\s+(?:Promise\.all|concurrency|parallel(?:ism)?)\b",
+    re.IGNORECASE
+)
+
+
 def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     """Return True if a finding proposes concurrent / parallel / overlapping execution."""
     if not isinstance(finding, dict):
@@ -219,8 +227,19 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
 
     remediation = str(finding.get("remediation", ""))
     diff = str(finding.get("proposed_fix_diff", ""))
-    # If remediation or fix diff specifically recommends execution concurrency, it is an execution concurrency finding
-    if _EXECUTION_CONCURRENCY_PATTERN.search(remediation) or _EXECUTION_CONCURRENCY_PATTERN.search(diff):
+    added_diff = ""
+    if diff:
+        added_diff = "\n".join(
+            line[1:] for line in diff.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+
+    # If the finding explicitly restores serial execution, it is not a concurrency recommendation (Reviewer P2)
+    if _SERIAL_RESTORATION_PATTERN.search(remediation) and not _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
+        return False
+
+    # If remediation or added lines in fix diff specifically recommend execution concurrency, it is an execution concurrency finding
+    if _EXECUTION_CONCURRENCY_PATTERN.search(remediation) or _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
         return True
 
     # Otherwise check title and description, excluding pure asset/stylesheet loading
@@ -258,13 +277,31 @@ def _is_concurrency_wrapper(call: str) -> bool:
     return c in _CONCURRENCY_WRAPPERS or ("." in c and c.split(".")[-1] in _CONCURRENCY_WRAPPERS)
 
 
+_STRING_OR_COMMENT_PATTERN = re.compile(
+    r'(\"(?:\\.|[^"\\])*\"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
+    r'|(/\*[\s\S]*?\*/|//[^\n]*)'
+)
+
+
+def _strip_comments_safely(code: str) -> str:
+    """Strip // and /* */ comments without truncating string literals containing '//'."""
+    if not code:
+        return ""
+
+    def _repl(m: re.Match) -> str:
+        if m.group(1):
+            return m.group(1)
+        return " "
+
+    return _STRING_OR_COMMENT_PATTERN.sub(_repl, code)
+
+
 def _extract_invoked_calls(code: str) -> Set[str]:
     """Extract function/method identifiers invoked in executable code (ignoring comments)."""
     calls: Set[str] = set()
     if not code:
         return calls
-    clean = re.sub(r"//.*$", "", code, flags=re.MULTILINE)
-    clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
+    clean = _strip_comments_safely(code)
     for m in re.finditer(r"\b([A-Za-z0-9_$.]+)\s*\(", clean):
         func = m.group(1).lower()
         calls.add(func)
@@ -280,8 +317,7 @@ def _extract_awaited_calls(code: str) -> Set[str]:
     calls: Set[str] = set()
     if not code:
         return calls
-    clean = re.sub(r"//.*$", "", code, flags=re.MULTILINE)
-    clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
+    clean = _strip_comments_safely(code)
     for m in re.finditer(r"\bawait\s+([A-Za-z0-9_$.]+)\s*\(", clean):
         func = m.group(1).lower()
         calls.add(func)
