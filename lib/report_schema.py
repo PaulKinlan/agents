@@ -192,8 +192,8 @@ _IF_REENTRANT_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-_SERIAL_FALLBACK_PATTERN = re.compile(
-    r"\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use|default\s+to)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequential(?:ly)?)\b",
+_FIRST_FALLBACK_SERIAL_PATTERN = re.compile(
+    r"\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use|default\s+to)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequential(?:ly)|in\s+series|one\s+(?:by|at\s+a)\s+time)\b",
     re.IGNORECASE
 )
 
@@ -510,15 +510,14 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
         return False
 
     # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
-    # Inspect starting from the FIRST fallback delimiter ('otherwise' or 'else') so that intermediate
-    # fallback branches advocating concurrency (e.g. 'otherwise use Promise.any; else preserve serial')
-    # cannot pass. The entire fallback section must preserve serial execution and must not contain
-    # any execution concurrency advice.
+    # Inspect starting from the FIRST fallback delimiter ('otherwise' or 'else'). The immediate first
+    # fallback clause must direct serial execution (not deferred to a later 'else'), and the entire
+    # fallback section must contain no execution concurrency advice.
     first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
     if first_fb:
         conditional_part = remediation[:first_fb.start()]
         fallback_part = remediation[first_fb.start():]
-        if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_part) and _SERIAL_FALLBACK_PATTERN.search(fallback_part):
+        if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_part) and _FIRST_FALLBACK_SERIAL_PATTERN.match(fallback_part):
             m_if = _IF_REENTRANT_PATTERN.search(conditional_part)
             if m_if:
                 prefix = conditional_part[:m_if.start()]
