@@ -615,6 +615,11 @@ class FindingsStore:
         # store file itself would be left pointing at the superseded inode.
         self._lock_path = self.store_file.with_name(self.store_file.name + ".lock")
         self._lock_fh = open(self._lock_path, "a+", encoding="utf-8")
+        # Whether WE hold the lock. A read-only store that cannot take the shared lock proceeds
+        # unlocked (see _acquire_lock), and it must then neither publish nor clear the holder
+        # metadata: clearing it erased a LIVE writer's diagnostic line (agents-4sij review, P1), so
+        # every later waiter reported "holder unknown" while a holder was in fact running.
+        self._lock_acquired = False
         try:
             self._acquire_lock()
             # A store written before this field existed predates the stamp, so it was written by
@@ -661,6 +666,8 @@ class FindingsStore:
                 fcntl.flock(self._lock_fh.fileno(), mode | fcntl.LOCK_NB)
             except OSError:
                 if self.read_only:
+                    # Proceed unlocked - and stay NOT acquired, so close() leaves the holder
+                    # metadata alone (agents-4sij review, P1).
                     return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -673,6 +680,9 @@ class FindingsStore:
                     ) from None
                 time.sleep(min(STORE_LOCK_POLL_SECONDS, remaining))
                 continue
+            # The lock is genuinely ours from here, so only from here may the holder metadata be
+            # published or cleared.
+            self._lock_acquired = True
             self._publish_lock_holder()
             return
 
@@ -710,8 +720,13 @@ class FindingsStore:
         fh = getattr(self, "_lock_fh", None)
         if fh is not None:
             try:
-                self._clear_lock_holder()
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                # Only a store that actually HELD the lock may clear the holder line or release it.
+                # A read-only store that proceeded unlocked owns neither, and clearing there is
+                # what erased a live writer's diagnostic (agents-4sij review, P1).
+                if self._lock_acquired:
+                    self._clear_lock_holder()
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    self._lock_acquired = False
             finally:
                 fh.close()
             self._lock_fh = None
@@ -1526,8 +1541,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.promote_issue:
         if not args.beads_dir or not args.repo or args.visibility != "public":
             parser.error("promotion needs --beads-dir, --repo and explicit --visibility public")
-        result = promote_issue(args.target, Path(args.target_dir).resolve(), args.repo,
-                               args.visibility, args.promote_issue, Path(args.beads_dir))
+        try:
+            result = promote_issue(args.target, Path(args.target_dir).resolve(), args.repo,
+                                   args.visibility, args.promote_issue, Path(args.beads_dir))
+        except (SuppressionFileError, StoreFileError, StoreBusyError) as e:
+            # The SECOND store-opening site (lib/sinks/github.py): promotion opens the store again
+            # while the outer one is held, so a bounded wait failure has to take the same clean path
+            # rather than a traceback (agents-4sij review, P2).
+            sys.stderr.write(f"Error: {e}\n")
+            sys.exit(2)
         print(json.dumps(result))
         return
     if not args.agent or not args.input:
@@ -1542,8 +1564,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     try:
         store = FindingsStore(target_name=args.target)
-    except (SuppressionFileError, StoreFileError) as e:
-        # Loud and non-zero: a register or store that cannot be parsed must not silently reset.
+    except (SuppressionFileError, StoreFileError, StoreBusyError) as e:
+        # Loud and non-zero: a register or store that cannot be parsed must not silently reset, and a
+        # CONTENDED store must not lose this clean path either. StoreBusyError is deliberately NOT a
+        # StoreFileError subclass, so it has to be named here or contention arrives as an uncaught
+        # traceback instead of the diagnostic two lines below (agents-4sij review, P2).
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(2)
     try:

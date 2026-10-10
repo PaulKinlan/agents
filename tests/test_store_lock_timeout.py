@@ -146,5 +146,70 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
             self.assertEqual((Path(tmp) / "probe.json.lock").read_text(encoding="utf-8").strip(), "")
 
 
+    def test_a_reader_that_proceeded_unlocked_does_not_erase_the_live_holder(self):
+        """agents-4sij review P1: the diagnostic must survive the READ path.
+
+        A read-only store that cannot take the shared lock proceeds UNLOCKED - it never held the
+        lock - so close() must not clear the holder line. Clearing it turned the file from
+        "pid N lane L since T" into EMPTY while the writer was still running, so every later waiter
+        reported "holder unknown" with a holder very much alive: the diagnostic this bead exists to
+        provide, destroyed by the read path.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            self._hold_lock(tmp)
+            lock_file = Path(tmp) / "probe.json.lock"
+            before = lock_file.read_text(encoding="utf-8").strip()
+            self.assertIn("pid ", before, "the holder never published its line")
+
+            sys.path.insert(0, str(ROOT))
+            from lib.findings import FindingsStore  # imported here: the child needs it first
+
+            FindingsStore("probe", findings_dir=Path(tmp), read_only=True, lock_timeout=0).close()
+
+            after = lock_file.read_text(encoding="utf-8").strip()
+            self.assertIn("pid ", after,
+                          "the reader erased the live holder's diagnostic line")
+
+    def test_the_cli_reports_a_contended_store_cleanly_instead_of_a_traceback(self):
+        """agents-4sij review P2: StoreBusyError is a SIBLING of StoreFileError, so the CLI had to
+        name it. Before that, contention - which this bead introduced as a bounded failure - reached
+        the operator as an uncaught traceback instead of the deliberate "Error: ..." and exit 2.
+
+        Load-bearing: drop StoreBusyError from that tuple and this fails on the traceback.
+        """
+        import json
+        target = f"locktest-{os.getpid()}"
+        findings_dir = ROOT / "findings"
+        findings_dir.mkdir(exist_ok=True)
+        lock_file = findings_dir / f"{target}.json.lock"
+        try:
+            sys.path.insert(0, str(ROOT))
+            from lib.findings import FindingsStore
+
+            # This process holds the lock; the CLI is a DIFFERENT process, where flock really
+            # excludes (same-process reopens are the self-deadlock coord filed separately).
+            holder = FindingsStore(target, lock_timeout=0)
+            try:
+                findings_in = Path(tempfile.mkdtemp()) / "in.json"
+                findings_in.write_text(json.dumps({"findings": []}), encoding="utf-8")
+                res = subprocess.run(
+                    [sys.executable, str(ROOT / "lib" / "findings.py"), "--target", target,
+                     "--agent", "vuln-discovery", "--input", str(findings_in), "--sink", "file"],
+                    capture_output=True, text=True, timeout=OUTER_TIMEOUT,
+                )
+            finally:
+                holder.close()
+            self.assertEqual(res.returncode, 2,
+                             f"expected the clean error path, got rc={res.returncode}: {res.stderr}")
+            self.assertIn("is locked", res.stderr)
+            self.assertNotIn("Traceback", res.stderr,
+                             "contention arrived as an uncaught traceback")
+        finally:
+            # Never leave litter in the repo's findings directory.
+            try:
+                lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
 if __name__ == "__main__":
     unittest.main()
