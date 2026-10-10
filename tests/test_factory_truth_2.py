@@ -123,13 +123,32 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Target Authoritative TM\nSection 1...\n")
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_findings_store_only_threat_model_is_preserved_on_maintenance_run(self):
+        """agents-tawg: when an existing threat model lives only in findings store,
+        a maintenance run that returns summary + findings preserves it and does not overwrite it."""
+        target_dir = self.box.target
+        for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md"]:
+            if cand.exists():
+                cand.unlink()
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        store_tm.parent.mkdir(parents=True, exist_ok=True)
+        store_tm.write_text("# Prior Established Threat Model\nStrict Invariants...", encoding="utf-8")
+
+        report = {"summary": "Routine maintenance audit", "target": "target", "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        self.assertEqual(res["report"]["summary"], "Routine maintenance audit")
+        self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Prior Established Threat Model\nStrict Invariants...")
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_bootstrap_without_threat_model_synthesizes_initial_document(self):
         """agents-tawg: when bootstrapping a target without THREAT_MODEL.md,
-        factory synthesizes an initial document from summary and findings if omitted."""
+        factory synthesizes a provisional 7-section document from summary and findings."""
         target_dir = self.box.target
-        local_tm = target_dir / "THREAT_MODEL.md"
-        if local_tm.exists():
-            local_tm.unlink()
+        for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md",
+                     self.box.root / "findings" / "target-THREAT_MODEL.md"]:
+            if cand.exists():
+                cand.unlink()
         findings = [{
             "rule_id": "tm-open-socket",
             "path": "server.py",
@@ -146,7 +165,14 @@ class TestFieldAliases(SchemaAgentCase):
         store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
         self.assertTrue(store_tm.exists())
         content = store_tm.read_text(encoding="utf-8")
-        self.assertIn("# THREAT MODEL: target", content)
+        self.assertIn("# THREAT MODEL: target (Provisional Bootstrap Baseline)", content)
+        self.assertIn("## 1. System Overview & Architecture", content)
+        self.assertIn("## 2. Trust Boundaries & Actors", content)
+        self.assertIn("## 3. Explicitly Trusted (Non-Threats)", content)
+        self.assertIn("## 4. Untrusted Attack Surfaces", content)
+        self.assertIn("## 5. Bug-Shape Hints from History", content)
+        self.assertIn("## 6. Security Invariants for Auditors", content)
+        self.assertIn("## 7. Explicit Exclusions (Wontfix / Accepted Risks)", content)
         self.assertIn("Initial audit of server architecture", content)
         self.assertIn("Unauthenticated external listener", content)
 
