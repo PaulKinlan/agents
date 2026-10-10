@@ -719,7 +719,7 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
 def main():
     parser = argparse.ArgumentParser(description="Deterministic doc drift scanner for docs-drift agent")
     parser.add_argument("--target", required=True, help="Target repository directory")
-    parser.add_argument("--output", help="Path to output JSON file (default: stdout)")
+    parser.add_argument("--output", help="Path to write the raw local JSON record to (default: stdout, which redacts matched values)")
     args = parser.parse_args()
 
     target_dir = Path(args.target).resolve()

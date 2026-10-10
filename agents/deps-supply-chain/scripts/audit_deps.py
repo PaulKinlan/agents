@@ -676,7 +676,7 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
 def main():
     parser = argparse.ArgumentParser(description="Deterministic dependency auditor for deps-supply-chain agent")
     parser.add_argument("--target", required=True, help="Target repository directory to audit")
-    parser.add_argument("--output", help="Path to write JSON candidates to (default: stdout)")
+    parser.add_argument("--output", help="Path to write the raw local JSON record to (default: stdout, which redacts matched values)")
     args = parser.parse_args()
 
     target_dir = Path(args.target).resolve()

@@ -11,7 +11,8 @@ release tag (or within a specified commit window). Extracts:
 - Conventional commit category and breaking change flags
 - Modified file lists
 
-Outputs commit history JSON to stdout or a designated output file.
+stdout carries the redacted report (reader keys and counts only); --output writes the
+raw local record.
 """
 
 import argparse
@@ -207,7 +208,7 @@ def gather_commits(target_dir: Path, since_tag: Optional[str] = None, max_count:
 def main():
     parser = argparse.ArgumentParser(description="Gather commit history for release-notes agent")
     parser.add_argument("--target", required=True, help="Target repository directory")
-    parser.add_argument("--output", help="Path to write output JSON (default: stdout)")
+    parser.add_argument("--output", help="Path to write the raw local JSON record to (default: stdout, which redacts matched values)")
     parser.add_argument("--since-tag", help="Explicit base tag to gather commits since")
     parser.add_argument("--max-count", type=int, default=50, help="Max commits if no tag exists")
     args = parser.parse_args()

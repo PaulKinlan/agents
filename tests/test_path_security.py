@@ -10,7 +10,6 @@ output. vuln-verify's consumer is covered by ``TestPathConfinement`` in
 """
 
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,24 +20,16 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib.path_security import resolve_within_target  # noqa: E402
+from tests.sandbox_fixtures import copy_station_script  # noqa: E402
 
-PATH_SECURITY = ROOT / "lib" / "path_security.py"
 COLLECT_SCRIPT = ROOT / "agents" / "pr-fixer" / "scripts" / "collect_failures.py"
 
 
 def _copy_script_and_helper(sandbox: Path, script_src: Path, script_rel: str) -> Path:
-    """Copy a pre-pass script and the shared helper into a disposable sandbox so the
-    script's FACTORY_ROOT (derived from __file__) resolves to the sandbox tree."""
-    script = sandbox / script_rel
-    script.parent.mkdir(parents=True)
-    shutil.copyfile(script_src, script)
-    helper = sandbox / "lib" / "path_security.py"
-    helper.parent.mkdir(parents=True)
-    shutil.copyfile(PATH_SECURITY, helper)
-    # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the converted
-    # scripts' import set; redaction.py is stdlib-only, so the copy needs no transitive helpers.
-    shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
-    return script
+    """Copy a pre-pass script into a disposable sandbox so the script's FACTORY_ROOT (derived
+    from __file__) resolves to the sandbox tree; the shared builder (agents-8ztd) copies the
+    script's lib import closure rather than a hand-maintained list."""
+    return copy_station_script(sandbox, script_src, script_rel)
 
 
 class TestResolveWithinTarget(unittest.TestCase):

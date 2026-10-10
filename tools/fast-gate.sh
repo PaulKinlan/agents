@@ -121,6 +121,19 @@ while IFS= read -r f; do
     agents/vuln-triage/scripts/triage.py)
       mapped="$mapped tests/test_vuln_triage_prepass.py"
       ;;
+    agents/issue-triage/scripts/fetch_issues.py|agents/release-notes/scripts/gather_commits.py)
+      # Prose surface only (--help text and module docstrings). SEARCH PERFORMED: `grep -ln
+      # "fetch_issues\|gather_commits" tests/*.py` returns nothing, so no suite names these two
+      # scripts - but tests/test_redaction.py PARSES every agents/*/scripts/*.py as an AST, so it
+      # does consume them, and tests/test_docs_drift.py owns the prose. Mapped rather than ignored
+      # so a future BEHAVIOUR change to either script is not silently absorbed (agents-fq92).
+      mapped="$mapped tests/test_redaction.py tests/test_docs_drift.py"
+      ;;
+    tests/sandbox_fixtures.py)
+      # Shared fixture builder for tests (agents-8ztd); its own suite pins the property that a new
+      # lib import reaches a sandbox without a fixture change.
+      mapped="$mapped tests/test_sandbox_fixtures.py"
+      ;;
     agents/vuln-verify/scripts/prepare_verification.py)
       # The verifier's pre-pass: unknown-location handling (agents-fy26) and path confinement
       # (agents-075) are both pinned in this suite.
