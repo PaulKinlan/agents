@@ -1087,7 +1087,9 @@ class FindingsStore:
                 "github_issue": existing.get("github_issue") if existing else None,
                 "first_seen": existing.get("first_seen", now) if existing else now,
                 "last_seen": now,
-                "suppression_reason": suppression_reason
+                "suppression_reason": suppression_reason,
+                "post_close_sightings": existing.get("post_close_sightings") if existing else None,
+                "post_close_bead_id": existing.get("post_close_bead_id") if existing else None,
             }
             # agents-4zg: the store is persisted REDACTED at save() and scrubbed at load (see
             # _redacted_data / _load_store), so the sandboxed engine never reads raw fields. The
@@ -1205,6 +1207,19 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     if "github-issues" in names:
         raise ValueError("github-issues is no longer a findings sink: internal findings file "
                          "to beads automatically; public-input issue triage is a separate flow")
+
+    # Reconcile closed bead sightings for ALL observed findings before dispatching sinks
+    # and rendering reports (agents-3sl6).
+    if "beads" in names:
+        try:
+            from lib.sinks.beads import reconcile_closed_bead_sightings
+            reconcile_closed_bead_sightings(
+                processed_findings,
+                beads_dir=beads_dir,
+                target_dir=target_dir,
+            )
+        except Exception:
+            pass
     context = sinks.SinkContext(target_name=target_name, target_dir=target_dir,
                                 visibility=visibility, agent=agent, stats=dict(stats),
                                 options=dict(sink_options or {}), beads_dir=beads_dir,
@@ -1541,6 +1556,27 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     if step_summary and withheld:
         lines.append("> **Withheld**: high/critical finding details are not rendered in the step "
                      "summary — see the run artifact (the full delta report) or the findings store.")
+        lines.append("")
+
+    closed_recurrences = [f for f in findings if f.get("post_close_sightings") and f.get("closed_bead_verified_in_run")]
+    if closed_recurrences:
+        lines.append("## Closed Bead Re-detections (Needs Review)")
+        lines.append("")
+        lines.append("> ⚠️ The following finding(s) match a closed bead in the tracker. "
+                     "The factory does not duplicate or auto-reopen closed beads; human review is required.")
+        lines.append("")
+        for f in closed_recurrences:
+            count = f["post_close_sightings"]
+            s_word = f"{count} sighting" if count == 1 else f"{count} sightings"
+            bead_id = f.get("post_close_bead_id", "?")
+            notice = f"re-detected after human close; {s_word}; needs review - not independently verified"
+            loc = f"{f.get('path')}:{f.get('line_number', '?')}"
+            rule = f.get('rule_id') or 'finding'
+            if reduced(f):
+                lines.append(f"- `{rule}` (`{loc}`) — {notice} (closed bead `{bead_id}`)")
+            else:
+                title = f.get('title') or rule
+                lines.append(f"- **{title}** (`{rule}` at `{loc}`) — {notice} (closed bead `{bead_id}`)")
         lines.append("")
 
     if new_or_regressed:
