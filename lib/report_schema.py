@@ -165,7 +165,7 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
 # ---------------------------------------------------------------------------------------------
 
 _EXECUTION_CONCURRENCY_PATTERN = re.compile(
-    r"\b(?:Promise\.(?:all|allSettled|race)|asyncio\.gather)\b"
+    r"\b(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b"
     r"|(?:run|execute|call|dispatch|await|start|issue|send|use|overlap)\b[^.;\n]*?\b(?:concurrently|in\s+parallel|simultaneously|at\s+the\s+same\s+time|overlap(?:ping)?)\b"
     r"|\b(?:concurrent|parallel|simultaneous|overlapping)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?|requests?|fetches|queries)\b"
     r"|\bparallel(?:ize|izing|ization)\b"
@@ -189,7 +189,7 @@ _NAMED_BACKEND_PATTERN = re.compile(
 
 _STRUCTURED_PRECONDITION_PATTERN = re.compile(
     r"\b(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)\b"
-    r"[^\n]{1,160}?\b(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrent|parallel|concurrency)\b"
+    r"[^\n]{1,160}?\b(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather|concurrent|parallel|concurrency)\b"
     r"[^\n]{0,100}?\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use|default\s+to)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequential(?:ly)?)\b",
     re.IGNORECASE
 )
@@ -209,7 +209,7 @@ _STOP_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:stop|avoid|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from|do\s+not|don't|never)\s+"
     r"(?:(?:use|using|the|a)\s+)?"
     r"(?:(?:run|running|execute|executing|dispatch|dispatching|call|calling|process|processing)\s+(?:(?!(?:serially|sequential|in\s+series|but)\b)[a-zA-Z0-9_.-]+\s+){0,3}(?:in\s+parallel|concurrently|simultaneously)|"
-    r"Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism|iz(?:e|ing|ation))?|overlap(?:ping)?|(?:a\s+)?worker\s+pools?|(?:a\s+)?pool\s+of\s+workers?|thread\s+pools?)\b",
+    r"Promise\.(?:all|allSettled|race|any)|asyncio\.gather|concurrency|parallel(?:ism|iz(?:e|ing|ation))?|overlap(?:ping)?|(?:a\s+)?worker\s+pools?|(?:a\s+)?pool\s+of\s+workers?|thread\s+pools?)\b",
     re.IGNORECASE
 )
 
@@ -340,7 +340,7 @@ def _is_stateless_call(call: str) -> bool:
 
 _CONCURRENCY_WRAPPERS = {
     "promise.all", "all", "promise.allsettled", "allsettled", "promise.race", "race",
-    "asyncio.gather", "gather", "map", "foreach", "for_each"
+    "promise.any", "any", "asyncio.gather", "gather", "map", "foreach", "for_each"
 }
 
 
