@@ -529,7 +529,6 @@ def sandbox_command(
     egress_forwards: Optional[Sequence[Tuple[int, str]]] = None,
     rw_binds: Sequence[str] = (),
     mask_findings: bool = False,
-    ro_binds: Sequence[str] = (),
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
 
@@ -601,8 +600,6 @@ def sandbox_command(
     # (models.json + an empty auth.json), so writability does not weaken containment.
     for path in rw_binds:
         plan.rw_bind(path)
-    for path in ro_binds:
-        plan.ro_bind(path)
 
     # agents-x8l: egress sockets may live outside run_dir (a short per-run dir under /tmp,
     # because run_dir embeds the worktree path and can exceed AF_UNIX's sun_path limit). Bind
