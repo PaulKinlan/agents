@@ -265,9 +265,17 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertTrue(has_reentrancy_precondition(with_documented_fallback))
 
         with_evidence = {
+            "snippet": "for (const f of files) await readFile(f);",
             "remediation": "The Node.js fs backend is proven reentrant and thread-safe; use Promise.all."
         }
         self.assertTrue(has_reentrancy_precondition(with_evidence))
+
+        # Reviewer P1 finding: unrelated backend evidence with non-reentrant session runs must NOT pass
+        unrelated_backend_evidence = {
+            "snippet": "for (const ex of exercises) await ex.run();",
+            "remediation": "Node.js fetch supports concurrent requests; use Promise.all for ONNX Runtime Web session runs"
+        }
+        self.assertFalse(has_reentrancy_precondition(unrelated_backend_evidence))
 
         # Reviewer P1 finding: bare assertion without naming a backend must NOT pass as evidence
         bare_assertion = {
@@ -382,6 +390,7 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     "rule_id": "sequential-await-waterfall",
                     "path": "src/files.ts",
                     "line_number": 5,
+                    "snippet": "for (const f of files) await readFile(f);",
                     "remediation": "The Node.js fs.promises backend is proven reentrant and thread-safe; use Promise.all.",
                     "proposed_fix_diff": "--- a/files.ts\n+++ b/files.ts\n@@ -1,2 +1,2 @@\n- for (const f of files) await readFile(f);\n+ await Promise.all(files.map(readFile));",
                 }
@@ -390,6 +399,25 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes3 = normalize_report(report3)
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes3))
         self.assertIn("proposed_fix_diff", report3["findings"][0])
+
+        # Case D: Reviewer counterexample - unrelated backend evidence with non-reentrant session runs -> diff withheld
+        report4 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/onnx_session.ts",
+                    "line_number": 20,
+                    "snippet": "for (const ex of exercises) await ex.run();",
+                    "remediation": "Node.js fetch supports concurrent requests; use Promise.all for ONNX Runtime Web session runs",
+                    "proposed_fix_diff": "--- a/session.ts\n+++ b/session.ts\n@@ -1,2 +1,2 @@\n- for (const ex of exercises) await ex.run();\n+ await Promise.all(exercises.map(ex => ex.run()));",
+                }
+            ]
+        }
+        notes4 = normalize_report(report4)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes4))
+        finding4 = report4["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding4)
+        self.assertIn("Code patch withheld", finding4["remediation"])
 
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
