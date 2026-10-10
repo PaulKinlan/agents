@@ -163,6 +163,16 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     # The scanner's baseline severity per (rule, path), so a triage model's severity flip can
     # be clamped back to the deterministic pre-pass (agents-964).
     severities: Dict[Tuple[str, str], str] = {}
+    # The candidate's own emitted identity (agents-rdyb), keyed exactly like the snippets above, so
+    # a finding that binds to a candidate can COPY that candidate's identity rather than quote a
+    # line the model re-words. This is what removes the reconstruction layer instead of making it
+    # safer (agents-q0mt): identity becomes scanner-owned data, and the two-findings-one-path case
+    # that the step-2 location fallback had to REFUSE is now resolvable, because each candidate
+    # says which one it is.
+    ids_at: Dict[Tuple[str, str, Any], str] = {}
+    ids_in: Dict[Tuple[str, str], List[str]] = {}
+    ids_by_path_at: Dict[Tuple[str, Any], List[str]] = {}
+    ids_by_path: Dict[str, List[str]] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
@@ -188,6 +198,16 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
             raw_matches_in.setdefault(key, [])
             if raw_match not in raw_matches_in[key]:
                 raw_matches_in[key].append(raw_match)
+        candidate_id = candidate.get("candidate_id")
+        if isinstance(rule_id, str) and path and isinstance(candidate_id, str) and candidate_id.strip():
+            cid = candidate_id.strip()
+            key = (rule_id.strip(), path)
+            ids_at[key + (candidate.get("line_number",),)] = cid
+            ids_in.setdefault(key, [])
+            if cid not in ids_in[key]:
+                ids_in[key].append(cid)
+            ids_by_path_at.setdefault((path, candidate.get("line_number",)), []).append(cid)
+            ids_by_path.setdefault(path, []).append(cid)
         severity = candidate.get("severity")
         if isinstance(rule_id, str) and path and isinstance(severity, str) and severity.strip():
             severities.setdefault((rule_id.strip(), path), severity.strip().lower())
@@ -199,6 +219,9 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
             "snippets_by_path_at": {k: v[0] for k, v in by_path_at.items() if len(set(v)) == 1},
             "snippets_by_path": {p: v[0] for p, v in by_path.items() if len(set(v)) == 1},
             "raw_matches_at": raw_matches_at, "raw_matches_in": raw_matches_in,
+            "ids_at": ids_at, "ids_in": ids_in,
+            "ids_by_path_at": {k: v[0] for k, v in ids_by_path_at.items() if len(set(v)) == 1},
+            "ids_by_path": {p: v[0] for p, v in ids_by_path.items() if len(set(v)) == 1},
             "severities": severities}
 
 
@@ -224,8 +247,10 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
 # stored rows, because the run that first applies a bump re-books them: it reports a one-time
 # new+fixed wave that is bookkeeping, not discovery, and the delta announces it in those words
 # (agents-x9my step 2; announcement agents-1ukp). Scheme 1 = the scanner snippet bound by rule id
-# (fleet-oed, agents-x9my step 1); scheme 2 = plus the location fallback (agents-x9my step 2).
-IDENTITY_SCHEME = 2
+# (fleet-oed, agents-x9my step 1); scheme 2 = plus the location fallback (agents-x9my step 2);
+# scheme 3 = plus the candidate id the station EMITS at scan time, consumed where a rule or
+# location bound the candidate (agents-q0mt, announcement agents-*).
+IDENTITY_SCHEME = 3
 
 IDENTITY_SOURCES = (
     "candidate-exact",      # the scanner candidate at (rule id, path, line)
@@ -233,6 +258,7 @@ IDENTITY_SOURCES = (
     "candidate-similar-by-model-snippet",  # the candidate whose text the MODEL's snippet quotes
     "unmatched-rule-location-unique",  # rule label bound nothing; ONE candidate at (path, line)
     "unmatched-rule-path-unique",      # rule label bound nothing; ONE candidate at the path
+    "candidate-id",         # the candidate's own emitted id, used where a rule/location bound it
     "model-snippet",        # a candidate set existed but nothing bound: identity IS model prose
     "no-candidate-index",   # no candidate set at all, so there was nothing to bind to
 )
@@ -252,13 +278,21 @@ IDENTITY_SOURCES = (
 # agents-x9my) - a reader seeing any `candidate-*` name could infer "scanner-derived, therefore
 # trustworthy", which is the inference this vocabulary exists to make impossible. Neither it, nor
 # `model-snippet`, nor `no-candidate-index` is sufficient to close on a Fixed line.
+#
+# `candidate-id` IS stable, and it is the one source whose value is not the scanner's TEXT at all:
+# it is the identity the station assigned to that candidate at scan time, so it is copied rather
+# than re-derived. It is used only where a rule or a location already bound the candidate - the
+# prose-selected step keeps its own unstable name, because there the SELECTION is still the model's,
+# and a stable-sounding label would hide that.
 IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
-                           "unmatched-rule-location-unique", "unmatched-rule-path-unique")
+                           "unmatched-rule-location-unique", "unmatched-rule-path-unique",
+                           "candidate-id")
 
 
 def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
                              candidate_index: Optional[Dict[str, Any]], *,
-                             path_unambiguous: bool = True) -> Tuple[Any, str]:
+                             path_unambiguous: bool = True,
+                             location_unambiguous: bool = True) -> Tuple[Any, str]:
     """The snippet a finding is fingerprinted on, and WHICH KEY bound it.
 
     The model re-quotes a candidate's line differently from run to run (masked, truncated,
@@ -278,6 +312,13 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
     path, the fallback is refused, because two rows sharing a path and a blanked rule label would
     be handed the same snippet, get the same fingerprint, and silently collapse into one - losing a
     finding rather than merely mislabelling it.
+
+    STEP 3: where a rule or a location bound the candidate, identity is COPIED from the candidate's
+    own emitted id rather than re-derived from its text (agents-q0mt). That is what removes the
+    reconstruction instead of making it safer, and it resolves the case step 2's guard had to
+    refuse: two candidates at one path are two identities, so two findings there no longer share a
+    key. The id is used at exactly the four STABLE steps and NOT at the prose-selected one, because
+    there the selection itself is the model's - naming it stable would hide the mechanism.
     """
     model_snippet = item.get("snippet", "")
     if not candidate_index or not isinstance(rule_id, str):
@@ -285,21 +326,42 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
     norm_path = normalize_path(path)
     key = (rule_id.strip(), norm_path)
     at = candidate_index.get("snippets_at", {})
+    ids_at = candidate_index.get("ids_at", {})
     line = item.get("line_number")
     if key + (line,) in at:
+        if key + (line,) in ids_at:
+            return ids_at[key + (line,)], "candidate-id"
         return at[key + (line,)], "candidate-exact"
     options = candidate_index.get("snippets_in", {}).get(key, [])
     if len(options) == 1:
+        ids = candidate_index.get("ids_in", {}).get(key, [])
+        if len(ids) == 1:
+            return ids[0], "candidate-id"
         return options[0], "candidate-unique"
-    if path_unambiguous:
+    if path_unambiguous or location_unambiguous:
         # The rule label bound nothing: the model renamed the rule, or the binder blanked a label it
         # could not verify. Identity must not fall back to the model's re-wording merely because the
         # LABEL moved, so bind on location - preferring the sharper statement, that the model's own
         # line points at exactly one candidate, over the coarser one that the path holds exactly one.
-        if (norm_path, line) in candidate_index.get("snippets_by_path_at", {}):
-            return candidate_index["snippets_by_path_at"][(norm_path, line)], "unmatched-rule-location-unique"
-        if norm_path in candidate_index.get("snippets_by_path", {}):
-            return candidate_index["snippets_by_path"][norm_path], "unmatched-rule-path-unique"
+        #
+        # The emitted id is consulted under EITHER guard, because it is the only thing here that can
+        # tell two candidates at one path apart: two findings on different lines of one file bind to
+        # different ids, which is the case the path-level guard had to refuse (agents-rdyb resolved
+        # it at the station; agents-q0mt consumes it here). The SNIPPET fallbacks stay under the
+        # path-level guard alone, because their refusal is landed behaviour (agents-x9my step 2).
+        ids_by_path_at = candidate_index.get("ids_by_path_at", {})
+        if (norm_path, line) in ids_by_path_at:
+            return ids_by_path_at[(norm_path, line)], "candidate-id"
+        if path_unambiguous:
+            if (norm_path, line) in candidate_index.get("snippets_by_path_at", {}):
+                return candidate_index["snippets_by_path_at"][(norm_path, line)], "unmatched-rule-location-unique"
+            if norm_path in candidate_index.get("snippets_by_path", {}):
+                return candidate_index["snippets_by_path"][norm_path], "unmatched-rule-path-unique"
+    if path_unambiguous:
+        # The path holds exactly one candidate, so its id is that candidate's alone.
+        ids_by_path = candidate_index.get("ids_by_path", {})
+        if norm_path in ids_by_path:
+            return ids_by_path[norm_path], "candidate-id"
     wanted = normalize_text(model_snippet)
     if wanted:
         matching = [o for o in options if wanted in normalize_text(o) or normalize_text(o) in wanted]
@@ -653,11 +715,19 @@ class FindingsStore:
         # How many findings THIS RUN reports per path, so a location fallback cannot merge two of
         # them onto one scanner snippet (see identity_snippet_binding).
         path_counts: Dict[str, int] = {}
+        # The same count per (path, line). This is the SHARPER guard the emitted candidate id needs:
+        # two findings in one file at DIFFERENT lines bind to different candidates and so to
+        # different ids, which is exactly the case the path-level guard had to refuse (agents-rdyb
+        # resolved it at the station; agents-q0mt consumes it here). It is deliberately NOT used for
+        # the snippet fallbacks, whose refusal is a landed behaviour (agents-x9my step 2).
+        location_counts: Dict[Tuple[str, Any], int] = {}
         for item in raw_findings:
             if isinstance(item, dict):
                 norm = normalize_path(item.get("path"))
                 if norm:
                     path_counts[norm] = path_counts.get(norm, 0) + 1
+                    loc = (norm, item.get("line_number"))
+                    location_counts[loc] = location_counts.get(loc, 0) + 1
 
         # 1. Process observed findings
         for item in raw_findings:
@@ -689,8 +759,13 @@ class FindingsStore:
             item["agent"] = agent
             norm_path = normalize_path(path)
             path_unambiguous = bool(norm_path) and path_counts.get(norm_path, 0) == 1
+            # The sharper guard, used only where the emitted candidate id is consulted: a finding is
+            # the only one at its own (path, line), so the candidate there is unambiguously its own.
+            location_unambiguous = bool(norm_path) and location_counts.get(
+                (norm_path, item.get("line_number")), 0) == 1
             identity_snip, identity_source = identity_snippet_binding(
-                item, rule_id, path, candidate_index, path_unambiguous=path_unambiguous)
+                item, rule_id, path, candidate_index, path_unambiguous=path_unambiguous,
+                location_unambiguous=location_unambiguous)
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
