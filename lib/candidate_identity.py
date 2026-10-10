@@ -73,6 +73,17 @@ def candidate_identity(rule_id: Any, path: Any, match_text: str, ordinal: int = 
     NUL-separated so that a path or rule containing the separator cannot be confused with another
     candidate's fields, and truncated to 16 hex characters (64 bits): this is an identity label for
     a per-run candidate set, not a security boundary.
+
+    AN IDENTIFIER, NOT A SECRET, and the distinction is worth stating where the construction lives
+    because it is easy to reason about backwards. Every input here is published or guessable, and
+    there is no secret or per-install salt in the digest, so anyone holding the id TOGETHER WITH the
+    rule, path and ordinal can test a guess at the matched text - and for a short human-chosen value
+    that search is trivial (measured: recovered in eight guesses with the rest held). Withholding the
+    id from a published surface (lib/redaction.py) is therefore NOT a guessing defence: for a row
+    bound by its candidate id, the PUBLISHED fingerprint is a digest of that same id, so that oracle
+    is already public there. What withholding buys is narrower and mundane - a consumer has no use
+    for the value - and it should be described that way. Treat this digest as provenance, never as
+    containment (agents-7928).
     """
     payload = "\x00".join([
         str(rule_id or "").strip(),
