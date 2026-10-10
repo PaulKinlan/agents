@@ -24,8 +24,8 @@ class TestStdoutChannelDropsTheMatch(unittest.TestCase):
     which branch ran.
 
     Load-bearing: revert main()'s output to `print(json.dumps(result, indent=2))` and this
-    fails with `AssertionError: 'd3b997c7b44a860a' != '[redacted]' ... the confirmation
-    oracle reached the station's stdout unmasked` (digest is fixture-derived).
+    fails with `AssertionError: 'candidate_id' unexpectedly found in ...` - the confirmation
+    oracle reached the station's stdout (digest is fixture-derived).
     """
 
     def test_stdout_drops_id_and_match_but_keeps_location(self):
@@ -43,9 +43,11 @@ class TestStdoutChannelDropsTheMatch(unittest.TestCase):
         artefact = json.loads(result.stdout)
         self.assertTrue(artefact["candidates"], "fixture must yield a candidate carrying a match")
         for candidate in artefact["candidates"]:
-            self.assertEqual(candidate["candidate_id"], "[redacted]",
-                             "the confirmation oracle reached the station's stdout unmasked")
-            self.assertEqual(candidate["snippet"], "[redacted]")
+            # The allowlist drops the match and its derived digest OUTRIGHT - the keys are
+            # absent, not masked in place (agents-h0mb).
+            self.assertNotIn("candidate_id", candidate,
+                             "the confirmation oracle reached the station's stdout")
+            self.assertNotIn("snippet", candidate)
             # The channel must stay usable: the location still ships.
             self.assertIn("rule_id", candidate)
             self.assertIn("path", candidate)

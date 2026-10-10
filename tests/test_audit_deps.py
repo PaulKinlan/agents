@@ -27,8 +27,8 @@ class TestStdoutChannelDropsTheMatch(unittest.TestCase):
 
     def test_stdout_has_no_candidate_id_and_no_match_text(self):
         """Load-bearing: change the else branch back to `print(output_json)` and this fails with
-        `AssertionError: '44a2559445e30938' != '[redacted]' ... the confirmation oracle reached the
-        station's stdout unmasked` (the snippet assert fails next).
+        `AssertionError: 'candidate_id' unexpectedly found in ...` - the confirmation oracle
+        reached the station's stdout (the snippet assert fails next).
 
         The fixture is requirements.txt plus a divergent shipped wheel, so the npm path is never
         entered and no external tool runs. The --output branch is NOT redacted on purpose - it is
@@ -57,9 +57,11 @@ Requires-Dist: requests == 2.28.0
                    if c.get("rule_id") == "lockfile-shipped-version-divergence"]
         self.assertTrue(matched, artefact["candidates"])
         for candidate in matched:
-            self.assertEqual(candidate["candidate_id"], "[redacted]",
-                             "the confirmation oracle reached the station's stdout unmasked")
-            self.assertEqual(candidate["snippet"], "[redacted]")
+            # The allowlist drops the match and its derived digest OUTRIGHT - the keys are
+            # absent, not masked in place (agents-h0mb).
+            self.assertNotIn("candidate_id", candidate,
+                             "the confirmation oracle reached the station's stdout")
+            self.assertNotIn("snippet", candidate)
             # The channel must stay usable: the location still ships.
             self.assertTrue(candidate["path"].endswith("sample-1.0.0-py3-none-any.whl"),
                             candidate["path"])

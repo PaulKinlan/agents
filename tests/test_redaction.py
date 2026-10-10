@@ -487,27 +487,25 @@ class TestScannerStdout(unittest.TestCase):
 
 
 
-class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
-    """agents-qslz (P1): a value DERIVED from the matched text must be dropped with it."""
+class TestStdoutChannelCarriesOnlyWhatReadersConsume(unittest.TestCase):
+    """agents-qslz (P1), restated for the allowlist (agents-h0mb): a value DERIVED from the
+    matched text must be dropped with it - and under the allowlist, dropped means ABSENT.
 
-    def test_candidate_id_is_dropped_with_the_match_fields_it_is_derived_from(self):
-        """candidate_id is sha256(rule NUL path NUL match_text NUL ordinal)[:16] - a digest of the
-        matched text - so the stdout channel must drop it exactly like the snippet it came from, for
-        the reason the function itself states: a terminal or CI log has no way to be un-published.
+    candidate_id is sha256(rule NUL path NUL match_text NUL ordinal)[:16] - a digest of the
+    matched text - and this channel carries no fingerprint, so the id is the only digest of
+    the match in the payload. The old shape emitted "[redacted]" sentinel VALUES under the
+    known names; the allowlist drops the keys outright, because a reader of this channel
+    consumes rule, path, location and severity and nothing else (the reader census is in
+    stdout_safe_report's docstring, and the tests that parse station stdout assert only those
+    keys).
 
-        It is a DROP, not a mask, and that distinction is the defect: mask_text cannot recognise a
-        16-char hex digest, so before this fix the id fell through the string branch verbatim while
-        its own source was [redacted]. Observed end-to-end on the scanner, not just in unit form.
+    Load-bearing: revert the drop in stdout_safe_report (carry unnamed keys through, e.g.
+    `else: safe[key] = value`) and this fails with the digest present in the serialized
+    output. The assertion is on the serialized channel and the exact surviving key set, not
+    on membership of any list in the implementation.
+    """
 
-        Load-bearing: stop dropping `candidate_id` on the stdout channel (in this tree: remove it
-        from CANDIDATE_MATCH_FIELDS) and this fails with
-        `AssertionError: '45242927149666d8' != '[redacted]' ... the confirmation oracle reached the
-        stdout channel unmasked`.
-
-        The assertion is on the OUTPUT, not on the shape of the implementation: an implementation
-        that hardcodes the key check instead of using the drop list is correct and must pass, so the
-        membership assertion that used to fire first is gone (agents-qslz review, P2).
-        """
+    def test_derived_match_values_and_the_match_text_never_reach_the_channel(self):
         from lib.redaction import stdout_safe_report
 
         report = {"rule_id": "github-pat", "path": "src/config.js", "line_number": 1,
@@ -515,75 +513,13 @@ class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
                   "candidate_id": "45242927149666d8", "identity_source": "candidate-id"}
         safe = stdout_safe_report(report)
 
-        self.assertEqual(safe["candidate_id"], "[redacted]",
-                         "the confirmation oracle reached the stdout channel unmasked")
-        self.assertEqual(safe["snippet"], "[redacted]")
-        self.assertEqual(safe["raw_match"], "[redacted]")
-        # The channel must stay USABLE: fields not derived from the match still survive.
-        self.assertEqual(safe["rule_id"], "github-pat")
-        self.assertEqual(safe["path"], "src/config.js")
-        self.assertEqual(safe["line_number"], 1)
-
-
-class TestStdoutChannelRedactsAtEveryDepth(unittest.TestCase):
-    """The stdout channel's drop/mask policy applies AT EVERY DEPTH, not only at the top level.
-
-    The leak this guards (agents-h0mb): vuln-verify attaches `source_context`, a nested dict
-    whose `context_snippet` is raw source lines, and those lines are exactly where the matched
-    secret sits. The flat fields were redacted while the nested copy of the same text passed
-    through unchanged, so the branch's claim that stdout is safe by construction was false while
-    a structural test asserted exactly that. The assertion here is on the SERIALIZED OUTPUT -
-    the secret must appear nowhere in it - because that is the shape that would have caught the
-    leak, where per-key assertions on the flat fields did not.
-
-    Load-bearing: revert the container recursion in stdout_safe_report (restore
-    `else: safe[key] = value`) and the first test fails with
-    `AssertionError: 'AKIAIOSFODNN7EXAMPLE' unexpectedly found in ...` while the flat fields
-    in that same output still read [redacted] - the leak is the nested copy, not the flat keys.
-    """
-
-    def test_a_secret_inside_a_nested_container_appears_nowhere_in_the_output(self):
-        from lib.redaction import stdout_safe_report
-
-        secret = "AKIAIOSFODNN7EXAMPLE"
-        candidate = {
-            "snippet": secret, "raw_match": secret, "candidate_id": "abc123",
-            "source_context": {"file": "a.js", "line": 3,
-                               "context_snippet": f'const k = "{secret}";'},
-        }
-        safe = stdout_safe_report(candidate)
-
         serialized = json.dumps(safe)
-        self.assertNotIn(secret, serialized,
-                         "a nested container carried the raw value past the stdout redactor")
-        # The flat fields are still dropped, and the channel stays usable.
-        self.assertEqual(safe["snippet"], "[redacted]")
-        self.assertEqual(safe["raw_match"], "[redacted]")
-        self.assertEqual(safe["candidate_id"], "[redacted]")
-        self.assertEqual(safe["source_context"]["file"], "a.js")
-        self.assertEqual(safe["source_context"]["line"], 3)
-
-    def test_match_fields_are_dropped_and_strings_masked_at_arbitrary_depth(self):
-        """Lists of dicts, dicts of dicts, and any combination get the SAME key set and the
-        SAME string masking - one policy, applied recursively, not a second policy per shape."""
-        from lib.redaction import stdout_safe_report
-
-        secret = "AKIAIOSFODNN7EXAMPLE"
-        report = {
-            "candidates": [{"snippet": secret,
-                            "meta": {"raw_match": secret, "keep": "ok"}}],
-            "outer": {"inner": [{"candidate_id": "abc123",
-                                 "note": f"the key is {secret}"}]},
-        }
-        safe = stdout_safe_report(report)
-
-        serialized = json.dumps(safe)
-        self.assertNotIn(secret, serialized)
-        self.assertNotIn("abc123", serialized)
-        # Non-match fields at depth survive - the recursion redacts, it does not withhold.
-        self.assertEqual(safe["candidates"][0]["meta"]["keep"], "ok")
-        self.assertEqual(safe["outer"]["inner"][0]["note"],
-                         "the key is [redacted:aws-access-key]")
+        self.assertNotIn("45242927149666d8", serialized,
+                         "the confirmation oracle reached the stdout channel")
+        self.assertNotIn("ghp_SECRETVALUE", serialized)
+        # The channel must stay USABLE: exactly the reader-consumed keys survive.
+        self.assertEqual(safe, {"rule_id": "github-pat", "path": "src/config.js",
+                                "line_number": 1})
 
 
 # Assembled at runtime, like CREDENTIAL above: a literal in this file would be reported as a
@@ -594,32 +530,28 @@ class TestStdoutChannelRedactsAtEveryDepth(unittest.TestCase):
 UNKNOWN_SHAPE_CANARY = "qz8x" + "k2m9" * 5 + "w7vd"
 
 
-class TestStdoutChannelDropsAnythingContainingTheMatchedText(unittest.TestCase):
-    """agents-dd0w (P1, third review): the stdout drop is a PROPERTY, not a key list.
+class TestStdoutChannelIsAnAllowlist(unittest.TestCase):
+    """agents-h0mb (coord's ruling, after the agents-iukb census) and agents-dd0w: the stdout
+    channel DROPS anything a reader does not consume.
 
-    The leak this guards: a matched value NO pattern recognises reached stdout verbatim through
-    `source_context.context_snippet` - vuln-verify's raw source lines, a copy of the matched text
-    by construction. The nested dict was recursed, but the nested STRING was only pattern-masked,
-    and mask_text passes through every shape it does not know. Two rules now hold instead:
+    The denylist this replaces - drop named fields, mask every other string - leaked
+    vuln-verify's source_context.context_snippet: raw source lines under a name the drop list
+    did not know, passed through verbatim because mask_text recognised nothing in them. The
+    census then found seven more fields of the same class across the real stations
+    (context_snippet, source_context, context_window, preview_head, recent_diff_excerpt,
+    readme_excerpt, body, comments). Naming them would fix eight instances and keep the defect
+    for the ninth, so the policy is the one the docstring always stated: the channel carries
+    the keys its readers need and nothing else. A new station field carrying source text is
+    safe by DEFAULT, not by someone remembering to add it to a list.
 
-    1. `context_snippet` is a confirmation oracle, so it is DROPPED wholesale at every depth,
-       exactly like snippet / raw_match / candidate_id - masking is the wrong defence for a field
-       whose content IS the match.
-    2. The recursion enforces the general rule as a property: the report's matched values are
-       collected once at the top level, and at EVERY depth any string that equals or contains one
-       of them has the value redacted out of it - so a nested field nobody named is covered by
-       what it HOLDS, not by what it is called.
+    The assertions are on the SERIALIZED output - the canary must appear nowhere in it -
+    because that is the shape that would have caught the leak where per-key assertions did not.
 
-    The assertions are on the SERIALIZED output, because that is the assertion that would have
-    caught the leak where per-key assertions on the flat fields did not.
-
-    Load-bearing: revert the property enforcement in stdout_safe_report (restore
-    `safe[key] = mask_text(value)` in the string branch) and
-    test_a_string_containing_the_match_is_redacted_at_every_depth fails with the raw canary
-    present in the serialized output while `snippet` in that same payload still reads
-    [redacted] - the leak is the unnamed nested copy, not the named fields. Remove
-    "context_snippet" from CANDIDATE_MATCH_FIELDS and the context_snippet assertion fails the
-    same way, because no pattern recognises the canary.
+    Load-bearing: revert the drop in stdout_safe_report (make the unnamed-value branch carry
+    the value, e.g. `else: safe[key] = value`) and test_an_unknown_field_carrying_source_text_
+    is_dropped fails with the raw canary present in the serialized output while `rule_id` in
+    that same payload still survives - the leak is the unknown key, not the reader keys. The
+    same revert fails test_a_matched_value_in_a_key_name_never_reaches_the_channel.
     """
 
     def test_the_canary_matches_no_pattern(self):
@@ -631,42 +563,125 @@ class TestStdoutChannelDropsAnythingContainingTheMatchedText(unittest.TestCase):
         self.assertEqual([name for name, pattern in ALL_PATTERNS
                           if pattern.search(UNKNOWN_SHAPE_CANARY)], [])
 
-    def test_a_string_containing_the_match_is_redacted_at_every_depth_whatever_its_name(self):
+    def test_an_unknown_field_carrying_source_text_is_dropped(self):
+        """A station field nobody has added yet: unknown key, source text no pattern knows."""
+        from lib.redaction import stdout_safe_report
+
+        canary = UNKNOWN_SHAPE_CANARY
+        report = {"candidates": [{
+            "rule_id": "custom-scanner-rule", "path": "src/app.js", "line_number": 3,
+            "severity": "high",
+            # A field a station adds NEXT MONTH: no list anywhere knows this name.
+            "brand_new_source_field": "// exfiltrated source line: " + canary,
+        }]}
+        safe = stdout_safe_report(report)
+
+        serialized = json.dumps(safe)
+        self.assertNotIn(canary, serialized,
+                         "an unknown field's source text reached the stdout channel")
+        self.assertNotIn("brand_new_source_field", serialized,
+                         "the unknown key itself survived on the channel")
+        # The channel stays usable: the reader keys survive, and nothing else.
+        candidate, = safe["candidates"]
+        self.assertEqual(candidate, {"rule_id": "custom-scanner-rule", "path": "src/app.js",
+                                     "line_number": 3, "severity": "high"})
+
+    def test_a_matched_value_in_a_key_name_never_reaches_the_channel(self):
+        """The KEY half of the dict statement (coord's ruling on the dict-key case): the policy
+        decides on the key - allowlist membership - never on the key's TEXT, so a key whose
+        text contains a matched value is dropped with its value by construction. No station
+        legitimately emits a matched value as a key name; this pins both halves of
+        `for key, value in report.items()`."""
+        from lib.redaction import stdout_safe_report
+
+        canary = UNKNOWN_SHAPE_CANARY
+        report = {
+            # The canary AS A KEY at the top level...
+            canary: "value under a matched-value key",
+            "candidates": [{
+                # ...and as BOTH key and value inside a candidate.
+                canary: canary,
+                "rule_id": "r", "path": "src/app.js", "line_number": 1,
+            }],
+        }
+        serialized = json.dumps(stdout_safe_report(report))
+        self.assertNotIn(canary, serialized,
+                         "a matched value used as a KEY reached the stdout channel")
+
+    def test_the_census_fields_and_their_containers_are_dropped(self):
+        """Every field the agents-iukb census found carrying repository text on a real station
+        is dropped unnamed - and the container around it goes with it, not recursed into."""
         from lib.redaction import stdout_safe_report
 
         canary = UNKNOWN_SHAPE_CANARY
         report = {
             "candidates": [{
-                "rule_id": "custom-scanner-rule", "path": "src/app.js", "line_number": 3,
-                "snippet": canary, "raw_match": canary, "candidate_id": "0123456789abcdef",
-                "source_context": {
-                    "file": "src/app.js", "line": 3,
-                    # The confirmation oracle: a copy of the matched source text (dropped by name).
-                    "context_snippet": "// confidential: " + canary,
-                    # dict in list in dict, under a name nobody listed: property-only coverage.
-                    "lines": [{"number": 3, "text": "prefix " + canary + " suffix"}],
-                    # A nested key NAMED like a match field: dropped by name at depth.
-                    "snippet": canary,
-                    # A field EQUAL to the matched value under an unremarkable name.
-                    "echo": canary,
-                },
+                "rule_id": "r", "path": "src/app.js", "line_number": 1,
+                "snippet": canary, "raw_match": canary, "candidate_id": "0" * 16,
+                "context_snippet": canary,
+                "source_context": {"context_snippet": canary},
+                "context_window": canary, "preview_head": canary,
+                "recent_diff_excerpt": canary, "body": canary, "comments": [canary],
             }],
+            "readme_excerpt": canary,
         }
         safe = stdout_safe_report(report)
 
         serialized = json.dumps(safe)
-        self.assertNotIn(canary, serialized,
-                         "a matched value no pattern recognises reached the stdout channel")
-        ctx = safe["candidates"][0]["source_context"]
-        self.assertEqual(ctx["context_snippet"], "[redacted]")
-        self.assertEqual(ctx["snippet"], "[redacted]")
-        self.assertEqual(ctx["echo"], "[redacted:value]")
-        self.assertEqual(ctx["lines"][0]["text"], "prefix [redacted:value] suffix")
-        # The channel stays usable: structure and fields bearing none of the match survive.
-        self.assertEqual(ctx["file"], "src/app.js")
-        self.assertEqual(ctx["lines"][0]["number"], 3)
-        self.assertEqual(safe["candidates"][0]["rule_id"], "custom-scanner-rule")
-        self.assertEqual(safe["candidates"][0]["line_number"], 3)
+        self.assertNotIn(canary, serialized)
+        for name in ("snippet", "raw_match", "candidate_id", "context_snippet",
+                     "source_context", "context_window", "preview_head",
+                     "recent_diff_excerpt", "readme_excerpt", "body", "comments"):
+            self.assertNotIn(name, serialized, f"{name} survived on the channel")
+        candidate, = safe["candidates"]
+        self.assertEqual(candidate, {"rule_id": "r", "path": "src/app.js", "line_number": 1})
+
+    def test_an_aws_shaped_canary_is_dropped_by_the_same_policy(self):
+        """The policy does not depend on which shapes the masker knows: a value mask_text WOULD
+        recognise is dropped too, because the key carrying it is not one a reader consumes.
+        (The nested-container canary of the tip commit can no longer reach stdout AT ALL - the
+        container is dropped, not recursed-and-masked.)"""
+        from lib.redaction import stdout_safe_report
+
+        report = {"candidates": [{
+            "rule_id": "r", "path": "src/app.js", "line_number": 1,
+            "source_context": {"file": "src/app.js", "line": 1,
+                               "context_snippet": f'const k = "{CREDENTIAL}";'},
+        }]}
+        safe = stdout_safe_report(report)
+
+        self.assertNotIn(CREDENTIAL, json.dumps(safe))
+        candidate, = safe["candidates"]
+        self.assertNotIn("source_context", candidate)
+
+    def test_carried_strings_are_still_masked_for_credential_shapes(self):
+        """mask_text remains the shared outer layer on the strings the channel DOES carry:
+        a carried field whose text is credential-SHAPED (a path named after a key) is masked."""
+        from lib.redaction import stdout_safe_report
+
+        safe = stdout_safe_report({"candidates": [{
+            "rule_id": "r", "path": f"src/{CREDENTIAL}-leaked.js", "line_number": 1}]})
+        self.assertNotIn(CREDENTIAL, json.dumps(safe))
+        self.assertIn("[redacted:aws-access-key]", safe["candidates"][0]["path"])
+
+    def test_small_scalars_pass_by_shape_and_everything_else_is_dropped(self):
+        """Counts and flags a summary carries cannot hold repository text, so they pass by
+        shape rather than by name. Strings, containers, and non-list/tuple shapes do not."""
+        from lib.redaction import stdout_safe_report
+
+        safe = stdout_safe_report({
+            "candidate_count": 3, "unlocatable_count": 1, "line_number_unknown": True,
+            "notes": None,
+            "scanner": "builtin-regex",          # unnamed string: dropped
+            "target": "some-project",            # unnamed string: dropped
+            "metrics": {"total": 1},             # container that is not candidates: dropped
+            "bloat_candidates": [{"size": 1}],   # a second list of dicts: dropped
+            "a_tuple": ("not", "carried"),       # not a carried shape: dropped
+            "candidates": [],
+        })
+        self.assertEqual(safe, {"candidate_count": 3, "unlocatable_count": 1,
+                                "line_number_unknown": True, "notes": None,
+                                "candidates": []})
 
     def test_the_raw_record_keeps_the_value_and_stdout_does_not(self):
         """The channel split itself: --output keeps the raw value (a human needs it to rotate

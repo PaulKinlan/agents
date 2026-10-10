@@ -286,7 +286,7 @@ class TestVerifierPriming(unittest.TestCase):
 
             script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
 
-            # No --output: the diagnostic survives on stderr and the oracle is redacted on stdout.
+            # No --output: the diagnostic survives on stderr and the oracle is dropped from stdout.
             res = subprocess.run([sys.executable, str(script), "--target", str(target)],
                                  capture_output=True, text=True, timeout=60)
             self.assertEqual(res.returncode, 0, f"script failed:\n{res.stderr}")
@@ -294,8 +294,11 @@ class TestVerifierPriming(unittest.TestCase):
             self.assertIn("candidates.json", res.stderr)
             bundle = json.loads(res.stdout)
             self.assertEqual(bundle["candidate_count"], 1)
-            self.assertEqual(bundle["candidates"][0]["snippet"], "[redacted]",
-                             "the confirmation oracle reached the station's stdout unmasked")
+            # The allowlist drops the match OUTRIGHT - the key is absent, not masked in place
+            # (agents-h0mb); the serialized channel carries no trace of the fallback snippet.
+            self.assertNotIn("snippet", bundle["candidates"][0],
+                             "the confirmation oracle reached the station's stdout")
+            self.assertNotIn("FALLBACK-VALID-SNIPPET", res.stdout)
 
             # --output: the raw local record is the machine channel; the fallback snippet must
             # arrive there intact, and the diagnostic is still recorded on stderr.
@@ -799,15 +802,16 @@ class TestStdoutCarriesNoRawSourceLines(unittest.TestCase):
 
     def test_no_output_run_drops_a_source_line_canary_no_pattern_recognises(self):
         """agents-dd0w: the AWS-shaped canary above exercises the MASKER; this one cannot,
-        because mask_text passes it through untouched. Only the wholesale drop of
-        context_snippet keeps it off stdout - the finding's snippet below deliberately does
-        NOT contain the canary, so the contains-the-matched-text property cannot be what
-        saves it either. What is asserted here is exactly the third review's repro, driven
-        through the real station.
+        because mask_text passes it through untouched. Only the allowlist's wholesale drop of
+        unnamed fields keeps it off stdout - the finding's snippet below deliberately does
+        NOT contain the canary, so no contains-the-matched-text reasoning can be what saves it
+        either. What is asserted here is exactly the third review's repro, driven through the
+        real station.
 
-        Load-bearing: remove "context_snippet" from CANDIDATE_MATCH_FIELDS in lib/redaction.py
-        and this fails with the raw canary present on stdout, while the AWS-shaped test above
-        still passes - a canary shaped for the masker cannot see the masker's blind spot.
+        Load-bearing: revert the drop in lib/redaction.py's stdout_safe_report (carry unnamed
+        values through, e.g. `else: safe[key] = value`) and this fails with the raw canary
+        present on stdout, while the AWS-shaped test above still passes - a canary shaped for
+        the masker cannot see the masker's blind spot.
         """
         sys.path.insert(0, str(ROOT))
         from lib.redaction import ALL_PATTERNS, mask_text
