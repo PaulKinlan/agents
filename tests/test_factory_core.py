@@ -21,6 +21,7 @@ from lib.findings import FindingsStore, compute_fingerprint, normalize_text
 from lib.child_env import child_environment
 from lib.credential_broker import PLACEHOLDER_KEY
 from lib.sandbox import sandbox_available
+from lib.tool_pins import ToolPinError
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader("factory_cli", str(FACTORY_ROOT / "factory"))
@@ -146,6 +147,100 @@ class TestSoftwareFactoryCore(unittest.TestCase):
             self.assertEqual(parsed["schedule"]["secret-scan"]["hour"], 7)
         finally:
             tf_path.unlink(missing_ok=True)
+
+
+class TestGitPinBoundary(unittest.TestCase):
+    """agents-28nn round 2, review P1: git IS in TRUSTED_TOOLS, but the factory's own git
+    plumbing (_run_git — worktree creation, the session diff, cleanup) executed
+    ["git", ...] by NAME across the operator's PATH, so the pin machinery was never
+    consulted for a nominally trusted tool and a PATH-planted fake git ran unverified
+    with the factory's privileges. A trust list that some call sites ignore is a comment.
+
+    The boundary is at the deliverer: _run_git resolves git through
+    lib.tool_pins.resolve_tool BEFORE every invocation. These tests remove
+    FACTORY_ALLOW_UNPINNED_TOOLS (the module-level dev/test opt-in the other suites use)
+    because the properties they pin are exactly what the opt-in waives.
+
+    The behaviour-mutation proof: reverting _run_git to prepend the literal "git"
+    (PATH-order resolution) makes the first test fail both ways at once — no ToolPinError
+    is raised AND the planted fake's invocation log appears.
+    """
+
+    FAKE = ('#!/bin/sh\n'
+            # Log every invocation: refusal must PRECEDE any execution of the untrusted
+            # binary, so the log existing at all fails the refusal tests. Exits 0 so the
+            # mutation (by-name resolution) looks like a SUCCESSFUL git call — the test
+            # notices via the log and the missing ToolPinError, not via an error code.
+            'echo ran >> "$FAKE_GIT_LOG"\n'
+            'exit 0\n')
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-git-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # Resolve the REAL git before any PATH tampering, and pin it by content.
+        self.real_git = os.path.realpath(shutil.which("git"))
+        from lib.tool_pins import sha256_file
+        self.real_sha = sha256_file(Path(self.real_git))
+        self.pins = self.root / "tools.pins.yaml"
+        # The proof-satisfying fake, planted in its own directory.
+        self.fake_dir = self.root / "fakebin"
+        self.fake_dir.mkdir()
+        self.fake_log = self.root / "fake-git-ran"
+        stub = self.fake_dir / "git"
+        stub.write_text(self.FAKE, encoding="utf-8")
+        stub.chmod(0o755)
+        # Environment: deterministic pins file, NO dev/test opt-in, PATH under control.
+        self._saved = {k: os.environ.get(k)
+                       for k in ("PATH", "FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS",
+                                 "FAKE_GIT_LOG")}
+        self.addCleanup(self._restore_env)
+        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        os.environ["FAKE_GIT_LOG"] = str(self.fake_log)
+
+    def _restore_env(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _plant_fake_first_on_path(self):
+        os.environ["PATH"] = f"{self.fake_dir}{os.pathsep}{self._saved['PATH']}"
+
+    def _write_pins(self, body):
+        self.pins.write_text(body, encoding="utf-8")
+
+    def test_a_path_planted_fake_git_is_refused_before_it_executes(self):
+        """THE FILED HOLE, CLOSED: with only the real git's content pinned (no `path` pin,
+        so resolution still follows PATH order), the planted fake is resolved, fails the
+        hash check, and is refused — never executed."""
+        self._write_pins(f"git:\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        with self.assertRaises(ToolPinError) as raised:
+            factory_cli._run_git(["status", "--porcelain"], self.root)
+        self.assertIn("git", str(raised.exception))
+        self.assertFalse(self.fake_log.exists(),
+                         "the unauthenticated git must be refused BEFORE it executes")
+
+    def test_a_full_pin_bypasses_the_planted_fake_and_runs_the_real_git(self):
+        """The positive direction: with `path` + `sha256` pinned, the configured path wins
+        over PATH order, so the planted fake is not even resolved and the REAL git runs."""
+        self._write_pins(f"git:\n  path: {self.real_git}\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        res = factory_cli._run_git(["--version"], self.root)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("git version", res.stdout)
+        self.assertFalse(self.fake_log.exists(),
+                         "the PATH-planted fake must not execute even on the success path")
+
+    def test_an_unpinned_git_fails_closed(self):
+        """The fail-closed composition for git itself: no pin anywhere and no dev opt-in,
+        so even the REAL git is refused rather than resolved by PATH order."""
+        self._write_pins("")  # no git entry anywhere
+        with self.assertRaises(ToolPinError):
+            factory_cli._run_git(["--version"], self.root)
 
 
 @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)

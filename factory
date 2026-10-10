@@ -43,8 +43,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
-                             sandbox_command, sandbox_record)
-    from lib.tool_pins import ToolPinError, allowlisted_path
+                             sandbox_command, sandbox_record, sandbox_unavailable_reason)
+    from lib.tool_pins import ToolPinError, allowlisted_path, resolve_tool
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -67,8 +67,8 @@ except ImportError:
                                prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
-                             sandbox_command, sandbox_record)
-    from lib.tool_pins import ToolPinError, allowlisted_path
+                             sandbox_command, sandbox_record, sandbox_unavailable_reason)
+    from lib.tool_pins import ToolPinError, allowlisted_path, resolve_tool
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -221,8 +221,18 @@ def detect_adapter_auth_failure(raw_output: str, stderr: str, stdout: str = "") 
 GIT_TIMEOUT_SECONDS = 120
 
 
-def _run_git(cmd, cwd):
-    """Run local git plumbing with a hard timeout; expiry is a non-zero (124) result."""
+def _run_git(args, cwd):
+    """Run local git plumbing with a hard timeout; expiry is a non-zero (124) result.
+
+    `args` EXCLUDE the binary name: the git executable is resolved and authenticated by
+    lib.tool_pins.resolve_tool on EVERY call (agents-28nn round 2, review P1) — git is in
+    TRUSTED_TOOLS, so a by-name invocation would run whichever git the operator's PATH
+    orders first, unverified, and a trust list that some call sites ignore is a comment
+    (the bwrap lesson generalised). A pin failure raises ToolPinError BEFORE any git
+    executes; re-resolving per call (a few MB hashed) keeps a post-probe binary swap from
+    being executed under a stale verification.
+    """
+    cmd = [resolve_tool("git"), *args]
     try:
         return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
                               check=False, timeout=GIT_TIMEOUT_SECONDS, env=child_environment())
@@ -255,13 +265,13 @@ def _create_session_worktree(target_dir: Path, worktree_dir: Path) -> Path:
     max_attempts = 3
     res = None
     for attempt in range(1, max_attempts + 1):
-        res = _run_git(["git", "worktree", "add", "--detach", str(worktree_dir)], target_dir)
+        res = _run_git(["worktree", "add", "--detach", str(worktree_dir)], target_dir)
         if res.returncode == 0:
             break
         stderr = (res.stderr or "").strip()
         # If failure is due to a stale worktree registration, prune and retry immediately
         if "already registered worktree" in stderr or "use 'prune'" in stderr:
-            _run_git(["git", "worktree", "prune"], target_dir)
+            _run_git(["worktree", "prune"], target_dir)
         elif "lock" in stderr.lower() and attempt < max_attempts:
             time.sleep(0.05 * (2 ** (attempt - 1)))
         else:
@@ -271,7 +281,7 @@ def _create_session_worktree(target_dir: Path, worktree_dir: Path) -> Path:
         raise StationError(
             f"cannot create the disposable session worktree at {worktree_dir}: git worktree "
             f"add exited {getattr(res, 'returncode', 'unknown')}: {(getattr(res, 'stderr', '') or '').strip()}")
-    gitdir = _run_git(["git", "rev-parse", "--absolute-git-dir"], worktree_dir)
+    gitdir = _run_git(["rev-parse", "--absolute-git-dir"], worktree_dir)
     if gitdir.returncode != 0 or not gitdir.stdout.strip():
         raise StationError(
             f"cannot resolve the session worktree's admin gitdir at {worktree_dir}: git "
@@ -344,7 +354,7 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     `base-commit:` header (the trailer git itself uses) so a proposal can never be
     applied blind against a moved HEAD; `git apply` skips it, verified."""
     _validate_worktree_marker(worktree_dir, gitdir)
-    pinned = ["git", f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
+    pinned = [f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
     add = _run_git(pinned + ["add", "-A", "--intent-to-add"], worktree_dir)
     if add.returncode != 0:
         raise StationError(
@@ -469,7 +479,7 @@ def _worktree_has_ignored_edits(worktree_dir: Path, gitdir: Path) -> bool:
     target's .gitignore, so edits that land ONLY in ignored paths produce an empty diff
     ("no file edits") while files DID change. Used for the honest message — the ignored
     files themselves are still not proposal content."""
-    pinned = ["git", f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
+    pinned = [f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
     status = _run_git(pinned + ["status", "--porcelain", "--ignored=matching",
                                 "--untracked-files=all"], worktree_dir)
     if status.returncode != 0:
@@ -486,7 +496,7 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
     .git marker; if the git remove still fails, the directory is deleted directly (it is under
     the run dir) and pruned, so no leak survives."""
     try:
-        res = _run_git(["git", "worktree", "remove", "--force", str(worktree_dir)], target_dir)
+        res = _run_git(["worktree", "remove", "--force", str(worktree_dir)], target_dir)
         if res.returncode != 0:
             sys.stderr.write(
                 f"[factory] worktree cleanup 'remove' exited {res.returncode}: "
@@ -498,7 +508,7 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
         # under the run dir, so removing it directly is safe; prune then clears the admin entry.
         shutil.rmtree(worktree_dir, ignore_errors=True)
     try:
-        prune = _run_git(["git", "worktree", "prune"], target_dir)
+        prune = _run_git(["worktree", "prune"], target_dir)
         if prune.returncode != 0:
             sys.stderr.write(
                 f"[factory] worktree cleanup 'prune' exited {prune.returncode}: "
@@ -517,7 +527,7 @@ def _apply_workspace_mismatch(target_dir: Path) -> Optional[str]:
     individually (unlike `--ignored=matching`, which collapses ignored directories)."""
     from lib.bench.runner import ASSET_EXTS, IGNORE_DIRS
 
-    status = _run_git(["git", "status", "--porcelain", "--untracked-files=all"], target_dir)
+    status = _run_git(["status", "--porcelain", "--untracked-files=all"], target_dir)
     if status.returncode != 0:
         return "could not read the target's git status (fail closed rather than assume a clean tree)"
     if status.stdout.strip():
@@ -529,7 +539,7 @@ def _apply_workspace_mismatch(target_dir: Path) -> Optional[str]:
     # -z emits NUL-delimited raw paths: `git ls-files` quotes a path containing a newline
     # ("assets/slow\n.html"), which would otherwise be parsed with a trailing quote and a
     # mismatched suffix — an ignored measured asset would slip past the refusal below.
-    ignored = _run_git(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
+    ignored = _run_git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
                        target_dir)
     if ignored.returncode != 0:
         return "could not enumerate the target's ignored files (fail closed rather than assume a clean tree)"
@@ -1030,6 +1040,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # A public/unknown-visibility target, or a raw --target path with no manifest, always
     # refuses; the banner and policy.json then report the session NOT confined.
     sandbox_ok = sandbox_available()
+    # WHY the sandbox is unavailable, for the loud refusal / honest downgrade below: a pin
+    # refusal (deployer forgot to regenerate host pins, an unreadable pins file, a
+    # mismatched bwrap) must NEVER read like an ordinary bwrap-less host (agents-28nn
+    # round 2) — the message names the cause so the failure is a warning, not a trap.
+    sandbox_why = None if sandbox_ok else sandbox_unavailable_reason()
     allow_unsandboxed = os.environ.get("FACTORY_ALLOW_UNSANDBOXED", "").strip().lower() \
         in ("1", "true", "yes", "on")
     trusted_opt_in = (allow_unsandboxed
@@ -1041,7 +1056,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                if allow_unsandboxed else "and no FACTORY_ALLOW_UNSANDBOXED opt-in was given")
         raise ContainmentError(
             f"engine '{engine}' relies on the OS filesystem sandbox to confine its read "
-            f"scope to the target, but bubblewrap cannot run on this host {why}; refusing "
+            f"scope to the target, but the OS sandbox is unavailable on this host"
+            f"{f' — {sandbox_why}' if sandbox_why else ''} {why}; refusing "
             f"an unsandboxed run (the model's read tool would reach any file the operator "
             f"can read). The opt-in exists only for a target that declares `trusted: true` "
             f"with `visibility: private` in its manifest (THREAT_MODEL.md section 7); the "
@@ -1054,6 +1070,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         f"'{Path(target_arg).name}' "
         f"(visibility private; THREAT_MODEL.md section 7): the engine process and the "
         f"pre-pass run as the operator"
+        + (f"; the OS sandbox is unavailable because {sandbox_why}" if sandbox_why else "")
         if engine in SANDBOXED_ENGINES and not sandbox_ok else None)
 
     # agents-ejm: claude is NEVER kernel-sandboxed — its adapter is not in SANDBOXED_ENGINES
@@ -2720,5 +2737,10 @@ if __name__ == "__main__":
     except ContainmentError as e:
         # Refused before any station work: nothing was scanned, so never a clean run.
         sys.stderr.write(f"\n[containment] Refusing the run: {e}\n")
+        sys.exit(3)
+    except ToolPinError as e:
+        # A trusted tool (bwrap/gh/bd/git/…) could not be authenticated — refuse rather
+        # than execute an unverified binary, and NAME the pin failure (agents-28nn).
+        sys.stderr.write(f"\n[tool pin] Refusing the run: {e}\n")
         sys.exit(3)
 

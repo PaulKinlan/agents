@@ -27,6 +27,12 @@ by-name fallback; it is never the default. A ``path`` pin without a matching ``s
 configuration error (a symlink deref could otherwise redirect the pin outside the trusted
 tree), so it is refused regardless of the opt-in.
 
+**Every failure of the pin machinery is a ``ToolPinError``** (agents-28nn round 2): an
+unreadable pins file, a directory where a file is expected, non-UTF-8 pins content, or a
+binary that cannot be hashed all raise ``ToolPinError``, never a raw ``OSError`` — so a
+caller that handles pin failures (lib/sandbox.py's probe degrading to "cannot sandbox",
+the sinks' honest "tool unavailable" notes) cannot be crashed past by a filesystem error.
+
 The sandbox binder (lib/sandbox.py ``_executable_binds``) calls ``verify_pin`` for each
 pinned tool before binding it, so a pinned pre-pass tool is authenticated by the same rule.
 
@@ -111,13 +117,24 @@ def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
     A missing file is an empty pin set — resolution then fails closed for any trusted tool, so
     a deleted config can never silently widen trust. A malformed entry — a non-string
     path/sha256, a sha256 that is not 64 hex chars, or a path pin without a sha256 — raises
-    ``ToolPinError`` so a bad pin cannot silently not-match.
+    ``ToolPinError`` so a bad pin cannot silently not-match. A file that cannot be READ as
+    pins — unreadable (chmod 000), a directory where a file is expected, non-UTF-8 bytes —
+    raises the same ``ToolPinError`` rather than a raw ``OSError``/``PermissionError``
+    escaping to a caller that only handles pin failures: lib/sandbox.py's probe must DEGRADE
+    to "cannot sandbox" on any pin-machinery failure, never crash the factory (agents-28nn
+    round 2, the unreadable-pins P2).
     """
     if not path.exists():
         return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise ToolPinError(
+            f"{label}: the pins file cannot be read as pins ({e}); failing closed rather "
+            f"than guessing") from e
     pins: Dict[str, Dict[str, str]] = {}
     current: Optional[str] = None
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.split("#", 1)[0].rstrip()
         if not line.strip():
             continue
@@ -222,7 +239,14 @@ def verify_pin(name: str, real_path: str,
                 f"{pinned_path}")
     pinned_sha = entry.get("sha256")
     if pinned_sha is not None:
-        actual = sha256_file(Path(real_path))
+        try:
+            actual = sha256_file(Path(real_path))
+        except OSError as e:
+            # A binary that cannot be read cannot be authenticated (agents-28nn round 2):
+            # fail closed as a pin failure, never as a raw OSError escaping the machinery.
+            raise ToolPinError(
+                f"trusted tool {name!r} at {real_path} could not be hashed ({e}); refusing "
+                "to run an unverified binary") from e
         if actual.lower() != pinned_sha.lower():
             raise ToolPinError(
                 f"trusted tool {name!r} at {real_path} hashes to {actual[:16]}…, not the configured "

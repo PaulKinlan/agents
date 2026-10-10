@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from lib.sandbox import (  # noqa: E402
     SANDBOXED_ENGINES, SandboxError, engine_sandboxed, sandbox_available, sandbox_command,
-    sandbox_record,
+    sandbox_record, sandbox_unavailable_reason,
 )
 from lib import sandbox as sandbox_module  # noqa: E402
 
@@ -476,6 +476,86 @@ class TestBwrapPinBoundary(unittest.TestCase):
             sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
                             run_dir=self.run_dir, env=dict(os.environ))
         self.assertFalse(self.fake_log.exists())
+
+
+class TestPinFailureDegradation(unittest.TestCase):
+    """agents-28nn round 2, review P2: EVERY failure of the pin machinery must degrade the
+    probe to 'cannot sandbox' — the honest refusal/downgrade path — instead of crashing
+    the factory with a raw OSError. Before the fix, an UNREADABLE pins file (chmod 000)
+    raised PermissionError out of _parse_pins_file, and _probe() caught only ToolPinError,
+    so the whole factory crashed rather than degrading. The fix makes the pin machinery's
+    failures all surface as ToolPinError, and the probe records WHY so the refusal names
+    the cause (a quiet downgrade that looks like an ordinary bwrap-less host is a trap).
+
+    The mutations that prove these tests guard the behaviour: reverting _parse_pins_file
+    to let OSError escape makes the first two tests raise PermissionError/
+    IsADirectoryError instead of observing the degradation; removing the probe's reason
+    recording makes the reason assertions fail.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-degrade-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory-root"
+        (self.factory / "runs").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.run_dir = self.factory / "runs" / "run1"
+        self.run_dir.mkdir(parents=True)
+        self._saved = {k: os.environ.get(k)
+                       for k in ("FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS")}
+        self.addCleanup(self._restore_env)
+        os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        sandbox_module._probe_result = None
+        self.addCleanup(setattr, sandbox_module, "_probe_result", None)
+
+    def _restore_env(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _assert_degrades_honestly(self):
+        """The probe returns False (no exception), names WHY, and the wrap build fails
+        closed with SandboxError naming bwrap — the same path as a missing pin."""
+        self.assertFalse(sandbox_available(),
+                         "a pins-file failure must degrade to 'cannot sandbox', never raise")
+        reason = sandbox_unavailable_reason()
+        self.assertIsNotNone(reason, "a refused/downgraded run must NAME the cause")
+        self.assertIn("bwrap", reason)
+        with self.assertRaises(SandboxError) as raised:
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+        self.assertIn("bwrap", str(raised.exception))
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores file permission bits")
+    def test_an_unreadable_pins_file_degrades_instead_of_crashing(self):
+        """The reviewer's P2 by construction: chmod 000 the host pins file."""
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text("bwrap:\n  sha256: " + "0" * 64 + "\n", encoding="utf-8")
+        pins.chmod(0o000)
+        self.addCleanup(pins.chmod, 0o644)
+        os.environ["FACTORY_TOOL_PINS"] = str(pins)
+        self._assert_degrades_honestly()
+
+    def test_a_directory_where_the_pins_file_is_expected_degrades(self):
+        """The other unreadable shape: FACTORY_TOOL_PINS names a directory."""
+        os.environ["FACTORY_TOOL_PINS"] = str(self.root / "pins.d")
+        (self.root / "pins.d").mkdir()
+        self._assert_degrades_honestly()
+
+    def test_an_empty_pins_file_fails_closed_and_degrades(self):
+        """An empty pins file is zero pins: unpinned bwrap fails closed, and the probe
+        degrades with the 'not pinned' cause named."""
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text("", encoding="utf-8")
+        os.environ["FACTORY_TOOL_PINS"] = str(pins)
+        self.assertFalse(sandbox_available())
+        reason = sandbox_unavailable_reason()
+        self.assertIsNotNone(reason)
+        self.assertIn("not pinned", reason)
 
 
 class TestSandboxRecord(unittest.TestCase):

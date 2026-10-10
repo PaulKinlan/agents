@@ -4,7 +4,6 @@ Moved from lib/findings.py unchanged in behaviour (fleet-km8). The issue guard b
 re-checks the embargo so a direct call cannot publish an embargoed finding.
 """
 
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -12,6 +11,11 @@ from typing import Any, Dict, List, Sequence
 from lib.embargo import effective_severity, embargo_reason
 from lib.redaction import redact_finding
 from lib.sinks.base import Sink, SinkContext
+# gh is a pinned trusted tool (agents-7bj): resolve it through the same pin rule as
+# lib/sinks/github.py and lib/sinks/beads.py. A by-name `shutil.which("gh")` would run
+# whichever gh the PATH orders first — unverified, with this sink's GitHub token — a
+# trust list that some call sites ignore is a comment (agents-28nn round 2).
+from lib.tool_pins import ToolPinError, resolve_tool
 
 GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
@@ -19,10 +23,17 @@ GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 def _dispatch_github(target_name: str, target_dir: Path, findings: List[Dict[str, Any]], visibility: Any = "public") -> Dict[str, Any]:
     """Public disclosure guard and issue creation for GitHub Issues. Returns delivery counts."""
     result: Dict[str, Any] = {"published": 0, "failed": 0, "skipped": 0, "note": ""}
-    gh_bin = shutil.which("gh")
+    try:
+        gh_bin = resolve_tool("gh")
+    except ToolPinError as e:
+        # Fail closed, but never silently: an absent OR unverifiable gh means nothing is
+        # filed and the note says why (same honest-failure shape as lib/sinks/beads.py).
+        gh_bin = None
+        result["note"] = f"gh unavailable or unverified: {e}"
     if not gh_bin and findings:
         result["failed"] = len(findings)
-        result["note"] = "gh binary not available: nothing filed"
+        if not result["note"]:
+            result["note"] = "gh binary not available: nothing filed"
         return result
     for f in findings:
         if f["state"] not in ("new", "regressed") or "github-issues" in f.get("dispatched_sinks", []):

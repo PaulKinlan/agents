@@ -37,6 +37,16 @@ jobs:
         with:
           python-version: '3.11'
 
+      # gen_site.py resolves git through the factory's fail-closed pin rule (agents-28nn
+      # round 2), so the runner's pins must exist first — same step the composite action
+      # runs. The generator never trusts the inherited PATH (a $GITHUB_PATH-planted
+      # binary would otherwise be hashed and ACCEPTED as the valid pin).
+      - name: Generate Tool Pins
+        run: |
+          set -euo pipefail
+          tools/generate-tool-pins.sh "$RUNNER_TEMP/tools.pins.yaml"
+          echo "FACTORY_TOOL_PINS=$RUNNER_TEMP/tools.pins.yaml" >> "$GITHUB_ENV"
+
       - name: Verify generated site is fresh
         run: |
           python3 tools/gen_site.py

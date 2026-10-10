@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -223,14 +224,149 @@ class GenerateToolPinsScriptTests(unittest.TestCase):
     tool (or, for bwrap, reads the host as unable to sandbox, agents-28nn). The
     generator's TOOLS list must cover exactly the trusted set."""
 
+    SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "generate-tool-pins.sh"
+
     def test_the_generator_covers_every_trusted_tool(self):
-        script = (Path(__file__).resolve().parent.parent
-                  / "tools" / "generate-tool-pins.sh").read_text(encoding="utf-8")
+        script = self.SCRIPT.read_text(encoding="utf-8")
         match = re.search(r'^TOOLS="([^"]*)"', script, re.MULTILINE)
         self.assertIsNotNone(match, "generate-tool-pins.sh has no TOOLS list to audit")
         self.assertEqual(set(match.group(1).split()), set(TRUSTED_TOOLS),
                          "the generator must pin exactly the trusted tools — a missing one "
                          "is un-pinnable on the generated host file, an extra one is dead")
+
+
+@unittest.skipUnless(shutil.which("bash"), "the generator is a bash script")
+class GenerateToolPinsSourceTests(unittest.TestCase):
+    """agents-28nn round 2, review P1: the generator is the pin's SOURCE OF TRUTH, so its
+    lookup must never trust the inherited PATH — an earlier CI step that manipulates PATH
+    (one $GITHUB_PATH line) would otherwise have the generator hash AND pin a planted
+    fake, supplying both the binary and the hash that vouches for it.
+
+    These tests run the REAL script with a PATH whose first entry holds a fake `git` AND
+    a fake `sha256sum` (the attacker controls the tool AND the hasher). The pin file must
+    contain no trace of the planted directory and must hash the real system git. The
+    behaviour-mutation proof: removing the script's `PATH="$PIN_LOOKUP_PATH"` line makes
+    the planted git the one that gets pinned, and the first assertion fails.
+    """
+
+    LOOKUP_DIRS = ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin",
+                   "/sbin", "/bin")
+    BOGUS_HASH = "f" * 64  # the fake hasher's output: proof the real hasher ran (or not)
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="toolpins-gen-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.fakebin = self.tmp / "fakebin"
+        self.fakebin.mkdir()
+        fake_git = _make_tool(self.fakebin, "git", "#!/bin/sh\necho PLANTED-GIT\n")
+        self.fake_git_sha = sha256_file(fake_git)
+        # A fake hasher too: the lookup confinement must cover every command the
+        # generator runs, or the pin's hash itself comes from a planted binary.
+        _make_tool(self.fakebin, "sha256sum",
+                   f"#!/bin/sh\necho '{self.BOGUS_HASH}  fake'\n")
+        self.out = self.tmp / "tools.pins.yaml"
+
+    def _run_generator(self, *extra_args):
+        env = {"PATH": os.pathsep.join([str(self.fakebin), *self.LOOKUP_DIRS]),
+               "HOME": str(self.tmp)}
+        res = subprocess.run(
+            ["bash", str(GenerateToolPinsScriptTests.SCRIPT), str(self.out), *extra_args],
+            env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return self.out.read_text(encoding="utf-8")
+
+    def _system_tool(self, name):
+        for d in self.LOOKUP_DIRS:
+            candidate = Path(d) / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
+    def test_a_path_planted_tool_and_hasher_are_never_pinned(self):
+        body = self._run_generator()
+        self.assertNotIn(str(self.fakebin), body,
+                         "the lookup must be confined to the system dirs — a PATH-planted "
+                         "binary must never be the pin's source")
+        self.assertNotIn(self.BOGUS_HASH, body,
+                         "the planted hasher must never feed the pin")
+        self.assertNotIn(self.fake_git_sha, body,
+                         "the planted git's own hash must never be vouched for")
+        system_git = self._system_tool("git")
+        if system_git is not None:
+            match = re.search(r'^git:\n  path: (\S+)\n  sha256: ([0-9a-f]{64})$', body,
+                              re.MULTILINE)
+            self.assertIsNotNone(match, "a git present in the system dirs must be pinned")
+            self.assertEqual(os.path.realpath(match.group(1)),
+                             os.path.realpath(str(system_git)))
+            self.assertEqual(match.group(2), sha256_file(system_git))
+
+    def test_a_tool_found_only_outside_the_lookup_dirs_is_reported_unpinned(self):
+        """The honest failure direction: a real install outside the system dirs (nvm,
+        homebrew, ~/.local) is NOT silently trusted from the inherited PATH — it is
+        reported not found, so the host fails closed until the operator passes
+        --lookup-path explicitly."""
+        only_fake = _make_tool(self.fakebin, "gitleaks")
+        if self._system_tool("gitleaks") is not None:
+            self.skipTest("gitleaks lives in the system dirs on this host")
+        body = self._run_generator()
+        self.assertNotIn(str(only_fake), body)
+        self.assertIn("# gitleaks: not found", body,
+                      "a tool outside the lookup dirs must be skipped with a comment, "
+                      "never pinned from the inherited PATH")
+
+    def test_lookup_path_flag_explicitly_admits_an_operator_dir(self):
+        """The explicit override works: --lookup-path (a flag on the invocation, which in
+        CI lives in the pinned action.yml — never an inherited env var, which
+        $GITHUB_ENV could set) lets an operator pin a home-installed tool. The dir is
+        PREPENDED to the system dirs, so the script's own hasher still resolves from the
+        system dirs."""
+        opbin = self.tmp / "opbin"
+        opbin.mkdir()
+        op_git = _make_tool(opbin, "git", "#!/bin/sh\necho OPERATOR-GIT\n")
+        body = self._run_generator("--lookup-path", str(opbin))
+        match = re.search(r'^git:\n  path: (\S+)\n  sha256: ([0-9a-f]{64})$', body,
+                          re.MULTILINE)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), str(opbin / "git"))
+        self.assertEqual(match.group(2), sha256_file(op_git))
+
+
+class PinsFileFailureModeTests(unittest.TestCase):
+    """agents-28nn round 2, review P2: every pins-file failure must surface as
+    ToolPinError — the fail-closed path callers handle (the sandbox probe degrades, the
+    sinks report an honest note) — never as a raw OSError that crashes the factory."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="toolpins-io-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores file permission bits")
+    def test_an_unreadable_pins_file_raises_tool_pin_error_not_permission_error(self):
+        cfg = self.tmp / "tools.yaml"
+        cfg.write_text("gh:\n  sha256: " + "a" * 64 + "\n", encoding="utf-8")
+        cfg.chmod(0o000)
+        self.addCleanup(cfg.chmod, 0o644)
+        with self.assertRaises(ToolPinError):
+            load_tool_pins(cfg)
+
+    def test_a_directory_where_the_pins_file_is_expected_raises_tool_pin_error(self):
+        with self.assertRaises(ToolPinError):
+            load_tool_pins(self.tmp)  # a directory, not a file
+
+    def test_a_non_utf8_pins_file_raises_tool_pin_error(self):
+        cfg = self.tmp / "tools.yaml"
+        cfg.write_bytes(b"gh:\xff\xfe\x00binary")
+        with self.assertRaises(ToolPinError):
+            load_tool_pins(cfg)
+
+    def test_an_empty_pins_file_is_zero_pins_and_still_fails_closed(self):
+        cfg = self.tmp / "tools.yaml"
+        cfg.write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": "",
+                                          "FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
+            self.assertEqual(load_tool_pins(cfg), {})
+            with self.assertRaises(ToolPinError):
+                resolve_tool("gh", path_env=str(self.tmp), pins=load_tool_pins(cfg))
 
 
 if __name__ == "__main__":

@@ -146,6 +146,7 @@ class SandboxError(RuntimeError):
 
 
 _probe_result: Optional[bool] = None
+_probe_reason: Optional[str] = None
 
 
 def sandbox_available() -> bool:
@@ -155,6 +156,19 @@ def sandbox_available() -> bool:
     if _probe_result is None:
         _probe_result = _probe()
     return _probe_result
+
+
+def sandbox_unavailable_reason() -> Optional[str]:
+    """WHY the probe said this host cannot sandbox, or None when it can (agents-28nn round 2).
+
+    A refusal or an honest downgrade must NAME the cause — a quiet downgrade that reads
+    like a normal no-bwrap host hides a pin refusal (e.g. a deployer who forgot to
+    regenerate host pins, or an unreadable pins file) behind an innocent-looking message.
+    Probes here record their failure reason; the factory's refusal and banner then say
+    exactly why the boundary is absent."""
+    if sandbox_available():
+        return None
+    return _probe_reason
 
 
 def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", *,
@@ -238,15 +252,21 @@ def _resolve_bwrap() -> str:
 
 
 def _probe() -> bool:
+    global _probe_reason
+    _probe_reason = None
     if not sys.platform.startswith("linux"):
+        _probe_reason = "not a Linux host (bubblewrap is Linux-only)"
         return False
     try:
         bwrap = _resolve_bwrap()
-    except ToolPinError:
+    except ToolPinError as e:
         # An unpinned or pin-mismatching bwrap cannot be trusted to deliver a sandbox, so
         # this host is reported as unable to sandbox: the factory then refuses the run
         # (pi) or runs honestly unsandboxed under the explicit attestation — it never
         # overclaims a sandbox an unauthenticated binary claimed to build (agents-28nn).
+        # The reason is recorded for the loud refusal/downgrade: a pin failure must never
+        # read like an ordinary bwrap-less host (round 2).
+        _probe_reason = f"bwrap cannot be authenticated: {e}"
         return False
     plan = _BindPlan()
     _system_binds(plan)
@@ -255,9 +275,15 @@ def _probe() -> bool:
     argv = [bwrap, *plan.argv, "--die-with-parent", "--new-session", "--", "/bin/true"]
     try:
         res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as e:
+        _probe_reason = f"the bwrap probe could not execute: {e}"
         return False
-    return res.returncode == 0
+    if res.returncode != 0:
+        detail = (res.stderr or "").strip().splitlines()
+        _probe_reason = (f"the bwrap probe exited {res.returncode}"
+                         + (f" ({detail[-1][:200]})" if detail else ""))
+        return False
+    return True
 
 
 def engine_sandboxed(engine: str) -> bool:
@@ -661,7 +687,16 @@ def sandbox_command(
             plan.ro_bind(str(interpreter))
         else:
             plan.ro_bind(str(root))
-    _executable_binds(plan, executables, child_env.get("PATH", ""), home)
+    try:
+        _executable_binds(plan, executables, child_env.get("PATH", ""), home)
+    except ToolPinError as e:
+        # A trusted tool whose content stopped matching its pin between the probe and this
+        # wrap build fails the wrap closed — exactly like an unauthenticated bwrap, the
+        # station fails loudly rather than binding an unverified binary (agents-28nn round
+        # 2: with the pin machinery's failures all surfaced as ToolPinError, no filesystem
+        # error can crash past this boundary either).
+        raise SandboxError(
+            f"a trusted tool bound into the sandbox cannot be authenticated: {e}") from e
 
     # Host tool pins file (agents-ebm7): when child_env forwards FACTORY_TOOL_PINS,
     # the target file is often under $HOME (e.g. ~/.config/factory/tools.pins.yaml).
