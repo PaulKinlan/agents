@@ -305,6 +305,19 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(mismatched_network_api))
 
+        # Reviewer P1 finding: intervening words attaching claim to different API must NOT pass
+        intervening_api_counterexample = {
+            "snippet": "for (const url of urls) await axios.get(url);",
+            "remediation": "For axios calls use fetch which supports concurrent requests; use Promise.all"
+        }
+        self.assertFalse(has_reentrancy_precondition(intervening_api_counterexample))
+
+        # Reviewer P1 finding: inverted conditional recommendation (concurrency on non-reentrant branch) must NOT pass
+        inverted_condition = {
+            "remediation": "If backend is reentrant, preserve serial execution; otherwise use Promise.all"
+        }
+        self.assertFalse(has_reentrancy_precondition(inverted_condition))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
@@ -696,6 +709,22 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes5 = normalize_report(report5)
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes5))
         self.assertIn("proposed_fix_diff", report5["findings"][0])
+
+        # Case F: Reviewer P1 finding - "Do not run model inference in parallel; preserve serial execution"
+        report6 = {
+            "findings": [
+                {
+                    "rule_id": "concurrency-hazard",
+                    "path": "src/infer.ts",
+                    "line_number": 65,
+                    "remediation": "Do not run model inference in parallel; preserve serial execution.",
+                    "proposed_fix_diff": "--- a/infer.ts\n+++ b/infer.ts\n@@ -1,2 +1,2 @@\n- await Promise.all(models.map(m => m.run()));\n+ for (const m of models) await m.run();",
+                }
+            ]
+        }
+        notes6 = normalize_report(report6)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes6))
+        self.assertIn("proposed_fix_diff", report6["findings"][0])
 
     def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
         """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""
