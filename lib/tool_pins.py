@@ -348,7 +348,8 @@ def resolve_tool(name: str, path_env: Optional[str] = None,
 
 
 def pin_trusted_argv(argv: Sequence[str]) -> List[str]:
-    """Replace argv[0] with its pin-verified resolution when it names a trusted tool.
+    """Route a config-supplied command through the pins: the PINNED THING IS THE EXECUTED
+    ARGV, not its first element.
 
     A command assembled at RUNTIME from configuration — a target manifest's
     ``sink_command``, a ``--bench-cmd`` — is invisible to a literal call-site census: the
@@ -356,21 +357,63 @@ def pin_trusted_argv(argv: Sequence[str]) -> List[str]:
     consulted for a trusted tool the config named, and a PATH-planted fake executed with
     the sink's credentials (agents-28nn round 3, review P1, proven by construction with a
     config-supplied fake ``git``). A trust list that a config-supplied command ignores is
-    the same false assurance as a call site that ignores it, so when argv[0]'s basename
-    is a trusted tool the pin resolves it: the verified absolute path replaces argv[0],
-    and an unpinned or mismatching tool raises ToolPinError BEFORE it executes.
+    the same false assurance as a call site that ignores it.
 
-    A non-trusted argv[0] passes through untouched: pinning every program an operator
-    might configure would be a registry someone must remember to update. An explicit
-    shell (``sh -c ...``, which the command sink documents as its escape hatch) is the
-    operator's own trust decision — intercepting inside a shell string would be a second
-    verification mechanism, not a stronger one.
+    THE POLICY (agents-28nn round 4, review P1 — ``['env', 'git', '--version']`` rode past
+    a first-element check unchanged and a PATH-planted fake git executed under it, proven
+    by construction with FACTORY_ALLOW_UNPINNED_TOOLS=0):
+
+    * A trusted tool may appear ONLY in COMMAND POSITION (argv[0]). There the pin
+      resolves it: the verified absolute path replaces argv[0], and an unpinned or
+      mismatching tool raises ToolPinError BEFORE it executes.
+    * A trusted-tool basename ANYWHERE ELSE in the argv is REFUSED, with the offending
+      element and its index named. ``['env', 'git', ...]`` is not ``git`` — it is the
+      ENVIRONMENT running ``git`` — so the moment a check inspects a PREFIX of what will
+      be executed, the remainder is unguarded: ``env``/``nice``/``sudo`` (and every
+      launcher not yet invented) would interpose between the pin and the tool. The scan
+      needs no launcher list — it is complete over the argv by construction.
+
+    Why refusal rather than the alternatives:
+
+    * UNWRAP the launcher and route the inner tool: unsound for the form that matters.
+      ``env NAME=VALUE git`` does not just launch — it REWRITES the child's environment
+      (``PATH``, ``LD_PRELOAD``, ``GIT_CONFIG_*``), so even the pinned binary would run
+      under attacker-chosen loader and config influence; authenticating the inner argv[0]
+      would authenticate the wrong thing. Unwrapping is also a per-launcher flag language
+      (``env -S``, ``sudo -u``, ``timeout --signal``) — a registry someone must remember
+      to update, the wrong-shape census in miniature.
+    * ALLOW ONLY AN EXPLICIT LAUNCHER LIST: same registry failure, plus each admitted
+      launcher's own flag semantics decides what executes. A blocklist of launchers is
+      enumerating instances again; the position rule needs none.
+    * SHELLS: ``sh -c ...`` remains the command sink's documented escape hatch — the
+      shell STRING is opaque to the pin BY DESIGN, and using it is the operator's
+      explicit trust decision (intercepting inside the string would be a second
+      verification mechanism, not a stronger one). INTERPRETERS: ``node`` is itself a
+      trusted tool, so ``node script.js`` in command position is routed as above; a
+      script's CONTENTS (what a python3/node script execs) are the same opaque boundary
+      as a shell string, stated here rather than claimed covered.
+
+    A non-trusted argv[0] with no trusted tool elsewhere passes through untouched:
+    pinning every program an operator might configure would be a registry someone must
+    remember to update. The false-positive direction (a trusted NAME as pure DATA, e.g.
+    ``mysink --compare git``) refuses closed with the element named — the ``sh -c``
+    escape hatch is the operator's way to say they meant it.
     """
     if not argv:
         return list(argv)
     name = os.path.basename(str(argv[0]))
     if name in TRUSTED_TOOLS:
         return [resolve_tool(name), *[str(a) for a in argv[1:]]]
+    for index, element in enumerate(argv[1:], start=1):
+        base = os.path.basename(str(element))
+        if base in TRUSTED_TOOLS:
+            raise ToolPinError(
+                f"config command's trusted tool {base!r} sits at argv[{index}], not in "
+                f"command position — {str(argv[0])!r} would LAUNCH it unverified (a check "
+                "that inspects a prefix of the executed argv leaves the remainder "
+                "unguarded). Name the tool directly so the pin can authenticate it, or "
+                "use the documented 'sh -c' escape hatch as an explicit operator trust "
+                "decision")
     return [str(a) for a in argv]
 
 

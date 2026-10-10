@@ -338,6 +338,24 @@ class TestCommandSinkPinBoundary(CommandSinkCase):
         self.assertIn("not pinned", result.stdout)
         self.assertFalse(self.fake_log.exists())
 
+    def test_a_launcher_cannot_ride_a_trusted_tool_past_the_pin(self):
+        """agents-28nn round 4, review P1 — the reviewer's constructed case, kept: the
+        pinned thing is the executed ARGV, not its first element. sink_command
+        'env git --version' is not git — it is the environment running git — so the
+        first-element check passed it through UNCHANGED and the PATH-planted fake ran
+        (constructed by the reviewer with unpinned tools disallowed). Now any trusted
+        tool OUTSIDE command position refuses with the element named, nothing is sent,
+        and the fake's log proves it never ran — even with a FULL pin for the real git
+        in force."""
+        from lib.tool_pins import sha256_file
+        result = self.scan_with_pin(
+            [SAMPLE], "env git --version",
+            f"git:\n  path: {self.real_git}\n  sha256: {sha256_file(Path(self.real_git))}\n")
+        self.assertIn("not in command position", result.stdout)
+        self.assertIn("nothing sent", result.stdout)
+        self.assertFalse(self.fake_log.exists(),
+                         "the fake git must not ride past the pin behind a launcher")
+
 
 class TestCommandSinkFromManifest(unittest.TestCase):
     """targets/<name>.yaml -> factory run -> command, with only sink_env added to the env."""

@@ -19,8 +19,9 @@ from pathlib import Path
 from unittest import mock
 
 from lib.tool_pins import (MAX_PINS_FILE_BYTES, TRUSTED_TOOLS, ToolPinError,
-                           allowlisted_path, host_pins_path, load_tool_pins, resolve_tool,
-                           sha256_file, tool_dir, verify_pin)
+                           allowlisted_path, host_pins_path, load_tool_pins,
+                           pin_trusted_argv, resolve_tool, sha256_file, tool_dir,
+                           verify_pin)
 
 
 def _make_tool(directory: Path, name: str, content: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -595,6 +596,61 @@ class PinsFileFailureModeTests(unittest.TestCase):
                          "the reader must REFUSE the swapped-in FIFO, never block on it")
         self.assertTrue(swapped, "the construction must actually perform the swap")
         self.assertIn("FIFO", str(raised.exception))
+
+
+class TrustedArgvLauncherPolicyTests(unittest.TestCase):
+    """agents-28nn round 4, review P1 — the PINNED THING IS THE EXECUTED ARGV, not its
+    first element: ['env', 'git', '--version'] is not git, it is the environment running
+    git. The round-3 check inspected argv[0] only, so a config-supplied command hid a
+    trusted tool BEHIND a launcher and the real tool rode past the pin (constructed by
+    the reviewer: a PATH-planted fake git executed via env with unpinned tools
+    disallowed). The policy: a trusted tool may appear ONLY in command position (where
+    the pin resolves it); anywhere else in the argv is refused with the element named —
+    complete over the argv by construction, with no launcher list to keep current."""
+
+    def test_env_cannot_smuggle_a_trusted_tool_past_the_pin(self):
+        """THE HOLE, CLOSED: pre-fix this returned ['env', 'git', '--version'] UNCHANGED."""
+        with self.assertRaises(ToolPinError) as raised:
+            pin_trusted_argv(["env", "git", "--version"])
+        self.assertIn("argv[1]", str(raised.exception))
+        self.assertIn("'git'", str(raised.exception))
+        self.assertIn("'env'", str(raised.exception))
+
+    def test_env_with_assignments_cannot_smuggle_a_trusted_tool(self):
+        with self.assertRaises(ToolPinError) as raised:
+            pin_trusted_argv(["env", "FOO=bar", "git", "status"])
+        self.assertIn("argv[2]", str(raised.exception))
+
+    def test_nice_and_sudo_cannot_smuggle_a_trusted_tool(self):
+        for launcher in ("nice", "sudo"):
+            with self.subTest(launcher=launcher):
+                with self.assertRaises(ToolPinError):
+                    pin_trusted_argv([launcher, "git", "--version"])
+
+    def test_a_trusted_name_as_data_is_refused_with_the_element_named(self):
+        """Fail closed, named, with the sh -c escape hatch documented in the message."""
+        with self.assertRaises(ToolPinError) as raised:
+            pin_trusted_argv(["mysink", "--compare", "git"])
+        self.assertIn("argv[2]", str(raised.exception))
+        self.assertIn("sh -c", str(raised.exception))
+
+    def test_a_non_trusted_command_passes_through_untouched(self):
+        argv = ["env", "FOO=bar", "mysink", "--flag", "value"]
+        self.assertEqual(pin_trusted_argv(argv), argv)
+
+    def test_the_shell_escape_hatch_is_unchanged(self):
+        """sh -c is the operator's documented explicit trust decision: the shell STRING is
+        opaque to the pin BY DESIGN — the boundary is stated, not claimed covered."""
+        argv = ["sh", "-c", "git status && mysink"]
+        self.assertEqual(pin_trusted_argv(argv), argv)
+
+    def test_a_trusted_tool_in_command_position_is_still_routed(self):
+        """The round-3 behaviour is preserved: argv[0] naming a trusted tool resolves
+        through the pin — here unpinned, so the routing itself fails closed."""
+        with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "",
+                                          "FACTORY_TOOL_PINS": ""}):
+            with self.assertRaises(ToolPinError):
+                pin_trusted_argv(["git", "--version"])
 
 
 if __name__ == "__main__":

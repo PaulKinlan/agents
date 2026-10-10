@@ -54,7 +54,10 @@ from lib.sinks.base import Sink, SinkContext, new_result
 # literal call-site census (agents-28nn round 3, review P1: a configured `git`/`gh`/...
 # executed from PATH order, the pin never consulted, with this sink's credentials in its
 # environment). pin_trusted_argv routes argv[0] through resolve_tool when it names a
-# trusted tool: the pinned binary runs, or nothing does and the note says why.
+# trusted tool — and refuses a trusted tool anywhere ELSE in the argv, because the pinned
+# thing is the executed argv, not its first element (agents-28nn round 4: 'env git ...'
+# is the environment running git): the pinned binary runs, or nothing does and the note
+# says why.
 from lib.tool_pins import ToolPinError, pin_trusted_argv
 
 PROTOCOL = "factory-sink/1"

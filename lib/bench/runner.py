@@ -151,9 +151,11 @@ def measure_target(target_dir: Path, bench_cmd: Optional[List[str]] = None) -> D
         # bench_cmd is argv assembled at RUNTIME from operator input — the same census
         # escape as the command sink's sink_command (agents-28nn round 3, review P1): a
         # trusted tool named here (git, node, npm, ...) would otherwise execute from PATH
-        # order with the pin machinery never consulted. Route argv[0] through the pin;
-        # a tool it cannot authenticate runs NOTHING — the measurement degrades to
-        # static metrics only, with the cause named on stderr.
+        # order with the pin machinery never consulted. Route argv[0] through the pin —
+        # and refuse a trusted tool anywhere else in the argv (agents-28nn round 4: the
+        # pinned thing is the executed argv, not its first element; 'env git ...' is the
+        # environment running git); a tool it cannot authenticate runs NOTHING — the
+        # measurement degrades to static metrics only, with the cause named on stderr.
         try:
             bench_cmd = pin_trusted_argv(bench_cmd)
         except ToolPinError as e:
