@@ -231,18 +231,57 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
 
 
+# Domains and primitives where concurrency is often non-reentrant or stateful
+_NON_REENTRANT_SUSPECT_PATTERN = re.compile(
+    r"\b(?:onnx|session|model|inference|forward\s+pass|wasm|webassembly|gpu|webgpu|webgl|transaction|mutex|lock|db|database|sqlite)\b",
+    re.IGNORECASE
+)
+
+# Stateless I/O operations where concurrent dispatch can be proven safe
+_STATELESS_IO_SNIPPET_PATTERN = re.compile(
+    r"\b(?:fetch\s*\(|axios\b|https?\.get|readFile|read_file|download)\b",
+    re.IGNORECASE
+)
+
+
 def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
-    """Return True if finding cites proven positive evidence for a specific named backend."""
+    """Return True only if finding cites proven positive evidence tied to the operation being patched.
+
+    If the finding involves non-reentrant domains (model inference, WASM, sessions, GPU, mutexes,
+    database transactions) or the snippet is not an inherently stateless I/O operation, it cannot
+    qualify as proven evidence, and automated patches must be withheld (agents-vorw / hub fleet-4inv).
+    """
     if not isinstance(finding, dict):
         return False
+
     remediation = str(finding.get("remediation", "")).strip()
     if not remediation:
         return False
+
+    # Any mention of non-reentrant or stateful domains disqualifies unconditional evidence
+    full_context = " ".join([
+        str(finding.get("title", "")),
+        str(finding.get("description", "")),
+        remediation,
+        str(finding.get("snippet", "")),
+    ])
+    if _NON_REENTRANT_SUSPECT_PATTERN.search(full_context):
+        return False
+
     has_negation = bool(_NEGATION_PATTERN.search(remediation))
-    if not has_negation and not re.search(r"\b(?:if|whether|assuming)\b", remediation, re.IGNORECASE):
-        if _NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation):
-            return True
-    return False
+    if has_negation or re.search(r"\b(?:if|whether|assuming)\b", remediation, re.IGNORECASE):
+        return False
+
+    # Remediation must name a reentrant backend and cite evidence
+    if not (_NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation)):
+        return False
+
+    # Snippet must be an inherently stateless I/O operation matching the named backend
+    snippet = str(finding.get("snippet", ""))
+    if snippet and not _STATELESS_IO_SNIPPET_PATTERN.search(snippet):
+        return False
+
+    return True
 
 
 def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
