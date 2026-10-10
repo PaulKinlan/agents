@@ -244,9 +244,7 @@ IDENTITY_SOURCES = (
 # `candidate-exact` is: the model's snippet plays no part in choosing them. They fire only where the
 # location is unambiguous AND only when this run reports a single finding at that path, so two rows
 # cannot be handed the same scanner snippet and collapse into one (which would lose a finding).
-IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
-                           "unmatched-rule-location-unique", "unmatched-rule-path-unique")
-
+#
 # Sources that are EVIDENCE that two runs describe the same finding, as opposed to sources that
 # merely say how a row was recognised. `candidate-similar-by-model-snippet` is scanner text SELECTED
 # BY the model's wording, so re-wording can select a different candidate: it is only partly stable,
@@ -254,7 +252,8 @@ IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
 # agents-x9my) - a reader seeing any `candidate-*` name could infer "scanner-derived, therefore
 # trustworthy", which is the inference this vocabulary exists to make impossible. Neither it, nor
 # `model-snippet`, nor `no-candidate-index` is sufficient to close on a Fixed line.
-IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique")
+IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
+                           "unmatched-rule-location-unique", "unmatched-rule-path-unique")
 
 
 def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
@@ -808,14 +807,17 @@ class FindingsStore:
                     delta_stats["fixed"] += 1
                     fixed_items.append(existing)
 
-        # This store was written by an older identity binding, so the rows this run retires are
-        # RE-KEYS rather than resolved findings. Count both shapes - rows moved in place by the
-        # bridge, and rows retired as Fixed because their old key could not be recomputed - and
-        # stamp the store, so the delta can say so once instead of letting triage read the wave as
-        # discoveries (agents-x9my step 2; announcement agents-1ukp).
+        # This store was written by an older identity binding, so the rows it retires may be RE-KEYS
+        # rather than resolved findings. Count only the ones whose stored identity was NOT stable:
+        # a row recognised by the model's wording is a re-key, while a row recognised by the scanner
+        # being genuinely fixed is an ordinary result, and calling that a migration would tell triage
+        # not to look at a real fix. Stamp the store so the announcement happens once
+        # (agents-x9my step 2; announcement agents-1ukp).
         delta_stats["migrated"] = migrated_in_place
         if self.identity_scheme_from < IDENTITY_SCHEME:
-            delta_stats["migrated"] += len(fixed_items)
+            delta_stats["migrated"] += sum(
+                1 for row in fixed_items
+                if row.get("identity_source") not in IDENTITY_STABLE_SOURCES)
         self.data["identity_scheme"] = IDENTITY_SCHEME
 
         self.save()

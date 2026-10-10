@@ -676,6 +676,100 @@ class TestIdentityAttribution(unittest.TestCase):
             stored = json.loads((Path(td) / "target.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["identity_scheme"], findings.IDENTITY_SCHEME)
 
+    def test_the_vocabulary_is_defined_once_and_graded_consistently(self):
+        """The review's P0, and the class it belongs to: a second definition of a constant is
+        invisible to every behavioural test, because the later one simply wins.
+
+        IDENTITY_STABLE_SOURCES was assigned twice (the new tuple above the old one), so every row
+        bound by `unmatched-rule-*` rendered as `(reword-unstable - not evidence on its own)` while
+        the commit message said the opposite. Nothing in the suite could see it: the rendering test
+        only checked `candidate-exact`, and the acceptance test checks fingerprints, not text. So
+        this pins BOTH the shadowing and the per-source grading, over the whole closed vocabulary.
+        """
+        source = (Path(findings.__file__)).read_text(encoding="utf-8")
+        for name in ("IDENTITY_SOURCES", "IDENTITY_STABLE_SOURCES", "IDENTITY_SCHEME"):
+            assignments = [ln for ln in source.splitlines() if ln.startswith(f"{name} =")]
+            self.assertEqual(len(assignments), 1,
+                             f"{name} is assigned {len(assignments)} times: {assignments}")
+
+        # Every source is graded by membership, and the two stable location sources really are
+        # stable - the user-facing contract of step 2.
+        self.assertTrue({"unmatched-rule-location-unique", "unmatched-rule-path-unique"}
+                        <= set(findings.IDENTITY_STABLE_SOURCES))
+        for src in findings.IDENTITY_SOURCES:
+            graded = findings._identity_grade({"identity_source": src})
+            if src in findings.IDENTITY_STABLE_SOURCES:
+                self.assertEqual(graded, "", f"{src} is stable and must render unmarked")
+            else:
+                self.assertIn("reword-unstable", graded, f"{src} must be marked unstable")
+        self.assertEqual(findings._identity_grade({"identity_source": None}), "")
+
+    def test_a_genuine_fix_is_never_announced_as_a_migration(self):
+        """The review's P1: the banner must not tell triage to ignore a real resolution.
+
+        On a store from an older binding, EVERY retired row used to be counted as a re-key, so a row
+        the scanner had identified being genuinely fixed produced 'Do not triage that wave'. Only
+        rows whose stored identity was unstable are re-keys; a stable-identified row disappearing is
+        an ordinary result.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            # A store from an older scheme holding a row the SCANNER identified (candidate-exact).
+            item = self._finding()
+            fp = findings.compute_fingerprint(agent="vuln-discovery", rule_id="scanner-rule",
+                                             path="a.py", snippet="scanner text")
+            record = dict(item, fingerprint=fp, agent="vuln-discovery", identity_source="candidate-exact",
+                          state="new", change="unchanged", first_seen="2026-01-01T00:00:00+00:00",
+                          last_seen="2026-01-01T00:00:00+00:00")
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "findings": {fp: record}}), encoding="utf-8")
+
+            # The run reports NOTHING: the finding is genuinely fixed. Nothing was re-keyed.
+            processed, stats, fixed = self._run(td, [], ci)
+            self.assertEqual((stats["fixed"], stats["migrated"]), (1, 0), stats)
+            self.assertNotIn("Identity migration",
+                             findings._render_delta_report("target", processed, stats, fixed))
+
+    def test_a_re_key_is_still_counted_when_the_run_also_has_a_genuine_fix(self):
+        """The other half of the same rule, and the sharper one: precision must not lose the wave.
+
+        Two rows are retired here. One was identified by the model's wording and reappears under a
+        location key - a re-key, and the wave the banner exists for. The other was identified by the
+        SCANNER and simply disappears - a genuine fix. The count must be 1, not 2, and the banner
+        must still fire: narrowing the count is only correct if the real wave survives it.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        agent = "vuln-discovery"
+        with tempfile.TemporaryDirectory() as td:
+            rekey_fp = findings.compute_fingerprint(agent=agent, rule_id="unclassified", path="a.py",
+                                                   snippet="the wording the model used last time")
+            genuine_fp = findings.compute_fingerprint(agent=agent, rule_id="scanner-rule",
+                                                      path="older.py", snippet="scanner text")
+            base = {"severity": "high", "title": "t", "description": "d", "remediation": "r",
+                    "state": "new", "change": "unchanged",
+                    "first_seen": "2026-01-01T00:00:00+00:00",
+                    "last_seen": "2026-01-01T00:00:00+00:00"}
+            rows = {
+                rekey_fp: dict(base, fingerprint=rekey_fp, agent=agent, rule_id="unclassified",
+                               path="a.py", line_number=2,
+                               snippet="the wording the model used last time",
+                               identity_source="model-snippet"),
+                genuine_fp: dict(base, fingerprint=genuine_fp, agent=agent, rule_id="scanner-rule",
+                                 path="older.py", line_number=9, snippet="scanner text",
+                                 identity_source="candidate-exact"),
+            }
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "findings": rows}), encoding="utf-8")
+
+            processed, stats, fixed = self._run(
+                td, [self._finding(rule_id="model-invented-label", snippet="wording this time")], ci)
+
+            self.assertEqual((stats["new"], stats["fixed"], stats["migrated"]), (1, 2, 1), stats)
+            self.assertIn("Identity migration (one-time)",
+                          findings._render_delta_report("target", processed, stats, fixed))
+
     def test_every_source_in_the_vocabulary_is_reachable(self):
         """EXACT equality, not a subset check: a source that can never be emitted is a defect.
 
