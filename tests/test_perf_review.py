@@ -277,6 +277,13 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(unrelated_backend_evidence))
 
+        # Reviewer P1 finding: mismatched backend evidence (readFile snippet with fetch evidence) must NOT pass
+        mismatched_backend_evidence = {
+            "snippet": "for (const f of files) await readFile(f);",
+            "remediation": "Node.js fetch supports concurrent requests; use Promise.all"
+        }
+        self.assertFalse(has_reentrancy_precondition(mismatched_backend_evidence))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
@@ -671,6 +678,23 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         finding = report["findings"][0]
         self.assertNotIn("proposed_fix_diff", finding)
         self.assertIn("Code patch withheld", finding["remediation"])
+
+    def test_plural_worker_pools_in_custom_rule_is_guarded(self):
+        """Reviewer P1 finding: plural worker pools in custom rule is guarded."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "custom-rule",
+                    "path": "src/service.ts",
+                    "line_number": 10,
+                    "remediation": "Use worker pools for ONNX sessions.",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        finding = report["findings"][0]
+        self.assertTrue(finding["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
 
     def test_mixed_direction_removes_promise_all_but_recommends_concurrency(self):
         """Reviewer P1 finding: diff removing Promise.all while remediation recommends worker pool concurrency is guarded."""

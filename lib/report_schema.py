@@ -170,7 +170,7 @@ _EXECUTION_CONCURRENCY_PATTERN = re.compile(
     r"|\b(?:concurrent|parallel|simultaneous|overlapping)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?|requests?|fetches|queries)\b"
     r"|\bparallel(?:ize|izing|ization)\b"
     r"|\b(?:overlap|overlapping)\s+(?:[^.;\n]{0,40}?\s+)?(?:calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?|requests?|fetches|queries|execution)\b"
-    r"|\b(?:pool\s+of\s+workers?|worker\s+pool|thread\s+pool|web\s+worker|worker_threads)\b"
+    r"|\b(?:pool\s+of\s+workers?|worker\s+pools?|thread\s+pools?|web\s+workers?|worker_threads)\b"
     r"|\b(?:pool\.(?:map|dispatch|exec|run|submit|queue)|pLimit|p-limit)\b",
     re.IGNORECASE
 )
@@ -298,6 +298,22 @@ _RECOGNIZED_STATELESS_CALLS = {
     "download",
 }
 
+_BACKEND_OP_FAMILIES = {
+    "fetch": re.compile(r"\b(?:fetch|http|network|stateless\s+api)\b", re.IGNORECASE),
+    "window.fetch": re.compile(r"\b(?:fetch|http|network|stateless\s+api)\b", re.IGNORECASE),
+    "globalthis.fetch": re.compile(r"\b(?:fetch|http|network|stateless\s+api)\b", re.IGNORECASE),
+    "axios": re.compile(r"\b(?:axios|http|network|stateless\s+api)\b", re.IGNORECASE),
+    "axios.get": re.compile(r"\b(?:axios|http|network|stateless\s+api)\b", re.IGNORECASE),
+    "https.get": re.compile(r"\b(?:https?|network|http)\b", re.IGNORECASE),
+    "http.get": re.compile(r"\b(?:https?|network|http)\b", re.IGNORECASE),
+    "download": re.compile(r"\b(?:download|network|http)\b", re.IGNORECASE),
+    "readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
+    "read_file": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
+    "fs.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
+    "fs.promises.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
+    "fspromises.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
+}
+
 
 def _is_stateless_call(call: str) -> bool:
     """Check if an invoked identifier is an exact recognized stateless I/O API."""
@@ -415,14 +431,21 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     if not (_NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation)):
         return False
 
-    # Every awaited operation in the snippet must be an inherently stateless I/O call.
-    # An empty snippet lacks operation evidence and cannot prove backend reentrancy safety (Reviewer P1).
+    # Every awaited operation in the snippet must be an inherently stateless I/O call
+    # matching the evidenced backend family (Reviewer P1).
+    # An empty snippet lacks operation evidence and cannot prove backend reentrancy safety.
     snippet = str(finding.get("snippet", "")).strip()
     if not snippet:
         return False
     awaited_calls = _extract_awaited_calls(snippet)
     if awaited_calls is None or not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
         return False
+
+    # The named backend evidence must specifically match the family of the awaited operations
+    for call in awaited_calls:
+        pat = _BACKEND_OP_FAMILIES.get(call)
+        if not pat or not pat.search(remediation):
+            return False
 
     # If proposed_fix_diff is present, every parallelized call inside it must also be stateless I/O
     diff = str(finding.get("proposed_fix_diff", ""))
