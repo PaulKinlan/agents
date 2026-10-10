@@ -2781,14 +2781,27 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
         "    'pins_content': Path(pins).read_text() if pins and Path(pins).exists() else '',\n"
         "}))\n")
 
-    def _git_pin_lines(self):
-        """A path+sha256 pin for the harness PATH's real git (the dispatcher's host-side
-        pre-pass verification, agents-28nn round 6, refuses a present-but-unpinned one)."""
+    def _present_trusted_prepass_pin_lines(self):
+        """Path+sha256 pins for every TRUSTED tool in PREPASS_EXECUTABLES that is PRESENT
+        on the harness PATH (agents-28nn round 6): the dispatcher verifies the pre-pass's
+        whole trusted-tool set host-side on EVERY path — exactly what the sandboxed path's
+        bind boundary does at wrap time (lib/sandbox.py _executable_binds verify_pins every
+        pinned tool) — so a present-but-unauthenticatable tool refuses the run and these
+        pins must exist. Genuinely ABSENT tools are skipped (the script fails closed or
+        takes its documented fallback, as on the sandboxed path).
+        MUST be called BEFORE planting any fake on the harness PATH: a pin IS a grant, so
+        the pinned path must be the real system binary, never the plant."""
         import hashlib
-        git = shutil.which("git", path=f"{self.bin}{os.pathsep}/usr/bin:/bin")
-        self.assertIsNotNone(git, "the harness PATH must carry a git to pin")
-        digest = hashlib.sha256(Path(git).read_bytes()).hexdigest()
-        return f"git:\n  path: {git}\n  sha256: {digest}\n"
+        from lib.sandbox import PREPASS_EXECUTABLES
+        from lib.tool_pins import TRUSTED_TOOLS
+        lines = []
+        for name in sorted(set(PREPASS_EXECUTABLES) & set(TRUSTED_TOOLS)):
+            tool = shutil.which(name, path=f"{self.bin}{os.pathsep}/usr/bin:/bin")
+            if tool is None:
+                continue
+            digest = hashlib.sha256(Path(tool).read_bytes()).hexdigest()
+            lines.append(f"{name}:\n  path: {tool}\n  sha256: {digest}\n")
+        return "".join(lines)
 
     def test_a_child_rewriting_the_pins_cannot_redirect_the_credential_handoff(self):
         """agents-28nn round 6, review P1 — the effective-pins TOCTOU on the UNSANDBOXED
@@ -2820,7 +2833,7 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
         digest = hashlib.sha256(stub.read_bytes()).hexdigest()
         host_pins = self.root / "tools.pins.yaml"
         host_pins.write_text(
-            f"pi:\n  path: {stub}\n  sha256: {digest}\n" + self._git_pin_lines(),
+            f"pi:\n  path: {stub}\n  sha256: {digest}\n" + self._present_trusted_prepass_pin_lines(),
             encoding="utf-8")
         fake = self.bin / "git"
         fake.write_text("#!/bin/sh\necho PWNED\n", encoding="utf-8")
@@ -2872,17 +2885,17 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
         self.trusted_target("trusted")
         # Pin the stub engine by path + content; OMIT bwrap so the probe fails closed and
         # the trusted-target opt-in takes the UNSANDBOXED path on this sandboxed host.
-        # git must ALSO be pinned (agents-28nn round 6): the dispatcher now verifies the
-        # pre-pass's whole trusted-tool set host-side on EVERY path, and a
-        # present-but-unauthenticatable tool refuses the run — exactly what the sandboxed
-        # path's bind boundary does at wrap time.
+        # Every PRESENT trusted pre-pass tool must ALSO be pinned (agents-28nn round 6):
+        # the dispatcher now verifies the pre-pass's whole trusted-tool set host-side on
+        # EVERY path, and a present-but-unauthenticatable tool refuses the run — exactly
+        # what the sandboxed path's bind boundary does at wrap time.
         import hashlib
         stub = self.bin / "pi"
         digest = hashlib.sha256(stub.read_bytes()).hexdigest()
         host_pins = self.root / "tools.pins.yaml"
         host_pins.write_text(
             f"pi:\n  path: {stub}\n  sha256: {digest}\n"
-            + self._git_pin_lines(),
+            + self._present_trusted_prepass_pin_lines(),
             encoding="utf-8")
         res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1",
                                   "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
