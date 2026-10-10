@@ -241,23 +241,26 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
             if line.startswith("-") and not line.startswith("---")
         )
 
-    # If added diff lines specifically introduce concurrency, it is a concurrency recommendation
+    # 1. If added diff lines specifically introduce concurrency, it is a concurrency recommendation
     if _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
         return True
 
-    # If diff removes concurrency to restore serial execution, it is NOT a concurrency recommendation
-    if _EXECUTION_CONCURRENCY_PATTERN.search(removed_diff) and not _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
-        return False
-
-    # Classify the direction of the remediation: strip negative cessation clauses (e.g. "stop using Promise.all")
-    # and serial advocacy clauses (e.g. "run tasks sequentially") to check if remaining text advocates concurrency.
+    # 2. Check for affirmative concurrency recommendation in remediation (Reviewer P1).
+    # Strip negative cessation clauses (e.g. "stop using Promise.all") and serial advocacy clauses
+    # (e.g. "run tasks sequentially") to check if any remaining text advocates concurrency.
     stripped_remediation = _STOP_CONCURRENCY_PATTERN.sub(" ", remediation)
     stripped_remediation = _ADVOCATES_SERIAL_PATTERN.sub(" ", stripped_remediation)
-    has_serial_direction = bool(_STOP_CONCURRENCY_PATTERN.search(remediation) or _ADVOCATES_SERIAL_PATTERN.search(remediation))
     has_remaining_concurrency = bool(_EXECUTION_CONCURRENCY_PATTERN.search(stripped_remediation))
-
     if has_remaining_concurrency:
         return True
+
+    # 3. Only after confirming there is NO affirmative concurrency recommendation in added diff
+    # or remediation, check for serial restoration exemptions:
+    # - If diff removes concurrency to restore serial execution, exempt it.
+    if _EXECUTION_CONCURRENCY_PATTERN.search(removed_diff):
+        return False
+    # - If remediation directs serial execution or cessation of concurrency, exempt it.
+    has_serial_direction = bool(_STOP_CONCURRENCY_PATTERN.search(remediation) or _ADVOCATES_SERIAL_PATTERN.search(remediation))
     if has_serial_direction:
         return False
 
