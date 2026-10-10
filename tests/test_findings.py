@@ -909,6 +909,32 @@ class TestIdentityAttribution(unittest.TestCase):
             self.assertNotIn("313b2133ae08c979", store_file.read_text(),
                              "the raw id must not be persisted: the fingerprint carries identity")
 
+    def test_a_non_scalar_line_number_cannot_crash_the_run(self):
+        """The redaction contract is fail-closed, not crash (agents-q0mt).
+
+        Found by the FULL gate, not the fast one: a dict line_number is unhashable and identity
+        binding uses the line as a dict key, so process_run exited 1 with TypeError: unhashable type
+        instead of coercing. Every lookup must MISS for a non-scalar (see _hashable_line).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            processed, stats, _ = self._run(td, [self._finding(line_number={"line": 12})], None)
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0]["identity_source"], "no-candidate-index")
+        self.assertEqual(stats["new"], 1)
+
+    def test_a_non_scalar_line_number_still_binds_by_rule_without_crashing(self):
+        """The second guarded site: identity_snippet_binding hashes the line too.
+
+        Guarding only the counting loop in process_run would have moved the crash one call later.
+        A non-scalar line cannot match a location, but the rule-keyed binding is still available and
+        must be used rather than lost.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text", "candidate_id": "c6cab6881fc8535e"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [self._finding(line_number=["nope"])], ci)
+        self.assertEqual(processed[0]["identity_source"], "candidate-id")
+
     def test_every_source_in_the_vocabulary_is_reachable(self):
         """EXACT equality, not a subset check: a source that can never be emitted is a defect.
 

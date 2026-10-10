@@ -51,8 +51,11 @@ while IFS= read -r f; do
       # The findings store and the delta renderer. Its own suite is not enough: the store's record
       # and stats shape is what the sink/record layers assert, and a change here broke
       # tests/test_sinks' exact stats expectation while the generic test_findings-only mapping ran
-      # (agents-x9my step 2).
-      mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py"
+      # (agents-x9my step 2). tests/test_redaction.py is here for the same reason, learned again the
+      # hard way: the fast gate passed 291 tests while the FULL gate caught a TypeError on a
+      # non-scalar line_number, because the redaction contract suite was not in this mapping
+      # (agents-q0mt) - the contract is fail-closed, so it is a real consumer of this module.
+      mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py tests/test_redaction.py"
       ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.

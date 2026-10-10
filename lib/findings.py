@@ -128,6 +128,23 @@ def compute_fingerprint(agent: str, rule_id: str, path: str, snippet: str) -> st
     key = f"{agent}:{rule_id}:{norm_path}:{norm_snippet}".encode("utf-8")
     return hashlib.sha256(key).hexdigest()
 
+def _hashable_line(value: Any) -> Any:
+    """The line number as a dict key, or None when it cannot be one (agents-q0mt).
+
+    The redaction contract is FAIL-CLOSED on non-scalar fields: a malformed value is coerced or
+    dropped, never crashed on. A line_number that arrives as a dict or list used to reach the
+    location counting below and raise `TypeError: unhashable type`, exiting the CLI 1 - the same
+    treatment the landed unknown-line handling (agents-fy26) gives a line the scanner could not
+    name. Returning None makes every lookup miss, which is the fail-closed outcome: the finding
+    keeps the model's identity rather than being dropped or crashing the run.
+    """
+    try:
+        hash(value)
+    except TypeError:
+        return None
+    return value
+
+
 def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     """The scanner's authoritative rule ids and paths, for binding model output (agents-nha).
 
@@ -176,6 +193,10 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
+        # Normalised ONCE, because this value is a dict key in five places below: a malformed
+        # artefact carrying a dict or list here would raise TypeError and take the whole run down,
+        # which is the same failure the item side had (see _hashable_line).
+        cand_line = _hashable_line(candidate.get("line_number"))
         rule_id = candidate.get("rule_id")
         if isinstance(rule_id, str) and rule_id.strip():
             rule_ids.add(rule_id.strip())
@@ -185,16 +206,16 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
         snippet = candidate.get("snippet")
         if isinstance(rule_id, str) and path and isinstance(snippet, str) and snippet.strip():
             key = (rule_id.strip(), path)
-            snippets_at[key + (candidate.get("line_number",),)] = snippet
+            snippets_at[key + (cand_line,)] = snippet
             snippets_in.setdefault(key, [])
             if snippet not in snippets_in[key]:
                 snippets_in[key].append(snippet)
-            by_path_at.setdefault((path, candidate.get("line_number",)), []).append(snippet)
+            by_path_at.setdefault((path, cand_line), []).append(snippet)
             by_path.setdefault(path, []).append(snippet)
         raw_match = candidate.get("raw_match")
         if isinstance(rule_id, str) and path and isinstance(raw_match, str) and raw_match.strip():
             key = (rule_id.strip(), path)
-            raw_matches_at[key + (candidate.get("line_number",),)] = raw_match
+            raw_matches_at[key + (cand_line,)] = raw_match
             raw_matches_in.setdefault(key, [])
             if raw_match not in raw_matches_in[key]:
                 raw_matches_in[key].append(raw_match)
@@ -202,11 +223,11 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
         if isinstance(rule_id, str) and path and isinstance(candidate_id, str) and candidate_id.strip():
             cid = candidate_id.strip()
             key = (rule_id.strip(), path)
-            ids_at[key + (candidate.get("line_number",),)] = cid
+            ids_at[key + (cand_line,)] = cid
             ids_in.setdefault(key, [])
             if cid not in ids_in[key]:
                 ids_in[key].append(cid)
-            ids_by_path_at.setdefault((path, candidate.get("line_number",)), []).append(cid)
+            ids_by_path_at.setdefault((path, cand_line), []).append(cid)
             ids_by_path.setdefault(path, []).append(cid)
         severity = candidate.get("severity")
         if isinstance(rule_id, str) and path and isinstance(severity, str) and severity.strip():
@@ -327,7 +348,9 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
     key = (rule_id.strip(), norm_path)
     at = candidate_index.get("snippets_at", {})
     ids_at = candidate_index.get("ids_at", {})
-    line = item.get("line_number")
+    # Guarded: every lookup below hashes this value, and a non-scalar one must miss rather than
+    # raise (see _hashable_line).
+    line = _hashable_line(item.get("line_number"))
     if key + (line,) in at:
         if key + (line,) in ids_at:
             return ids_at[key + (line,)], "candidate-id"
@@ -387,7 +410,8 @@ def identity_raw_match(item: Dict[str, Any], rule_id: Any, path: Any,
         return item.get("raw_match")
     key = (rule_id.strip(), normalize_path(path))
     at = candidate_index.get("raw_matches_at", {})
-    line = item.get("line_number")
+    # Guarded for the same reason as identity_snippet_binding: this value is hashed by the lookup.
+    line = _hashable_line(item.get("line_number"))
     matched = at.get(key + (line,))
     if matched is not None:
         return matched
@@ -726,7 +750,7 @@ class FindingsStore:
                 norm = normalize_path(item.get("path"))
                 if norm:
                     path_counts[norm] = path_counts.get(norm, 0) + 1
-                    loc = (norm, item.get("line_number"))
+                    loc = (norm, _hashable_line(item.get("line_number")))
                     location_counts[loc] = location_counts.get(loc, 0) + 1
 
         # 1. Process observed findings
@@ -762,7 +786,7 @@ class FindingsStore:
             # The sharper guard, used only where the emitted candidate id is consulted: a finding is
             # the only one at its own (path, line), so the candidate there is unambiguously its own.
             location_unambiguous = bool(norm_path) and location_counts.get(
-                (norm_path, item.get("line_number")), 0) == 1
+                (norm_path, _hashable_line(item.get("line_number"))), 0) == 1
             identity_snip, identity_source = identity_snippet_binding(
                 item, rule_id, path, candidate_index, path_unambiguous=path_unambiguous,
                 location_unambiguous=location_unambiguous)
