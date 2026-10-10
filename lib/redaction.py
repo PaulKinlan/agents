@@ -295,6 +295,14 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     the notes stay in the local run artifact for whoever has to rotate the credential.
     """
     published = dict(finding)
+    # The candidate id is an INTERNAL identity key, and it is a digest of the matched text itself,
+    # so publishing it hands out a confirmation oracle: anyone holding it together with the rule,
+    # path and ordinal could test a guess at the line the scanner matched - and for a credential
+    # finding, a guess at the credential. It is scanner-owned rather than model prose, so this is
+    # not a masking case under the checklist; it is withheld outright, the same shape as
+    # model_rule_id's withholding branches (agents-p8og). The id stays in the LOCAL store, which is
+    # where the second-order stations read it, and is never a publication channel.
+    published.pop("candidate_id", None)
     agent = str(finding.get("agent") or "")
     literals = matched_literals(finding)
     credential = is_credential_finding(finding)
@@ -359,6 +367,30 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     return published
+
+
+def redact_for_storage(finding: Dict[str, Any]) -> Dict[str, Any]:
+    """The at-rest scrubber: `redact_finding` PLUS what the LOCAL store must keep (agents-p8og).
+
+    There are two boundaries and they are not the same one:
+      * `redact_finding` protects everything that LEAVES this machine (tracker sinks, the delta
+        report, the step summary, scanner stdout). `candidate_id` is withheld there, because it is a
+        digest of the matched text: anyone holding it with the rule, path and ordinal can test a
+        guess at the matched line, and for a credential finding a guess at the credential.
+      * this function protects the store AT REST. The store is local and gitignored, and it is the
+        only place a second-order station can read a candidate's emitted identity, so the id has to
+        survive here or the persistence is pointless.
+
+    Collapsing the two was a real defect, caught in review: putting the drop in `redact_finding`
+    also stripped the id on the way TO DISK, because save() calls this path - so the branch stored
+    nothing and every test that asserted the in-memory return value still passed. Hence a named
+    function: the two policies can now differ on purpose and each has a test, which is also what the
+    comment at the top of this module has referred to since agents-4zg without ever having it.
+    """
+    stored = redact_finding(finding)
+    if finding.get("candidate_id"):
+        stored["candidate_id"] = finding["candidate_id"]
+    return stored
 
 
 def redact_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
