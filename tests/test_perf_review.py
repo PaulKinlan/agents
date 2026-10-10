@@ -298,6 +298,13 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(same_sentence_mixed_backend))
 
+        # Reviewer P1 finding: mismatched network API (axios.get snippet with fetch evidence) must NOT pass
+        mismatched_network_api = {
+            "snippet": "for (const url of urls) await axios.get(url);",
+            "remediation": "Node.js fetch supports concurrent requests; use Promise.all for axios.get calls"
+        }
+        self.assertFalse(has_reentrancy_precondition(mismatched_network_api))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
@@ -673,6 +680,22 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes4 = normalize_report(report4)
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes4))
         self.assertIn("proposed_fix_diff", report4["findings"][0])
+
+        # Case E: Reviewer P1 finding - "Avoid parallelizing model inference; use serial execution"
+        report5 = {
+            "findings": [
+                {
+                    "rule_id": "concurrency-hazard",
+                    "path": "src/infer.ts",
+                    "line_number": 60,
+                    "remediation": "Avoid parallelizing model inference; use serial execution.",
+                    "proposed_fix_diff": "--- a/infer.ts\n+++ b/infer.ts\n@@ -1,2 +1,2 @@\n- await Promise.all(models.map(m => m.run()));\n+ for (const m of models) await m.run();",
+                }
+            ]
+        }
+        notes5 = normalize_report(report5)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes5))
+        self.assertIn("proposed_fix_diff", report5["findings"][0])
 
     def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
         """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""
