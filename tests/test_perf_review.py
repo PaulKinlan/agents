@@ -476,6 +476,44 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertNotIn("proposed_fix_diff", finding7)
         self.assertIn("Code patch withheld", finding7["remediation"])
 
+        # Case H: Reviewer finding - optional chaining call job.run?.() is inspected and rejected
+        report8 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/jobs.ts",
+                    "line_number": 20,
+                    "snippet": "for (const job of jobs) await fetch(url);",
+                    "remediation": "The Node.js fetch backend is proven reentrant and thread-safe; use Promise.all.",
+                    "proposed_fix_diff": "--- a/jobs.ts\n+++ b/jobs.ts\n@@ -1,2 +1,2 @@\n- for (const job of jobs) await fetch(url);\n+ await Promise.all(jobs.map(async job => { await fetch(url); await job.run?.(); }));",
+                }
+            ]
+        }
+        notes8 = normalize_report(report8)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes8))
+        finding8 = report8["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding8)
+        self.assertIn("Code patch withheld", finding8["remediation"])
+
+        # Case I: Reviewer finding - un-inspectable computed call syntax fails closed
+        report9 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/jobs.ts",
+                    "line_number": 25,
+                    "snippet": "for (const job of jobs) await fetch(url);",
+                    "remediation": "The Node.js fetch backend is proven reentrant and thread-safe; use Promise.all.",
+                    "proposed_fix_diff": "--- a/jobs.ts\n+++ b/jobs.ts\n@@ -1,2 +1,2 @@\n- for (const job of jobs) await fetch(url);\n+ await Promise.all(jobs.map(async (job, i) => { await fetch(url); await jobs[i]?.(); }));",
+                }
+            ]
+        }
+        notes9 = normalize_report(report9)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes9))
+        finding9 = report9["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding9)
+        self.assertIn("Code patch withheld", finding9["remediation"])
+
     def test_serial_execution_restoration_patch_retained(self):
         """Reviewer P2 finding: diffs removing Promise.all to restore serial execution are not guarded."""
         report = {

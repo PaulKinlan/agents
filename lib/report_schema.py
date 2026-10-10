@@ -259,9 +259,12 @@ _NON_REENTRANT_SUSPECT_PATTERN = re.compile(
 _STATELESS_IO_CALLS = {"fetch", "axios", "readfile", "read_file", "https.get", "http.get", "download"}
 
 
+_COMPUTED_OR_INDIRECT_CALL = re.compile(r"\]\s*(?:\?\.)?\s*\(|\)\s*(?:\?\.)?\s*\(")
+
+
 def _is_stateless_call(call: str) -> bool:
     """Check if an invoked identifier is an inherently stateless I/O call."""
-    c = call.lower().strip()
+    c = call.lower().replace("?.", ".").strip()
     return c in _STATELESS_IO_CALLS or ("." in c and c.split(".")[-1] in _STATELESS_IO_CALLS)
 
 
@@ -273,7 +276,7 @@ _CONCURRENCY_WRAPPERS = {
 
 def _is_concurrency_wrapper(call: str) -> bool:
     """Check if an invoked identifier is an iteration / concurrency wrapper (map, Promise.all)."""
-    c = call.lower().strip()
+    c = call.lower().replace("?.", ".").strip()
     return c in _CONCURRENCY_WRAPPERS or ("." in c and c.split(".")[-1] in _CONCURRENCY_WRAPPERS)
 
 
@@ -296,29 +299,44 @@ def _strip_comments_safely(code: str) -> str:
     return _STRING_OR_COMMENT_PATTERN.sub(_repl, code)
 
 
-def _extract_invoked_calls(code: str) -> Set[str]:
-    """Extract function/method identifiers invoked in executable code (ignoring comments)."""
-    calls: Set[str] = set()
+def _extract_invoked_calls(code: str) -> Optional[Set[str]]:
+    """Extract function/method identifiers invoked in executable code (ignoring comments).
+
+    Returns None if the code contains un-inspectable call syntax (e.g. computed
+    invocation like obj[fn]() or chained calls like getFn()()), indicating that
+    the caller must fail closed.
+    """
     if not code:
-        return calls
+        return set()
     clean = _strip_comments_safely(code)
-    for m in re.finditer(r"\b([A-Za-z0-9_$.]+)\s*\(", clean):
+    # Fail closed on computed invocations or chained invocation syntax
+    if _COMPUTED_OR_INDIRECT_CALL.search(clean):
+        return None
+
+    calls: Set[str] = set()
+    for m in re.finditer(r"\b([A-Za-z0-9_$.]+(?:\?\.[A-Za-z0-9_$]+)*)\s*(?:\?\.)?\s*\(", clean):
         func = m.group(1).lower()
         calls.add(func)
     # Also extract callback arguments like map(readFile) or map(fetch)
-    for m in re.finditer(r"\bmap\s*\(\s*([A-Za-z0-9_$.]+)\s*\)", clean):
+    for m in re.finditer(r"\bmap\s*(?:\?\.)?\s*\(\s*([A-Za-z0-9_$.]+(?:\?\.[A-Za-z0-9_$]+)*)\s*\)", clean):
         cb = m.group(1).lower()
         calls.add(cb)
     return calls
 
 
-def _extract_awaited_calls(code: str) -> Set[str]:
-    """Extract function/method identifiers directly awaited in executable code (ignoring comments)."""
-    calls: Set[str] = set()
+def _extract_awaited_calls(code: str) -> Optional[Set[str]]:
+    """Extract function/method identifiers directly awaited in executable code (ignoring comments).
+
+    Returns None if the code contains un-inspectable call syntax.
+    """
     if not code:
-        return calls
+        return set()
     clean = _strip_comments_safely(code)
-    for m in re.finditer(r"\bawait\s+([A-Za-z0-9_$.]+)\s*\(", clean):
+    if _COMPUTED_OR_INDIRECT_CALL.search(clean):
+        return None
+
+    calls: Set[str] = set()
+    for m in re.finditer(r"\bawait\s+([A-Za-z0-9_$.]+(?:\?\.[A-Za-z0-9_$]+)*)\s*(?:\?\.)?\s*\(", clean):
         func = m.group(1).lower()
         calls.add(func)
     return calls
@@ -361,14 +379,17 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     snippet = str(finding.get("snippet", ""))
     if snippet:
         awaited_calls = _extract_awaited_calls(snippet)
-        if not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
+        if awaited_calls is None or not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
             return False
 
     # If proposed_fix_diff is present, every parallelized call inside it must also be stateless I/O
     diff = str(finding.get("proposed_fix_diff", ""))
     if diff:
         added_lines = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
-        diff_calls = {c for c in _extract_invoked_calls(added_lines) if not _is_concurrency_wrapper(c)}
+        extracted = _extract_invoked_calls(added_lines)
+        if extracted is None:
+            return False
+        diff_calls = {c for c in extracted if not _is_concurrency_wrapper(c)}
         if not diff_calls or any(not _is_stateless_call(c) for c in diff_calls):
             return False
 
