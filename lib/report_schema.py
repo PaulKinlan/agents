@@ -214,7 +214,9 @@ _STOP_CONCURRENCY_PATTERN = re.compile(
 )
 
 _ADVOCATES_SERIAL_PATTERN = re.compile(
-    r"\b(?:restore|prefer|keep|enforce|switch\s+to|use|run|execute|process|dispatch|await)\b[^.;\n]{0,40}?\b(?:serial(?:ly)?|sequential(?:ly)?|in\s+series|one\s+(?:by|at\s+a)\s+time)\b",
+    r"\b(?:restore|prefer|keep|enforce|switch\s+to|use|run|execute|process|dispatch|await|setup|set\s+up)\s+"
+    r"(?:(?!(?:concurrent|parallel|simultaneous|overlap|promise|gather|but)\b)[a-zA-Z0-9_.-]+\s+){0,3}"
+    r"(?:serial(?:ly)?|sequential(?:ly)?|in\s+series|one\s+(?:by|at\s+a)\s+time)\b",
     re.IGNORECASE
 )
 
