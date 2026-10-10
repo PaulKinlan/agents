@@ -97,6 +97,38 @@ class TestPrFixerUnknownLine(unittest.TestCase):
             self.assertEqual(bundle["fixable_candidates_count"], 3,
                              "a finding was dropped, not windowed")
 
+    def test_a_bound_row_carries_the_persisted_candidate_id_onto_the_bundle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+
+            bundle = self._run(sandbox, target, [self._finding(candidate_id="c6cab6881fc8535e")])
+
+            self.assertEqual(bundle["candidates"][0]["candidate_id"], "c6cab6881fc8535e")
+
+    def test_an_unbound_row_omits_the_key_and_is_carried_as_absent(self):
+        # The ORDINARY case, not the edge: save() routes the record through
+        # redact_for_storage, which pops candidate_id and restores it only when truthy
+        # (lib/redaction.py:305, :390-392), so a row with no scanner binding reaches disk with
+        # the KEY ABSENT - not null. This store fixture is that shape, and the station must read it
+        # with .get rather than by index or it raises KeyError here. The other fields are asserted
+        # too, so a rebuild that dropped the whole record could not pass this test silently.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            unbound = self._finding(rule_id="unbound-row")
+            self.assertNotIn("candidate_id", unbound, "this test is only load-bearing without the key")
+
+            bundle = self._run(sandbox, target, [unbound])
+
+            candidate = bundle["candidates"][0]
+            self.assertIsNone(candidate["candidate_id"],
+                              "an absent id must not be fabricated into a value")
+            self.assertEqual(bundle["fixable_candidates_count"], 1)
+            self.assertEqual(candidate["rule_id"], "unbound-row")
+            self.assertEqual(candidate["fingerprint"], "a" * 12)
+            self.assertEqual(candidate["path"], "src/app.js")
+            self.assertEqual(candidate["line_number"], 2)
+            self.assertIn("2: const b = 2;", candidate["source_context"])
+
 
 if __name__ == "__main__":
     unittest.main()

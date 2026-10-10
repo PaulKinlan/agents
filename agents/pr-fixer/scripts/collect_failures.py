@@ -67,6 +67,13 @@ def load_active_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
             "fingerprint": rec.get("fingerprint", "")[:12],
             "agent": rec.get("agent"),
             "rule_id": rec.get("rule_id"),
+            # Scanner-owned identity, copied rather than reconstructed (agents-o2to). Read with .get
+            # and never by index: save() pops the key and restores it only when truthy
+            # (lib/redaction.py:305, :390-392), so on disk an UNBOUND row omits the key entirely
+            # while a bound row carries it - "absent" and None are the same state here, and absent
+            # is the common case for any store that predates the id scheme. Indexing would raise
+            # KeyError on that ordinary row.
+            "candidate_id": rec.get("candidate_id"),
             "severity": rec.get("severity", "medium"),
             "path": rel_path,
             "line_number": line_no,
