@@ -205,6 +205,16 @@ def _resolve_common_git_dir(path: Path) -> Optional[Path]:
 FACTORY_COMMON_GIT_DIR = _resolve_common_git_dir(FACTORY_ROOT)
 
 
+def _resolve_enclosing_git_dir(path: Path) -> Optional[Path]:
+    """Find the common git dir of the nearest enclosing repository by walking up parents."""
+    current = path.resolve()
+    for p in [current, *current.parents]:
+        git_dir = _resolve_common_git_dir(p)
+        if git_dir is not None:
+            return git_dir
+    return None
+
+
 def is_factory_self_target(target_dir: Path) -> bool:
     """Determine whether the target repository is the Software Factory itself.
 
@@ -216,23 +226,21 @@ def is_factory_self_target(target_dir: Path) -> bool:
     """
     try:
         resolved = target_dir.resolve()
-        target_common = _resolve_common_git_dir(resolved)
+        enclosing_common = _resolve_enclosing_git_dir(resolved)
 
-        # P3 fix (agents-760p): Decide git repository identity before path containment.
-        # If the target carries its own repository identity (a .git dir or worktree gitdir),
-        # it is self ONLY IF that identity matches the factory's. If it carries a different
-        # common git dir, it is a foreign repository that merely lives inside or beside the
-        # factory tree; fail toward third-party immediately so path containment cannot rescue it.
-        if target_common is not None:
-            if FACTORY_COMMON_GIT_DIR is not None and target_common == FACTORY_COMMON_GIT_DIR:
+        # P3 fix (agents-i4ra): Resolve git repository identity via the nearest enclosing
+        # repository. A directory inside a repository belongs to that repository.
+        # If the target (or any parent directory) carries a git repository identity,
+        # it is self ONLY IF that enclosing repository matches the factory's.
+        # If it belongs to a foreign repository (even one nested inside the factory tree),
+        # fail toward third-party immediately so no path containment can rescue it.
+        if enclosing_common is not None:
+            if FACTORY_COMMON_GIT_DIR is not None and enclosing_common == FACTORY_COMMON_GIT_DIR:
                 return True
             return False
 
-        # When the target carries NO repository identity of its own (e.g. a plain subdirectory
-        # of the factory or a factory worktree with no nested .git), path containment applies
-        # so factory components and stations continue to be recognized as self.
-        if resolved == FACTORY_ROOT.resolve() or FACTORY_ROOT.resolve() in resolved.parents:
-            return True
+        # When no git identity can be established (e.g. non-git directory or extracted tarball),
+        # fail toward third-party per contract: return False.
     except Exception:
         pass
     return False
