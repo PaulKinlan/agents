@@ -123,6 +123,34 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Target Authoritative TM\nSection 1...\n")
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_bootstrap_without_threat_model_synthesizes_initial_document(self):
+        """agents-tawg: when bootstrapping a target without THREAT_MODEL.md,
+        factory synthesizes an initial document from summary and findings if omitted."""
+        target_dir = self.box.target
+        local_tm = target_dir / "THREAT_MODEL.md"
+        if local_tm.exists():
+            local_tm.unlink()
+        findings = [{
+            "rule_id": "tm-open-socket",
+            "path": "server.py",
+            "line_number": 10,
+            "snippet": "listen(0.0.0.0)",
+            "severity": "high",
+            "title": "Unauthenticated external listener",
+            "description": "Listens on all interfaces without authentication",
+            "remediation": "Bind to loopback"
+        }]
+        report = {"summary": "Initial audit of server architecture", "target": "target", "findings": findings}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertTrue(store_tm.exists())
+        content = store_tm.read_text(encoding="utf-8")
+        self.assertIn("# THREAT MODEL: target", content)
+        self.assertIn("Initial audit of server architecture", content)
+        self.assertIn("Unauthenticated external listener", content)
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_prompt_carries_the_declared_schema(self):
         self.schema_agent("threat-model", tm_output([]))
         res = self.box.run_agent("threat-model")

@@ -1613,6 +1613,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # If the agent produced THREAT_MODEL.md content, save it. If the agent returned summary
     # and findings on a target that already carries an authoritative THREAT_MODEL.md, sync that
     # document to the findings store so downstream stations retain context (agents-tawg review).
+    # If bootstrapping a target with neither an existing document nor a model-supplied document,
+    # synthesize a structured initial document from summary and findings so the target is never
+    # left without a THREAT_MODEL.md.
     tm_doc = report.get("threat_model_markdown")
     if not tm_doc and agent_name == "threat-model":
         for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md"]:
@@ -1622,6 +1625,30 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     break
                 except OSError:
                     pass
+        if not tm_doc:
+            summary_text = report.get("summary", "Initial threat model bootstrap.")
+            findings_list = report.get("findings", [])
+            findings_md = ""
+            if findings_list:
+                findings_md = "\n### Identified Architectural Gaps\n" + "\n".join(
+                    f"- **[{f.get('severity', 'info').upper()}] {f.get('title', 'Gap')}** ({f.get('path', 'unknown')}): {f.get('description', '')}"
+                    for f in findings_list if isinstance(f, dict)
+                )
+            tm_doc = (
+                f"# THREAT MODEL: {target_name}\n\n"
+                f"## 1. System Overview & Summary\n{summary_text}\n"
+                f"{findings_md}\n\n"
+                f"## 2. Trust Boundaries & Actors\n"
+                f"- Primary boundary: Host/Operator vs Untrusted Inputs\n\n"
+                f"## 3. Explicitly Trusted (Non-Threats)\n"
+                f"- Local developer environment and test suites.\n\n"
+                f"## 4. Untrusted Attack Surfaces\n"
+                f"- External network inputs, third-party packages, and user-supplied data.\n\n"
+                f"## 5. Security Invariants\n"
+                f"- Maintain strict input validation and least-privilege execution.\n\n"
+                f"## 6. Accepted Risks\n"
+                f"- None documented at bootstrap.\n"
+            )
     if tm_doc:
         tm_run_file = run_dir / "THREAT_MODEL.md"
         _write_run_artifact(tm_run_file, tm_doc)
