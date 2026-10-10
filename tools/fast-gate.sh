@@ -28,7 +28,8 @@ cd "$ROOT"
 BASE="${GIT_BASE:-origin/main}"
 
 # The branch delta. Empty when the base is absent/unknown -> smoke fallback.
-changed="$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)"
+# Override changed files directly with GIT_CHANGED (used by tests).
+changed="${GIT_CHANGED:-$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)}"
 
 run=""
 mapped=""
@@ -172,6 +173,10 @@ while IFS= read -r f; do
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;
+    tools/fast-gate.sh)
+      # Fast gate mapping verification test (agents-vt7w).
+      mapped="$mapped tests/test_fast_gate_mapping.py"
+      ;;
     docs/*)
       # Documentation pages snapshot and publishing scope (agents-vt7w).
       mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py"
@@ -195,6 +200,12 @@ done <<< "$changed"
 
 # Union, dedupe, deterministic order.
 files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort || true)"
+
+# Dry-run support for testing mapping resolution without invoking unittest.
+if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
+  printf '%s\n' $files
+  exit 0
+fi
 
 # Fall back to a bounded smoke subset when nothing maps (docs-only / config-only / new tools).
 if [ -z "$files" ]; then
