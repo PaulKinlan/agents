@@ -286,7 +286,8 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.stats(), {"new": 0, "regressed": 0, "fixed": 0,
                                         "unchanged": 1, "suppressed": 0,
-                                        "false_positive": 0, "migrated": 0})
+                                        "false_positive": 0, "migrated": 0,
+                                        "fixed_unanchored": 0})
         self.assertEqual(len(self.store()["findings"]), 1)
 
     def test_duplicate_input_is_one_finding_and_one_bead(self):
