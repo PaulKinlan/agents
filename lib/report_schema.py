@@ -441,10 +441,21 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     if awaited_calls is None or not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
         return False
 
-    # The named backend evidence must specifically match the family of the awaited operations
+    # Each awaited operation must have its own positive evidence clause in remediation,
+    # rather than relying on an unrelated positive claim elsewhere in the text (Reviewer P1).
+    clauses = [c.strip() for c in re.split(r"(?:\.\s+|;\s*|\n+)", remediation) if c.strip()]
     for call in awaited_calls:
         pat = _BACKEND_OP_FAMILIES.get(call)
-        if not pat or not pat.search(remediation):
+        if not pat:
+            return False
+        has_clause_evidence = False
+        for clause in clauses:
+            if _NEGATION_PATTERN.search(clause) or re.search(r"\b(?:if|whether|assuming)\b", clause, re.IGNORECASE):
+                continue
+            if pat.search(clause) and _POSITIVE_EVIDENCE_PATTERN.search(clause):
+                has_clause_evidence = True
+                break
+        if not has_clause_evidence:
             return False
 
     # If proposed_fix_diff is present, every parallelized call inside it must also be stateless I/O

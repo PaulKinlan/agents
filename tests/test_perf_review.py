@@ -284,6 +284,13 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(mismatched_backend_evidence))
 
+        # Reviewer P1 finding: positive fetch clause with incidental readFile mention must NOT pass as readFile evidence
+        incidental_readfile_counterexample = {
+            "snippet": "for (const f of files) await readFile(f);",
+            "remediation": "Node.js fetch supports concurrent requests; use Promise.all to parallelize readFile calls"
+        }
+        self.assertFalse(has_reentrancy_precondition(incidental_readfile_counterexample))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
