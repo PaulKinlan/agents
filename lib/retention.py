@@ -46,13 +46,16 @@ a pruned run directory resolves to an explanation instead of a missing path.
 
 The harm a tombstone answers is "a cited FILE cannot be resolved" — a citation
 points at a file inside a run directory — so the tombstone records at file
-granularity: the exact list of files that disappeared with the removal. A removal
+granularity: the list of files that disappeared with the removal (for ``removed``
+and ``partial``; ``null`` for ``moved``, where the directory vanished externally
+during removal and ``moved_files`` records the pre-removal snapshot). A removal
 that fails PART WAY (e.g. a permission bound leaves the directory present but its
 contents deleted) cannot satisfy the record falsely: the tombstone is written
 with ``outcome: "partial"`` listing exactly the files that were lost, computed as
-the pre-removal file set minus the post-removal file set. A removal that fails
-without losing anything writes nothing: a tombstone must never claim a loss that
-did not happen.
+the pre-removal file set minus the post-removal file set (with any newly appeared
+files recorded in ``appeared``). A removal that fails without losing anything
+(and where the directory was not moved externally) writes nothing: a tombstone
+must never claim an event that did not happen.
 
 The record tells the truth about its own limits (agents-dm8n round 3):
 
@@ -632,12 +635,13 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
     a still-running directory. Returns the list of directories that were removed.
 
     Every removal goes through ``remove_recorded`` (agents-dm8n): each directory
-    actually removed — and each removal that failed PART WAY, losing files but
-    leaving the directory — is recorded as a tombstone line in the ledger BESIDE
+    actually removed — and each removal that failed PART WAY (losing files but
+    leaving the directory) or where the directory disappeared externally (recorded
+    with ``outcome: "moved"``) — is recorded as a tombstone line in the ledger BESIDE
     the runs root (``retention_ledger_path``), at file granularity, so a citation
     to a pruned run directory (or to a file inside one) resolves to an explanation
-    rather than dangling. Only fully removed directories are returned; a partial
-    removal is recorded with ``outcome: "partial"`` and retried by a later prune.
+    rather than dangling. Only fully removed directories are returned; partial
+    removals and moved directories return False and are not listed in removed.
 
     ``now`` is injectable for deterministic TTL tests; it defaults to the current
     wall-clock time. ``retain``, ``max_age_seconds`` and ``active_grace`` default to
