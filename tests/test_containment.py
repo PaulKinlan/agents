@@ -634,45 +634,63 @@ class TestAdapters(unittest.TestCase):
         self.assertIsNone(argv, "the engine must not start")
         self.assertFalse((self.tmp / "run" / "model_output.txt").exists())
 
-    def test_no_write_capable_adapter_delivers_write_outside_the_sandbox(self):
-        """agents-dpbc review P1-B, the structural guard at the ADAPTER boundary: the
-        worktree-write grant is deliverable only inside the dispatcher's OS sandbox, so
-        for EVERY engine whose ENGINE_TOOL_POLICIES row carries WORKTREE_WRITE a direct
-        adapter invocation must not reach the engine with write flags — refused, engine
-        never started. The subset check in
-        test_every_write_capable_engine_is_sandbox_verified_or_named_unverified reads the
-        TABLE; this pins the BEHAVIOUR the table claims, per engine, so the guard cannot
-        pass while an adapter still leaks (pi was in SANDBOXED_ENGINES and satisfied the
-        subset check while its adapter handed out edit,write on a direct invocation). The
-        FACTORY_SANDBOXED=1 case matters: the marker is caller-controlled env, so it must
-        never be sufficient on its own. New engines enter this guard automatically via the
-        table. The accept side — the verified sandbox really does deliver the grant — is
-        pinned by test_pi_delivers_worktree_write_inside_the_verified_sandbox and the
-        bwrap-gated dispatcher write-agent tests."""
-        write_capable = sorted(e for e, policies in ENGINE_TOOL_POLICIES.items()
-                               if WORKTREE_WRITE in policies)
-        self.assertTrue(write_capable, "guard vacuous: no write-capable engine in the table")
-        for engine in write_capable:
-            for extra in ({}, {"FACTORY_SANDBOXED": "1"}):
-                with self.subTest(engine=engine, sandboxed_env=bool(extra)):
-                    res, argv = self.run_adapter(engine, "worktree-write", env_overrides=extra)
-                    self.assertEqual(res.returncode, 3, res.stderr)
-                    self.assertIn("Refusing", res.stderr)
-                    self.assertIsNone(
-                        argv,
-                        f"{engine} must not start: a direct worktree-write invocation "
-                        f"must not reach the engine with write flags outside the "
-                        f"dispatcher-verified OS sandbox")
+    def test_a_direct_pi_worktree_write_invocation_is_unsandboxed_misuse(self):
+        """agents-dpbc, the misuse regression test coord asked for IN PLACE OF a trust
+        mechanism (fourth ruling): pi.sh ACCEPTS the policy the dispatcher grants and
+        verifies nothing itself, because an adapter cannot verify its own kernel
+        boundary — FACTORY_SANDBOXED is caller-controlled env, and the round-3 uid_map
+        and read-only-mount checks read facts from inside namespaces the caller can
+        create with unprivileged unshare (the third verdict satisfied all three signals
+        WITHOUT a sandbox), so a check kept in the adapter would read as a guarantee it
+        cannot keep. The honest contract, pinned here by delivery rather than exit 0:
+        a DIRECT invocation with FACTORY_TOOL_POLICY=worktree-write delivers
+        read,grep,find,ls,edit,write to the engine WITH OR WITHOUT the spoofable
+        FACTORY_SANDBOXED=1 marker — accepted, with NO kernel boundary. That is misuse,
+        not a supported caller: every production path (CLI, line, hillclimb, the CI
+        action, the scheduler) converges on run_agent, and run_agent sets this policy
+        only when sandbox_command wraps the adapter. The source-level pin below keeps
+        the spoofable self-check OUT — its return would reintroduce a guarantee-shaped
+        artefact. The sandboxed delivery, the only legitimate one, is the
+        COMPOSITION's claim and is pinned where it is delivered:
+        test_a_write_grant_reaches_the_engine_only_inside_the_sandbox_wrap (the
+        dispatcher downgrades before the adapter env is set when the wrap cannot be
+        built) and the bwrap-gated composition e2e
+        (test_a_write_agent_edits_a_disposable_worktree_and_leaves_the_target_untouched).
+        claude's direct worktree-write REFUSAL is a different, also-correct contract
+        (its grant is never deliverable, so a direct presenter is always a lie risk),
+        pinned by test_claude_never_honours_worktree_write_until_sandbox_verified."""
+        for extra in ({}, {"FACTORY_SANDBOXED": "1"}):
+            with self.subTest(spoofed_marker=bool(extra)):
+                res, argv = self.run_adapter("pi", "worktree-write", env_overrides=extra)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(
+                    argv[argv.index("--tools") + 1], "read,grep,find,ls,edit,write",
+                    "the adapter accepts the dispatcher's grant — the caller-controlled "
+                    "marker must gate nothing, and the write flags must be IN THE ARGV "
+                    "(delivery, not exit 0)")
+                self.assertIn("--no-extensions", argv)
+                self.assertIn("--no-approve", argv)
+        source = (ROOT / "lib" / "adapters" / "pi.sh").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "/proc/self/uid_map", source,
+            "no spoofable kernel-boundary self-check may creep back into the adapter: "
+            "a check an unprivileged caller can satisfy reads as a guarantee")
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_pi_delivers_worktree_write_inside_the_verified_sandbox(self):
-        """The accept side of the adapter-boundary guard, so the verification cannot rot
-        into refusing everything (a refuse-everything adapter would pass the direct-
-        invocation guard while silently killing the sandboxed write feature). Inside a
-        REAL bubblewrap reproducing the dispatcher's sandbox fingerprint — a private user
-        namespace and the factory tree bound read-only — with the dispatcher's
-        FACTORY_SANDBOXED=1 marker, pi.sh honours worktree-write and the engine receives
-        edit,write."""
+        """The accept side of the composition contract (agents-dpbc, fourth ruling): pi.sh
+        ACCEPTS the dispatcher's grant, so the sandboxed write feature lives or dies with
+        the dispatcher wrapping the adapter. This test reproduces the dispatcher's sandbox
+        fingerprint — a REAL bubblewrap with the factory tree bound read-only and the
+        dispatcher's FACTORY_SANDBOXED=1 marker — and asserts
+        --tools read,grep,find,ls,edit,write IS IN THE ARGV, proving delivery rather than
+        exit 0 (the standard the third verdict confirmed correct). A refuse-everything
+        regression in pi.sh fails here, so the misuse regression test
+        (test_a_direct_pi_worktree_write_invocation_is_unsandboxed_misuse) can never rot
+        into an adapter that refuses the legitimate grant. The containment claim itself —
+        the sandbox really confines the write — is NOT this adapter-level test's to make:
+        it lives in the bwrap-gated composition e2e
+        (test_a_write_agent_edits_a_disposable_worktree_and_leaves_the_target_untouched)."""
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                "ANTHROPIC_API_KEY": "stub-key", "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
                "FACTORY_TOOL_POLICY": "worktree-write", "FACTORY_SANDBOXED": "1"}
@@ -938,16 +956,25 @@ class TestAdapters(unittest.TestCase):
 
     def test_the_adapters_agree_with_the_policy_table(self):
         """Drift guard: the adapters and ENGINE_TOOL_POLICIES agree, and every adapter on
-        disk is in the table. READ_ONLY rows run (exit 0); a policy outside an engine's row
-        is refused (exit 3, engine never starts); and a WORKTREE_WRITE row does NOT mean a
-        direct invocation gets write flags — the write grant is deliverable only inside
-        the dispatcher's OS sandbox, so EVERY adapter REFUSES a direct worktree-write
-        invocation (agents-dpbc review P1: an exit-0 silent downgrade would leave a direct
-        caller believing its writes happened; this test was the caller that presented
-        worktree-write to claude.sh at all, since the dispatcher downgrades before it
-        invokes the adapter). The sandboxed delivery path is pinned by
-        test_pi_delivers_worktree_write_inside_the_verified_sandbox and the bwrap-gated
-        dispatcher write-agent tests."""
+        disk is in the table (the iteration source the third verdict confirmed sound).
+        READ_ONLY rows run (exit 0) and a policy outside an engine's row is refused
+        (exit 3, engine never starts). A WORKTREE_WRITE row on a DIRECT invocation has a
+        per-engine contract (agents-dpbc, fourth ruling — the guarantee is the
+        COMPOSITION, not the adapter):
+        - an engine named in WORKTREE_WRITE_UNVERIFIED_ENGINES (claude) REFUSES (exit 3,
+          engine never starts): its grant is never deliverable, the dispatcher downgrades
+          it to read-only BEFORE invoking the adapter, so the only presenter of
+          worktree-write is a direct caller, and an accept or an exit-0 silent downgrade
+          would leave that caller believing its writes happened;
+        - a sandbox-verified engine (pi, in SANDBOXED_ENGINES) ACCEPTS: the dispatcher is
+          the sole grantor and only sets this policy when sandbox_command wraps the
+          adapter, so the adapter honours it — asserted as DELIVERY (write flags in the
+          argv), not exit 0. On a direct invocation that delivery is unsandboxed MISUSE,
+          pinned by test_a_direct_pi_worktree_write_invocation_is_unsandboxed_misuse;
+          the containment claim lives in the composition, pinned by
+          test_a_write_grant_reaches_the_engine_only_inside_the_sandbox_wrap and the
+          bwrap-gated dispatcher write-agent e2e. No adapter verifies its own kernel
+          boundary, and no assertion here claims one does."""
         on_disk = {p.stem for p in (ROOT / "lib" / "adapters").glob("*.sh")}
         self.assertEqual(on_disk, set(ENGINE_TOOL_POLICIES))
         for engine, supported in ENGINE_TOOL_POLICIES.items():
@@ -957,9 +984,19 @@ class TestAdapters(unittest.TestCase):
                     if policy in supported and policy == READ_ONLY:
                         self.assertEqual(res.returncode, 0, res.stderr)
                         self.assertIsNotNone(argv)
+                    elif policy in supported and engine in SANDBOXED_ENGINES:
+                        # A sandbox-verified engine's adapter accepts the dispatcher's
+                        # grant — assert the write flags are IN THE ARGV (delivery,
+                        # not exit 0).
+                        self.assertEqual(res.returncode, 0, res.stderr)
+                        tools = argv[argv.index("--tools") + 1]
+                        self.assertIn("write", tools.lower(),
+                                      f"{engine} must deliver the {policy} grant's write "
+                                      f"flags, got --tools {tools}")
                     else:
-                        # Not in the row, or a worktree-write row on a DIRECT invocation:
-                        # refused either way — never a silent partial delivery.
+                        # Not in the row, or a worktree-write row on an engine whose grant
+                        # is never deliverable (named unverified): refused either way —
+                        # never a silent partial delivery.
                         self.assertEqual(res.returncode, 3, res.stderr)
                         self.assertIsNone(argv)
 
@@ -1624,6 +1661,86 @@ process.stdin.on('end', () => {
         record = json.loads((run_dir / "policy.json").read_text(encoding="utf-8"))
         self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
         self.assertIn("write", record["withheld"])
+
+    def test_a_write_grant_reaches_the_engine_only_inside_the_sandbox_wrap(self):
+        """agents-dpbc, the guard REPINNED TO THE COMPOSITION (fourth ruling): the
+        worktree-write guarantee is run_agent + sandbox_command, not any adapter, so the
+        property pinned here is the composition's real contract — a dispatcher-driven run
+        reaches the engine with write flags ONLY when sandbox_command wraps it. For EVERY
+        engine whose ENGINE_TOOL_POLICIES row carries WORKTREE_WRITE (the iteration source
+        the third verdict confirmed sound; new write-capable engines enter automatically
+        via the table), drive a real factory write-agent run on a host where the wrap
+        cannot be built — a broken bwrap on PATH simulates the bwrap-less host, so this
+        runs anywhere — under the trusted-target opt-in. The dispatcher must downgrade
+        BEFORE the adapter env is set: the engine's stub reports POLICY read-only with
+        the read-only tool flags (delivery of the DOWNGRADE asserted, not just exit 0),
+        the downgrade reason names the missing sandbox wrap (not some other gate), no
+        worktree or session.patch is produced, and policy.json records write withheld.
+        MUTATION THAT FAILS THIS GUARD: removing run_agent's `not engine_sandboxed`
+        downgrade arm hands the engine worktree-write on the no-wrap host and the stub
+        reports POLICY worktree-write with edit,write in argv. The wrap side — the grant
+        really is delivered inside the sandbox — is pinned by the bwrap-gated
+        test_a_write_agent_edits_a_disposable_worktree_and_leaves_the_target_untouched,
+        which asserts a collected session.patch and a byte-identical target and must not
+        be replaced by a green adapter-only substitute on a host without bwrap. The
+        adapter side of the contract is pinned separately: claude refuses a direct
+        worktree-write (test_claude_never_honours_worktree_write_until_sandbox_verified)
+        and pi accepts it as unsandboxed misuse
+        (test_a_direct_pi_worktree_write_invocation_is_unsandboxed_misuse)."""
+        write_capable = sorted(e for e, policies in ENGINE_TOOL_POLICIES.items()
+                               if WORKTREE_WRITE in policies)
+        self.assertIn("pi", write_capable,
+                      "guard vacuous: the sandboxed write engine must be iterated")
+        self._git_init_target()
+        self.trusted_target("trusted")
+        self.agent("name: probe\nclass: proposer\ncontainment: t2-local\n"
+                   "capabilities:\n  write: true\nbudget: {max_minutes: 1}\n")
+        broken = self.root / "brokenbin"
+        broken.mkdir()
+        bwrap = broken / "bwrap"
+        bwrap.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        bwrap.chmod(0o755)
+        for engine in write_capable:
+            with self.subTest(engine=engine):
+                if engine != "pi":  # the setUp stub covers pi
+                    stub = self.bin / TestAdapters.ENGINE_BINARY.get(engine, engine)
+                    stub.write_text(
+                        "#!/usr/bin/env bash\n"
+                        "echo \"ARGV:$*\"\n"
+                        "echo \"POLICY:${FACTORY_TOOL_POLICY:-unset}\"\n"
+                        "cat >/dev/null\n" + STUB_REPORT,
+                        encoding="utf-8",
+                    )
+                    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+                shutil.rmtree(self.root / "runs", ignore_errors=True)
+                res = self.factory(
+                    engine,
+                    {"PATH": f"{broken}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+                     "FACTORY_ALLOW_UNSANDBOXED": "1",
+                     # Satisfies claude.sh's deterministic auth gate (a presence check);
+                     # the stub never calls the real API.
+                     "ANTHROPIC_API_KEY": "sk-ant-test-not-real"},
+                    target_arg="trusted")
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(
+                    self.stub_line("POLICY:"), READ_ONLY,
+                    "the composition must downgrade before the adapter env is set: "
+                    "write flags may reach the engine only inside the sandbox wrap")
+                self.assertIn(
+                    "will not run inside the OS sandbox", res.stdout,
+                    "the downgrade reason must be the missing sandbox wrap, not another "
+                    "gate (a non-git-target downgrade would pass for the wrong reason)")
+                argv = self.stub_line("ARGV:").split()
+                tools = argv[argv.index("--tools") + 1]
+                self.assertNotIn("write", tools.lower(),
+                                 f"{engine} received write flags outside the wrap: "
+                                 f"--tools {tools}")
+                run_dir = self.run_dirs()[0]
+                self.assertFalse((run_dir / "worktree").exists())
+                self.assertFalse((run_dir / "session.patch").exists())
+                record = json.loads((run_dir / "policy.json").read_text(encoding="utf-8"))
+                self.assertEqual(record["granted"]["tool_policy"], READ_ONLY)
+                self.assertIn("write", record["withheld"])
 
     def test_a_claude_run_against_a_public_target_is_refused(self):
         """agents-ejm: claude runs without the OS sandbox (--restricted only, not a kernel

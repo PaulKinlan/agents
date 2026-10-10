@@ -103,10 +103,15 @@ ENGINE_ENFORCEMENT: Dict[str, Dict[str, str]] = {
     "pi": {
         READ_ONLY: "pi --tools read,grep,find,ls --no-extensions --no-approve",
         WORKTREE_WRITE: ("pi --tools read,grep,find,ls,edit,write --no-extensions --no-approve "
-                         "in a disposable worktree (target bound read-only); the adapter "
-                         "refuses the grant unless it can verify the OS sandbox — a private "
-                         "user namespace and the factory tree read-only — so a direct "
-                         "invocation cannot obtain unsandboxed write (agents-dpbc)"),
+                         "in a disposable worktree (target bound read-only); delivered ONLY "
+                         "inside the dispatcher's OS sandbox — run_agent grants it solely when "
+                         "the run is engine_sandboxed and wraps the adapter in sandbox_command, "
+                         "and downgrades to read-only otherwise. The adapter ACCEPTS the "
+                         "dispatcher's grant and verifies nothing itself (agents-dpbc, fourth "
+                         "ruling: an adapter cannot verify its own kernel boundary — the "
+                         "round-3 uid_map/mount checks were spoofable with unprivileged "
+                         "namespaces), so a direct adapter invocation carrying this policy is "
+                         "UNSANDBOXED — misuse, not a supported caller"),
     },
     "claude": {
         READ_ONLY: "claude --restricted --tools Read,Grep,Glob --strict-mcp-config",

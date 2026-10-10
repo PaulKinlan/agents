@@ -31,50 +31,24 @@ case "$TOOL_POLICY" in
   # worktree-write (agents-6ce): the model may edit files, but the dispatcher runs this
   # adapter with cwd = a disposable git worktree and the OS sandbox binds that worktree
   # read-write while the target checkout stays read-only, so edits can only land in the
-  # throwaway worktree. edit,write are pi's file-mutation tools; bash/network stay off. The
-  # dispatcher grants this policy only when the run is engine_sandboxed (pi is in
-  # SANDBOXED_ENGINES); on a bwrap-less host it downgrades to read-only (review P1-2).
+  # throwaway worktree. edit,write are pi's file-mutation tools; bash/network stay off.
   #
-  # agents-dpbc review P1 (third round): this adapter is a SECOND entry point — a direct
-  # invocation sets FACTORY_TOOL_POLICY itself, and there is no dispatcher to wrap it in
-  # bwrap, so honouring the grant here would hand out UNSANDBOXED edit,write (proven with a
-  # stub pi). The dispatcher remains the sole GRANTOR, but the grant's precondition is a
-  # KERNEL boundary this arm must VERIFY rather than trust: FACTORY_SANDBOXED is
-  # caller-controlled env (an export fakes it), so it is necessary but never sufficient.
-  # The verification uses facts the environment cannot forge: bwrap always creates a private
-  # user namespace, whose /proc/self/uid_map is a CONFINED mapping (the host's is the
-  # identity map, range 4294967295), and the sandbox bind plan that ro-binds the target
-  # checkout also ro-binds this script's own factory tree. A caller can export a variable;
-  # it cannot put itself in a user namespace with a read-only factory tree without actually
-  # building the sandbox. Anything this arm cannot verify is REFUSED (exit 3) — the adapter
-  # must refuse what it cannot verify rather than deliver a grant whose confinement is
-  # absent. On macOS (no /proc/self/uid_map) verification is impossible, which matches
-  # reality: there is no bubblewrap there, so the dispatcher never grants this policy.
-  worktree-write)
-    sandbox_ok=1
-    if [ "${FACTORY_SANDBOXED:-}" != "1" ]; then
-      sandbox_ok=0
-    fi
-    uid_map_range=""
-    if [ -r /proc/self/uid_map ]; then
-      read -r _ _ uid_map_range _ < /proc/self/uid_map || true
-    fi
-    if [ -z "$uid_map_range" ] || [ "$uid_map_range" = "4294967295" ]; then
-      sandbox_ok=0
-    fi
-    # The bind plan ro-binds the factory root this script lives under (lib/adapters/../..),
-    # the same plan that ro-binds the target checkout — so its read-only-ness is a proxy
-    # for the confinement the grant relies on. A read-only mount denies write even to root.
-    factory_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-    if [ -w "$factory_root" ]; then
-      sandbox_ok=0
-    fi
-    if [ "$sandbox_ok" -ne 1 ]; then
-      echo "[pi adapter] Refusing: tool policy 'worktree-write' is deliverable only inside the dispatcher's OS sandbox, and this process cannot verify one (requires FACTORY_SANDBOXED=1 from the dispatcher AND a private user namespace AND the factory tree bound read-only). A direct invocation has no sandbox, so edit,write here would be an unconfined write primitive; run read-only instead." >&2
-      exit 3
-    fi
-    POLICY_FLAGS=(--tools read,grep,find,ls,edit,write --no-extensions --no-approve)
-    ;;
+  # agents-dpbc (fourth ruling): this adapter ACCEPTS the policy the dispatcher grants —
+  # it verifies nothing and must not pretend to. The guarantee is the COMPOSITION:
+  # factory's run_agent grants worktree-write only when the run is engine_sandboxed (pi is
+  # in SANDBOXED_ENGINES) and wraps this adapter in sandbox_command — the OS sandbox is
+  # the boundary, built by the dispatcher; on any other host run_agent downgrades to
+  # read-only BEFORE this script is invoked. An adapter cannot verify its own kernel
+  # boundary from inside: FACTORY_SANDBOXED is caller-controlled env, and uid_map or
+  # read-only-mount checks read facts from inside namespaces the caller can create for
+  # itself with unprivileged unshare — the third verdict satisfied all three of the
+  # signals this arm used to check WITHOUT a sandbox, so a check kept here would read as
+  # a guarantee it cannot keep. Consequence, stated honestly rather than guarded against:
+  # a DIRECT invocation with FACTORY_TOOL_POLICY=worktree-write hands pi edit,write with
+  # NO kernel boundary. That is misuse, not a supported caller — every production path
+  # (CLI, line, hillclimb, the CI action, the scheduler) converges on run_agent — and
+  # tests/test_containment.py pins it as a misuse regression test, not a trust mechanism.
+  worktree-write) POLICY_FLAGS=(--tools read,grep,find,ls,edit,write --no-extensions --no-approve) ;;
   *)
     echo "[pi adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
     exit 3
