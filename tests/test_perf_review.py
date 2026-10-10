@@ -210,6 +210,13 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         f4 = {"rule_id": "layout-thrashing-forced-reflow", "remediation": "Batch geometry reads"}
         self.assertFalse(is_concurrency_recommendation(f4))
 
+        # Reviewer counterexample P2: "simultaneously"
+        f5 = {"rule_id": "custom-rule", "remediation": "Start all forward passes simultaneously"}
+        self.assertTrue(is_concurrency_recommendation(f5))
+
+        f6 = {"rule_id": "custom-rule", "remediation": "Run checks at the same time"}
+        self.assertTrue(is_concurrency_recommendation(f6))
+
     def test_detects_reentrancy_precondition_or_evidence(self):
         """Identify whether finding already carries backend evidence or precondition."""
         without_precondition = {"remediation": "Replace loop with Promise.all"}
@@ -225,10 +232,18 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertTrue(has_reentrancy_precondition(with_evidence))
 
-        with_mutex_caveat = {
-            "remediation": "Runtime uses a non-reentrant mutex, so preserve serial execution."
+        with_conditional_mutex = {
+            "remediation": "IF the backend does not use a non-reentrant mutex, use Promise.all; otherwise preserve serial execution."
         }
-        self.assertTrue(has_reentrancy_precondition(with_mutex_caveat))
+        self.assertTrue(has_reentrancy_precondition(with_conditional_mutex))
+
+        # Reviewer counterexample P1: description mentions mutex / non-reentrant, but remediation still suggests concurrency
+        unsafe_description_bypass = {
+            "title": "Inference loop",
+            "description": "ONNX Runtime Web uses a non-reentrant mutex around _OrtRun",
+            "remediation": "Use Promise.all to run all forward passes simultaneously"
+        }
+        self.assertFalse(has_reentrancy_precondition(unsafe_description_bypass))
 
     def test_post_filter_enforces_reentrancy_precondition_on_unpreconditioned_finding(self):
         """Post-filter must prepend reentrancy precondition to unchecked concurrency recommendation."""
@@ -241,11 +256,19 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     "title": "Sequential Model Inference Waterfall",
                     "description": "Sequential await in loop slows down execution",
                     "remediation": "Replace loop with await Promise.all(items.map(runInference))",
+                },
+                {
+                    "rule_id": "custom-rule",
+                    "path": "src/forward_pass.ts",
+                    "line_number": 100,
+                    "title": "Forward Pass Optimization",
+                    "description": "ONNX Runtime uses a non-reentrant mutex around _OrtRun",
+                    "remediation": "Start all forward passes simultaneously",
                 }
             ]
         }
         notes = normalize_report(report)
-        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        self.assertEqual(len([n for n in notes if "enforced reentrancy precondition" in n]), 2)
 
         finding = report["findings"][0]
         self.assertTrue(finding["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
@@ -253,6 +276,11 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertIn("ONNX Runtime _OrtRun", finding["remediation"])
         self.assertIn("otherwise preserve serial execution", finding["remediation"])
         self.assertIn("[Precondition Note:", finding["description"])
+
+        finding2 = report["findings"][1]
+        self.assertTrue(finding2["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
+        self.assertIn("Start all forward passes simultaneously", finding2["remediation"])
+        self.assertIn("otherwise preserve serial execution", finding2["remediation"])
 
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""

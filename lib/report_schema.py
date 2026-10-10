@@ -165,18 +165,23 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
 # ---------------------------------------------------------------------------------------------
 
 _CONCURRENCY_PATTERN = re.compile(
-    r"\b(?:Promise\.(?:all|allSettled)|asyncio\.gather|in\s+parallel|parallelize|parallel\s+execution|concurrently|concurrent\s+execution|overlapping)\b",
+    r"\b(?:Promise\.(?:all|allSettled)|asyncio\.gather|in\s+parallel|parallel(?:ize|izing|ization)?|parallel\s+execution|concurrent(?:ly)?|concurrent\s+execution|overlap(?:ping)?|simultaneous(?:ly)?|at\s+the\s+same\s+time)\b",
     re.IGNORECASE
 )
 
-_REENTRANCY_EVIDENCE_PATTERN = re.compile(
-    r"\b(?:reentrant|reentrancy|thread-safe|threadsafe|thread\s+safe|mutex|non-reentrant|if\s+(?:the\s+)?(?:runtime|backend)|if\s+reentrant|if\s+supported|verify\s+(?:the\s+)?(?:runtime|backend|reentrancy)|supports?\s+(?:concurrency|concurrent|overlap)|tolerates?\s+overlap)\b",
+_POSITIVE_EVIDENCE_PATTERN = re.compile(
+    r"\b(?:is\s+reentrant|supports?\s+(?:concurrency|concurrent|overlap)|tolerates?\s+overlap|is\s+thread[- ]safe|threadsafe\s+backend)\b",
+    re.IGNORECASE
+)
+
+_CONDITIONAL_PRECONDITION_PATTERN = re.compile(
+    r"(?:\bif\s+(?:the\s+)?(?:runtime|backend|it|this|execution)\b|\bif\s+(?:supported|reentrant)\b|\bprecondition\b|\bverify\s+(?:the\s+)?(?:runtime|backend|reentrancy)\b)",
     re.IGNORECASE
 )
 
 
 def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
-    """Return True if a finding proposes concurrent / parallel execution."""
+    """Return True if a finding proposes concurrent / parallel / overlapping execution."""
     if not isinstance(finding, dict):
         return False
     rule_id = str(finding.get("rule_id", "")).strip().lower()
@@ -192,15 +197,34 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
 
 
 def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
-    """Return True if a finding cites backend reentrancy evidence or states its precondition."""
+    """Return True if the remediation is explicitly conditional or cites positive evidence.
+
+    Negative statements (e.g. stating in description that a runtime is non-reentrant or has
+    a mutex while still recommending concurrency) do NOT qualify as a preconditioned
+    recommendation (agents-vorw / hub fleet-4inv).
+    """
     if not isinstance(finding, dict):
         return False
-    text = " ".join([
-        str(finding.get("remediation", "")),
-        str(finding.get("description", "")),
-        str(finding.get("title", "")),
-    ])
-    return bool(_REENTRANCY_EVIDENCE_PATTERN.search(text))
+    remediation = str(finding.get("remediation", "")).strip()
+    if not remediation:
+        return False
+
+    # Positive evidence in remediation that this backend is reentrant / thread-safe / tolerates overlap
+    if _POSITIVE_EVIDENCE_PATTERN.search(remediation):
+        if not re.search(r"\b(?:not\s+reentrant|not\s+thread[- ]safe|non-reentrant)\b", remediation, re.IGNORECASE):
+            return True
+
+    # Explicit conditional precondition ("IF <runtime> is reentrant... otherwise serial...")
+    has_condition = bool(_CONDITIONAL_PRECONDITION_PATTERN.search(remediation))
+    has_alternative = bool(re.search(
+        r"\b(?:otherwise|serial|sequential(?:ly)?|keep\s+serial|preserve\s+serial)\b",
+        remediation,
+        re.IGNORECASE
+    ))
+    if has_condition and has_alternative:
+        return True
+
+    return False
 
 
 def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[str]:
