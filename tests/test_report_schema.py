@@ -9,8 +9,10 @@ dispatcher treats a schema-violating report exactly like unparseable output — 
 never sees it.
 """
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
@@ -241,9 +243,15 @@ class TestDispatcherSchemaGate(unittest.TestCase):
             })
 
             # No verdict is a station failure, never a clean PASS/0 (fleet-ddd).
-            with self.assertRaises(factory_cli.StationError):
-                self._run(sandbox, target)
+            # Capture stdout so the deliberate test warning does not leak into gate logs
+            # as an unexplained recurring failure (agents-4ass).
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                with self.assertRaises(factory_cli.StationError):
+                    self._run(sandbox, target)
 
+            self.assertIn("Model output violates the declared report schema", out.getvalue())
+            self.assertIn("missing required property 'summary'", out.getvalue())
             self.assertFalse((sandbox / "findings" / "target.json").exists(),
                              "the store must never see a schema-violating report")
             report = json.loads(next((sandbox / "runs").glob("*/report.json")).read_text())
@@ -262,7 +270,9 @@ class TestDispatcherSchemaGate(unittest.TestCase):
                 }],
             })
 
-            self._run(sandbox, target)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self._run(sandbox, target)
 
             store = json.loads((sandbox / "findings" / "target.json").read_text(encoding="utf-8"))
             record, = store["findings"].values()
