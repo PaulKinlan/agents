@@ -59,6 +59,10 @@ BUDGET_KEYS = frozenset({"max_minutes", "max_usd"})
 # Tool policies the factory can grant a model session, and which adapter enforces which.
 # lib/adapters/<engine>.sh reads FACTORY_TOOL_POLICY and refuses anything it cannot enforce;
 # tests/test_containment.py asserts the adapters and this table agree.
+# This table says NOTHING about OS sandboxing: a WORKTREE_WRITE row means only that the
+# adapter implements the policy's flags. The sandbox-verified set is lib/sandbox.py
+# SANDBOXED_ENGINES, and the runtime delivers a write grant solely when the run is
+# engine_sandboxed — factory downgrades it to read-only otherwise.
 READ_ONLY = "read-only"
 # A write grant runs the engine in a disposable per-session git worktree (agents-6ce): the
 # model may edit files, but only inside the throwaway worktree — the target checkout is bound
@@ -70,11 +74,28 @@ GRANTABLE_POLICIES = (READ_ONLY, WORKTREE_WRITE)
 VALID_CLASSES = ("observer", "proposer", "optimizer")
 ENGINE_TOOL_POLICIES: Dict[str, frozenset] = {
     "pi": frozenset({READ_ONLY, WORKTREE_WRITE}),
+    # claude's adapter carries the worktree-write policy in this table, but claude is NOT
+    # OS-sandbox-verified (not in lib/sandbox.py SANDBOXED_ENGINES — its session auth needs
+    # $HOME, which the sandbox hides), so the write grant is never delivered to it: the
+    # factory dispatcher downgrades a claude worktree-write to read-only on every host
+    # BEFORE invoking the adapter, and the adapter REFUSES a direct worktree-write
+    # invocation outright (exit 3 — agents-dpbc review P1: a silent exit-0 downgrade would
+    # leave a direct caller believing its writes happened). The row stays because
+    # check_engine runs before that downgrade — without it a claude write-agent would be
+    # refused outright instead of downgraded honestly.
     "claude": frozenset({READ_ONLY, WORKTREE_WRITE}),
     "deepseek": frozenset({READ_ONLY}),
     # `agentapi new-conversation` takes a prompt and nothing else: no tool controls.
     "antigravity": frozenset(),
 }
+# Engines whose table row carries the worktree-write policy but which are NOT
+# OS-sandbox-verified, so the runtime never delivers the grant to them and their adapters
+# refuse a direct invocation of it. Named here so the table cannot be read as a
+# verification claim (agents-dpbc); tests/test_containment.py pins that a WORKTREE_WRITE
+# row above implies membership in lib/sandbox.py
+# SANDBOXED_ENGINES or in this set, so the next engine added to the wrong column fails
+# the test unless its author names it unverified here, in code.
+WORKTREE_WRITE_UNVERIFIED_ENGINES = frozenset({"claude"})
 
 # How each adapter enforces each grantable policy, and what that leaves open. Stated in the
 # banner and in policy.json so the operator reads the enforcement, not an adjective.
@@ -82,12 +103,26 @@ ENGINE_ENFORCEMENT: Dict[str, Dict[str, str]] = {
     "pi": {
         READ_ONLY: "pi --tools read,grep,find,ls --no-extensions --no-approve",
         WORKTREE_WRITE: ("pi --tools read,grep,find,ls,edit,write --no-extensions --no-approve "
-                         "in a disposable worktree (target bound read-only)"),
+                         "in a disposable worktree (target bound read-only); delivered ONLY "
+                         "inside the dispatcher's OS sandbox — run_agent grants it solely when "
+                         "the run is engine_sandboxed and wraps the adapter in sandbox_command, "
+                         "and downgrades to read-only otherwise. The adapter ACCEPTS the "
+                         "dispatcher's grant and verifies nothing itself (agents-dpbc, fourth "
+                         "ruling: an adapter cannot verify its own kernel boundary — the "
+                         "round-3 uid_map/mount checks were spoofable with unprivileged "
+                         "namespaces), so a direct adapter invocation carrying this policy is "
+                         "UNSANDBOXED — misuse, not a supported caller"),
     },
     "claude": {
         READ_ONLY: "claude --restricted --tools Read,Grep,Glob --strict-mcp-config",
-        WORKTREE_WRITE: ("claude --restricted --tools Read,Grep,Glob,Edit,Write "
-                         "--strict-mcp-config in a disposable worktree"),
+        # Never delivered: claude is not sandbox-verified, so the dispatcher downgrades a
+        # claude worktree-write grant to read-only before the adapter is invoked, and the
+        # adapter REFUSES a direct worktree-write invocation (exit 3) rather than silently
+        # downgrading it (agents-dpbc review P1) — no caller reaches claude with Edit,Write,
+        # and no caller is left believing writes happened that did not.
+        WORKTREE_WRITE: ("never delivered: downgraded to read-only by the dispatcher before "
+                         "the adapter is invoked, and refused (exit 3) by the adapter on a "
+                         "direct invocation (claude is not sandbox-verified)"),
     },
     "deepseek": {READ_ONLY: "deepseek-api read-only payload triage"},
 }

@@ -55,15 +55,24 @@ fi
 TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
 case "$TOOL_POLICY" in
   read-only) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob" --strict-mcp-config) ;;
-  # worktree-write (agents-6ce): Edit,Write are added and --restricted confines the file tools
-  # to the working directory — which the dispatcher sets to a disposable git worktree — so
-  # edits land there, not in the target. NOTE: claude gets NO OS sandbox (its adapter is not in
-  # lib/sandbox.py SANDBOXED_ENGINES), so --restricted (claude's own confinement, not a kernel
-  # boundary) would be the only thing keeping the target read-only. run_agent therefore
-  # downgrades a claude worktree-write grant to read-only unless the run is engine_sandboxed
-  # (review P1-2, agents-6ce); this arm is reached only once claude is sandbox-verified. Bash
-  # stays off; the worktree is discarded after the session.
-  worktree-write) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob,Edit,Write" --strict-mcp-config) ;;
+  # worktree-write (agents-6ce; agents-dpbc review P1, third round): REFUSED, never
+  # delivered and never silently downgraded. claude is NOT OS-sandbox-verified (its adapter
+  # is not in lib/sandbox.py SANDBOXED_ENGINES — its session auth needs $HOME, which the
+  # sandbox hides), so Edit,Write here would be an unconfined write primitive: --restricted
+  # is claude's own confinement, not a kernel boundary. The dispatcher therefore downgrades
+  # a claude worktree-write grant to read-only BEFORE invoking this adapter (run_agent sets
+  # FACTORY_TOOL_POLICY from the already-downgraded policy), so no legitimate caller ever
+  # presents worktree-write to this script. A caller that does is a direct invocation, and
+  # it is REFUSED rather than downgraded: an exit-0 silent downgrade would leave that caller
+  # believing its writes happened — a claim must not report success for a grant it did not
+  # deliver. The ENGINE_TOOL_POLICIES row stays because check_engine reads the PRE-downgrade
+  # policy — without it a claude write-agent would abort instead of downgrading honestly.
+  # When claude is sandbox-verified this arm changes to deliver Edit,Write; until then there
+  # is deliberately NO path from this script to a write-capable claude.
+  worktree-write)
+    echo "[claude adapter] Refusing: tool policy 'worktree-write' cannot be delivered by this adapter — claude is not sandbox-verified, so nothing kernel-enforces confinement and Edit,Write would be an unconfined write primitive. The dispatcher downgrades a claude write grant to read-only BEFORE invoking this adapter; a direct caller must do the same (run with FACTORY_TOOL_POLICY=read-only)." >&2
+    exit 3
+    ;;
   *)
     echo "[claude adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
     exit 3

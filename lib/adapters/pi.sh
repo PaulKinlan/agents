@@ -31,10 +31,23 @@ case "$TOOL_POLICY" in
   # worktree-write (agents-6ce): the model may edit files, but the dispatcher runs this
   # adapter with cwd = a disposable git worktree and the OS sandbox binds that worktree
   # read-write while the target checkout stays read-only, so edits can only land in the
-  # throwaway worktree. edit,write are pi's file-mutation tools; bash/network stay off. The
-  # dispatcher grants this policy only when the run is engine_sandboxed (pi is in
-  # SANDBOXED_ENGINES); on a bwrap-less host it downgrades to read-only (review P1-2), so the
-  # OS sandbox this comment relies on is always present when this arm runs.
+  # throwaway worktree. edit,write are pi's file-mutation tools; bash/network stay off.
+  #
+  # agents-dpbc (fourth ruling): this adapter ACCEPTS the policy the dispatcher grants —
+  # it verifies nothing and must not pretend to. The guarantee is the COMPOSITION:
+  # factory's run_agent grants worktree-write only when the run is engine_sandboxed (pi is
+  # in SANDBOXED_ENGINES) and wraps this adapter in sandbox_command — the OS sandbox is
+  # the boundary, built by the dispatcher; on any other host run_agent downgrades to
+  # read-only BEFORE this script is invoked. An adapter cannot verify its own kernel
+  # boundary from inside: FACTORY_SANDBOXED is caller-controlled env, and uid_map or
+  # read-only-mount checks read facts from inside namespaces the caller can create for
+  # itself with unprivileged unshare — the third verdict satisfied all three of the
+  # signals this arm used to check WITHOUT a sandbox, so a check kept here would read as
+  # a guarantee it cannot keep. Consequence, stated honestly rather than guarded against:
+  # a DIRECT invocation with FACTORY_TOOL_POLICY=worktree-write hands pi edit,write with
+  # NO kernel boundary. That is misuse, not a supported caller — every production path
+  # (CLI, line, hillclimb, the CI action, the scheduler) converges on run_agent — and
+  # tests/test_containment.py pins it as a misuse regression test, not a trust mechanism.
   worktree-write) POLICY_FLAGS=(--tools read,grep,find,ls,edit,write --no-extensions --no-approve) ;;
   *)
     echo "[pi adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
