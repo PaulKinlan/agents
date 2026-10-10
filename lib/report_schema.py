@@ -315,6 +315,32 @@ _BACKEND_OP_FAMILIES = {
 }
 
 
+_BACKEND_DIRECT_EVIDENCE_PATTERNS = {
+    "network": re.compile(
+        r"\b(?:fetch|axios|https?|network|stateless\s+api)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+(?:known\s+to\s+be\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|"
+        r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fetch|axios|https?|network|stateless\s+api)\b",
+        re.IGNORECASE,
+    ),
+    "fs": re.compile(
+        r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile|read_file)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+(?:known\s+to\s+be\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|"
+        r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile|read_file)\b",
+        re.IGNORECASE,
+    ),
+}
+
+_CATEGORY_TERMS = {
+    "network": re.compile(r"\b(?:fetch|axios|https?|network)\b", re.IGNORECASE),
+    "fs": re.compile(r"\b(?:fs(?:\.promises)?|readfile|read_file)\b", re.IGNORECASE),
+}
+
+
+def _get_backend_category(call: str) -> str:
+    c = call.lower()
+    if any(k in c for k in ("readfile", "read_file", "fs.")):
+        return "fs"
+    return "network"
+
+
 def _is_stateless_call(call: str) -> bool:
     """Check if an invoked identifier is an exact recognized stateless I/O API."""
     c = call.lower().replace("?.", ".").strip()
@@ -441,18 +467,24 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     if awaited_calls is None or not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
         return False
 
-    # Each awaited operation must have its own positive evidence clause in remediation,
-    # rather than relying on an unrelated positive claim elsewhere in the text (Reviewer P1).
+    # Each awaited operation must have its own positive evidence clause in remediation.
+    # Conservatively reject mixed-backend clauses (e.g. mentioning both fetch and readFile in one sentence)
+    # and require positive evidence directly tied to each awaited operation (Reviewer P1).
     clauses = [c.strip() for c in re.split(r"(?:\.\s+|;\s*|\n+)", remediation) if c.strip()]
     for call in awaited_calls:
-        pat = _BACKEND_OP_FAMILIES.get(call)
-        if not pat:
+        cat = _get_backend_category(call)
+        direct_pat = _BACKEND_DIRECT_EVIDENCE_PATTERNS.get(cat)
+        if not direct_pat:
             return False
         has_clause_evidence = False
+        other_cats = [c for c in _CATEGORY_TERMS if c != cat]
         for clause in clauses:
             if _NEGATION_PATTERN.search(clause) or re.search(r"\b(?:if|whether|assuming)\b", clause, re.IGNORECASE):
                 continue
-            if pat.search(clause) and _POSITIVE_EVIDENCE_PATTERN.search(clause):
+            # Reject mixed-backend clause where multiple backend families appear in the same clause
+            if any(_CATEGORY_TERMS[other].search(clause) for other in other_cats):
+                continue
+            if direct_pat.search(clause):
                 has_clause_evidence = True
                 break
         if not has_clause_evidence:
