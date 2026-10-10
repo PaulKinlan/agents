@@ -178,16 +178,51 @@ def is_test_or_fixture_path(rel_path: str, fname: str) -> bool:
     return False
 
 
+def _resolve_common_git_dir(path: Path) -> Optional[Path]:
+    """Resolve the root .git directory for a repository or linked git worktree."""
+    git_entry = path / ".git"
+    if git_entry.is_dir():
+        return git_entry.resolve()
+    if git_entry.is_file():
+        try:
+            line = git_entry.read_text(encoding="utf-8").strip()
+            if line.startswith("gitdir:"):
+                raw_git_dir = Path(line.split(":", 1)[1].strip())
+                if not raw_git_dir.is_absolute():
+                    raw_git_dir = (path / raw_git_dir).resolve()
+                else:
+                    raw_git_dir = raw_git_dir.resolve()
+                if raw_git_dir.parent.name == "worktrees":
+                    return raw_git_dir.parent.parent.resolve()
+                return raw_git_dir
+        except Exception:
+            return None
+    return None
+
+
+FACTORY_COMMON_GIT_DIR = _resolve_common_git_dir(FACTORY_ROOT)
+
+
 def is_factory_self_target(target_dir: Path) -> bool:
-    """Determine whether the target repository is the Software Factory itself."""
+    """Determine whether the target repository is the Software Factory itself.
+
+    WHEN IDENTITY CANNOT BE ESTABLISHED, TREAT THE TARGET AS THIRD-PARTY AND DO NOT SUPPRESS.
+    A false negative costs NOISE - the factory flags its own pattern definitions when it audits
+    itself - and a false positive costs SILENT LOSS OF PRODUCTION SINKS FROM AN ATTACK-SURFACE
+    INVENTORY. The function must fail toward "not self", and it must say so, because the next
+    person to open it will otherwise reach for the safer-looking default.
+    """
     try:
         resolved = target_dir.resolve()
         if resolved == FACTORY_ROOT.resolve() or FACTORY_ROOT.resolve() in resolved.parents:
             return True
-        return (resolved / "agents" / "threat-model" / "scripts").is_dir() or \
-               (resolved / "factory").is_file()
+        if FACTORY_COMMON_GIT_DIR is not None:
+            target_common = _resolve_common_git_dir(resolved)
+            if target_common is not None and target_common == FACTORY_COMMON_GIT_DIR:
+                return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def is_scanner_file(fpath: Path, rel_path: str, is_self_target: bool = True) -> bool:

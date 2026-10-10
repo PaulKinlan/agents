@@ -299,18 +299,44 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             self.assertIn("code-execution", categories)
             self.assertEqual(len(results), 4, f"Expected all 4 genuine sinks to be detected, got: {results}")
 
-    def test_auto_detected_self_target_telemetry_fires(self):
-        """P3 fix (agents-tj9u): Default auto-detection recognizes factory target layout and records telemetry.
+    def test_decoy_files_do_not_trigger_factory_self_target(self):
+        """P2 fix (agents-rul9): Decoy files (factory file, agents/threat-model/scripts dir) do NOT trigger self-target.
 
-        Exercises the production auto-detection path for factory self-targets:
-        is_factory_self_target auto-detects True, self-matches are suppressed, and
-        fail-visible telemetry captures suppressed entry points.
+        Third-party target containing BOTH decoys must be recognized as third-party,
+        and its production sinks must NOT be suppressed.
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            # Create factory layout markers so is_factory_self_target auto-detects True
+            # Create both decoy layout elements in a third-party target
             (tmp_path / "factory").touch()
             (tmp_path / "agents" / "threat-model" / "scripts").mkdir(parents=True)
+
+            src_dir = tmp_path / "src"
+            src_dir.mkdir(parents=True)
+            routes_code = """
+            const routes = [
+                { category: "api", endpoint: app.get("/api/v1/users", listUsers) },
+                { severity: "critical", handler: app.post("/api/v1/emergency", alertHandler) }
+            ];
+            """
+            (src_dir / "routes.js").write_text(routes_code, encoding="utf-8")
+
+            # Must fail toward third-party and not suppress
+            self.assertFalse(mine_history.is_factory_self_target(tmp_path))
+            results = mine_history.scan_entry_points(tmp_path)
+            self.assertEqual(len(results), 2, f"Expected 2 sinks to be found despite decoys, got: {results}")
+
+    def test_real_factory_worktree_recognized_as_self_with_telemetry(self):
+        """P2 fix (agents-rul9): Real factory worktree is recognized via common git dir and records telemetry."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            common_dir = mine_history.FACTORY_COMMON_GIT_DIR
+            if common_dir is None:
+                self.skipTest("FACTORY_COMMON_GIT_DIR not available in test environment")
+
+            # Simulate a git worktree of the factory
+            fake_worktree_gitdir = common_dir / "worktrees" / "temp-test-worktree"
+            (tmp_path / ".git").write_text(f"gitdir: {fake_worktree_gitdir}\n", encoding="utf-8")
 
             src_dir = tmp_path / "src"
             src_dir.mkdir(parents=True)
@@ -321,7 +347,6 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             )
             (src_dir / "factory_code.py").write_text(code, encoding="utf-8")
 
-            # Call with NO is_self_target kwarg: auto-detection must identify factory self-target
             self.assertTrue(mine_history.is_factory_self_target(tmp_path))
             results, suppressed = mine_history.scan_entry_points(tmp_path, return_suppressed=True)
             self.assertEqual(len(results), 0, f"Expected self-matches to be suppressed, got: {results}")
@@ -370,6 +395,11 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
+            if mine_history.FACTORY_COMMON_GIT_DIR is not None:
+                (tmp_path / ".git").write_text(
+                    f"gitdir: {mine_history.FACTORY_COMMON_GIT_DIR}/worktrees/test-worktree\n",
+                    encoding="utf-8"
+                )
             scripts_dir = tmp_path / "agents" / "threat-model" / "scripts"
             scripts_dir.mkdir(parents=True)
 
