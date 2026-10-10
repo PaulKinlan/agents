@@ -116,6 +116,87 @@ class TestStationTrustedToolPins(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"expected exit 0 when npm is absent, got {res.returncode}")
         self.assertNotIn("Error: npm is present", res.stderr)
 
+    def test_prepass_child_environment_forwards_tool_pins(self):
+        """prepass_environment must forward FACTORY_TOOL_PINS and FACTORY_ALLOW_UNPINNED_TOOLS (agents-qbl8)."""
+        from lib.child_env import prepass_environment
+        parent = {
+            "PATH": "/bin:/usr/bin",
+            "FACTORY_TOOL_PINS": "/some/path/tools.pins.yaml",
+            "FACTORY_ALLOW_UNPINNED_TOOLS": "1"
+        }
+        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent)
+        self.assertEqual(child_env.get("FACTORY_TOOL_PINS"), "/some/path/tools.pins.yaml")
+        self.assertEqual(child_env.get("FACTORY_ALLOW_UNPINNED_TOOLS"), "1")
+
+    def test_perf_review_runs_dispatched_under_prepass_env_with_valid_pins(self):
+        """perf-review runs to exit 0 when dispatched under prepass_environment with valid pins (agents-qbl8)."""
+        import hashlib
+        from lib.child_env import prepass_environment
+
+        fake_git = self._plant("git")
+        git_sha = hashlib.sha256(fake_git.read_bytes()).hexdigest()
+        pins = self._pins_file(f"git:\n  path: {fake_git}\n  sha256: {git_sha}\n")
+
+        parent = os.environ.copy()
+        parent["PATH"] = f"{self.fakebin}:{parent.get('PATH', '')}"
+        parent["FACTORY_TOOL_PINS"] = str(pins)
+        parent.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent)
+        script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=child_env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 0, f"expected exit 0, got {res.returncode}: {res.stderr}")
+        self.assertTrue((self.tmp / "fake_git.log").exists(), "authenticated git should have run")
+
+    def test_pr_fixer_runs_dispatched_under_prepass_env_with_valid_pins(self):
+        """pr-fixer runs to exit 0 when dispatched under prepass_environment with valid pins (agents-qbl8)."""
+        import hashlib
+        from lib.child_env import prepass_environment
+
+        fake_git = self._plant("git")
+        git_sha = hashlib.sha256(fake_git.read_bytes()).hexdigest()
+        pins = self._pins_file(f"git:\n  path: {fake_git}\n  sha256: {git_sha}\n")
+
+        parent = os.environ.copy()
+        parent["PATH"] = f"{self.fakebin}:{parent.get('PATH', '')}"
+        parent["FACTORY_TOOL_PINS"] = str(pins)
+        parent.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent)
+        script = ROOT / "agents/pr-fixer/scripts/collect_failures.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=child_env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 0, f"expected exit 0, got {res.returncode}: {res.stderr}")
+        self.assertTrue((self.tmp / "fake_git.log").exists(), "authenticated git should have run")
+
+    def test_deps_supply_chain_runs_dispatched_under_prepass_env_with_valid_pins(self):
+        """deps-supply-chain runs to exit 0 when dispatched under prepass_environment with valid pins (agents-qbl8)."""
+        import hashlib
+        from lib.child_env import prepass_environment
+
+        fake_npm = self._plant("npm")
+        npm_sha = hashlib.sha256(fake_npm.read_bytes()).hexdigest()
+        pins = self._pins_file(f"npm:\n  path: {fake_npm}\n  sha256: {npm_sha}\n")
+
+        parent = os.environ.copy()
+        parent["PATH"] = f"{self.fakebin}:{parent.get('PATH', '')}"
+        parent["FACTORY_TOOL_PINS"] = str(pins)
+        parent.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+
+        pkg = self.target / "package.json"
+        pkg.write_text('{"name": "test", "dependencies": {"foo": "1.0.0"}}\n')
+
+        child_env = prepass_environment({"capabilities": {"requires": ["npm"]}}, parent=parent)
+        script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
+        res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
+                             env=child_env, capture_output=True, text=True)
+
+        self.assertEqual(res.returncode, 0, f"expected exit 0, got {res.returncode}: {res.stderr}")
+        self.assertTrue((self.tmp / "fake_npm.log").exists(), "authenticated npm should have run")
+
 
 if __name__ == "__main__":
     unittest.main()
