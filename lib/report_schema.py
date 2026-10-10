@@ -187,14 +187,10 @@ _NAMED_BACKEND_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-_CONDITIONAL_REENTRANCY_PATTERN = re.compile(
-    r"\b(?:precondition:?\s*verify\s+backend\s+reentrancy|if\s+[^.;\n]{1,80}?\b(?:is\s+reentrant|is\s+thread[- ]safe|supports?\s+concurrency|supports?\s+concurrent|tolerates?\s+overlap))\b",
-    re.IGNORECASE
-)
-
-_SERIAL_FALLBACK_PATTERN = re.compile(
-    r"\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequentially)\b"
-    r"|\b(?:preserve|keep|maintain)\s+(?:documented\s+)?(?:serial|sequential)\b",
+_STRUCTURED_PRECONDITION_PATTERN = re.compile(
+    r"\b(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)\b"
+    r"[^\n]{1,160}?\b(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrent|parallel|concurrency)\b"
+    r"[^\n]{0,100}?\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use|default\s+to)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequential(?:ly)?)\b",
     re.IGNORECASE
 )
 
@@ -211,7 +207,9 @@ _NEGATION_PATTERN = re.compile(
 
 _STOP_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:stop|avoid|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from|do\s+not|don't|never)\s+"
-    r"(?:(?:use|using|the|a)\s+)?(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism|iz(?:e|ing|ation))?|overlap(?:ping)?|(?:a\s+)?worker\s+pools?|(?:a\s+)?pool\s+of\s+workers?|thread\s+pools?)\b",
+    r"(?:(?:use|using|the|a)\s+)?"
+    r"(?:(?:run|running|execute|executing|dispatch|dispatching|call|calling|process|processing)\b[^.;\n]*?\b(?:in\s+parallel|concurrently|simultaneously)|"
+    r"Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism|iz(?:e|ing|ation))?|overlap(?:ping)?|(?:a\s+)?worker\s+pools?|(?:a\s+)?pool\s+of\s+workers?|thread\s+pools?)\b",
     re.IGNORECASE
 )
 
@@ -316,19 +314,19 @@ _BACKEND_OP_FAMILIES = {
 
 
 _API_DIRECT_PATTERNS = {
-    "fetch": re.compile(r"\b(?:fetch|stateless\s+api)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fetch|stateless\s+api)\b", re.IGNORECASE),
-    "window.fetch": re.compile(r"\b(?:fetch|stateless\s+api)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fetch|stateless\s+api)\b", re.IGNORECASE),
-    "globalthis.fetch": re.compile(r"\b(?:fetch|stateless\s+api)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fetch|stateless\s+api)\b", re.IGNORECASE),
-    "axios": re.compile(r"\baxios\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\baxios\b", re.IGNORECASE),
-    "axios.get": re.compile(r"\baxios\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\baxios\b", re.IGNORECASE),
-    "https.get": re.compile(r"\bhttps?\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\bhttps?\b", re.IGNORECASE),
-    "http.get": re.compile(r"\bhttps?\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\bhttps?\b", re.IGNORECASE),
-    "download": re.compile(r"\bdownload\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\bdownload\b", re.IGNORECASE),
-    "readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
-    "read_file": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
-    "fs.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
-    "fs.promises.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
-    "fspromises.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b[^.,;\n]{0,50}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b|\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b[^.,;\n]{0,50}?\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b", re.IGNORECASE),
+    "fetch": re.compile(r"\b(?:fetch|window\.fetch|globalthis\.fetch)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "window.fetch": re.compile(r"\b(?:fetch|window\.fetch|globalthis\.fetch)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "globalthis.fetch": re.compile(r"\b(?:fetch|window\.fetch|globalthis\.fetch)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "axios": re.compile(r"\baxios\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "axios.get": re.compile(r"\baxios(?:\.get)?\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "https.get": re.compile(r"\bhttps?\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "http.get": re.compile(r"\bhttps?\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "download": re.compile(r"\bdownload\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "read_file": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "fs.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "fs.promises.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
+    "fspromises.readfile": re.compile(r"\b(?:fs(?:\.promises)?|read-only\s+i/o|readfile)\b(?:\s+backend|\s+runtime|\s+library)?\s+(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b", re.IGNORECASE),
 }
 
 
@@ -503,10 +501,8 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     if not remediation:
         return False
 
-    # Case 1: Conditional advice with explicit serial fallback
-    has_condition = bool(_CONDITIONAL_REENTRANCY_PATTERN.search(remediation))
-    has_fallback = bool(_SERIAL_FALLBACK_PATTERN.search(remediation))
-    if has_condition and has_fallback:
+    # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1)
+    if _STRUCTURED_PRECONDITION_PATTERN.search(remediation):
         return True
 
     # Case 2: Named backend citing proven evidence of overlap tolerance
