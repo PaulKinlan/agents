@@ -494,5 +494,42 @@ class TestDiscoverThreatModel(unittest.TestCase):
             self.assertEqual(info["size_bytes"], 0)
 
 
+class TestThreatModelOutputContractBound(unittest.TestCase):
+    """agents-uhru: the threat-model report schema enforces a bounded slot for threat_model_markdown."""
+
+    def test_schema_declares_max_length_bound(self):
+        schema_path = ROOT / "agents" / "threat-model" / "report.schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        tm_prop = schema["properties"]["threat_model_markdown"]
+        self.assertEqual(tm_prop.get("maxLength"), 16384)
+
+    def test_validator_enforces_slot_bound(self):
+        from lib.report_schema import validate_agent_report
+        agent_dir = ROOT / "agents" / "threat-model"
+        cfg = {"output": {"schema": "report.schema.json"}}
+
+        # Under/at bound passes
+        report_at_bound = {
+            "summary": "At bound",
+            "target": "target",
+            "findings": [],
+            "threat_model_markdown": "# TM\n" + "A" * (16384 - 5),
+        }
+        self.assertEqual(validate_agent_report(agent_dir, cfg, report_at_bound), [])
+
+        # Just over bound fails loudly
+        report_over_bound = {
+            "summary": "Over bound",
+            "target": "target",
+            "findings": [],
+            "threat_model_markdown": "# TM\n" + "A" * (16384 - 4),
+        }
+        errors = validate_agent_report(agent_dir, cfg, report_over_bound)
+        self.assertIsNotNone(errors)
+        self.assertTrue(any("$.threat_model_markdown: length 16385 exceeds maxLength 16384" in e for e in errors),
+                        errors)
+
+
+
 if __name__ == "__main__":
     unittest.main()
