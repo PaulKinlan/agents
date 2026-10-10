@@ -118,7 +118,11 @@ RENDERED_TEXT_FIELDS = (
 )
 
 # Fields on a scanner candidate that hold the matched value.
-CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match")
+# Fields the STDOUT channel must drop wholesale. candidate_id belongs here with the values it is
+# derived from: it is sha256(rule NUL path NUL match_text NUL ordinal)[:16], so it is a digest of the
+# same secret - and a 16-char hex digest matches no secret pattern, which is why mask_text cannot
+# mask it and why it must be dropped rather than pattern-masked (agents-qslz).
+CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match", "candidate_id")
 
 
 # Identity fields (`agent`, `rule_id`, `path`) are rendered, and they reach this layer as

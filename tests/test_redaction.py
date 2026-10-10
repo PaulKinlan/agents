@@ -485,5 +485,39 @@ class TestScannerStdout(unittest.TestCase):
         self.assertIn(CREDENTIAL, json.dumps(candidates))
 
 
+
+class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
+    """agents-qslz (P1): a value DERIVED from the matched text must be dropped with it."""
+
+    def test_candidate_id_is_dropped_with_the_match_fields_it_is_derived_from(self):
+        """candidate_id is sha256(rule NUL path NUL match_text NUL ordinal)[:16] - a digest of the
+        matched text - so the stdout channel must drop it exactly like the snippet it came from, for
+        the reason the function itself states: a terminal or CI log has no way to be un-published.
+
+        It is a DROP, not a mask, and that distinction is the defect: mask_text cannot recognise a
+        16-char hex digest, so before this fix the id fell through the string branch verbatim while
+        its own source was [redacted]. Observed end-to-end on the scanner, not just in unit form.
+
+        Load-bearing: remove "candidate_id" from CANDIDATE_MATCH_FIELDS and this fails with the id
+        present in the safe copy.
+        """
+        from lib.redaction import CANDIDATE_MATCH_FIELDS, stdout_safe_report
+
+        report = {"rule_id": "github-pat", "path": "src/config.js", "line_number": 1,
+                  "snippet": "ghp_SECRETVALUE", "raw_match": "ghp_SECRETVALUE",
+                  "candidate_id": "45242927149666d8", "identity_source": "candidate-id"}
+        safe = stdout_safe_report(report)
+
+        self.assertIn("candidate_id", CANDIDATE_MATCH_FIELDS,
+                      "the id is a digest of the matched text and must be in the drop list")
+        self.assertEqual(safe["candidate_id"], "[redacted]",
+                         "the confirmation oracle reached the stdout channel unmasked")
+        self.assertEqual(safe["snippet"], "[redacted]")
+        self.assertEqual(safe["raw_match"], "[redacted]")
+        # The channel must stay USABLE: fields not derived from the match still survive.
+        self.assertEqual(safe["rule_id"], "github-pat")
+        self.assertEqual(safe["path"], "src/config.js")
+        self.assertEqual(safe["line_number"], 1)
+
 if __name__ == "__main__":
     unittest.main()
