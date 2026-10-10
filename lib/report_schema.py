@@ -240,10 +240,22 @@ _NON_REENTRANT_SUSPECT_PATTERN = re.compile(
 _STATELESS_IO_CALLS = {"fetch", "axios", "readfile", "read_file", "https.get", "http.get", "download"}
 
 
+def _is_stateless_call(call: str) -> bool:
+    """Check if an invoked identifier is an inherently stateless I/O call."""
+    c = call.lower().strip()
+    return c in _STATELESS_IO_CALLS or ("." in c and c.split(".")[-1] in _STATELESS_IO_CALLS)
+
+
 _CONCURRENCY_WRAPPERS = {
     "promise.all", "all", "promise.allsettled", "allsettled", "promise.race", "race",
     "asyncio.gather", "gather", "map", "foreach", "for_each"
 }
+
+
+def _is_concurrency_wrapper(call: str) -> bool:
+    """Check if an invoked identifier is an iteration / concurrency wrapper (map, Promise.all)."""
+    c = call.lower().strip()
+    return c in _CONCURRENCY_WRAPPERS or ("." in c and c.split(".")[-1] in _CONCURRENCY_WRAPPERS)
 
 
 def _extract_invoked_calls(code: str) -> Set[str]:
@@ -256,14 +268,10 @@ def _extract_invoked_calls(code: str) -> Set[str]:
     for m in re.finditer(r"\b([A-Za-z0-9_$.]+)\s*\(", clean):
         func = m.group(1).lower()
         calls.add(func)
-        if "." in func:
-            calls.add(func.split(".")[-1])
     # Also extract callback arguments like map(readFile) or map(fetch)
     for m in re.finditer(r"\bmap\s*\(\s*([A-Za-z0-9_$.]+)\s*\)", clean):
         cb = m.group(1).lower()
         calls.add(cb)
-        if "." in cb:
-            calls.add(cb.split(".")[-1])
     return calls
 
 
@@ -277,8 +285,6 @@ def _extract_awaited_calls(code: str) -> Set[str]:
     for m in re.finditer(r"\bawait\s+([A-Za-z0-9_$.]+)\s*\(", clean):
         func = m.group(1).lower()
         calls.add(func)
-        if "." in func:
-            calls.add(func.split(".")[-1])
     return calls
 
 
@@ -315,19 +321,19 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     if not (_NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation)):
         return False
 
-    # The actual awaited operation in the snippet must be an inherently stateless I/O call
+    # Every awaited operation in the snippet must be an inherently stateless I/O call
     snippet = str(finding.get("snippet", ""))
     if snippet:
         awaited_calls = _extract_awaited_calls(snippet)
-        if not (awaited_calls & _STATELESS_IO_CALLS):
+        if not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
             return False
 
-    # If proposed_fix_diff is present, any parallelized call inside it must also match stateless I/O
+    # If proposed_fix_diff is present, every parallelized call inside it must also be stateless I/O
     diff = str(finding.get("proposed_fix_diff", ""))
     if diff:
         added_lines = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
-        diff_calls = _extract_invoked_calls(added_lines) - _CONCURRENCY_WRAPPERS
-        if diff_calls and not (diff_calls & _STATELESS_IO_CALLS):
+        diff_calls = {c for c in _extract_invoked_calls(added_lines) if not _is_concurrency_wrapper(c)}
+        if not diff_calls or any(not _is_stateless_call(c) for c in diff_calls):
             return False
 
     return True

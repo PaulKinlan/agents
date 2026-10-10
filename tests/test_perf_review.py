@@ -438,6 +438,25 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertNotIn("proposed_fix_diff", finding5)
         self.assertIn("Code patch withheld", finding5["remediation"])
 
+        # Case F: Reviewer counterexample - mixed awaited calls (fetch and job.run) -> diff withheld
+        report6 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/mixed.ts",
+                    "line_number": 10,
+                    "snippet": "for (const job of jobs) { await fetch(job.url); await job.run(); }",
+                    "remediation": "The Node.js fetch backend is proven reentrant and thread-safe; use Promise.all.",
+                    "proposed_fix_diff": "--- a/mixed.ts\n+++ b/mixed.ts\n@@ -1,2 +1,2 @@\n- for (const job of jobs) { await fetch(job.url); await job.run(); }\n+ await Promise.all(jobs.map(async j => { await fetch(j.url); await j.run(); }));",
+                }
+            ]
+        }
+        notes6 = normalize_report(report6)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes6))
+        finding6 = report6["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding6)
+        self.assertIn("Code patch withheld", finding6["remediation"])
+
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
         original_remediation = (
