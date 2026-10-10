@@ -6,6 +6,7 @@ empty (which re-books every prior finding as new), and concurrent factory proces
 other's findings via last-writer-wins read-modify-write.
 """
 
+import gc
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -153,6 +155,47 @@ class TestCliStoreCleanup(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, failure + " failed"):
                             findings.main(argv)
                     store.close.assert_called_once()
+
+
+class TestAbandonedStoreReleasesItsLock(unittest.TestCase):
+    def test_a_store_that_is_never_closed_does_not_leak_its_lock_handle(self):
+        """agents-b81j: "a caller that forgets close()" is the ORDINARY case for a library.
+
+        Five test files forgot, and each leaked the store's lock handle (`target.json.lock`) to the
+        file object's finalizer, which CPython reports as `ResourceWarning: unclosed file`. The
+        store owns the handle, so it releases it at teardown without the caller's help. Load-
+        bearing: with `close()` reached only from `__del__`, dropping that finalizer makes this
+        fail instead of printing a warning nobody gates on. The error filter raises inside the file
+        object's own finalizer, so the failure arrives as an UNRAISABLE exception - hence the hook,
+        because an unraisable warning does not fail a test run by itself (a `-W error` discovery
+        run of the leaking suite printed 12 of them and still exited 0).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            findings_dir = Path(tmpdir)
+            unraisable = []
+            previous_hook = sys.unraisablehook
+            sys.unraisablehook = unraisable.append
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", ResourceWarning)
+                    store = FindingsStore("abandoned", findings_dir=findings_dir)
+                    lock_file = store._lock_path
+                    self.assertTrue(store._lock_acquired, "the store never took the lock")
+                    del store  # the caller that forgets: no close(), no context manager
+                    gc.collect()
+            finally:
+                sys.unraisablehook = previous_hook
+            self.assertTrue(lock_file.exists(), "the abandoned store never opened its lock file")
+            self.assertEqual(
+                [u for u in unraisable if issubclass(u.exc_type, ResourceWarning)], [],
+                "the abandoned store leaked its lock handle to the garbage collector",
+            )
+            # And the flock went with it: a second store on the same target acquires at once.
+            replacement = FindingsStore("abandoned", findings_dir=findings_dir, lock_timeout=0)
+            try:
+                self.assertIn("findings", replacement.data)
+            finally:
+                replacement.close()
 
 
 class TestConcurrentWriters(unittest.TestCase):
