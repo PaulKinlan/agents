@@ -2744,6 +2744,88 @@ class TestEngineCredentialPinning(TestDispatcher):
                          "the fake claude must never execute with the credential")
 
 
+class TestPrepassEffectivePinsEveryPath(TestDispatcher):
+    """agents-28nn round 5, review P1 — THE CONTROL MUST BE A PROPERTY OF THE OPERATION,
+    NOT OF THE PATH TAKEN TO IT.
+
+    This is the THIRD appearance of the inverted-polarity shape in this bead (the
+    agents-dpt pins forwarding to children; the round-4 verdict's bind verification only
+    when sandbox_ok; and this one), so it is fixed as a design rule, not patched as a
+    slip: the merged effective pins were written ONLY inside the `if sandbox_ok:` block,
+    so the LESS-confined unsandboxed pre-pass had LESS control — it re-derived its pins
+    from the forwarded host path instead of verifying against EXACTLY what the host
+    verified (a snapshot a host-pins swap between host resolution and child exec cannot
+    widen).
+
+    The constructed case forces the unsandboxed path on a sandboxed host — a host pins
+    file with NO bwrap entry fails the probe closed, and FACTORY_ALLOW_UNSANDBOXED=1 plus
+    a trusted private target permits the run — and the pre-pass records the
+    FACTORY_TOOL_PINS it was handed. The control must hold on this path too: the env
+    names the dispatcher's effective pins file (a factory-pins-*/ dir, NOT the run dir,
+    NOT the forwarded host file) and its content is the merged view.
+
+    MUTATION PROOF (performed, not asserted): reverting the hoist — the effective-pins
+    write back inside `if sandbox_ok:` — turns this red: the pre-pass then records the
+    FORWARDED host pins path, which fails the effective-file assertions below.
+    """
+
+    RECORDER = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        "pins = os.environ.get('FACTORY_TOOL_PINS', '')\n"
+        "Path(out).write_text(json.dumps({\n"
+        "    'candidates': [],\n"
+        "    'pins_env': pins,\n"
+        "    'pins_exists': bool(pins) and Path(pins).exists(),\n"
+        "    'pins_content': Path(pins).read_text() if pins and Path(pins).exists() else '',\n"
+        "}))\n")
+
+    def test_the_unsandboxed_prepass_verifies_against_the_same_effective_pins(self):
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        scripts = self.root / "agents" / "probe" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "record_pins.py").write_text(self.RECORDER, encoding="utf-8")
+        self.trusted_target("trusted")
+        # Pin the stub engine by path + content; OMIT bwrap so the probe fails closed and
+        # the trusted-target opt-in takes the UNSANDBOXED path on this sandboxed host.
+        import hashlib
+        stub = self.bin / "pi"
+        digest = hashlib.sha256(stub.read_bytes()).hexdigest()
+        host_pins = self.root / "tools.pins.yaml"
+        host_pins.write_text(f"pi:\n  path: {stub}\n  sha256: {digest}\n",
+                             encoding="utf-8")
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1",
+                                  "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+                                  "FACTORY_TOOL_PINS": str(host_pins)},
+                           target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     NOT enforced", res.stdout,
+                      "the test must EXERCISE the unsandboxed path, or it proves nothing "
+                      "about it: " + res.stdout)
+        runs = self.run_dirs()
+        self.assertEqual(len(runs), 1)
+        record = json.loads((runs[0] / "candidates.json").read_text(encoding="utf-8"))
+        pins_env = record["pins_env"]
+        self.assertTrue(record["pins_exists"],
+                        "the unsandboxed pre-pass must receive a pins file that EXISTS")
+        self.assertEqual(Path(pins_env).name, "tool-pins.effective.yaml",
+                         "every path's child must verify against the EFFECTIVE pins the "
+                         "host wrote, not a re-derived merge of the forwarded host file: "
+                         + pins_env)
+        self.assertTrue(Path(pins_env).parent.name.startswith("factory-pins-"),
+                        "the effective pins live in their own per-run dir: " + pins_env)
+        self.assertNotIn(str(runs[0]), pins_env,
+                         "the pins file must not live in the rw run dir (the round-5 P0)")
+        self.assertNotEqual(pins_env, str(host_pins),
+                            "the child gets the host's merged snapshot, not the host file "
+                            "itself (a swap between host resolution and child exec must "
+                            "not widen what the child trusts)")
+        self.assertIn(digest, record["pins_content"],
+                      "the effective pins must carry the host's merge (the pi pin)")
+
+
 class TestEgressEndToEnd(unittest.TestCase):
     """agents-2x6 named end-to-end acceptance (coord guardrails), all in ONE sandboxed
     run: from INSIDE a real --unshare-net bubblewrap engine, through the net_forward relay

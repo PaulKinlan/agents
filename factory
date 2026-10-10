@@ -1241,6 +1241,28 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     if prepass_script and prepass_script.exists():
         prepass_cmd = _prepass_argv(prepass_script, read_dir, target_name,
                                     candidates_file, agent_name)
+        # agents-28nn round 5 (review P1) — stated as a DESIGN RULE, not fixed as a slip,
+        # because this bead has now met it THREE times (the agents-dpt pins forwarding to
+        # children; the round-4 verdict's bind-verification-only-when-sandbox_ok; and now
+        # the merged pins themselves): THE CONTROL MUST BE A PROPERTY OF THE OPERATION,
+        # NOT OF THE PATH TAKEN TO IT. A control that applies only on the confined path
+        # leaves the LESS-confined path with LESS control — the inverted polarity. So the
+        # merged effective pins are written for EVERY pre-pass, sandboxed or not, and
+        # every pre-pass child's FACTORY_TOOL_PINS names the same file: the child verifies
+        # against EXACTLY the bytes the host verified (a snapshot — a host-pins swap
+        # between the host's own resolutions and the child's exec cannot widen what the
+        # child trusts), on every path. Pins are paths and hashes, not secrets.
+        # The pins file must NOT be one the child can rewrite (the rule on
+        # _make_pins_dir): it lives in its own per-run dir OUTSIDE the rw-bound run
+        # directory. On the sandboxed path the wrap binds it READ-ONLY at the same
+        # absolute path (below), so the kernel enforces the rule. On the UNSANDBOXED path
+        # no mount namespace exists and no userspace mechanism can keep a file immutable
+        # to a process running with the operator's own uid — stated, not claimed: there
+        # the pins constrain PATH-order resolution for honest code, and the boundary is
+        # the trusted-target attestation (agents-bp0), not this file.
+        effective_pins = write_effective_pins(
+            _make_pins_dir() / "tool-pins.effective.yaml")
+        prepass_env[HOST_PINS_ENV] = str(effective_pins)
         # Egress control applies to the pre-pass whenever the host can sandbox (agents-2x6):
         # its netns is isolated and its only egress is the allowlist proxy, reached through
         # the net_forward relay. The proxy itself starts later, just before execution; the
@@ -1257,17 +1279,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # resolve_tool (agents-28nn round 4: a station script's own trusted-tool
             # launch is a census kind of its own — the bind boundary authenticates at
             # WRAP time; the script re-verifies at EXEC time). The host pins file lives
-            # under $HOME, tmpfs-hidden inside the wrap, so the child gets the EFFECTIVE
-            # pins the host just verified — paths and hashes, not secrets.
-            # agents-28nn round 5 (review P0): the pins file must NOT be one the child
-            # can rewrite (the rule on _make_pins_dir), so it lives in its own per-run
-            # dir OUTSIDE the rw-bound run directory and is bound into the wrap
-            # READ-ONLY at the same absolute path — the child that rewrites the file it
-            # was handed gets EROFS, and resolve_tool keeps validating what the host
-            # verified.
-            effective_pins = write_effective_pins(
-                _make_pins_dir() / "tool-pins.effective.yaml")
-            prepass_env[HOST_PINS_ENV] = str(effective_pins)
+            # under $HOME, tmpfs-hidden inside the wrap, so the child reads the EFFECTIVE
+            # pins the host just verified, bound READ-ONLY into the wrap at the same
+            # absolute path — a child that rewrites the file it was handed gets EROFS,
+            # and resolve_tool keeps validating what the host verified (round 5, the P0
+            # this round's first commit closed).
             try:
                 prepass_cmd = sandbox_command(
                     prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
