@@ -216,5 +216,60 @@ class TestVulnTriageClustering(unittest.TestCase):
             self.assertEqual(len(payload["clusters"]), 2)
 
 
+class TestThreatModelContextSummary(unittest.TestCase):
+    """agents-tawg: test visible summarization path and findings-store threat model copy."""
+
+    def test_large_threat_model_has_visible_summary_notice(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            target_dir = tmp_path / "target"
+            target_dir.mkdir()
+            large_text = "# THREAT MODEL\n" + "x" * 5000
+            (target_dir / "THREAT_MODEL.md").write_text(large_text, encoding="utf-8")
+
+            out_file = tmp_path / "output" / "clusters.json"
+            out_file.parent.mkdir()
+
+            res = subprocess.run([
+                sys.executable,
+                str(ROOT / "agents" / "vuln-triage" / "scripts" / "triage.py"),
+                "--target", str(target_dir),
+                "--output", str(out_file),
+            ], capture_output=True, text=True, check=True)
+
+            payload = json.loads(out_file.read_text(encoding="utf-8"))
+            summary = payload["threat_model_summary"]
+            self.assertIn("[THREAT_MODEL.md summarised: showing first 3000 of 5015 chars", summary)
+            self.assertIn("TRUNCATED", summary)
+            self.assertEqual(payload["threat_model_file"], "THREAT_MODEL.md")
+
+    def test_findings_store_threat_model_copied_to_output_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            orig_root = triage.FACTORY_ROOT
+            try:
+                triage.FACTORY_ROOT = tmp_path
+                findings_dir = tmp_path / "findings"
+                findings_dir.mkdir()
+                target_name = "proj-x"
+                store_tm = findings_dir / f"{target_name}-THREAT_MODEL.md"
+                store_tm.write_text("# Stored TM Content", encoding="utf-8")
+
+                target_dir = tmp_path / target_name
+                target_dir.mkdir()
+
+                out_file = tmp_path / "run" / "clusters.json"
+                out_file.parent.mkdir()
+
+                text, rel = triage.load_threat_model(target_name, target_dir, output_file=out_file)
+                self.assertEqual(text, "# Stored TM Content")
+                self.assertEqual(rel, "THREAT_MODEL.md")
+                copied = out_file.parent / "THREAT_MODEL.md"
+                self.assertTrue(copied.exists())
+                self.assertEqual(copied.read_text(encoding="utf-8"), "# Stored TM Content")
+            finally:
+                triage.FACTORY_ROOT = orig_root
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,6 @@
   "required": [
     "summary",
     "target",
-    "threat_model_markdown",
     "findings"
   ],
   "properties": {
@@ -19,7 +18,7 @@
     },
     "threat_model_markdown": {
       "type": "string",
-      "description": "Full GitHub Flavored Markdown document for THREAT_MODEL.md"
+      "description": "Optional threat model markdown document or notes (for small summaries only; large documents must not be embedded in JSON)"
     },
     "findings": {
       "type": "array",

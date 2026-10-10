@@ -430,5 +430,67 @@ class TestThreatModelRefusalGuardsAndExclusions(unittest.TestCase):
         self.assertFalse(is_false_positive(genuine_finding))
 
 
+class TestDiscoverThreatModel(unittest.TestCase):
+    """agents-tawg: threat model document discovery without prompt embedding."""
+
+    def test_finds_threat_model_in_repo_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            tm_file = tmp_path / "THREAT_MODEL.md"
+            tm_file.write_text("# THREAT MODEL\nInvariants...", encoding="utf-8")
+            info = mine_history.discover_threat_model(tmp_path)
+            self.assertTrue(info["present"])
+            self.assertEqual(info["file"], "THREAT_MODEL.md")
+            self.assertGreater(info["size_bytes"], 0)
+            self.assertIn("THREAT_MODEL.md", info["note"])
+
+    def test_finds_threat_model_in_docs_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docs = tmp_path / "docs"
+            docs.mkdir()
+            tm_file = docs / "THREAT_MODEL.md"
+            tm_file.write_text("# DOCS THREAT MODEL\nInvariants...", encoding="utf-8")
+            info = mine_history.discover_threat_model(tmp_path)
+            self.assertTrue(info["present"])
+            self.assertEqual(info["file"], "docs/THREAT_MODEL.md")
+
+    def test_copies_findings_store_threat_model_to_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            findings_dir = tmp_path / "findings"
+            findings_dir.mkdir()
+            target_name = "sample-proj"
+            store_tm = findings_dir / f"{target_name}-THREAT_MODEL.md"
+            store_tm.write_text("# STORED THREAT MODEL\nContent...", encoding="utf-8")
+
+            # Mock FACTORY_ROOT to tmp_path
+            orig_root = mine_history.FACTORY_ROOT
+            try:
+                mine_history.FACTORY_ROOT = tmp_path
+                target_dir = tmp_path / target_name
+                target_dir.mkdir()
+                out_dir = tmp_path / "runs" / "run-1"
+                out_dir.mkdir(parents=True)
+                out_candidates = out_dir / "candidates.json"
+
+                info = mine_history.discover_threat_model(target_dir, output_file=out_candidates)
+                self.assertTrue(info["present"])
+                self.assertEqual(info["file"], "THREAT_MODEL.md")
+                copied_file = out_dir / "THREAT_MODEL.md"
+                self.assertTrue(copied_file.exists())
+                self.assertEqual(copied_file.read_text(encoding="utf-8"), store_tm.read_text(encoding="utf-8"))
+            finally:
+                mine_history.FACTORY_ROOT = orig_root
+
+    def test_absent_when_no_threat_model_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            info = mine_history.discover_threat_model(tmp_path)
+            self.assertFalse(info["present"])
+            self.assertIsNone(info["file"])
+            self.assertEqual(info["size_bytes"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
