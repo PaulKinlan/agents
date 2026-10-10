@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from lib.redaction import redact_finding
 from lib.embargo import effective_severity, embargo_reason
 from lib.tool_pins import ToolPinError, resolve_tool
+from lib.sinks.base import Sink, SinkContext
 
 
 _BEAD_EXTERNAL_REF_PREFIX = "factory:"
@@ -176,3 +177,22 @@ def _dispatch_beads(beads_dir: Path, findings: List[Dict[str, Any]],
             result["note"] = str(e)
             print(f"Failed to create bead: {e}")
     return result
+
+
+# Target guidance is only consulted when the manifest has no explicit sink.
+AGENTS_MD_PHRASES = ("beads only", "bd is the only", "uses **bd**",
+                     "use `bd` for all task tracking")
+
+
+class BeadsSink(Sink):
+    name = "beads"
+
+    def detect(self, target_dir: Path) -> bool:
+        agents_md = target_dir / "AGENTS.md"
+        if not agents_md.exists():
+            return False
+        content = agents_md.read_text(encoding="utf-8", errors="ignore").lower()
+        return any(phrase in content for phrase in AGENTS_MD_PHRASES)
+
+    def publish(self, ctx: SinkContext, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return _dispatch_beads(ctx.beads_dir or ctx.target_dir, findings, ctx.visibility)

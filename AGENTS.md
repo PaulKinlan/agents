@@ -9,7 +9,7 @@ targets, or agent skills), see [docs/INTEGRATION.md](docs/INTEGRATION.md).
 > **This repo is the highest-privilege component in the system.** It holds model API keys and
 > GitHub tokens, runs unattended on a schedule, and has write access to other repositories.
 > A compromise here is a supply-chain compromise of every target it touches. Treat changes to
-> `lib/adapters/`, `.github/`, and any agent with `write: true` as security-sensitive.
+> `lib/adapters/`, `lib/sinks/`, `.github/`, and any agent with `write: true` as security-sensitive.
 
 ## Non-negotiables
 
@@ -114,6 +114,7 @@ explicitly configured `beads_path`.
 | `agents`, `chrome-agent-platform`, `voicebox`, `aifocus` | `beads` | Findings file to beads automatically; public input is triaged via issue-triage. |
 | `fauxmium` | `file` | No beads DB configured yet; local evidence only until its destination is declared. |
 | *default* | `file` | Local JSON for targets without a configured beads DB. |
+| *other trackers* | `command` | A manifest `sink_command` receives redacted, embargo-filtered JSON Lines (factory-sink/1). |
 
 ### Severity & Public Disclosure Rules
 
