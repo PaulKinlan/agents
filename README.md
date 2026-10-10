@@ -452,7 +452,7 @@ cannot be created — go through one recorded-removal choke point
 to **`retention-ledger.jsonl` at the factory root** (never inside `runs/`): directory
 name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome (`removed`, `moved` or `partial`),
 every disappeared symlink with its target (`symlinks`),
-and **the exact list of files that disappeared**. A citation is to a *file* — e.g. a bead
+and the list of files that disappeared (for `removed` and `partial`; `null` for `moved`, where `moved_files` records the pre-removal snapshot). A citation is to a *file* — e.g. a bead
 citing `runs/<agent>-<target>-<run_id>/candidates.json` as evidence — so the record counts
 files: a removal that fails *part way* (the directory survives but contents are destroyed)
 is tombstoned with `outcome: "partial"` and the lost files named, rather than passing a

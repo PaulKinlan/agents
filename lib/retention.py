@@ -159,7 +159,8 @@ no longer exists: every removal is tombstoned in `../retention-ledger.jsonl`
 `runs/` precisely so the record outlives the evidence). Search that ledger for
 the directory name: each line records the directory, the reason (`age`/`count`/
 `apply-worktree-failure`), the UTC time, the outcome (`removed`, `moved` or `partial`),
-and the exact list of files that disappeared with it.
+and the list of files that disappeared with it (for `removed` and `partial`; `null` for
+`moved`, where `moved_files` records the pre-removal snapshot).
 
 **This ledger records only removals made through it.** Beads sync across VMs
 and containers; this ledger does not — it is local to the filesystem that
@@ -548,7 +549,9 @@ def remove_recorded(directory: Path, *, reason: str,
     ``None`` = unresolvable (a loop, a permission boundary, or too many links)
     — the record then claims NEITHER survival NOR destruction.
 
-    Returns True only when the directory is gone. Refuses symlinks and missing
+    Returns True only when the directory was removed by this pass (outcome == "removed").
+    Returns False on partial removal, failure, or when the directory was moved/renamed
+    externally (outcome == "moved"). Refuses symlinks and missing
     directories (warns, returns False): the choke point never follows a link out
     of the runs root and never records a removal of something that was not there.
     """
