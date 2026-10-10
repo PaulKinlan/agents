@@ -58,6 +58,9 @@ while IFS= read -r f; do
       # (agents-q0mt) - the contract is fail-closed, so it is a real consumer of this module.
       # tests/test_suppressions.py asserts the committed suppressions register contract (agents-vt7w).
       mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py tests/test_redaction.py tests/test_suppressions.py"
+      # The lock is only observable from OUTSIDE a single process, so this suite is the only one
+      # that can see a regression to the unbounded wait (agents-4sij).
+      mapped="$mapped tests/test_store_lock_timeout.py"
       ;;
     lib/candidate_identity.py)
       # Candidate identity generator (agents-rdyb) and pre-pass emission assertion (agents-vt7w).

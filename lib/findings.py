@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,38 @@ class StoreFileError(ValueError):
     finding as new and re-file duplicates, so a store that exists but cannot be decoded raises
     instead (agents-3ls).
     """
+
+
+# The store lock is advisory mutual exclusion between writers (agents-3ls). The WAIT for it was
+# unbounded, which cost a reviewer an entire deadline: a blocked lane produces no verdict at all, and
+# the failure mode of an unbounded wait is SILENCE rather than an error (agents-4sij). The bound is a
+# default rather than a policy, so a lane running a long gate can raise it per process.
+STORE_LOCK_TIMEOUT_SECONDS = 10.0
+STORE_LOCK_POLL_SECONDS = 0.05
+STORE_LOCK_TIMEOUT_ENV = "FACTORY_STORE_LOCK_TIMEOUT"
+
+
+class StoreBusyError(ValueError):
+    """Another process holds the store lock and the bounded wait expired.
+
+    Deliberately NOT a subclass of StoreFileError: contention is not a corrupt or unreadable store,
+    and a caller that catches store errors broadly must not silently treat a busy store as a broken
+    one. The message names the holder and since when, because a lane that can see "held by pid N
+    since T" can decide to wait or work elsewhere, while one that sees a generic failure retries
+    blindly and one that sees nothing at all - the behaviour this replaces - simply stops.
+    """
+
+
+def _lock_holder_description(lock_path: Path) -> str:
+    """Who holds the lock, from the metadata the holder writes when it takes it (agents-4sij)."""
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "holder unknown (the lock file could not be read)"
+    if not raw:
+        return ("holder unknown (no metadata in the lock file - a build predating this field, or a "
+                "process that did not write it, may hold it)")
+    return raw
 
 try:  # imported as lib.findings (root on sys.path), or run as a script (lib/ on it)
     from lib.redaction import redact_finding, redact_for_storage
@@ -564,13 +597,16 @@ def parse_suppressions_yaml(text: str, source: str = SUPPRESSIONS_FILENAME) -> D
     return entries
 
 class FindingsStore:
-    def __init__(self, target_name: str, findings_dir: Optional[Path] = None):
+    def __init__(self, target_name: str, findings_dir: Optional[Path] = None, *,
+                 read_only: bool = False, lock_timeout: Optional[float] = None):
         self.target_name = target_name
         self.findings_dir = findings_dir or (FACTORY_ROOT / "findings")
         self.findings_dir.mkdir(parents=True, exist_ok=True)
         self.store_file = self.findings_dir / f"{target_name}.json"
         self.suppressions_file = self.findings_dir / SUPPRESSIONS_FILENAME
         self.legacy_suppressions_file = self.findings_dir / f"{target_name}.suppressions.json"
+        self.read_only = read_only
+        self._lock_timeout = self._resolve_lock_timeout(lock_timeout)
         # Advisory lock held across the whole load -> mutate -> save window (agents-3ls).
         # Concurrent factory processes (scheduled timer, manual run, CI) each do a
         # read-modify-write; without a lock the last writer wins and silently drops the
@@ -579,8 +615,13 @@ class FindingsStore:
         # store file itself would be left pointing at the superseded inode.
         self._lock_path = self.store_file.with_name(self.store_file.name + ".lock")
         self._lock_fh = open(self._lock_path, "a+", encoding="utf-8")
+        # Whether WE hold the lock. A read-only store that cannot take the shared lock proceeds
+        # unlocked (see _acquire_lock), and it must then neither publish nor clear the holder
+        # metadata: clearing it erased a LIVE writer's diagnostic line (agents-4sij review, P1), so
+        # every later waiter reported "holder unknown" while a holder was in fact running.
+        self._lock_acquired = False
         try:
-            fcntl.flock(self._lock_fh.fileno(), fcntl.LOCK_EX)
+            self._acquire_lock()
             # A store written before this field existed predates the stamp, so it was written by
             # some older scheme: treat it as 1 rather than as current, so the first run after the
             # change announces the re-key instead of passing it off as discoveries. A store that
@@ -597,12 +638,105 @@ class FindingsStore:
             self._lock_fh.close()
             raise
 
+    @staticmethod
+    def _resolve_lock_timeout(lock_timeout: Optional[float]) -> float:
+        """The bounded wait, from the argument, the environment, or the default (agents-4sij)."""
+        if lock_timeout is not None:
+            return max(0.0, float(lock_timeout))
+        raw = os.environ.get(STORE_LOCK_TIMEOUT_ENV)
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                pass  # a malformed override must not take a run down; the default is safe
+        return STORE_LOCK_TIMEOUT_SECONDS
+
+    def _acquire_lock(self) -> None:
+        """Take the store lock, waiting at most self._lock_timeout seconds.
+
+        A READ-ONLY store never waits: it takes the shared lock when it can and proceeds without it
+        otherwise. A reader that blocks forever behind a writer is the same defect wearing a
+        different hat (agents-4sij), and the store is replaced atomically on save, so a reader that
+        cannot lock is still reading a consistent file.
+        """
+        mode = fcntl.LOCK_SH if self.read_only else fcntl.LOCK_EX
+        deadline = time.monotonic() + self._lock_timeout
+        while True:
+            try:
+                fcntl.flock(self._lock_fh.fileno(), mode | fcntl.LOCK_NB)
+            except OSError:
+                if self.read_only:
+                    # Proceed unlocked - and stay NOT acquired, so close() leaves the holder
+                    # metadata alone (agents-4sij review, P1).
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise StoreBusyError(
+                        f"findings store {self.store_file} is locked: "
+                        f"{_lock_holder_description(self._lock_path)}; waited "
+                        f"{self._lock_timeout:g}s. Another factory process is writing this store - "
+                        f"retry later or work elsewhere (raise {STORE_LOCK_TIMEOUT_ENV} to wait "
+                        f"longer)."
+                    ) from None
+                try:
+                    time.sleep(min(STORE_LOCK_POLL_SECONDS, remaining))
+                except InterruptedError:
+                    # A rare interrupted sleep must not escape as an unhandled error from a path
+                    # whose whole job is to fail predictably (review out-of-scope note).
+                    pass
+                continue
+            # The lock is genuinely ours from here, so only from here may the holder metadata be
+            # published or cleared.
+            self._lock_acquired = True
+            if not self.read_only:
+                # A reader holding the SHARED lock is not writing this store, so it must not claim
+                # to be: that line says "pid ... lane ... since ..." about a WRITER, and two
+                # concurrent readers would clobber each other's (review out-of-scope notes).
+                self._publish_lock_holder()
+            return
+
+    def _publish_lock_holder(self) -> None:
+        """Record who holds the lock and since when, for the next waiter (agents-4sij).
+
+        Best-effort: failing to write metadata must never fail an ACQUIRED lock, so every error here
+        is swallowed and the waiter falls back to "holder unknown".
+        """
+        lane = os.environ.get("FLEET_LANE") or "unknown lane"
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            self._lock_fh.seek(0)
+            self._lock_fh.truncate()
+            self._lock_fh.write(f"pid {os.getpid()} lane {lane} since {stamp}\n")
+            self._lock_fh.flush()
+        except OSError:
+            pass
+
+    def _clear_lock_holder(self) -> None:
+        """Drop the metadata BEFORE releasing the lock, so no waiter can read a stale owner.
+
+        Clearing after LOCK_UN would race a process that had already taken the lock and written its
+        own line; clearing first can only ever leave "holder unknown", which is honest.
+        """
+        try:
+            self._lock_fh.seek(0)
+            self._lock_fh.truncate()
+            self._lock_fh.flush()
+        except OSError:
+            pass
+
     def close(self) -> None:
         """Release the advisory lock so another process can load and mutate this store."""
         fh = getattr(self, "_lock_fh", None)
         if fh is not None:
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                # Only a store that actually HELD the lock may clear the holder line or release it.
+                # A read-only store that proceeded unlocked owns neither, and clearing there is
+                # what erased a live writer's diagnostic (agents-4sij review, P1).
+                if self._lock_acquired:
+                    if not self.read_only:
+                        self._clear_lock_holder()
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    self._lock_acquired = False
             finally:
                 fh.close()
             self._lock_fh = None
@@ -1430,8 +1564,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.promote_issue:
         if not args.beads_dir or not args.repo or args.visibility != "public":
             parser.error("promotion needs --beads-dir, --repo and explicit --visibility public")
-        result = promote_issue(args.target, Path(args.target_dir).resolve(), args.repo,
-                               args.visibility, args.promote_issue, Path(args.beads_dir))
+        try:
+            result = promote_issue(args.target, Path(args.target_dir).resolve(), args.repo,
+                                   args.visibility, args.promote_issue, Path(args.beads_dir))
+        except (SuppressionFileError, StoreFileError, StoreBusyError) as e:
+            # The SECOND store-opening site (lib/sinks/github.py): promotion opens the store again
+            # while the outer one is held, so a bounded wait failure has to take the same clean path
+            # rather than a traceback (agents-4sij review, P2).
+            sys.stderr.write(f"Error: {e}\n")
+            sys.exit(2)
         print(json.dumps(result))
         return
     if not args.agent or not args.input:
@@ -1446,8 +1587,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     try:
         store = FindingsStore(target_name=args.target)
-    except (SuppressionFileError, StoreFileError) as e:
-        # Loud and non-zero: a register or store that cannot be parsed must not silently reset.
+    except (SuppressionFileError, StoreFileError, StoreBusyError) as e:
+        # Loud and non-zero: a register or store that cannot be parsed must not silently reset, and a
+        # CONTENDED store must not lose this clean path either. StoreBusyError is deliberately NOT a
+        # StoreFileError subclass, so it has to be named here or contention arrives as an uncaught
+        # traceback instead of the diagnostic two lines below (agents-4sij review, P2).
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(2)
     try:
