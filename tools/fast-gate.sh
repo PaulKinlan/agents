@@ -368,5 +368,14 @@ fi
 
 modules="$(printf '%s\n' $files | sed 's#/#.#g; s#\.py$##' | tr '\n' ' ' | sed 's/ *$//')"
 echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
-python3 -u -m unittest $modules
-echo "fast-gate: passed: $files"
+
+rc=0
+python3 -u -m unittest $modules || rc=$?
+
+if [ "$rc" -eq 0 ]; then
+  echo "fast-gate: passed: $files"
+  exit 0
+else
+  echo "fast-gate: failed: exit $rc (modules: $modules)" >&2
+  exit "$rc"
+fi

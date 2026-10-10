@@ -231,11 +231,32 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("install.sh", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
-    def test_fast_gate_invokes_unbuffered_unittest_and_reports_passed(self):
-        """tools/fast-gate.sh must run python3 with -u to unbuffer stdout/stderr and emit completion marker (agents-7zts)."""
-        content = FAST_GATE.read_text(encoding="utf-8")
-        self.assertIn("python3 -u -m unittest", content)
-        self.assertIn('echo "fast-gate: passed: $files"', content)
+    def test_fast_gate_execution_reports_passed_terminal_signal_on_success(self):
+        """tools/fast-gate.sh must leave an explicit 'fast-gate: passed:' terminal signal on success (agents-7zts)."""
+        probe = ROOT / "tests" / "test_pass_probe_tmp.py"
+        try:
+            probe.write_text("import unittest\nclass _T(unittest.TestCase):\n    def test_ok(self): pass\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = "tests/test_pass_probe_tmp.py"
+            res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"expected rc 0, got {res.returncode}: {res.stderr}")
+            self.assertIn("fast-gate: passed: tests/test_pass_probe_tmp.py", res.stdout)
+        finally:
+            probe.unlink(missing_ok=True)
+
+    def test_fast_gate_execution_reports_failed_terminal_signal_even_with_no_test_output(self):
+        """P2 fix (agents-ltgl): tools/fast-gate.sh must leave a terminal signal naming the failure and exit code
+        even when tests exit with no output at all (e.g. os._exit)."""
+        probe = ROOT / "tests" / "test_abort_probe_tmp.py"
+        try:
+            probe.write_text("import os\nos._exit(1)\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = "tests/test_abort_probe_tmp.py"
+            res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 1, f"expected rc 1, got {res.returncode}")
+            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp)", res.stderr)
+        finally:
+            probe.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
