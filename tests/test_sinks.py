@@ -77,7 +77,7 @@ class SinkFixture:
         self.root = Path(temporary.name).resolve()
         self.factory = self.root / "factory"
         (self.factory / "lib").mkdir(parents=True)
-        for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py"):
+        for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "line_numbers.py"):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
         shutil.copytree(ROOT / "lib" / "sinks", self.factory / "lib" / "sinks", dirs_exist_ok=True)
