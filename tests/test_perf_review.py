@@ -860,6 +860,30 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertNotIn("proposed_fix_diff", finding)
         self.assertIn("Code patch withheld", finding["remediation"])
 
+    def test_normalization_replaces_unsafe_intermediate_fallback_and_validates(self):
+        """Reviewer P1 finding: guard replaces unsafe fallback rather than wrapping it, passing validation."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/tasks.ts",
+                    "line_number": 12,
+                    "remediation": "IF backend is reentrant, use Promise.all; otherwise use Promise.any; else preserve serial execution",
+                }
+            ]
+        }
+        # Before normalization: rejected as having concurrency in fallback
+        self.assertFalse(has_reentrancy_precondition(report["findings"][0]))
+        # After normalization: repaired cleanly
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        finding = report["findings"][0]
+        self.assertTrue(has_reentrancy_precondition(finding))
+        self.assertNotIn("Promise.any", finding["remediation"])
+        # Validation must accept the repaired report without violations
+        violations = unpreconditioned_concurrency_findings(report)
+        self.assertEqual(violations, [])
+
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
         original_remediation = (

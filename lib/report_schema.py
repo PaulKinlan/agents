@@ -552,10 +552,25 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
     if not has_reentrancy_precondition(finding):
         remediation = str(finding.get("remediation", "")).strip()
         if remediation:
-            finding["remediation"] = (
-                "Precondition: Verify backend reentrancy before applying. "
-                f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {remediation}; otherwise preserve serial execution."
-            )
+            # Strip any broken/unsafe trailing fallback or malformed conditional prefix (Reviewer P1)
+            first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
+            clean_rem = remediation[:first_fb.start()].strip().rstrip(";,.") if first_fb else remediation
+            clean_rem = re.sub(
+                r"^(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b\s*)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)[,;:]?\s*",
+                "",
+                clean_rem,
+                flags=re.IGNORECASE,
+            ).strip()
+            if clean_rem:
+                finding["remediation"] = (
+                    "Precondition: Verify backend reentrancy before applying. "
+                    f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {clean_rem}; otherwise preserve serial execution."
+                )
+            else:
+                finding["remediation"] = (
+                    "Precondition: Verify backend reentrancy before applying. "
+                    "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
+                )
         else:
             finding["remediation"] = (
                 "Precondition: Verify backend reentrancy before applying. "
