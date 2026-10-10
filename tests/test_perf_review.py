@@ -337,25 +337,59 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertIn("Start all forward passes simultaneously", finding2["remediation"])
         self.assertIn("otherwise preserve serial execution", finding2["remediation"])
 
-    def test_post_filter_conditions_proposed_fix_diff_when_unpreconditioned(self):
-        """Reviewer P1 finding: proposed_fix_diff must be conditioned when remediation is guarded."""
-        report = {
+    def test_post_filter_withholds_proposed_fix_diff_when_not_proven(self):
+        """Reviewer P1 finding: proposed_fix_diff must be withheld unless reentrancy is proven."""
+        # Case A: unpreconditioned finding with diff -> diff withheld, remediation guarded
+        report1 = {
             "findings": [
                 {
                     "rule_id": "sequential-await-waterfall",
                     "path": "src/session.ts",
                     "line_number": 25,
                     "remediation": "Use Promise.all to run requests concurrently",
-                    "proposed_fix_diff": "- for (const r of reqs) await r();\n+ await Promise.all(reqs.map(r => r()));",
+                    "proposed_fix_diff": "--- a/session.ts\n+++ b/session.ts\n@@ -1,2 +1,2 @@\n- for (const r of reqs) await r();\n+ await Promise.all(reqs.map(r => r()));",
                 }
             ]
         }
-        notes = normalize_report(report)
-        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
-        finding = report["findings"][0]
-        self.assertTrue(finding["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
-        self.assertIn("reentrancy", finding["proposed_fix_diff"].lower())
-        self.assertIn("preserve serial execution", finding["proposed_fix_diff"].lower())
+        notes1 = normalize_report(report1)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes1))
+        finding1 = report1["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding1)
+        self.assertIn("Code patch withheld until runtime reentrancy is proven safe", finding1["remediation"])
+
+        # Case B: preconditioned remediation but unproven backend -> diff still withheld
+        report2 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/model.ts",
+                    "line_number": 10,
+                    "remediation": "IF the model runtime is reentrant, use Promise.all; otherwise preserve serial execution.",
+                    "proposed_fix_diff": "--- a/model.ts\n+++ b/model.ts\n@@ -1,2 +1,2 @@\n- for (const e of ex) await e();\n+ await Promise.all(ex.map(e => e()));",
+                }
+            ]
+        }
+        notes2 = normalize_report(report2)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes2))
+        finding2 = report2["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding2)
+        self.assertIn("Code patch withheld", finding2["remediation"])
+
+        # Case C: proven backend evidence -> diff is safely retained
+        report3 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/files.ts",
+                    "line_number": 5,
+                    "remediation": "The Node.js fs.promises backend is proven reentrant and thread-safe; use Promise.all.",
+                    "proposed_fix_diff": "--- a/files.ts\n+++ b/files.ts\n@@ -1,2 +1,2 @@\n- for (const f of files) await readFile(f);\n+ await Promise.all(files.map(readFile));",
+                }
+            ]
+        }
+        notes3 = normalize_report(report3)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes3))
+        self.assertIn("proposed_fix_diff", report3["findings"][0])
 
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""

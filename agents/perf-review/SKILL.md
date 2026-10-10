@@ -25,6 +25,7 @@ Your mission is to examine recent code changes (`recent_commits`, `recently_chan
        1. Name the backend and cite evidence that it supports concurrent calls (e.g. stateless network fetch, read-only file I/O); OR
        2. Explicitly state the reentrancy precondition in `remediation`: "Precondition: Verify backend reentrancy before applying. IF the underlying runtime/backend is reentrant and thread-safe (verify it does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve documented serial execution."
      - If the code operates on ML model sessions, WASM modules, GPU queues, hardware handles, or database transactions, default to preserving serial execution unless concurrent support is explicitly proven.
+     - **Withhold Code Patches on Unverified Runtimes**: Do NOT provide `proposed_fix_diff` for concurrency recommendations unless backend reentrancy is explicitly proven. An unconditional diff on an unverified runtime risks automated application (e.g. via `pr-fixer`) that causes fatal crashes.
 
 3. **Always Provide Concrete Fixes**:
    - Do not just describe the issue. For every finding, write a concrete `remediation` AND a `proposed_fix_diff` (unified diff or exact replacement block) that resolves the bottleneck without altering functional behavior.

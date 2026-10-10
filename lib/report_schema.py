@@ -231,6 +231,20 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
 
 
+def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
+    """Return True if finding cites proven positive evidence for a specific named backend."""
+    if not isinstance(finding, dict):
+        return False
+    remediation = str(finding.get("remediation", "")).strip()
+    if not remediation:
+        return False
+    has_negation = bool(_NEGATION_PATTERN.search(remediation))
+    if not has_negation and not re.search(r"\b(?:if|whether|assuming)\b", remediation, re.IGNORECASE):
+        if _NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation):
+            return True
+    return False
+
+
 def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     """Return True if the remediation is properly conditional with a serial fallback
     or names a specific backend with cited evidence that it tolerates overlap.
@@ -245,8 +259,6 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     if not remediation:
         return False
 
-    has_negation = bool(_NEGATION_PATTERN.search(remediation))
-
     # Case 1: Conditional advice with explicit serial fallback
     has_condition = bool(_CONDITIONAL_REENTRANCY_PATTERN.search(remediation))
     has_fallback = bool(_SERIAL_FALLBACK_PATTERN.search(remediation))
@@ -254,10 +266,8 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
         return True
 
     # Case 2: Named backend citing proven evidence of overlap tolerance
-    # Must name the specific backend, cite positive evidence, have no negation, and not be hypothetical
-    if not has_negation and not re.search(r"\b(?:if|whether|assuming)\b", remediation, re.IGNORECASE):
-        if _NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation):
-            return True
+    if has_proven_backend_evidence(finding):
+        return True
 
     return False
 
@@ -265,58 +275,79 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
 def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[str]:
     """Ensure a concurrency recommendation carries its reentrancy precondition.
 
-    If the finding recommends concurrency without citing backend evidence or stating
-    a reentrancy precondition, wrap/prepend the remediation, description, and proposed_fix_diff
-    with the explicit precondition so applying it will not crash on non-reentrant runtimes
-    (agents-vorw / hub fleet-4inv).
+    If the finding recommends concurrency without proven backend evidence:
+    1. If the remediation is not yet preconditioned, wrap it with the explicit reentrancy precondition
+       and add the precondition note to description.
+    2. Withhold proposed_fix_diff: an automated unconditional patch must not be offered for
+       an unverified runtime, preventing tools (like pr-fixer) from blindly applying an
+       unconditional concurrency diff that crashes non-reentrant runtimes (agents-vorw / hub fleet-4inv).
     """
-    if not is_concurrency_recommendation(finding) or has_reentrancy_precondition(finding):
+    if not is_concurrency_recommendation(finding):
         return None
 
-    remediation = str(finding.get("remediation", "")).strip()
-    if remediation:
-        finding["remediation"] = (
-            "Precondition: Verify backend reentrancy before applying. "
-            f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {remediation}; otherwise preserve serial execution."
-        )
-    else:
-        finding["remediation"] = (
-            "Precondition: Verify backend reentrancy before applying. "
-            "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
-        )
+    proven = has_proven_backend_evidence(finding)
+    modified = False
 
-    desc = str(finding.get("description", "")).strip()
-    if desc and "[Precondition Note:" not in desc:
-        finding["description"] = (
-            desc + "\n[Precondition Note: Concurrency advice requires verified backend reentrancy; if the runtime is non-reentrant, serial execution must be preserved.]"
-        )
-
-    # Condition proposed_fix_diff so automated patch application is guarded
-    diff = str(finding.get("proposed_fix_diff", "")).strip()
-    if diff and "reentrancy" not in diff.lower():
-        comment_header = "// Precondition: verify backend reentrancy before applying; if non-reentrant, preserve serial execution.\n"
-        if diff.startswith("+") or diff.startswith("-"):
-            finding["proposed_fix_diff"] = f"+ {comment_header}" + diff
+    # 1. Enforce precondition on remediation if not already preconditioned or proven
+    if not proven and not has_reentrancy_precondition(finding):
+        remediation = str(finding.get("remediation", "")).strip()
+        if remediation:
+            finding["remediation"] = (
+                "Precondition: Verify backend reentrancy before applying. "
+                f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {remediation}; otherwise preserve serial execution."
+            )
         else:
-            finding["proposed_fix_diff"] = f"{comment_header}" + diff
+            finding["remediation"] = (
+                "Precondition: Verify backend reentrancy before applying. "
+                "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
+            )
 
-    return f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
+        desc = str(finding.get("description", "")).strip()
+        if desc and "[Precondition Note:" not in desc:
+            finding["description"] = (
+                desc + "\n[Precondition Note: Concurrency advice requires verified backend reentrancy; if the runtime is non-reentrant, serial execution must be preserved.]"
+            )
+        modified = True
+
+    # 2. Withhold unconditional proposed_fix_diff unless backend reentrancy is proven
+    if not proven and "proposed_fix_diff" in finding:
+        diff = finding.pop("proposed_fix_diff", None)
+        if diff:
+            if "(Code patch withheld" not in finding.get("remediation", ""):
+                finding["remediation"] = (
+                    finding.get("remediation", "").rstrip()
+                    + " (Code patch withheld until runtime reentrancy is proven safe)."
+                )
+            modified = True
+
+    if modified:
+        return f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
+    return None
 
 
 def unpreconditioned_concurrency_findings(report: Any) -> List[str]:
-    """Check if any finding makes an unchecked concurrency recommendation without a precondition."""
+    """Check if any finding makes an unchecked concurrency recommendation without a precondition
+    or provides an unverified proposed_fix_diff."""
     violations: List[str] = []
     if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
         return violations
     for i, item in enumerate(report["findings"]):
         if not isinstance(item, dict):
             continue
-        if is_concurrency_recommendation(item) and not has_reentrancy_precondition(item):
-            violations.append(
-                f"$.findings[{i}]: concurrency recommendation (rule {item.get('rule_id', 'unknown')!r}) "
-                "must cite backend evidence that it tolerates overlap or state its reentrancy precondition "
-                "('IF this runtime is reentrant...')"
-            )
+        if is_concurrency_recommendation(item):
+            proven = has_proven_backend_evidence(item)
+            if not proven:
+                if not has_reentrancy_precondition(item):
+                    violations.append(
+                        f"$.findings[{i}]: concurrency recommendation (rule {item.get('rule_id', 'unknown')!r}) "
+                        "must cite backend evidence that it tolerates overlap or state its reentrancy precondition "
+                        "('IF this runtime is reentrant... otherwise preserve serial execution')"
+                    )
+                if item.get("proposed_fix_diff"):
+                    violations.append(
+                        f"$.findings[{i}]: proposed_fix_diff for concurrency recommendation must be withheld "
+                        "unless backend reentrancy is proven safe"
+                    )
     return violations
 
 
