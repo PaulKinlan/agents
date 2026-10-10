@@ -207,7 +207,7 @@ else:
         if not self.calls_file.exists():
             return []
         calls = [json.loads(line) for line in self.calls_file.read_text().splitlines()]
-        return [c for c in calls if '--method' in c['args'] or c['tool'] == 'bd'] if write_only else calls
+        return [c for c in calls if '--method' in c['args'] or (c['tool'] == 'bd' and c['args'][0] != 'list')] if write_only else calls
 
     def state(self):
         return json.loads(self.remote.read_text())
@@ -334,7 +334,7 @@ class TestSinks(SinkFixture, unittest.TestCase):
             f"{first}:\n  reason: Synthetic accepted risk\n")
         result = self.scan(items=[SAMPLE, dict(SAMPLE, rule_id="accepted-rule")])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.calls(write_only=True), [])
         self.assertEqual(self.stats()["suppressed"], 1)
         self.assertEqual(self.stats()["unchanged"], 1)
         self.assertIn("Synthetic accepted risk", self.report())
@@ -375,8 +375,12 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertEqual(self.scan("beads").returncode, 0)
         self.assertEqual(len(self.state()["beads"]), 1)
 
-    def test_regressed_finding_with_closed_bead_creates_new_bead(self):
-        """A finding that was fixed and then reappears (regressed) with its prior bead closed creates a NEW bead (guards FIX 1)."""
+    def test_regressed_finding_with_closed_bead_does_not_duplicate_and_reports_notice(self):
+        """agents-3sl6: a regressed finding with a closed bead does NOT file a duplicate or auto-reopen.
+
+        Instead, the bead remains closed, post_close_sightings is persisted across runs, and
+        the closed-recurrence notice is displayed in both full and summary reports.
+        """
         # 1. Initial run: finding is filed to beads
         self.assertEqual(self.scan("beads").returncode, 0)
         self.assertEqual(len(self.state()["beads"]), 1)
@@ -392,16 +396,115 @@ class TestSinks(SinkFixture, unittest.TestCase):
         remote_state["beads"][0]["status"] = "closed"
         self.remote.write_text(json.dumps(remote_state))
 
-        # 4. Finding reappears (regressed): prior bead is closed, so a new bead is filed
+        # 4. Finding reappears (regressed): prior bead is closed -> NO new bead, stays closed
         result = self.scan("beads")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.finding()["state"], "regressed")
-        self.assertEqual(self.finding()["dispatched_sinks"], ["beads"])
         beads = self.state()["beads"]
-        self.assertEqual(len(beads), 2)
-        self.assertEqual(beads[0]["status"], "closed")
-        self.assertEqual(beads[1]["status"], "open")
-        self.assertEqual(beads[0]["external_ref"], beads[1]["external_ref"])
+        self.assertEqual(len(beads), 1, "must never create a duplicate bead for an existing external_ref")
+        self.assertEqual(beads[0]["status"], "closed", "must never auto-reopen a closed bead")
+        self.assertEqual(self.finding()["post_close_sightings"], 1)
+
+        # Notice rendered in full delta report and step summary
+        expected_notice_1 = "re-detected after human close; 1 sighting; needs review - not independently verified"
+        self.assertIn(expected_notice_1, self.report())
+        self.assertIn(expected_notice_1, self.summary_report())
+
+        # 5. Subsequent run: finding is observed again (repeated sighting)
+        result2 = self.scan("beads")
+        self.assertEqual(result2.returncode, 0, result2.stderr)
+        self.assertEqual(len(self.state()["beads"]), 1)
+        self.assertEqual(self.state()["beads"][0]["status"], "closed")
+        self.assertEqual(self.finding()["post_close_sightings"], 2)
+
+        expected_notice_2 = "re-detected after human close; 2 sightings; needs review - not independently verified"
+        self.assertIn(expected_notice_2, self.report())
+        self.assertIn(expected_notice_2, self.summary_report())
+
+    def test_closed_wontfix_finding_reconciled_without_duplication(self):
+        """agents-3sl6: a wontfix/suppressed finding matching a closed bead does not duplicate and shows notice."""
+        # 1. Initial run: finding is filed to beads
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
+        bead_id = self.state()["beads"][0]["id"]
+
+        # 2. Bead is closed in tracker and finding is suppressed as wontfix
+        remote_state = self.state()
+        remote_state["beads"][0]["status"] = "closed"
+        self.remote.write_text(json.dumps(remote_state))
+
+        fp = self.finding()["fingerprint"]
+        (self.factory / "findings" / "suppressions.yaml").write_text(
+            f"{fp}:\n  reason: Accepted architectural risk\n")
+
+        # 3. Scanner re-detects the suppressed finding
+        result = self.scan("beads")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["state"], "wontfix")
+        self.assertEqual(len(self.state()["beads"]), 1, "must not duplicate closed bead for wontfix")
+        self.assertEqual(self.finding()["post_close_sightings"], 1)
+        self.assertEqual(self.finding()["post_close_bead_id"], bead_id)
+
+        expected_notice = "re-detected after human close; 1 sighting; needs review - not independently verified"
+        self.assertIn(expected_notice, self.report())
+        self.assertIn(expected_notice, self.summary_report())
+
+    def test_unavailable_tracker_listing_does_not_emit_false_closed_notice(self):
+        """agents-3sl6: an unavailable tracker listing fails closed and does not claim closure status.
+
+        Even when a finding already has a persisted post_close_sightings count from a prior confirmed
+        run, an unreadable tracker in the current run must NOT emit a closed-bead recurrence notice.
+        """
+        # 1. Initial run: filed to beads
+        self.assertEqual(self.scan("beads").returncode, 0)
+        # 2. Fixed in next run
+        self.assertEqual(self.scan("beads", items=[]).returncode, 0)
+        # 3. Bead is closed in tracker
+        remote_state = self.state()
+        remote_state["beads"][0]["status"] = "closed"
+        self.remote.write_text(json.dumps(remote_state))
+        # 4. Reappears: tracker confirmed closed -> notice emitted and post_close_sightings is 1
+        self.assertEqual(self.scan("beads").returncode, 0)
+        self.assertEqual(self.finding()["post_close_sightings"], 1)
+        self.assertIn("re-detected after human close; 1 sighting", self.report())
+
+        # 5. Next run: tracker is UNREADABLE (SINK_FAIL_BD_LIST=1)
+        # Persisted count survives in store, but current run must NOT claim verified closure
+        result = self.scan("beads", extra_env={"SINK_FAIL_BD_LIST": "1"})
+        # The scan succeeds locally, store count is preserved, but no closed notice in this run's report
+        self.assertEqual(self.finding()["post_close_sightings"], 1)
+        self.assertNotIn("re-detected after human close", self.report())
+        self.assertNotIn("re-detected after human close", self.summary_report())
+
+        # Also test new finding with unreadable tracker fails closed (rc=3) and emits no notice
+        new_item = dict(SAMPLE, rule_id="new-rule")
+        result_new = self.scan("beads", items=[new_item], extra_env={"SINK_FAIL_BD_LIST": "1"})
+        self.assertEqual(result_new.returncode, 3)
+        self.assertIn("could not list existing beads", result_new.stdout)
+        self.assertNotIn("re-detected after human close", self.report())
+
+    def test_anchored_finding_missed_once_and_reobserved_with_closed_bead(self):
+        """agents-3sl6: anchored finding missed once (fixed) and re-observed with closed bead stays deduped."""
+        candidates = {"candidates": [{"rule_id": "unused-export", "path": "src/example.py"}]}
+        self.assertEqual(self.scan("beads", candidates=candidates).returncode, 0)
+        self.assertEqual(len(self.state()["beads"]), 1)
+
+        # Prior bead is closed
+        remote_state = self.state()
+        remote_state["beads"][0]["status"] = "closed"
+        self.remote.write_text(json.dumps(remote_state))
+
+        # Run 2: missed once -> fixed
+        self.assertEqual(self.scan("beads", items=[], candidates=candidates).returncode, 0)
+        self.assertEqual(self.finding()["state"], "fixed")
+
+        # Run 3: re-observed -> regressed, stays deduped with notice
+        result = self.scan("beads", candidates=candidates)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.finding()["state"], "regressed")
+        self.assertEqual(len(self.state()["beads"]), 1)
+        self.assertEqual(self.finding()["post_close_sightings"], 1)
+        self.assertIn("re-detected after human close; 1 sighting", self.report())
 
     def test_regressed_finding_with_open_bead_does_not_duplicate(self):
         """A finding that was fixed and reappears (regressed) while prior bead is still open does NOT file a duplicate."""

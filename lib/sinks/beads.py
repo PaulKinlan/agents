@@ -87,6 +87,65 @@ def _existing_bead_fingerprints(bd_bin: str, beads_dir: Path) -> Optional[Dict[s
     return index
 
 
+def reconcile_closed_bead_sightings(
+    findings: List[Dict[str, Any]],
+    beads_dir: Optional[Path] = None,
+    target_dir: Optional[Path] = None,
+) -> None:
+    """Reconcile all observed findings against the tracker before report rendering (agents-3sl6).
+
+    Never create a second bead for a matching fingerprint, and never auto-reopen a closed one.
+    If a human closed the bead and the finding is observed in this run, track and persist the
+    count of post-close observations on the finding record (post_close_sightings).
+    If the tracker cannot be listed, leave closure status alone (never claim closure status on
+    an unreadable tracker).
+    """
+    if not findings:
+        return
+
+    if beads_dir is None and target_dir is not None:
+        candidate = Path(target_dir) / ".beads"
+        if candidate.is_dir():
+            beads_dir = Path(target_dir)
+
+    if beads_dir is None:
+        return
+
+    beads_dir = Path(beads_dir).expanduser().resolve()
+    if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
+        return
+
+    try:
+        from lib.tool_pins import resolve_tool
+        bd_bin = resolve_tool("bd")
+    except Exception:
+        return
+
+    existing = _existing_bead_fingerprints(bd_bin, beads_dir)
+    if existing is None:
+        return
+
+    for f in findings:
+        fp = f.get("fingerprint")
+        if not fp:
+            continue
+        matches = existing.get(fp, [])
+        if not matches:
+            f.pop("post_close_sightings", None)
+            f.pop("post_close_bead_id", None)
+            f.pop("closed_bead_verified_in_run", None)
+            continue
+        open_matches = [m for m in matches if m.get("status") != "closed"]
+        if open_matches:
+            f.pop("post_close_sightings", None)
+            f.pop("post_close_bead_id", None)
+            f.pop("closed_bead_verified_in_run", None)
+        else:
+            f["post_close_sightings"] = int(f.get("post_close_sightings") or 0) + 1
+            f["post_close_bead_id"] = str(matches[0].get("id", "?"))
+            f["closed_bead_verified_in_run"] = True
+
+
 def _dispatch_beads(beads_dir: Path, findings: List[Dict[str, Any]],
                     visibility: Any = None) -> Dict[str, Any]:
     """File findings as beads automatically (agents-eyo): beads is the tracked owner-visible
@@ -148,11 +207,14 @@ def _dispatch_beads(beads_dir: Path, findings: List[Dict[str, Any]],
 
     for f in to_file:
         matches = existing.get(f["fingerprint"], [])
-        open_matches = [m for m in matches if m.get("status") != "closed"]
-        if open_matches or (matches and f["state"] != "regressed"):
+        if matches:
             result["duplicate"] += 1
-            ids = ", ".join(m.get("id", "?") for m in (open_matches or matches))
-            print(f"Skipped duplicate: {f['fingerprint'][:16]} already tracked by {ids}")
+            ids = ", ".join(m.get("id", "?") for m in matches)
+            open_matches = [m for m in matches if m.get("status") != "closed"]
+            if open_matches:
+                print(f"Skipped duplicate: {f['fingerprint'][:16]} already tracked by {ids}")
+            else:
+                print(f"Skipped duplicate: {f['fingerprint'][:16]} already tracked by closed bead {ids} (not reopened)")
             continue
         published = redact_finding(f)
         title = f"[{published['agent']}] {published['title']}"
