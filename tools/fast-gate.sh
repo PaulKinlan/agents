@@ -75,9 +75,17 @@ while IFS= read -r f; do
       # Mini YAML parser plus GitHub Actions action.yml contract pin (agents-vt7w).
       mapped="$mapped tests/test_yaml_mini.py tests/test_ci_action.py"
       ;;
-    lib/adapters/*.sh)
-      # Engine adapters (e.g. claude.sh session auth scrub and precedence) (agents-vt7w).
+    lib/adapters/claude.sh)
+      # Claude adapter session auth scrub and precedence (agents-vt7w).
       mapped="$mapped tests/test_claude_adapter.py"
+      ;;
+    lib/adapters/pi.sh)
+      # Pi adapter keyless broker wireup and auth failure handling (agents-vt7w).
+      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py"
+      ;;
+    lib/adapters/*.sh)
+      # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure and core runner (agents-vt7w).
+      mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py"
       ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.

@@ -76,9 +76,22 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_ci_action.py", mapped)
 
     def test_claude_adapter_maps_to_claude_adapter_test(self):
-        """lib/adapters/*.sh must run claude adapter session auth scrub tests."""
+        """lib/adapters/claude.sh must run claude adapter session auth scrub tests."""
         mapped = resolve_fast_gate(["lib/adapters/claude.sh"])
         self.assertIn("tests/test_claude_adapter.py", mapped)
+
+    def test_pi_adapter_maps_to_keyless_and_auth_failure_tests(self):
+        """lib/adapters/pi.sh must run keyless broker and adapter auth failure tests."""
+        mapped = resolve_fast_gate(["lib/adapters/pi.sh"])
+        self.assertIn("tests/test_pi_keyless_broker.py", mapped)
+        self.assertIn("tests/test_adapter_auth_failure.py", mapped)
+        self.assertIn("tests/test_factory_core.py", mapped)
+
+    def test_other_adapters_map_to_auth_failure_and_core(self):
+        """Other adapters must fall back to auth failure detection and factory core."""
+        mapped = resolve_fast_gate(["lib/adapters/deepseek.sh"])
+        self.assertIn("tests/test_adapter_auth_failure.py", mapped)
+        self.assertIn("tests/test_factory_core.py", mapped)
 
     def test_factory_dispatcher_maps_to_line_andon_and_auth_failures(self):
         """factory dispatcher must run core truth, line andon, auth failure, and transient cleanup."""
