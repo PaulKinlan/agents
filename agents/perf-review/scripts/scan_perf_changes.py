@@ -25,6 +25,24 @@ if str(FACTORY_ROOT) not in sys.path:
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.line_numbers import line_number_sort_key  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+
+
+def _trusted_tool(name: str) -> str:
+    """The pin-authenticated path of a trusted tool this pre-pass executes (agents-01qd).
+
+    git is a trusted tool (lib/tool_pins.TRUSTED_TOOLS): a station script's own
+    trusted-tool launch is a census kind of its own (agents-28nn round 4, review P1) —
+    a bare name executes whatever PATH plants first, including on the trusted-private
+    unsandboxed path where no sandbox bind boundary verifies anything.
+    Unauthenticatable is LOUD (nonzero exit; the factory turns a failed pre-pass into a
+    StationError), never a quiet empty result that reads like 'no recent commits'.
+    """
+    try:
+        return resolve_tool(name)
+    except ToolPinError as e:
+        sys.stderr.write(f"Error: trusted tool {name!r} cannot be authenticated: {e}\n")
+        sys.exit(2)
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
@@ -100,9 +118,11 @@ def get_recent_git_context(target_dir: Path) -> Dict[str, Any]:
     changed_files: Set[str] = set()
     diff_excerpt = ""
 
+    git_bin = _trusted_tool("git")
+
     try:
         log_res = subprocess.run(
-            ["git", "log", "-n", "5", "--oneline"],
+            [git_bin, "log", "-n", "5", "--oneline"],
             cwd=str(target_dir), capture_output=True, text=True, timeout=5
         )
         if log_res.returncode == 0:
@@ -110,9 +130,9 @@ def get_recent_git_context(target_dir: Path) -> Dict[str, Any]:
 
         # Working tree + last 3 commits changed files
         for cmd in [
-            ["git", "diff", "--name-only"],
-            ["git", "diff", "--name-only", "HEAD~3..HEAD"],
-            ["git", "diff", "--name-only", "HEAD~1..HEAD"]
+            [git_bin, "diff", "--name-only"],
+            [git_bin, "diff", "--name-only", "HEAD~3..HEAD"],
+            [git_bin, "diff", "--name-only", "HEAD~1..HEAD"]
         ]:
             res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, timeout=5)
             if res.returncode == 0 and res.stdout.strip():
@@ -122,7 +142,7 @@ def get_recent_git_context(target_dir: Path) -> Dict[str, Any]:
 
         MAX_DIFF_BYTES = 6000
         diff_res = subprocess.run(
-            ["git", "diff", "HEAD~1..HEAD", "--unified=2"],
+            [git_bin, "diff", "HEAD~1..HEAD", "--unified=2"],
             cwd=str(target_dir), capture_output=True, text=True, timeout=5
         )
         if diff_res.returncode == 0:
