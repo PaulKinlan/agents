@@ -474,7 +474,11 @@ ledger existed — absence is not evidence of absence. The
 record also reads as best-effort where it is best-effort: `files` is the pre-removal
 snapshot (stated on every line as `record_scope`), and a file created inside the
 directory *during* the removal window may be destroyed without being listed — the
-mechanism cannot see it, so the record does not claim completeness there. A `symlinks`
+mechanism cannot see it, so the record does not claim completeness there. Equally,
+a listed file is one the removal saw disappear between its two observations:
+destroyed by the removal, or moved or renamed out of the snapshot by a concurrent
+writer — the record cannot tell which, so a listed file must never be read as a
+destroyed file. A `symlinks`
 entry with `outside_tree: true` means the link's target was never in the removed tree:
 its contents were NOT removed and are NOT covered by the record — the difference
 between "this evidence is gone" and "this evidence moved or was never in this tree".

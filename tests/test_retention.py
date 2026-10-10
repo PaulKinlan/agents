@@ -739,6 +739,58 @@ class TestRemovalWindowClaim(unittest.TestCase):
             self.assertEqual(tombstone["record_scope"], RECORD_SCOPE)
 
 
+class TestMovedFileClaim(unittest.TestCase):
+    """agents-dm8n round 4, finding 3 (P2): disappeared = before - after lists
+    a file renamed AFTER the before-snapshot and BEFORE rmtree as disappeared -
+    "destroyed", the list implies, when it merely survived under another name.
+    The honest answer is that the file left the snapshot by a route the record
+    cannot see, so the record must SAY that listed is not destroyed. The
+    construction is driven through the choke point; the property pinned is
+    that the claim carries its own uncertainty, not that the list changes.
+    """
+
+    def test_a_renamed_file_is_listed_but_the_record_does_not_claim_destruction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            (doomed / "moved.txt").write_text("here\n", encoding="utf-8")
+
+            def rename_then_fail(path):
+                # The reviewer's race: renamed after the before-snapshot,
+                # before the removal, which then fails part way.
+                (Path(path) / "moved.txt").rename(Path(path) / "survivor.txt")
+                raise OSError("simulated partial removal")
+
+            with mock.patch.object(shutil, "rmtree", side_effect=rename_then_fail):
+                self.assertFalse(remove_recorded(doomed, reason="age"))
+
+            # The file was NOT destroyed - it survived under another name.
+            self.assertTrue((doomed / "survivor.txt").exists())
+            tombstone = read_tombstones(runs)[0]
+            self.assertEqual(tombstone["outcome"], "partial")
+            # moved.txt IS listed - it left the snapshot - but the record's
+            # scope must not let "listed" read as "destroyed".
+            self.assertIn("moved.txt", tombstone["files"])
+            self.assertNotIn("survivor.txt", tombstone["files"])
+            self.assertIn("moved or renamed", tombstone["record_scope"])
+
+    def test_the_pointer_and_readme_say_a_listed_file_may_have_moved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "old", now - 100)
+            make_dir(runs, "new", now)
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+            pointer = " ".join(
+                (runs / RUNS_POINTER_NAME).read_text(encoding="utf-8").split())
+        self.assertIn("moved or renamed", pointer)
+        self.assertIn("must never be read as", pointer)
+        content = " ".join(
+            (ROOT / "README.md").read_text(encoding="utf-8").split())
+        self.assertIn("moved or renamed", content)
+        self.assertIn("must never be read as", content)
+
+
 class TestSymlinkTombstones(unittest.TestCase):
     """agents-dm8n round 3, finding 3 (P2): os.walk YIELDS a symlink to a
     directory but does not traverse it, so a run dir containing

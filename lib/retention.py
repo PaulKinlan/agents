@@ -168,10 +168,13 @@ so rather than letting the three readings collapse into one.
 **What a line does and does not claim.** `files` is the pre-removal snapshot
 and the line says so (`record_scope`): a file created inside the directory
 DURING the removal window may be destroyed without being listed — the record is
-best-effort, not a completeness guarantee. A `symlinks` entry records a link
-and its target; `outside_tree: true` means the target's contents were NOT
-removed and are NOT covered by this record — the evidence moved or was never in
-this tree.
+best-effort, not a completeness guarantee. Equally, a listed file is one the
+removal saw disappear BETWEEN its two observations: destroyed by the removal,
+or moved or renamed out of the snapshot by a concurrent writer — the record
+cannot tell which, so `listed` must never be read as `destroyed`. A `symlinks`
+entry records a link and its target; `outside_tree: true` means the target's
+contents were NOT removed and are NOT covered by this record — the evidence
+moved or was never in this tree.
 
 If this whole `runs/` directory was cleared and this pointer is new, see the
 repository README's \"Run Artifact Retention\" section — the ledger itself is
@@ -183,9 +186,17 @@ never inside `runs/`.
 # principle — a file created inside the directory after the pre-removal snapshot
 # and before the removal finishes is destroyed without ever being observed, and
 # no snapshot ordering closes that window — so every line carries its scope
-# rather than letting a bare ledger line read as a guarantee.
+# rather than letting a bare ledger line read as a guarantee. Round 4, finding
+# 3: the same honesty applies in the other direction — a LISTED file left the
+# snapshot between the snapshots, and the removal cannot tell "destroyed by
+# rmtree" from "moved or renamed out of the snapshot by a concurrent writer",
+# so the scope says that too: listed must never read as destroyed.
 RECORD_SCOPE = ("best-effort: files observed when the removal began; a file "
-                "created during the removal window may not be listed")
+                "created during the removal window may not be listed, and a "
+                "listed file left the snapshot between the two observations — "
+                "destroyed by the removal, or moved or renamed out of it by a "
+                "concurrent writer; the record cannot tell which, so listed "
+                "must never be read as destroyed")
 
 _SECONDS_PER_DAY = 86400
 
