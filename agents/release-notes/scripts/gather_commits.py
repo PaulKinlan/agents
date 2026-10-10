@@ -23,6 +23,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+from lib.redaction import emit_station_result  # noqa: E402
+
 PR_PATTERNS = [
     re.compile(r"\(#(\d+)\)$"),                        # Squash merge: feat: foo (#123)
     re.compile(r"Merge pull request #(\d+)", re.IGNORECASE), # Merge commit: Merge pull request #123
@@ -212,12 +218,7 @@ def main():
         sys.exit(1)
 
     result = gather_commits(target_dir=target_dir, since_tag=args.since_tag, max_count=args.max_count)
-    output_json = json.dumps(result, indent=2)
-
-    if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-    else:
-        print(output_json)
+    emit_station_result(result, args.output)
 
 if __name__ == "__main__":
     main()

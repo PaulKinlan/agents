@@ -41,6 +41,7 @@ if str(FACTORY_ROOT) not in sys.path:
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.line_numbers import line_number_sort_key  # noqa: E402
+from lib.redaction import emit_station_result  # noqa: E402
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
@@ -1310,12 +1311,7 @@ def main():
         # policy refusal or a broken install, not an internal crash.
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    out = json.dumps(result, indent=2)
-
-    if args.output:
-        Path(args.output).write_text(out, encoding="utf-8")
-    else:
-        print(out)
+    emit_station_result(result, args.output)
     return 0
 
 

@@ -15,6 +15,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+from lib.redaction import emit_station_result  # noqa: E402
+
 def fetch_beads_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
     """Extract open issues from .beads/issues.jsonl if the target uses beads."""
     beads_file = target_dir / ".beads" / "issues.jsonl"
@@ -166,11 +172,7 @@ def main():
         "candidates": candidates
     }
 
-    output_json = json.dumps(result, indent=2)
-    if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-    else:
-        print(output_json)
+    emit_station_result(result, args.output)
 
 if __name__ == "__main__":
     main()

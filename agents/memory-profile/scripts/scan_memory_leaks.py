@@ -23,6 +23,7 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+from lib.redaction import emit_station_result  # noqa: E402
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
@@ -139,12 +140,7 @@ def main():
 
     target_dir = Path(args.target).resolve()
     result = scan_memory_leaks(target_dir)
-    out = json.dumps(result, indent=2)
-
-    if args.output:
-        Path(args.output).write_text(out, encoding="utf-8")
-    else:
-        print(out)
+    emit_station_result(result, args.output)
 
 
 if __name__ == "__main__":
