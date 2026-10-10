@@ -12,6 +12,7 @@ what the defect did to a real reviewer.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -189,8 +190,9 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
             # This process holds the lock; the CLI is a DIFFERENT process, where flock really
             # excludes (same-process reopens are the self-deadlock coord filed separately).
             holder = FindingsStore(target, lock_timeout=0)
+            findings_in_dir = Path(tempfile.mkdtemp())
+            findings_in = findings_in_dir / "in.json"
             try:
-                findings_in = Path(tempfile.mkdtemp()) / "in.json"
                 findings_in.write_text(json.dumps({"findings": []}), encoding="utf-8")
                 res = subprocess.run(
                     [sys.executable, str(ROOT / "lib" / "findings.py"), "--target", target,
@@ -199,6 +201,7 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
                 )
             finally:
                 holder.close()
+                shutil.rmtree(findings_in_dir, ignore_errors=True)
             self.assertEqual(res.returncode, 2,
                              f"expected the clean error path, got rc={res.returncode}: {res.stderr}")
             self.assertIn("is locked", res.stderr)
@@ -325,3 +328,4 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
             except OSError:
                 pass
             shutil.rmtree(fake_bin, ignore_errors=True)
+            shutil.rmtree(beads_dir, ignore_errors=True)
