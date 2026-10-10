@@ -24,7 +24,7 @@ sys.path.insert(0, str(FACTORY_ROOT))
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 
 from lib.redaction import emit_station_result  # noqa: E402
-from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
 
 
 def _gitleaks_binary() -> Optional[str]:
@@ -40,7 +40,7 @@ def _gitleaks_binary() -> Optional[str]:
     builtin-regex fallback — the result's `scanner` field names which actually ran.
     """
     try:
-        return resolve_tool("gitleaks")
+        return prepass_tool("gitleaks")
     except ToolPinError as e:
         if shutil.which("gitleaks") is None:
             return None  # not installed at all: the documented builtin fallback

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Deterministic issue fetcher for issue-triage agent.
 
-Queries either the local Beads repository or GitHub CLI for open issues.
+Pre-pass script that extracts open issues from either local beads issues
+(.beads/issues.jsonl) or GitHub issues via the gh CLI.
 Outputs a structured JSON payload containing candidate issues for agent triage.
 """
 
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +19,7 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.redaction import emit_station_result, mask_literals, mask_text  # noqa: E402
-from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
 
 
 def _redact_stderr(raw_stderr: str) -> str:
@@ -32,77 +32,94 @@ def _redact_stderr(raw_stderr: str) -> str:
     }
     return mask_literals(mask_text(raw_stderr), literals)
 
+
 def fetch_beads_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
     """Extract open issues from .beads/issues.jsonl if the target uses beads."""
-    issues_file = target_dir / ".beads" / "issues.jsonl"
-    if not issues_file.is_file():
+    beads_file = target_dir / ".beads" / "issues.jsonl"
+    if not beads_file.exists():
         return None
 
     candidates = []
     try:
-        with open(issues_file, "r", encoding="utf-8") as f:
+        with open(beads_file, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                issue = json.loads(line)
-                status = issue.get("status", "").lower()
-                # Consider open, in_progress, or untriaged issues
-                if status in ("open", "in_progress", "triage", ""):
-                    candidates.append({
-                        "id": f"beads-{issue.get('id', 'unknown')}",
-                        "title": issue.get("title", ""),
-                        "body": issue.get("description", ""),
-                        "labels": issue.get("labels", []),
-                        "source": "beads",
-                        "raw": issue,
-                    })
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+
+                status = str(data.get("status", "")).lower()
+                # Only process non-closed issues
+                if status in ("closed", "resolved", "done"):
+                    continue
+
+                issue_id = str(data.get("id", ""))
+                title = str(data.get("title", "")).strip()
+                body = str(data.get("description", "")).strip()
+                labels = data.get("labels", [])
+                if not isinstance(labels, list):
+                    labels = [str(labels)]
+
+                comments = []
+                for c in data.get("comments", []):
+                    if isinstance(c, dict):
+                        text = c.get("text") or c.get("body", "")
+                        if text:
+                            comments.append(str(text))
+                    elif isinstance(c, str):
+                        comments.append(c)
+
+                candidates.append({
+                    "id": issue_id,
+                    "number": issue_id,
+                    "title": title,
+                    "body": body,
+                    "labels": labels,
+                    "author": str(data.get("created_by") or data.get("owner", "")),
+                    "created_at": str(data.get("created_at", "")),
+                    "updated_at": str(data.get("updated_at", "")),
+                    "comments": comments,
+                    "status": status,
+                    "issue_type": str(data.get("issue_type", "task")),
+                    "priority": data.get("priority"),
+                    "source": "beads"
+                })
     except Exception as e:
-        sys.stderr.write(f"Warning: failed reading beads issues: {e}\n")
+        sys.stderr.write(f"Warning: error reading beads issues at {beads_file}: {e}\n")
         return None
 
     return candidates
 
-def _parse_github_repo(target_dir: Path) -> Optional[str]:
-    """Try to determine owner/repo from git remotes."""
-    try:
-        res = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=str(target_dir),
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        if res.returncode != 0:
-            return None
-        url = res.stdout.strip()
-        # Parse github.com:owner/repo.git or https://github.com/owner/repo.git
-        if "github.com" in url:
-            part = url.split("github.com")[-1].lstrip("/:")
-            if part.endswith(".git"):
-                part = part[:-4]
-            return part
-    except Exception:
-        pass
-    return None
 
 def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
-    """Fetch open issues using the GitHub CLI (gh) if available."""
-    gh_bin = shutil.which("gh")
-    if not gh_bin:
-        sys.stderr.write("Note: gh CLI not found in PATH.\n")
-        return None
+    """Fetch open issues using the GitHub CLI (gh), resolved THROUGH THE PIN.
 
-    repo_slug = _parse_github_repo(target_dir)
+    gh is a trusted tool (lib/tool_pins.TRUSTED_TOOLS) and this pre-pass holds GH_TOKEN,
+    so the binary must be authenticated BEFORE it executes — including on the
+    trusted-private UNSANDBOXED path, where no sandbox bind boundary verifies anything
+    (agents-28nn round 4, review P1: a PATH-planted fake gh ran with GH_TOKEN in its
+    environment and its result was accepted). And the failure must be LOUD: a gh that was
+    not the pinned gh, or that failed, must NOT look like "there are no open issues" — a
+    wrong answer that looks like a normal one. So an unauthenticated gh and a failed gh
+    both exit nonzero (the factory turns a nonzero pre-pass into a StationError: "no scan
+    was performed"), never a quiet None that main() would report as an empty source.
+    """
+    try:
+        gh_bin = prepass_tool("gh")
+    except ToolPinError as e:
+        redacted_err = _redact_stderr(str(e))
+        sys.stderr.write(f"Error: trusted tool 'gh' cannot be authenticated: {redacted_err}\n")
+        sys.exit(2)
+
     cmd = [
         gh_bin, "issue", "list",
         "--state", "open",
-        "--limit", "50",
-        "--json", "number,title,body,labels,author,createdAt,comments"
+        "--json", "number,title,body,labels,author,comments",
+        "--limit", "50"
     ]
-    if repo_slug:
-        cmd.extend(["--repo", repo_slug])
-
     try:
         res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False)
         if res.returncode != 0:
@@ -112,22 +129,38 @@ def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
 
         raw_issues = json.loads(res.stdout or "[]")
         candidates = []
-        for issue in raw_issues:
-            labels = [l.get("name") if isinstance(l, dict) else str(l) for l in issue.get("labels", [])]
-            comments_text = "\n".join([c.get("body", "") for c in issue.get("comments", [])])
-            full_body = issue.get("body", "")
-            if comments_text:
-                full_body += f"\n\n--- Comments ---\n{comments_text}"
+        for item in raw_issues:
+            labels = [
+                lbl.get("name") if isinstance(lbl, dict) else str(lbl)
+                for lbl in item.get("labels", [])
+            ]
+            author = ""
+            if isinstance(item.get("author"), dict):
+                author = item["author"].get("login", "")
+            elif item.get("author"):
+                author = str(item.get("author"))
+
+            comments = []
+            for c in item.get("comments", []):
+                if isinstance(c, dict):
+                    body = c.get("body", "")
+                    if body:
+                        comments.append(body)
+                elif isinstance(c, str):
+                    comments.append(c)
 
             candidates.append({
-                "id": f"gh-{issue.get('number')}",
-                "title": issue.get("title", ""),
-                "body": full_body,
+                "id": str(item.get("number")),
+                "number": item.get("number"),
+                "title": str(item.get("title", "")).strip(),
+                "body": str(item.get("body", "")).strip(),
                 "labels": labels,
-                "source": "github",
-                "author": issue.get("author", {}).get("login", "") if isinstance(issue.get("author"), dict) else "",
-                "created_at": issue.get("createdAt", ""),
-                "raw": issue,
+                "author": author,
+                "created_at": str(item.get("createdAt", "")),
+                "comments": comments,
+                "status": "open",
+                "issue_type": "issue",
+                "source": "github"
             })
         return candidates
     except Exception as e:
@@ -135,29 +168,31 @@ def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
         sys.stderr.write(f"Error: unexpected error executing gh CLI: {redacted_err}\n")
         sys.exit(2)
 
+
 def main():
     parser = argparse.ArgumentParser(description="Deterministic issue fetcher for issue-triage agent")
-    parser.add_argument("--target", required=True, help="Path to target repository")
-    parser.add_argument("--output", required=False, help="Path to output candidates JSON")
+    parser.add_argument("--target", required=True, help="Target repository path")
+    parser.add_argument("--output", help="Path to write the raw local JSON record to (default: stdout, which redacts matched values)")
     args = parser.parse_args()
 
     target_dir = Path(args.target).resolve()
-    if not target_dir.is_dir():
-        sys.stderr.write(f"Error: target directory {target_dir} does not exist\n")
+    if not target_dir.exists():
+        sys.stderr.write(f"Error: Target directory does not exist: {target_dir}\n")
         sys.exit(1)
 
-    candidates = []
-    beads_candidates = fetch_beads_issues(target_dir)
-    if beads_candidates is not None:
-        candidates.extend(beads_candidates)
-        source = "beads"
-    else:
-        gh_candidates = fetch_github_issues(target_dir)
-        if gh_candidates is not None:
-            candidates.extend(gh_candidates)
-            source = "github"
-        else:
-            source = "none"
+    # 1. Try beads first (per SDLC sink rules)
+    candidates = fetch_beads_issues(target_dir)
+    source = "beads"
+
+    # 2. Fall back to GitHub issues via gh CLI
+    if candidates is None:
+        candidates = fetch_github_issues(target_dir)
+        source = "github"
+
+    # 3. If neither available or failed, return clean empty candidate list
+    if candidates is None:
+        candidates = []
+        source = "none"
 
     result = {
         "target": str(target_dir),
@@ -167,6 +202,7 @@ def main():
     }
 
     emit_station_result(result, args.output)
+
 
 if __name__ == "__main__":
     main()

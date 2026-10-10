@@ -2781,6 +2781,88 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
         "    'pins_content': Path(pins).read_text() if pins and Path(pins).exists() else '',\n"
         "}))\n")
 
+    def _git_pin_lines(self):
+        """A path+sha256 pin for the harness PATH's real git (the dispatcher's host-side
+        pre-pass verification, agents-28nn round 6, refuses a present-but-unpinned one)."""
+        import hashlib
+        git = shutil.which("git", path=f"{self.bin}{os.pathsep}/usr/bin:/bin")
+        self.assertIsNotNone(git, "the harness PATH must carry a git to pin")
+        digest = hashlib.sha256(Path(git).read_bytes()).hexdigest()
+        return f"git:\n  path: {git}\n  sha256: {digest}\n"
+
+    def test_a_child_rewriting_the_pins_cannot_redirect_the_credential_handoff(self):
+        """agents-28nn round 6, review P1 — the effective-pins TOCTOU on the UNSANDBOXED
+        path, COMPOSED with the falsified polarity argument (a pin IS a grant):
+        A CONTROL THAT DEPENDS ON A MOUNT NAMESPACE IS ABSENT ON THE PATH THAT HAS NONE.
+
+        The constructed case, kept as a regression test: an unsandboxed pre-pass child
+        REWRITES the FACTORY_TOOL_PINS file it was handed, injecting a pin that names a
+        planted fake git by path+hash — the round-6 reviewer's exact construction — and
+        then asks lib.tool_pins which git it may execute. On the round-5 tree the
+        resolver validated the injected pin and the fake would have run with the
+        pre-pass's credentials. The fix: the credential handoff must not depend on a
+        file the child can write — the dispatcher resolves the pre-pass's trusted tools
+        HOST-SIDE, before the handoff, and the verified absolute paths ride the
+        fork-time env (FACTORY_RESOLVED_TOOL_*), so prepass_tool returns the REAL git
+        and the injected pin is never consulted.
+
+        MUTATION PROOF (performed, not asserted): reverting prepass_tool's dispatcher
+        preference (unsandboxed arm falls through to resolve_tool against the pins file)
+        turns this red — the recorded resolution names the FAKE.
+        """
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        scripts = self.root / "agents" / "probe" / "scripts"
+        scripts.mkdir(parents=True)
+        self.trusted_target("trusted")
+        import hashlib
+        stub = self.bin / "pi"
+        digest = hashlib.sha256(stub.read_bytes()).hexdigest()
+        host_pins = self.root / "tools.pins.yaml"
+        host_pins.write_text(
+            f"pi:\n  path: {stub}\n  sha256: {digest}\n" + self._git_pin_lines(),
+            encoding="utf-8")
+        fake = self.bin / "git"
+        fake.write_text("#!/bin/sh\necho PWNED\n", encoding="utf-8")
+        fake.chmod(0o755)
+        # The fake's path is embedded in the script (the pre-pass env is an allowlist, so
+        # a test-only variable would never reach the child).
+        rewriter = (
+            "import hashlib, json, os, sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parents[3]))\n"
+            "from lib.tool_pins import prepass_tool\n"
+            "out = sys.argv[sys.argv.index('--output') + 1]\n"
+            "pins = Path(os.environ['FACTORY_TOOL_PINS'])\n"
+            f"fake = {str(fake)!r}\n"
+            "digest = hashlib.sha256(Path(fake).read_bytes()).hexdigest()\n"
+            # THE ATTACK: rewrite the pins file in place, granting the fake the git role.
+            "pins.write_text('git:\\n  path: %s\\n  sha256: %s\\n' % (fake, digest))\n"
+            "Path(out).write_text(json.dumps({\n"
+            "    'candidates': [],\n"
+            "    'resolved_git': prepass_tool('git'),\n"
+            "    'dispatcher_env': os.environ.get('FACTORY_RESOLVED_TOOL_GIT', ''),\n"
+            "}))\n")
+        (scripts / "rewrite_pins.py").write_text(rewriter, encoding="utf-8")
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1",
+                                  "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+                                  "FACTORY_TOOL_PINS": str(host_pins)},
+                           target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     NOT enforced", res.stdout,
+                      "the test must EXERCISE the unsandboxed path: " + res.stdout)
+        runs = self.run_dirs()
+        self.assertEqual(len(runs), 1)
+        record = json.loads((runs[0] / "candidates.json").read_text(encoding="utf-8"))
+        self.assertTrue(record["dispatcher_env"],
+                        "the dispatcher must hand the child a host-verified git path")
+        self.assertNotEqual(record["resolved_git"], str(fake),
+                            "the injected pin redirected the handoff: the rewritten pins "
+                            "file decided which binary receives the credentials")
+        self.assertEqual(record["resolved_git"], record["dispatcher_env"],
+                         "the child must execute the dispatcher-verified path, never "
+                         "what the rewritten pins file names")
+
     def test_the_unsandboxed_prepass_verifies_against_the_same_effective_pins(self):
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "budget: {max_minutes: 1}\n")
@@ -2790,12 +2872,18 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
         self.trusted_target("trusted")
         # Pin the stub engine by path + content; OMIT bwrap so the probe fails closed and
         # the trusted-target opt-in takes the UNSANDBOXED path on this sandboxed host.
+        # git must ALSO be pinned (agents-28nn round 6): the dispatcher now verifies the
+        # pre-pass's whole trusted-tool set host-side on EVERY path, and a
+        # present-but-unauthenticatable tool refuses the run — exactly what the sandboxed
+        # path's bind boundary does at wrap time.
         import hashlib
         stub = self.bin / "pi"
         digest = hashlib.sha256(stub.read_bytes()).hexdigest()
         host_pins = self.root / "tools.pins.yaml"
-        host_pins.write_text(f"pi:\n  path: {stub}\n  sha256: {digest}\n",
-                             encoding="utf-8")
+        host_pins.write_text(
+            f"pi:\n  path: {stub}\n  sha256: {digest}\n"
+            + self._git_pin_lines(),
+            encoding="utf-8")
         res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1",
                                   "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
                                   "FACTORY_TOOL_PINS": str(host_pins)},

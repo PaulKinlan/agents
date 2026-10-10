@@ -28,7 +28,7 @@ if str(FACTORY_ROOT) not in sys.path:
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
-from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
 
 
 def _trusted_tool(name: str) -> str:
@@ -41,7 +41,7 @@ def _trusted_tool(name: str) -> str:
     per call: a post-resolution binary swap never executes under a stale verification.
     """
     try:
-        return resolve_tool(name)
+        return prepass_tool(name)
     except ToolPinError as e:
         sys.stderr.write(f"Error: trusted tool {name!r} cannot be authenticated: {e}\n")
         sys.exit(2)

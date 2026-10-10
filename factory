@@ -44,7 +44,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
-    from lib.tool_pins import (HOST_PINS_ENV, ToolPinError, allowlisted_path, resolve_tool,
+    from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
+                               allowlisted_path, prepass_tool_env, resolve_tool,
                                write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
@@ -69,7 +70,8 @@ except ImportError:
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
-    from lib.tool_pins import (HOST_PINS_ENV, ToolPinError, allowlisted_path, resolve_tool,
+    from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
+                               allowlisted_path, prepass_tool_env, resolve_tool,
                                write_effective_pins)
 
 
@@ -1241,28 +1243,90 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     if prepass_script and prepass_script.exists():
         prepass_cmd = _prepass_argv(prepass_script, read_dir, target_name,
                                     candidates_file, agent_name)
-        # agents-28nn round 5 (review P1) — stated as a DESIGN RULE, not fixed as a slip,
-        # because this bead has now met it THREE times (the agents-dpt pins forwarding to
-        # children; the round-4 verdict's bind-verification-only-when-sandbox_ok; and now
-        # the merged pins themselves): THE CONTROL MUST BE A PROPERTY OF THE OPERATION,
-        # NOT OF THE PATH TAKEN TO IT. A control that applies only on the confined path
-        # leaves the LESS-confined path with LESS control — the inverted polarity. So the
-        # merged effective pins are written for EVERY pre-pass, sandboxed or not, and
-        # every pre-pass child's FACTORY_TOOL_PINS names the same file: the child verifies
-        # against EXACTLY the bytes the host verified (a snapshot — a host-pins swap
-        # between the host's own resolutions and the child's exec cannot widen what the
-        # child trusts), on every path. Pins are paths and hashes, not secrets.
-        # The pins file must NOT be one the child can rewrite (the rule on
-        # _make_pins_dir): it lives in its own per-run dir OUTSIDE the rw-bound run
-        # directory. On the sandboxed path the wrap binds it READ-ONLY at the same
-        # absolute path (below), so the kernel enforces the rule. On the UNSANDBOXED path
-        # no mount namespace exists and no userspace mechanism can keep a file immutable
-        # to a process running with the operator's own uid — stated, not claimed: there
-        # the pins constrain PATH-order resolution for honest code, and the boundary is
-        # the trusted-target attestation (agents-bp0), not this file.
+        # agents-28nn round 6 (review P0, the round-5 polarity argument FALSIFIED):
+        # WHENEVER A RESOLVER'S OUTPUT DETERMINES WHO RECEIVES A SECRET, THE RESOLVER IS A
+        # GRANTING MECHANISM. The round-5 report claimed pins only ever RESTRICT which
+        # binaries may run as trusted and never GRANT capability; the round-6 reviewer
+        # falsified that by construction — a pin naming `path: /tmp/evil` made
+        # resolve_tool(engine) authorise that path, and the evil binary executed and
+        # RECEIVED THE CREDENTIALS despite being in no PATH and on no allowlist. So a
+        # trusted pin IS an authorisation to hand credentials to the named path — and the
+        # pin's granularity is the binary, so a pinned LAUNCHER (a shell, env, an
+        # interpreter) confers whatever that launcher can reach; pins decide WHICH FILE
+        # RUNS and are silent about WHAT THAT FILE CAN DO. And the two findings COMPOSE:
+        # the round-5 read-only bind is a control that depends on a mount namespace, and
+        # on the unsandboxed path there is none — the child runs as the operator and can
+        # rewrite /tmp/factory-pins-* — so a rewritten pin PLUS a pin being a grant meant
+        # the unsandboxed credential handoff was protected by NOTHING but the operator's
+        # own environment. That composition, not either half alone, is why this path was
+        # the priority.
+        #
+        # THE RULE this bead works to, stated once here and referenced from the credential
+        # broker below: THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
+        # MORE-CONFINED PATH — a control that applies only on the confined path leaves
+        # the less-confined path with less control, the inverted polarity this bead has
+        # now met four times (the agents-dpt pins forwarding; the round-4 bind
+        # verification; the round-5 merged pins; the round-6 credential broker).
+        #
+        # WHAT NOW CONTAINS THE RISK ON THE UNSANDBOXED PATH (it is no longer, and never
+        # was, the pin's inability to grant):
+        #  1. THE HANDOFF DOES NOT DEPEND ON A FILE THE CHILD CAN WRITE. Every trusted
+        #     tool the pre-pass may execute is resolved and pin-verified HOST-SIDE below,
+        #     BEFORE the credentials leave, and the verified absolute paths ride the
+        #     fork-time env (FACTORY_RESOLVED_TOOL_*, lib.tool_pins.prepass_tool_env);
+        #     the scripts execute those paths (lib.tool_pins.prepass_tool). Chosen over
+        #     the two alternatives: making the pins file immutable WITHOUT a mount
+        #     namespace cannot work (no userspace mechanism keeps a file immutable to a
+        #     process running with the operator's own uid — stated in round 5 and still
+        #     true); and a sealed memfd inherited by the child (the third option) WOULD
+        #     give same-uid immutability on Linux, but it is Linux-only, needs
+        #     fd-inheritance plumbed through run_station_command and the wrap, and makes
+        #     /proc/self/fd part of the resolver's trust root — a second trust mechanism
+        #     where removing the dependency is simpler and platform-independent.
+        #  2. NO RE-ENTRY: nothing the pins authorise can write what the resolver reads,
+        #     and a pinned tool's output never feeds resolution. On the sandboxed path
+        #     the effective pins are ro-bound and $HOME (the host pins) is tmpfs-hidden;
+        #     on the unsandboxed path the resolver's inputs are the fork-time env and the
+        #     host's own pins, which a pinned child process cannot reach retroactively.
+        #     "Pins only restrict" is TRUE of which file runs; NO RE-ENTRY is what makes
+        #     that restriction SUFFICIENT rather than merely true.
+        #  3. The path exists only behind the explicit FACTORY_ALLOW_UNSANDBOXED=1 opt-in
+        #     plus a manifest declaring trusted: true with visibility: private.
+        #  4. STATED, NOT CLAIMED AWAY: the unsandboxed pre-pass's extra capability —
+        #     operator uid reach, forwarded proxy networking, no mount namespace — is a
+        #     FACT ABOUT THE PLATFORM, not a defect anyone failed to prevent; the safety
+        #     above is a property of the MECHANISM, not of the path. An unsandboxed
+        #     pre-pass is a credential-holding process running as the operator: code
+        #     executing inside it already holds the credentials, so this mechanism's
+        #     guarantee is scoped — the binary the HANDOFF authenticates is host-verified
+        #     and honest code is never fooled by the filesystem. It is not confinement.
+        #
+        # The merged effective pins are still written for EVERY pre-pass (round 5: the
+        # sandboxed child re-verifies against EXACTLY the bytes the host verified; pins
+        # are paths and hashes, not secrets) and still live OUTSIDE the rw-bound run dir
+        # (the rule on _make_pins_dir). On the sandboxed path the wrap binds them
+        # READ-ONLY and FACTORY_PINS_RO_BOUND tells prepass_tool that exec-time
+        # re-verification against them is sound (below). On the unsandboxed path the file
+        # remains only as the fail-closed backstop for tools outside the pre-resolved
+        # set — the grant no longer routes through it.
         effective_pins = write_effective_pins(
             _make_pins_dir() / "tool-pins.effective.yaml")
         prepass_env[HOST_PINS_ENV] = str(effective_pins)
+        # Host-side verification of the pre-pass's whole trusted-tool set, on EVERY path
+        # (the control is a property of the operation, not of the path taken to it).
+        # A PRESENT-BUT-UNAUTHENTICATABLE tool refuses the run here — exactly what the
+        # sandboxed path's bind boundary does at wrap time (lib/sandbox.py
+        # _executable_binds); a genuinely ABSENT tool is skipped, and the script fails
+        # closed or takes its documented fallback, again as the sandboxed path does.
+        try:
+            prepass_env.update(prepass_tool_env(
+                sorted(set(PREPASS_EXECUTABLES) | set(policy.requires))))
+        except ToolPinError as e:
+            raise StationError(
+                f"{agent_name}: a trusted tool the pre-pass may execute is present but "
+                f"cannot be authenticated: {e}; refusing the run — the sandboxed path "
+                f"refuses this state at the wrap's bind boundary, and the less-confined "
+                f"path must not receive more than the more-confined path") from e
         # Egress control applies to the pre-pass whenever the host can sandbox (agents-2x6):
         # its netns is isolated and its only egress is the allowlist proxy, reached through
         # the net_forward relay. The proxy itself starts later, just before execution; the
@@ -1275,15 +1339,20 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             prepass_env["HTTP_PROXY"] = prepass_env["HTTPS_PROXY"] = \
                 f"http://127.0.0.1:{EGRESS_PROXY_PORT}"
             prepass_env["NO_PROXY"] = "localhost,127.0.0.1"
-            # The pre-pass scripts re-authenticate their own trusted tools through
-            # resolve_tool (agents-28nn round 4: a station script's own trusted-tool
-            # launch is a census kind of its own — the bind boundary authenticates at
-            # WRAP time; the script re-verifies at EXEC time). The host pins file lives
-            # under $HOME, tmpfs-hidden inside the wrap, so the child reads the EFFECTIVE
-            # pins the host just verified, bound READ-ONLY into the wrap at the same
-            # absolute path — a child that rewrites the file it was handed gets EROFS,
-            # and resolve_tool keeps validating what the host verified (round 5, the P0
-            # this round's first commit closed).
+            # The pre-pass scripts re-authenticate their own trusted tools (agents-28nn
+            # round 4: a station script's own trusted-tool launch is a census kind of its
+            # own — the bind boundary authenticates at WRAP time; the script re-verifies
+            # at EXEC time). The host pins file lives under $HOME, tmpfs-hidden inside the
+            # wrap, so the child reads the EFFECTIVE pins the host just verified, bound
+            # READ-ONLY into the wrap at the same absolute path — a child that rewrites
+            # the file it was handed gets EROFS, and resolve_tool keeps validating what
+            # the host verified (round 5, the P0 that round's first commit closed).
+            # FACTORY_PINS_RO_BOUND (round 6) is what licenses prepass_tool to re-verify
+            # against the pins file at exec time: it is set ONLY here, where the kernel
+            # enforces the file's integrity — on the unsandboxed path the same file is
+            # operator-writable and the handoff rests on the dispatcher-resolved paths
+            # instead.
+            prepass_env[PINS_RO_BOUND_ENV] = "1"
             try:
                 prepass_cmd = sandbox_command(
                     prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,

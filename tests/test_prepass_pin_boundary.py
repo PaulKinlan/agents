@@ -114,6 +114,35 @@ class TestFetchIssuesPinBoundary(PrepassPinBoundaryBase):
         self.assertEqual(res.returncode, 2, res.stderr)
         self.assertIn("gh issue list failed", res.stderr)
 
+    def test_the_dispatcher_resolved_path_survives_a_rewritten_pins_file(self):
+        """agents-28nn round 6, review P1: on the UNSANDBOXED path the pins file is
+        operator-writable and the child runs as the operator, so the credential handoff
+        must not depend on it. The dispatcher hands the host-verified path in
+        FACTORY_RESOLVED_TOOL_GH; even with the pins file REWRITTEN to grant the fake
+        (path+sha of the fake — a pin IS a grant, the falsified round-5 claim), the
+        script must execute the dispatcher-verified binary and the fake must never run."""
+        tmp, sandbox, fakebin, target = self._sandbox(FETCH_ISSUES)
+        fake_log = tmp / "fake.log"
+        real_log = tmp / "real.log"
+        fake = self._plant(fakebin, "gh", f'#!/bin/sh\necho ran >> {fake_log}\necho "[]"\n')
+        # A second plant standing in for the dispatcher-verified binary (the host-verified
+        # path is an operator decision; what matters is WHICH one executes).
+        verified = self._plant(fakebin, "gh-verified",
+                               f'#!/bin/sh\necho ran >> {real_log}\necho "[]"\n')
+        pins = self._pins(tmp, "gh", path=str(fake), sha256=_sha256(fake))
+        env = self._env(pins, fakebin)
+        env["FACTORY_RESOLVED_TOOL_GH"] = str(verified)
+        out = tmp / "out.json"
+        cmd = [sys.executable, str(sandbox / FETCH_ISSUES), "--target", str(target),
+               "--output", str(out)]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(fake_log.exists(),
+                         "the rewritten pins file redirected the credential handoff to "
+                         "the fake: a file the child can write decided who gets GH_TOKEN")
+        self.assertTrue(real_log.exists(),
+                        "the dispatcher-verified binary must be the one that executes")
+
     def test_a_genuine_empty_result_from_the_pinned_gh_stays_an_empty_result(self):
         tmp, sandbox, fakebin, target = self._sandbox(FETCH_ISSUES)
         fake = self._plant(fakebin, "gh", '#!/bin/sh\necho "[]"\nexit 0\n')

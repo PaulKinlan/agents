@@ -29,7 +29,7 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.redaction import emit_station_result  # noqa: E402
-from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
 
 
 def _trusted_tool(name: str) -> str:
@@ -45,7 +45,7 @@ def _trusted_tool(name: str) -> str:
     binary swap never executes under a stale verification.
     """
     try:
-        return resolve_tool(name)
+        return prepass_tool(name)
     except ToolPinError as e:
         sys.stderr.write(f"Error: trusted tool {name!r} cannot be authenticated: {e}\n")
         sys.exit(2)

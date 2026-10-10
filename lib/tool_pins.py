@@ -111,6 +111,103 @@ class ToolPinError(RuntimeError):
     fails rather than executing an unverified binary."""
 
 
+# agents-28nn round 6 (review P1 — the effective-pins TOCTOU on the UNSANDBOXED path):
+# the dispatcher resolves every trusted tool the pre-pass may execute HOST-SIDE and hands
+# the child the verified absolute paths under this env prefix. On the unsandboxed path no
+# mount namespace exists, so the merged pins file is operator-writable and the child runs
+# as the operator — a file the child can rewrite cannot be what the credential handoff
+# depends on. The fork-time env is the one artefact neither the child nor any other
+# operator-uid process can rewrite from outside, so THAT is what the handoff rests on.
+DISPATCHER_RESOLVED_PREFIX = "FACTORY_RESOLVED_TOOL_"
+
+# Set by the dispatcher ONLY on the sandboxed pre-pass path, where the wrap binds the
+# effective pins READ-ONLY: there exec-time re-verification against the pins is sound
+# (the kernel enforces the file's integrity), and it catches a post-wrap binary swap.
+# Everywhere else prepass_tool trusts the dispatcher-resolved path, never the writable
+# pins file.
+PINS_RO_BOUND_ENV = "FACTORY_PINS_RO_BOUND"
+
+
+def dispatcher_resolved_name(name: str) -> str:
+    """The env var under which the dispatcher hands a pre-pass child `name`'s verified path."""
+    return DISPATCHER_RESOLVED_PREFIX + name.upper().replace("-", "_")
+
+
+def tool_present(name: str, pins: Optional[Dict[str, Dict[str, str]]] = None) -> bool:
+    """Whether `name` is genuinely available to resolve (a configured pin path, or on PATH).
+
+    Distinguishes ABSENT (the pre-pass script fails closed or takes its documented
+    fallback, exactly as on the sandboxed path where the binder skips unresolvable names)
+    from PRESENT-BUT-UNAUTHENTICATABLE (the sandboxed path refuses at the wrap's bind
+    boundary, so every other path must refuse too — the control is a property of the
+    operation, not of the path taken to it).
+    """
+    if pins is None:
+        pins = load_tool_pins()
+    if pins.get(name, {}).get("path"):
+        return True
+    return shutil.which(name) is not None
+
+
+def prepass_tool_env(names: Sequence[str],
+                     pins: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, str]:
+    """HOST-SIDE (the dispatcher): resolve and pin-verify each trusted tool a pre-pass may
+    execute, returning the ``{env_name: absolute_path}`` mapping for the child's env.
+
+    Raises ``ToolPinError`` for a PRESENT-BUT-UNAUTHENTICATABLE tool (the caller turns it
+    into a run refusal, mirroring the sandbox bind boundary); a genuinely ABSENT tool is
+    skipped (the script's own resolution then fails closed or falls back per its
+    documented contract — e.g. secret-scan's builtin-regex when gitleaks is absent).
+    """
+    if pins is None:
+        pins = load_tool_pins()
+    env: Dict[str, str] = {}
+    for name in names:
+        if name not in TRUSTED_TOOLS:
+            continue
+        try:
+            env[dispatcher_resolved_name(name)] = resolve_tool(name, pins=pins)
+        except ToolPinError:
+            if tool_present(name, pins):
+                raise
+    return env
+
+
+def prepass_tool(name: str) -> str:
+    """CHILD-SIDE (a pre-pass script): the authenticated absolute path of a trusted tool.
+
+    WHENEVER A RESOLVER'S OUTPUT DETERMINES WHO RECEIVES A SECRET, THE RESOLVER IS A
+    GRANTING MECHANISM — this resolution decides which binary runs with the pre-pass's
+    credentials (GH_TOKEN et al.), so WHAT IT READS decides who gets them:
+
+    * Sandboxed pre-pass (``FACTORY_PINS_RO_BOUND`` set by the dispatcher): the effective
+      pins are bound READ-ONLY by the wrap, so re-verifying at exec time is sound and
+      catches a post-wrap binary swap — resolve_tool against them, as before.
+    * Unsandboxed pre-pass: no mount namespace exists, the pins file is operator-writable
+      and this process runs as the operator, so the file CANNOT be what the handoff
+      depends on (agents-28nn round 6, constructed: the child rewrote FACTORY_TOOL_PINS
+      in place and resolve_tool validated the injected pin). Use the dispatcher-resolved
+      path from the fork-time env — verified host-side BEFORE the credentials were
+      handed over, and unreachable to anything outside this process afterwards.
+    * No dispatcher variable (a tool outside PREPASS_EXECUTABLES + the manifest's
+      ``requires``): fall back to resolve_tool against the pins file. CONDITION that ends
+      this justification: the tool set the scripts use stays inside the dispatcher's
+      pre-resolved set; a script that adopts a NEW trusted tool must add it to
+      PREPASS_EXECUTABLES (lib/sandbox.py), which the sandboxed path needs anyway.
+    """
+    if os.environ.get(PINS_RO_BOUND_ENV, "").strip():
+        return resolve_tool(name)
+    resolved = os.environ.get(dispatcher_resolved_name(name), "").strip()
+    if resolved:
+        real = os.path.realpath(os.path.expanduser(resolved))
+        if not os.path.isfile(real):
+            raise ToolPinError(
+                f"dispatcher-resolved trusted tool {name!r} is not a file: {real}; the "
+                f"handoff named a binary that does not exist")
+        return real
+    return resolve_tool(name)
+
+
 # A pins file is a handful of tool entries — hundreds of bytes. The read is BOUNDED
 # (agents-28nn round 3, review P2): FACTORY_TOOL_PINS naming a huge regular file makes an
 # unbounded read allocate until MemoryError — which no (OSError, ...) clause catches — and
