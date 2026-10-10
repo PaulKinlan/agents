@@ -22,6 +22,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
 except ImportError:
@@ -116,7 +118,12 @@ def scan_memory_leaks(target_dir: Path) -> Dict[str, Any]:
                     "rationale": "Active DOM observers pin observed elements and callback closures in V8 heap memory even after elements are removed from the document."
                 })
 
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     return {
+        **artefact_scheme_fields(),
         "target": target_dir.name,
         "scanned_files": scanned_files,
         "memory_leak_debugging_skill": os.path.expanduser("~/.gemini/config/plugins/chrome-devtools-plugin/skills/memory-leak-debugging/SKILL.md"),

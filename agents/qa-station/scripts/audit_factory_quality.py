@@ -13,8 +13,13 @@ import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
+import sys
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 AGENTS_DIR = FACTORY_ROOT / "agents"
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
@@ -149,14 +154,22 @@ def main():
         if p.is_dir() and (p / "agent.yaml").exists()
     ])
 
+    # The candidate set is an expression here, so it is named first: the helper needs the whole
+    # list, and a spread would hide the fact that these candidates never got an identity.
+    candidates = contract_issues + precision_data["noisy_candidates"]
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     payload = {
+        **artefact_scheme_fields(),
         "target": target.name,
         "stores_read": precision_data["stores_read"],
         "fleet_size": len(fleet_names),
         "fleet_agents": fleet_names,
         "contract_issues": contract_issues,
         "agent_scorecards": precision_data["agent_scorecards"],
-        "candidates": contract_issues + precision_data["noisy_candidates"]
+        "candidates": candidates
     }
 
     out = json.dumps(payload, indent=2)
