@@ -208,10 +208,19 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
 IDENTITY_SOURCES = (
     "candidate-exact",      # the scanner candidate at (rule id, path, line)
     "candidate-unique",     # the only candidate for (rule id, path)
-    "candidate-similar",    # the candidate whose text the model's snippet quotes
+    "candidate-similar-by-model-snippet",  # the candidate whose text the MODEL's snippet quotes
     "model-snippet",        # a candidate set existed but nothing bound: identity IS model prose
     "no-candidate-index",   # no candidate set at all, so there was nothing to bind to
 )
+
+# Sources that are EVIDENCE that two runs describe the same finding, as opposed to sources that
+# merely say how a row was recognised. `candidate-similar-by-model-snippet` is scanner text SELECTED
+# BY the model's wording, so re-wording can select a different candidate: it is only partly stable,
+# and its NAME says so, because a label a reader can over-read is worse than no label (coord ruling,
+# agents-x9my) - a reader seeing any `candidate-*` name could infer "scanner-derived, therefore
+# trustworthy", which is the inference this vocabulary exists to make impossible. Neither it, nor
+# `model-snippet`, nor `no-candidate-index` is sufficient to close on a Fixed line.
+IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique")
 
 
 def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
@@ -241,7 +250,7 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
     if wanted:
         matching = [o for o in options if wanted in normalize_text(o) or normalize_text(o) in wanted]
         if len(matching) == 1:
-            return matching[0], "candidate-similar"
+            return matching[0], "candidate-similar-by-model-snippet"
     return model_snippet, "model-snippet"
 
 
@@ -946,8 +955,21 @@ def _badge(f: Dict[str, Any]) -> str:
     return f"[{shown.upper()}]"
 
 
+def _identity_grade(f: Dict[str, Any]) -> str:
+    """The grading suffix for a row's identity source, or empty when the source is real evidence.
+
+    Rendered rather than only documented: a reader should not have to know this module's vocabulary
+    to know whether a Fixed line is evidence, so every source outside IDENTITY_STABLE_SOURCES is
+    marked wherever the key is shown - the full report, the step summary and the Fixed section.
+    """
+    source = f.get("identity_source")
+    if source and source not in IDENTITY_STABLE_SOURCES:
+        return " (reword-unstable — not evidence on its own)"
+    return ""
+
+
 def _identity_note(f: Dict[str, Any]) -> str:
-    """` — identity: `x``, naming the key that produced this row's fingerprint (agents-x9my).
+    """` — identity: `x`` plus its grading, naming the key that produced this fingerprint.
 
     A Fixed line nobody can attribute is unfalsifiable, which is why the teams reading these
     reports concluded that nothing may be closed on one. `model-snippet` says the row was
@@ -955,7 +977,7 @@ def _identity_note(f: Dict[str, Any]) -> str:
     `candidate-exact` means the scanner's own match text identified it.
     """
     source = f.get("identity_source")
-    return f" — identity: `{source}`" if source else ""
+    return f" — identity: `{source}`{_identity_grade(f)}" if source else ""
 
 
 def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
@@ -1074,7 +1096,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
                 lines.append(f"- **Model's own label** (not scanner provenance): "
                              f"`{f['model_rule_id']}`")
             if f.get("identity_source"):
-                lines.append(f"- **Identity**: `{f['identity_source']}`")
+                lines.append(f"- **Identity**: `{f['identity_source']}`{_identity_grade(f)}")
             lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`")
             lines.append(f"- **Fingerprint**: `{f['fingerprint'][:16]}...`")
             lines.append(f"- **Description**: {f['description']}")

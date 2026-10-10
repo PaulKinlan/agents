@@ -447,7 +447,27 @@ class TestIdentityAttribution(unittest.TestCase):
         quoted = self._finding(line_number=99, snippet="the line reads beta gamma here")
         self.assertEqual(
             findings.identity_snippet_binding(quoted, "scanner-rule", "a.py", ambiguous),
-            ("beta gamma", "candidate-similar"))
+            ("beta gamma", "candidate-similar-by-model-snippet"))
+
+    def test_a_model_selected_candidate_is_named_as_such_and_not_graded_as_stable(self):
+        """The name says the mechanism, and the delta repeats the grading (coord ruling).
+
+        `candidate-similar-by-model-snippet` is the scanner's text chosen by the MODEL's wording, so
+        re-wording can pick a different candidate. A reader must not have to know this module's
+        vocabulary to know whether a Fixed line is evidence, so the unstable sources are marked in
+        the rendered line itself.
+        """
+        self.assertNotIn("candidate-similar-by-model-snippet", findings.IDENTITY_STABLE_SOURCES)
+        record = dict(self._finding(), identity_source="candidate-similar-by-model-snippet",
+                      change="new", state="new", fingerprint="f" * 64)
+        stable = dict(self._finding(), identity_source="candidate-exact",
+                      change="new", state="new", fingerprint="g" * 64)
+        stats = {key: 0 for key in findings.DELTA_KEYS}
+        stats["new"] = 2
+        report = findings._render_delta_report("target", [record, stable], stats, [])
+        self.assertIn("`candidate-similar-by-model-snippet` (reword-unstable", report)
+        self.assertIn("`candidate-exact`\n", report)
+        self.assertNotIn("`candidate-exact` (reword-unstable", report)
 
     def test_an_untrusted_rule_id_is_recorded_as_prose_identity(self):
         """The mechanism: the label is blanked before the lookup, so the scanner cannot be bound."""
