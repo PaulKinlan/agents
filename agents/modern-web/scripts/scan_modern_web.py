@@ -80,21 +80,33 @@ BASELINE_COMMENT_RE = re.compile(
     re.IGNORECASE
 )
 
-# Pinned mapping from rule_id to canonical web-features IDs / BCD keys (agents-08d).
-# Strict, explicit allowlist — no fuzzy token derivation or startswith matching.
+# Pinned mapping from rule_id to canonical web-features IDs / BCD keys (agents-08d, agents-mw6m).
+# Strict, explicit allowlist — 100% of rules in RULES must have non-empty canonical IDs.
 PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
     # Popover API & CSS Anchor Positioning
     "legacy-tooltip-popover-anchor": {
         "anchor-positioning",
         "css-anchor-positioning",
         "popover",
+        "anchor",
+        "position-anchor",
+        "anchor-name",
+        "position-try-fallbacks",
+        "css.properties.anchor-name",
+        "css.properties.position-anchor",
+        "popover-api",
     },
-    # Dialog closedby
+    # Dialog closedby & native dialog
     "legacy-custom-modal": {
         "dialog-closedby",
         "closedby",
         "html.elements.dialog.closedby",
         "api.htmldialogelement.closedby",
+        "dialog",
+        "html.elements.dialog",
+        "htmldialogelement",
+        "html-dialog",
+        "dialog-element",
     },
     # Temporal API (Date math)
     "legacy-date-math-instead-of-temporal": {
@@ -105,6 +117,11 @@ PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
         "temporal-zoneddatetime",
         "temporal-duration",
         "javascript.builtins.temporal",
+        "temporal-date",
+        "temporal-api",
+        "plain-date",
+        "temporal.plaindate",
+        "javascript.builtins.temporal.plaindate",
     },
     # Scheduler API (yield / postTask)
     "legacy-settimeout-zero-task-yielding": {
@@ -112,12 +129,14 @@ PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
         "scheduler.yield",
         "api.scheduler.yield",
         "scheduler-api",
+        "scheduler",
     },
     # View Transitions API
     "legacy-view-swap-without-view-transitions": {
         "view-transitions",
         "view-transition",
         "startviewtransition",
+        "api.document.startviewtransition",
     },
     # Atomic DOM reparenting (moveBefore)
     "dom-reparenting-without-movebefore": {
@@ -130,36 +149,44 @@ PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
         "scroll-snap",
         "scrollsnapchange",
         "scroll-initial-target",
+        "scrollsnapchanging",
     },
     # Native form controls accent-color
     "custom-checkbox-radio-without-accent-color": {
         "accent-color",
+        "css.properties.accent-color",
     },
     # Invoker Commands (commandfor)
     "imperative-button-toggle-without-invoker-commands": {
         "invoker-commands",
         "commandfor",
+        "command",
     },
     # Beacon fetchLater
     "legacy-unload-beacon-instead-of-fetchlater": {
         "fetchlater",
         "api.fetchlater",
+        "api.fetch",
     },
     # Starting style & discrete display animations
     "discrete-display-animation-without-starting-style": {
         "starting-style",
         "@starting-style",
         "transition-behavior",
+        "css.at-rules.starting-style",
     },
     # Native scrollend event
     "debounced-scroll-instead-of-scrollend": {
         "scrollend",
+        "api.element.scrollend_event",
     },
     # Text wrap balance / pretty
     "headings-missing-text-wrap-balance-or-pretty": {
         "text-wrap",
         "text-wrap-balance",
         "text-wrap-pretty",
+        "text-box",
+        "text-box-trim",
     },
     # Form validation pseudo-classes (:user-valid / :user-invalid)
     "legacy-form-validation-classes": {
@@ -167,63 +194,78 @@ PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
         "user-invalid",
         ":user-valid",
         ":user-invalid",
+        "css.selectors.user-valid",
+        "css.selectors.user-invalid",
     },
     "a11y-aria-invalid-unsynced": {
         "user-valid",
         "user-invalid",
         ":user-valid",
         ":user-invalid",
+        "aria-invalid",
     },
     # Relational pseudo-classes (:has / :not)
     "legacy-js-parent-or-child-state-styling": {
         "has",
         ":has()",
+        ":has",
+        "css.selectors.has",
     },
     # Container Size & Style Queries
     "legacy-viewport-media-for-components": {
         "container-queries",
         "@container",
+        "css.at-rules.container",
     },
     "legacy-variant-classes-without-style-queries": {
         "container-style-queries",
         "style-queries",
+        "style()",
     },
     # Light-dark color function
     "dark-mode-media-without-light-dark": {
         "light-dark",
         "light-dark()",
+        "css.types.light-dark",
     },
     # Customizable <select> (appearance: base-select)
     "legacy-custom-select-dropdown": {
         "select-customizable",
         "customizable-select",
         "appearance: base-select",
+        "base-select",
     },
     # Container Scroll-State Queries (sticky header / scroll shadow)
     "sticky-or-scroll-shadow-js-instead-of-scroll-state-queries": {
         "scroll-state-queries",
         "container-scroll-state-queries",
         "scroll-state",
+        "scroll-state()",
     },
     # Field-sizing content
     "legacy-textarea-auto-resize-js": {
         "field-sizing",
         "field-sizing-content",
+        "css.properties.field-sizing",
     },
     # Content-visibility
     "missing-content-visibility-on-sections": {
         "content-visibility",
         "content-visibility-auto",
+        "css.properties.content-visibility",
     },
     # Fetchpriority
     "missing-fetchpriority-or-lazy-img": {
         "fetchpriority",
         "fetchpriority-high",
+        "loading-lazy",
+        "api.htmlimageelement.fetchpriority",
     },
     # Speculation Rules
     "navigation-links-without-speculation-rules": {
         "speculation-rules",
         "speculationrules",
+        "html.elements.script.type.speculationrules",
     },
     # Interest Invokers
     "hover-focus-tooltip-without-interest-invokers": {
@@ -235,17 +277,21 @@ PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
         "linear-easing",
         "linear-easing-function",
         "linear()",
+        "css.types.linear",
     },
     # Scroll-driven animations
     "legacy-scroll-listener-animation": {
         "scroll-driven-animations",
         "animation-timeline",
+        "view-timeline",
+        "scroll-timeline",
     },
     # Custom Highlight API
     "dom-wrapping-text-highlight-instead-of-custom-highlights": {
         "custom-highlights",
         "custom-highlight-api",
         "css.highlights",
+        "::highlight",
     },
     # CSS Masks
     "overlay-fade-or-cutout-without-css-masks": {
@@ -253,33 +299,195 @@ PINNED_RULE_CANONICAL_IDS: Dict[str, Set[str]] = {
         "css-masks",
         "masking",
         "mask-image",
+        "mask-composite",
     },
     # Font-size-adjust
     "font-face-missing-font-size-adjust": {
         "font-size-adjust",
+        "css.properties.font-size-adjust",
     },
     # Sanitizer API
     "unsafe-innerhtml-without-sanitizer-api": {
         "sanitizer-api",
         "sethtml",
         "element.sethtml",
+        "sanitizer",
     },
     # WebAuthn & Signal API
     "auth-flow-without-passkeys-or-signal-api": {
         "passkeys",
         "webauthn",
         "signal-api",
+        "publickeycredential",
     },
     # Long Animation Frames (LoAF)
     "performance-observer-missing-loaf-inp": {
         "long-animation-frames",
         "loaf",
+        "api.performanceobserver",
     },
     # Interpolate-size & calc-size
     "legacy-max-height-intrinsic-animation": {
         "interpolate-size",
         "calc-size",
         "calc-size()",
+        "css.properties.interpolate-size",
+    },
+    # Semantic HTML controls
+    "non-semantic-interactive-markup": {
+        "button",
+        "dialog",
+        "details",
+        "search",
+        "html.elements.button",
+        "html.elements.dialog",
+    },
+    # Built-in AI
+    "client-llm-or-nlp-without-builtin-ai": {
+        "built-in-ai",
+        "ai",
+        "window.ai",
+        "ai-language-model",
+        "ai-summarizer",
+        "ai-translator",
+    },
+    # Sibling index & count
+    "legacy-nth-child-stagger-delays": {
+        "sibling-index",
+        "sibling-count",
+        "css.types.sibling-index",
+        "css.types.sibling-count",
+    },
+    # Individual transforms
+    "legacy-compound-transform-property": {
+        "individual-transforms",
+        "translate",
+        "rotate",
+        "scale",
+        "css.properties.translate",
+    },
+    # Overflow clip
+    "legacy-overflow-hidden-clipping": {
+        "overflow-clip",
+        "overflow-clip-margin",
+        "css.properties.overflow.clip",
+    },
+    # CSS Custom Functions (@function)
+    "repeated-complex-css-calculations": {
+        "css-functions",
+        "custom-functions",
+        "function",
+        "@function",
+        "calc",
+    },
+    # IME composition guard
+    "textarea-enter-submit-missing-ime-check": {
+        "keyboardevent-iscomposing",
+        "iscomposing",
+        "requestsubmit",
+        "api.keyboardevent.iscomposing",
+    },
+    # Form inputmode / autocomplete
+    "forms-missing-autofill-inputmode-hints": {
+        "inputmode",
+        "autocomplete",
+        "enterkeyhint",
+        ":autofill",
+        "autofill",
+    },
+    # Intl.DurationFormat
+    "manual-duration-formatting": {
+        "durationformat",
+        "intl.durationformat",
+        "temporal-duration",
+        "intl-durationformat",
+    },
+    # Page lifecycle
+    "manual-visibilitychange-timing": {
+        "page-lifecycle",
+        "visibilitychange",
+        "api.document.visibilitychange",
+    },
+    # Top-level await
+    "async-iife-instead-of-top-level-await": {
+        "top-level-await",
+        "javascript.operators.await.top_level",
+    },
+    # image-set()
+    "css-background-url-without-image-set": {
+        "image-set",
+        "css.types.image-set",
+    },
+    # Low priority fetch
+    "background-fetch-missing-low-priority": {
+        "fetchpriority",
+        "fetchpriority-low",
+        "api.request.fetchpriority",
+    },
+    # Render blocking expect
+    "ab-test-or-transition-without-render-blocking-expect": {
+        "blocking-render",
+        "link-rel-expect",
+        "html.elements.link.blocking",
+    },
+    # Declarative HTML setters
+    "streaming-dom-patching-without-html-setters": {
+        "sethtml",
+        "sethtmlunsafe",
+        "declarative-shadow-dom",
+        "api.element.sethtml",
+    },
+    # User-Agent Client Hints & Partitioned Cookies
+    "legacy-useragent-or-unpartitioned-cookies": {
+        "useragentdata",
+        "client-hints",
+        "chips",
+        "partitioned-cookies",
+        "fedcm",
+    },
+    # Exclusive accordion & hidden until-found
+    "accordion-hidden-content-not-searchable": {
+        "details-name",
+        "hidden-until-found",
+        "beforematch",
+        "html.elements.details.name",
+    },
+    # Scrollspy target-current
+    "js-intersection-observer-scrollspy": {
+        "scroll-target-group",
+        "target-current",
+        "css.selectors.target-current",
+    },
+    # Progress ring & conic-gradient
+    "custom-spinner-or-progress-ring-div": {
+        "progress",
+        "conic-gradient",
+        "css.types.conic-gradient",
+    },
+    # Scrollbar color & width
+    "legacy-webkit-scrollbar-styling": {
+        "scrollbar-color",
+        "scrollbar-width",
+        "css.properties.scrollbar-color",
+        "css.properties.scrollbar-width",
+    },
+    # contrast-color()
+    "js-color-contrast-instead-of-contrast-color": {
+        "contrast-color",
+        "css.types.contrast-color",
+    },
+    # HTML in Canvas
+    "canvas-html-rendering-or-html2canvas": {
+        "layoutsubtree",
+        "html-in-canvas",
+        "api.canvasrenderingcontext2d.drawelementimage",
+    },
+    # WebMCP
+    "forms-and-tools-missing-webmcp": {
+        "webmcp",
+        "modelcontext",
+        "toolname",
+        "tooldescription",
     },
 }
 
@@ -289,22 +497,36 @@ def normalize_feature_key(s: str) -> str:
 
 
 def rule_matches_baseline_feature(rule_id: str, feature_id: str) -> bool:
-    """Check if a rule matches a canonical feature ID via pinned allowlist lookup."""
+    """Check if a rule matches a canonical feature ID via pinned allowlist lookup.
+
+    Strict matching against declared canonical IDs and aliases (agents-08d, agents-mw6m).
+    Normalizes kebab/dot separators and lowercases, but never strips arbitrary prefix segments.
+    """
     f_clean = normalize_feature_key(feature_id)
-    candidate_keys = {f_clean}
-    if "." in f_clean:
-        parts = f_clean.split(".")
-        candidate_keys.add(parts[-1])
-        if len(parts) >= 2:
-            candidate_keys.add(f"{parts[-2]}-{parts[-1]}")
-            candidate_keys.add(f"{parts[-2]}.{parts[-1]}")
-            no_ns = [p for p in parts if p not in ("api", "html", "javascript", "builtins", "elements")]
-            if no_ns:
-                candidate_keys.add("-".join(no_ns))
-    alt_keys = {re.sub(r"[^a-z0-9]+", "-", k).strip("-") for k in candidate_keys}
-    all_keys = candidate_keys | alt_keys
     rule_keys = PINNED_RULE_CANONICAL_IDS.get(rule_id, set())
-    return bool(all_keys & rule_keys)
+    if f_clean in rule_keys:
+        return True
+    # Allow exact BCD-style prefix stripping ONLY for known standard namespaces
+    # (api., html.elements., css.properties., etc.)
+    for bcd_prefix in (
+        "api.",
+        "html.elements.",
+        "css.properties.",
+        "css.selectors.",
+        "css.types.",
+        "css.at-rules.",
+        "javascript.builtins.",
+        "javascript.operators.",
+    ):
+        if f_clean.startswith(bcd_prefix):
+            remainder = f_clean[len(bcd_prefix):]
+            if remainder in rule_keys:
+                return True
+    # Normalize punctuation (. to -) for exact matches
+    kebab = re.sub(r"[^a-z0-9]+", "-", f_clean).strip("-")
+    if kebab in rule_keys:
+        return True
+    return False
 
 
 def is_in_string_literal(line: str, pos: int) -> bool:
@@ -339,7 +561,7 @@ def extract_baseline_annotations(lines: List[str]) -> List[Tuple[int, str]]:
     return annotations
 
 
-def is_in_fallback_window(annot_line: int, line_no: int, lines: List[str], window_before: int = 3, window_after: int = 15) -> bool:
+def is_in_fallback_window(annot_line: int, line_no: int, lines: List[str], window_before: int = 3, window_after: int = 25) -> bool:
     """Determine if line_no is part of the fallback implementation adjacent to annot_line."""
     if line_no == annot_line:
         return True
@@ -349,9 +571,15 @@ def is_in_fallback_window(annot_line: int, line_no: int, lines: List[str], windo
         gap_lines = lines[annot_line:line_no - 1]
     else:
         gap_lines = lines[line_no:annot_line - 1]
-    blank_count = sum(1 for gl in gap_lines if not gl.strip())
-    if blank_count >= 2:
-        return False
+    # Two consecutive blank lines separate top-level blocks / declarations; single blank lines inside a function are allowed.
+    consecutive_blanks = 0
+    for gl in gap_lines:
+        if not gl.strip():
+            consecutive_blanks += 1
+            if consecutive_blanks >= 2:
+                return False
+        else:
+            consecutive_blanks = 0
     return True
 
 
@@ -1207,19 +1435,34 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
 
                     # Check if this candidate falls within an annotated fallback window for this rule
                     is_known_fallback = False
+                    unrecognized_fallback_annotations = []
                     for annot_line, feat in baseline_annotations:
-                        if is_in_fallback_window(annot_line, line_no, lines) and rule_matches_baseline_feature(rule["rule_id"], feat):
-                            is_known_fallback = True
-                            known_baseline_fallbacks.append({
-                                "feature_id": feat,
-                                "rule_id": rule["rule_id"],
-                                "path": rel_path,
-                                "line_number": line_no,
-                                "annotation_line": annot_line
-                            })
-                            break
+                        if is_in_fallback_window(annot_line, line_no, lines):
+                            if rule_matches_baseline_feature(rule["rule_id"], feat):
+                                is_known_fallback = True
+                                known_baseline_fallbacks.append({
+                                    "feature_id": feat,
+                                    "rule_id": rule["rule_id"],
+                                    "path": rel_path,
+                                    "line_number": line_no,
+                                    "annotation_line": annot_line
+                                })
+                                break
+                            else:
+                                unrecognized_fallback_annotations.append((annot_line, feat))
                     if is_known_fallback:
                         continue
+
+                    # Loud warning (agents-mw6m): if there was an adjacent TODO(baseline/...) marker
+                    # whose feature ID does not match this rule's pinned canonical IDs, emit a loud warning on stderr.
+                    for annot_line, feat in unrecognized_fallback_annotations:
+                        pinned = sorted(PINNED_RULE_CANONICAL_IDS.get(rule["rule_id"], set()))
+                        print(
+                            f"Warning: [modern-web] TODO(baseline/{feat}) at {rel_path}:{annot_line} "
+                            f"does not match rule '{rule['rule_id']}' pinned canonical IDs ({pinned}); "
+                            f"fallback suppression skipped and finding candidate emitted.",
+                            file=sys.stderr
+                        )
 
                     guide_ids = rule.get("guide_ids", [])
                     matched_guide_ids.update(guide_ids)
@@ -1236,7 +1479,7 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
                         for gid in guide_ids
                     ]
 
-                    candidates.append({
+                    candidate = {
                         "rule_id": rule["rule_id"],
                         "title": rule["title"],
                         "path": rel_path,
@@ -1247,7 +1490,13 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
                         "rationale": rule["rationale"],
                         "guide_ids": guide_ids,
                         "modern_web_guidance_refs": guide_refs
-                    })
+                    }
+                    if unrecognized_fallback_annotations:
+                        candidate["unrecognized_baseline_annotations"] = [
+                            {"annotation_line": al, "feature_id": feat}
+                            for al, feat in unrecognized_fallback_annotations
+                        ]
+                    candidates.append(candidate)
                     break  # One representative match per rule per file to keep signal-to-noise high
 
     # Deterministic tie-breakers. `line_number_sort_key` orders an unknown location after every
