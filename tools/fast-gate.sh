@@ -86,8 +86,8 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_claude_adapter.py"
       ;;
     lib/adapters/pi.sh)
-      # Pi adapter keyless broker wireup and auth failure handling (agents-vt7w).
-      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py"
+      # Pi adapter keyless broker wireup, auth failure handling, containment policies, and factory core.
+      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py"
       ;;
     lib/adapters/*.sh)
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure and core runner (agents-vt7w).
@@ -235,11 +235,9 @@ while IFS= read -r f; do
         exit 1
       fi
       ;;
-    README.md)
-      # The one markdown file a suite pins by CONTENT: tests/test_docs_drift.py reads the
-      # committed README and asserts its tree diagram resolves the governance paths
-      # (test_repository_readme_resolves_its_governance_paths). Every other *.md is prose
-      # and is ignored below.
+    README.md|AGENTS.md|THREAT_MODEL.md|CLAUDE.md)
+      # Root governance, architecture, and threat model documentation.
+      # tests/test_docs_drift.py reads committed docs and checks drift, anchors, and references.
       mapped="$mapped tests/test_docs_drift.py"
       ;;
     .github/*)
@@ -373,7 +371,8 @@ rc=0
 python3 -u -m unittest $modules || rc=$?
 
 if [ "$rc" -eq 0 ]; then
-  echo "fast-gate: passed: $files"
+  passed_files="$(echo $files | tr '\n' ' ' | sed 's/ *$//')"
+  echo "fast-gate: passed: $passed_files"
   exit 0
 else
   echo "fast-gate: failed: exit $rc (modules: $modules)" >&2
