@@ -19,7 +19,7 @@ import json
 import re
 from collections.abc import Mapping as MappingABC
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from lib.findings import path_resolves_in_target
 
@@ -237,19 +237,58 @@ _NON_REENTRANT_SUSPECT_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Stateless I/O operations where concurrent dispatch can be proven safe
-_STATELESS_IO_SNIPPET_PATTERN = re.compile(
-    r"\b(?:fetch\s*\(|axios\b|https?\.get|readFile|read_file|download)\b",
-    re.IGNORECASE
-)
+_STATELESS_IO_CALLS = {"fetch", "axios", "readfile", "read_file", "https.get", "http.get", "download"}
+
+
+_CONCURRENCY_WRAPPERS = {
+    "promise.all", "all", "promise.allsettled", "allsettled", "promise.race", "race",
+    "asyncio.gather", "gather", "map", "foreach", "for_each"
+}
+
+
+def _extract_invoked_calls(code: str) -> Set[str]:
+    """Extract function/method identifiers invoked in executable code (ignoring comments)."""
+    calls: Set[str] = set()
+    if not code:
+        return calls
+    clean = re.sub(r"//.*$", "", code, flags=re.MULTILINE)
+    clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
+    for m in re.finditer(r"\b([A-Za-z0-9_$.]+)\s*\(", clean):
+        func = m.group(1).lower()
+        calls.add(func)
+        if "." in func:
+            calls.add(func.split(".")[-1])
+    # Also extract callback arguments like map(readFile) or map(fetch)
+    for m in re.finditer(r"\bmap\s*\(\s*([A-Za-z0-9_$.]+)\s*\)", clean):
+        cb = m.group(1).lower()
+        calls.add(cb)
+        if "." in cb:
+            calls.add(cb.split(".")[-1])
+    return calls
+
+
+def _extract_awaited_calls(code: str) -> Set[str]:
+    """Extract function/method identifiers directly awaited in executable code (ignoring comments)."""
+    calls: Set[str] = set()
+    if not code:
+        return calls
+    clean = re.sub(r"//.*$", "", code, flags=re.MULTILINE)
+    clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
+    for m in re.finditer(r"\bawait\s+([A-Za-z0-9_$.]+)\s*\(", clean):
+        func = m.group(1).lower()
+        calls.add(func)
+        if "." in func:
+            calls.add(func.split(".")[-1])
+    return calls
 
 
 def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     """Return True only if finding cites proven positive evidence tied to the operation being patched.
 
     If the finding involves non-reentrant domains (model inference, WASM, sessions, GPU, mutexes,
-    database transactions) or the snippet is not an inherently stateless I/O operation, it cannot
-    qualify as proven evidence, and automated patches must be withheld (agents-vorw / hub fleet-4inv).
+    database transactions) or the awaited operation and proposed patch do not match the evidenced
+    stateless backend, it cannot qualify as proven evidence, and automated patches must be
+    withheld (agents-vorw / hub fleet-4inv).
     """
     if not isinstance(finding, dict):
         return False
@@ -276,10 +315,20 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     if not (_NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation)):
         return False
 
-    # Snippet must be an inherently stateless I/O operation matching the named backend
+    # The actual awaited operation in the snippet must be an inherently stateless I/O call
     snippet = str(finding.get("snippet", ""))
-    if snippet and not _STATELESS_IO_SNIPPET_PATTERN.search(snippet):
-        return False
+    if snippet:
+        awaited_calls = _extract_awaited_calls(snippet)
+        if not (awaited_calls & _STATELESS_IO_CALLS):
+            return False
+
+    # If proposed_fix_diff is present, any parallelized call inside it must also match stateless I/O
+    diff = str(finding.get("proposed_fix_diff", ""))
+    if diff:
+        added_lines = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+        diff_calls = _extract_invoked_calls(added_lines) - _CONCURRENCY_WRAPPERS
+        if diff_calls and not (diff_calls & _STATELESS_IO_CALLS):
+            return False
 
     return True
 
