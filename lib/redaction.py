@@ -2,9 +2,20 @@
 """Structural redaction for everything the factory publishes.
 
 A finding's `snippet` is whatever the deterministic scanner matched — for `secret-scan`
-that is the credential itself. Those values leave this machine in three directions:
-the local delta report (which the composite action appends to a public step summary),
-tracker sinks (beads / GitHub Issues), and scanner stdout.
+that is the credential itself. Three boundaries decide what happens to it: the local delta
+report (which the composite action appends to a public step summary), tracker sinks
+(beads / GitHub Issues), and scanner stdout. Scanner stdout is the strict one — it carries
+no matched text at all, dropping the match fields rather than masking them, because a
+terminal or CI log cannot be un-published (see `stdout_safe_report`, agents-qslz).
+
+THE RULE IS PER CHANNEL (agents-qslz, second review): dropping `candidate_id` is SECRECY on
+scanner stdout and HYGIENE on the sink and report channels. Stdout runs on raw candidates
+before ingestion, so it carries NO fingerprint — the id is the only digest of the matched
+text in that payload, and dropping it is what keeps a confirmation oracle off the terminal.
+The sink and report channels publish the fingerprint by design (THREAT_MODEL.md), and for an
+id-bound row that fingerprint is already an oracle over the same value, so withholding the
+id there is hygiene. The same drop is a different kind of rule per channel; do not collapse
+them.
 
 The rule here is structural, never a prompt. Non-negotiable #2: a model is not a
 containment boundary, so nothing relies on the triage model choosing not to repeat what
@@ -22,8 +33,11 @@ be able to see what leaked in order to rotate it. Redaction applies at the publi
 boundary, not at ingestion, so fingerprints and the lifecycle stay stable.
 """
 
+import json
 import re
-from typing import Any, Dict, List
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # Agents whose candidate snippets are credentials by construction (see agents/*/SKILL.md).
 CREDENTIAL_AGENTS = frozenset({"secret-scan"})
@@ -118,7 +132,14 @@ RENDERED_TEXT_FIELDS = (
 )
 
 # Fields on a scanner candidate that hold the matched value.
-CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match")
+# Fields the STDOUT channel must drop wholesale. candidate_id belongs here with the values it is
+# derived from: it is sha256(rule NUL path NUL match_text NUL ordinal)[:16], so it is a digest of the
+# same secret - and a 16-char hex digest matches no secret pattern, which is why mask_text cannot
+# mask it and why it must be dropped rather than pattern-masked (agents-qslz). On this channel the
+# drop is SECRECY: stdout carries no fingerprint, so the id is the only digest of the match in the
+# payload. On the sink and report channels the same drop is hygiene, because the fingerprint is
+# published there (see the module docstring for the per-channel rule).
+CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match", "candidate_id")
 
 
 # Identity fields (`agent`, `rule_id`, `path`) are rendered, and they reach this layer as
@@ -295,13 +316,19 @@ def redact_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
     the notes stay in the local run artifact for whoever has to rotate the credential.
     """
     published = dict(finding)
-    # The candidate id is an INTERNAL identity key, and it is a digest of the matched text itself,
-    # so publishing it hands out a confirmation oracle: anyone holding it together with the rule,
-    # path and ordinal could test a guess at the line the scanner matched - and for a credential
-    # finding, a guess at the credential. It is scanner-owned rather than model prose, so this is
-    # not a masking case under the checklist; it is withheld outright, the same shape as
-    # model_rule_id's withholding branches (agents-p8og). The id stays in the LOCAL store, which is
-    # where the second-order stations read it, and is never a publication channel.
+    # The candidate id is an INTERNAL identity key, scanner-owned rather than model prose, so this is
+    # not a masking case under the checklist - it is withheld outright, the same shape as
+    # model_rule_id's withholding branches (agents-p8og). It stays in the LOCAL store, where the
+    # second-order stations read it, and is never a publication channel.
+    #
+    # WHY IT GOES, and this is HYGIENE, NOT SECRECY (coord's channel standard, agents-qslz): a
+    # published consumer has no use for an internal key, and this channel's readers are not among its
+    # consumers. Withholding it does NOT protect the match. For a row bound by its candidate id the
+    # PUBLISHED fingerprint is sha256(agent:rule:path:candidate_id) - a digest of this same value,
+    # printed right beside the same rule and path - so that oracle is already public and anyone can
+    # test a guess against it without ever seeing the id. Removing a rawer digest that no reader of
+    # this channel needs is harm reduction; it is not containment, and the next reader must not
+    # reason from it as though it were.
     published.pop("candidate_id", None)
     agent = str(finding.get("agent") or "")
     literals = matched_literals(finding)
@@ -373,10 +400,17 @@ def redact_for_storage(finding: Dict[str, Any]) -> Dict[str, Any]:
     """The at-rest scrubber: `redact_finding` PLUS what the LOCAL store must keep (agents-p8og).
 
     There are two boundaries and they are not the same one:
-      * `redact_finding` protects everything that LEAVES this machine (tracker sinks, the delta
-        report, the step summary, scanner stdout). `candidate_id` is withheld there, because it is a
-        digest of the matched text: anyone holding it with the rule, path and ordinal can test a
-        guess at the matched line, and for a credential finding a guess at the credential.
+      * `redact_finding` protects everything that LEAVES this machine as a published finding
+        (tracker sinks, the delta report, the step summary). On THOSE channels `candidate_id`
+        is withheld as HYGIENE rather than secrecy: the fingerprint IS published there by
+        design, and for an id-bound row it is a digest of that same id, so the oracle is
+        already public and withholding the rawer digest protects nothing (agents-qslz, per
+        coord's channel standard). Scanner stdout is NOT one of those channels: it is written
+        by `stdout_safe_report`, a separate function, NOT through `redact_finding`, and it
+        publishes NO fingerprint at all - the fingerprint is computed downstream, when a
+        scanner's output is ingested. So on stdout the same drop is SECRECY, not hygiene: the
+        id is the only digest of the match in that payload. Do not extend this function's
+        hygiene reasoning to the stdout channel - the rule is per channel.
       * this function protects the store AT REST. The store is local and gitignored, and it is the
         only place a second-order station can read a candidate's emitted identity, so the id has to
         survive here or the persistence is pointless.
@@ -400,9 +434,21 @@ def redact_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def stdout_safe_report(report: Any) -> Any:
     """Return a publishable copy of a scanner candidate report.
 
-    Candidate match fields are dropped wholesale rather than pattern-masked: this output
-    goes to a terminal or a CI log, which has no way to be un-published. The raw values
-    remain in the file written by `--output`, which is the local record.
+    The channel carries the keys its readers need and nothing else (agents-qslz): a terminal or CI
+    log consumes rule, path, location and severity. The matched text and `candidate_id` are dropped
+    wholesale rather than pattern-masked - the id is a 16-hex digest and matches no secret pattern.
+    The raw values remain in the file written by `--output`.
+
+    THE DROP IS SECRECY ON THIS CHANNEL - not hygiene - and the difference is the fingerprint. This
+    runs on RAW scanner candidates BEFORE ingestion, so the payload carries NO fingerprint at all:
+    the fingerprint is computed downstream, when the candidates are ingested. `candidate_id` is
+    therefore the ONLY digest of the matched text in this payload, and dropping it is exactly what
+    keeps a confirmation oracle for the match off a terminal or CI log that cannot be un-published.
+    On the sink and report channels the fingerprint IS published by design (THREAT_MODEL.md), and
+    for an id-bound row it is a digest of the same value, so withholding the id there is only
+    hygiene. The same drop is a different kind of rule per channel; an earlier wording of this
+    docstring called the stdout drop hygiene, and it was wrong in exactly that way (agents-qslz,
+    second review).
     """
     if isinstance(report, list):
         return [stdout_safe_report(item) for item in report]
@@ -420,3 +466,5 @@ def stdout_safe_report(report: Any) -> Any:
         else:
             safe[key] = value
     return safe
+
+

@@ -88,6 +88,47 @@ class TestTheStationEmitsCandidateIdentity(unittest.TestCase):
         self.assertEqual(len(set(ids)), 2, ids)
 
 
+class TestStdoutChannelDropsTheMatch(unittest.TestCase):
+    """agents-qslz: the station's stdout goes through lib/redaction.stdout_safe_report.
+
+    Driven through the real CLI with no --output, because the defect was a raw `print(output_json)`
+    in exactly that branch, and a unit test of stdout_safe_report cannot see which branch ran.
+    """
+
+    def test_stdout_has_no_candidate_id_and_no_match_text(self):
+        """Load-bearing: change the else branch back to `print(output_json)` and this fails with
+        `AssertionError: 'c464d56dafccfd24' != '[redacted]' ... the confirmation oracle reached the
+        station's stdout unmasked` (the snippet assert fails next).
+
+        The --output branch is NOT redacted on purpose - it is the raw local record - so the fixture
+        is read from stdout only.
+        """
+        import json
+        import subprocess
+        script = ROOT / "agents" / "vuln-discovery" / "scripts" / "scan_surface.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            src = target / "src"
+            src.mkdir(parents=True)
+            (src / "server.ts").write_text("app.post('/api/auth/login', handleLogin);\n",
+                                           encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(script), "--target", str(target)],
+                capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+                env={**os.environ, "PYTHONPATH": str(ROOT)})
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+        artefact = json.loads(result.stdout)
+        self.assertTrue(artefact["candidates"], "fixture must yield a candidate carrying a match")
+        for candidate in artefact["candidates"]:
+            self.assertEqual(candidate["candidate_id"], "[redacted]",
+                             "the confirmation oracle reached the station's stdout unmasked")
+            self.assertEqual(candidate["snippet"], "[redacted]")
+            # The channel must stay usable: the location still ships.
+            self.assertIn("rule_id", candidate)
+            self.assertIn("path", candidate)
+        self.assertIn("stdout redacts matched values", result.stderr)
+
+
 class TestSurfaceScannerExclusionsAndSuppression(unittest.TestCase):
     """agents-o5w: verify test-dir exclusion and self-referential suppression."""
     def test_fixture_only_tree_yields_zero_entry_points(self):

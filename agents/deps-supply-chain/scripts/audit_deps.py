@@ -24,6 +24,8 @@ if str(FACTORY_ROOT) not in sys.path:
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 
+from lib.redaction import stdout_safe_report  # noqa: E402
+
 # Exclude standard ignored directories including vendor/ (third-party vendored code)
 # and factory artifact dirs (findings, runs) to avoid scanning non-first-party dependencies.
 try:
@@ -723,7 +725,12 @@ def main():
     if args.output:
         Path(args.output).write_text(output_json, encoding="utf-8")
     else:
-        print(output_json)
+        # stdout goes to a terminal or a CI log, which cannot be un-published: never emit
+        # match text there, whatever shape the credential turns out to be.
+        print(json.dumps(stdout_safe_report(result), indent=2))
+        sys.stderr.write(
+            "Note: stdout redacts matched values. Use --output <file> for the raw local record.\n"
+        )
 
 if __name__ == "__main__":
     main()
