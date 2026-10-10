@@ -28,7 +28,7 @@ Your mission is to examine recent code changes (`recent_commits`, `recently_chan
      - **Withhold Code Patches for Concurrency**: Do NOT provide `proposed_fix_diff` for concurrency recommendations. Concurrency transformations (`Promise.all`, `asyncio.gather`) require manual verification of runtime reentrancy and binding safety (e.g. ensuring `fetch` is not shadowed or operating on non-reentrant state). Provide the conditional remediation with its serial fallback without an automated code patch.
 
 3. **Always Provide Concrete Fixes**:
-   - Do not just describe the issue. For every finding, write a concrete `remediation` AND a `proposed_fix_diff` (unified diff or exact replacement block) that resolves the bottleneck without altering functional behavior.
+   - Do not just describe the issue. For every finding, write a concrete `remediation` AND a `proposed_fix_diff` (unified diff or exact replacement block) that resolves the bottleneck without altering functional behavior (except for concurrency recommendations, where `proposed_fix_diff` must be withheld pending manual verification of runtime reentrancy).
 
 ## Severity Assignment & Triage Rules
 
