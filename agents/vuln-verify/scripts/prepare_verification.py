@@ -28,7 +28,12 @@ from lib.path_security import resolve_within_target  # noqa: E402
 # The only fields that cross from discovery to verification (SF-08). Everything the discovery
 # model wrote about a candidate — title, description, severity, remediation, exploit chain —
 # stays on the discovery side; the verifier re-derives its own judgement from the code.
-LOCATION_FIELDS = ("fingerprint", "rule_id", "path", "line_number", "snippet")
+LOCATION_FIELDS = ("fingerprint", "rule_id", "path", "line_number", "snippet",
+                   # The station's own emitted candidate id (agents-rdyb). Carried through so this
+                   # pre-pass hands a COPY of identity downstream. A hard allowlist drops unknown
+                   # fields SILENTLY, which would bring the reconstruction back for exactly the rows
+                   # that had escaped it - the failure mode agents-q0mt exists to remove.
+                   "candidate_id")
 
 # The store is shared by every agent, so select the records discovery actually produced.
 DISCOVERY_AGENTS = ("vuln-discovery", "threat-model")
@@ -284,6 +289,10 @@ def main():
             candidate["line_number_unknown"] = True
         if f.get("fingerprint"):
             candidate["fingerprint"] = f["fingerprint"]
+        if f.get("candidate_id"):
+            # Second drop point: the allowlist above is not enough, because this rebuild constructs a
+            # fresh dict, so anything not named here is lost even when it survived the reduction.
+            candidate["candidate_id"] = f["candidate_id"]
         verification_candidates.append(candidate)
 
     tm_summary = load_threat_model_summary(target_dir)

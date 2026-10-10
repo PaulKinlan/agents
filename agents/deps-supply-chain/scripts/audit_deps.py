@@ -22,6 +22,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+
 # Exclude standard ignored directories including vendor/ (third-party vendored code)
 # and factory artifact dirs (findings, runs) to avoid scanning non-first-party dependencies.
 try:
@@ -700,7 +702,12 @@ def main():
         if sev in severity_counts:
             severity_counts[sev] += 1
 
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     result = {
+        **artefact_scheme_fields(),
         "target": str(target_dir),
         "scanner": "audit_deps",
         "scanned_manifests": scanned_manifests,

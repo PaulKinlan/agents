@@ -23,6 +23,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
 except ImportError:
@@ -254,7 +256,12 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
                     "rationale": "Without `<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">`, mobile browsers render at a zoomed-out 980px desktop canvas."
                 })
 
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     return {
+        **artefact_scheme_fields(),
         "target": target_dir.name,
         "scanned_files": scanned_files,
         "design_system_metrics": {

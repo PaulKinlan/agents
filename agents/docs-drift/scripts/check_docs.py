@@ -26,6 +26,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS
     IGNORE_DIRS = DEFAULT_IGNORE_DIRS | {"scratch"}
@@ -726,7 +728,12 @@ def main():
 
     candidates = scan_target(target_dir)
 
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     result = {
+        **artefact_scheme_fields(),
         "target": str(target_dir),
         "scanner": "check_docs.py",
         "candidate_count": len(candidates),

@@ -22,6 +22,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
 except ImportError:
@@ -218,7 +220,12 @@ def main():
     git_ctx = get_recent_git_context(target_dir)
     candidates = scan_files(target_dir, git_ctx["changed_files"])
 
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     payload = {
+        **artefact_scheme_fields(),
         "target": target_dir.name,
         "recent_commits": git_ctx["recent_commits"],
         "recently_changed_files": git_ctx["changed_files"],

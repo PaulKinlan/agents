@@ -17,6 +17,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+
 # Exclude standard ignored directories including vendor/ (third-party vendored code)
 # and factory artifact dirs (findings, runs) from test coverage deficit calculations.
 try:
@@ -101,13 +103,21 @@ def main():
     total_src = len(sources)
     coverage_ratio = (tested_count / total_src) if total_src > 0 else 1.0
 
+    # The candidate set is an expression here, so it is named first: the helper needs the whole
+    # list, and a slice built inline would hide the fact that these candidates never got an id.
+    candidates = untested_modules[:15]  # top 15 modules needing tests
+    # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
+    # COPY it rather than reconstruct identity from the model's label and prose.
+    assign_candidate_ids(candidates)
+
     payload = {
+        **artefact_scheme_fields(),
         "target": target_path.name,
         "total_source_files": total_src,
         "total_test_files": len(tests),
         "coverage_ratio": round(coverage_ratio, 2),
         "untested_files_count": len(untested_modules),
-        "candidates": untested_modules[:15]  # top 15 modules needing tests
+        "candidates": candidates  # top 15 modules needing tests
     }
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

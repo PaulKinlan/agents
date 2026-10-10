@@ -51,15 +51,20 @@ while IFS= read -r f; do
       # The findings store and the delta renderer. Its own suite is not enough: the store's record
       # and stats shape is what the sink/record layers assert, and a change here broke
       # tests/test_sinks' exact stats expectation while the generic test_findings-only mapping ran
-      # (agents-x9my step 2).
-      mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py"
+      # (agents-x9my step 2). tests/test_redaction.py is here for the same reason, learned again the
+      # hard way: the fast gate passed 291 tests while the FULL gate caught a TypeError on a
+      # non-scalar line_number, because the redaction contract suite was not in this mapping
+      # (agents-q0mt) - the contract is fail-closed, so it is a real consumer of this module.
+      mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py tests/test_redaction.py"
       ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.
       mapped="$mapped tests/test_bench_runner.py tests/test_hillclimb.py"
       ;;
     agents/docs-drift/scripts/check_docs.py)
-      mapped="$mapped tests/test_docs_drift.py"
+      # agents-q0mt: also emits candidate ids now; the exclusion suite drives this script, and the
+      # emission pin reads the id out of a real artefact.
+      mapped="$mapped tests/test_docs_drift.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
       ;;
     agents/vuln-triage/scripts/triage.py)
       mapped="$mapped tests/test_vuln_triage_prepass.py"
@@ -81,6 +86,53 @@ while IFS= read -r f; do
       # suite plus the shared helper's property tests, which are what fail if the id stops being
       # deterministic or starts moving with the model's prose.
       mapped="$mapped tests/test_scan_surface.py tests/test_candidate_identity.py"
+      ;;
+    agents/secret-scan/scripts/scan.py)
+      # The secret pre-pass. Both producer paths (gitleaks and the builtin fallback) meet at one
+      # artefact assembly point, so the candidate-identity conversion is one call (agents-q0mt).
+      mapped="$mapped tests/test_secret_scanner.py tests/test_candidate_id_emission.py"
+      ;;
+    agents/modern-web/scripts/scan_modern_web.py)
+      # agents-q0mt: the station now emits a candidate id; its own suite plus the pre-pass
+      # exclusion suite, which exercises this script directly.
+      mapped="$mapped tests/test_modern_web.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
+      ;;
+    agents/deps-supply-chain/scripts/audit_deps.py)
+      # agents-q0mt: emits candidate ids; the pre-pass exclusion suite exercises it too.
+      mapped="$mapped tests/test_audit_deps.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
+      ;;
+    agents/ui-ux-audit/scripts/scan_ui_ux.py)
+      # agents-q0mt: emits candidate ids; this station's output is pinned as the pre-pass truth
+      # fixture, and the exclusion suite drives it directly.
+      mapped="$mapped tests/test_prepass_truth.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
+      ;;
+    agents/accessibility/scripts/audit_a11y.py)
+      # agents-q0mt: emits candidate ids. The emission pin is this station's only executable
+      # coverage of its artefact, so it is named here rather than left to the smoke subset.
+      mapped="$mapped tests/test_candidate_id_emission.py"
+      ;;
+    agents/memory-profile/scripts/scan_memory_leaks.py)
+      # agents-q0mt: emits candidate ids; the binding suite drives this script.
+      mapped="$mapped tests/test_candidate_binding.py tests/test_candidate_id_emission.py"
+      ;;
+    agents/perf-review/scripts/scan_perf_changes.py)
+      # agents-q0mt: emits candidate ids; its own review suite plus the emission pin.
+      mapped="$mapped tests/test_perf_review.py tests/test_candidate_id_emission.py"
+      ;;
+    agents/qa-station/scripts/audit_factory_quality.py)
+      # agents-q0mt: emits candidate ids. The truth harnesses assert its payload shape, which is
+      # what a new key could disturb.
+      mapped="$mapped tests/test_factory_truth_2.py tests/test_prepass_truth.py tests/test_candidate_id_emission.py"
+      ;;
+    agents/resilience/scripts/scan_resilience.py)
+      # agents-q0mt: emits candidate ids; the emission pin is this station's only executable
+      # coverage of its artefact today.
+      mapped="$mapped tests/test_candidate_id_emission.py"
+      ;;
+    agents/test-gap/scripts/find_untested.py)
+      # agents-q0mt: emits candidate ids; the emission pin is this station's only executable
+      # coverage of its artefact today.
+      mapped="$mapped tests/test_candidate_id_emission.py"
       ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"

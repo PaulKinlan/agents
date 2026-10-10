@@ -100,6 +100,9 @@ class TestVerifierPriming(unittest.TestCase):
             self.assertEqual(candidate["line_number"], 2)
             self.assertEqual(candidate["snippet"], "el.innerHTML = user;")
             self.assertIn("context_snippet", candidate["source_context"])
+            # No fabrication: a store record carries no candidate id, so the reducer must not
+            # invent one. An invented id would be worse than none - it would look like provenance.
+            self.assertNotIn("candidate_id", candidate)
             self._assert_no_conclusions(bundle)
 
     def test_the_scanner_output_is_preferred_over_the_model_report(self):
@@ -109,7 +112,7 @@ class TestVerifierPriming(unittest.TestCase):
             run_dir.mkdir(parents=True)
             (run_dir / "candidates.json").write_text(json.dumps({"candidates": [
                 {"rule_id": "dom-injection-sink", "path": "src/app.js", "line_number": 2,
-                 "snippet": "el.innerHTML = user;"},
+                 "snippet": "el.innerHTML = user;", "candidate_id": "c6cab6881fc8535e"},
             ]}), encoding="utf-8")
             (run_dir / "report.json").write_text(json.dumps({"findings": [
                 discovery_finding(snippet="SENTINEL-FROM-REPORT"),
@@ -119,6 +122,10 @@ class TestVerifierPriming(unittest.TestCase):
 
             self.assertEqual(bundle["candidate_count"], 1)
             self.assertEqual(bundle["candidates"][0]["snippet"], "el.innerHTML = user;")
+            # agents-q0mt, condition 3: the emitted id must SURVIVE both drop points - the
+            # LOCATION_FIELDS allowlist and the literal rebuild below it. Losing it here would be
+            # silent and would put the reconstruction back for the rows that had escaped it.
+            self.assertEqual(bundle["candidates"][0]["candidate_id"], "c6cab6881fc8535e")
             self.assertNotIn("SENTINEL-FROM-REPORT", json.dumps(bundle))
             self._assert_no_conclusions(bundle)
 

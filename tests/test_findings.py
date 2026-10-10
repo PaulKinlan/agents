@@ -770,6 +770,171 @@ class TestIdentityAttribution(unittest.TestCase):
             self.assertIn("Identity migration (one-time)",
                           findings._render_delta_report("target", processed, stats, fixed))
 
+    def test_the_emitted_candidate_id_is_copied_where_a_rule_bound_the_candidate(self):
+        """agents-q0mt: identity is COPIED from the station's id, not re-derived from text.
+
+        rdyb has the station assign the id from data it owns at scan time; consuming it here is what
+        removes the reconstruction layer rather than making it safer.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text", "candidate_id": "c6cab6881fc8535e"}])
+        self.assertEqual(
+            findings.identity_snippet_binding(self._finding(), "scanner-rule", "a.py", ci),
+            ("c6cab6881fc8535e", "candidate-id"))
+        self.assertIn("candidate-id", findings.IDENTITY_STABLE_SOURCES)
+
+    def test_reworded_prose_cannot_move_an_identity_that_came_from_the_candidate_id(self):
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "el.innerHTML = user;", "candidate_id": "abc123def456abcd"}])
+        first = findings.identity_snippet_binding(
+            self._finding(snippet="el.innerHTML = user"), "scanner-rule", "a.py", ci)
+        second = findings.identity_snippet_binding(
+            self._finding(snippet="the line assigns innerHTML here"), "scanner-rule", "a.py", ci)
+        # Equality alone would pass if BOTH runs fell back to the same unstable key, so the
+        # mechanism is asserted before the stability it is supposed to provide (review finding).
+        self.assertEqual((first[0], first[1]), ("abc123def456abcd", "candidate-id"))
+        self.assertEqual(first, second)
+
+    def test_a_prose_selected_candidate_does_not_borrow_the_stable_name(self):
+        """The id is used at the four STABLE steps only.
+
+        At this step the SELECTION is the model's, so the name must keep saying so even though the
+        chosen candidate carries an id - a stable-sounding label there would hide the mechanism.
+        """
+        ci = self._index([
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "snippet": "alpha",
+             "candidate_id": "aaaa"},
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "snippet": "beta gamma",
+             "candidate_id": "bbbb"},
+        ])
+        value, source = findings.identity_snippet_binding(
+            self._finding(line_number=99, snippet="the line reads beta gamma here"),
+            "scanner-rule", "a.py", ci)
+        self.assertEqual((value, source), ("beta gamma", "candidate-similar-by-model-snippet"))
+        self.assertNotIn(source, findings.IDENTITY_STABLE_SOURCES)
+
+    def test_two_findings_at_one_path_now_bind_to_two_candidates(self):
+        """The case agents-x9my step 2 had to REFUSE, resolved by the emitted id.
+
+        Two rows in one file whose labels bind nothing: step 2's path-level guard refused the
+        location fallback because both rows would have been handed the same snippet and collapsed
+        into one. Different lines are different candidates, and each now says which one it is, so
+        both survive with stable identities.
+        """
+        ci = self._index([
+            {"rule_id": "r", "path": "a.js", "line_number": 1, "snippet": "same text",
+             "candidate_id": "id-one"},
+            {"rule_id": "r", "path": "a.js", "line_number": 2, "snippet": "same text",
+             "candidate_id": "id-two"},
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            items = [self._finding(rule_id="invented", path="a.js", line_number=1, snippet="wording one"),
+                     self._finding(rule_id="invented", path="a.js", line_number=2, snippet="wording two")]
+            processed, _, _ = self._run(td, items, ci)
+        self.assertEqual([r["identity_source"] for r in processed], ["candidate-id"] * 2)
+        self.assertEqual(len({r["fingerprint"] for r in processed}), 2,
+                         "the two rows must not collapse into one")
+
+    def test_two_findings_at_the_same_line_still_refuse_the_id(self):
+        """The matching negative: the sharper guard is per (path, line), not per path.
+
+        If two rows in one run claim the SAME location, the candidate there is not theirs alone, so
+        the id is not used - a shared id would give both rows one fingerprint and drop a finding,
+        which is the outcome this guard exists to prevent.
+        """
+        ci = self._index([{"rule_id": "r", "path": "a.js", "line_number": 1, "snippet": "same",
+                           "candidate_id": "shared"}])
+        with tempfile.TemporaryDirectory() as td:
+            items = [self._finding(rule_id="invented", path="a.js", line_number=1, snippet="wording one"),
+                     self._finding(rule_id="invented", path="a.js", line_number=1, snippet="wording two")]
+            processed, _, _ = self._run(td, items, ci)
+        self.assertEqual([r["identity_source"] for r in processed], ["model-snippet"] * 2)
+        self.assertEqual(len({r["fingerprint"] for r in processed}), 2,
+                         "the two rows must not collapse into one")
+
+    def test_the_acceptance_is_pinned_with_an_emitted_id_wave_once_and_then_gone(self):
+        """agents-q0mt, condition 2: same unchanged location, prose re-worded, untrusted label.
+
+        Two runs against one store. Because the station's emitted id is consumed, run 2 re-words the
+        prose completely and identity does not move: identical fingerprint, nothing booked new or
+        fixed. The migration wave is then observed EXACTLY once - on the run that crosses the scheme
+        stamp - and gone on the next, which is the difference between an announcement and a mystery.
+
+        The last assertion is the disclosure-surface claim, tested rather than asserted: identity
+        goes into the fingerprint, so the raw id is never persisted and the record gains no field.
+        That is why storing it belongs with agents-p8og and not here.
+        """
+        ci = self._index([{"rule_id": "doc-broken-link", "path": "docs/a.md", "line_number": 10,
+                           "snippet": "see [x](../src/gone.py)",
+                           "candidate_id": "313b2133ae08c979"}])
+        with tempfile.TemporaryDirectory() as td:
+            first, _, _ = self._run(td, [self._finding(
+                rule_id="invented", path="docs/a.md", line_number=10, snippet="quote one")], ci)
+            self.assertEqual(first[0]["identity_source"], "candidate-id")
+            fp1 = first[0]["fingerprint"]
+
+            second, stats2, _ = self._run(td, [self._finding(
+                rule_id="invented", path="docs/a.md", line_number=10,
+                snippet="a completely different re-quoting of the same line")], ci)
+            self.assertEqual(second[0]["fingerprint"], fp1)
+            self.assertEqual((stats2["new"], stats2["fixed"], stats2["unchanged"]), (0, 0, 1), stats2)
+
+            # Downgrade the stored run to an older binding, so the next run must cross the stamp.
+            store_file = Path(td) / "target.json"
+            data = json.loads(store_file.read_text())
+            for key, row in list(data["findings"].items()):
+                row["fingerprint"] = "0" * 64
+                row["identity_source"] = "model-snippet"
+                # The store is keyed BY fingerprint, so the key has to move too - rewriting the
+                # field alone leaves the row matching under its old key and nothing migrates.
+                del data["findings"][key]
+                data["findings"]["0" * 64] = row
+            data["identity_scheme"] = findings.IDENTITY_SCHEME - 1
+            store_file.write_text(json.dumps(data))
+            # The history ledger would re-match the row by its old key, so it is dropped: an older
+            # store is one whose rows are only in the store, which is how the migration case is
+            # constructed for agents-x9my step 2 as well.
+            (Path(td) / "target-history.jsonl").unlink(missing_ok=True)
+
+            _, stats3, _ = self._run(td, [self._finding(
+                rule_id="invented", path="docs/a.md", line_number=10, snippet="quote one")], ci)
+            self.assertEqual(stats3["migrated"], 1, stats3)          # the wave, exactly once
+            _, stats4, _ = self._run(td, [self._finding(
+                rule_id="invented", path="docs/a.md", line_number=10, snippet="quote three")], ci)
+            self.assertEqual(stats4["migrated"], 0, stats4)          # and gone
+            # "gone" has to mean the store was STAMPED, not merely that this run had nothing to
+            # retire: without the stamp every later run would re-announce the wave (review finding).
+            self.assertEqual(json.loads(store_file.read_text()).get("identity_scheme"),
+                             findings.IDENTITY_SCHEME)
+            self.assertNotIn("313b2133ae08c979", store_file.read_text(),
+                             "the raw id must not be persisted: the fingerprint carries identity")
+
+    def test_a_non_scalar_line_number_cannot_crash_the_run(self):
+        """The redaction contract is fail-closed, not crash (agents-q0mt).
+
+        Found by the FULL gate, not the fast one: a dict line_number is unhashable and identity
+        binding uses the line as a dict key, so process_run exited 1 with TypeError: unhashable type
+        instead of coercing. Every lookup must MISS for a non-scalar (see _hashable_line).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            processed, stats, _ = self._run(td, [self._finding(line_number={"line": 12})], None)
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0]["identity_source"], "no-candidate-index")
+        self.assertEqual(stats["new"], 1)
+
+    def test_a_non_scalar_line_number_still_binds_by_rule_without_crashing(self):
+        """The second guarded site: identity_snippet_binding hashes the line too.
+
+        Guarding only the counting loop in process_run would have moved the crash one call later.
+        A non-scalar line cannot match a location, but the rule-keyed binding is still available and
+        must be used rather than lost.
+        """
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text", "candidate_id": "c6cab6881fc8535e"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [self._finding(line_number=["nope"])], ci)
+        self.assertEqual(processed[0]["identity_source"], "candidate-id")
+
     def test_every_source_in_the_vocabulary_is_reachable(self):
         """EXACT equality, not a subset check: a source that can never be emitted is a defect.
 
@@ -779,6 +944,11 @@ class TestIdentityAttribution(unittest.TestCase):
         """
         single = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
                                "snippet": "scanner text"}])
+        # A separate index, because an id takes precedence over the snippet at the same step: with
+        # the id present the `candidate-exact` case below would no longer be reachable.
+        single_with_id = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                                       "snippet": "scanner text",
+                                       "candidate_id": "c6cab6881fc8535e"}])
         ambiguous = self._index([
             {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "snippet": "alpha"},
             {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "snippet": "beta gamma"},
@@ -787,6 +957,7 @@ class TestIdentityAttribution(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cases = [
                 (self._finding(), single),                                  # exact
+                (self._finding(), single_with_id),                          # candidate-id
                 (self._finding(line_number=99), single),                    # unique
                 (self._finding(line_number=99, snippet="reads beta gamma"),
                  ambiguous),                                                # similar-by-model-snippet
