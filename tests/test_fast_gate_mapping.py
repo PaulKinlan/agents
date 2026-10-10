@@ -284,6 +284,36 @@ class TestFastGateMapping(unittest.TestCase):
         finally:
             probe.unlink(missing_ok=True)
 
+    def test_fast_gate_pre_runner_failure_emits_aborted_marker_with_stage(self):
+        """agents-adhc: a failure occurring before the test runner starts (e.g. unmatched changed path)
+        must emit a fail-visible 'fast-gate: aborted:' line naming the exit code and stage."""
+        env = os.environ.copy()
+        env["GIT_CHANGED"] = "nonexistent_unmatched_file.xyz"
+        env.pop("FAST_GATE_DRY_RUN", None)
+        res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("fast-gate: aborted: exit 1 (stage: checking unmapped files)", res.stderr)
+
+    def test_fast_gate_sigterm_emits_aborted_marker_with_stage(self):
+        """agents-adhc: an external SIGTERM signal must emit a fail-visible 'fast-gate: aborted:' line
+        naming the signal and stage."""
+        import signal, time
+        probe = ROOT / "tests" / "test_sleep_probe_tmp.py"
+        try:
+            probe.write_text("import unittest, time\nclass _S(unittest.TestCase):\n    def test_sleep(self): time.sleep(10)\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = "tests/test_sleep_probe_tmp.py"
+            env.pop("FAST_GATE_DRY_RUN", None)
+            p = subprocess.Popen(["bash", str(FAST_GATE)], cwd=ROOT, env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 start_new_session=True)
+            time.sleep(0.3)
+            os.killpg(p.pid, signal.SIGTERM)
+            _, stderr = p.communicate()
+            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_sleep_probe_tmp))", stderr)
+        finally:
+            probe.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,9 +24,40 @@
 #   CHECK_FAST_TIMEOUT=180
 set -euo pipefail
 
+# Fail-visible abort diagnostics (agents-adhc).
+# UNCOVERABLE BY CONSTRUCTION: SIGKILL (kill -9), kernel OOM-killer invocations,
+# host power loss, or kernel panics terminate the process immediately at the OS level
+# without executing userspace signal handlers or shell traps.
+FAST_GATE_STAGE="initializing"
+FAST_GATE_TERMINATED=0
+
+_fast_gate_cleanup() {
+  local rc=$?
+  if [ "$FAST_GATE_TERMINATED" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "fast-gate: aborted: exit $rc (stage: $FAST_GATE_STAGE)" >&2
+  fi
+}
+_fast_gate_term() {
+  FAST_GATE_TERMINATED=1
+  echo "fast-gate: aborted: caught SIGTERM (stage: $FAST_GATE_STAGE)" >&2
+  exit 143
+}
+_fast_gate_int() {
+  FAST_GATE_TERMINATED=1
+  echo "fast-gate: aborted: caught SIGINT (stage: $FAST_GATE_STAGE)" >&2
+  exit 130
+}
+trap _fast_gate_cleanup EXIT
+trap _fast_gate_term TERM
+trap _fast_gate_int INT
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+FAST_GATE_STAGE="resolving changed files"
 BASE="${GIT_BASE:-origin/main}"
 
 # The branch delta. Empty when the base is absent/unknown -> smoke fallback.
@@ -37,6 +68,7 @@ run=""
 mapped=""
 unmatched=""
 
+FAST_GATE_STAGE="mapping changed files"
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   case "$f" in
@@ -336,6 +368,7 @@ while IFS= read -r f; do
   esac
 done <<< "$changed"
 
+FAST_GATE_STAGE="checking unmapped files"
 # Loud failure (agents-9nir): a changed file that matches neither a mapping arm nor the
 # ignore list is exactly the case that must be seen - name every such file and fail,
 # rather than quietly running tests/test_factory_core.py and reporting PASS for an
@@ -354,6 +387,7 @@ files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort || true)"
 
 # Dry-run support for testing mapping resolution without invoking unittest.
 if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
+  FAST_GATE_TERMINATED=1
   printf '%s\n' $files
   exit 0
 fi
@@ -364,12 +398,16 @@ if [ -z "$files" ]; then
   files="tests/test_factory_core.py"
 fi
 
+FAST_GATE_STAGE="preparing runner"
 modules="$(printf '%s\n' $files | sed 's#/#.#g; s#\.py$##' | tr '\n' ' ' | sed 's/ *$//')"
+
+FAST_GATE_STAGE="running tests ($modules)"
 echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
 
 rc=0
 python3 -u -m unittest $modules || rc=$?
 
+FAST_GATE_TERMINATED=1
 if [ "$rc" -eq 0 ]; then
   passed_files="$(echo $files | tr '\n' ' ' | sed 's/ *$//')"
   echo "fast-gate: passed: $passed_files"
