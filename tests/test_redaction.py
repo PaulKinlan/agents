@@ -334,7 +334,8 @@ class TestCredentialEchoRegression(SinkFixture, unittest.TestCase):
         self.assertEqual(publishable_line_number(12), 12)
         self.assertEqual(publishable_line_number("12"), 12)
         self.assertEqual(publishable_line_number(" 12 "), 12)
-        self.assertEqual(publishable_line_number(0), 0)
+        # agents-wnad: line 0 is unknown ("?"), matching lib.line_numbers.usable_line_number
+        self.assertEqual(publishable_line_number(0), "?")
         for rejected in (MAX_LINE_NUMBER + 1, -1, "line 12", "", None, True, 12.5, {"line": 12}):
             with self.subTest(value=rejected):
                 self.assertEqual(publishable_line_number(rejected), "?")

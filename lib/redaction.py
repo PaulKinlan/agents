@@ -201,22 +201,40 @@ MAX_LINE_NUMBER = 9_999_999
 
 
 def publishable_line_number(value: Any, literals: set = frozenset()) -> Any:
-    """A line number in range, or the unknown marker. Never a value that could carry a secret."""
-    if isinstance(value, bool):
-        return "?"
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, str) and value.strip().isdigit():
-        number = int(value.strip())
-    else:
-        return "?"
-    if not 0 <= number <= MAX_LINE_NUMBER:
-        return "?"
+    """A line number in range, or the unknown marker. Never a value that could carry a secret.
+
+    Delegates line validity to lib.line_numbers.usable_line_number (agents-ghtz, agents-wnad):
+    a usable line is a 1-based positive int. 0 and negative values are unknown location markers
+    ('?'). Values exceeding MAX_LINE_NUMBER or matching secret literals are also redacted to '?'.
+    """
+    try:
+        from lib.line_numbers import UNKNOWN_LINE_MARKER, usable_line_number
+    except ImportError:
+        try:
+            from line_numbers import UNKNOWN_LINE_MARKER, usable_line_number
+        except ImportError:
+            UNKNOWN_LINE_MARKER = "?"
+
+            def usable_line_number(v: Any) -> Optional[int]:
+                if isinstance(v, bool):
+                    return None
+                if isinstance(v, int):
+                    return v if v > 0 else None
+                if isinstance(v, str):
+                    s = v.strip()
+                    if s.isascii() and s.isdigit():
+                        n = int(s)
+                        return n if n > 0 else None
+                return None
+
+    number = usable_line_number(value)
+    if number is None or not (1 <= number <= MAX_LINE_NUMBER):
+        return UNKNOWN_LINE_MARKER
     # Same protection every other rendered field gets: if the number *is* a value the scanner
     # matched, it does not get published just because it happens to be small.
     rendered = str(number)
     if mask_literals(rendered, literals) != rendered:
-        return "?"
+        return UNKNOWN_LINE_MARKER
     return number
 
 
