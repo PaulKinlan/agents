@@ -574,8 +574,9 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertIn("Code patch withheld", finding["remediation"])
 
     def test_serial_execution_restoration_patch_retained(self):
-        """Reviewer P2 finding: diffs removing Promise.all to restore serial execution are not guarded."""
-        report = {
+        """Reviewer P1/P2 findings: diffs removing Promise.all to restore serial execution are not guarded."""
+        # Case A: "Restore serial execution by replacing Promise.all with sequential for-of loop."
+        report1 = {
             "findings": [
                 {
                     "rule_id": "race-condition",
@@ -586,9 +587,25 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                 }
             ]
         }
-        notes = normalize_report(report)
-        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes))
-        self.assertIn("proposed_fix_diff", report["findings"][0])
+        notes1 = normalize_report(report1)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes1))
+        self.assertIn("proposed_fix_diff", report1["findings"][0])
+
+        # Case B: Reviewer P1 finding - "Stop using Promise.all and run tasks sequentially"
+        report2 = {
+            "findings": [
+                {
+                    "rule_id": "non-reentrant-concurrency",
+                    "path": "src/queue.ts",
+                    "line_number": 18,
+                    "remediation": "Stop using Promise.all and run tasks sequentially.",
+                    "proposed_fix_diff": "--- a/queue.ts\n+++ b/queue.ts\n@@ -1,2 +1,2 @@\n- await Promise.all(tasks.map(t => t()));\n+ for (const t of tasks) await t();",
+                }
+            ]
+        }
+        notes2 = normalize_report(report2)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes2))
+        self.assertIn("proposed_fix_diff", report2["findings"][0])
 
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
