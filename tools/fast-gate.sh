@@ -179,21 +179,20 @@ while IFS= read -r f; do
     agents/docs-drift/scripts/check_docs.py)
       # agents-q0mt: also emits candidate ids now; the exclusion suite drives this script, and the
       # emission pin reads the id out of a real artefact.
-      mapped="$mapped tests/test_docs_drift.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
+      mapped="$mapped tests/test_docs_drift.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py tests/test_prepass_pin_boundary.py"
       ;;
     agents/vuln-triage/scripts/triage.py)
       mapped="$mapped tests/test_vuln_triage_prepass.py"
       ;;
     agents/issue-triage/scripts/fetch_issues.py)
-      mapped="$mapped tests/test_issue_triage_prepass.py tests/test_redaction.py tests/test_docs_drift.py"
+      mapped="$mapped tests/test_issue_triage_prepass.py tests/test_prepass_pin_boundary.py tests/test_redaction.py tests/test_docs_drift.py"
       ;;
     agents/release-notes/scripts/gather_commits.py)
-      # Prose surface only (--help text and module docstrings). SEARCH PERFORMED: `grep -ln
-      # "gather_commits" tests/*.py` returns nothing, so no suite names this script - but
-      # tests/test_redaction.py PARSES every agents/*/scripts/*.py as an AST, so it does consume
-      # it, and tests/test_docs_drift.py owns the prose. Mapped rather than ignored so a future
-      # BEHAVIOUR change is not silently absorbed (agents-fq92).
-      mapped="$mapped tests/test_redaction.py tests/test_docs_drift.py"
+      # agents-28nn round 4: gather_commits resolves git through the pin, pinned by
+      # tests/test_prepass_pin_boundary.py. tests/test_redaction.py parses every agents/*/scripts/*.py,
+      # and tests/test_docs_drift.py owns the prose.
+      mapped="$mapped tests/test_prepass_pin_boundary.py tests/test_redaction.py tests/test_docs_drift.py"
+      ;;
       ;;
     tests/sandbox_fixtures.py)
       # Shared fixture builder for tests (agents-8ztd); its own suite pins the property that a new
@@ -219,7 +218,9 @@ while IFS= read -r f; do
     agents/secret-scan/scripts/scan.py)
       # The secret pre-pass. Both producer paths (gitleaks and the builtin fallback) meet at one
       # artefact assembly point, so the candidate-identity conversion is one call (agents-q0mt).
-      mapped="$mapped tests/test_secret_scanner.py tests/test_candidate_id_emission.py"
+      # agents-28nn round 4: gitleaks is resolved through the pin (present-but-unauthenticatable
+      # is loud; genuinely absent keeps the builtin fallback) - pinned by the boundary suite.
+      mapped="$mapped tests/test_secret_scanner.py tests/test_candidate_id_emission.py tests/test_prepass_pin_boundary.py"
       ;;
     agents/modern-web/scripts/scan_modern_web.py)
       # agents-q0mt: the station now emits a candidate id; its own suite plus the pre-pass
