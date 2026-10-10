@@ -799,18 +799,50 @@ class TestStationStdoutChannelIsStructural(unittest.TestCase):
 
     @staticmethod
     def _stdout_emission_sites(source: str):
-        """Every site that can write to stdout WITHOUT going through the helper: a print()
-        whose file= is absent or is not sys.stderr, any reference to sys.stdout (covers
-        sys.stdout.write/writelines, json.dump(..., sys.stdout), sys.stdout.fileno()), and
-        any pprint call (pprint's default stream is stdout)."""
+        """Every site that can write to stdout WITHOUT going through the helper:
+        - print() whose file= is absent or is not sys.stderr
+        - reference to sys.stdout or sys.__stdout__ (covers sys.stdout.write, json.dump(..., sys.stdout), etc.)
+        - import of stdout or __stdout__ from sys (from sys import stdout)
+        - dynamic getattr on stdout or __stdout__ (getattr(sys, "stdout"))
+        - low-level file descriptor 1 write (os.write(1, ...))
+        - open() targeting stdout special device paths (open("/dev/stdout"), open("/dev/fd/1"))
+        - pprint calls (pprint's default stream is stdout).
+        """
         tree = ast.parse(source)
         sites = []
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Attribute) and node.attr == "stdout"
+            # sys.stdout or sys.__stdout__
+            if (isinstance(node, ast.Attribute) and node.attr in ("stdout", "__stdout__")
                     and isinstance(node.value, ast.Name) and node.value.id == "sys"):
-                sites.append(f"sys.stdout reference at line {node.lineno}")
+                sites.append(f"sys.{node.attr} reference at line {node.lineno}")
+
+            # from sys import stdout / from sys import __stdout__
+            if isinstance(node, ast.ImportFrom) and node.module == "sys":
+                for alias in node.names:
+                    if alias.name in ("stdout", "__stdout__"):
+                        sites.append(f"from sys import {alias.name} at line {node.lineno}")
+
             if isinstance(node, ast.Call):
                 func = node.func
+
+                # getattr(..., "stdout") or getattr(..., "__stdout__")
+                if isinstance(func, ast.Name) and func.id == "getattr":
+                    if (len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                            and node.args[1].value in ("stdout", "__stdout__")):
+                        sites.append(f"getattr(..., {node.args[1].value!r}) at line {node.lineno}")
+
+                # os.write(1, ...)
+                if (isinstance(func, ast.Attribute) and func.attr == "write"
+                        and isinstance(func.value, ast.Name) and func.value.id == "os"):
+                    if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 1:
+                        sites.append(f"os.write(1, ...) at line {node.lineno}")
+
+                # open("/dev/stdout") or open("/dev/fd/1")
+                if isinstance(func, ast.Name) and func.id == "open":
+                    if node.args and isinstance(node.args[0], ast.Constant) and str(node.args[0].value) in ("/dev/stdout", "/dev/fd/1"):
+                        sites.append(f"open({node.args[0].value!r}) at line {node.lineno}")
+
+                # print()
                 if isinstance(func, ast.Name) and func.id == "print":
                     file_kw = next((k for k in node.keywords if k.arg == "file"), None)
                     stderr = (file_kw is not None
@@ -820,6 +852,8 @@ class TestStationStdoutChannelIsStructural(unittest.TestCase):
                               and file_kw.value.value.id == "sys")
                     if not stderr:
                         sites.append(f"print() without file=sys.stderr at line {node.lineno}")
+
+                # pprint
                 if isinstance(func, ast.Name) and func.id == "pprint":
                     sites.append(f"pprint() (default stream is stdout) at line {node.lineno}")
                 if isinstance(func, ast.Attribute) and func.attr == "pprint":
@@ -881,6 +915,26 @@ class TestStationStdoutChannelIsStructural(unittest.TestCase):
             self.assertTrue(reason.strip(), f"exception {rel} must state its reason")
             self.assertFalse(self._calls_helper_unconditionally(scripts[rel]),
                              f"{rel} calls the helper AND is excepted - drop the stale exception")
+
+    def test_guard_catches_static_and_dynamic_stdout_escapes(self):
+        """P4 verification (agents-lmc4): Verify that the AST guard catches both direct
+        and common dynamic escape hatches: from sys import stdout, sys.__stdout__,
+        getattr(sys, 'stdout'), os.write(1, ...), and open('/dev/stdout').
+        """
+        mutations = [
+            ("from sys import stdout\nstdout.write('x')", "from sys import stdout"),
+            ("from sys import __stdout__ as out\nout.write('x')", "from sys import __stdout__"),
+            ("import sys\nsys.__stdout__.write('x')", "sys.__stdout__ reference"),
+            ("import sys\ngetattr(sys, 'stdout').write('x')", "getattr(..., 'stdout')"),
+            ("import sys\ngetattr(sys, '__stdout__').write('x')", "getattr(..., '__stdout__')"),
+            ("import os\nos.write(1, b'x')", "os.write(1, ...)"),
+            ("open('/dev/stdout', 'w').write('x')", "open('/dev/stdout')"),
+            ("open('/dev/fd/1', 'w').write('x')", "open('/dev/fd/1')"),
+        ]
+        for snippet, expected_marker in mutations:
+            sites = self._stdout_emission_sites(snippet)
+            self.assertTrue(any(expected_marker in s for s in sites),
+                            f"Expected guard to flag {expected_marker!r} in snippet:\n{snippet}\nGot: {sites}")
 
 
 if __name__ == "__main__":
