@@ -277,6 +277,20 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(unrelated_backend_evidence))
 
+        # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
+        empty_snippet_plural = {
+            "snippet": "",
+            "remediation": "Node.js fetch supports concurrent requests; use Promise.all for sessions"
+        }
+        self.assertFalse(has_reentrancy_precondition(empty_snippet_plural))
+
+        # Plural session references in remediation disqualify even if snippet has fetch
+        fetch_with_plural_sessions = {
+            "snippet": "await fetch(url);",
+            "remediation": "The Node.js fetch backend is proven reentrant and thread-safe; use Promise.all for sessions"
+        }
+        self.assertFalse(has_reentrancy_precondition(fetch_with_plural_sessions))
+
         # Reviewer P1 finding: bare assertion without naming a backend must NOT pass as evidence
         bare_assertion = {
             "remediation": "Backend is reentrant; use Promise.all"
@@ -622,6 +636,22 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes3 = normalize_report(report3)
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes3))
         self.assertIn("proposed_fix_diff", report3["findings"][0])
+
+        # Case D: Reviewer P2 finding - "Remove worker pool; run model inference serially"
+        report4 = {
+            "findings": [
+                {
+                    "rule_id": "concurrency-hazard",
+                    "path": "src/infer.ts",
+                    "line_number": 50,
+                    "remediation": "Remove worker pool; run model inference serially.",
+                    "proposed_fix_diff": "--- a/infer.ts\n+++ b/infer.ts\n@@ -1,2 +1,2 @@\n- await pool.map(models, runInference);\n+ for (const m of models) await runInference(m);",
+                }
+            ]
+        }
+        notes4 = normalize_report(report4)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes4))
+        self.assertIn("proposed_fix_diff", report4["findings"][0])
 
     def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
         """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""

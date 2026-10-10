@@ -211,7 +211,7 @@ _NEGATION_PATTERN = re.compile(
 
 _STOP_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:stop|avoid|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from|do\s+not|don't|never)\s+"
-    r"(?:(?:use|using)\s+)?(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism)?|overlap(?:ping)?)\b",
+    r"(?:(?:use|using|the|a)\s+)?(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism)?|overlap(?:ping)?|(?:a\s+)?worker\s+pools?|(?:a\s+)?pool\s+of\s+workers?|thread\s+pools?)\b",
     re.IGNORECASE
 )
 
@@ -278,7 +278,7 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
 
 # Domains and primitives where concurrency is often non-reentrant or stateful
 _NON_REENTRANT_SUSPECT_PATTERN = re.compile(
-    r"\b(?:onnx|session|model|inference|forward\s+pass|wasm|webassembly|gpu|webgpu|webgl|transaction|mutex|lock|db|database|sqlite)\b",
+    r"\b(?:onnx|sessions?|models?|inferences?|forward\s+passes?|wasm|webassembly|gpus?|webgpu|webgl|transactions?|mutex(?:es)?|locks?|db|databases?|sqlite)\b",
     re.IGNORECASE
 )
 
@@ -415,12 +415,14 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     if not (_NAMED_BACKEND_PATTERN.search(remediation) and _POSITIVE_EVIDENCE_PATTERN.search(remediation)):
         return False
 
-    # Every awaited operation in the snippet must be an inherently stateless I/O call
-    snippet = str(finding.get("snippet", ""))
-    if snippet:
-        awaited_calls = _extract_awaited_calls(snippet)
-        if awaited_calls is None or not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
-            return False
+    # Every awaited operation in the snippet must be an inherently stateless I/O call.
+    # An empty snippet lacks operation evidence and cannot prove backend reentrancy safety (Reviewer P1).
+    snippet = str(finding.get("snippet", "")).strip()
+    if not snippet:
+        return False
+    awaited_calls = _extract_awaited_calls(snippet)
+    if awaited_calls is None or not awaited_calls or any(not _is_stateless_call(c) for c in awaited_calls):
+        return False
 
     # If proposed_fix_diff is present, every parallelized call inside it must also be stateless I/O
     diff = str(finding.get("proposed_fix_diff", ""))
