@@ -52,15 +52,17 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         """Buffer stdout during test execution so deliberate mock banners and blocked messages
         do not leak into gate logs on passing runs (agents-janc). If the test fails, replay the
         captured buffer to sys.stderr so genuine diagnostics from the code under test survive
-        the failure (agents-lq6y)."""
+        the failure (agents-lq6y). If the underlying runner raises before assigning a result,
+        the original exception propagates unmasked (agents-ekbx)."""
         orig_stdout = sys.stdout
         self._stdout_capture = io.StringIO()
         sys.stdout = self._stdout_capture
+        res = None
         try:
             res = super().run(result)
         finally:
             sys.stdout = orig_stdout
-            actual_result = result or res
+            actual_result = result if result is not None else res
             if actual_result is not None and any(
                 test == self for test, _ in getattr(actual_result, "failures", []) + getattr(actual_result, "errors", [])
             ):
@@ -582,6 +584,21 @@ class TestHillClimbStdoutDiagnostics(unittest.TestCase):
         stderr_output = err_sink.getvalue()
         self.assertIn("DIAGNOSTIC: station proposal failed syntax validation on index.html:42", stderr_output)
         self.assertIn("--- Captured stdout for", stderr_output)
+
+    def test_underlying_runner_exception_propagates_unmasked(self):
+        """P3 fix (agents-ekbx): an exception raised by the underlying runner must propagate
+        as itself rather than being masked by UnboundLocalError/NameError in finally."""
+        class _RaisingRunnerTest(HillClimbApplyIsolationTest):
+            def test_noop(self):
+                pass
+
+        orig_run = unittest.TestCase.run
+        unittest.TestCase.run = lambda self, r=None: (_ for _ in ()).throw(KeyboardInterrupt())
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                _RaisingRunnerTest("test_noop").run(None)
+        finally:
+            unittest.TestCase.run = orig_run
 
 
 if __name__ == "__main__":
