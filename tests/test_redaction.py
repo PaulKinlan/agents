@@ -498,18 +498,22 @@ class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
         16-char hex digest, so before this fix the id fell through the string branch verbatim while
         its own source was [redacted]. Observed end-to-end on the scanner, not just in unit form.
 
-        Load-bearing: remove "candidate_id" from CANDIDATE_MATCH_FIELDS and this fails with the id
-        present in the safe copy.
+        Load-bearing: stop dropping `candidate_id` on the stdout channel (in this tree: remove it
+        from CANDIDATE_MATCH_FIELDS) and this fails with
+        `AssertionError: '45242927149666d8' != '[redacted]' ... the confirmation oracle reached the
+        stdout channel unmasked`.
+
+        The assertion is on the OUTPUT, not on the shape of the implementation: an implementation
+        that hardcodes the key check instead of using the drop list is correct and must pass, so the
+        membership assertion that used to fire first is gone (agents-qslz review, P2).
         """
-        from lib.redaction import CANDIDATE_MATCH_FIELDS, stdout_safe_report
+        from lib.redaction import stdout_safe_report
 
         report = {"rule_id": "github-pat", "path": "src/config.js", "line_number": 1,
                   "snippet": "ghp_SECRETVALUE", "raw_match": "ghp_SECRETVALUE",
                   "candidate_id": "45242927149666d8", "identity_source": "candidate-id"}
         safe = stdout_safe_report(report)
 
-        self.assertIn("candidate_id", CANDIDATE_MATCH_FIELDS,
-                      "the id is a digest of the matched text and must be in the drop list")
         self.assertEqual(safe["candidate_id"], "[redacted]",
                          "the confirmation oracle reached the stdout channel unmasked")
         self.assertEqual(safe["snippet"], "[redacted]")

@@ -18,6 +18,54 @@ audit_deps = importlib.util.module_from_spec(spec)
 loader.exec_module(audit_deps)
 
 
+class TestStdoutChannelDropsTheMatch(unittest.TestCase):
+    """agents-qslz: the station's stdout goes through lib/redaction.stdout_safe_report.
+
+    Driven through the real CLI with no --output, because the defect was a raw `print(output_json)`
+    in exactly that branch, and a unit test of stdout_safe_report cannot see which branch ran.
+    """
+
+    def test_stdout_has_no_candidate_id_and_no_match_text(self):
+        """Load-bearing: change the else branch back to `print(output_json)` and this fails with
+        `AssertionError: '44a2559445e30938' != '[redacted]' ... the confirmation oracle reached the
+        station's stdout unmasked` (the snippet assert fails next).
+
+        The fixture is requirements.txt plus a divergent shipped wheel, so the npm path is never
+        entered and no external tool runs. The --output branch is NOT redacted on purpose - it is
+        the raw local record - so the fixture is read from stdout only.
+        """
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("requests==2.25.1\n", encoding="utf-8")
+            dist = repo / "dist"
+            dist.mkdir()
+            whl = dist / "sample-1.0.0-py3-none-any.whl"
+            with zipfile.ZipFile(whl, "w") as z:
+                z.writestr("sample-1.0.0.dist-info/METADATA", """Metadata-Version: 2.1
+Name: sample
+Version: 1.0.0
+Requires-Dist: requests == 2.28.0
+""")
+            result = subprocess.run(
+                [sys.executable, str(SCANNER_PATH), "--target", str(repo)],
+                capture_output=True, text=True, timeout=120, cwd=str(ROOT))
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+        artefact = json.loads(result.stdout)
+        matched = [c for c in artefact["candidates"]
+                   if c.get("rule_id") == "lockfile-shipped-version-divergence"]
+        self.assertTrue(matched, artefact["candidates"])
+        for candidate in matched:
+            self.assertEqual(candidate["candidate_id"], "[redacted]",
+                             "the confirmation oracle reached the station's stdout unmasked")
+            self.assertEqual(candidate["snippet"], "[redacted]")
+            # The channel must stay usable: the location still ships.
+            self.assertTrue(candidate["path"].endswith("sample-1.0.0-py3-none-any.whl"),
+                            candidate["path"])
+        self.assertIn("stdout redacts matched values", result.stderr)
+
+
 class TestLockfileShippedArtifactDivergence(unittest.TestCase):
     """Test detection of divergence between lockfiles and shipped artifacts (agents-gtq)."""
 
