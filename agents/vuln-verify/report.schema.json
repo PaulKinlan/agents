@@ -40,8 +40,8 @@
             "description": "Relative file path of the candidate finding."
           },
           "line_number": {
-            "type": "integer",
-            "description": "Line number where the candidate was flagged."
+            "type": ["integer", "null"],
+            "description": "Line number where the candidate was flagged, or null when no line could be resolved. A candidate whose line is unknown (the scanner data carries line_number_unknown: true, or its line is the factory's '?' marker) is located by its path; cite the line you identified, or null when the claim has no single line (agents-fy26)."
           },
           "verdict": {
             "type": "string",
@@ -104,8 +104,8 @@
             "description": "Relative file path within the target repository."
           },
           "line_number": {
-            "type": "integer",
-            "description": "Line number of the verified vulnerability."
+            "type": ["integer", "null"],
+            "description": "Line number of the verified vulnerability, or null when the verified claim has no resolvable line (agents-fy26)."
           },
           "snippet": {
             "type": "string",

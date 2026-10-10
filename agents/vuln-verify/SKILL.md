@@ -61,6 +61,11 @@ For each candidate:
     the absent file belongs in (`.github/`, `scripts/`) or a file you read while checking. A
     path that does not exist is not a location, and neither is the repository root itself
     (`"."`), so name the real place you looked.
+  - An UNKNOWN LINE is not an unlocatable record. Scanner candidates can arrive with
+    `line_number: null` and `line_number_unknown: true` (the factory's `?` marker means the
+    scanner could not name a line). The `path` is still a location, so adjudicate the file,
+    cite the line you identified while verifying, and do not return `unverifiable` for the
+    unknown line alone.
 
 - **DISPROVED**:
   - Assigned when *any* defense, sanitizer, auth gate, framework handler, or threat-model trust rule mitigates the issue or renders it unreachable.
@@ -118,3 +123,8 @@ You must output a single valid JSON object strictly matching `report.schema.json
 ```
 
 Do not wrap the JSON in conversational commentary. Output valid JSON only.
+
+An unknown line is STATED, not omitted: `line_number` is required and may be `null`, which is
+what you emit when the claim has no resolvable line (the scanner's data then carries
+`line_number_unknown: true` with a null line). If you located the claim while verifying, cite the
+line you found instead.
