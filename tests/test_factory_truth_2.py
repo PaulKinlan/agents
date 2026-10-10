@@ -107,6 +107,7 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual(res["report"]["findings"][0]["rule_id"], "TM-1")
         self.assertTrue((res["run_dir"] / "normalised_fields.json").exists())
         store = json.loads((self.box.root / "findings" / "target.json").read_text())
+        self.assertEqual([f["rule_id"] for f in store["findings"].values()], ["TM-1"])
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_existing_target_threat_model_is_preserved_when_markdown_omitted(self):
