@@ -35,6 +35,8 @@ except ImportError:
 # back in place, which is the defect this exists to end.
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields
 
+from lib.redaction import stdout_safe_report  # noqa: E402
+
 IGNORE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2",
     ".ttf", ".eot", ".mp4", ".webm", ".zip", ".tar", ".gz", ".wasm", ".lock",
@@ -394,7 +396,12 @@ def main():
         Path(args.output).write_text(output_json, encoding="utf-8")
         print(f"Deterministic scan complete: {len(raw_candidates)} candidates across {scanned_files} files written to {args.output}")
     else:
-        print(output_json)
+        # stdout goes to a terminal or a CI log, which cannot be un-published: never emit
+        # match text there, whatever shape the credential turns out to be.
+        print(json.dumps(stdout_safe_report(result), indent=2))
+        sys.stderr.write(
+            "Note: stdout redacts matched values. Use --output <file> for the raw local record.\n"
+        )
 
 
 if __name__ == "__main__":
