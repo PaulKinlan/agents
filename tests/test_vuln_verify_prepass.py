@@ -216,6 +216,70 @@ class TestVerifierPriming(unittest.TestCase):
             self.assertEqual(bundle["candidate_count"], 1)
             self._assert_no_conclusions(bundle)
 
+    def test_direct_findings_input_accepts_candidates_payload(self):
+        """agents-nxr0: --findings accepts top-level 'candidates' key from prepass output."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            sandbox, target = self._sandbox(tmp)
+            direct = tmp / "prepass_candidates.json"
+            direct.write_text(json.dumps({"candidates": [discovery_finding()]}), encoding="utf-8")
+
+            bundle = self._run(sandbox, target, findings_file=direct)
+
+            self.assertEqual(bundle["candidate_count"], 1)
+            self._assert_no_conclusions(bundle)
+
+    def test_direct_findings_input_accepts_bare_list_payload(self):
+        """agents-nxr0: --findings accepts top-level bare list of candidate objects."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            sandbox, target = self._sandbox(tmp)
+            direct = tmp / "bare_list.json"
+            direct.write_text(json.dumps([discovery_finding()]), encoding="utf-8")
+
+            bundle = self._run(sandbox, target, findings_file=direct)
+
+            self.assertEqual(bundle["candidate_count"], 1)
+            self._assert_no_conclusions(bundle)
+
+    def test_direct_findings_input_rejects_unrecognized_payload_shape(self):
+        """agents-nxr0: --findings fails loudly on unrecognized top-level shapes instead of falling through."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            sandbox, target = self._sandbox(tmp)
+            direct = tmp / "unrecognized.json"
+            direct.write_text(json.dumps({"unknown_key": [1, 2, 3]}), encoding="utf-8")
+
+            cmd = [sys.executable, str(sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"),
+                   "--target", str(target), "--findings", str(direct)]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(res.returncode, 0, "script must exit non-zero on unrecognized payload shape")
+            self.assertIn("unrecognized payload shape", res.stderr)
+
+    def test_malformed_run_artifact_records_warning_and_continues(self):
+        """agents-dh5l: unreadable/malformed run artifacts must record a warning on stderr and continue."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            sandbox, target = self._sandbox(tmp)
+            run_dir = sandbox / "runs" / "vuln-discovery-target-20260101-000000"
+            run_dir.mkdir(parents=True)
+            # candidates.json is broken JSON
+            (run_dir / "candidates.json").write_text("{broken json...", encoding="utf-8")
+            # report.json is valid fallback
+            (run_dir / "report.json").write_text(json.dumps({"findings": [
+                discovery_finding(snippet="FALLBACK-VALID-SNIPPET"),
+            ]}), encoding="utf-8")
+
+            cmd = [sys.executable, str(sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"),
+                   "--target", str(target)]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            self.assertEqual(res.returncode, 0, f"script failed:\n{res.stderr}")
+            self.assertIn("Warning: Could not read run artifact", res.stderr)
+            self.assertIn("candidates.json", res.stderr)
+            bundle = json.loads(res.stdout)
+            self.assertEqual(bundle["candidate_count"], 1)
+            self.assertEqual(bundle["candidates"][0]["snippet"], "FALLBACK-VALID-SNIPPET")
+
 
 class TestPathConfinement(unittest.TestCase):
     """agents-075: a store/run-dir supplied path must never read outside the target.
