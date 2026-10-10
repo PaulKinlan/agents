@@ -166,10 +166,12 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
 
 _EXECUTION_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:Promise\.(?:all|allSettled|race)|asyncio\.gather)\b"
-    r"|(?:run|execute|call|dispatch|await|start|issue|send|use)\b[^.;\n]*?\b(?:concurrently|in\s+parallel|simultaneously|at\s+the\s+same\s+time)\b"
-    r"|\b(?:concurrent|parallel|simultaneous)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?|requests?|fetches|queries)\b"
+    r"|(?:run|execute|call|dispatch|await|start|issue|send|use|overlap)\b[^.;\n]*?\b(?:concurrently|in\s+parallel|simultaneously|at\s+the\s+same\s+time|overlap(?:ping)?)\b"
+    r"|\b(?:concurrent|parallel|simultaneous|overlapping)\s+(?:execution|calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?|requests?|fetches|queries)\b"
     r"|\bparallel(?:ize|izing|ization)\b"
-    r"|\b(?:worker\s+pool|thread\s+pool|web\s+worker|worker_threads)\b",
+    r"|\b(?:overlap|overlapping)\s+(?:[^.;\n]{0,40}?\s+)?(?:calls?|invocations?|passes|runs?|tasks?|inferences?|computations?|operations?|requests?|fetches|queries|execution)\b"
+    r"|\b(?:pool\s+of\s+workers?|worker\s+pool|thread\s+pool|web\s+worker|worker_threads)\b"
+    r"|\b(?:pool\.(?:map|dispatch|exec|run|submit|queue)|pLimit|p-limit)\b",
     re.IGNORECASE
 )
 
@@ -208,8 +210,8 @@ _NEGATION_PATTERN = re.compile(
 
 
 _STOP_CONCURRENCY_PATTERN = re.compile(
-    r"\b(?:stop|avoid|do\s+not|don't|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from)\s+"
-    r"(?:using\s+)?(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism)?)\b",
+    r"\b(?:stop|avoid|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from|do\s+not|don't|never)\s+"
+    r"(?:(?:use|using)\s+)?(?:Promise\.(?:all|allSettled|race)|asyncio\.gather|concurrency|parallel(?:ism)?|overlap(?:ping)?)\b",
     re.IGNORECASE
 )
 
