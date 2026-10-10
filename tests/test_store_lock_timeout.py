@@ -235,5 +235,72 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
             finally:
                 reader.close()
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_the_promote_path_reports_a_contended_store_cleanly_too(self):
+        """The SECOND store-opening site (lib/sinks/github.py), reached only from main()'s promote
+        branch at findings.py:1529. Promoting a public issue is human-invoked, which is the worst
+        place for a traceback, so the bounded-wait failure must take the same clean path as the run.
+
+        The harness has to be IN-PROCESS, and that is not a shortcut: resolve_tool ENFORCES a
+        content pin on gh, so a fake gh can never be injected through PATH - which is the point of
+        that module. So this patches resolve_tool and asserts the catch turns StoreBusyError into a
+        clean exit 2 rather than letting it escape. Load-bearing: without the promote-path catch the
+        exception propagates and this fails on StoreBusyError instead of SystemExit.
+        """
+        import contextlib
+        import io
+        import json as _json
+        from unittest import mock
+
+        import lib.sinks.github as ghmod
+        from lib.findings import FindingsStore, main as findings_main
+        from lib.tool_pins import resolve_tool as real_resolve_tool
+
+        target = f"locktest-promote-{os.getpid()}"
+        findings_dir = ROOT / "findings"
+        findings_dir.mkdir(exist_ok=True)
+        lock_file = findings_dir / f"{target}.json.lock"
+        repo = "example-owner/example-repo"
+        url = f"https://github.com/{repo}/issues/7"
+        fp = "a" * 64
+        fake_bin = Path(tempfile.mkdtemp())
+        beads_dir = Path(tempfile.mkdtemp())
+        (beads_dir / ".beads").mkdir()
+        gh = fake_bin / "gh"
+        gh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "endpoint = sys.argv[-1]\n"
+            "if endpoint.endswith('/issues/7'):\n"
+            "    print(json.dumps({'number': 7, 'html_url': '" + url + "',\n"
+            "                      'body': '**Fingerprint**: `" + fp + "`',\n"
+            "                      'labels': [{'name': 'factory-approved'}]}))\n"
+            "else:\n"
+            "    print(json.dumps({'full_name': '" + repo + "',\n"
+            "                      'html_url': 'https://github.com/" + repo + "',\n"
+            "                      'private': False, 'has_issues': True}))\n",
+            encoding="utf-8")
+        gh.chmod(0o755)
+
+        def fake_resolve(name, *args, **kwargs):
+            return str(gh) if name == "gh" else real_resolve_tool(name, *args, **kwargs)
+
+        holder = FindingsStore(target, lock_timeout=0)  # this process holds the store lock
+        try:
+            err = io.StringIO()
+            # Short bound: this exercises the BOUND and the clean error path, not the default 10s.
+            with mock.patch.dict(os.environ, {"FACTORY_STORE_LOCK_TIMEOUT": "1"}), \
+                 mock.patch.object(ghmod, "resolve_tool", side_effect=fake_resolve):
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as caught:
+                        findings_main(["--target", target, "--target-dir", str(ROOT),
+                                       "--promote-issue", url, "--repo", repo,
+                                       "--visibility", "public", "--beads-dir", str(beads_dir)])
+            self.assertEqual(caught.exception.code, 2, err.getvalue())
+            self.assertIn("is locked", err.getvalue(),
+                          "the promote path did not report the contention")
+        finally:
+            holder.close()
+            try:
+                lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass
