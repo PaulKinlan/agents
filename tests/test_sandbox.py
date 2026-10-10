@@ -60,6 +60,8 @@ class TestSandboxCommandShape(unittest.TestCase):
         (self.factory / "runs" / "old").mkdir(parents=True)
         # sandbox_command() exercises every wrap it builds (agents-kwi), and an egress wrap
         # runs lib/net_forward.py from the factory root: the fake root must carry it.
+        # agents-r2ne census: net_forward.py is the egress-wrap runtime of a FAKE FACTORY ROOT,
+        # not a station script's dependency - tests/sandbox_fixtures.py does not apply here.
         (self.factory / "lib").mkdir()
         shutil.copyfile(ROOT / "lib" / "net_forward.py",
                         self.factory / "lib" / "net_forward.py")
