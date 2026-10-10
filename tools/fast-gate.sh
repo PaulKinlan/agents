@@ -57,6 +57,11 @@ while IFS= read -r f; do
     agents/vuln-triage/scripts/triage.py)
       mapped="$mapped tests/test_vuln_triage_prepass.py"
       ;;
+    agents/vuln-verify/scripts/prepare_verification.py)
+      # The verifier's pre-pass: unknown-location handling (agents-fy26) and path confinement
+      # (agents-075) are both pinned in this suite.
+      mapped="$mapped tests/test_vuln_verify_prepass.py"
+      ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;

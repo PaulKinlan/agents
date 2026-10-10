@@ -308,5 +308,152 @@ class TestPathConfinement(unittest.TestCase):
             self.assertIn("el.innerHTML = user;", ctx["context_snippet"])
 
 
+class TestUnknownLineNumbers(unittest.TestCase):
+    """agents-fy26: an unknown LINE must not crash the station, and must not be presented as real.
+
+    `"?"` is the factory's own unknown marker - lib/redaction.publishable_line_number returns it
+    rather than publish a line it cannot trust - so 16 candidates on web-ai-showcase's nightly
+    carried it. `"?" <= 0` raised TypeError, vuln-verify errored, and the seven stations after it
+    were SKIPPED: their findings read UNKNOWN to anyone who looked and clean to anyone who did not.
+
+    The other half is quieter and was already in the code: an absent line became line 1, which
+    hands the verifier a fabricated location. Both directions are pinned here.
+    """
+
+    def _sandbox(self, tmp: Path, app_lines: int = 2):
+        sandbox = tmp / "sandbox"
+        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        helper = sandbox / "lib" / "path_security.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        target = sandbox / "target"
+        (target / "src").mkdir(parents=True)
+        body = "".join(f"const line{i} = {i};\n" for i in range(1, app_lines + 1))
+        (target / "src" / "app.js").write_text(body, encoding="utf-8")
+        return sandbox, target
+
+    def _candidate(self, **overrides):
+        candidate = {
+            "fingerprint": "f" * 64,
+            "agent": "vuln-discovery",
+            "rule_id": "dom-injection-sink",
+            "path": "src/app.js",
+            "line_number": 2,
+            "snippet": "el.innerHTML = user;",
+        }
+        candidate.update(overrides)
+        return candidate
+
+    def _run(self, sandbox: Path, target: Path, candidates) -> dict:
+        out = sandbox / "out.json"
+        findings_file = sandbox / "findings.json"
+        findings_file.write_text(json.dumps({"findings": candidates}), encoding="utf-8")
+        cmd = [sys.executable,
+               str(sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"),
+               "--target", str(target), "--output", str(out),
+               "--findings", str(findings_file)]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_the_question_mark_sentinel_no_longer_crashes_the_station(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+
+            bundle = self._run(sandbox, target, [self._candidate(line_number="?")])
+
+            self.assertEqual(bundle["candidate_count"], 1)
+            candidate = bundle["candidates"][0]
+            self.assertIsNone(candidate["line_number"])
+            self.assertTrue(candidate["line_number_unknown"])
+            self.assertFalse(candidate["source_context"]["line_number_known"])
+
+    def test_a_missing_line_number_is_unknown_not_dropped(self):
+        sentinel_free = self._candidate()
+        del sentinel_free["line_number"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+
+            bundle = self._run(sandbox, target, [sentinel_free])
+
+            self.assertEqual(bundle["candidate_count"], 1)
+            self.assertTrue(bundle["candidates"][0]["line_number_unknown"])
+
+    def test_a_mixed_batch_keeps_every_candidate_and_keeps_the_numbers(self):
+        no_line = self._candidate(rule_id="no-line")
+        del no_line["line_number"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+
+            bundle = self._run(sandbox, target, [
+                self._candidate(rule_id="numeric", line_number=2),
+                self._candidate(rule_id="sentinel", line_number="?"),
+                no_line,
+            ])
+
+            self.assertEqual(bundle["candidate_count"], 3, "a candidate was dropped, not marked")
+            by_rule = {c["rule_id"]: c for c in bundle["candidates"]}
+            self.assertEqual(by_rule["numeric"]["line_number"], 2)
+            self.assertNotIn("line_number_unknown", by_rule["numeric"])
+            self.assertTrue(by_rule["sentinel"]["line_number_unknown"])
+            self.assertTrue(by_rule["no-line"]["line_number_unknown"])
+            # The sentinel is not echoed back as a line a consumer might compare again.
+            self.assertIsNone(by_rule["sentinel"]["line_number"])
+
+    def test_an_unknown_line_gets_file_level_context_not_a_fabricated_window(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir), app_lines=400)
+
+            bundle = self._run(sandbox, target, [self._candidate(line_number="?")])
+            ctx = bundle["candidates"][0]["source_context"]
+
+            self.assertFalse(ctx["line_number_known"])
+            self.assertEqual(ctx["window_start"], 1)
+            self.assertEqual(ctx["window_end"], 200, "a file-level view, not a window on line 1")
+            self.assertTrue(ctx["truncated"])
+            self.assertIn("unknown", ctx["location_note"])
+            self.assertIn("const line1 = 1;", ctx["context_snippet"])
+
+    def test_a_known_line_still_gets_its_own_window(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir), app_lines=400)
+
+            bundle = self._run(sandbox, target, [self._candidate(line_number=200)])
+            ctx = bundle["candidates"][0]["source_context"]
+
+            self.assertTrue(ctx["line_number_known"])
+            self.assertEqual((ctx["window_start"], ctx["window_end"]), (171, 230))
+            self.assertNotIn("location_note", ctx)
+
+    def test_removing_the_normalisation_reintroduces_the_type_error(self):
+        """The mutation check: the unknown-line path is what makes the sentinel safe.
+
+        A guard that cannot fail is not a guard, so this mutates the helper back to handing the
+        raw value through and asserts the station crashes on the same input the test above
+        passes - if this ever stops crashing, the test above is proving nothing.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+            original = script.read_text(encoding="utf-8")
+            anchor = "    if isinstance(value, bool):\n        return None\n"
+            self.assertIn(anchor, original, "the mutation anchor moved; fix this probe")
+            script.write_text(original.replace(anchor, "    return value\n"), encoding="utf-8")
+
+            out = sandbox / "mutated.json"
+            findings_file = sandbox / "findings.json"
+            findings_file.write_text(
+                json.dumps({"findings": [self._candidate(line_number="?")]}), encoding="utf-8")
+            res = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--output", str(out), "--findings", str(findings_file)],
+                capture_output=True, text=True, timeout=60)
+
+            self.assertNotEqual(res.returncode, 0, "the mutated station survived the sentinel")
+            self.assertIn("TypeError", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,6 +109,39 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
     return []
 
 
+# How much of a file to hand over when the line is unknown. The verifier's contract keys on a
+# resolvable PATH (SKILL.md "Verdict Determination": cite the nearest path that exists), so a
+# file-level view keeps such a candidate verifiable rather than dropping it or inventing a line.
+FILE_VIEW_LINES = 200
+
+
+def usable_line_number(value: Any) -> Optional[int]:
+    """The line as a 1-based int, or None when the location is unknown.
+
+    An unknown line is not a malformed record. `"?"` is the factory's own unknown marker -
+    lib/redaction.publishable_line_number returns it rather than publish a line it cannot
+    trust - so a candidate carrying it is one whose line is unknown. Comparing it to 0 raised
+    TypeError and took the whole station down, which skipped every station after it and left
+    their findings reading UNKNOWN rather than clean (agents-fy26).
+
+    The quieter half of the same defect was the old `None -> 1` fallback: it presented the top
+    of the file as the candidate's location. Neither direction is allowed - unknown stays
+    unknown. Mirrors vuln-triage's `_parse_line_number` (agents-ajt4), where the same assumption
+    lived in a sort key and a proximity comparison: booleans and non-positive numbers are not
+    line numbers either.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isascii() and stripped.isdigit():
+            number = int(stripped)
+            return number if number > 0 else None
+    return None
+
+
 def load_file_context(target_dir: Path, rel_path: str, line_number: Optional[int]) -> Dict[str, Any]:
     """Read source file and extract rich window around candidate line."""
     filepath = resolve_within_target(target_dir, rel_path)
@@ -125,12 +158,16 @@ def load_file_context(target_dir: Path, rel_path: str, line_number: Optional[int
     all_lines = content.splitlines()
     total_lines = len(all_lines)
 
-    if line_number is None or line_number <= 0:
-        line_number = 1
-
-    # Extract window of ~30 lines before and after
-    start_idx = max(0, line_number - 30)
-    end_idx = min(total_lines, line_number + 30)
+    usable_line = usable_line_number(line_number)
+    if usable_line is None:
+        # UNKNOWN line: give a bounded file-level view and say so, rather than centring the
+        # window on line 1 as if the scanner had named it.
+        start_idx = 0
+        end_idx = min(total_lines, FILE_VIEW_LINES)
+    else:
+        # Extract window of ~30 lines before and after
+        start_idx = max(0, usable_line - 30)
+        end_idx = min(total_lines, usable_line + 30)
 
     context_lines = []
     for idx in range(start_idx, end_idx):
@@ -141,15 +178,25 @@ def load_file_context(target_dir: Path, rel_path: str, line_number: Optional[int
     has_auth_gate = bool(re.search(r"(?:authenticate|requireAuth|checkToken|verifySession|authHeader|bearerToken)", content, re.IGNORECASE))
     has_sanitizer = bool(re.search(r"(?:sanitize|escape|DOMPurify|validator|encodeURI|encodeURIComponent)", content, re.IGNORECASE))
 
-    return {
+    context: Dict[str, Any] = {
         "total_lines": total_lines,
         "window_start": start_idx + 1,
         "window_end": end_idx,
+        "line_number_known": usable_line is not None,
         "context_snippet": "\n".join(context_lines),
         "file_has_try_catch": has_try_catch,
         "file_has_auth_gate": has_auth_gate,
         "file_has_sanitizer": has_sanitizer,
     }
+    if usable_line is None:
+        # Says what the window IS, so the file-level view is not read as a located finding.
+        context["location_note"] = (
+            "candidate carries no usable line number; this is file-level context and the "
+            "exact line is unknown"
+        )
+        if total_lines > FILE_VIEW_LINES:
+            context["truncated"] = True
+    return context
 
 
 def load_threat_model_summary(target_dir: Path) -> Dict[str, Any]:
@@ -222,13 +269,19 @@ def main():
             continue
 
         file_ctx = load_file_context(target_dir, path, line_no)
+        usable_line = usable_line_number(line_no)
         candidate = {
             "rule_id": f.get("rule_id", "generic-vuln"),
             "path": path,
-            "line_number": line_no,
+            "line_number": usable_line,
             "snippet": f.get("snippet", ""),
             "source_context": file_ctx,
         }
+        if usable_line is None:
+            # The candidate STAYS, marked. Dropping it would turn a crash into a false clean,
+            # which is the outcome this bead exists to prevent (agents-fy26); the path is the
+            # location the verifier can still act on, and it asks for the line if it needs one.
+            candidate["line_number_unknown"] = True
         if f.get("fingerprint"):
             candidate["fingerprint"] = f["fingerprint"]
         verification_candidates.append(candidate)
