@@ -330,6 +330,12 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(unconditioned_prefix))
 
+        # Reviewer P1 finding: intermediate fallback branch advocating concurrency must NOT pass
+        intermediate_fallback_concurrency = {
+            "remediation": "IF backend is reentrant, use Promise.all; otherwise use Promise.any; else preserve serial execution"
+        }
+        self.assertFalse(has_reentrancy_precondition(intermediate_fallback_concurrency))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
