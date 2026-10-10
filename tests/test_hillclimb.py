@@ -48,6 +48,27 @@ BLOCKING_HTML = '<html><head><script src="app.js"></script></head><body></body><
 
 
 class HillClimbApplyIsolationTest(unittest.TestCase):
+    def run(self, result=None):
+        """Buffer stdout during test execution so deliberate mock banners and blocked messages
+        do not leak into gate logs on passing runs (agents-janc). If the test fails, replay the
+        captured buffer to sys.stderr so genuine diagnostics from the code under test survive
+        the failure (agents-lq6y)."""
+        orig_stdout = sys.stdout
+        self._stdout_capture = io.StringIO()
+        sys.stdout = self._stdout_capture
+        try:
+            res = super().run(result)
+        finally:
+            sys.stdout = orig_stdout
+            actual_result = result or res
+            if actual_result is not None and any(
+                test == self for test, _ in getattr(actual_result, "failures", []) + getattr(actual_result, "errors", [])
+            ):
+                val = self._stdout_capture.getvalue()
+                if val:
+                    sys.stderr.write(f"\n--- Captured stdout for {self.id()} ---\n{val}\n")
+        return res
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="factory-hc-")
         self.addCleanup(temporary.cleanup)
@@ -60,11 +81,6 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self._root_patch.start()
         self.addCleanup(self._findings_patch.stop)
         self.addCleanup(self._root_patch.stop)
-        # Capture stdout so deliberate test blocked messages do not leak into gate logs
-        self._stdout_capture = io.StringIO()
-        self._stdout_patch = mock.patch("sys.stdout", self._stdout_capture)
-        self._stdout_patch.start()
-        self.addCleanup(self._stdout_patch.stop)
 
     def _git_target(self, files):
         target = self.tmp / "target"
@@ -521,6 +537,51 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
             with self.assertRaises(factory_cli.StationError) as ctx:
                 factory_cli._create_session_worktree(target, wt_dir)
             self.assertIn("git worktree add exited 128: fatal: corrupt git repository", str(ctx.exception))
+
+
+class TestHillClimbStdoutDiagnostics(unittest.TestCase):
+    """agents-lq6y: verify that HillClimbApplyIsolationTest retains station diagnostics on failure
+    while muffling deliberate banners on passing runs."""
+
+    class _SamplePassingTest(HillClimbApplyIsolationTest):
+        def test_passing_run(self):
+            print("⛰️  CLASS C HILL-CLIMB OPTIMIZER STARTED (mock banner)")
+            self.assertTrue(True)
+
+    class _SampleFailingTest(HillClimbApplyIsolationTest):
+        def test_failing_run(self):
+            print("DIAGNOSTIC: station proposal failed syntax validation on index.html:42")
+            self.fail("deliberate test failure for diagnostic verification")
+
+    def test_passing_test_keeps_stdout_and_stderr_clean(self):
+        out_sink, err_sink = io.StringIO(), io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        try:
+            sys.stdout, sys.stderr = out_sink, err_sink
+            result = unittest.TestResult()
+            self._SamplePassingTest("test_passing_run").run(result)
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(out_sink.getvalue(), "", "Passing run must not leak banner to stdout")
+        self.assertEqual(err_sink.getvalue(), "", "Passing run must not write to stderr")
+
+    def test_failing_test_replays_station_diagnostics_to_stderr(self):
+        out_sink, err_sink = io.StringIO(), io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        try:
+            sys.stdout, sys.stderr = out_sink, err_sink
+            result = unittest.TestResult()
+            self._SampleFailingTest("test_failing_run").run(result)
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+
+        self.assertFalse(result.wasSuccessful())
+        self.assertEqual(out_sink.getvalue(), "")
+        stderr_output = err_sink.getvalue()
+        self.assertIn("DIAGNOSTIC: station proposal failed syntax validation on index.html:42", stderr_output)
+        self.assertIn("--- Captured stdout for", stderr_output)
 
 
 if __name__ == "__main__":
