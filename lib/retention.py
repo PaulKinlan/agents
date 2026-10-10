@@ -46,13 +46,16 @@ a pruned run directory resolves to an explanation instead of a missing path.
 
 The harm a tombstone answers is "a cited FILE cannot be resolved" — a citation
 points at a file inside a run directory — so the tombstone records at file
-granularity: the exact list of files that disappeared with the removal. A removal
+granularity: the list of files that disappeared with the removal (for ``removed``
+and ``partial``; ``null`` for ``moved``, where the directory vanished externally
+during removal and ``moved_files`` records the pre-removal snapshot). A removal
 that fails PART WAY (e.g. a permission bound leaves the directory present but its
 contents deleted) cannot satisfy the record falsely: the tombstone is written
 with ``outcome: "partial"`` listing exactly the files that were lost, computed as
-the pre-removal file set minus the post-removal file set. A removal that fails
-without losing anything writes nothing: a tombstone must never claim a loss that
-did not happen.
+the pre-removal file set minus the post-removal file set (with any newly appeared
+files recorded in ``appeared``). A removal that fails without losing anything
+(and where the directory was not moved externally and no files appeared) writes
+nothing: a tombstone must never claim an event that did not happen.
 
 The record tells the truth about its own limits (agents-dm8n round 3):
 
@@ -101,6 +104,7 @@ tests/test_retention.py's deletion-inventory guard fails the gate if any other
 deletion primitive appears in the shipped source without being enumerated.
 """
 
+import errno
 import json
 import os
 import shutil
@@ -157,8 +161,9 @@ no longer exists: every removal is tombstoned in `../retention-ledger.jsonl`
 (beside this directory, at the factory root — it survives a full clear of
 `runs/` precisely so the record outlives the evidence). Search that ledger for
 the directory name: each line records the directory, the reason (`age`/`count`/
-`apply-worktree-failure`), the UTC time, the outcome (`removed` or `partial`),
-and the exact list of files that disappeared with it.
+`apply-worktree-failure`), the UTC time, the outcome (`removed`, `moved` or `partial`),
+and the list of files that disappeared with it (for `removed` and `partial`; `null` for
+`moved`, where `moved_files` records the pre-removal snapshot).
 
 **This ledger records only removals made through it.** Beads sync across VMs
 and containers; this ledger does not — it is local to the filesystem that
@@ -174,14 +179,16 @@ ANOTHER ledger (ledgers are local and do not sync); or it was pruned before
 this ledger existed. Absence is not evidence of absence, and the record says
 so rather than letting the three readings collapse into one.
 
-**What a line does and does not claim.** `files` is the pre-removal snapshot
-and the line says so (`record_scope`): a file created inside the directory
-DURING the removal window may be destroyed without being listed — the record is
-best-effort, not a completeness guarantee. Equally, a listed file is one the
+**What a line does and does not claim.** For `removed` and `partial`, `files`
+is the pre-removal snapshot and the line says so (`record_scope`): a file
+created inside the directory DURING the removal window may be destroyed without
+being listed — the record is best-effort, not a completeness guarantee (for
+`moved`, `files` and `symlinks` are `null` and `moved_files` records the
+pre-removal snapshot). Equally, a listed file is one the
 removal saw disappear BETWEEN its two observations: destroyed by the removal,
 or moved or renamed out of the snapshot by a concurrent writer — the record
 cannot tell which, so `listed` must never be read as `destroyed`. A `symlinks`
-entry records a link and its raw target; `outside_tree` is three-valued.
+entry (for `removed` and `partial`) records a link and its raw target; `outside_tree` is three-valued.
 `true`: the target resolved OUTSIDE the removed tree — its contents were NOT
 removed and are NOT covered by this record (the evidence moved or was never in
 this tree). `false`: the target resolved INSIDE — the evidence is gone,
@@ -512,16 +519,24 @@ def remove_recorded(directory: Path, *, reason: str,
     The record is at FILE granularity, in the harm's own terms: the tombstone
     lists exactly the files that disappeared (the pre-removal file set minus the
     post-removal file set), so a bead citation to a FILE inside the directory
-    resolves to an explanation. Three outcomes:
+    resolves to an explanation. Four outcomes:
 
-    - ``removed``: the directory is gone. Tombstone lists everything it held.
+    - ``removed``: the directory is gone and rmtree succeeded. Tombstone lists
+      everything it held.
+    - ``moved``: the directory disappeared after rmtree failed with an error (e.g.
+      renamed or moved externally during removal). Because rmtree may have partially
+      deleted files before the move occurred, the record cannot determine which files
+      were destroyed versus moved; ``files`` and ``symlinks`` are recorded as None (null),
+      claiming neither destruction nor survival, and ``moved_files`` records the
+      pre-removal snapshot (agents-5qz7).
     - ``partial``: the removal failed part way (e.g. a permission bound) — the
       directory survives but some contents are gone. Tombstone lists exactly the
-      lost files with ``outcome: "partial"``, so the loss is VISIBLE instead of
+      lost files with ``outcome: "partial"`` and records any newly appeared files
+      (``appeared``), so the loss and within-directory renames are VISIBLE instead of
       silently satisfying a directory-level check (the round-1 defect: the
       directory survived, so "directories removed == directories tombstoned"
       held while the cited file was already destroyed).
-    - ``failed``: nothing disappeared. NO tombstone — the record must never
+    - ``failed``: nothing disappeared or changed. NO tombstone — the record must never
       claim a loss that did not happen.
 
     Every tombstone states what the record can stand behind and no more: the
@@ -539,7 +554,9 @@ def remove_recorded(directory: Path, *, reason: str,
     ``None`` = unresolvable (a loop, a permission boundary, or too many links)
     — the record then claims NEITHER survival NOR destruction.
 
-    Returns True only when the directory is gone. Refuses symlinks and missing
+    Returns True only when the directory was removed by this pass (outcome == "removed").
+    Returns False on partial removal, failure, or when the directory was moved/renamed
+    externally (outcome == "moved"). Refuses symlinks and missing
     directories (warns, returns False): the choke point never follows a link out
     of the runs root and never records a removal of something that was not there.
     """
@@ -551,9 +568,11 @@ def remove_recorded(directory: Path, *, reason: str,
         return False
     before = _snapshot_files(directory)
     before_symlinks = _snapshot_symlinks(directory)
+    rmtree_err: Optional[OSError] = None
     try:
         shutil.rmtree(directory)
     except OSError as exc:
+        rmtree_err = exc
         sys.stderr.write(f"[retention] could not remove {directory}: {exc}\n")
     if directory.is_dir():
         after = _snapshot_files(directory)
@@ -561,26 +580,47 @@ def remove_recorded(directory: Path, *, reason: str,
     else:
         after, after_symlinks = set(), {}
     disappeared = sorted(before - after)
+    appeared = sorted(after - before)
     disappeared_symlinks = [
         {"path": rel, **before_symlinks[rel]}
         for rel in sorted(set(before_symlinks) - set(after_symlinks))
     ]
+    moved_files: Optional[List[str]] = None
     if directory.is_dir():
-        outcome = "partial" if disappeared else "failed"
+        outcome = "partial" if (disappeared or appeared) else "failed"
+    elif rmtree_err is not None and (
+        isinstance(rmtree_err, FileNotFoundError)
+        or getattr(rmtree_err, "errno", None) in (errno.ENOENT, errno.ENOTDIR)
+    ):
+        # A directory rename or move during removal (agents-5qz7): rmtree failed
+        # with ENOENT/ENOTDIR and the directory is gone. Because rmtree may have removed
+        # some entries before the directory was moved, the record cannot distinguish
+        # files destroyed by rmtree from files that survived in the moved tree.
+        # Following the dm8n third-state principle (like outside_tree=None), record
+        # outcome "moved" with files=None and symlinks=None — claiming neither
+        # destruction nor survival — and preserve moved_files as the pre-removal snapshot.
+        outcome = "moved"
+        moved_files = disappeared
+        disappeared = None
+        disappeared_symlinks = None
     else:
         outcome = "removed"
     if outcome == "failed":
         return False
-    _append_tombstone(retention_ledger_path(directory.parent), {
+    record = {
         "name": directory.name,
         "path": str(directory),
         "pruned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
         "reason": reason,
         "outcome": outcome,
         "files": disappeared,
+        "appeared": appeared,
         "symlinks": disappeared_symlinks,
         "record_scope": RECORD_SCOPE,
-    })
+    }
+    if outcome == "moved":
+        record["moved_files"] = moved_files
+    _append_tombstone(retention_ledger_path(directory.parent), record)
     return outcome == "removed"
 
 
@@ -598,12 +638,14 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
     a still-running directory. Returns the list of directories that were removed.
 
     Every removal goes through ``remove_recorded`` (agents-dm8n): each directory
-    actually removed — and each removal that failed PART WAY, losing files but
-    leaving the directory — is recorded as a tombstone line in the ledger BESIDE
-    the runs root (``retention_ledger_path``), at file granularity, so a citation
-    to a pruned run directory (or to a file inside one) resolves to an explanation
-    rather than dangling. Only fully removed directories are returned; a partial
-    removal is recorded with ``outcome: "partial"`` and retried by a later prune.
+    actually removed — and each removal that failed PART WAY (losing files but
+    leaving the directory) or where the directory was moved externally during
+    removal with ENOENT (recorded with ``outcome: "moved"``) — is recorded as a
+    tombstone line in the ledger BESIDE the runs root (``retention_ledger_path``), at
+    file granularity, so a citation to a pruned run directory (or to a file inside one)
+    resolves to an explanation rather than dangling. Only fully removed directories
+    are returned; partial removals and moved directories return False and are not
+    listed in removed.
 
     ``now`` is injectable for deterministic TTL tests; it defaults to the current
     wall-clock time. ``retain``, ``max_age_seconds`` and ``active_grace`` default to

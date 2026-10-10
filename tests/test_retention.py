@@ -36,6 +36,7 @@ accumulate without bound. These tests pin the retention contract:
 """
 
 import contextlib
+import errno
 import importlib.machinery
 import importlib.util
 import io
@@ -773,6 +774,8 @@ class TestMovedFileClaim(unittest.TestCase):
             self.assertIn("moved.txt", tombstone["files"])
             self.assertNotIn("survivor.txt", tombstone["files"])
             self.assertIn("moved or renamed", tombstone["record_scope"])
+            # survivor.txt newly appeared: recorded to identify within-directory renames (agents-5qz7)
+            self.assertEqual(tombstone["appeared"], ["survivor.txt"])
 
     def test_the_pointer_and_readme_say_a_listed_file_may_have_moved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -849,6 +852,109 @@ class TestSymlinkTombstones(unittest.TestCase):
             # real paths, so the record covers them - "this evidence is gone".
             self.assertIn("real/evidence.txt", tombstone["files"])
             self.assertIn("alias", tombstone["files"])
+
+
+class TestDirectoryRenameDuringPrune(unittest.TestCase):
+    """agents-5qz7: an rmtree failure with ENOENT (e.g. concurrent directory rename)
+    records outcome 'moved' rather than 'removed', does not claim destruction of the
+    files, and records appeared files to identify within-directory renames."""
+
+    def test_a_directory_renamed_during_prune_records_outcome_moved_and_does_not_claim_destruction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            (doomed / "report.json").write_text("{}", encoding="utf-8")
+            (doomed / "data.txt").write_text("important\n", encoding="utf-8")
+
+            renamed_target = Path(tmp) / "rescued_run"
+
+            def rename_dir_during_rmtree(path):
+                # Another process / operator renames or moves the directory
+                Path(path).rename(renamed_target)
+                err = FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+                raise err
+
+            with mock.patch.object(shutil, "rmtree", side_effect=rename_dir_during_rmtree):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    removed = remove_recorded(doomed, reason="age")
+
+            # remove_recorded must return False because it did NOT destroy the directory
+            self.assertFalse(removed)
+            self.assertTrue(renamed_target.exists())
+            self.assertTrue((renamed_target / "data.txt").exists())
+
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            tombstone = tombstones[0]
+            self.assertEqual(tombstone["name"], "doomed")
+            self.assertEqual(tombstone["outcome"], "moved")
+            # files & symlinks are uncertain (None/null): claims neither complete destruction nor survival
+            self.assertIsNone(tombstone["files"])
+            self.assertIsNone(tombstone["symlinks"])
+            # moved_files preserves the pre-removal snapshot
+            self.assertEqual(tombstone["moved_files"], ["data.txt", "report.json"])
+            self.assertEqual(tombstone["appeared"], [])
+
+    def test_partial_delete_then_rename_during_prune_records_outcome_moved_with_uncertain_files(self):
+        """Reviewer finding P1: if rmtree unlinks a file before an external rename causes ENOENT,
+        the record must not claim the unlinked file survived; files remains None (uncertain)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            (doomed / "deleted.txt").write_text("deleted\n", encoding="utf-8")
+            (doomed / "survivor.txt").write_text("survived\n", encoding="utf-8")
+
+            renamed_target = Path(tmp) / "rescued_partial"
+
+            def partial_delete_then_rename(path):
+                # rmtree unlinks one file before the rename happens
+                (Path(path) / "deleted.txt").unlink()
+                # another actor moves the directory
+                Path(path).rename(renamed_target)
+                raise FileNotFoundError(errno.ENOENT, "No such file", str(path))
+
+            with mock.patch.object(shutil, "rmtree", side_effect=partial_delete_then_rename):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    removed = remove_recorded(doomed, reason="age")
+
+            self.assertFalse(removed)
+            # deleted.txt is gone from rescued directory
+            self.assertFalse((renamed_target / "deleted.txt").exists())
+            self.assertTrue((renamed_target / "survivor.txt").exists())
+
+            tombstone = read_tombstones(runs)[0]
+            self.assertEqual(tombstone["outcome"], "moved")
+            # Because rmtree might have deleted files before the rename, files is explicitly uncertain (None)
+            self.assertIsNone(tombstone["files"])
+            self.assertIsNone(tombstone["symlinks"])
+            self.assertEqual(tombstone["moved_files"], ["deleted.txt", "report.json", "survivor.txt"])
+
+    def test_prune_run_dirs_excludes_moved_directory_from_returned_removed_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "keep", now)
+            doomed = make_dir(runs, "old", now - 100)
+            (doomed / "file.txt").write_text("evidence\n", encoding="utf-8")
+            os.utime(doomed, (now - 100, now - 100))
+
+            renamed_target = Path(tmp) / "old_renamed"
+
+            def rename_dir(path):
+                Path(path).rename(renamed_target)
+                raise FileNotFoundError(errno.ENOENT, "No such file", str(path))
+
+            with mock.patch.object(shutil, "rmtree", side_effect=rename_dir):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    pruned = prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+
+            # The moved directory must NOT be in the returned list of removed directories
+            self.assertEqual(pruned, [])
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            self.assertEqual(tombstones[0]["outcome"], "moved")
+            self.assertIsNone(tombstones[0]["files"])
+            self.assertEqual(tombstones[0]["moved_files"], ["file.txt", "report.json"])
 
 
 class TestSymlinkResolutionHonesty(unittest.TestCase):

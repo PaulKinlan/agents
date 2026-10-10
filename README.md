@@ -450,9 +450,9 @@ cleanup that deletes `runs/hillclimb-<target>-<run_id>/` when the disposable wor
 cannot be created — go through one recorded-removal choke point
 (`lib/retention.py::remove_recorded`), which appends one JSON tombstone line per removal
 to **`retention-ledger.jsonl` at the factory root** (never inside `runs/`): directory
-name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome,
-every disappeared symlink with its target (`symlinks`),
-and **the exact list of files that disappeared**. A citation is to a *file* — e.g. a bead
+name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome (`removed`, `moved` or `partial`),
+every disappeared symlink with its target (`symlinks`, for `removed` and `partial`; `null` for `moved`),
+and the list of files that disappeared (for `removed` and `partial`; `null` for `moved`, where `moved_files` records the pre-removal snapshot). A citation is to a *file* — e.g. a bead
 citing `runs/<agent>-<target>-<run_id>/candidates.json` as evidence — so the record counts
 files: a removal that fails *part way* (the directory survives but contents are destroyed)
 is tombstoned with `outcome: "partial"` and the lost files named, rather than passing a
@@ -471,15 +471,16 @@ A cited directory with **no** tombstone in this ledger admits three readings the
 record cannot distinguish: it was never pruned at all; it was pruned through
 another ledger (ledgers are local and do not sync); or it was pruned before this
 ledger existed — absence is not evidence of absence. The
-record also reads as best-effort where it is best-effort: `files` is the pre-removal
-snapshot (stated on every line as `record_scope`), and a file created inside the
-directory *during* the removal window may be destroyed without being listed — the
-mechanism cannot see it, so the record does not claim completeness there. Equally,
-a listed file is one the removal saw disappear between its two observations:
-destroyed by the removal, or moved or renamed out of the snapshot by a concurrent
-writer — the record cannot tell which, so a listed file must never be read as a
-destroyed file. A `symlinks`
-entry records the link and its raw target, and `outside_tree` is three-valued: `true`
+record also reads as best-effort where it is best-effort: for `removed` and
+`partial`, `files` is the pre-removal snapshot (stated on every line as `record_scope`),
+and a file created inside the directory *during* the removal window may be destroyed
+without being listed — the mechanism cannot see it, so the record does not claim
+completeness there (for `moved`, `files` is `null` and `moved_files` records the
+pre-removal snapshot). Equally, a listed file is one the removal saw disappear between
+its two observations: destroyed by the removal, or moved or renamed out of the snapshot
+by a concurrent writer — the record cannot tell which, so a listed file must never be
+read as a destroyed file. A `symlinks`
+entry (for `removed` and `partial`) records the link and its raw target, and `outside_tree` is three-valued: `true`
 means the target resolved outside the removed tree — its contents were NOT removed and
 are NOT covered by the record (the difference between "this evidence is gone" and "this
 evidence moved or was never in this tree"); `false` means it resolved inside, so the
