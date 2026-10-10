@@ -326,9 +326,151 @@ function compute(a, b) {
         candidates = [c for c in res["candidates"] if c["path"].endswith("projects.css")]
         self.assertEqual(len(candidates), 0, f"Expected 0 candidates for projects.css, got {candidates}")
 
+    def test_every_rule_has_pinned_canonical_baseline_ids(self):
+        """agents-mw6m requirement 3: 100% of modern-web rules must have pinned canonical Baseline IDs.
+        
+        A rule added to RULES with no pinned entry in PINNED_RULE_CANONICAL_IDS fails statically,
+        preventing silent fallback suppression failures at authoring time.
+        """
+        for rule in self.mod.RULES:
+            rule_id = rule["rule_id"]
+            with self.subTest(rule_id=rule_id):
+                self.assertIn(
+                    rule_id,
+                    self.mod.PINNED_RULE_CANONICAL_IDS,
+                    f"Rule '{rule_id}' has no declared pinned canonical Baseline IDs"
+                )
+                self.assertTrue(
+                    len(self.mod.PINNED_RULE_CANONICAL_IDS[rule_id]) > 0,
+                    f"Rule '{rule_id}' has empty pinned canonical Baseline IDs"
+                )
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_audio_feed_baseline_fallback_instances_suppressed(self):
+        """agents-mw6m requirement 1: audio-feed false-positive instances (anchor, dialog, plain-date).
+        
+        Verifies that legitimate Baseline fallback annotations matching canonical IDs or aliases
+        are properly recognized in known_baseline_fallbacks and suppressed from candidate findings.
+        """
+        # 1. v9e4: anchor positioning fallback with TODO(baseline/anchor)
+        (self.repo / "v9e4_anchor.js").write_text("""
+// TODO(baseline/anchor): Remove positionFallback() and getBoundingClientRect() viewport math.
+function positionMenu(el) {
+  const rect = el.getBoundingClientRect();
+  return { top: rect.top, left: rect.left };
+}
+""", encoding="utf-8")
+
+        # 2. xm8o: dialog closedby shim with TODO(baseline/dialog)
+        (self.repo / "xm8o_dialog.html").write_text("""
+<!-- TODO(baseline/dialog): Remove shim when closedby reaches Baseline -->
+<dialog class="modal-overlay">
+  <button>Close</button>
+</dialog>
+""", encoding="utf-8")
+
+        # 3. mjvz: temporal PlainDate fallback with TODO(baseline/plain-date)
+        (self.repo / "mjvz_temporal.js").write_text("""
+// TODO(baseline/plain-date): Remove fallback when Baseline Widely Available
+function daysBetween(a, b) {
+  return new Date(b) - new Date(a);
+}
+""", encoding="utf-8")
+
+        result = self.mod.scan_repository(self.repo, retrieve_guides=False)
+
+        self.assertEqual(len(result["candidates"]), 0, f"Expected 0 candidates, got: {result['candidates']}")
+        self.assertEqual(len(result["known_baseline_fallbacks"]), 3)
+        features = {f["feature_id"] for f in result["known_baseline_fallbacks"]}
+        self.assertEqual(features, {"anchor", "dialog", "plain-date"})
+
+    def test_unrecognized_baseline_marker_emits_loud_warning_and_candidate(self):
+        """agents-mw6m requirement 2: unrecognized marker emits candidate with loud stderr warning.
+        
+        When a marker in the fallback window does not match pinned canonical IDs, it must NOT
+        be silently emitted: emit with a loud warning on stderr and annotate candidate.
+        """
+        import io
+        import contextlib
+
+        (self.repo / "unrecognized.js").write_text("""
+// TODO(baseline/nonexistent-feature-xyz): Deliberate fallback for unrecognised feature
+function positionMenu(el) {
+  const rect = el.getBoundingClientRect();
+  return { top: rect.top, left: rect.left };
+}
+""", encoding="utf-8")
+
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf):
+            result = self.mod.scan_repository(self.repo, retrieve_guides=False)
+
+        warning_output = stderr_buf.getvalue()
+        self.assertIn("Warning: [modern-web] TODO(baseline/nonexistent-feature-xyz)", warning_output)
+        self.assertIn("does not match rule 'legacy-tooltip-popover-anchor' pinned canonical IDs", warning_output)
+        self.assertIn("fallback suppression skipped and finding candidate emitted", warning_output)
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["rule_id"], "legacy-tooltip-popover-anchor")
+        self.assertIn("unrecognized_baseline_annotations", candidate)
+        self.assertEqual(
+            candidate["unrecognized_baseline_annotations"],
+            [{"annotation_line": 2, "feature_id": "nonexistent-feature-xyz"}]
+        )
+
+    def test_fallback_window_with_intermittent_blank_lines(self):
+        """agents-mw6m: multi-line fallback functions with scattered blank lines are within window."""
+        (self.repo / "spaced_function.js").write_text("""
+// TODO(baseline/temporal-plaindate): Remove fallback
+
+function daysBetween(a, b) {
+
+  // intermediate comment
+  const d1 = new Date(a);
+
+  return new Date(b) - new Date(a);
+}
+""", encoding="utf-8")
+
+        result = self.mod.scan_repository(self.repo, retrieve_guides=False)
+        self.assertEqual(len(result["candidates"]), 0)
+        self.assertEqual(len(result["known_baseline_fallbacks"]), 1)
+        self.assertEqual(result["known_baseline_fallbacks"][0]["feature_id"], "temporal-plaindate")
+
+    def test_arbitrary_namespaced_suffix_marker_does_not_suppress_and_warns(self):
+        """agents-mw6m review finding P1: arbitrary namespaced suffix (e.g. not-a-real-feature.anchor).
+        
+        Arbitrary dot-separated prefixes must not be stripped to match suffix aliases;
+        only declared canonical IDs and standard BCD namespaces are accepted.
+        """
+        import io
+        import contextlib
+
+        (self.repo / "bogus_namespace.js").write_text("""
+// TODO(baseline/not-a-real-feature.anchor): Bogus namespace should not match
+function positionMenu(el) {
+  const rect = el.getBoundingClientRect();
+  return { top: rect.top, left: rect.left };
+}
+""", encoding="utf-8")
+
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf):
+            result = self.mod.scan_repository(self.repo, retrieve_guides=False)
+
+        warning_output = stderr_buf.getvalue()
+        self.assertIn("Warning: [modern-web] TODO(baseline/not-a-real-feature.anchor)", warning_output)
+        self.assertIn("does not match rule 'legacy-tooltip-popover-anchor' pinned canonical IDs", warning_output)
+        self.assertIn("fallback suppression skipped and finding candidate emitted", warning_output)
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["rule_id"], "legacy-tooltip-popover-anchor")
+        self.assertIn("unrecognized_baseline_annotations", candidate)
+        self.assertEqual(
+            candidate["unrecognized_baseline_annotations"],
+            [{"annotation_line": 2, "feature_id": "not-a-real-feature.anchor"}]
+        )
 
 
 class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
@@ -496,3 +638,7 @@ class TestModernWebPrepassNeverExecutesUnpinnedRemoteCode(unittest.TestCase):
             if isinstance(node, _ast.Constant) and isinstance(node.value, str):
                 self.assertFalse(re.match(r"^\s*(?:npx|npm)\b", node.value),
                                  f"command-shaped literal at line {node.lineno}: {node.value!r}")
+
+
+if __name__ == "__main__":
+    unittest.main()
