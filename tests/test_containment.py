@@ -618,25 +618,77 @@ class TestAdapters(unittest.TestCase):
                 self.assertNotIn("--plugin-dir", argv)
 
     def test_claude_never_honours_worktree_write_until_sandbox_verified(self):
-        """agents-dpbc review P1: the dispatcher downgrades a claude worktree-write grant to
-        read-only because claude is not in SANDBOXED_ENGINES, but the adapter is a second
-        entry point — a direct invocation sets FACTORY_TOOL_POLICY itself and used to reach
-        the engine with Edit,Write, the sandbox check bypassed entirely. The invariant now
-        lives at the layer that turns the policy into flags: claude.sh applies the SAME
-        downgrade the dispatcher would, with the dispatcher's reason string, so every caller
-        gets the read-only run. The engine still runs (exit 0, so
-        test_the_adapters_agree_with_the_policy_table keeps the load-bearing row), but with
-        the read-only tool set only."""
+        """agents-dpbc review P1 (third round): claude is not in SANDBOXED_ENGINES, so the
+        dispatcher downgrades a claude worktree-write grant to read-only BEFORE invoking the
+        adapter — no legitimate caller ever presents worktree-write to claude.sh. A direct
+        invocation that does is REFUSED (exit 3, the engine never starts), not silently
+        downgraded: an exit-0 downgrade would leave the caller believing its writes
+        happened, and a claim must not report success for a grant it did not deliver. The
+        load-bearing ENGINE_TOOL_POLICIES row stays (check_engine reads the pre-downgrade
+        policy); the agreement with the table is now pinned as refusal by
+        test_the_adapters_agree_with_the_policy_table."""
         res, argv = self.run_adapter("claude", "worktree-write")
+        self.assertEqual(res.returncode, 3, res.stderr)
+        self.assertIn("Refusing", res.stderr)
+        self.assertIn("not sandbox-verified", res.stderr)
+        self.assertIsNone(argv, "the engine must not start")
+        self.assertFalse((self.tmp / "run" / "model_output.txt").exists())
+
+    def test_no_write_capable_adapter_delivers_write_outside_the_sandbox(self):
+        """agents-dpbc review P1-B, the structural guard at the ADAPTER boundary: the
+        worktree-write grant is deliverable only inside the dispatcher's OS sandbox, so
+        for EVERY engine whose ENGINE_TOOL_POLICIES row carries WORKTREE_WRITE a direct
+        adapter invocation must not reach the engine with write flags — refused, engine
+        never started. The subset check in
+        test_every_write_capable_engine_is_sandbox_verified_or_named_unverified reads the
+        TABLE; this pins the BEHAVIOUR the table claims, per engine, so the guard cannot
+        pass while an adapter still leaks (pi was in SANDBOXED_ENGINES and satisfied the
+        subset check while its adapter handed out edit,write on a direct invocation). The
+        FACTORY_SANDBOXED=1 case matters: the marker is caller-controlled env, so it must
+        never be sufficient on its own. New engines enter this guard automatically via the
+        table. The accept side — the verified sandbox really does deliver the grant — is
+        pinned by test_pi_delivers_worktree_write_inside_the_verified_sandbox and the
+        bwrap-gated dispatcher write-agent tests."""
+        write_capable = sorted(e for e, policies in ENGINE_TOOL_POLICIES.items()
+                               if WORKTREE_WRITE in policies)
+        self.assertTrue(write_capable, "guard vacuous: no write-capable engine in the table")
+        for engine in write_capable:
+            for extra in ({}, {"FACTORY_SANDBOXED": "1"}):
+                with self.subTest(engine=engine, sandboxed_env=bool(extra)):
+                    res, argv = self.run_adapter(engine, "worktree-write", env_overrides=extra)
+                    self.assertEqual(res.returncode, 3, res.stderr)
+                    self.assertIn("Refusing", res.stderr)
+                    self.assertIsNone(
+                        argv,
+                        f"{engine} must not start: a direct worktree-write invocation "
+                        f"must not reach the engine with write flags outside the "
+                        f"dispatcher-verified OS sandbox")
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_pi_delivers_worktree_write_inside_the_verified_sandbox(self):
+        """The accept side of the adapter-boundary guard, so the verification cannot rot
+        into refusing everything (a refuse-everything adapter would pass the direct-
+        invocation guard while silently killing the sandboxed write feature). Inside a
+        REAL bubblewrap reproducing the dispatcher's sandbox fingerprint — a private user
+        namespace and the factory tree bound read-only — with the dispatcher's
+        FACTORY_SANDBOXED=1 marker, pi.sh honours worktree-write and the engine receives
+        edit,write."""
+        env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
+               "ANTHROPIC_API_KEY": "stub-key", "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+               "FACTORY_TOOL_POLICY": "worktree-write", "FACTORY_SANDBOXED": "1"}
+        res = subprocess.run(
+            ["bwrap", "--dev-bind", "/", "/", "--ro-bind", str(ROOT), str(ROOT),
+             "--die-with-parent", "--",
+             "bash", str(ROOT / "lib" / "adapters" / "pi.sh"), "probe", str(self.target),
+             str(self.skill), str(self.tmp / "run")],
+            input="the prompt", capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("Downgrading tool policy 'worktree-write' to 'read-only'", res.stderr)
-        self.assertIn("will not run inside the OS sandbox", res.stderr)
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob",
-                         "a direct worktree-write invocation must not reach claude with "
-                         "Edit,Write — the adapter self-downgrades like the dispatcher")
-        self.assertIn("--restricted", argv)
-        self.assertIn("--strict-mcp-config", argv)
-        self.assertIn("Tool policy: read-only", res.stdout)
+        argv = self.argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(argv[argv.index("--tools") + 1], "read,grep,find,ls,edit,write",
+                         "inside the verified OS sandbox the pi adapter must deliver the "
+                         "worktree-write grant")
+        self.assertIn("--no-extensions", argv)
+        self.assertIn("--no-approve", argv)
 
     def test_claude_combines_the_skill_and_the_system_directive(self):
         """agents-m2n: with FACTORY_SYSTEM_DIRECTIVE_FILE set, claude.sh concatenates
@@ -885,18 +937,29 @@ class TestAdapters(unittest.TestCase):
                     self.assertFalse((self.tmp / "run" / "model_output.txt").exists())
 
     def test_the_adapters_agree_with_the_policy_table(self):
-        """Drift guard: an adapter runs exactly the policies ENGINE_TOOL_POLICIES says it
-        enforces, and every adapter on disk is in the table."""
+        """Drift guard: the adapters and ENGINE_TOOL_POLICIES agree, and every adapter on
+        disk is in the table. READ_ONLY rows run (exit 0); a policy outside an engine's row
+        is refused (exit 3, engine never starts); and a WORKTREE_WRITE row does NOT mean a
+        direct invocation gets write flags — the write grant is deliverable only inside
+        the dispatcher's OS sandbox, so EVERY adapter REFUSES a direct worktree-write
+        invocation (agents-dpbc review P1: an exit-0 silent downgrade would leave a direct
+        caller believing its writes happened; this test was the caller that presented
+        worktree-write to claude.sh at all, since the dispatcher downgrades before it
+        invokes the adapter). The sandboxed delivery path is pinned by
+        test_pi_delivers_worktree_write_inside_the_verified_sandbox and the bwrap-gated
+        dispatcher write-agent tests."""
         on_disk = {p.stem for p in (ROOT / "lib" / "adapters").glob("*.sh")}
         self.assertEqual(on_disk, set(ENGINE_TOOL_POLICIES))
         for engine, supported in ENGINE_TOOL_POLICIES.items():
             for policy in GRANTABLE_POLICIES:
                 with self.subTest(engine=engine, policy=policy):
                     res, argv = self.run_adapter(engine, policy)
-                    if policy in supported:
+                    if policy in supported and policy == READ_ONLY:
                         self.assertEqual(res.returncode, 0, res.stderr)
                         self.assertIsNotNone(argv)
                     else:
+                        # Not in the row, or a worktree-write row on a DIRECT invocation:
+                        # refused either way — never a silent partial delivery.
                         self.assertEqual(res.returncode, 3, res.stderr)
                         self.assertIsNone(argv)
 
