@@ -131,15 +131,31 @@ RENDERED_TEXT_FIELDS = (
     "state", "change",
 )
 
-# Fields on a scanner candidate that hold the matched value.
-# Fields the STDOUT channel must drop wholesale. candidate_id belongs here with the values it is
-# derived from: it is sha256(rule NUL path NUL match_text NUL ordinal)[:16], so it is a digest of the
-# same secret - and a 16-char hex digest matches no secret pattern, which is why mask_text cannot
-# mask it and why it must be dropped rather than pattern-masked (agents-qslz). On this channel the
-# drop is SECRECY: stdout carries no fingerprint, so the id is the only digest of the match in the
-# payload. On the sink and report channels the same drop is hygiene, because the fingerprint is
-# published there (see the module docstring for the per-channel rule).
-CANDIDATE_MATCH_FIELDS = ("snippet", "raw_match", "candidate_id")
+# THE STDOUT CHANNEL IS AN ALLOWLIST, not a denylist (agents-h0mb, coord's ruling after the
+# iukb census). The function's own docstring always described an allowlist - "the channel carries
+# the keys its readers need and nothing else" - while the implementation was a denylist (drop the
+# named match fields, mask every other string), and the census proved the gap: eight fields across
+# the real stations carry repository-derived free text under names no drop list knew
+# (context_snippet, source_context, context_window, preview_head, recent_diff_excerpt,
+# readme_excerpt, body, comments). Naming them would fix eight instances and keep the defect for
+# the ninth field added next month, so the policy is inverted: a key survives on stdout only
+# because a READER of the channel consumes it, and everything else is dropped whatever its name
+# and whatever its shape. The reader census behind STDOUT_REPORT_KEYS is recorded in
+# stdout_safe_report's docstring and pinned by tests/test_redaction.py.
+#
+# The keys a reader of the stdout channel consumes: the identity of each candidate (rule, path,
+# location, severity) for the terminal/CI reader, and nothing else. Every other string is dropped
+# unnamed; a container is dropped unnamed (nested containers are a consequence, not a special
+# case); only small non-string scalars pass by shape, because a number, bool or None cannot carry
+# repository-derived text. The --output file keeps the raw record, so dropping here removes no
+# information a human needs to rotate a credential.
+STDOUT_REPORT_KEYS = frozenset({"rule_id", "path", "line_number", "severity"})
+
+# The one container the channel carries: the candidate list itself, which is what every reader
+# (the terminal, and the tests that parse a station's stdout) actually consumes. Each item is a
+# candidate dict and gets the same allowlist, so a list item is held to exactly the rule a
+# top-level field is held to.
+STDOUT_CANDIDATES_KEY = "candidates"
 
 
 # Identity fields (`agent`, `rule_id`, `path`) are rendered, and they reach this layer as
@@ -450,39 +466,112 @@ def redact_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def stdout_safe_report(report: Any) -> Any:
-    """Return a publishable copy of a scanner candidate report.
+    """Return a copy of a scanner candidate report carrying only what the channel's readers need.
 
-    The channel carries the keys its readers need and nothing else (agents-qslz): a terminal or CI
-    log consumes rule, path, location and severity. The matched text and `candidate_id` are dropped
-    wholesale rather than pattern-masked - the id is a 16-hex digest and matches no secret pattern.
-    The raw values remain in the file written by `--output`.
+    THE POLICY IS AN ALLOWLIST (agents-h0mb, coord's ruling after the agents-iukb census),
+    because the previous denylist did not do what this docstring always claimed: it said "the
+    channel carries the keys its readers need and nothing else" while the code dropped a named
+    list and masked everything else - and the census of the routed stations found EIGHT fields
+    of repository-derived free text that no name list knew (context_snippet, source_context,
+    context_window, preview_head, recent_diff_excerpt, readme_excerpt, body, comments). Naming
+    those eight would have kept the same defect for the ninth field added next month. So the
+    rule is now what the docstring always said: a key survives because a READER consumes it,
+    and an unknown key is dropped, whatever its name, its text, or its shape. The safety claim
+    holds by construction rather than by enumeration: a new station field carrying source text
+    is safe by default, not by someone remembering to add it to a list.
 
-    THE DROP IS SECRECY ON THIS CHANNEL - not hygiene - and the difference is the fingerprint. This
-    runs on RAW scanner candidates BEFORE ingestion, so the payload carries NO fingerprint at all:
-    the fingerprint is computed downstream, when the candidates are ingested. `candidate_id` is
-    therefore the ONLY digest of the matched text in this payload, and dropping it is exactly what
-    keeps a confirmation oracle for the match off a terminal or CI log that cannot be un-published.
-    On the sink and report channels the fingerprint IS published by design (THREAT_MODEL.md), and
-    for an id-bound row it is a digest of the same value, so withholding the id there is only
-    hygiene. The same drop is a different kind of rule per channel; an earlier wording of this
-    docstring called the stdout drop hygiene, and it was wrong in exactly that way (agents-qslz,
-    second review).
+    THE READER CENSUS BEHIND THE ALLOWLIST (enumerated, not sampled):
+      * the terminal/CI reader this docstring has always named: rule, path, location, severity;
+      * the tests that parse a station's stdout (tests/test_audit_a11y.py,
+        tests/test_scan_surface.py, tests/test_audit_deps.py, tests/test_vuln_verify_prepass.py,
+        tests/test_prepass_truth.py): they read `candidates`, `candidate_count`, and per
+        candidate `rule_id`, `path`, `line_number`;
+      * station-to-station consumers: none read stdout. docs-write consumes docs-drift through
+        the --output file (prepare_docs_fixes.py), and every other subprocess call in a station
+        script parses an EXTERNAL tool's stdout (npm, git, gh, gitleaks), never a station's.
+    STDOUT_REPORT_KEYS is exactly that reader set; the small scalars (counts, flags) the
+    summaries carry pass by shape because a number, bool or None cannot hold repository text.
+
+    candidate_id is dropped like every other unnamed key, and on THIS channel that drop is
+    SECRECY, not hygiene (agents-qslz, second review): this runs on raw scanner candidates
+    BEFORE ingestion, so the payload carries no fingerprint and the id - sha256(rule NUL path
+    NUL match NUL ordinal)[:16], a 16-hex digest no secret pattern matches - is the only digest
+    of the matched text in the payload. On the sink and report channels the fingerprint is
+    published by design (THREAT_MODEL.md) and the same drop is only hygiene; the rule is per
+    channel and the two must not be collapsed. The raw values remain in the file written by
+    `--output`.
+
+    THE DECISION IS MADE ON THE KEY, NEVER ON THE KEY'S TEXT: the membership test below is the
+    only thing that decides whether a field survives. A dict key whose TEXT contains a matched
+    value is not a member of the allow set, so it is dropped with its value by construction -
+    the same construction that drops a nested dict carrying the match. No station legitimately
+    emits a matched value as a key name, and the tests pin both halves of that statement.
+
+    Carried strings still pass through mask_text, the outer layer every channel shares, so a
+    carried field whose text is credential-SHAPED (a path named after a key) is masked in place.
+    That is the whole of what survives of the old masking on this channel: the by-name drop list
+    and the matched-literal property it needed are gone, because a channel that carries no
+    unnamed text has nothing left for them to catch. A tuple or other non-list container is
+    dropped like any unnamed value (no station emits one; noted from review, not widened for).
     """
     if isinstance(report, list):
-        return [stdout_safe_report(item) for item in report]
+        # A bare string in a list is text under no name at all, so it cannot survive: the
+        # allowlist decides on keys, and a list item has none. Dicts and lists recurse;
+        # non-string scalars pass.
+        return [item for item in (stdout_safe_report(entry) for entry in report)
+                if not isinstance(item, str)]
     if not isinstance(report, dict):
         return report
 
     safe: Dict[str, Any] = {}
     for key, value in report.items():
-        if key == "candidates" and isinstance(value, list):
-            safe[key] = [stdout_safe_report(c) for c in value]
-        elif key in CANDIDATE_MATCH_FIELDS:
-            safe[key] = "[redacted]"
+        if isinstance(value, (dict, list)):
+            # The one carried container is the candidate list the readers consume. Every other
+            # container - source_context, ground_truth, metrics, comments - is dropped unnamed:
+            # nested repository text is a consequence of the rule, not a special case.
+            if key == STDOUT_CANDIDATES_KEY:
+                safe[key] = stdout_safe_report(value)
         elif isinstance(value, str):
-            safe[key] = mask_text(value)
-        else:
+            # A string survives only as the value of a key a reader consumes, masked for the
+            # credential-SHAPED text a carried field can still hold (mask_text is the shared
+            # outer layer, not the boundary - the allowlist is the boundary).
+            if key in STDOUT_REPORT_KEYS:
+                safe[key] = mask_text(value)
+        elif isinstance(value, (bool, int, float)) or value is None:
+            # A small scalar the summary carries (candidate_count, unlocatable_count, flags):
+            # it cannot hold repository-derived text, so it passes by shape, not by name.
             safe[key] = value
+        # Anything else - a tuple, bytes, a set - is dropped with the unnamed strings.
     return safe
 
 
+def emit_station_result(result: Any, output_path: Optional[str], *, summary: Optional[str] = None) -> None:
+    """The ONE spelling of a station CLI's output rule (agents-qslz): the file gets the raw
+    record, stdout gets the redacted one.
+
+    Every station CLI ends here rather than spelling the branch out itself, because the class of
+    defect this closes cannot be enumerated by grepping print sites - some scripts print a
+    variable - so the rule has to be a shared helper plus the structural test in
+    tests/test_redaction.py that asserts every `--output` script calls it.
+
+    With `output_path`: write the RAW JSON there. It is the local, gitignored record of what
+    matched - what a human needs in order to rotate a credential - so it must stay raw. Print
+    `summary` if one is given.
+
+    Without `output_path`: stdout goes to a terminal or a CI log, which cannot be un-published,
+    so print `stdout_safe_report(result)` and point stderr at `--output`.
+    """
+    if output_path:
+        # The file is the local record of what matched — it is what a human needs in order
+        # to rotate a credential, and it is gitignored. Every published render of a finding
+        # is masked instead, so write the raw record here only.
+        Path(output_path).write_text(json.dumps(result, indent=2), encoding="utf-8")
+        if summary:
+            print(summary)
+    else:
+        # stdout goes to a terminal or a CI log, which cannot be un-published: never emit
+        # match text there, whatever shape the credential turns out to be.
+        print(json.dumps(stdout_safe_report(result), indent=2))
+        sys.stderr.write(
+            "Note: stdout redacts matched values. Use --output <file> for the raw local record.\n"
+        )

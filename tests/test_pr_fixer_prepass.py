@@ -27,10 +27,13 @@ class TestPrFixerUnknownLine(unittest.TestCase):
         script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, script)
         # The script imports the shared path-confinement helper and derives FACTORY_ROOT from its
-        # own location, so the sandbox mirrors the real repo layout.
+        # own location, so the sandbox mirrors the real repo layout. The emit_station_result output
+        # rule (agents-qslz) adds lib/redaction.py to the import set; redaction.py is stdlib-only,
+        # so the copy needs no transitive helpers.
         helper = sandbox / "lib" / "path_security.py"
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(

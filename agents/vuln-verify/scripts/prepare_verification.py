@@ -25,6 +25,7 @@ sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.line_numbers import usable_line_number  # noqa: E402
 from lib.path_security import resolve_within_target  # noqa: E402
+from lib.redaction import emit_station_result  # noqa: E402
 
 # The only fields that cross from discovery to verification (SF-08). Everything the discovery
 # model wrote about a candidate — title, description, severity, remediation, exploit chain —
@@ -387,12 +388,8 @@ def main():
         "candidates": verification_candidates
     }
 
-    output_json = json.dumps(result, indent=2)
-    if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-        print(f"Prepared {len(verification_candidates)} candidate findings with source context to {args.output}")
-    else:
-        print(output_json)
+    emit_station_result(result, args.output,
+                        summary=f"Prepared {len(verification_candidates)} candidate findings with source context to {args.output}")
 
 
 if __name__ == "__main__":

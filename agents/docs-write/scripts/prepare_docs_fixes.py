@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -29,6 +30,8 @@ except ImportError:
         ".git", "node_modules", "vendor", "dist", "build", ".next",
         "coverage", ".venv", "venv", "__pycache__", ".beads", "runs", "findings"
     }
+
+from lib.redaction import emit_station_result  # noqa: E402
 
 
 def collect_repo_ground_truth(target_dir: Path) -> Dict[str, Any]:
@@ -76,6 +79,14 @@ def collect_repo_ground_truth(target_dir: Path) -> Dict[str, Any]:
     }
 
 
+def _fail_closed(message: str) -> None:
+    # The repo's failure convention (modern-web's scanner): one line on stderr and a
+    # nonzero exit, never a traceback for an expected failure - and, critically here,
+    # never the successful-looking payload an empty scan would have produced.
+    print(f"error: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare context for docs-write proposer")
     parser.add_argument("--target", required=True, help="Target repository directory")
@@ -85,17 +96,39 @@ def main():
     target_dir = Path(args.target).resolve()
     drift_candidates: List[Dict[str, Any]] = []
 
-    if DOCS_DRIFT_SCRIPT.exists():
+    # A producer failure must NOT look like an empty scan: if docs-drift never ran, a
+    # payload with drift_candidates_count=0 tells the proposer "no drift" when the truth
+    # is "drift unknown" - so every failure below is reported and exits nonzero instead
+    # of leaving drift_candidates=[] (agents-h0mb review, P1).
+    if not DOCS_DRIFT_SCRIPT.exists():
+        _fail_closed(f"docs-drift producer not found at {DOCS_DRIFT_SCRIPT} - "
+                     "cannot distinguish 'no drift' from 'drift never scanned'")
+    # docs-drift's stdout is the human-facing channel and is redacted by design
+    # (agents-qslz): a machine consumer must read the raw local record via --output.
+    drift_out = None
+    try:
         try:
-            res = subprocess.run(
-                [sys.executable, str(DOCS_DRIFT_SCRIPT), "--target", str(target_dir)],
-                capture_output=True, text=True, timeout=15
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                drift_data = json.loads(res.stdout)
-                drift_candidates = drift_data.get("candidates", [])
-        except Exception:
-            pass
+            with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", prefix="docs-drift-", delete=False) as tmp:
+                drift_out = tmp.name
+        except OSError as exc:
+            _fail_closed(f"could not create a temp file for the docs-drift record: {exc}")
+        res = subprocess.run(
+            [sys.executable, str(DOCS_DRIFT_SCRIPT), "--target", str(target_dir),
+             "--output", drift_out],
+            capture_output=True, text=True, timeout=15
+        )
+        if res.returncode != 0:
+            _fail_closed(f"docs-drift producer exited {res.returncode}: "
+                         f"{res.stderr.strip()[:400]}")
+        drift_data = json.loads(Path(drift_out).read_text(encoding="utf-8"))
+        drift_candidates = drift_data.get("candidates", [])
+    finally:
+        if drift_out:
+            try:
+                os.unlink(drift_out)
+            except OSError:
+                pass
 
     ground_truth = collect_repo_ground_truth(target_dir)
     readme_excerpt = ""
@@ -123,11 +156,7 @@ def main():
         "readme_excerpt": readme_excerpt
     }
 
-    out = json.dumps(payload, indent=2)
-    if args.output:
-        Path(args.output).write_text(out, encoding="utf-8")
-    else:
-        print(out)
+    emit_station_result(payload, args.output)
 
 
 if __name__ == "__main__":

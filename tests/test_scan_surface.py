@@ -97,8 +97,8 @@ class TestStdoutChannelDropsTheMatch(unittest.TestCase):
 
     def test_stdout_has_no_candidate_id_and_no_match_text(self):
         """Load-bearing: change the else branch back to `print(output_json)` and this fails with
-        `AssertionError: 'c464d56dafccfd24' != '[redacted]' ... the confirmation oracle reached the
-        station's stdout unmasked` (the snippet assert fails next).
+        `AssertionError: 'candidate_id' unexpectedly found in ...` - the confirmation oracle
+        reached the station's stdout (the snippet assert fails next).
 
         The --output branch is NOT redacted on purpose - it is the raw local record - so the fixture
         is read from stdout only.
@@ -120,9 +120,11 @@ class TestStdoutChannelDropsTheMatch(unittest.TestCase):
         artefact = json.loads(result.stdout)
         self.assertTrue(artefact["candidates"], "fixture must yield a candidate carrying a match")
         for candidate in artefact["candidates"]:
-            self.assertEqual(candidate["candidate_id"], "[redacted]",
-                             "the confirmation oracle reached the station's stdout unmasked")
-            self.assertEqual(candidate["snippet"], "[redacted]")
+            # The allowlist drops the match and its derived digest OUTRIGHT - the keys are
+            # absent, not masked in place (agents-h0mb).
+            self.assertNotIn("candidate_id", candidate,
+                             "the confirmation oracle reached the station's stdout")
+            self.assertNotIn("snippet", candidate)
             # The channel must stay usable: the location still ships.
             self.assertIn("rule_id", candidate)
             self.assertIn("path", candidate)

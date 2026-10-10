@@ -21,7 +21,7 @@ sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 
-from lib.redaction import stdout_safe_report  # noqa: E402
+from lib.redaction import emit_station_result  # noqa: E402
 
 # Built-in high-confidence regex patterns for when gitleaks is not installed
 PATTERNS = [
@@ -204,19 +204,9 @@ def main():
         "candidates": candidates
     }
 
-    output_json = json.dumps(result, indent=2)
-    if args.output:
-        # The file is the local record of what matched — it is what a human needs in order
-        # to rotate a credential, and it is gitignored. Every published render of a finding
-        # is masked instead (see lib/redaction.py), so write the raw record here only.
-        Path(args.output).write_text(output_json, encoding="utf-8")
-    else:
-        # stdout goes to a terminal or a CI log, which cannot be un-published: never emit
-        # match text there, whatever shape the credential turns out to be.
-        print(json.dumps(stdout_safe_report(result), indent=2))
-        sys.stderr.write(
-            "Note: stdout redacts matched values. Use --output <file> for the raw local record.\n"
-        )
+    # One spelling of the output rule (agents-qslz): the --output file keeps the raw local
+    # record, stdout gets the redacted form plus the advisory.
+    emit_station_result(result, args.output)
 
 if __name__ == "__main__":
     main()

@@ -48,6 +48,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.redaction import emit_station_result  # noqa: E402
+
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS
     IGNORED_DIRS = DEFAULT_IGNORE_DIRS | {"fixtures", "reports", "tests", "test", "__tests__", ".github", ".vscode", ".idea"}
@@ -495,12 +497,8 @@ def main():
         "candidate_ids": candidate_ids
     }
 
-    output_json = json.dumps(result, indent=2)
-    if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-        print(f"Saved mined data to {args.output}")
-    else:
-        print(output_json)
+    emit_station_result(result, args.output,
+                        summary=f"Saved mined data to {args.output}")
 
 
 if __name__ == "__main__":

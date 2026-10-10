@@ -19,6 +19,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# The redaction helper lives at the repo root, one level above FACTORY_ROOT as defined above.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from lib.redaction import emit_station_result  # noqa: E402
+
 EXCLUDE_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "vendor", ".beads", "runs", "scratch",
     "findings", "__pycache__", ".nyc_output", "coverage", "test", "tests",
@@ -417,11 +424,7 @@ def main():
         "top_assets": metrics["largest_assets"]
     }
 
-    output_json = json.dumps(result, indent=2)
-    if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-    else:
-        print(output_json)
+    emit_station_result(result, args.output)
 
 if __name__ == "__main__":
     main()

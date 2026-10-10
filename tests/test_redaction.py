@@ -11,6 +11,7 @@ reported as a candidate by the factory's own secret-scan pre-pass on every run, 
 exactly the permanent false positive this work exists to avoid.
 """
 
+import ast
 import json
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
@@ -487,27 +488,25 @@ class TestScannerStdout(unittest.TestCase):
 
 
 
-class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
-    """agents-qslz (P1): a value DERIVED from the matched text must be dropped with it."""
+class TestStdoutChannelCarriesOnlyWhatReadersConsume(unittest.TestCase):
+    """agents-qslz (P1), restated for the allowlist (agents-h0mb): a value DERIVED from the
+    matched text must be dropped with it - and under the allowlist, dropped means ABSENT.
 
-    def test_candidate_id_is_dropped_with_the_match_fields_it_is_derived_from(self):
-        """candidate_id is sha256(rule NUL path NUL match_text NUL ordinal)[:16] - a digest of the
-        matched text - so the stdout channel must drop it exactly like the snippet it came from, for
-        the reason the function itself states: a terminal or CI log has no way to be un-published.
+    candidate_id is sha256(rule NUL path NUL match_text NUL ordinal)[:16] - a digest of the
+    matched text - and this channel carries no fingerprint, so the id is the only digest of
+    the match in the payload. The old shape emitted "[redacted]" sentinel VALUES under the
+    known names; the allowlist drops the keys outright, because a reader of this channel
+    consumes rule, path, location and severity and nothing else (the reader census is in
+    stdout_safe_report's docstring, and the tests that parse station stdout assert only those
+    keys).
 
-        It is a DROP, not a mask, and that distinction is the defect: mask_text cannot recognise a
-        16-char hex digest, so before this fix the id fell through the string branch verbatim while
-        its own source was [redacted]. Observed end-to-end on the scanner, not just in unit form.
+    Load-bearing: revert the drop in stdout_safe_report (carry unnamed keys through, e.g.
+    `else: safe[key] = value`) and this fails with the digest present in the serialized
+    output. The assertion is on the serialized channel and the exact surviving key set, not
+    on membership of any list in the implementation.
+    """
 
-        Load-bearing: stop dropping `candidate_id` on the stdout channel (in this tree: remove it
-        from CANDIDATE_MATCH_FIELDS) and this fails with
-        `AssertionError: '45242927149666d8' != '[redacted]' ... the confirmation oracle reached the
-        stdout channel unmasked`.
-
-        The assertion is on the OUTPUT, not on the shape of the implementation: an implementation
-        that hardcodes the key check instead of using the drop list is correct and must pass, so the
-        membership assertion that used to fire first is gone (agents-qslz review, P2).
-        """
+    def test_derived_match_values_and_the_match_text_never_reach_the_channel(self):
         from lib.redaction import stdout_safe_report
 
         report = {"rule_id": "github-pat", "path": "src/config.js", "line_number": 1,
@@ -515,14 +514,374 @@ class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
                   "candidate_id": "45242927149666d8", "identity_source": "candidate-id"}
         safe = stdout_safe_report(report)
 
-        self.assertEqual(safe["candidate_id"], "[redacted]",
-                         "the confirmation oracle reached the stdout channel unmasked")
-        self.assertEqual(safe["snippet"], "[redacted]")
-        self.assertEqual(safe["raw_match"], "[redacted]")
-        # The channel must stay USABLE: fields not derived from the match still survive.
-        self.assertEqual(safe["rule_id"], "github-pat")
-        self.assertEqual(safe["path"], "src/config.js")
-        self.assertEqual(safe["line_number"], 1)
+        serialized = json.dumps(safe)
+        self.assertNotIn("45242927149666d8", serialized,
+                         "the confirmation oracle reached the stdout channel")
+        self.assertNotIn("ghp_SECRETVALUE", serialized)
+        # The channel must stay USABLE: exactly the reader-consumed keys survive.
+        self.assertEqual(safe, {"rule_id": "github-pat", "path": "src/config.js",
+                                "line_number": 1})
+
+
+# Assembled at runtime, like CREDENTIAL above: a literal in this file would be reported as a
+# candidate by the factory's own secret-scan pre-pass on every run. NO pattern in lib/redaction
+# recognises this shape - no vendor prefix, no assignment context - and that is the point of the
+# canary: it is a matched value the masker cannot see (agents-dd0w). The previous round's canary
+# was AWS-shaped, which mask_text recognises, so it could not see the masker's blind spot.
+UNKNOWN_SHAPE_CANARY = "qz8x" + "k2m9" * 5 + "w7vd"
+
+
+class TestStdoutChannelIsAnAllowlist(unittest.TestCase):
+    """agents-h0mb (coord's ruling, after the agents-iukb census) and agents-dd0w: the stdout
+    channel DROPS anything a reader does not consume.
+
+    The denylist this replaces - drop named fields, mask every other string - leaked
+    vuln-verify's source_context.context_snippet: raw source lines under a name the drop list
+    did not know, passed through verbatim because mask_text recognised nothing in them. The
+    census then found seven more fields of the same class across the real stations
+    (context_snippet, source_context, context_window, preview_head, recent_diff_excerpt,
+    readme_excerpt, body, comments). Naming them would fix eight instances and keep the defect
+    for the ninth, so the policy is the one the docstring always stated: the channel carries
+    the keys its readers need and nothing else. A new station field carrying source text is
+    safe by DEFAULT, not by someone remembering to add it to a list.
+
+    The assertions are on the SERIALIZED output - the canary must appear nowhere in it -
+    because that is the shape that would have caught the leak where per-key assertions did not.
+
+    Load-bearing: revert the drop in stdout_safe_report (make the unnamed-value branch carry
+    the value, e.g. `else: safe[key] = value`) and test_an_unknown_field_carrying_source_text_
+    is_dropped fails with the raw canary present in the serialized output while `rule_id` in
+    that same payload still survives - the leak is the unknown key, not the reader keys. The
+    same revert fails test_a_matched_value_in_a_key_name_never_reaches_the_channel.
+    """
+
+    def test_the_canary_matches_no_pattern(self):
+        """The premise of the whole class: if any pattern recognised this value, every assertion
+        below could be satisfied by adding one more pattern - the enumeration defect again."""
+        from lib.redaction import ALL_PATTERNS, mask_text
+
+        self.assertEqual(mask_text(UNKNOWN_SHAPE_CANARY), UNKNOWN_SHAPE_CANARY)
+        self.assertEqual([name for name, pattern in ALL_PATTERNS
+                          if pattern.search(UNKNOWN_SHAPE_CANARY)], [])
+
+    def test_an_unknown_field_carrying_source_text_is_dropped(self):
+        """A station field nobody has added yet: unknown key, source text no pattern knows."""
+        from lib.redaction import stdout_safe_report
+
+        canary = UNKNOWN_SHAPE_CANARY
+        report = {"candidates": [{
+            "rule_id": "custom-scanner-rule", "path": "src/app.js", "line_number": 3,
+            "severity": "high",
+            # A field a station adds NEXT MONTH: no list anywhere knows this name.
+            "brand_new_source_field": "// exfiltrated source line: " + canary,
+        }]}
+        safe = stdout_safe_report(report)
+
+        serialized = json.dumps(safe)
+        self.assertNotIn(canary, serialized,
+                         "an unknown field's source text reached the stdout channel")
+        self.assertNotIn("brand_new_source_field", serialized,
+                         "the unknown key itself survived on the channel")
+        # The channel stays usable: the reader keys survive, and nothing else.
+        candidate, = safe["candidates"]
+        self.assertEqual(candidate, {"rule_id": "custom-scanner-rule", "path": "src/app.js",
+                                     "line_number": 3, "severity": "high"})
+
+    def test_a_matched_value_in_a_key_name_never_reaches_the_channel(self):
+        """The KEY half of the dict statement (coord's ruling on the dict-key case): the policy
+        decides on the key - allowlist membership - never on the key's TEXT, so a key whose
+        text contains a matched value is dropped with its value by construction. No station
+        legitimately emits a matched value as a key name; this pins both halves of
+        `for key, value in report.items()`."""
+        from lib.redaction import stdout_safe_report
+
+        canary = UNKNOWN_SHAPE_CANARY
+        report = {
+            # The canary AS A KEY at the top level...
+            canary: "value under a matched-value key",
+            "candidates": [{
+                # ...and as BOTH key and value inside a candidate.
+                canary: canary,
+                "rule_id": "r", "path": "src/app.js", "line_number": 1,
+            }],
+        }
+        serialized = json.dumps(stdout_safe_report(report))
+        self.assertNotIn(canary, serialized,
+                         "a matched value used as a KEY reached the stdout channel")
+
+    def test_the_census_fields_and_their_containers_are_dropped(self):
+        """Every field the agents-iukb census found carrying repository text on a real station
+        is dropped unnamed - and the container around it goes with it, not recursed into."""
+        from lib.redaction import stdout_safe_report
+
+        canary = UNKNOWN_SHAPE_CANARY
+        report = {
+            "candidates": [{
+                "rule_id": "r", "path": "src/app.js", "line_number": 1,
+                "snippet": canary, "raw_match": canary, "candidate_id": "0" * 16,
+                "context_snippet": canary,
+                "source_context": {"context_snippet": canary},
+                "context_window": canary, "preview_head": canary,
+                "recent_diff_excerpt": canary, "body": canary, "comments": [canary],
+            }],
+            "readme_excerpt": canary,
+        }
+        safe = stdout_safe_report(report)
+
+        serialized = json.dumps(safe)
+        self.assertNotIn(canary, serialized)
+        for name in ("snippet", "raw_match", "candidate_id", "context_snippet",
+                     "source_context", "context_window", "preview_head",
+                     "recent_diff_excerpt", "readme_excerpt", "body", "comments"):
+            self.assertNotIn(name, serialized, f"{name} survived on the channel")
+        candidate, = safe["candidates"]
+        self.assertEqual(candidate, {"rule_id": "r", "path": "src/app.js", "line_number": 1})
+
+    def test_an_aws_shaped_canary_is_dropped_by_the_same_policy(self):
+        """The policy does not depend on which shapes the masker knows: a value mask_text WOULD
+        recognise is dropped too, because the key carrying it is not one a reader consumes.
+        (The nested-container canary of the tip commit can no longer reach stdout AT ALL - the
+        container is dropped, not recursed-and-masked.)"""
+        from lib.redaction import stdout_safe_report
+
+        report = {"candidates": [{
+            "rule_id": "r", "path": "src/app.js", "line_number": 1,
+            "source_context": {"file": "src/app.js", "line": 1,
+                               "context_snippet": f'const k = "{CREDENTIAL}";'},
+        }]}
+        safe = stdout_safe_report(report)
+
+        self.assertNotIn(CREDENTIAL, json.dumps(safe))
+        candidate, = safe["candidates"]
+        self.assertNotIn("source_context", candidate)
+
+    def test_carried_strings_are_still_masked_for_credential_shapes(self):
+        """mask_text remains the shared outer layer on the strings the channel DOES carry:
+        a carried field whose text is credential-SHAPED (a path named after a key) is masked."""
+        from lib.redaction import stdout_safe_report
+
+        safe = stdout_safe_report({"candidates": [{
+            "rule_id": "r", "path": f"src/{CREDENTIAL}-leaked.js", "line_number": 1}]})
+        self.assertNotIn(CREDENTIAL, json.dumps(safe))
+        self.assertIn("[redacted:aws-access-key]", safe["candidates"][0]["path"])
+
+    def test_small_scalars_pass_by_shape_and_everything_else_is_dropped(self):
+        """Counts and flags a summary carries cannot hold repository text, so they pass by
+        shape rather than by name. Strings, containers, and non-list/tuple shapes do not."""
+        from lib.redaction import stdout_safe_report
+
+        safe = stdout_safe_report({
+            "candidate_count": 3, "unlocatable_count": 1, "line_number_unknown": True,
+            "notes": None,
+            "scanner": "builtin-regex",          # unnamed string: dropped
+            "target": "some-project",            # unnamed string: dropped
+            "metrics": {"total": 1},             # container that is not candidates: dropped
+            "bloat_candidates": [{"size": 1}],   # a second list of dicts: dropped
+            "a_tuple": ("not", "carried"),       # not a carried shape: dropped
+            "candidates": [],
+        })
+        self.assertEqual(safe, {"candidate_count": 3, "unlocatable_count": 1,
+                                "line_number_unknown": True, "notes": None,
+                                "candidates": []})
+
+    def test_the_raw_record_keeps_the_value_and_stdout_does_not(self):
+        """The channel split itself: --output keeps the raw value (a human needs it to rotate
+        the credential); stdout and stderr never carry it."""
+        import contextlib
+        import io
+
+        from lib.redaction import emit_station_result
+
+        canary = UNKNOWN_SHAPE_CANARY
+        result = {"candidates": [{"snippet": canary,
+                                  "source_context": {"context_snippet": "// " + canary}}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "raw.json"
+            emit_station_result(result, str(out))
+            self.assertIn(canary, out.read_text(encoding="utf-8"),
+                          "the raw local record lost the value a human needs to rotate it")
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            emit_station_result(result, None)
+        self.assertNotIn(canary, stdout.getvalue())
+        self.assertNotIn(canary, stderr.getvalue())
+
+
+class TestStationStdoutChannelIsStructural(unittest.TestCase):
+    """agents-qslz: EVERY station CLI that accepts --output must route its result through
+    lib.redaction.emit_station_result - the helper next to stdout_safe_report above.
+
+    The class this closes cannot be enumerated by grep: ui-ux-audit printed a VARIABLE
+    (`out = json.dumps(result, indent=2)` then `print(out)`), which is why two text searches
+    missed different subsets of the same leak. So the assertion is POSITIVE and structural -
+    parse each script's AST and require a call to the helper - rather than forbidding
+    particular print strings, which is the check that kept missing sites.
+
+    Presence alone is not enough (agents-h0mb review, P1): a station that calls the helper
+    only inside `if args.output:` and raw-prints in the `else:` satisfies a presence check
+    while still leaking on the no-output path. So the test asserts the two-part property
+    that makes the no-output stdout channel PROVABLY the helper's:
+
+    1. UNCONDITIONAL ROUTING - an emit_station_result call that is not nested under any
+       conditional or short-circuiting construct (if/while/for/try/match, ternary,
+       boolean operator, comprehension), so no sibling branch can route around it.
+    2. STDOUT EXCLUSIVITY - no other stdout emission anywhere in the script: no print()
+       without file=sys.stderr, no reference to sys.stdout, no pprint (whose default
+       stream is stdout). With the helper as the ONLY writer to stdout, whatever reaches
+       the terminal on the no-output path is the redacted report by construction.
+
+    Together these hold against the whole mutation family, not one spelling: removing the
+    call fails (1), conditioning it on --output fails (1), raw-printing the result on any
+    path fails (2), and aliasing or wrapping the helper so no direct unconditional call
+    remains also fails (1).
+    """
+
+    # Scripts that accept --output but have NO stdout result path at all: --output is
+    # required, and stdout carries only a one-line human summary. Each entry is a considered
+    # exclusion WITH its reason - an omission and a deliberate exclusion must look different
+    # to the next reader.
+    STDOUT_RESULT_EXCEPTIONS = {
+        "agents/log-check/scripts/parse_logs.py":
+            "--output is required=True; stdout carries only a one-line scan summary, never result JSON",
+        "agents/test-gap/scripts/find_untested.py":
+            "--output is required=True; stdout carries only a one-line deficit summary, never result JSON",
+        "agents/vuln-triage/scripts/triage.py":
+            "--output is required=True; stdout carries only a one-line cluster summary, never result JSON",
+    }
+
+    @staticmethod
+    def _output_scripts():
+        scripts = {}
+        for path in sorted(ROOT.glob("agents/*/scripts/*.py")):
+            source = path.read_text(encoding="utf-8")
+            if '"--output"' in source or "'--output'" in source:
+                scripts[str(path.relative_to(ROOT))] = source
+        return scripts
+
+    # A helper call nested under any of these has a sibling execution path that does NOT
+    # reach it - which is exactly the leak shape (helper under `if args.output:`, raw print
+    # in the `else:`). BoolOp covers the `args.output and emit(...)` short-circuit spelling;
+    # comprehensions execute zero times on an empty iterable. TryStar/Match are guarded for
+    # older interpreters. `with` is unconditional, so it is deliberately absent.
+    _CONDITIONAL_ANCESTORS = tuple(cls for cls in (
+        ast.If, ast.While, ast.For, ast.AsyncFor, ast.Try, ast.BoolOp, ast.IfExp,
+        ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+        getattr(ast, "TryStar", None), getattr(ast, "Match", None),
+    ) if cls is not None)
+
+    @staticmethod
+    def _is_helper_call(node) -> bool:
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "emit_station_result":
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "emit_station_result":
+            return True
+        return False
+
+    @classmethod
+    def _calls_helper_unconditionally(cls, source: str) -> bool:
+        """True iff the script contains a call to emit_station_result that no conditional,
+        loop, short-circuit, or comprehension guards - so the call executes on EVERY path
+        through its enclosing scope, the no-output path included."""
+        tree = ast.parse(source)
+
+        def visit(node, conditioned):
+            if isinstance(node, ast.Call) and cls._is_helper_call(node) and not conditioned:
+                return True
+            return any(
+                visit(child, conditioned or isinstance(node, cls._CONDITIONAL_ANCESTORS))
+                for child in ast.iter_child_nodes(node)
+            )
+
+        return visit(tree, False)
+
+    @staticmethod
+    def _stdout_emission_sites(source: str):
+        """Every site that can write to stdout WITHOUT going through the helper: a print()
+        whose file= is absent or is not sys.stderr, any reference to sys.stdout (covers
+        sys.stdout.write/writelines, json.dump(..., sys.stdout), sys.stdout.fileno()), and
+        any pprint call (pprint's default stream is stdout)."""
+        tree = ast.parse(source)
+        sites = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr == "stdout"
+                    and isinstance(node.value, ast.Name) and node.value.id == "sys"):
+                sites.append(f"sys.stdout reference at line {node.lineno}")
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "print":
+                    file_kw = next((k for k in node.keywords if k.arg == "file"), None)
+                    stderr = (file_kw is not None
+                              and isinstance(file_kw.value, ast.Attribute)
+                              and file_kw.value.attr == "stderr"
+                              and isinstance(file_kw.value.value, ast.Name)
+                              and file_kw.value.value.id == "sys")
+                    if not stderr:
+                        sites.append(f"print() without file=sys.stderr at line {node.lineno}")
+                if isinstance(func, ast.Name) and func.id == "pprint":
+                    sites.append(f"pprint() (default stream is stdout) at line {node.lineno}")
+                if isinstance(func, ast.Attribute) and func.attr == "pprint":
+                    sites.append(f"pprint.pprint() (default stream is stdout) at line {node.lineno}")
+        return sites
+
+    def test_every_output_script_routes_its_result_through_the_helper(self):
+        """Load-bearing: point one station back at a raw print (e.g. revert
+        accessibility/scripts/audit_a11y.py's main() to `print(json.dumps(result, indent=2))`)
+        and this fails with `AssertionError: Lists differ:
+        ['agents/accessibility/scripts/audit_a11y.py'] != []` naming the unconverted script.
+
+        Load-bearing against the CONDITIONAL-ROUTING mutant too (agents-h0mb review, P1):
+        rewrite a converted station to call the helper only inside `if args.output:` and
+        raw-print in the `else:` and this fails the same way, because the remaining helper
+        call is conditional and no longer counts.
+        """
+        scripts = self._output_scripts()
+        self.assertTrue(scripts, "no --output scripts found - the enumeration itself is broken")
+        missing = [rel for rel, source in scripts.items()
+                   if rel not in self.STDOUT_RESULT_EXCEPTIONS
+                   and not self._calls_helper_unconditionally(source)]
+        self.assertEqual(missing, [],
+                         "station CLIs with --output and no UNCONDITIONAL emit_station_result "
+                         "call (a call nested under if/try/loops/short-circuits leaves a path "
+                         "that routes around the helper): " + ", ".join(missing))
+
+    def test_no_output_script_emits_to_stdout_outside_the_helper(self):
+        """The exclusivity half of the property: since NO station script writes to stdout by
+        any other spelling, the no-output stdout content can only be the helper's redacted
+        report.
+
+        Load-bearing: add `print(json.dumps(result, indent=2))` alongside (not instead of)
+        the helper call in any converted station and this fails naming the print site - the
+        shape a presence-only check can never catch.
+        """
+        scripts = self._output_scripts()
+        self.assertTrue(scripts, "no --output scripts found - the enumeration itself is broken")
+        offenders = {}
+        for rel, source in scripts.items():
+            if rel in self.STDOUT_RESULT_EXCEPTIONS:
+                continue  # excepted scripts print a one-line summary, never result JSON
+            sites = self._stdout_emission_sites(source)
+            if sites:
+                offenders[rel] = sites
+        self.assertEqual(offenders, {},
+                         "station CLIs writing to stdout outside emit_station_result "
+                         "(route summaries through the helper's summary= instead): "
+                         + "; ".join(f"{rel}: {sites}" for rel, sites in offenders.items()))
+
+    def test_exception_list_is_exact_current_and_reasoned(self):
+        """An exception must still exist, still handle --output, still carry a reason, and
+        must not hide a script that DOES call the helper (a stale exception reads as an
+        omission)."""
+        scripts = self._output_scripts()
+        for rel, reason in self.STDOUT_RESULT_EXCEPTIONS.items():
+            self.assertIn(rel, scripts,
+                          f"exception {rel} no longer handles --output - remove it or the rule changed")
+            self.assertTrue(reason.strip(), f"exception {rel} must state its reason")
+            self.assertFalse(self._calls_helper_unconditionally(scripts[rel]),
+                             f"{rel} calls the helper AND is excepted - drop the stale exception")
+
 
 if __name__ == "__main__":
     unittest.main()

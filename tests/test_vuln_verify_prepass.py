@@ -56,6 +56,9 @@ class TestVerifierPriming(unittest.TestCase):
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -257,7 +260,18 @@ class TestVerifierPriming(unittest.TestCase):
             self.assertIn("unrecognized payload shape", res.stderr)
 
     def test_malformed_run_artifact_records_warning_and_continues(self):
-        """agents-dh5l: unreadable/malformed run artifacts must record a warning on stderr and continue."""
+        """agents-dh5l: unreadable/malformed run artifacts must record a warning on stderr and continue.
+
+        agents-h0mb (coord ruling): a test is a consumer too. The warning is a DIAGNOSTIC the
+        station writes to stderr (prepare_verification.py), a channel redaction never touches,
+        so it must stay visible on the no-output path; the snippet is the confirmation oracle,
+        which stdout must not carry. This test therefore asserts both halves of the contract on
+        the no-output path - warning visible on stderr, payload redacted on stdout - and reads
+        the RAW record through --output, the sanctioned machine channel, to prove the fallback
+        snippet actually flowed through. Asserting '[redacted]' in place of the raw-record check
+        would silently change what this test measures, so the redaction is pinned as a separate
+        assertion instead.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             sandbox, target = self._sandbox(tmp)
@@ -270,13 +284,31 @@ class TestVerifierPriming(unittest.TestCase):
                 discovery_finding(snippet="FALLBACK-VALID-SNIPPET"),
             ]}), encoding="utf-8")
 
-            cmd = [sys.executable, str(sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"),
-                   "--target", str(target)]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+
+            # No --output: the diagnostic survives on stderr and the oracle is dropped from stdout.
+            res = subprocess.run([sys.executable, str(script), "--target", str(target)],
+                                 capture_output=True, text=True, timeout=60)
             self.assertEqual(res.returncode, 0, f"script failed:\n{res.stderr}")
             self.assertIn("Warning: Could not read run artifact", res.stderr)
             self.assertIn("candidates.json", res.stderr)
             bundle = json.loads(res.stdout)
+            self.assertEqual(bundle["candidate_count"], 1)
+            # The allowlist drops the match OUTRIGHT - the key is absent, not masked in place
+            # (agents-h0mb); the serialized channel carries no trace of the fallback snippet.
+            self.assertNotIn("snippet", bundle["candidates"][0],
+                             "the confirmation oracle reached the station's stdout")
+            self.assertNotIn("FALLBACK-VALID-SNIPPET", res.stdout)
+
+            # --output: the raw local record is the machine channel; the fallback snippet must
+            # arrive there intact, and the diagnostic is still recorded on stderr.
+            out = sandbox / "out.json"
+            res = subprocess.run([sys.executable, str(script), "--target", str(target),
+                                  "--output", str(out)],
+                                 capture_output=True, text=True, timeout=60)
+            self.assertEqual(res.returncode, 0, f"script failed:\n{res.stderr}")
+            self.assertIn("Warning: Could not read run artifact", res.stderr)
+            bundle = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(bundle["candidate_count"], 1)
             self.assertEqual(bundle["candidates"][0]["snippet"], "FALLBACK-VALID-SNIPPET")
 
@@ -300,6 +332,9 @@ class TestPathConfinement(unittest.TestCase):
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -402,6 +437,9 @@ class TestUnknownLineNumbers(unittest.TestCase):
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         body = "".join(f"const line{i} = {i};\n" for i in range(1, app_lines + 1))
@@ -554,6 +592,9 @@ class TestPathlessCandidates(unittest.TestCase):
         # has to carry it too or the script cannot import at all (found by rebasing, not by
         # reading: the suite was green on the pre-rebase main).
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -672,6 +713,153 @@ class TestPathlessCandidates(unittest.TestCase):
                              "the store's finding replaced the findings file's")
             self.assertEqual(bundle["unlocatable_count"], 1)
             self.assertIsNone(bundle["candidates"][0]["path"])
+
+
+# Assembled at runtime on purpose: a literal in this file would be reported as a candidate by
+# the factory's own secret-scan pre-pass on every run (same reason as CREDENTIAL in
+# tests/test_redaction.py).
+SOURCE_LINE_CANARY = "AKIA" + "CANARYNESTED0001"  # matches the aws-access-key shape, not a live secret
+
+# The third review's shape (agents-dd0w): a value NO pattern in lib/redaction recognises. The AWS
+# canary above matches the masker, so it cannot see the masker's blind spot - the leak reached a
+# third round precisely because the acceptance canary matched the mechanism under test.
+UNKNOWN_SHAPE_LINE_CANARY = "qz8x" + "k2m9" * 5 + "w7vd"
+
+
+class TestStdoutCarriesNoRawSourceLines(unittest.TestCase):
+    """A no-output run must not carry raw SOURCE LINES to stdout (agents-h0mb).
+
+    The station enriches each candidate with `source_context`, a nested dict whose
+    `context_snippet` is a window of raw source lines - and those lines are exactly where the
+    matched secret sits. The stdout redactor dropped the flat match fields but passed nested
+    containers through unchanged, so the nested copy of the same text left verbatim on the
+    no-output path. A canary that also appears in the candidate's snippet would prove nothing
+    about that nested path (the flat drop already removes it), so the canary below appears ONLY
+    in the target's source file, never in the candidate's own snippet.
+
+    Load-bearing: revert the container recursion in lib/redaction.py stdout_safe_report
+    (restore `else: safe[key] = value`) and this fails with the raw canary line present in
+    stdout while `candidates[0].snippet` in that same payload still reads [redacted].
+    """
+
+    def _sandbox(self, tmp: Path):
+        sandbox = tmp / "sandbox"
+        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        helper = sandbox / "lib" / "path_security.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        target = sandbox / "target"
+        (target / "src").mkdir(parents=True)
+        # The canary sits on a SOURCE LINE inside the candidate's context window. The finding
+        # below points at line 2 and its snippet does not contain the canary, so the only way
+        # the canary can reach the bundle is through source_context.context_snippet.
+        (target / "src" / "app.js").write_text(
+            "const el = document.body;\n"
+            "el.innerHTML = user;\n"
+            f'const AWS_KEY = "{SOURCE_LINE_CANARY}";\n',
+            encoding="utf-8")
+        return sandbox, target
+
+    def test_no_output_run_never_prints_a_source_line_canary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            findings_file = sandbox / "findings.json"
+            findings_file.write_text(json.dumps({"findings": [{
+                "fingerprint": "f" * 64,
+                "agent": "vuln-discovery",
+                "rule_id": "dom-injection-sink",
+                "path": "src/app.js",
+                "line_number": 2,
+                # Deliberately NOT the canary: a canary shared with the snippet would be
+                # removed by the flat drop and prove nothing about the nested path.
+                "snippet": "el.innerHTML = user;",
+            }]}), encoding="utf-8")
+
+            script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+            res = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file)],  # no --output: stdout is the channel under test
+                capture_output=True, text=True, timeout=60)
+
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertNotIn(SOURCE_LINE_CANARY, res.stdout,
+                             "a raw source line reached stdout through source_context on the "
+                             "no-output path")
+            # The run really did enrich the candidate (the canary is in the raw record), so the
+            # assertion above is not vacuous: re-run through --output, the sanctioned raw channel.
+            out = sandbox / "raw.json"
+            res2 = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file), "--output", str(out)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(res2.returncode, 0, res2.stderr)
+            self.assertIn(SOURCE_LINE_CANARY, out.read_text(encoding="utf-8"),
+                          "the canary never entered the bundle at all; the stdout assertion is vacuous")
+
+    def test_no_output_run_drops_a_source_line_canary_no_pattern_recognises(self):
+        """agents-dd0w: the AWS-shaped canary above exercises the MASKER; this one cannot,
+        because mask_text passes it through untouched. Only the allowlist's wholesale drop of
+        unnamed fields keeps it off stdout - the finding's snippet below deliberately does
+        NOT contain the canary, so no contains-the-matched-text reasoning can be what saves it
+        either. What is asserted here is exactly the third review's repro, driven through the
+        real station.
+
+        Load-bearing: revert the drop in lib/redaction.py's stdout_safe_report (carry unnamed
+        values through, e.g. `else: safe[key] = value`) and this fails with the raw canary
+        present on stdout, while the AWS-shaped test above still passes - a canary shaped for
+        the masker cannot see the masker's blind spot.
+        """
+        sys.path.insert(0, str(ROOT))
+        from lib.redaction import ALL_PATTERNS, mask_text
+
+        # The premise: no pattern recognises the canary, so masking alone cannot stop it.
+        self.assertEqual(mask_text(UNKNOWN_SHAPE_LINE_CANARY), UNKNOWN_SHAPE_LINE_CANARY)
+        self.assertEqual([name for name, pattern in ALL_PATTERNS
+                          if pattern.search(UNKNOWN_SHAPE_LINE_CANARY)], [])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            # Rewrite the target source so the canary - not the AWS shape - sits on a source
+            # line inside the candidate's context window.
+            (target / "src" / "app.js").write_text(
+                "const el = document.body;\n"
+                "el.innerHTML = user;\n"
+                f'const KEY = "{UNKNOWN_SHAPE_LINE_CANARY}";\n',
+                encoding="utf-8")
+            findings_file = sandbox / "findings.json"
+            findings_file.write_text(json.dumps({"findings": [{
+                "fingerprint": "f" * 64,
+                "agent": "vuln-discovery",
+                "rule_id": "dom-injection-sink",
+                "path": "src/app.js",
+                "line_number": 2,
+                # NOT the canary: the only route to the bundle is source_context.context_snippet.
+                "snippet": "el.innerHTML = user;",
+            }]}), encoding="utf-8")
+
+            script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+            res = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file)],  # no --output: stdout is the channel under test
+                capture_output=True, text=True, timeout=60)
+
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertNotIn(UNKNOWN_SHAPE_LINE_CANARY, res.stdout,
+                             "a source line carrying a value no pattern recognises reached stdout "
+                             "through source_context on the no-output path")
+            # Non-vacuous: the canary really did enter the bundle, proven via --output.
+            out = sandbox / "raw.json"
+            res2 = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file), "--output", str(out)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(res2.returncode, 0, res2.stderr)
+            self.assertIn(UNKNOWN_SHAPE_LINE_CANARY, out.read_text(encoding="utf-8"),
+                          "the canary never entered the bundle at all; the stdout assertion is vacuous")
 
 
 if __name__ == "__main__":

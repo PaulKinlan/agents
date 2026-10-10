@@ -18,6 +18,7 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.path_security import resolve_within_target  # noqa: E402
+from lib.redaction import emit_station_result  # noqa: E402
 
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
@@ -117,11 +118,7 @@ def main():
         "candidates": fixable_findings
     }
 
-    out = json.dumps(payload, indent=2)
-    if args.output:
-        Path(args.output).write_text(out, encoding="utf-8")
-    else:
-        print(out)
+    emit_station_result(payload, args.output)
 
 
 if __name__ == "__main__":
