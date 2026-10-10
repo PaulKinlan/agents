@@ -525,6 +525,67 @@ class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
         self.assertEqual(safe["line_number"], 1)
 
 
+class TestStdoutChannelRedactsAtEveryDepth(unittest.TestCase):
+    """The stdout channel's drop/mask policy applies AT EVERY DEPTH, not only at the top level.
+
+    The leak this guards (agents-h0mb): vuln-verify attaches `source_context`, a nested dict
+    whose `context_snippet` is raw source lines, and those lines are exactly where the matched
+    secret sits. The flat fields were redacted while the nested copy of the same text passed
+    through unchanged, so the branch's claim that stdout is safe by construction was false while
+    a structural test asserted exactly that. The assertion here is on the SERIALIZED OUTPUT -
+    the secret must appear nowhere in it - because that is the shape that would have caught the
+    leak, where per-key assertions on the flat fields did not.
+
+    Load-bearing: revert the container recursion in stdout_safe_report (restore
+    `else: safe[key] = value`) and the first test fails with
+    `AssertionError: 'AKIAIOSFODNN7EXAMPLE' unexpectedly found in ...` while the flat fields
+    in that same output still read [redacted] - the leak is the nested copy, not the flat keys.
+    """
+
+    def test_a_secret_inside_a_nested_container_appears_nowhere_in_the_output(self):
+        from lib.redaction import stdout_safe_report
+
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        candidate = {
+            "snippet": secret, "raw_match": secret, "candidate_id": "abc123",
+            "source_context": {"file": "a.js", "line": 3,
+                               "context_snippet": f'const k = "{secret}";'},
+        }
+        safe = stdout_safe_report(candidate)
+
+        serialized = json.dumps(safe)
+        self.assertNotIn(secret, serialized,
+                         "a nested container carried the raw value past the stdout redactor")
+        # The flat fields are still dropped, and the channel stays usable.
+        self.assertEqual(safe["snippet"], "[redacted]")
+        self.assertEqual(safe["raw_match"], "[redacted]")
+        self.assertEqual(safe["candidate_id"], "[redacted]")
+        self.assertEqual(safe["source_context"]["file"], "a.js")
+        self.assertEqual(safe["source_context"]["line"], 3)
+
+    def test_match_fields_are_dropped_and_strings_masked_at_arbitrary_depth(self):
+        """Lists of dicts, dicts of dicts, and any combination get the SAME key set and the
+        SAME string masking - one policy, applied recursively, not a second policy per shape."""
+        from lib.redaction import stdout_safe_report
+
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        report = {
+            "candidates": [{"snippet": secret,
+                            "meta": {"raw_match": secret, "keep": "ok"}}],
+            "outer": {"inner": [{"candidate_id": "abc123",
+                                 "note": f"the key is {secret}"}]},
+        }
+        safe = stdout_safe_report(report)
+
+        serialized = json.dumps(safe)
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("abc123", serialized)
+        # Non-match fields at depth survive - the recursion redacts, it does not withhold.
+        self.assertEqual(safe["candidates"][0]["meta"]["keep"], "ok")
+        self.assertEqual(safe["outer"]["inner"][0]["note"],
+                         "the key is [redacted:aws-access-key]")
+
+
 class TestStationStdoutChannelIsStructural(unittest.TestCase):
     """agents-qslz: EVERY station CLI that accepts --output must route its result through
     lib.redaction.emit_station_result - the helper next to stdout_safe_report above.

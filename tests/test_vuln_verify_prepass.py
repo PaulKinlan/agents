@@ -712,5 +712,86 @@ class TestPathlessCandidates(unittest.TestCase):
             self.assertIsNone(bundle["candidates"][0]["path"])
 
 
+# Assembled at runtime on purpose: a literal in this file would be reported as a candidate by
+# the factory's own secret-scan pre-pass on every run (same reason as CREDENTIAL in
+# tests/test_redaction.py).
+SOURCE_LINE_CANARY = "AKIA" + "CANARYNESTED0001"  # matches the aws-access-key shape, not a live secret
+
+
+class TestStdoutCarriesNoRawSourceLines(unittest.TestCase):
+    """A no-output run must not carry raw SOURCE LINES to stdout (agents-h0mb).
+
+    The station enriches each candidate with `source_context`, a nested dict whose
+    `context_snippet` is a window of raw source lines - and those lines are exactly where the
+    matched secret sits. The stdout redactor dropped the flat match fields but passed nested
+    containers through unchanged, so the nested copy of the same text left verbatim on the
+    no-output path. A canary that also appears in the candidate's snippet would prove nothing
+    about that nested path (the flat drop already removes it), so the canary below appears ONLY
+    in the target's source file, never in the candidate's own snippet.
+
+    Load-bearing: revert the container recursion in lib/redaction.py stdout_safe_report
+    (restore `else: safe[key] = value`) and this fails with the raw canary line present in
+    stdout while `candidates[0].snippet` in that same payload still reads [redacted].
+    """
+
+    def _sandbox(self, tmp: Path):
+        sandbox = tmp / "sandbox"
+        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        helper = sandbox / "lib" / "path_security.py"
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        target = sandbox / "target"
+        (target / "src").mkdir(parents=True)
+        # The canary sits on a SOURCE LINE inside the candidate's context window. The finding
+        # below points at line 2 and its snippet does not contain the canary, so the only way
+        # the canary can reach the bundle is through source_context.context_snippet.
+        (target / "src" / "app.js").write_text(
+            "const el = document.body;\n"
+            "el.innerHTML = user;\n"
+            f'const AWS_KEY = "{SOURCE_LINE_CANARY}";\n',
+            encoding="utf-8")
+        return sandbox, target
+
+    def test_no_output_run_never_prints_a_source_line_canary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox, target = self._sandbox(Path(tmpdir))
+            findings_file = sandbox / "findings.json"
+            findings_file.write_text(json.dumps({"findings": [{
+                "fingerprint": "f" * 64,
+                "agent": "vuln-discovery",
+                "rule_id": "dom-injection-sink",
+                "path": "src/app.js",
+                "line_number": 2,
+                # Deliberately NOT the canary: a canary shared with the snippet would be
+                # removed by the flat drop and prove nothing about the nested path.
+                "snippet": "el.innerHTML = user;",
+            }]}), encoding="utf-8")
+
+            script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+            res = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file)],  # no --output: stdout is the channel under test
+                capture_output=True, text=True, timeout=60)
+
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertNotIn(SOURCE_LINE_CANARY, res.stdout,
+                             "a raw source line reached stdout through source_context on the "
+                             "no-output path")
+            # The run really did enrich the candidate (the canary is in the raw record), so the
+            # assertion above is not vacuous: re-run through --output, the sanctioned raw channel.
+            out = sandbox / "raw.json"
+            res2 = subprocess.run(
+                [sys.executable, str(script), "--target", str(target),
+                 "--findings", str(findings_file), "--output", str(out)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(res2.returncode, 0, res2.stderr)
+            self.assertIn(SOURCE_LINE_CANARY, out.read_text(encoding="utf-8"),
+                          "the canary never entered the bundle at all; the stdout assertion is vacuous")
+
+
 if __name__ == "__main__":
     unittest.main()

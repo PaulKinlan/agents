@@ -449,6 +449,14 @@ def stdout_safe_report(report: Any) -> Any:
     hygiene. The same drop is a different kind of rule per channel; an earlier wording of this
     docstring called the stdout drop hygiene, and it was wrong in exactly that way (agents-qslz,
     second review).
+
+    The policy applies AT EVERY DEPTH, not only at the top level (agents-h0mb): any nested
+    container - a dict of dicts, a list of dicts, any combination - recurses through this same
+    function, so CANDIDATE_MATCH_FIELDS are dropped and strings are masked no matter how deep
+    they sit. That recursion is what the channel's safety claim rests on: vuln-verify attaches
+    `source_context`, a nested dict whose `context_snippet` is raw source lines, and those
+    lines are exactly where the matched secret sits. Passing a container through unchanged
+    redacted the flat fields while the nested copy of the same text left verbatim.
     """
     if isinstance(report, list):
         return [stdout_safe_report(item) for item in report]
@@ -457,14 +465,18 @@ def stdout_safe_report(report: Any) -> Any:
 
     safe: Dict[str, Any] = {}
     for key, value in report.items():
-        if key == "candidates" and isinstance(value, list):
-            safe[key] = [stdout_safe_report(c) for c in value]
-        elif key in CANDIDATE_MATCH_FIELDS:
+        if key in CANDIDATE_MATCH_FIELDS:
             safe[key] = "[redacted]"
         elif isinstance(value, str):
             safe[key] = mask_text(value)
         else:
-            safe[key] = value
+            # Containers recurse with the SAME policy at every depth (agents-h0mb) - this is
+            # also what covers the `candidates` list, which the top isinstance branch maps
+            # through this same function. Scalars (ints, bools, None) are not containers and
+            # pass through untouched. No nested key is deliberately left raw: anything not in
+            # CANDIDATE_MATCH_FIELDS is still masked string-by-string, and a nested key that
+            # ever needs a raw passthrough must say why in a comment right beside the branch.
+            safe[key] = stdout_safe_report(value)
     return safe
 
 
