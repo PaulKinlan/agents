@@ -247,6 +247,29 @@ class TestFastGateMapping(unittest.TestCase):
         finally:
             probe.unlink(missing_ok=True)
 
+    def test_fast_gate_execution_emits_single_line_marker_naming_all_suites(self):
+        """agents-gttt: when multiple suites run, tools/fast-gate.sh must emit exactly ONE
+        'fast-gate: passed:' line naming every executed suite, so the line-by-line coverage
+        parser (/home/exedev/fleet/remote/check-coverage.py) does not silently drop suites."""
+        probe_a = ROOT / "tests" / "test_multi_a_probe_tmp.py"
+        probe_b = ROOT / "tests" / "test_multi_b_probe_tmp.py"
+        try:
+            probe_a.write_text("import unittest\nclass _A(unittest.TestCase):\n    def test_a(self): pass\n", encoding="utf-8")
+            probe_b.write_text("import unittest\nclass _B(unittest.TestCase):\n    def test_b(self): pass\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = f"{probe_a.relative_to(ROOT)}\n{probe_b.relative_to(ROOT)}"
+            res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"expected rc 0, got {res.returncode}: {res.stderr}")
+            passed_lines = [l for l in res.stdout.splitlines() if l.startswith("fast-gate: passed:")]
+            self.assertEqual(len(passed_lines), 1, f"expected exactly one 'fast-gate: passed:' line, got: {passed_lines}")
+            suites_on_marker = passed_lines[0].replace("fast-gate: passed:", "").split()
+            expected = sorted([str(probe_a.relative_to(ROOT)), str(probe_b.relative_to(ROOT))])
+            self.assertEqual(sorted(suites_on_marker), expected,
+                             f"completion marker must name all suites on the single marker line: {passed_lines[0]}")
+        finally:
+            probe_a.unlink(missing_ok=True)
+            probe_b.unlink(missing_ok=True)
+
     def test_fast_gate_execution_reports_failed_terminal_signal_even_with_no_test_output(self):
         """P2 fix (agents-ltgl): tools/fast-gate.sh must leave a terminal signal naming the failure and exit code
         even when tests exit with no output at all (e.g. os._exit)."""
