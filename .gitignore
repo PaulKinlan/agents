@@ -18,6 +18,12 @@ credentials.json
 
 # Local engine state
 .agent-state/
+# The root package.json is a pi-package manifest with NO dependencies, so a root lockfile locks an
+# empty tree: it carries no information and any npm command in this checkout recreates it. It has
+# already reached a branch by accident once (agents-fy26) and turned up in two reviewer worktrees
+# the same day. Scoped to the root deliberately - if this package ever declares a real dependency,
+# delete this rule so its lockfile can be committed.
+/package-lock.json
 # Staged Pages artifact (tools/stage_site.py) — build output, never committed
 _site/
 node_modules/
