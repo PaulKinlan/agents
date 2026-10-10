@@ -127,29 +127,41 @@ def _read_pins_text(path: Path, label: str) -> str:
     The bound is the mechanism, not one more except clause (agents-28nn round 3): a FIFO
     or device file has no trustworthy size and no end, and a huge file's MemoryError is a
     resource exhaustion the process may never observe — so the refusal happens BEFORE the
-    allocation. stat first: a non-regular file (directory, FIFO, device, socket) is
-    refused by kind; an over-bound size is refused unread; the read itself is hard-capped,
-    so a file that grows past the bound while being read is refused too. MemoryError is
-    still caught as a backstop — with the cap in place it should be unreachable, and the
-    contract ("every pins-file failure is a ToolPinError") must not depend on that.
+    allocation.
+
+    The checks run against the OPENED DESCRIPTOR, never the path (agents-28nn round 4,
+    review P2): a stat-then-open BY NAME is two syscalls with a swap window between them —
+    a regular file swapped for a FIFO after the stat turns the kind refusal into a
+    BLOCKING open (the reviewer reproduced the block; the byte cap bounds a read, not an
+    open, and a blocking read on this path is the same resource class as the unbounded
+    allocation the reaper killed). So the file is opened NONBLOCKING first — a FIFO open
+    with O_NONBLOCK returns immediately instead of waiting for a writer — and fstat on
+    the descriptor then validates the very object the read will consume: a non-regular
+    file (directory, FIFO, device, socket) is refused by kind, an over-bound size is
+    refused unread, and the read itself is hard-capped, so a file that grows past the
+    bound while being read is refused too. There is no stat/open window left to swap in:
+    the object validated is the object read. MemoryError is still caught as a backstop —
+    with the cap in place it should be unreachable, and the contract ("every pins-file
+    failure is a ToolPinError") must not depend on that.
     """
     try:
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode):
-            kinds = ((stat.S_ISDIR, "a directory"), (stat.S_ISFIFO, "a FIFO"),
-                     (stat.S_ISCHR, "a character device"), (stat.S_ISBLK, "a block device"),
-                     (stat.S_ISSOCK, "a socket"))
-            kind = next((name for test, name in kinds if test(info.st_mode)),
-                        f"not a regular file (mode {oct(info.st_mode)})")
-            raise ToolPinError(
-                f"{label}: the pins path is {kind}, not a pins file; refusing to read it "
-                "as pins (a non-regular file has no trustworthy size and no end)")
-        if info.st_size > MAX_PINS_FILE_BYTES:
-            raise ToolPinError(
-                f"{label}: the pins file is {info.st_size} bytes, over the "
-                f"{MAX_PINS_FILE_BYTES}-byte bound for a pins file; refusing to read it "
-                "rather than allocate unbounded memory")
-        with open(path, "rb") as fh:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            info = os.fstat(fh.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                kinds = ((stat.S_ISDIR, "a directory"), (stat.S_ISFIFO, "a FIFO"),
+                         (stat.S_ISCHR, "a character device"), (stat.S_ISBLK, "a block device"),
+                         (stat.S_ISSOCK, "a socket"))
+                kind = next((name for test, name in kinds if test(info.st_mode)),
+                            f"not a regular file (mode {oct(info.st_mode)})")
+                raise ToolPinError(
+                    f"{label}: the pins path is {kind}, not a pins file; refusing to read it "
+                    "as pins (a non-regular file has no trustworthy size and no end)")
+            if info.st_size > MAX_PINS_FILE_BYTES:
+                raise ToolPinError(
+                    f"{label}: the pins file is {info.st_size} bytes, over the "
+                    f"{MAX_PINS_FILE_BYTES}-byte bound for a pins file; refusing to read it "
+                    "rather than allocate unbounded memory")
             data = fh.read(MAX_PINS_FILE_BYTES + 1)
         if len(data) > MAX_PINS_FILE_BYTES:
             raise ToolPinError(

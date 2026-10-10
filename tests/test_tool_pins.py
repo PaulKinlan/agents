@@ -508,28 +508,93 @@ class PinsFileFailureModeTests(unittest.TestCase):
         self.assertIn("bound", str(raised.exception))
 
     def test_a_pins_file_that_grows_past_the_bound_while_being_read_is_refused(self):
-        """The TOCTOU sibling: stat says small, the file is big by the time the read
-        finishes. The read's hard cap — not the stat check — is what catches it."""
+        """The TOCTOU sibling: fstat says small, the file is big by the time the read
+        finishes. The read's hard cap — not the fstat check — is what catches it.
+        The lie is told at os.fstat (what the reader actually consults), identified by
+        /proc/self/fd so only the pins file's descriptor is misreported."""
         cfg = self.tmp / "tools.yaml"
         cfg.write_text("gh:\n  sha256: " + "a" * 64 + "\n" + "# pad\n" * 200_000,
                        encoding="utf-8")
         self.assertGreater(cfg.stat().st_size, MAX_PINS_FILE_BYTES)
-        real_stat = Path.stat
+        real_fstat = os.fstat
 
-        def lying_stat(this, *args, **kwargs):
-            result = real_stat(this, *args, **kwargs)
-            if this == cfg:
-                return os.stat_result((result.st_mode, result.st_ino, result.st_dev,
-                                       result.st_nlink, result.st_uid, result.st_gid, 10,
-                                       int(result.st_atime), int(result.st_mtime),
-                                       int(result.st_ctime)))
+        def lying_fstat(fd, *args, **kwargs):
+            result = real_fstat(fd, *args, **kwargs)
+            try:
+                if os.readlink(f"/proc/self/fd/{fd}") == str(cfg):
+                    return os.stat_result((result.st_mode, result.st_ino, result.st_dev,
+                                           result.st_nlink, result.st_uid, result.st_gid, 10,
+                                           int(result.st_atime), int(result.st_mtime),
+                                           int(result.st_ctime)))
+            except OSError:
+                pass
             return result
 
         with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": ""}), \
-             mock.patch.object(Path, "stat", lying_stat):
+             mock.patch("os.fstat", lying_fstat):
             with self.assertRaises(ToolPinError) as raised:
                 load_tool_pins(cfg)
         self.assertIn("grew past", str(raised.exception))
+
+    def test_a_regular_to_fifo_swap_before_open_cannot_block_the_reader(self):
+        """agents-28nn round 4, review P2 — the reviewer's constructed case, kept as the
+        permanent regression test: the pins path is a REGULAR file when the run starts and
+        a FIFO by the time the reader opens it. A stat-then-open BY NAME has a swap window
+        between the two syscalls: the stat sees the regular file, the open then blocks on
+        the FIFO waiting for a writer (the reviewer reproduced the block at a 2s timeout).
+        The byte cap bounds a READ, not a blocking OPEN — so the reader opens
+        O_RDONLY|O_NONBLOCK and validates the OPENED DESCRIPTOR with fstat: the object
+        validated is the object read, the FIFO is refused by kind, and nothing ever
+        blocks. The swap is injected by an os.open wrapper — the first path-touching call
+        in BOTH the fixed and the reverted reader — so the construction bites whichever
+        implementation is under test; the feeder thread keeps the MUTATION direction
+        bounded (a reverted reader blocks in open() until the feeder's write lands, then
+        parses the fed pins and raises NOTHING, failing the test)."""
+        cfg = self.tmp / "tools.yaml"
+        cfg.write_text("gh:\n  sha256: " + "a" * 64 + "\n", encoding="utf-8")
+        swapped = []
+        real_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            if not swapped and str(path) == str(cfg):
+                # The swap: the regular pins file becomes a FIFO between the reader's
+                # validation and its open. os.mkfifo cannot replace an existing file,
+                # so rename it aside first — the reader's open then meets the FIFO.
+                os.rename(cfg, self.tmp / "original.yaml")
+                os.mkfifo(cfg)
+                swapped.append(True)
+            return real_open(path, flags, *args, **kwargs)
+
+        def writer():
+            import time as _time
+            fd = None
+            for _ in range(30):
+                try:
+                    fd = real_open(cfg, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError:
+                    _time.sleep(0.1)
+            if fd is None:
+                return  # the fixed reader never completes a blocking open: ENXIO expected
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("gh:\n  sha256: " + "a" * 64 + "\n")
+            except OSError:
+                pass
+
+        feeder = threading.Thread(target=writer, daemon=True)
+        feeder.start()
+        try:
+            with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": ""}), \
+                 mock.patch("os.open", swapping_open):
+                with self.assertRaises(ToolPinError) as raised:
+                    load_tool_pins(cfg)
+        finally:
+            feeder.join(timeout=5)
+        self.assertFalse(feeder.is_alive(),
+                         "the reader must REFUSE the swapped-in FIFO, never block on it")
+        self.assertTrue(swapped, "the construction must actually perform the swap")
+        self.assertIn("FIFO", str(raised.exception))
 
 
 if __name__ == "__main__":
