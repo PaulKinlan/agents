@@ -160,14 +160,14 @@ def wrap_untrusted(text: Any, nonce: str, max_length: int = 120) -> str:
 def is_test_or_fixture_path(rel_path: str, fname: str) -> bool:
     """Check if path is inside tests, fixtures, or is a test file.
 
-    TRADE-OFF (agents-bcz P2-5): Trades recall for precision. Any production file
-    or package whose path or filename begins with 'test' or 'fixture' (e.g.
-    `testing_framework/` or `fixtures_client.py`) will be silently unscanned.
+    P3 fix (agents-tj9u): Narrows directory matching from broad `.startswith("test")` /
+    `.startswith("fixture")` to exact directory names, so production packages like
+    `testing_service/` or `fixtures_client/` are not silently discarded.
     """
     parts = Path(rel_path).parts
     for part in parts[:-1]:
         pl = part.lower()
-        if pl in IGNORED_DIRS or pl.startswith("test") or pl.startswith("fixture"):
+        if pl in IGNORED_DIRS or pl in {"test", "tests", "fixtures", "fixture", "__tests__"}:
             return True
     name_lower = fname.lower()
     if name_lower.startswith("test_") or name_lower.endswith(
@@ -178,20 +178,32 @@ def is_test_or_fixture_path(rel_path: str, fname: str) -> bool:
     return False
 
 
-def is_scanner_file(fpath: Path, rel_path: str) -> bool:
+def is_factory_self_target(target_dir: Path) -> bool:
+    """Determine whether the target repository is the Software Factory itself."""
+    try:
+        resolved = target_dir.resolve()
+        if resolved == FACTORY_ROOT.resolve() or FACTORY_ROOT.resolve() in resolved.parents:
+            return True
+        return (resolved / "agents" / "threat-model" / "scripts").is_dir() or \
+               (resolved / "factory").is_file()
+    except Exception:
+        return False
+
+
+def is_scanner_file(fpath: Path, rel_path: str, is_self_target: bool = True) -> bool:
     """Check if file is a pattern-defining scanner script or scanner output.
 
-    TRADE-OFF (agents-bcz P2-5, agents-5gg): Silently unscans any files under `agents/*/scripts/`,
-    any file named `mine_history.py`, and any generated threat model artifact (`*-THREAT_MODEL.md`).
-    If a target repository ships production code under those paths, it will be excluded. This is
-    a deliberate precision-over-recall choice to prevent the scanner's own pattern definitions and
-    station-generated output artifacts from generating self-matches.
+    P3 fix (agents-tj9u): Gated on `is_self_target`. Third-party targets are never
+    assumed to be Software Factory scanner installations, so files named `mine_history.py`
+    or paths in `agents/*/scripts/` in third-party targets are not excluded.
     """
     try:
         if fpath.resolve() == Path(__file__).resolve():
             return True
     except Exception:
         pass
+    if not is_self_target:
+        return False
     if fpath.name == "mine_history.py" or fpath.name.endswith("-THREAT_MODEL.md"):
         return True
     # Exclude scanner scripts in agents/*/scripts/
@@ -201,19 +213,21 @@ def is_scanner_file(fpath: Path, rel_path: str) -> bool:
     return False
 
 
-def is_self_referential_line(line: str) -> bool:
+def is_self_referential_line(line: str, is_self_target: bool = True) -> bool:
     """Suppress comments and pattern-definition lines.
 
-    TRADE-OFF (agents-bcz P2-5): This suppression is GLOBAL across every line of
-    every scanned file in the target repository. If production code defines regexes
-    using `re.compile`, or defines objects with keys matching `rule_id`, `category`,
-    etc., or contains test assertions, those lines will be suppressed. This trade-off
-    bounds noise and self-matches at the cost of missing genuine sinks co-located on
-    such lines.
+    P3 fix (agents-tj9u): Gated on `is_self_target`. Comments are always ignored,
+    but `SELF_REFERENTIAL_SUPPRESSIONS` (suppressing lines containing `rule_id:`,
+    `category:`, `severity:`, `re.compile`, etc.) is applied ONLY when auditing
+    the Software Factory itself. Third-party repositories often use these common
+    property names in production code (e.g. routing, logging, event dispatch),
+    so applying them globally caused silent dropping of genuine production sinks.
     """
     clean = line.strip()
     if not clean or clean.startswith(("//", "#", "*", "/*", "'''", '"""')):
         return True
+    if not is_self_target:
+        return False
     for pat in SELF_REFERENTIAL_SUPPRESSIONS:
         if pat.search(line):
             return True
@@ -312,28 +326,36 @@ def mine_beads_issues(target_dir: Path, nonce: Optional[str] = None, max_issues:
     return relevant
 
 
-def scan_entry_points(target_dir: Path, nonce: Optional[str] = None) -> List[Dict[str, Any]]:
+def scan_entry_points(
+    target_dir: Path,
+    nonce: Optional[str] = None,
+    *,
+    is_self_target: Optional[bool] = None,
+    return_suppressed: bool = False
+) -> Any:
     """Scan source files for exposed attack surfaces and sensitive primitives.
 
     Excludes test directories, test files, scanner definitions, and output directories.
     Suppresses self-referential pattern literals and comments.
     Wraps snippets in unpredictable nonce delimiters.
 
-    NOTE (agents-bcz P2-5): Suppression is global. Path exclusions (test*, fixture*,
-    agents/*/scripts/) and line-level suppressions (re.compile, rule_id literals) trade
-    recall for precision by silently unscanning any production code that matches those
-    rules.
+    P3 fix (agents-tj9u): Target-aware gating restricts self-referential pattern
+    and scanner file suppressions strictly to Software Factory self-audits.
+    Fail-visible telemetry records suppressed entry points so any dropped candidate
+    is explicit rather than silent.
     """
     findings = []
+    suppressed_entry_points = []
     active_nonce = nonce or generate_nonce()
+    if is_self_target is None:
+        is_self_target = is_factory_self_target(target_dir)
 
     for root, dirs, files in os.walk(target_dir):
         dirs[:] = [
             d for d in dirs
             if d.lower() not in IGNORED_DIRS
             and not d.startswith(".")
-            and not d.lower().startswith("test")
-            and not d.lower().startswith("fixture")
+            and d.lower() not in {"test", "tests", "fixtures", "fixture", "__tests__"}
         ]
         for fname in sorted(files):
             if not fname.endswith((".js", ".ts", ".mjs", ".cjs", ".py", ".go")):
@@ -350,7 +372,7 @@ def scan_entry_points(target_dir: Path, nonce: Optional[str] = None) -> List[Dic
                 continue
 
             # Exclude pattern-defining scanner files and scanner scripts
-            if is_scanner_file(fpath, rel_path):
+            if is_scanner_file(fpath, rel_path, is_self_target=is_self_target):
                 continue
 
             try:
@@ -359,21 +381,41 @@ def scan_entry_points(target_dir: Path, nonce: Optional[str] = None) -> List[Dic
                 continue
 
             for line_idx, line in enumerate(content.splitlines(), start=1):
-                if is_self_referential_line(line):
+                clean = line.strip()
+                if not clean or clean.startswith(("//", "#", "*", "/*", "'''", '"""')):
                     continue
 
-                for category, regex in ENTRY_POINT_PATTERNS:
-                    if regex.search(line):
-                        findings.append({
-                            "id": f"ep-{len(findings) + 1}",
+                matched_categories = [
+                    cat for cat, regex in ENTRY_POINT_PATTERNS if regex.search(line)
+                ]
+                if not matched_categories:
+                    continue
+
+                # Check if line is suppressed by self-referential rules
+                if is_self_referential_line(line, is_self_target=is_self_target):
+                    for category in matched_categories:
+                        suppressed_entry_points.append({
+                            "id": f"sep-{len(suppressed_entry_points) + 1}",
                             "category": category,
                             "path": sanitize_untrusted_text(rel_path, max_length=100, nonce=active_nonce),
                             "line_number": line_idx,
-                            "snippet": wrap_untrusted(line.strip()[:100], nonce=active_nonce, max_length=100)
+                            "snippet": wrap_untrusted(line.strip()[:100], nonce=active_nonce, max_length=100),
+                            "suppression_reason": "self-referential factory pattern"
                         })
-                        if len(findings) > 60:
-                            return findings
-    return findings
+                    continue
+
+                for category in matched_categories:
+                    findings.append({
+                        "id": f"ep-{len(findings) + 1}",
+                        "category": category,
+                        "path": sanitize_untrusted_text(rel_path, max_length=100, nonce=active_nonce),
+                        "line_number": line_idx,
+                        "snippet": wrap_untrusted(line.strip()[:100], nonce=active_nonce, max_length=100)
+                    })
+                    if len(findings) > 60:
+                        return (findings, suppressed_entry_points) if return_suppressed else findings
+
+    return (findings, suppressed_entry_points) if return_suppressed else findings
 
 
 def extract_project_metadata(target_dir: Path, nonce: Optional[str] = None) -> Dict[str, Any]:
@@ -468,7 +510,13 @@ def main():
     beads_bugs = mine_beads_issues(target_dir, nonce=nonce)
 
     sys.stderr.write(f"Scanning entry points and sensitive primitives...\n")
-    entry_points = scan_entry_points(target_dir, nonce=nonce)
+    entry_points, suppressed_entry_points = scan_entry_points(
+        target_dir, nonce=nonce, return_suppressed=True
+    )
+    if suppressed_entry_points:
+        sys.stderr.write(
+            f"Note: {len(suppressed_entry_points)} candidate entry point(s) suppressed by self-referential rules.\n"
+        )
 
     meta = extract_project_metadata(target_dir, nonce=nonce)
     output_path = Path(args.output).resolve() if args.output else None
@@ -492,6 +540,8 @@ def main():
         "beads_bugs": beads_bugs[:25],
         "entry_points_count": len(entry_points),
         "entry_points": entry_points[:40],
+        "suppressed_entry_points_count": len(suppressed_entry_points),
+        "suppressed_entry_points": suppressed_entry_points[:40],
         "candidate_ids": candidate_ids
     }
 

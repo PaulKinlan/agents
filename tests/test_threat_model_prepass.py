@@ -236,7 +236,7 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
                 self.assertIn("```", r["snippet"])  # Wrapped in nonce fence
 
     def test_scanner_patterns_and_comments_suppressed(self):
-        """Pattern definitions, rule metadata, and commented-out sinks are suppressed."""
+        """Pattern definitions, rule metadata, and commented-out sinks are suppressed on factory targets."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             src_dir = tmp_path / "src"
@@ -250,8 +250,74 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             )
             (src_dir / "scanner_rules.py").write_text(code, encoding="utf-8")
 
-            results = mine_history.scan_entry_points(tmp_path)
+            results, suppressed = mine_history.scan_entry_points(
+                tmp_path, is_self_target=True, return_suppressed=True
+            )
             self.assertEqual(len(results), 0, f"Expected self-matches to be suppressed, got: {results}")
+            self.assertEqual(len(suppressed), 1, f"Expected suppressed telemetry for rule_dict fetch, got: {suppressed}")
+            self.assertEqual(suppressed[0]["category"], "external-fetch")
+
+    def test_third_party_target_sinks_with_schema_tokens_not_suppressed(self):
+        """P3 fix (agents-tj9u): Genuine sinks in third-party code co-located with schema tokens are NOT dropped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "src"
+            src_dir.mkdir(parents=True)
+
+            # 1. API router with category property
+            routes_code = """
+            const routes = [
+                { category: "api", endpoint: app.get("/api/v1/users", listUsers) },
+                { severity: "critical", handler: app.post("/api/v1/emergency", alertHandler) }
+            ];
+            """
+            (src_dir / "routes.js").write_text(routes_code, encoding="utf-8")
+
+            # 2. Telemetry client co-locating severity with fetch
+            alert_code = """
+            const record = { severity: "high", res: await fetch("https://alerts.example.com") };
+            """
+            (src_dir / "alert.js").write_text(alert_code, encoding="utf-8")
+
+            # 3. Code using re.compile alongside an execution sink
+            exec_code = """
+            const pat = re.compile(r"^/cmd");
+            child_process.exec(cmd, cb);
+            """
+            (src_dir / "runner.js").write_text(exec_code, encoding="utf-8")
+
+            results = mine_history.scan_entry_points(tmp_path, is_self_target=False)
+            categories = [r["category"] for r in results]
+            self.assertIn("server-listener", categories)
+            self.assertIn("external-fetch", categories)
+            self.assertIn("code-execution", categories)
+            self.assertEqual(len(results), 4, f"Expected all 4 genuine sinks to be detected, got: {results}")
+
+    def test_test_or_fixture_path_narrowing(self):
+        """P3 fix (agents-tj9u): Exact directory matching ensures production packages like testing_service are not skipped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            # Production package starting with "testing_" or "fixtures_"
+            prod_tools = tmp_path / "testing_service"
+            prod_tools.mkdir(parents=True)
+            (prod_tools / "server.js").write_text("app.get('/health', handler);\n", encoding="utf-8")
+
+            prod_fixtures = tmp_path / "fixtures_client"
+            prod_fixtures.mkdir(parents=True)
+            (prod_fixtures / "api.js").write_text("fetch('https://api.example.com');\n", encoding="utf-8")
+
+            # Real test directories (must still be excluded)
+            test_dir = tmp_path / "test"
+            test_dir.mkdir(parents=True)
+            (test_dir / "test_dummy.js").write_text("fetch('/test');\n", encoding="utf-8")
+
+            results = mine_history.scan_entry_points(tmp_path, is_self_target=False)
+            paths = [r["path"] for r in results]
+            self.assertIn("testing_service/server.js", paths)
+            self.assertIn("fixtures_client/api.js", paths)
+            self.assertFalse(any("test/" in p for p in paths), f"Test dir should be excluded: {paths}")
+            self.assertEqual(len(results), 2)
 
     def test_pattern_defining_scanner_file_excluded(self):
         """The scanner's own file (mine_history.py) is excluded from entry-point findings.
