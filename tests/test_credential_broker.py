@@ -176,6 +176,126 @@ class TestRoutingAndInjection(BrokerTestBase):
                          "/v1beta/models?pageSize=1")
 
 
+class TestUnauthenticatedRefusal(BrokerTestBase):
+    """agents-28nn round 7, the verdict's P0: on the unsandboxed path the broker's TCP
+    listener sits on the HOST's loopback — a shared interface any local process can dial —
+    so a broker that does not authenticate is an open proxy injecting the raw credentials
+    for whoever asks. The verdict CONSTRUCTED exactly that: start the broker with
+    {"anthropic": "sk-ant"} and a plain curl to /proxy/anthropic/v1/messages routed WITH
+    THE KEY ATTACHED. The fix: the placeholder is a per-run random secret the broker
+    demands back on every request, refused with 403 BEFORE any path processing or upstream
+    hop. These tests drive the REAL broker listener over real loopback TCP (only the
+    upstream HTTPSConnection is faked, so nothing leaves the host and the assertion can
+    prove nothing was forwarded).
+
+    MUTATION PROOF (performed, not merely asserted — agents-28nn round 7): neutralising
+    the check (`_request_authenticated` -> `return True`) turns the refusal tests red:
+    the same unauthenticated request then reaches the (faked) upstream with the REAL KEY
+    attached, which is the verdict's constructed attack exactly. Re-verified this round by
+    mutating the worktree, watching this class fail, and reverting the mutation.
+    """
+
+    # The verdict's constructed request, verbatim in shape: a plain local call to the
+    # broker's loopback port presenting NO credential of any kind.
+    def _unauthenticated_request(self, broker):
+        return _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"content-type": "application/json", "content-length": "2"},
+            body=b"{}")
+
+    def test_a_request_without_the_run_secret_is_refused_before_any_upstream_hop(self):
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        status, headers, body = self._unauthenticated_request(broker)
+        self.assertEqual(status, 403)
+        self.assertIn(b"per-run secret", body)
+        # Nothing was forwarded: the raw key was never attached to anything.
+        self.assertEqual(_FakeHTTPSConnection.calls, [],
+                         "an unauthenticated request must NEVER reach the upstream")
+        # And the refusal leaks nothing: not the key, not the secret, not even whether
+        # the provider is configured.
+        self.assertNotIn(REAL["anthropic"].encode(), body)
+        self.assertNotIn(broker.placeholder.encode(), body)
+        self.assertNotIn(REAL["anthropic"], str(headers))
+
+    def test_a_wrong_or_malformed_secret_is_refused(self):
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        wrong_values = (
+            {"x-api-key": "factory-broker-not-the-runs-secret"},
+            {"x-api-key": cb.PLACEHOLDER_PREFIX},  # the prefix alone, no random suffix
+            {"authorization": "Bearer factory-broker-guessed"},
+            {"authorization": "Bearer "},          # an empty bearer token
+            {"x-goog-api-key": "nope", "api-key": "nope"},
+            # The REAL key is not the run secret: holding a stolen raw key must not
+            # authenticate against the broker either (it is a credential, not a ticket).
+            {"x-api-key": REAL["anthropic"]},
+        )
+        for headers in wrong_values:
+            with self.subTest(headers=headers):
+                status, _, body = _client_request(
+                    broker.port, "POST", "/proxy/anthropic/v1/messages",
+                    headers={**headers, "content-length": "2"}, body=b"{}")
+                self.assertEqual(status, 403)
+                self.assertEqual(_FakeHTTPSConnection.calls, [],
+                                 "a wrong secret must never be forwarded upstream")
+
+    def test_the_run_secret_authenticates_and_the_real_key_is_injected(self):
+        # The other direction of the contract: the process that WAS handed the run's
+        # placeholder — the engine — is served, and the broker injects the real key.
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        status, _, body = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": broker.placeholder, "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 200)
+        call = _FakeHTTPSConnection.calls[0]
+        self.assertEqual(call["headers"]["x-api-key"], REAL["anthropic"])
+        self.assertNotIn(REAL["anthropic"].encode(), body)
+
+    def test_the_secret_is_per_run_unguessable_and_not_portable_between_brokers(self):
+        broker_a = self.start_broker({"anthropic": REAL["anthropic"]})
+        broker_b = self.start_broker({"anthropic": REAL["anthropic"]})
+        # Per-run: two brokers in the same process get different secrets...
+        self.assertNotEqual(broker_a.placeholder, broker_b.placeholder)
+        # ...both recognisably placeholders (not vendor-shaped: no sk-/AIza form)...
+        for placeholder in (broker_a.placeholder, broker_b.placeholder):
+            self.assertTrue(placeholder.startswith(cb.PLACEHOLDER_PREFIX))
+            self.assertGreater(len(placeholder), len(cb.PLACEHOLDER_PREFIX) + 16)
+            self.assertFalse(placeholder.startswith(("sk-", "AIza")))
+        # ...and one run's secret is refused by another run's broker: possession is the
+        # authentication, so a secret only licences the broker that issued it.
+        status, _, _ = _client_request(
+            broker_b.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": broker_a.placeholder, "content-length": "2"},
+            body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertEqual(_FakeHTTPSConnection.calls, [])
+
+    def test_a_keyless_broker_also_refuses_the_unauthenticated(self):
+        # The refusal does not depend on holding a keyed credential: a keyless managed
+        # endpoint broker (agents-3y2) must not be an unauthenticated forwarder either.
+        broker = self.start_broker({"deepseek": None})
+        status, _, _ = _client_request(
+            broker.port, "POST", "/proxy/deepseek/chat/completions",
+            headers={"content-length": "2"}, body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertEqual(_FakeHTTPSConnection.calls, [])
+
+    def test_the_unix_listener_demands_the_secret_too(self):
+        # The sandboxed path's UNIX listener runs the same handler; its confinement is the
+        # netns, but the authentication is the broker's own and holds on both shapes.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = os.path.join(d, "broker.sock")
+        broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
+        broker.start(unix_path=sock, child_port=8384)
+        self.addCleanup(broker.stop)
+        status, _, _ = _unix_client_request(
+            sock, "POST", "/proxy/anthropic/v1/messages",
+            headers={"content-length": "2"}, body=b"{}")
+        self.assertEqual(status, 403)
+        self.assertEqual(_FakeHTTPSConnection.calls, [])
+
+
 class TestFailClosedAndEdgeCases(BrokerTestBase):
     def test_a_provider_without_a_real_key_is_refused_not_forwarded(self):
         # The broker holds only an anthropic key; a request for openai must fail closed
@@ -192,13 +312,15 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
     def test_an_unknown_provider_path_is_404(self):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, _, _ = _client_request(broker.port, "POST", "/proxy/nope/v1/x",
-                                       headers={"content-length": "0"})
+                                       headers={"x-api-key": broker.placeholder,
+                                                "content-length": "0"})
         self.assertEqual(status, 404)
         self.assertEqual(_FakeHTTPSConnection.calls, [])
 
     def test_a_non_broker_path_is_404(self):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
-        status, _, _ = _client_request(broker.port, "GET", "/healthz")
+        status, _, _ = _client_request(broker.port, "GET", "/healthz",
+                                       headers={"x-api-key": broker.placeholder})
         self.assertEqual(status, 404)
 
     def test_content_length_above_cap_returns_413_without_forwarding_upstream(self):
@@ -407,9 +529,10 @@ class TestLifecycle(unittest.TestCase):
         with cb.CredentialBroker({"anthropic": REAL["anthropic"]}) as broker:
             port = broker.port
             self.assertIsNotNone(port)
-            # A non-broker path 404s at the handler BEFORE any upstream hop, proving the
-            # listener is up with no network call and no credential needed.
-            status, _, _ = _client_request(port, "GET", "/healthz")
+            # An authenticated non-broker path 404s at the handler BEFORE any upstream hop,
+            # proving the listener is up with no network call and no real credential involved.
+            status, _, _ = _client_request(port, "GET", "/healthz",
+                                           headers={"x-api-key": broker.placeholder})
             self.assertEqual(status, 404)
         # After stop(), the port no longer accepts connections.
         with self.assertRaises(OSError):
@@ -514,7 +637,8 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         # The engine's env, built the way run_agent will: placeholder + base URL, no real key.
         env = child_environment(engine="pi", parent=parent,
-                                broker_urls={"anthropic": broker.base_url("anthropic")})
+                                broker_urls={"anthropic": broker.base_url("anthropic")},
+                                broker_placeholder=broker.placeholder)
         self.assertEqual(env["ANTHROPIC_API_KEY"], broker.placeholder)
         self.assertNotIn(REAL["anthropic"], env.values())
         # Simulate the engine's SDK: POST {base_url}/v1/messages with the placeholder key.
@@ -541,7 +665,8 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         parent = {"PATH": "/usr/bin"}
         broker = self.start_broker({"deepseek": None})
         env = child_environment(engine="pi", parent=parent,
-                                broker_urls={"deepseek": broker.base_url("deepseek")})
+                                broker_urls={"deepseek": broker.base_url("deepseek")},
+                                broker_placeholder=broker.placeholder)
         self.assertEqual(env["DEEPSEEK_API_KEY"], broker.placeholder)
         split = urlsplit(env["DEEPSEEK_BASE_URL"])
         status, _, body = _client_request(
@@ -701,7 +826,8 @@ class TestBodyBoundAndBudget(BrokerTestBase):
         s = self._raw_send(
             broker.port,
             b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
-            b"Host: localhost\r\nContent-Length: 5\r\n\r\nhelloEXTRA")
+            b"Host: localhost\r\nx-api-key: " + broker.placeholder.encode() + b"\r\n"
+            b"Content-Length: 5\r\n\r\nhelloEXTRA")
         status_line = s.makefile("rb").readline()
         s.close()
         self.assertEqual(status_line.split()[1], b"200")
@@ -713,7 +839,8 @@ class TestBodyBoundAndBudget(BrokerTestBase):
         s = self._raw_send(
             broker.port,
             b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
-            b"Host: localhost\r\n\r\n{\"ignored\": true}")
+            b"Host: localhost\r\nx-api-key: " + broker.placeholder.encode() + b"\r\n\r\n"
+            b"{\"ignored\": true}")
         status_line = s.makefile("rb").readline()
         s.close()
         self.assertEqual(status_line.split()[1], b"200")
@@ -741,7 +868,8 @@ class TestBodyBoundAndBudget(BrokerTestBase):
             s1 = self._raw_send(
                 broker.port,
                 b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
-                b"Host: localhost\r\nContent-Length: 60\r\n\r\n")
+                b"Host: localhost\r\nx-api-key: " + broker.placeholder.encode() + b"\r\n"
+                b"Content-Length: 60\r\n\r\n")
             deadline = time.time() + 5
             while cb._aggregate_body_bytes < 60 and time.time() < deadline:
                 time.sleep(0.05)

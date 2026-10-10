@@ -339,7 +339,14 @@ class _Handler(BaseHTTPRequestHandler):
         the placeholder is what distinguishes the engine the broker serves from any
         other local process. Constant-time comparison; any of the auth header shapes
         the SDKs use counts (x-api-key / Authorization Bearer / x-goog-api-key /
-        api-key), and the broker strips and re-sets them all downstream regardless."""
+        api-key), and the broker strips and re-sets them all downstream regardless.
+
+        The general form this fix instances (agents-28nn round 7): WHEN A FIX MOVES A
+        CONTROL TO A DIFFERENT LEVEL, THE NEXT QUESTION IS NOT "IS IT IN THE RIGHT
+        PLACE" BUT "WHO CAN REACH IT FROM HERE" — the old level carried an implied
+        boundary (a namespace, a uid, a mount) that the new level does not inherit;
+        the sandboxed loopback was confined by the network namespace, the unsandboxed
+        one is the host's, same code, same address, no confinement."""
         secret = self.run_secret
         if not secret:  # pragma: no cover - start() always binds one
             return False
