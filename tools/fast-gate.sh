@@ -119,6 +119,27 @@ while IFS= read -r f; do
       # Bubblewrap sandbox (bwrap isolation, binds, proc/env masking) plus no-bwrap refusal contract (agents-vt7w).
       mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py"
       ;;
+    lib/tool_pins.py)
+      # Trusted-tool pinning (agents-7bj). Since agents-28nn this module also authenticates
+      # bwrap itself, and the property that an unauthenticated bwrap is refused BEFORE it
+      # executes lives in tests/test_sandbox.py (TestBwrapPinBoundary) — the pins contract
+      # alone cannot see a sandbox-side regression.
+      mapped="$mapped tests/test_tool_pins.py tests/test_sandbox.py"
+      ;;
+    tools/generate-tool-pins.sh)
+      # Operator-run pin generator (never invoked by the factory — its own header). SEARCH
+      # PERFORMED (agents-28nn): `grep -rn "generate-tool-pins" tests/` named no suite before
+      # this bead; agents-28nn adds the assertion that its TOOLS list covers every
+      # TRUSTED_TOOLS entry to tests/test_tool_pins.py, which owns the pins contract.
+      mapped="$mapped tests/test_tool_pins.py"
+      ;;
+    THREAT_MODEL.md)
+      # Root markdown the docs-drift scanner WALKS (check_docs.py os.walk()s every committed
+      # .md outside IGNORE_DIRS). SEARCH PERFORMED (agents-28nn): `grep -rn 'ROOT /
+      # "THREAT_MODEL' tests/` finds no direct reader; the test_threat_model_prepass.py hits
+      # are fixture strings for the findings-store recognizer, not the committed file.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
     lib/yaml_mini.py)
       # Mini YAML parser plus GitHub Actions action.yml contract pin (agents-vt7w).
       mapped="$mapped tests/test_yaml_mini.py tests/test_ci_action.py"

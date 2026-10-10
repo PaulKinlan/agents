@@ -1,9 +1,11 @@
 # Integrity pins for the factory's host-side trusted tools (agents-7bj).
 #
-# A trusted tool (gh, bd, git, semgrep, gitleaks, node, npm, npx) is resolved by
+# A trusted tool (bwrap, gh, bd, git, semgrep, gitleaks, node, npm, npx) is resolved by
 # lib/tool_pins.resolve_tool(): the configured `path` (if set) is preferred, otherwise it is
 # found by name across PATH, and its SHA-256 is verified against `sha256`. A mismatch fails
-# the run closed — the factory refuses to execute an unverified binary.
+# the run closed — the factory refuses to execute an unverified binary. bwrap heads the
+# list because it delivers the OS sandbox itself: an unpinned or mismatched bwrap makes the
+# host read as unable to sandbox (agents-28nn).
 #
 #   path:   (optional) absolute path the tool MUST resolve to.
 #   sha256: (REQUIRED) 64-hex SHA-256 the resolved binary MUST hash to (this IS the
@@ -22,6 +24,9 @@
 #   export FACTORY_TOOL_PINS="$HOME/.config/factory/tools.pins.yaml"
 #
 # Generate a single pin by hand with:  sha256sum "$(command -v gh)"
+bwrap:
+  # path: /usr/bin/bwrap
+  # sha256: <64 hex>
 gh:
   # path: /usr/local/bin/gh
   # sha256: <64 hex>

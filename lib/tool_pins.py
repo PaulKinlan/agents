@@ -2,12 +2,15 @@
 """Integrity-pinned resolution of the factory's host-side trusted tools (agents-7bj).
 
 The factory is the highest-privilege component in a run: it resolves its trusted tools
-(``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``) by *name*
-across ``PATH`` and executes them host-side for the pre-pass, the findings dispatch and bead
-promotion. A trojaned binary earlier on ``PATH`` — or a hijacked install tree — would run
-with the factory's GitHub token and write access, and because these tools are the audit's own
-ground truth a compromised one can both fake evidence and act on it (threat-model
-``tm-external-tool-integrity``).
+(``bwrap``, ``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``)
+by *name* across ``PATH`` and executes them host-side for the pre-pass, the findings
+dispatch, bead promotion — and, for ``bwrap``, the OS sandbox itself. A trojaned binary
+earlier on ``PATH`` — or a hijacked install tree — would run with the factory's GitHub
+token and write access, and because these tools are the audit's own ground truth a
+compromised one can both fake evidence and act on it (threat-model
+``tm-external-tool-integrity``). For ``bwrap`` the stakes are the boundary itself: a fake
+``bwrap`` that execs its child natively satisfies every check the sandbox module can run
+*through* it (agents-28nn), so the binary must be authenticated before it is executed.
 
 So each trusted tool is resolved to an **absolute path** and pinned by **SHA-256** from
 factory configuration (``tools.yaml`` under ``FACTORY_ROOT``):
@@ -58,9 +61,12 @@ HOST_PINS_ENV = "FACTORY_TOOL_PINS"
 UNPINNED_ALLOW_ENV = "FACTORY_ALLOW_UNPINNED_TOOLS"
 
 # Host-side tools the factory must resolve + pin before it trusts them.
-# `bd`/`git` are the findings store and the worktree/admin; `gh` fetches issues and drives
-# promotion; `semgrep`/`gitleaks` and `node`/`npm`/`npx` are the pre-pass scanners.
-TRUSTED_TOOLS: Tuple[str, ...] = ("gh", "bd", "git", "semgrep", "gitleaks", "node", "npm", "npx")
+# `bwrap` is the sandbox wrapper — the one binary whose integrity decides whether any
+# sandbox exists at all (agents-28nn). `bd`/`git` are the findings store and the
+# worktree/admin; `gh` fetches issues and drives promotion; `semgrep`/`gitleaks` and
+# `node`/`npm`/`npx` are the pre-pass scanners.
+TRUSTED_TOOLS: Tuple[str, ...] = ("bwrap", "gh", "bd", "git", "semgrep", "gitleaks",
+                                  "node", "npm", "npx")
 
 def _unpinned_allowed() -> bool:
     """The explicit, auditable dev/test opt-in: resolves unpinned trusted tools by name

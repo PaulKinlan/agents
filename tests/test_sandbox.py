@@ -341,6 +341,143 @@ class TestWrapVerification(unittest.TestCase):
         self.assertEqual(list(self.run_dir.iterdir()), [])
 
 
+@unittest.skipUnless(LIVE, "the pin boundary is exercised against a real, functional bwrap")
+class TestBwrapPinBoundary(unittest.TestCase):
+    """agents-28nn: the child's-write proof CANNOT catch a fake bwrap — the run directory is
+    bound at the SAME host path inside and outside the wrap, so a PATH-planted fake that
+    shifts to `--` and execs the child natively satisfies the proof (the token write, the
+    exit status, the confined-looking argv; established by execution). The boundary
+    assertion is therefore on the deliverer, not on anything the deliverer executes: bwrap
+    is a pinned trusted tool, resolved and hash-verified BEFORE it runs, and an
+    unauthenticated bwrap is refused without being executed.
+
+    These tests remove FACTORY_ALLOW_UNPINNED_TOOLS (the module-level dev/test opt-in the
+    other suites use) because the properties they pin are exactly what the opt-in waives.
+    """
+
+    FAKE = ('#!/bin/sh\n'
+            # Log every invocation: refusal must PRECEDE any execution of the untrusted
+            # binary, so the log existing at all fails the refusal tests.
+            'echo ran >> "$FAKE_BWRAP_LOG"\n'
+            'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+            '[ "$1" = "--" ] && shift\n'
+            'exec "$@"\n')
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-pin-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory-root"
+        (self.factory / "runs").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.run_dir = self.factory / "runs" / "run1"
+        self.run_dir.mkdir(parents=True)
+        # Resolve the REAL bwrap before any PATH tampering, and pin it by content.
+        self.real_bwrap = os.path.realpath(shutil.which("bwrap"))
+        from lib.tool_pins import sha256_file
+        self.real_sha = sha256_file(Path(self.real_bwrap))
+        self.pins = self.root / "tools.pins.yaml"
+        # The proof-satisfying fake, planted in its own directory.
+        self.fake_dir = self.root / "fakebin"
+        self.fake_dir.mkdir()
+        self.fake_log = self.root / "fake-bwrap-ran"
+        stub = self.fake_dir / "bwrap"
+        stub.write_text(self.FAKE, encoding="utf-8")
+        stub.chmod(0o755)
+        # Environment: deterministic pins file, NO dev/test opt-in, PATH under control.
+        self._saved = {k: os.environ.get(k)
+                       for k in ("PATH", "FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS")}
+        self.addCleanup(self._restore_env)
+        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        os.environ["FAKE_BWRAP_LOG"] = str(self.fake_log)
+        self.addCleanup(os.environ.pop, "FAKE_BWRAP_LOG", None)
+        # The probe result is process-cached: every test here re-probes.
+        sandbox_module._probe_result = None
+        self.addCleanup(setattr, sandbox_module, "_probe_result", None)
+
+    def _restore_env(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _plant_fake_first_on_path(self):
+        os.environ["PATH"] = f"{self.fake_dir}{os.pathsep}{self._saved['PATH']}"
+
+    def _write_pins(self, body):
+        self.pins.write_text(body, encoding="utf-8")
+        sandbox_module._probe_result = None
+
+    def test_a_path_planted_fake_bwrap_that_would_satisfy_the_proof_is_refused(self):
+        """THE FILED HOLE, CLOSED: a fake bwrap that execs the child natively satisfies the
+        child's-write proof, so it must be stopped at RESOLUTION. With only the real
+        bwrap's content pinned (no `path` pin, so resolution still follows PATH order),
+        the planted fake is resolved, fails the hash check, and is refused — never
+        executed. sandbox_available() reports the host as unable to sandbox (the factory
+        then refuses or honestly downgrades) and sandbox_command() fails closed."""
+        self._write_pins(f"bwrap:\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        self.assertFalse(sandbox_available(),
+                         "an unauthenticated bwrap must read as 'cannot sandbox', never as "
+                         "'sandboxed' — the overclaim is the hole")
+        with self.assertRaises(SandboxError) as raised:
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+        self.assertIn("bwrap", str(raised.exception))
+        self.assertFalse(self.fake_log.exists(),
+                         "the unauthenticated bwrap must be refused BEFORE it executes")
+        self.assertEqual(list(self.run_dir.iterdir()), [],
+                         "no verification artifact may be left behind")
+
+    def test_a_full_pin_bypasses_the_planted_fake_and_the_wrap_still_confines(self):
+        """The positive direction: with `path` + `sha256` pinned, the configured path wins
+        over PATH order, so the planted fake is not even resolved; the REAL bwrap builds
+        the wrap, and the wrap still does what the pin vouches for — a write to the
+        'read-only' target fails inside it."""
+        self._write_pins(f"bwrap:\n  path: {self.real_bwrap}\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        self.assertTrue(sandbox_available())
+        argv = sandbox_command(
+            ["/bin/sh", "-c", f"echo x > {self.target}/marker"],
+            target_dir=self.target, factory_root=self.factory, run_dir=self.run_dir,
+            env=dict(os.environ))
+        self.assertEqual(argv[0], self.real_bwrap,
+                         "the pinned path must win over the PATH-planted fake")
+        res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        self.assertNotEqual(res.returncode, 0, "the ro-bound target must reject the write")
+        self.assertFalse((self.target / "marker").exists(),
+                         "the authenticated wrap still confines the child")
+        self.assertFalse(self.fake_log.exists(),
+                         "the PATH-planted fake must not execute even on the success path")
+
+    def test_a_pin_mismatch_refuses_even_the_real_bwrap(self):
+        """Fail closed the other way: a bwrap whose content does not match its pin — a
+        swapped or rebuilt binary at the pinned location — is refused exactly like the
+        planted fake, and is never executed."""
+        self._write_pins(f"bwrap:\n  path: {self.real_bwrap}\n  sha256: {'0' * 64}\n")
+        self.assertFalse(sandbox_available())
+        with self.assertRaises(SandboxError):
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+
+    def test_no_bwrap_pin_at_all_fails_closed(self):
+        """The fail-closed composition end to end: NO bwrap pin configured anywhere (empty
+        pins file, no dev opt-in) and the fake planted on PATH. Refusal here is what
+        bwrap's TRUSTED_TOOLS membership buys — dropping the membership (not just the
+        wiring) must fail this test."""
+        self._write_pins("")  # no bwrap entry anywhere
+        self._plant_fake_first_on_path()
+        self.assertFalse(sandbox_available(),
+                         "an unpinned bwrap must fail closed, never resolve by PATH order")
+        with self.assertRaises(SandboxError):
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+        self.assertFalse(self.fake_log.exists())
+
+
 class TestSandboxRecord(unittest.TestCase):
     def test_no_sandbox_host_records_none(self):
         if LIVE:

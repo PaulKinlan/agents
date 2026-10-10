@@ -237,7 +237,7 @@ jobs:
 
 ### 1.5 Tool Integrity Pinning (agents-7bj / agents-3g6)
 
-The factory resolves its host-side trusted tools (`gh`, `bd`, `git`, `semgrep`, `gitleaks`, `node`/`npm`/`npx`) and now **fails closed** unless each one carries a SHA-256 pin — a trojaned binary earlier on `PATH` must never run with the factory's GitHub token or write access (threat-model `tm-external-tool-integrity`). A resolved binary whose hash does not match its pin, or a trusted tool with no pin at all, is refused (`ToolPinError`) rather than executed.
+The factory resolves its host-side trusted tools (`bwrap`, `gh`, `bd`, `git`, `semgrep`, `gitleaks`, `node`/`npm`/`npx`) and now **fails closed** unless each one carries a SHA-256 pin — a trojaned binary earlier on `PATH` must never run with the factory's GitHub token or write access (threat-model `tm-external-tool-integrity`). A resolved binary whose hash does not match its pin, or a trusted tool with no pin at all, is refused (`ToolPinError`) rather than executed. `bwrap` heads the list (agents-28nn): it delivers the OS sandbox itself, and the wrap-verification proof cannot detect a fake `bwrap` that execs its child natively, so an unpinned or mismatched `bwrap` makes the host read as unable to sandbox — the factory then refuses the run or honestly downgrades, never overclaiming a sandbox.
 
 Binary hashes are host-specific, so the repo's `tools.yaml` ships the **format** with the pins commented out. Deployers supply the actual hashes out-of-band through a host-local file named by `FACTORY_TOOL_PINS`, which `lib/tool_pins.load_tool_pins()` merges **over** `tools.yaml` (host wins per tool):
 

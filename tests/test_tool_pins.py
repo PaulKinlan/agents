@@ -8,6 +8,7 @@ resolution/verification logic without touching the real tools.
 """
 
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -15,8 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lib.tool_pins import (ToolPinError, allowlisted_path, host_pins_path, load_tool_pins,
-                           resolve_tool, sha256_file, tool_dir, verify_pin)
+from lib.tool_pins import (TRUSTED_TOOLS, ToolPinError, allowlisted_path, host_pins_path,
+                           load_tool_pins, resolve_tool, sha256_file, tool_dir, verify_pin)
 
 
 def _make_tool(directory: Path, name: str, content: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -55,6 +56,19 @@ class ResolveToolTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
             with self.assertRaises(ToolPinError):
                 resolve_tool("gh", path_env=str(self.bindir), pins={})
+
+    def test_bwrap_is_a_trusted_tool_and_fails_closed_when_unpinned(self):
+        """agents-28nn: bwrap delivers the OS sandbox itself, and the wrap-verification
+        proof cannot catch a fake bwrap that execs its child natively (the run directory
+        is bound at the same host path inside and outside the wrap), so bwrap must be in
+        the pinned set and refused when unpinned like every other trusted tool. The
+        sandbox-side boundary property is pinned in tests/test_sandbox.py
+        (TestBwrapPinBoundary)."""
+        self.assertIn("bwrap", TRUSTED_TOOLS)
+        _make_tool(self.bindir, "bwrap")
+        with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
+            with self.assertRaises(ToolPinError):
+                resolve_tool("bwrap", path_env=str(self.bindir), pins={})
 
     def test_resolve_unpinned_allowed_by_explicit_opt_in(self):
         with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "1"}):
@@ -200,6 +214,23 @@ class HostPinsTests(unittest.TestCase):
                                           "FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
             with self.assertRaises(ToolPinError):
                 resolve_tool("gh", path_env=str(self.tmp), pins=load_tool_pins())
+
+
+class GenerateToolPinsScriptTests(unittest.TestCase):
+    """tools/generate-tool-pins.sh writes the host pins file every real run depends on.
+    Fail-closed is the default, so a trusted tool MISSING from the generator's list is
+    silently un-pinnable on a freshly generated host file — the run then refuses that
+    tool (or, for bwrap, reads the host as unable to sandbox, agents-28nn). The
+    generator's TOOLS list must cover exactly the trusted set."""
+
+    def test_the_generator_covers_every_trusted_tool(self):
+        script = (Path(__file__).resolve().parent.parent
+                  / "tools" / "generate-tool-pins.sh").read_text(encoding="utf-8")
+        match = re.search(r'^TOOLS="([^"]*)"', script, re.MULTILINE)
+        self.assertIsNotNone(match, "generate-tool-pins.sh has no TOOLS list to audit")
+        self.assertEqual(set(match.group(1).split()), set(TRUSTED_TOOLS),
+                         "the generator must pin exactly the trusted tools — a missing one "
+                         "is un-pinnable on the generated host file, an extra one is dead")
 
 
 if __name__ == "__main__":

@@ -69,6 +69,27 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_sandbox.py", mapped)
         self.assertIn("tests/test_no_bwrap_guard.py", mapped, "no-bwrap guard omitted (agents-vt7w)")
 
+    def test_tool_pins_py_maps_to_pins_contract_and_sandbox_boundary(self):
+        """lib/tool_pins.py authenticates bwrap itself (agents-28nn): the refusal property
+        lives in tests/test_sandbox.py, so the pins contract alone is not enough."""
+        mapped = resolve_fast_gate(["lib/tool_pins.py"])
+        self.assertIn("tests/test_tool_pins.py", mapped)
+        self.assertIn("tests/test_sandbox.py", mapped,
+                      "bwrap-pin boundary suite omitted (agents-28nn)")
+
+    def test_generate_tool_pins_maps_to_pins_contract(self):
+        """tools/generate-tool-pins.sh must run the suite asserting its TOOLS list covers
+        every trusted tool (agents-28nn)."""
+        mapped = resolve_fast_gate(["tools/generate-tool-pins.sh"])
+        self.assertIn("tests/test_tool_pins.py", mapped,
+                      "generator-coverage suite omitted (agents-28nn)")
+
+    def test_threat_model_md_maps_to_the_walker_suite(self):
+        """THREAT_MODEL.md is root markdown the docs-drift scanner walks (agents-28nn)."""
+        mapped = resolve_fast_gate(["THREAT_MODEL.md"])
+        self.assertIn("tests/test_docs_drift.py", mapped,
+                      "walker suite omitted for walked root markdown (agents-28nn)")
+
     def test_candidate_identity_maps_to_prepass_emission(self):
         """lib/candidate_identity.py must run property tests and prepass emission assertions."""
         mapped = resolve_fast_gate(["lib/candidate_identity.py"])
