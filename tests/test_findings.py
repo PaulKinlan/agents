@@ -882,10 +882,24 @@ class TestIdentityAttribution(unittest.TestCase):
         self.assertTrue(findings.is_unanchored_finding({}))
         self.assertTrue(findings.is_unanchored_finding({"identity_source": None}))
 
-        # 2. Structural assertion against FindingsStore.process_run
+        # 2. Structural assertion against FindingsStore.process_run and _identity_grade
         import inspect
         src = inspect.getsource(findings.FindingsStore.process_run)
         self._check_process_run_shared_predicate(src)
+
+        # agents-l17v: _identity_grade delegates stability classification to is_unanchored_finding
+        grade_src = inspect.getsource(findings._identity_grade)
+        self.assertIn("is_unanchored_finding(f)", grade_src,
+                      "_identity_grade must delegate stability classification to is_unanchored_finding")
+        self.assertNotIn("not in IDENTITY_STABLE_SOURCES", grade_src,
+                         "_identity_grade must not duplicate the IDENTITY_STABLE_SOURCES membership check")
+        # And verify the deliberate difference on missing source (agents-l17v)
+        self.assertTrue(findings.is_unanchored_finding({"identity_source": None}))
+        self.assertEqual(findings._identity_grade({"identity_source": None}), "")
+        for src in findings.IDENTITY_SOURCES:
+            has_grade = bool(findings._identity_grade({"identity_source": src}))
+            is_unanchored = findings.is_unanchored_finding({"identity_source": src})
+            self.assertEqual(has_grade, is_unanchored, f"mismatch between grade and predicate for {src}")
 
     def test_inlining_the_unanchored_predicate_fails_the_drift_check(self):
         """Mutation test: inlining an inline copy of the predicate into process_run must fail the drift check."""
