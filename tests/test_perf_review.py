@@ -760,6 +760,22 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes = normalize_report(report)
         self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
 
+    def test_promise_any_concurrency_patch_is_guarded(self):
+        """Reviewer P1 finding: Promise.any patch with custom rule must be guarded and diff withheld."""
+        finding = {
+            "rule_id": "custom-batch-optimization",
+            "path": "src/infer.ts",
+            "line_number": 80,
+            "remediation": "Return the first successful result from the batch.",
+            "proposed_fix_diff": "--- a/infer.ts\n+++ b/infer.ts\n@@ -1,2 +1,2 @@\n- for (const m of models) await m.run();\n+ await Promise.any(models.map(m => m.run()));"
+        }
+        self.assertTrue(is_concurrency_recommendation(finding))
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        self.assertNotIn("proposed_fix_diff", report["findings"][0])
+
     def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
         """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""
         report = {
