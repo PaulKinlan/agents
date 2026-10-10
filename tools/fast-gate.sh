@@ -76,6 +76,12 @@ while IFS= read -r f; do
     agents/perf-review/scripts/scan_perf_changes.py)
       mapped="$mapped tests/test_perf_review.py"
       ;;
+    agents/vuln-discovery/scripts/scan_surface.py)
+      # The first station to EMIT a stable candidate identity (agents-rdyb): its own precision
+      # suite plus the shared helper's property tests, which are what fail if the id stops being
+      # deterministic or starts moving with the model's prose.
+      mapped="$mapped tests/test_scan_surface.py tests/test_candidate_identity.py"
+      ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;

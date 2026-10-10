@@ -21,10 +21,75 @@ sys.path.insert(0, str(ROOT / "agents" / "vuln-discovery" / "scripts"))
 
 import scan_surface  # noqa: E402
 
+from lib.candidate_identity import CANDIDATE_ID_FIELD, CANDIDATE_ID_SCHEME_FIELD  # noqa: E402
+
+
+class TestTheStationEmitsCandidateIdentity(unittest.TestCase):
+    """agents-rdyb: the station must EMIT a stable identity, not merely have a helper available.
+
+    Driven through the real CLI and the real artefact, because the property is about what lands in
+    candidates.json - a unit test of the helper would pass on a station that never calls it.
+    """
+
+    def _run(self, target_dir, out_path):
+        import subprocess
+        script = ROOT / "agents" / "vuln-discovery" / "scripts" / "scan_surface.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--target", str(target_dir), "--output", str(out_path)],
+            capture_output=True, text=True, cwd=str(ROOT),
+            env={**os.environ, "PYTHONPATH": str(ROOT)})
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+        import json
+        return json.loads(Path(out_path).read_text(encoding="utf-8"))
+
+    def _tree(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir(parents=True)
+        (src / "server.ts").write_text("app.post('/api/auth/login', handleLogin);\n",
+                                       encoding="utf-8")
+        (src / "dom.js").write_text("el.innerHTML = userInput;\n", encoding="utf-8")
+
+    def test_every_candidate_carries_a_stable_id_across_two_scans(self):
+        """Two scans of the SAME unchanged tree, through the CLI: identical ids, and no model input.
+
+        The ids must be equal as a SET keyed by (rule id, path): the artefact's list order is
+        os.walk order and is not guaranteed stable, while the identity is.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self._tree(tmp_path)
+            first = self._run(tmp_path, tmp_path / "c1.json")
+            second = self._run(tmp_path, tmp_path / "c2.json")
+
+        def by_location(artefact):
+            return {(c["rule_id"], c["path"]): c[CANDIDATE_ID_FIELD]
+                    for c in artefact["candidates"] if CANDIDATE_ID_FIELD in c}
+
+        self.assertTrue(first["candidates"])
+        for candidate in first["candidates"]:
+            self.assertIn(CANDIDATE_ID_FIELD, candidate, candidate)
+        self.assertEqual(by_location(first), by_location(second))
+        self.assertEqual(first[CANDIDATE_ID_SCHEME_FIELD], 1,
+                         "the artefact must say which id shape wrote it")
+
+    def test_two_identical_matches_in_one_file_get_different_ids(self):
+        """Dropping the line number must not make two candidates share an identity."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src = tmp_path / "src"
+            src.mkdir(parents=True)
+            (src / "dup.js").write_text("el.innerHTML = userInput;\nel.innerHTML = userInput;\n",
+                                        encoding="utf-8")
+            artefact = self._run(tmp_path, tmp_path / "c.json")
+
+        ids = [c[CANDIDATE_ID_FIELD] for c in artefact["candidates"]
+               if c.get("path", "").endswith("dup.js")]
+        self.assertEqual(len(ids), 2, artefact["candidates"])
+        self.assertEqual(len(set(ids)), 2, ids)
+
 
 class TestSurfaceScannerExclusionsAndSuppression(unittest.TestCase):
     """agents-o5w: verify test-dir exclusion and self-referential suppression."""
-
     def test_fixture_only_tree_yields_zero_entry_points(self):
         """A tree containing only tests/fixtures must yield exactly zero candidates."""
         with tempfile.TemporaryDirectory() as tmp:
