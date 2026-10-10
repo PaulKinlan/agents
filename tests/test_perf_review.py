@@ -336,6 +336,12 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(intermediate_fallback_concurrency))
 
+        # Reviewer P1 finding: first fallback branch not directing serial execution must NOT pass
+        deferred_serial_fallback = {
+            "remediation": "IF backend is reentrant, use Promise.all; otherwise launch model runs on separate workers; else preserve serial execution"
+        }
+        self.assertFalse(has_reentrancy_precondition(deferred_serial_fallback))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
