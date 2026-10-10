@@ -30,6 +30,11 @@ except ImportError:
         "__pycache__", ".vscode", ".idea"
     }
 
+# agents-rdyb: the shared candidate-identity helper. Imported WITHOUT a fallback, deliberately: a
+# station that silently emitted no candidate id would silently put the downstream RECONSTRUCTION
+# back in place, which is the defect this exists to end.
+from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields
+
 IGNORE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2",
     ".ttf", ".eot", ".mp4", ".webm", ".zip", ".tar", ".gz", ".wasm", ".lock",
@@ -371,10 +376,16 @@ def main():
 
     candidates_list.extend(raw_candidates)
 
+    # Every candidate gets a deterministic identity at scan time, over data the SCANNER owns
+    # (rule id, path, matched text) - so a consumer can copy it rather than reconstruct identity
+    # from the model's label and prose (agents-rdyb).
+    assign_candidate_ids(candidates_list)
+
     result = {
         "target": target_dir.name,
         "scanned_files": scanned_files,
         "threat_model_present": threat_model is not None,
+        **artefact_scheme_fields(),
         "candidates": candidates_list
     }
 
