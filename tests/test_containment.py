@@ -550,6 +550,13 @@ class TestAdapters(unittest.TestCase):
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                "ANTHROPIC_API_KEY": "stub-key",
                "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
+        # agents-28nn round 5: adapters exec ONLY the dispatcher-verified FACTORY_ENGINE_BIN
+        # and refuse a by-name PATH lookup. The test stands in for the dispatcher: hand the
+        # adapter the stub's absolute path. Conditional because deepseek's Python-API
+        # fallback tests UNLINK the stub to force the no-binary path.
+        binary = self.bin / self.ENGINE_BINARY.get(engine, engine)
+        if binary.exists():
+            env["FACTORY_ENGINE_BIN"] = str(binary)
         if policy is not None:
             env["FACTORY_TOOL_POLICY"] = policy
         if budget_usd is not None:
@@ -700,6 +707,8 @@ class TestAdapters(unittest.TestCase):
         (test_a_write_agent_edits_a_disposable_worktree_and_leaves_the_target_untouched)."""
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                "ANTHROPIC_API_KEY": "stub-key", "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+               # agents-28nn round 5: the adapter execs only this dispatcher-verified path.
+               "FACTORY_ENGINE_BIN": str(self.bin / "pi"),
                "FACTORY_TOOL_POLICY": "worktree-write", "FACTORY_SANDBOXED": "1"}
         res = subprocess.run(
             ["bwrap", "--dev-bind", "/", "/", "--ro-bind", str(ROOT), str(ROOT),
@@ -2619,6 +2628,120 @@ except OSError:
 
 print("EGRESS:" + json.dumps(results, sort_keys=True))
 """
+
+
+class TestEngineCredentialPinning(TestDispatcher):
+    """agents-28nn round 5, review P0 — the DEMONSTRATED credential exfiltration.
+
+    The adapter is the LAST GRANTER BEFORE THE KEY: it hands the run's model credentials
+    to whatever binary it executes, so an unpinned engine is an EXFILTRATION PATH, not
+    merely an unverified binary. The round-4 reviewer proved it by construction: a fake
+    `pi` planted first on PATH, run via `factory run --engine pi` under the trusted-target
+    FACTORY_ALLOW_UNSANDBOXED opt-in with ANTHROPIC_API_KEY set, EXECUTED and dumped the
+    environment — key included — into model_output.txt.
+
+    The attack payload is CHECKED IN as tests/fixtures/fake_engine.sh, so these tests
+    contain the attack rather than describing one, and the assertion sits at the point the
+    secret should never arrive — what the fake RECEIVED — not at an exit code (a fake that
+    dumps the environment and then fails would pass a nonzero-exit assertion while the
+    leak stands):
+
+    * the attack arm asserts the fake NEVER EXECUTES (no dump exists) and that no run
+      artefact carries the secret;
+    * the control arm pins the SAME payload and asserts the run succeeds AND the dump
+      CONTAINS the secret — the credential path is live, so only the pin gates it.
+
+    MUTATION PROOF, both directions (performed, not asserted): dropping the engine
+    binaries from TRUSTED_TOOLS turns the attack arm red (the fake resolves, executes and
+    its dump carries the secret); dropping the dispatcher's FACTORY_ENGINE_BIN wiring
+    turns the control arm red (the adapter refuses, nothing is delivered).
+    """
+
+    SECRET = "sk-ant-EXFIL-CANARY-28nn"
+    FIXTURE = ROOT / "tests" / "fixtures" / "fake_engine.sh"
+
+    def _plant_fake_engine(self, name="pi"):
+        """Install the checked-in attack payload as an engine namesake FIRST on PATH."""
+        evil = self.root / "evilbin"
+        evil.mkdir(exist_ok=True)
+        fake = evil / name
+        shutil.copyfile(self.FIXTURE, fake)
+        fake.chmod(0o755)
+        return evil, fake
+
+    def _attack_env(self, evil, extra=None):
+        env = {"PATH": f"{evil}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+               "FACTORY_ALLOW_UNSANDBOXED": "1",
+               # The dev/test opt-in must NOT rescue resolution: this is the pinned-host
+               # posture the attack ran under.
+               "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+               "ANTHROPIC_API_KEY": self.SECRET}
+        env.update(extra or {})
+        return env
+
+    def _model_outputs(self):
+        """The model_output.txt files that ACTUALLY exist — one is created only when the
+        adapter execs an engine (the redirect target), so existence is execution."""
+        return [run / "model_output.txt" for run in self.run_dirs()
+                if (run / "model_output.txt").exists()]
+
+    def test_a_path_planted_fake_engine_never_receives_the_credential(self):
+        """The constructed attack, retained: an UNPINNED namesake first on PATH must be
+        refused BEFORE it executes — the assertion is that the credential never reaches
+        it, not that the run exits nonzero."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        evil, _fake = self._plant_fake_engine()
+        res = self.factory("pi", self._attack_env(evil), target_arg="trusted")
+        self.assertNotEqual(res.returncode, 0,
+                            "an unpinned engine must refuse the run, not exit clean")
+        self.assertIn("not pinned", res.stderr,
+                      "the refusal must name the pin cause, not some other gate: "
+                      + res.stderr)
+        for output in self._model_outputs():
+            self.fail(f"the fake engine EXECUTED and received the environment: "
+                      f"{output} exists; the dump would carry the key "
+                      f"({'key present' if self.SECRET in output.read_text() else 'key absent'})")
+
+    def test_a_pinned_engine_is_delivered_the_credential(self):
+        """The control: the SAME payload, pinned by its sha256, runs and its environment
+        dump CONTAINS the key — the credential path is live end to end, so the attack
+        arm's silence is the pin's doing, not a broken harness. This is also the mutation
+        trap for the delivery half: remove the dispatcher's FACTORY_ENGINE_BIN wiring and
+        the adapter refuses, the dump never appears, and this test goes red."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        evil, fake = self._plant_fake_engine()
+        digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text(f"pi:\n  sha256: {digest}\n", encoding="utf-8")
+        res = self.factory("pi", self._attack_env(
+            evil, {"FACTORY_TOOL_PINS": str(pins)}), target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        outputs = self._model_outputs()
+        self.assertEqual(len(outputs), 1)
+        dump = outputs[0].read_text(encoding="utf-8")
+        self.assertIn("FAKE ENGINE ENVIRONMENT DUMP", dump,
+                      "the pinned payload must have EXECUTED and dumped its environment")
+        self.assertIn(self.SECRET, dump,
+                      "the pinned engine must have RECEIVED the credential — otherwise the "
+                      "attack arm proves nothing about the key")
+
+    def test_an_unpinned_claude_is_refused_before_it_can_receive_the_key(self):
+        """Same granter, never-sandboxed engine (agents-ejm): claude's credentials reach
+        the adapter UNBROKERED by design, so the pin is the whole boundary."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        evil, _fake = self._plant_fake_engine("claude")
+        res = self.factory("claude", self._attack_env(evil), target_arg="trusted")
+        self.assertNotEqual(res.returncode, 0,
+                            "an unpinned engine must refuse the run, not exit clean")
+        self.assertIn("not pinned", res.stderr)
+        self.assertEqual(self._model_outputs(), [],
+                         "the fake claude must never execute with the credential")
 
 
 class TestEgressEndToEnd(unittest.TestCase):

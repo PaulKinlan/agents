@@ -183,13 +183,26 @@ echo "[claude adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
 cd "$TARGET_DIR"
 
+# agents-28nn round 5 (review P0 — credential exfiltration): THE ADAPTER IS THE LAST
+# GRANTER BEFORE THE KEY. claude is never kernel-sandboxed (agents-ejm), so its credentials
+# reach this process unbrokered by design — which makes the binary this adapter execs the
+# WHOLE boundary. A by-name PATH lookup hands the key to whatever an attacker planted first
+# on PATH: an unpinned engine is an EXFILTRATION PATH, not merely an unverified binary. The
+# dispatcher resolves and pin-verifies the engine binary (lib/tool_pins.resolve_tool;
+# engine binaries are in TRUSTED_TOOLS) and passes the verified absolute path as
+# FACTORY_ENGINE_BIN; this adapter execs ONLY that path and refuses without it.
+ENGINE_BIN="${FACTORY_ENGINE_BIN:-}"
+if [ -z "$ENGINE_BIN" ]; then
+  echo "[claude adapter] Refusing: FACTORY_ENGINE_BIN is unset — the dispatcher must resolve and pin-verify the engine binary (lib/tool_pins.resolve_tool) before this adapter may hand it the run's credentials; a by-name PATH lookup is an exfiltration path (agents-28nn round 5)." >&2
+  exit 3
+fi
 # The engine reads the prompt on stdin too, so it is not in the engine's argv either.
 echo "[claude adapter] Tool policy: $TOOL_POLICY (${POLICY_FLAGS[*]})"
 if [ ${#BUDGET_FLAGS[@]} -gt 0 ]; then
   echo "[claude adapter] Budget cap: \$$FACTORY_MAX_BUDGET_USD (--max-budget-usd)"
 fi
 # ${SKILL_FLAGS[@]+...} / ${BUDGET_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
-printf '%s' "$PROMPT" | claude "${POLICY_FLAGS[@]}" ${SKILL_FLAGS[@]+"${SKILL_FLAGS[@]}"} ${BUDGET_FLAGS[@]+"${BUDGET_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
+printf '%s' "$PROMPT" | "$ENGINE_BIN" "${POLICY_FLAGS[@]}" ${SKILL_FLAGS[@]+"${SKILL_FLAGS[@]}"} ${BUDGET_FLAGS[@]+"${BUDGET_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
   echo "[claude adapter] Error executing claude" >&2
   cat "$OUTPUT_FILE" >&2
   exit 1

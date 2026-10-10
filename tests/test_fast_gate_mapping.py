@@ -90,6 +90,15 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_docs_drift.py", mapped,
                       "walker suite omitted for walked root markdown (agents-28nn)")
 
+    def test_tests_fixtures_map_to_the_containment_suite(self):
+        """tests/fixtures/ holds the checked-in attack payloads (agents-28nn round 5):
+        fake_engine.sh is asserted on by TestEngineCredentialPinning in the containment
+        suite, so a payload change must run the suite that contains the attack."""
+        mapped = resolve_fast_gate(["tests/fixtures/fake_engine.sh"])
+        self.assertIn("tests/test_containment.py", mapped,
+                      "containing suite omitted for the checked-in attack payload "
+                      "(agents-28nn round 5)")
+
     def test_candidate_identity_maps_to_prepass_emission(self):
         """lib/candidate_identity.py must run property tests and prepass emission assertions."""
         mapped = resolve_fast_gate(["lib/candidate_identity.py"])

@@ -2,7 +2,8 @@
 # Generate a host-local tool pins file for the Software Factory (agents-3g6).
 #
 # agents-7bj made tool pinning FAIL-CLOSED: every trusted host-side tool (bwrap, gh, bd,
-# git, semgrep, gitleaks, node, npm, npx) must carry a sha256 pin or a real run is refused.
+# git, semgrep, gitleaks, node, npm, npx, and the engine binaries pi, claude, agentapi,
+# deepseek) must carry a sha256 pin or a real run is refused.
 # bwrap heads the list: it delivers the OS sandbox itself, so an unpinned bwrap makes the
 # host read as unable to sandbox (agents-28nn). The
 # repo `tools.yaml` ships the format with the pins commented out, because a binary's hash
@@ -56,7 +57,13 @@
 # A tool that is not installed (e.g. the optional semgrep/gitleaks pre-pass scanners, or
 # bwrap on a host that never sandboxes) is skipped with a comment: the factory only fails
 # closed for a tool it actually resolves, so an absent tool stays absent rather than
-# blocking the run.
+# blocking the run. The same rule covers the ENGINE BINARIES (agents-28nn round 5): an
+# engine that is not installed is skipped, but an INSTALLED engine whose directory was not
+# passed via --lookup-path (engines usually install outside the system dirs, e.g.
+# ~/.local/pi) is reported NOT FOUND and stays unpinned — and a factory run that dispatches
+# it then REFUSES, because the adapter may only execute a pin-verified binary. Pass the
+# engine's install dir explicitly, e.g.:
+#   tools/generate-tool-pins.sh --lookup-path "$HOME/.local/bin"
 #
 # This is an explicit operator/runner step, never auto-run by the factory — the factory does
 # not generate or relax pins on its own.
@@ -135,7 +142,7 @@ if [ -z "$MKDIR" ] || [ -z "$DIRNAME_BIN" ] || [ -z "$DATE" ]; then
   exit 2
 fi
 
-TOOLS="bwrap gh bd git semgrep gitleaks node npm npx"
+TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi deepseek"
 
 "$MKDIR" -p "$("$DIRNAME_BIN" "$OUT")"
 {

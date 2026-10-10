@@ -16,11 +16,20 @@ OUTPUT_FILE="$RUN_DIR/model_output.txt"
 # agentapi is the only supported headless dispatch path. Fail loudly when it is
 # missing: writing a placeholder and exiting 0 made the dispatcher parse no JSON and
 # store an empty report, so a run that never happened was recorded as a clean scan.
-AGENTAPI_BIN="$(command -v agentapi || true)"
+#
+# agents-28nn round 5 (review P0 — credential exfiltration): THE ADAPTER IS THE LAST
+# GRANTER BEFORE THE KEY — this process's environment carries the run's model
+# credentials, so the binary it execs decides who receives them. A by-name PATH lookup
+# hands the key to whatever an attacker planted first on PATH: an unpinned engine is an
+# EXFILTRATION PATH, not merely an unverified binary. The dispatcher resolves and
+# pin-verifies the engine binary (lib/tool_pins.resolve_tool; agentapi is in
+# TRUSTED_TOOLS) and passes the verified absolute path as FACTORY_ENGINE_BIN; this
+# adapter execs ONLY that path and refuses without it.
+AGENTAPI_BIN="${FACTORY_ENGINE_BIN:-}"
 if [ -z "$AGENTAPI_BIN" ]; then
-  echo "[antigravity adapter] Error: 'agentapi' not found on PATH — cannot dispatch a headless antigravity run." >&2
+  echo "[antigravity adapter] Refusing: FACTORY_ENGINE_BIN is unset — the dispatcher must resolve and pin-verify the agentapi binary (lib/tool_pins.resolve_tool) before this adapter may hand it the run's credentials; a by-name PATH lookup is an exfiltration path (agents-28nn round 5)." >&2
   echo "[antigravity adapter] Install agentapi, or run the factory with --engine pi / --engine claude." >&2
-  exit 1
+  exit 3
 fi
 
 # agents-m2n (review P1-1): a set directive variable REQUIRES a readable, nonempty file

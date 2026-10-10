@@ -785,6 +785,8 @@ class TestEngineAdapterAuth(unittest.TestCase):
             res, run_dir = self._run_claude_adapter(tmp, {
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "ANTHROPIC_API_KEY": "synthetic-test-key",
+                # agents-28nn round 5: the adapter execs only this dispatcher-verified path.
+                "FACTORY_ENGINE_BIN": str(bindir / "claude"),
             }, prompt="x" * 200000)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn('"summary":"stub"', (run_dir / "model_output.txt").read_text())
@@ -801,6 +803,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
             res, run_dir = self._run_claude_adapter(tmp, {
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "ANTHROPIC_API_KEY": "sk-ant-stale-key",
+                "FACTORY_ENGINE_BIN": str(bindir / "claude"),
             })
 
             self.assertEqual(res.returncode, 0, res.stderr)
@@ -817,6 +820,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
             res, _ = self._run_claude_adapter(tmp, {
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "ANTHROPIC_API_KEY": "sk-ant-ci-key",
+                "FACTORY_ENGINE_BIN": str(bindir / "claude"),
             })
 
             self.assertEqual(res.returncode, 0, res.stderr)
@@ -842,21 +846,25 @@ class TestEngineAdapterAuth(unittest.TestCase):
     @unittest.skipIf(shutil.which("agentapi"), "agentapi installed; missing-binary path not reachable")
     def test_antigravity_fails_loudly_when_agentapi_is_missing(self):
         """A missing engine must abort the run, never write a placeholder the dispatcher
-        would then store as a clean, zero-finding report."""
+        would then store as a clean, zero-finding report. agents-28nn round 5: "missing"
+        now surfaces as FACTORY_ENGINE_BIN unset — the dispatcher could not resolve and
+        pin-verify agentapi — and the adapter REFUSES (exit 3) rather than falling back
+        to a by-name PATH lookup, which is the exfiltration path this round closed."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             run_dir = tmp / "run"
             adapter = FACTORY_ROOT / "lib" / "adapters" / "antigravity.sh"
             env = dict(os.environ)
             env["PATH"] = "/usr/bin:/bin"
+            env.pop("FACTORY_ENGINE_BIN", None)
 
             res = subprocess.run(
                 ["bash", str(adapter), "probe", str(tmp), str(tmp), str(run_dir)],
                 input="prompt", capture_output=True, text=True, env=env, timeout=60,
             )
 
-            self.assertEqual(res.returncode, 1)
-            self.assertIn("agentapi", res.stderr)
+            self.assertEqual(res.returncode, 3)
+            self.assertIn("FACTORY_ENGINE_BIN", res.stderr)
             self.assertFalse((run_dir / "model_output.txt").exists())
 
 

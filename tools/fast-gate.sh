@@ -75,6 +75,14 @@ while IFS= read -r f; do
     tests/test_*.py)
       run="$run $f"
       ;;
+    tests/fixtures/*)
+      # Checked-in test payloads (agents-28nn round 5): fake_engine.sh is the contained
+      # engine-exfiltration attack asserted on by tests/test_containment.py
+      # TestEngineCredentialPinning. Search recorded: `grep -rln fixtures tests/
+      # --include='*.py'` -> tests/test_containment.py is the only consumer of
+      # tests/fixtures/ (the other hits name tests/sandbox_fixtures.py or tmp-tree dirs).
+      mapped="$mapped tests/test_containment.py"
+      ;;
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
       mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_adapter_auth_failure.py tests/test_line_andon.py tests/test_prompt_exposure.py tests/test_transient_dirs.py"

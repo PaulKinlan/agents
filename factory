@@ -767,6 +767,42 @@ def choose_engine(requested_engine: str) -> str:
 
     return "pi"
 
+
+# The binary each engine's adapter EXECUTES (agents-28nn round 5, review P0 — a demonstrated
+# credential exfiltration). The engine name is not always the binary name: antigravity is
+# dispatched headless through `agentapi`. The adapter is the LAST GRANTER BEFORE THE KEY — it
+# hands the run's model credentials to whatever binary it executes, so an unpinned engine is
+# an EXFILTRATION PATH, not merely an unverified binary: a PATH-planted namesake runs with
+# the key in its environment (proven by construction with a fake `pi` that dumped its env).
+# Every engine binary is therefore in lib.tool_pins.TRUSTED_TOOLS: the dispatcher resolves and
+# pin-verifies it via resolve_tool BEFORE the adapter runs and hands the verified absolute
+# path to the adapter as FACTORY_ENGINE_BIN; the adapter refuses to run without it, so a
+# by-name PATH lookup can never be handed the credential. The sandbox binder re-verifies the
+# same pin at wrap time (lib/sandbox.py _executable_binds) before binding the engine in.
+ENGINE_BINARIES = {"pi": "pi", "claude": "claude", "antigravity": "agentapi",
+                   "deepseek": "deepseek"}
+
+
+def _resolve_engine_bin(engine: str) -> Optional[str]:
+    """Resolve the engine's executed binary to a pin-verified absolute path, or None.
+
+    Raises ToolPinError when the binary is unpinned, mismatched, or unresolvable — the run
+    fails closed rather than handing credentials to an unverified binary. deepseek is the
+    one engine whose binary is OPTIONAL: with no `deepseek` CLI installed its adapter falls
+    back to the factory's own Python HTTP client, which is station code with no binary to
+    pin, so an absent binary resolves to None (no FACTORY_ENGINE_BIN) rather than failing.
+    A deepseek binary that IS present but unpinned still fails closed — a resolvable but
+    unverifiable binary must never be silently skipped while the adapter could reach it.
+    """
+    binary = ENGINE_BINARIES.get(engine)
+    if binary is None:
+        # An engine with no adapter on this station gets no credentials (lib/child_env.py
+        # fails closed the same way) and its adapter script will not exist; nothing to pin.
+        return None
+    if engine == "deepseek" and shutil.which(binary) is None:
+        return None
+    return resolve_tool(binary)
+
 # Bounds the scan of a pathological output (a truncated report with thousands of braces).
 MAX_JSON_DECODE_ATTEMPTS = 20000
 
@@ -1222,6 +1258,20 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     adapter_env = child_environment(engine=engine,
                                     proxied=not engine_sandboxed(engine))
     adapter_env["FACTORY_TOOL_POLICY"] = policy.tool_policy
+    # agents-28nn round 5 (review P0 — credential exfiltration): the adapter is the LAST
+    # GRANTER BEFORE THE KEY, so the binary it executes is pin-verified HERE, before the
+    # credential-bearing env is handed over. The adapter execs ONLY this verified absolute
+    # path (it refuses without it); a PATH-planted namesake is never executed, so it can
+    # never receive the run's credentials. Failure is a station error naming the pin cause,
+    # never a fallback to PATH order.
+    try:
+        engine_bin = _resolve_engine_bin(engine)
+    except ToolPinError as e:
+        raise StationError(
+            f"{agent_name}: engine '{engine}'s binary cannot be authenticated: {e}; "
+            f"refusing to hand the run's credentials to an unverified binary") from e
+    if engine_bin is not None:
+        adapter_env["FACTORY_ENGINE_BIN"] = engine_bin
     if engine == "pi":
         # agents-3y2: name the model explicitly so a sandboxed pi runs deepseek/deepseek-flash
         # (the keyless BYOK path) instead of falling back to its Anthropic default and asking

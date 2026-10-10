@@ -121,6 +121,21 @@ if [ -n "${FACTORY_MODEL:-}" ]; then
   echo "[pi adapter] Model: $FACTORY_MODEL"
 fi
 
+# agents-28nn round 5 (review P0 — credential exfiltration): THE ADAPTER IS THE LAST
+# GRANTER BEFORE THE KEY. This process's environment carries the run's model credentials
+# (lib/child_env.py ENGINE_CREDENTIALS), so the binary it execs decides who receives them.
+# A by-name PATH lookup hands the key to whatever an attacker planted first on PATH — an
+# unpinned engine is an EXFILTRATION PATH, not merely an unverified binary (proven by
+# construction: a fake pi dumped the environment, key included, into model_output.txt).
+# The dispatcher therefore resolves and pin-verifies the engine binary
+# (lib/tool_pins.resolve_tool; engine binaries are in TRUSTED_TOOLS) and passes the
+# verified absolute path as FACTORY_ENGINE_BIN; this adapter execs ONLY that path and
+# refuses without it.
+ENGINE_BIN="${FACTORY_ENGINE_BIN:-}"
+if [ -z "$ENGINE_BIN" ]; then
+  echo "[pi adapter] Refusing: FACTORY_ENGINE_BIN is unset — the dispatcher must resolve and pin-verify the engine binary (lib/tool_pins.resolve_tool) before this adapter may hand it the run's credentials; a by-name PATH lookup is an exfiltration path (agents-28nn round 5)." >&2
+  exit 3
+fi
 # Run pi non-interactively with the specified skill loaded
 # The engine reads the prompt on stdin too, so it is not in the engine's argv either.
 echo "[pi adapter] Tool policy: $TOOL_POLICY (${POLICY_FLAGS[*]})"
@@ -129,7 +144,7 @@ if [ -n "${FACTORY_MAX_BUDGET_USD:-}" ]; then
   echo "[pi adapter] Note: budget.max_usd=\$$FACTORY_MAX_BUDGET_USD declared but NOT enforced by this adapter (no per-run budget flag; the claude engine enforces it via --max-budget-usd)."
 fi
 # ${SYSTEM_DIRECTIVE_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
-printf '%s' "$PROMPT" | pi --no-session "${MODEL_FLAGS[@]}" "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" ${SYSTEM_DIRECTIVE_FLAGS[@]+"${SYSTEM_DIRECTIVE_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
+printf '%s' "$PROMPT" | "$ENGINE_BIN" --no-session "${MODEL_FLAGS[@]}" "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" ${SYSTEM_DIRECTIVE_FLAGS[@]+"${SYSTEM_DIRECTIVE_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
   echo "[pi adapter] Error executing pi" >&2
   cat "$OUTPUT_FILE" >&2
   exit 1

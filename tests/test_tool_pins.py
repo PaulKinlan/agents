@@ -74,6 +74,21 @@ class ResolveToolTests(unittest.TestCase):
             with self.assertRaises(ToolPinError):
                 resolve_tool("bwrap", path_env=str(self.bindir), pins={})
 
+    def test_engine_binaries_are_trusted_tools_and_fail_closed_when_unpinned(self):
+        """agents-28nn round 5, review P0: the adapter is the LAST GRANTER BEFORE THE KEY,
+        so the engine binaries it executes (pi, claude, agentapi, deepseek) are trusted
+        tools — an unpinned engine is a credential exfiltration path, not merely an
+        unverified binary (proven by construction: a fake pi handed the run's
+        ANTHROPIC_API_KEY and dumped its environment). The end-to-end containment property
+        is pinned in tests/test_containment.py (TestEngineCredentialPinning)."""
+        for binary in ("pi", "claude", "agentapi", "deepseek"):
+            with self.subTest(binary=binary):
+                self.assertIn(binary, TRUSTED_TOOLS)
+                _make_tool(self.bindir, binary)
+                with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
+                    with self.assertRaises(ToolPinError):
+                        resolve_tool(binary, path_env=str(self.bindir), pins={})
+
     def test_resolve_unpinned_allowed_by_explicit_opt_in(self):
         with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "1"}):
             path = resolve_tool("gh", path_env=str(self.bindir), pins={})

@@ -2,7 +2,8 @@
 """Integrity-pinned resolution of the factory's host-side trusted tools (agents-7bj).
 
 The factory is the highest-privilege component in a run: it resolves its trusted tools
-(``bwrap``, ``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``)
+(``bwrap``, ``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``,
+and the engine binaries ``pi``/``claude``/``agentapi``/``deepseek``)
 by *name* across ``PATH`` and executes them host-side for the pre-pass, the findings
 dispatch, bead promotion — and, for ``bwrap``, the OS sandbox itself. A trojaned binary
 earlier on ``PATH`` — or a hijacked install tree — would run with the factory's GitHub
@@ -76,8 +77,18 @@ UNPINNED_ALLOW_ENV = "FACTORY_ALLOW_UNPINNED_TOOLS"
 # sandbox exists at all (agents-28nn). `bd`/`git` are the findings store and the
 # worktree/admin; `gh` fetches issues and drives promotion; `semgrep`/`gitleaks` and
 # `node`/`npm`/`npx` are the pre-pass scanners.
+#
+# `pi`/`claude`/`agentapi`/`deepseek` are the ENGINE BINARIES the adapters execute
+# (agents-28nn round 5, review P0 — a demonstrated credential exfiltration): the adapter
+# is the LAST GRANTER BEFORE THE KEY — it hands the run's model credentials to whatever
+# binary it executes, so an unpinned engine is an EXFILTRATION PATH, not merely an
+# unverified binary: a PATH-planted namesake runs with ANTHROPIC_API_KEY et al. in its
+# environment (proven by construction with a fake `pi` that dumped its env). `agentapi`
+# is the antigravity engine's headless binary; `deepseek`'s CLI is optional (the adapter
+# falls back to the factory's own Python HTTP client, which has no binary to pin).
 TRUSTED_TOOLS: Tuple[str, ...] = ("bwrap", "gh", "bd", "git", "semgrep", "gitleaks",
-                                  "node", "npm", "npx")
+                                  "node", "npm", "npx",
+                                  "pi", "claude", "agentapi", "deepseek")
 
 def _unpinned_allowed() -> bool:
     """The explicit, auditable dev/test opt-in: resolves unpinned trusted tools by name
