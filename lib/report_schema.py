@@ -187,10 +187,13 @@ _NAMED_BACKEND_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-_STRUCTURED_PRECONDITION_PATTERN = re.compile(
-    r"\b(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)\b"
-    r"[^\n]{1,160}?\b(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather|concurrent|parallel|concurrency)\b"
-    r"[^\n]{0,100}?\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use|default\s+to)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequential(?:ly)?)\b",
+_IF_REENTRANT_PATTERN = re.compile(
+    r"\b(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)\b",
+    re.IGNORECASE
+)
+
+_SERIAL_FALLBACK_PATTERN = re.compile(
+    r"\b(?:otherwise|else)\s+(?:preserve|keep|maintain|run|use|default\s+to)?\s*(?:documented\s+)?(?:serial(?:ly)?|sequential(?:ly)?)\b",
     re.IGNORECASE
 )
 
@@ -507,17 +510,20 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
         return False
 
     # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
-    # The condition must govern every concurrency recommendation in remediation (no unconditioned prefix/suffix),
-    # and the fallback branch must preserve serial execution without advocating concurrency.
-    match = _STRUCTURED_PRECONDITION_PATTERN.search(remediation)
-    if match:
-        prefix = remediation[:match.start()]
-        suffix = remediation[match.end():]
-        if not _EXECUTION_CONCURRENCY_PATTERN.search(prefix) and not _EXECUTION_CONCURRENCY_PATTERN.search(suffix):
-            otherwise_parts = re.split(r"\b(?:otherwise|else)\b", match.group(0), flags=re.IGNORECASE)
-            if len(otherwise_parts) >= 2:
-                fallback_branch = otherwise_parts[-1]
-                if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_branch):
+    # Inspect starting from the FIRST fallback delimiter ('otherwise' or 'else') so that intermediate
+    # fallback branches advocating concurrency (e.g. 'otherwise use Promise.any; else preserve serial')
+    # cannot pass. The entire fallback section must preserve serial execution and must not contain
+    # any execution concurrency advice.
+    first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
+    if first_fb:
+        conditional_part = remediation[:first_fb.start()]
+        fallback_part = remediation[first_fb.start():]
+        if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_part) and _SERIAL_FALLBACK_PATTERN.search(fallback_part):
+            m_if = _IF_REENTRANT_PATTERN.search(conditional_part)
+            if m_if:
+                prefix = conditional_part[:m_if.start()]
+                concurrency_branch = conditional_part[m_if.end():]
+                if not _EXECUTION_CONCURRENCY_PATTERN.search(prefix) and _EXECUTION_CONCURRENCY_PATTERN.search(concurrency_branch):
                     return True
 
     # Case 2: Named backend citing proven evidence of overlap tolerance
