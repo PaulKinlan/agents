@@ -158,6 +158,29 @@ class TestVulnTriageClustering(unittest.TestCase):
         for c in non_num_clusters:
             self.assertEqual(c["count"], 1)
 
+    def test_zero_line_is_unknown_not_line_zero(self):
+        """agents-ghtz: consolidating onto lib.line_numbers made 0/"0" UNKNOWN, not line 0.
+
+        The old private copy accepted 0 as a line, which is the coercion agents-ajt4 existed to
+        remove: line 0 is within 15 of the real findings at lines 1-5, so it must not merge with
+        them. Unknown stays unknown and gets its own cluster.
+        """
+        findings = [
+            {"path": "z.py", "line_number": 1, "rule_id": "r1"},
+            {"path": "z.py", "line_number": 5, "rule_id": "r2"},
+            {"path": "z.py", "line_number": 0, "rule_id": "r-zero"},
+            {"path": "z.py", "line_number": "0", "rule_id": "r-zero-str"},
+        ]
+        clusters = triage.cluster_deterministic(findings)
+
+        self.assertEqual([i["rule_id"] for i in clusters[0]["items"]], ["r1", "r2"])
+        self.assertEqual([i["line_number"] for i in clusters[0]["items"]], [1, 5])
+        self.assertEqual(clusters[0]["count"], 2)
+        self.assertEqual(len(clusters), 3)
+        self.assertEqual([c["items"][0]["rule_id"] for c in clusters[1:]],
+                         ["r-zero", "r-zero-str"])
+        self.assertTrue(all(c["count"] == 1 for c in clusters[1:]))
+
     def test_determinism_across_input_order(self):
         """Input findings arriving in different orders must produce byte-identical cluster output."""
         list_a = [
@@ -184,6 +207,11 @@ class TestVulnTriageClustering(unittest.TestCase):
             mock_script = mock_root / "agents" / "vuln-triage" / "scripts" / "triage.py"
             mock_script.parent.mkdir(parents=True)
             shutil.copyfile(ROOT / "agents" / "vuln-triage" / "scripts" / "triage.py", mock_script)
+            # triage.py imports the shared line-sentinel rule; mirror the repo layout so its
+            # FACTORY_ROOT resolves to this tree and the lib module is importable (agents-ghtz).
+            mock_lib = mock_root / "lib"
+            mock_lib.mkdir(parents=True)
+            shutil.copyfile(ROOT / "lib" / "line_numbers.py", mock_lib / "line_numbers.py")
 
             mock_findings = mock_root / "findings"
             mock_findings.mkdir(parents=True)

@@ -40,6 +40,7 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+from lib.line_numbers import line_number_sort_key  # noqa: E402
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
@@ -1249,10 +1250,13 @@ def scan_repository(target_dir: Path, retrieve_guides: bool = False) -> Dict[str
                     })
                     break  # One representative match per rule per file to keep signal-to-noise high
 
+    # Deterministic tie-breakers. `line_number_sort_key` orders an unknown location after every
+    # known line instead of at an implicit line 0; these candidates carry the scanner's own
+    # 1-based line ints, so the order is unchanged - the safety is just declared (agents-ghtz).
     candidates.sort(key=lambda c: (
         c["severity"] != "high",
         c["path"],
-        c.get("line_number") or 0,
+        line_number_sort_key(c.get("line_number")),
         c["rule_id"],
     ))
 

@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(FACTORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(FACTORY_ROOT))
+
+from lib.line_numbers import usable_line_number  # noqa: E402
 
 def load_threat_model(target_name: str, target_dir: Path, output_file: Optional[Path] = None) -> Tuple[str, str]:
     # 1. Local target THREAT_MODEL.md
@@ -60,22 +64,6 @@ def gather_findings(target_name: str) -> List[Dict[str, Any]]:
             pass
     return findings
 
-def _parse_line_number(val: Any) -> Optional[int]:
-    """Returns integer line number if valid and non-negative, else None."""
-    if isinstance(val, bool):
-        return None
-    if isinstance(val, int):
-        return val if val >= 0 else None
-    if isinstance(val, str):
-        s = val.strip()
-        if s.isascii() and s.isdigit():
-            try:
-                n = int(s)
-                return n if n >= 0 else None
-            except ValueError:
-                return None
-    return None
-
 
 def cluster_deterministic(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Groups findings by file and proximity (lines within 15).
@@ -86,6 +74,8 @@ def cluster_deterministic(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]
     Because unknown locations cannot have spatial proximity established either
     with numeric lines or with each other, they are never coerced to line 0 (which
     would falsely merge them with lines <= 15) or grouped together by proximity.
+    The unknown test is `lib.line_numbers.usable_line_number` (agents-ghtz): non-positive
+    values such as 0 are UNKNOWN too, not line 0.
     """
     by_file: Dict[str, List[Dict[str, Any]]] = {}
     for f in findings:
@@ -101,7 +91,7 @@ def cluster_deterministic(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]
         unknown_items: List[Dict[str, Any]] = []
 
         for item in items:
-            line = _parse_line_number(item.get("line_number"))
+            line = usable_line_number(item.get("line_number"))
             if line is not None:
                 numeric_items.append((line, item))
             else:
