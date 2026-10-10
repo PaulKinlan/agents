@@ -198,7 +198,10 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
 # either the SCANNER's own match text (stable across runs) or the MODEL's re-quoted prose (not
 # stable): on findings/audit-target-5qe.json 28% of rows carry rule_id "unclassified", which is
 # exactly the population where the scanner binding below cannot fire. Naming the key turns an
-# unfalsifiable line into a graded one: `candidate-exact` is evidence, `model-snippet` is not.
+# unattributable line into a graded one - and note what the grade is a grade OF: `candidate-exact`
+# says the row was recognised by the scanner's own text on its last observation, NOT that a finding
+# was fixed. A row still gets booked fixed when a later run drifts its label or line, or omits it,
+# which is why the Fixed section says so at the point of use.
 #
 # Classification, per the four-step field checklist above lib/redaction.py's RENDERED_TEXT_FIELDS:
 # this is a CLOSED vocabulary produced here, never model input, so it is copied verbatim rather
