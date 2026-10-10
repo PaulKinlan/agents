@@ -494,6 +494,27 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         self.assertEqual(prepass.get("NO_PROXY"), "localhost,127.0.0.1")
         self.assertNotIn("operator-proxy", json.dumps(prepass))
 
+    @mock.patch("lib.sandbox._probe_result", False)
+    def test_engine_children_never_inherit_the_operator_proxy_on_the_unsandboxed_path(self):
+        """agents-28nn round 8 (verdict P1, the fourth inverted-polarity instance): the
+        adapter env used to pass proxied=not engine_sandboxed(engine), forwarding the
+        operator's HTTP_PROXY/HTTPS_PROXY/NO_PROXY to the UNSANDBOXED engine only — the
+        less-confined path given more network configuration freedom than the confined
+        one, the exact shape the rule on lib/sandbox.py's engine_sandboxed condemns.
+        The engine's model traffic goes through the host-side credential broker or its
+        own ~/.pi session, never an inherited operator proxy. Mutation proof, both
+        directions: restoring proxied=not engine_sandboxed(engine) at the adapter env
+        build turns this red (operator-proxy.invalid survives into the engine's env);
+        the sandboxed sibling test above pins that the confined path never had them."""
+        _prepass, engine = self._run_probe(
+            env_overrides={"FACTORY_ALLOW_UNSANDBOXED": "1",
+                           "HTTP_PROXY": "http://operator-proxy.invalid:3128",
+                           "HTTPS_PROXY": "http://operator-proxy.invalid:3128"},
+            target_arg="trusted")
+        self.assertNotIn("operator-proxy", json.dumps(engine),
+                         "the operator's own proxy config must not reach the engine child "
+                         "on the less-confined path")
+
 
 @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestDispatcherCandidateBinding(unittest.TestCase):

@@ -292,8 +292,12 @@ def engine_sandboxed(engine: str) -> bool:
     THE RULE every conditional on this function (or on sandbox_available) must satisfy
     (agents-28nn round 6 — four appearances in four mechanisms make this a design
     property, not a set of bugs: the round-5 effective-pins hoist, the credential broker
-    gate in factory, the pre-pass HTTP_PROXY only-if-sandbox_ok, and the adapter proxy
-    only-if-egress_active): THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
+    gate in factory, the pre-pass HTTP_PROXY only-if-sandbox_ok, and the adapter env's
+    proxied=not engine_sandboxed, which handed the operator's HTTP(S)_PROXY/NO_PROXY to
+    the UNSANDBOXED engine only until round 8 dropped it; the round-6 enumeration's own
+    fourth entry — an adapter proxy gated on egress_active — was falsified by the
+    round-7 verdict: no such gate exists, the adapter's proxy is a UNIX-socket forward
+    for the broker): THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
     MORE-CONFINED PATH. A control that applies only on the confined path leaves the
     less-confined path with less control — the inverted polarity. Before gating anything
     on the result of this check, ask what the unsandboxed path gets instead: if the
