@@ -663,6 +663,8 @@ class FindingsStore:
             self.suppressions: Dict[str, Any] = self._load_suppressions()
         except BaseException:
             self._lock_fh.close()
+            # The handle is gone, so a later __del__ must not touch a closed file (agents-b81j).
+            self._lock_fh = None
             raise
 
     @staticmethod
@@ -774,6 +776,24 @@ class FindingsStore:
     def __exit__(self, exc_type, exc, tb):
         self.close()
         return False
+
+    def __del__(self) -> None:
+        """Release the lock handle even when the caller never called close() (agents-b81j).
+
+        `close()` is the documented path, but "a caller that forgets to close" is the ORDINARY case
+        for a library, and this handle is opened in __init__ and held for the store's whole
+        lifetime. Left to the file object's own finalizer it leaks an fd and holds the flock until
+        CPython collects it, which it reports as `ResourceWarning: unclosed file
+        <.../target.json.lock>` - five independent test files forgot and each leaked one. So the
+        SUCCESS path of the acquisition is closed here, the way __init__'s except already closes the
+        exception and FACTORY_STORE_LOCK_TIMEOUT contention paths, and no caller has to remember.
+        """
+        try:
+            self.close()
+        except Exception:
+            # A finalizer must not raise: this also runs at interpreter shutdown, after the
+            # modules close() needs may already be gone, and the process is exiting anyway.
+            pass
 
     def _load_store(self) -> Dict[str, Any]:
         if not self.store_file.exists():
@@ -1024,6 +1044,13 @@ class FindingsStore:
                 # bound: an invented id would look like provenance. Scanner-owned and never model
                 # input, so under the checklist it is copied VERBATIM (step 1) and deliberately NOT
                 # added to RENDERED_TEXT_FIELDS: nothing renders it.
+                #
+                # ASYMMETRY, and it is a trap for a reader of the PERSISTED record: here the key is
+                # always PRESENT and None means "nothing bound". At rest the key is OMITTED for an
+                # unbound row, because redact_finding strips it and redact_for_storage puts it back
+                # only when it is truthy - so `rec["candidate_id"]` raises KeyError on a loaded
+                # record, and `rec.get("candidate_id") is None` is the absent case, not a bound one
+                # (agents-7928).
                 "candidate_id": identity_snip if identity_source == "candidate-id" else None,
                 "agent": agent,
                 "rule_id": rule_id,
