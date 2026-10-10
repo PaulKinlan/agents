@@ -956,11 +956,11 @@ def _badge(f: Dict[str, Any]) -> str:
 
 
 def _identity_grade(f: Dict[str, Any]) -> str:
-    """The grading suffix for a row's identity source, or empty when the source is real evidence.
+    """The grading suffix for a row's identity source, or empty when the source is stable.
 
     Rendered rather than only documented: a reader should not have to know this module's vocabulary
-    to know whether a Fixed line is evidence, so every source outside IDENTITY_STABLE_SOURCES is
-    marked wherever the key is shown - the full report, the step summary and the Fixed section.
+    to know how much to trust the key, so every source outside IDENTITY_STABLE_SOURCES is marked
+    wherever the key is shown - the full report, the step summary and the Fixed section.
     """
     source = f.get("identity_source")
     if source and source not in IDENTITY_STABLE_SOURCES:
@@ -973,8 +973,14 @@ def _identity_note(f: Dict[str, Any]) -> str:
 
     A Fixed line nobody can attribute is unfalsifiable, which is why the teams reading these
     reports concluded that nothing may be closed on one. `model-snippet` says the row was
-    recognised by the model's re-quoted prose, so its disappearance is not evidence of a fix, while
-    `candidate-exact` means the scanner's own match text identified it.
+    recognised by the model's re-quoted prose, and `candidate-exact` that the scanner's own match
+    text recognised it.
+
+    WHAT THIS IS NOT, corrected after review: no source makes a Fixed line proof that a finding was
+    fixed. A row is also booked fixed when the next run drifts its rule label, drifts its line in a
+    multi-candidate file, or omits it entirely - and the row that disappears then still carries a
+    stable-looking `candidate-exact` from its LAST observation, because that is when it was written.
+    The key describes how the row was recognised, never that its disappearance was verified.
     """
     source = f.get("identity_source")
     return f" — identity: `{source}`{_identity_grade(f)}" if source else ""
@@ -1107,6 +1113,10 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 
     if fixed_items:
         lines.append("## Resolved in this Run (Fixed)")
+        lines.append("")
+        lines.append("> Identity names how each row was recognised, NOT that its disappearance was "
+                     "verified: a row is also booked fixed when a later run drifts its label or line, "
+                     "or omits it entirely.")
         lines.append("")
         for f in fixed_items:
             if reduced(f):

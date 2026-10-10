@@ -470,7 +470,13 @@ class TestIdentityAttribution(unittest.TestCase):
         self.assertNotIn("`candidate-exact` (reword-unstable", report)
 
     def test_an_untrusted_rule_id_is_recorded_as_prose_identity(self):
-        """The mechanism: the label is blanked before the lookup, so the scanner cannot be bound."""
+        """A model-invented label cannot bind a candidate, so identity rests on prose.
+
+        CORRECTED after review: this is NOT an execution-ordering bug. bind_candidates blanks the
+        label to "unclassified", but the lookup misses either way, because the candidate index is
+        keyed by the SCANNER's rule id - calling the lookup with the model's own unbound label
+        misses too. What is missing is a rule-agnostic (path) fallback, which is step 2.
+        """
         ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
                            "snippet": "scanner text"}])
         with tempfile.TemporaryDirectory() as td:
@@ -520,12 +526,29 @@ class TestIdentityAttribution(unittest.TestCase):
             self.assertIn("## Resolved in this Run (Fixed)", report)
             self.assertIn("identity: `model-snippet`", report)
 
-    def test_every_source_belongs_to_the_closed_vocabulary(self):
-        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
-                           "snippet": "scanner text"}])
+    def test_every_source_in_the_vocabulary_is_reachable(self):
+        """EXACT equality, not a subset check: a source that can never be emitted is a defect.
+
+        The reviewer was right that the subset form proved nothing - it would pass if the binder
+        returned one value or none. Every vocabulary entry is now constructed for real, which is
+        why it also catches a name that is defined but unreachable.
+        """
+        single = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                               "snippet": "scanner text"}])
+        ambiguous = self._index([
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "snippet": "alpha"},
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "snippet": "beta gamma"},
+        ])
         observed = set()
         with tempfile.TemporaryDirectory() as td:
-            for label, index in (("scanner-rule", ci), ("invented", ci), ("scanner-rule", None)):
-                for item in (self._finding(rule_id=label), self._finding(rule_id=label, line_number=99)):
-                    observed.add(self._run(td, [item], index)[0][0]["identity_source"])
-        self.assertTrue(observed <= set(findings.IDENTITY_SOURCES), observed)
+            cases = [
+                (self._finding(), single),                                  # exact
+                (self._finding(line_number=99), single),                    # unique
+                (self._finding(line_number=99, snippet="reads beta gamma"),
+                 ambiguous),                                                # similar-by-model-snippet
+                (self._finding(line_number=99, snippet="nothing like it"), ambiguous),  # model-snippet
+                (self._finding(), None),                                    # no-candidate-index
+            ]
+            for item, index in cases:
+                observed.add(self._run(td, [item], index)[0][0]["identity_source"])
+        self.assertEqual(observed, set(findings.IDENTITY_SOURCES), observed)
