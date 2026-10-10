@@ -106,7 +106,8 @@ class KeylessSandbox:
             "fail() { echo \"[keyless-stub] $*\" >&2; exit 7; }\n"
             "[ -n \"${DEEPSEEK_BASE_URL:-}\" ] || fail 'DEEPSEEK_BASE_URL not set by the broker'\n"
             "case \"$DEEPSEEK_BASE_URL\" in *'/proxy/deepseek'*) ;; *) fail \"base URL is not the broker: $DEEPSEEK_BASE_URL\";; esac\n"
-            "[ \"${DEEPSEEK_API_KEY:-}\" = 'factory-broker-placeholder' ] || fail 'DEEPSEEK_API_KEY is not the broker placeholder'\n"
+            # agents-28nn round 7: the placeholder is a per-run random secret; assert its shape.
+            "case \"${DEEPSEEK_API_KEY:-}\" in factory-broker-?*) ;; *) fail 'DEEPSEEK_API_KEY is not the broker placeholder';; esac\n"
             "[ -n \"${PI_CODING_AGENT_DIR:-}\" ] || fail 'PI_CODING_AGENT_DIR not set'\n"
             "[ -s \"$PI_CODING_AGENT_DIR/models.json\" ] || fail 'models.json was not written for pi'\n"
             "grep -q '\"deepseek\"' \"$PI_CODING_AGENT_DIR/models.json\" || fail 'models.json has no deepseek provider'\n"

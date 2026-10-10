@@ -41,7 +41,7 @@ from lib.containment import (  # noqa: E402
     policy_record,
 )
 from lib.sandbox import SANDBOXED_ENGINES, sandbox_available, sandbox_command  # noqa: E402
-from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
+from lib.credential_broker import PLACEHOLDER_PREFIX  # noqa: E402
 from lib.child_env import child_environment  # noqa: E402
 from lib import egress_proxy  # noqa: E402
 from lib import containment as containment_module  # noqa: E402
@@ -454,10 +454,15 @@ class TestBannerAndRecord(unittest.TestCase):
         sandbox = {"engine_sandboxed": True, "network_egress_filtered": True,
                    "engine_read_scope": "OS sandbox"}
         parent = {"ANTHROPIC_API_KEY": "not-a-real-provider-key"}
+        # agents-28nn round 7: the record only drops the residual when the env holds the
+        # RUNNING broker's per-run placeholder (any other value — including a retired
+        # static placeholder — is not evidence of a broker that will answer).
+        run_placeholder = "factory-broker-the-run-placeholder"
         engine_env = child_environment(engine="pi", parent=parent, broker_urls={
-            "anthropic": "http://127.0.0.1:8384/proxy/anthropic"})
+            "anthropic": "http://127.0.0.1:8384/proxy/anthropic"},
+            broker_placeholder=run_placeholder)
         kwargs = {"sandbox": sandbox, "brokered_providers": ("anthropic",),
-                  "engine_env": engine_env}
+                  "engine_env": engine_env, "expected_placeholder": run_placeholder}
         record = policy_record(policy, "pi", **kwargs)
         self.assertNotIn("env-credentials", record["not_enforced"])
         self.assertEqual(record["granted"]["credential_broker"]["providers"], ["anthropic"])
@@ -471,14 +476,20 @@ class TestBannerAndRecord(unittest.TestCase):
             "a provider name without apply_broker_urls must not upgrade policy.json")
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
-            engine_env=dict(engine_env, ANTHROPIC_BASE_URL="http://[invalid"))[
-                "not_enforced"])
+            engine_env=dict(engine_env, ANTHROPIC_BASE_URL="http://[invalid"),
+            expected_placeholder=run_placeholder)["not_enforced"])
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
-            engine_env=dict(engine_env, OPENAI_API_KEY="unbrokered"))["not_enforced"])
+            engine_env=dict(engine_env, OPENAI_API_KEY="unbrokered"),
+            expected_placeholder=run_placeholder)["not_enforced"])
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
-            engine_env=dict(engine_env, HTTPS_PROXY="http://user:pass@proxy.test"))[
+            engine_env=dict(engine_env, HTTPS_PROXY="http://user:pass@proxy.test"),
+            expected_placeholder=run_placeholder)["not_enforced"])
+        # agents-28nn round 7: a placeholder that is NOT the running broker's per-run
+        # secret is not evidence of enforcement either.
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", **{**kwargs, "expected_placeholder": "factory-broker-other-run"})[
                 "not_enforced"])
         # agents-28nn round 6: the broker is no longer sandbox-gated, so a verified
         # placeholder env drops the residual on EITHER path — _broker_covers_engine_env
@@ -486,13 +497,15 @@ class TestBannerAndRecord(unittest.TestCase):
         # credential), which is direct evidence, not an attestation by the sandbox.
         self.assertNotIn("env-credentials", policy_record(
             policy, "pi", sandbox={**sandbox, "engine_sandboxed": False},
-            brokered_providers=("anthropic",), engine_env=engine_env)["not_enforced"],
+            brokered_providers=("anthropic",), engine_env=engine_env,
+            expected_placeholder=run_placeholder)["not_enforced"],
             "a brokered unsandboxed engine's env holds placeholders only — verified directly")
         # And with NO sandbox record at all (a sandbox-less host): a started broker whose
         # swap verified drops the residual and records the grant; one whose swap did NOT
         # take keeps it.
         none_record = policy_record(policy, "pi", sandbox=None,
-                                    brokered_providers=("anthropic",), engine_env=engine_env)
+                                    brokered_providers=("anthropic",), engine_env=engine_env,
+                                    expected_placeholder=run_placeholder)
         self.assertNotIn("env-credentials", none_record["not_enforced"])
         self.assertEqual(none_record["granted"]["credential_broker"]["providers"],
                          ["anthropic"])
@@ -2344,11 +2357,21 @@ process.stdin.on('end', () => {
             "else\n"
             "  echo PROCENV:CLEAN\n"
             "fi\n"
-            # Reach the broker over loopback; the root path 404s BEFORE any upstream hop, so
-            # this needs no real provider network.
+            # Reach the broker over loopback. agents-28nn round 7 (the verdict's P0): the
+            # listener now AUTHENTICATES — an unauthenticated local call is refused 403
+            # before any upstream hop, and only the run's per-run placeholder (which the
+            # engine carries as ANTHROPIC_API_KEY) is served; the root path then 404s
+            # before any upstream hop, so this still needs no real provider network.
             "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
             "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
             "  printf 'GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3\n"
+            "  read -r LINE <&3 && echo \"NOAUTHLINE:$LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo NOAUTHLINE:UNREACHABLE\n"
+            "fi\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf \"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nx-api-key: ${ANTHROPIC_API_KEY}\\r\\nConnection: close\\r\\n\\r\\n\" >&3\n"
             "  read -r LINE <&3 && echo \"BROKERLINE:$LINE\"\n"
             "  exec 3>&-\n"
             "else\n"
@@ -2364,15 +2387,21 @@ process.stdin.on('end', () => {
         res = self.factory("pi", {"ANTHROPIC_API_KEY": real_key,
                                   "FACTORY_MODEL": "anthropic/claude-3-5-sonnet"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        # The engine's environ holds the placeholder, never the real key.
-        self.assertEqual(self.stub_line("ENVKEY:"), PLACEHOLDER_KEY)
+        # The engine's environ holds the run's per-run placeholder, never the real key.
+        self.assertTrue(self.stub_line("ENVKEY:").startswith(PLACEHOLDER_PREFIX),
+                        f"the engine must carry a per-run placeholder, got {self.stub_line('ENVKEY:')!r}")
         self.assertEqual(self.stub_line("PROCENV:"), "CLEAN",
                          "the real key must not appear in the sandboxed engine's /proc/self/environ")
         base = self.stub_line("ENVBASE:")
         self.assertTrue(base.startswith("http://127.0.0.1:") and base.endswith("/proxy/anthropic"),
                         f"the engine must be pointed at the localhost broker, got {base!r}")
-        # And it can actually reach the broker through the sandbox network: a 404 on the root
-        # path proves the listener answered (no upstream hop involved).
+        # agents-28nn round 7 (the verdict's P0): an UNAUTHENTICATED local call is refused
+        # (403 before any upstream hop) ...
+        self.assertIn("403", self.stub_line("NOAUTHLINE:"),
+                      "the broker must refuse a request that does not present the run's secret")
+        # ... and the engine, holding the placeholder, reaches the broker through the
+        # sandbox network: a 404 on the root path proves the listener answered (no upstream
+        # hop involved).
         self.assertIn("404", self.stub_line("BROKERLINE:"),
                       "the sandboxed engine must reach the broker over loopback")
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
@@ -2416,11 +2445,21 @@ process.stdin.on('end', () => {
             "else\n"
             "  echo PROCENV:CLEAN\n"
             "fi\n"
-            # Reach the broker over loopback; the root path 404s BEFORE any upstream hop, so
-            # this needs no real provider network.
+            # Reach the broker over loopback. agents-28nn round 7 (the verdict's P0): the
+            # listener now AUTHENTICATES — an unauthenticated local call is refused 403
+            # before any upstream hop, and only the run's per-run placeholder (which the
+            # engine carries as ANTHROPIC_API_KEY) is served; the root path then 404s
+            # before any upstream hop, so this still needs no real provider network.
             "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
             "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
             "  printf 'GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3\n"
+            "  read -r LINE <&3 && echo \"NOAUTHLINE:$LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo NOAUTHLINE:UNREACHABLE\n"
+            "fi\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf \"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nx-api-key: ${ANTHROPIC_API_KEY}\\r\\nConnection: close\\r\\n\\r\\n\" >&3\n"
             "  read -r LINE <&3 && echo \"BROKERLINE:$LINE\"\n"
             "  exec 3>&-\n"
             "else\n"
@@ -2447,16 +2486,24 @@ process.stdin.on('end', () => {
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("Sandbox:     NOT enforced", res.stdout,
                       "the test must EXERCISE the unsandboxed path: " + res.stdout)
-        # The engine's environ holds the placeholder, never the real key — the same
+        # The engine's environ holds the run's per-run placeholder, never the real key — the same
         # guarantee the sandboxed path delivers (the less-confined path must not receive
         # more).
-        self.assertEqual(self.stub_line("ENVKEY:"), PLACEHOLDER_KEY)
+        self.assertTrue(self.stub_line("ENVKEY:").startswith(PLACEHOLDER_PREFIX),
+                        f"the engine must carry a per-run placeholder, got {self.stub_line('ENVKEY:')!r}")
         self.assertEqual(self.stub_line("PROCENV:"), "CLEAN",
                          "the real key must not appear in the unsandboxed engine's "
                          "/proc/self/environ")
         base = self.stub_line("ENVBASE:")
         self.assertTrue(base.startswith("http://127.0.0.1:") and base.endswith("/proxy/anthropic"),
                         f"the engine must be pointed at the localhost broker, got {base!r}")
+        # agents-28nn round 7 (the verdict's P0, the CONSTRUCTED surface): on this path the
+        # broker's loopback is the HOST's — an unauthenticated local call must be refused
+        # (403 before any upstream hop) ...
+        self.assertIn("403", self.stub_line("NOAUTHLINE:"),
+                      "on the unsandboxed path the broker sits on the host's shared loopback; "
+                      "a request without the run's secret must be refused")
+        # ... while the engine, holding the run's placeholder, is served.
         self.assertIn("404", self.stub_line("BROKERLINE:"),
                       "the unsandboxed engine must reach the broker over loopback")
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
@@ -2536,7 +2583,7 @@ process.stdin.on('end', () => {
         # …which holds the broker-routed provider override, readable inside the sandbox.
         models = self.stub_line("MODELSJSON:")
         self.assertIn("proxy/deepseek", models)
-        self.assertIn("factory-broker-placeholder", models)
+        self.assertIn(f'"apiKey": "{PLACEHOLDER_PREFIX}', models)
         self.assertIn("openai-completions", models)
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
@@ -2842,7 +2889,7 @@ class TestEngineCredentialPinning(TestDispatcher):
         dump = outputs[0].read_text(encoding="utf-8")
         self.assertIn("FAKE ENGINE ENVIRONMENT DUMP", dump,
                       "the pinned payload must have EXECUTED and dumped its environment")
-        self.assertIn(PLACEHOLDER_KEY, dump,
+        self.assertIn(PLACEHOLDER_PREFIX, dump,
                       "the pinned engine must have RECEIVED the brokered credential shape — "
                       "otherwise the attack arm proves nothing about delivery")
         self.assertIn("http://127.0.0.1:", dump,

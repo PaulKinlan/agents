@@ -19,7 +19,7 @@ from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
 from lib.child_env import child_environment
-from lib.credential_broker import PLACEHOLDER_KEY
+from lib.credential_broker import PLACEHOLDER_PREFIX
 from lib.sandbox import sandbox_available
 from lib.tool_pins import ToolPinError
 
@@ -417,7 +417,8 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         # operator's raw keys never reach its environ (the leak the round closed; the
         # old assertion here — "unsandboxed gets the real key directly, no broker" —
         # encoded exactly that leak).
-        self.assertEqual(engine["DEEPSEEK_API_KEY"], PLACEHOLDER_KEY)
+        self.assertTrue(engine["DEEPSEEK_API_KEY"].startswith(PLACEHOLDER_PREFIX),
+                        engine.get("DEEPSEEK_API_KEY"))
         self.assertTrue(engine["DEEPSEEK_BASE_URL"].startswith("http://127.0.0.1:"),
                         engine.get("DEEPSEEK_BASE_URL"))
         # The harm the finding named: the raw keys must not appear anywhere in the
@@ -436,7 +437,8 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         # dispatcher brokers it — the engine's environ (and so its /proc/self/environ, the leak
         # vector THREAT_MODEL §6.1 names) holds a non-secret placeholder + the localhost broker
         # base URL, and the real key is injected host-side only. Non-allowed credentials are stripped.
-        self.assertEqual(engine["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
+        self.assertTrue(engine["ANTHROPIC_API_KEY"].startswith(PLACEHOLDER_PREFIX),
+                        engine.get("ANTHROPIC_API_KEY"))
         self.assertNotIn("GEMINI_API_KEY", engine)
         self.assertNotIn("sk-ant-ci", engine.values())
         self.assertNotIn("gem-ci", engine.values())

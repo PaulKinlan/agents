@@ -26,8 +26,14 @@ from lib.child_env import (  # noqa: E402
     declares_requirement,
     prepass_environment,
 )
-from lib.credential_broker import PLACEHOLDER_KEY, BROKER_ENV_CONFIGS  # noqa: E402
+from lib.credential_broker import PLACEHOLDER_PREFIX, BROKER_ENV_CONFIGS  # noqa: E402
 from lib.containment import ContainmentError
+
+# The placeholder is a PER-RUN secret (agents-28nn round 7): child_environment must be
+# handed the running broker's value via broker_placeholder and swaps it in verbatim.
+# These tests pass an explicit stand-in; the broker's own generation and per-run
+# uniqueness are pinned in tests/test_credential_broker.py.
+TEST_PLACEHOLDER = PLACEHOLDER_PREFIX + "test-run-secret"
 
 SECRETS = {
     "GITHUB_TOKEN": "ghs_ci_token",
@@ -290,22 +296,25 @@ class TestCredentialBrokering(unittest.TestCase):
     def test_brokered_anthropic_gets_a_placeholder_and_base_url_not_the_real_key(self):
         url = "http://127.0.0.1:9999/proxy/anthropic"
         env = child_environment(engine="pi", parent=parent_env(),
-                                broker_urls={"anthropic": url})
-        self.assertEqual(env["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
+                                broker_urls={"anthropic": url},
+                                broker_placeholder=TEST_PLACEHOLDER)
+        self.assertEqual(env["ANTHROPIC_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["ANTHROPIC_BASE_URL"], url)
         self.assertNotIn("sk-ant", env.values())  # the real key is gone
 
     def test_every_secret_var_of_a_brokered_provider_is_stripped(self):
         parent = parent_env(ANTHROPIC_AUTH_TOKEN="auth-tok", CLAUDE_CODE_OAUTH_TOKEN="oauth-tok")
         env = child_environment(engine="claude", parent=parent,
-                                broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"})
+                                broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"},
+                                broker_placeholder=TEST_PLACEHOLDER)
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
-        self.assertEqual(env["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["ANTHROPIC_API_KEY"], TEST_PLACEHOLDER)
 
     def test_unbrokered_providers_keep_their_real_keys(self):
         env = child_environment(engine="pi", parent=parent_env(),
-                                broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"})
+                                broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"},
+                                broker_placeholder=TEST_PLACEHOLDER)
         self.assertEqual(env["OPENAI_API_KEY"], "op")   # not brokered -> untouched
         self.assertEqual(env["GEMINI_API_KEY"], "gem")
 
@@ -313,10 +322,10 @@ class TestCredentialBrokering(unittest.TestCase):
         env = child_environment(engine="pi", parent=parent_env(), broker_urls={
             "openai": "http://127.0.0.1:1/proxy/openai",
             "google": "http://127.0.0.1:1/proxy/google",
-        })
-        self.assertEqual(env["OPENAI_API_KEY"], PLACEHOLDER_KEY)
+        }, broker_placeholder=TEST_PLACEHOLDER)
+        self.assertEqual(env["OPENAI_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["OPENAI_BASE_URL"], "http://127.0.0.1:1/proxy/openai")
-        self.assertEqual(env["GEMINI_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["GEMINI_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["GOOGLE_GEMINI_BASE_URL"], "http://127.0.0.1:1/proxy/google")
         self.assertNotIn("op", env.values())
         self.assertNotIn("gem", env.values())
@@ -331,7 +340,8 @@ class TestCredentialBrokering(unittest.TestCase):
         # otherwise its real key would survive in the sandboxed environment.
         with self.assertRaisesRegex(ContainmentError, "fail closed: broker provided URL for unmapped provider 'unmapped'"):
             child_environment(engine="pi", parent=parent_env(UNMAPPED_API_KEY="key"),
-                              broker_urls={"unmapped": "http://127.0.0.1:1/proxy/unmapped"})
+                              broker_urls={"unmapped": "http://127.0.0.1:1/proxy/unmapped"},
+                              broker_placeholder=TEST_PLACEHOLDER)
 
     def test_deepseek_and_openrouter_are_brokered(self):
         # agents-2x6: under --unshare-net a sandboxed engine cannot dial a provider directly,
@@ -342,19 +352,29 @@ class TestCredentialBrokering(unittest.TestCase):
             DEEPSEEK_API_KEY="ds-key", OPENROUTER_API_KEY="or-key"), broker_urls={
             "deepseek": "http://127.0.0.1:1/proxy/deepseek",
             "openrouter": "http://127.0.0.1:1/proxy/openrouter",
-        })
-        self.assertEqual(env["DEEPSEEK_API_KEY"], PLACEHOLDER_KEY)
+        }, broker_placeholder=TEST_PLACEHOLDER)
+        self.assertEqual(env["DEEPSEEK_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["DEEPSEEK_BASE_URL"], "http://127.0.0.1:1/proxy/deepseek")
-        self.assertEqual(env["OPENROUTER_API_KEY"], PLACEHOLDER_KEY)
+        self.assertEqual(env["OPENROUTER_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["OPENROUTER_BASE_URL"], "http://127.0.0.1:1/proxy/openrouter")
         self.assertNotIn("ds-key", env.values())
         self.assertNotIn("or-key", env.values())
 
+    def test_brokering_fails_closed_without_the_running_brokers_placeholder(self):
+        # agents-28nn round 7: the broker refuses any request that does not present the
+        # run's per-run secret, so a swap that cannot name it would hand the engine an
+        # env whose model calls can never authenticate. Fail closed at the swap.
+        with self.assertRaisesRegex(ContainmentError, "per-run placeholder"):
+            child_environment(engine="pi", parent=parent_env(),
+                              broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"})
+
     def test_the_placeholder_is_not_credential_shaped(self):
         # The whole point: the value in the sandboxed environ must not look like a key, so a
         # prompt-injected engine reading /proc/self/environ finds nothing worth exfiltrating.
-        self.assertFalse(re.search(r"^(sk-|AIza|ghp_|ghs_|xox)", PLACEHOLDER_KEY))
-        self.assertNotIn("KEY", PLACEHOLDER_KEY.upper().replace("-", "").replace("_", ""))
+        # The prefix is the constant part (the per-run random suffix is generated by the
+        # broker; its uniqueness is pinned in tests/test_credential_broker.py).
+        self.assertFalse(re.search(r"^(sk-|AIza|ghp_|ghs_|xox)", PLACEHOLDER_PREFIX))
+        self.assertNotIn("KEY", PLACEHOLDER_PREFIX.upper().replace("-", "").replace("_", ""))
 
     def test_broker_provider_table_is_consistent_with_the_broker(self):
         # child_env's BROKER_ENV_CONFIGS and credential_broker's PROVIDERS must name the same
