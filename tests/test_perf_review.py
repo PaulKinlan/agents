@@ -607,6 +607,41 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes2))
         self.assertIn("proposed_fix_diff", report2["findings"][0])
 
+        # Case C: Reviewer P2 finding - "Do not use Promise.all; run tasks sequentially"
+        report3 = {
+            "findings": [
+                {
+                    "rule_id": "non-reentrant-concurrency",
+                    "path": "src/tasks.ts",
+                    "line_number": 22,
+                    "remediation": "Do not use Promise.all; run tasks sequentially.",
+                    "proposed_fix_diff": "--- a/tasks.ts\n+++ b/tasks.ts\n@@ -1,2 +1,2 @@\n- await Promise.all(tasks.map(t => t()));\n+ for (const t of tasks) await t();",
+                }
+            ]
+        }
+        notes3 = normalize_report(report3)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes3))
+        self.assertIn("proposed_fix_diff", report3["findings"][0])
+
+    def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
+        """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "bottleneck",
+                    "path": "src/models.ts",
+                    "line_number": 45,
+                    "remediation": "Overlap model inference calls through a pool of workers.",
+                    "proposed_fix_diff": "--- a/models.ts\n+++ b/models.ts\n@@ -1,2 +1,2 @@\n- for (const m of models) await run(m);\n+ await pool.map(models, runInference);",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        finding = report["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding)
+        self.assertIn("Code patch withheld", finding["remediation"])
+
     def test_mixed_direction_removes_promise_all_but_recommends_concurrency(self):
         """Reviewer P1 finding: diff removing Promise.all while remediation recommends worker pool concurrency is guarded."""
         report = {
