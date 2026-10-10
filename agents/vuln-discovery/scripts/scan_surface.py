@@ -35,7 +35,7 @@ except ImportError:
 # back in place, which is the defect this exists to end.
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields
 
-from lib.redaction import stdout_safe_report  # noqa: E402
+from lib.redaction import emit_station_result  # noqa: E402
 
 IGNORE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2",
@@ -391,17 +391,8 @@ def main():
         "candidates": candidates_list
     }
 
-    output_json = json.dumps(result, indent=2)
-    if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-        print(f"Deterministic scan complete: {len(raw_candidates)} candidates across {scanned_files} files written to {args.output}")
-    else:
-        # stdout goes to a terminal or a CI log, which cannot be un-published: never emit
-        # match text there, whatever shape the credential turns out to be.
-        print(json.dumps(stdout_safe_report(result), indent=2))
-        sys.stderr.write(
-            "Note: stdout redacts matched values. Use --output <file> for the raw local record.\n"
-        )
+    emit_station_result(result, args.output,
+                        summary=f"Deterministic scan complete: {len(raw_candidates)} candidates across {scanned_files} files written to {args.output}")
 
 
 if __name__ == "__main__":
