@@ -225,6 +225,15 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(is_concurrency_recommendation(f7))
 
+        # Reviewer P1 finding: asset mention in description must NOT suppress execution concurrency guard
+        f8 = {
+            "rule_id": "custom-rule",
+            "title": "Inference Latency",
+            "description": "Examine stylesheet preload and asset loading on startup",
+            "remediation": "Start all inference passes simultaneously"
+        }
+        self.assertTrue(is_concurrency_recommendation(f8))
+
     def test_detects_reentrancy_precondition_or_evidence(self):
         """Identify whether finding already carries backend evidence or precondition."""
         without_precondition = {"remediation": "Replace loop with Promise.all"}
@@ -235,10 +244,22 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertTrue(has_reentrancy_precondition(with_precondition))
 
+        # Reviewer P2 finding: scanner advice with "documented serial execution" must be recognized
+        with_documented_fallback = {
+            "remediation": "IF the underlying backend is reentrant and thread-safe, use Promise.all; otherwise preserve documented serial execution."
+        }
+        self.assertTrue(has_reentrancy_precondition(with_documented_fallback))
+
         with_evidence = {
             "remediation": "The Node.js fs backend is proven reentrant and thread-safe; use Promise.all."
         }
         self.assertTrue(has_reentrancy_precondition(with_evidence))
+
+        # Reviewer P1 finding: bare assertion without naming a backend must NOT pass as evidence
+        bare_assertion = {
+            "remediation": "Backend is reentrant; use Promise.all"
+        }
+        self.assertFalse(has_reentrancy_precondition(bare_assertion))
 
         with_conditional_mutex = {
             "remediation": "IF the runtime is reentrant, use Promise.all; otherwise preserve serial execution."
@@ -308,6 +329,10 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
             "IF the WebGPU runtime backend is reentrant and supports concurrent queue submission, "
             "use Promise.all; otherwise preserve serial execution."
         )
+        scanner_suggestion = (
+            "IF the underlying runtime/backend is reentrant and thread-safe, consider concurrent "
+            "execution via await Promise.all(items.map(...)); otherwise preserve documented serial execution."
+        )
         report = {
             "findings": [
                 {
@@ -316,12 +341,20 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     "line_number": 12,
                     "remediation": original_remediation,
                     "description": "Model check",
+                },
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/batch.ts",
+                    "line_number": 50,
+                    "remediation": scanner_suggestion,
+                    "description": "Scanner rule",
                 }
             ]
         }
         notes = normalize_report(report)
         self.assertFalse(any("enforced reentrancy precondition" in n for n in notes))
         self.assertEqual(report["findings"][0]["remediation"], original_remediation)
+        self.assertEqual(report["findings"][1]["remediation"], scanner_suggestion)
 
     def test_validator_rejects_unpreconditioned_concurrency_if_normalization_bypassed(self):
         """validate_agent_report must reject an un-preconditioned concurrency finding if un-normalized."""
