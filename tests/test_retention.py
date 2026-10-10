@@ -17,14 +17,20 @@ accumulate without bound. These tests pin the retention contract:
 - pruning never follows a symlink out of ``runs/`` and tolerates unexpected
   contents (non-directory files);
 - the ``factory`` ``create_run_dir`` hook actually applies the policy and marks the
-  new run active (so removing the hook fails the suite).
+  new run active (so removing the hook fails the suite);
+- every directory a prune removes is recorded as a tombstone line in
+  ``runs/pruned.jsonl`` and nothing else is (agents-dm8n): the set of directories
+  that disappear equals the set of explanations written, so a bead citation to a
+  pruned run directory resolves instead of dangling.
 """
 
 import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -40,6 +46,7 @@ from lib.retention import (  # noqa: E402
     ACTIVE_MARKER_NAME,
     FINDINGS_RETENTION_BYTES_DEFAULT,
     HILLCLIMB_RETENTION_AGE_DAYS_DEFAULT,
+    PRUNE_LOG_NAME,
     RETAIN_AGE_DAYS_DEFAULT,
     RETAIN_COUNT_DEFAULT,
     active_grace_seconds,
@@ -79,6 +86,15 @@ def make_hillclimb(runs_dir: Path, name: str, mtime: float) -> Path:
     (path / "session.patch").write_text("patch\n", encoding="utf-8")
     os.utime(path, (mtime, mtime))
     return path
+
+
+def read_tombstones(runs_dir: Path) -> list:
+    """Return the tombstone records in ``runs/pruned.jsonl`` (empty when absent)."""
+    log = runs_dir / PRUNE_LOG_NAME
+    if not log.exists():
+        return []
+    return [json.loads(line)
+            for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 class TestRetentionConfig(unittest.TestCase):
@@ -161,6 +177,115 @@ class TestAgeBound(unittest.TestCase):
             pruned = prune_run_dirs(runs, now=2000, retain=10**9, max_age_seconds=500)
             self.assertEqual(pruned, [])
             self.assertTrue(at_boundary.exists())
+
+
+class TestPruneTombstones(unittest.TestCase):
+    """agents-dm8n: a pruned run directory resolves to an explanation, not a gap.
+
+    The property, pinned at the boundary that delivers it (prune_run_dirs): the set
+    of directories a prune makes disappear EQUALS the set of tombstone records it
+    writes. A prune that deletes without recording fails the equality from one side;
+    a prune that records without deleting fails it from the other. The ledger lives
+    at ``runs/pruned.jsonl`` and is itself never swept.
+    """
+
+    def test_disappeared_directories_equal_tombstoned_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            now = 1_700_000_000.0
+            dirs = [make_dir(runs, f"agent-target-202610{i:02d}-000000", now - 100 + i)
+                    for i in range(6)]
+            before = {d.name for d in runs.iterdir() if d.is_dir()}
+
+            pruned = prune_run_dirs(runs, now=now, retain=2,
+                                    max_age_seconds=float("inf"))
+
+            after = {d.name for d in runs.iterdir() if d.is_dir()}
+            disappeared = before - after
+            self.assertEqual(disappeared, {d.name for d in pruned})
+            tombstones = read_tombstones(runs)
+            # THE property: everything that vanished has exactly one explanation,
+            # and nothing that survived is claimed as pruned.
+            self.assertEqual({t["name"] for t in tombstones}, disappeared)
+            self.assertEqual(len(tombstones), len(disappeared))
+            for tombstone in tombstones:
+                self.assertEqual(tombstone["reason"], "count")
+                self.assertEqual(tombstone["path"],
+                                 str((runs / tombstone["name"]).resolve()))
+                self.assertEqual(tombstone["pruned_at"],
+                                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)))
+
+    def test_age_bound_removals_carry_the_age_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            old = make_dir(runs, "agent-target-20260901-000000", 1000)
+            make_dir(runs, "agent-target-20261010-000000", 2000)
+
+            pruned = prune_run_dirs(runs, now=2000, retain=10**9, max_age_seconds=500)
+
+            self.assertEqual(pruned, [old.resolve()])
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            self.assertEqual(tombstones[0]["name"], old.name)
+            self.assertEqual(tombstones[0]["reason"], "age")
+
+    def test_a_failed_removal_leaves_no_tombstone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            now = 1_700_000_000.0
+            dirs = [make_dir(runs, f"run-{i:02d}", now - 100 + i) for i in range(4)]
+            failing = dirs[0].resolve()
+            real_rmtree = shutil.rmtree
+
+            def flaky_rmtree(path, *args, **kwargs):
+                if Path(path) == failing:
+                    raise OSError("simulated removal failure")
+                return real_rmtree(path, *args, **kwargs)
+
+            fake_shutil = mock.Mock(wraps=shutil)
+            fake_shutil.rmtree = flaky_rmtree
+            with mock.patch("lib.retention.shutil", fake_shutil), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                pruned = prune_run_dirs(runs, now=now, retain=1,
+                                        max_age_seconds=float("inf"))
+
+            self.assertTrue(failing.exists())
+            tombstones = read_tombstones(runs)
+            # No tombstone may claim a removal that did not happen.
+            self.assertEqual({t["name"] for t in tombstones},
+                             {d.name for d in pruned})
+            self.assertNotIn(failing.name, {t["name"] for t in tombstones})
+
+    def test_tombstones_accumulate_across_prunes_and_the_log_is_never_swept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            now = 1_700_000_000.0
+            first = [make_dir(runs, f"first-{i}", now - 200 + i) for i in range(3)]
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+            second = [make_dir(runs, f"second-{i}", now - 100 + i) for i in range(3)]
+            prune_run_dirs(runs, now=now + 10, retain=1,
+                           max_age_seconds=float("inf"))
+
+            log = runs / PRUNE_LOG_NAME
+            self.assertTrue(log.is_file())
+            tombstoned = {t["name"] for t in read_tombstones(runs)}
+            # Explanations from BOTH prunes survive: resolvability is durable, and
+            # the ledger (a regular file, not a run directory) is never swept.
+            self.assertTrue({d.name for d in first[:2]} <= tombstoned)
+            self.assertTrue({d.name for d in second[:2]} <= tombstoned)
+            self.assertEqual(first[2].name not in tombstoned, first[2].exists())
+            self.assertIn(PRUNE_LOG_NAME, {p.name for p in runs.iterdir()})
+
+    def test_a_prune_that_removes_nothing_writes_no_tombstone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp)
+            make_dir(runs, "only-run", 1000)
+
+            pruned = prune_run_dirs(runs, now=2000, retain=5,
+                                    max_age_seconds=float("inf"))
+
+            self.assertEqual(pruned, [])
+            self.assertFalse((runs / PRUNE_LOG_NAME).exists())
 
 
 class TestInProgressSafety(unittest.TestCase):
@@ -359,6 +484,10 @@ class TestFactoryHook(unittest.TestCase):
                 remaining,
                 sorted(["old-22", "old-23", "old-24", new_dir.name]),
             )
+            # The production hook delivers the tombstones too (agents-dm8n): every
+            # directory this prune removed resolves to an explanation.
+            tombstoned = {t["name"] for t in read_tombstones(runs)}
+            self.assertEqual(tombstoned, {f"old-{i:02d}" for i in range(22)})
 
 
 class TestFindingsRetentionConfig(unittest.TestCase):

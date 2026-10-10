@@ -35,8 +35,19 @@ created and before the pre-pass/model work. The ``.active`` marker protects the 
 run for the grace window; if the process is hard-killed the marker stays behind and
 is swept once it goes stale, so a crashed run's partial directory is kept for
 inspection and pruned on a later run — never while it is being written.
+
+Pruned-directory tombstones (agents-dm8n): beads cite run directories by path as
+evidence, and a prune used to delete the target of such a citation with nothing
+joining the two — the citation then dangled. ``prune_run_dirs`` therefore appends
+one JSON tombstone line per removed directory to ``runs/pruned.jsonl`` (name,
+absolute path, reason ``age``|``count``, UTC timestamp) at the moment of removal,
+so a citation to a pruned run directory resolves to an explanation instead of a
+missing path. The ledger is a plain append-only file, never swept (pruning only
+removes directories), and it is written by the prune itself — no caller has to
+remember to record anything.
 """
 
+import json
 import os
 import shutil
 import stat
@@ -62,6 +73,13 @@ _HILLCLIMB_PREFIX = "hillclimb-"
 ACTIVE_MARKER_NAME = ".active"
 ACTIVE_GRACE_SECONDS_DEFAULT = 3600  # one hour: comfortably above any station budget
 _ENV_ACTIVE_GRACE_SECONDS = "FACTORY_RUN_ACTIVE_GRACE_SECONDS"
+
+# The pruned-directory tombstone ledger (agents-dm8n): one append-only JSON line per
+# removed run directory, written by prune_run_dirs itself at the moment of removal.
+# It lives directly under ``runs/`` as a regular file, so run_directories never
+# yields it and no prune can sweep it; a bead citation to a pruned run directory
+# resolves here to "pruned at T because <reason>" instead of dangling.
+PRUNE_LOG_NAME = "pruned.jsonl"
 
 _SECONDS_PER_DAY = 86400
 
@@ -168,6 +186,33 @@ def _marker_is_active(directory: Path, now: float, grace: float) -> bool:
     return (now - st.st_mtime) < grace
 
 
+def _record_pruned_directories(runs_dir: Path, removed: List[Tuple[Path, str]],
+                               now: float) -> None:
+    """Append one tombstone line per removed run directory to ``runs/pruned.jsonl``.
+
+    This is the annotation half of agents-dm8n, written at the boundary that performs
+    the deletion: every directory this prune actually removed gets a durable record
+    (name, absolute path, reason ``age``|``count``, UTC timestamp), so a bead
+    citation to a pruned run directory resolves to an explanation. Only directories
+    whose ``rmtree`` succeeded are recorded — a tombstone must never claim a removal
+    that did not happen. A write failure warns on stderr and does not abort the
+    prune: retention bounds secret-bearing artifacts, so a full disk must not turn
+    the ledger into a reason to keep them.
+    """
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    try:
+        with open(runs_dir / PRUNE_LOG_NAME, "a", encoding="utf-8") as handle:
+            for directory, reason in removed:
+                handle.write(json.dumps({
+                    "name": directory.name,
+                    "path": str(directory),
+                    "pruned_at": stamp,
+                    "reason": reason,
+                }, sort_keys=True) + "\n")
+    except OSError as exc:
+        sys.stderr.write(f"[retention] could not write {runs_dir / PRUNE_LOG_NAME}: {exc}\n")
+
+
 def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
                    retain: Optional[int] = None,
                    max_age_seconds: Optional[float] = None,
@@ -180,6 +225,10 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
     removed, and directories carrying a fresh ``.active`` marker (younger than
     ``active_grace`` seconds) are skipped entirely, so a concurrent run cannot sweep
     a still-running directory. Returns the list of directories that were removed.
+
+    Every directory actually removed is recorded as a tombstone line in
+    ``runs_dir / pruned.jsonl`` (agents-dm8n), so a citation to a pruned run
+    directory resolves to an explanation rather than dangling.
 
     ``now`` is injectable for deterministic TTL tests; it defaults to the current
     wall-clock time. ``retain``, ``max_age_seconds`` and ``active_grace`` default to
@@ -213,31 +262,40 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
     # Oldest first; the newest are the tail of the list.
     dirs.sort(key=lambda item: (item[1], item[2]))
 
-    pruned: List[Path] = []
+    # (resolved_path, reason) — the reason (age or count bound) is what a tombstone
+    # records so a dead citation resolves to WHY the directory went away.
+    pruned: List[Tuple[Path, str]] = []
 
     # Age bound: any directory older than the TTL is pruned, regardless of count.
     for resolved, mtime, _ in dirs:
         if resolved in exclude_resolved:
             continue
         if max_age_seconds is not None and (now - mtime) > max_age_seconds:
-            pruned.append(resolved)
+            pruned.append((resolved, "age"))
+
+    pruned_paths = {path for path, _ in pruned}
 
     # Count bound: of the survivors, keep only the ``retain`` most recent.
     survivors = [r for r, _, _ in dirs
-                 if r not in exclude_resolved and r not in pruned]
+                 if r not in exclude_resolved and r not in pruned_paths]
     if retain is not None and len(survivors) > retain:
         overflow = survivors[: len(survivors) - retain]
-        pruned.extend(overflow)
+        pruned.extend((r, "count") for r in overflow)
 
-    removed: List[Path] = []
-    for directory in pruned:
+    removed: List[Tuple[Path, str]] = []
+    for directory, reason in pruned:
         try:
             shutil.rmtree(directory)
-            removed.append(directory)
+            removed.append((directory, reason))
         except OSError as exc:
             sys.stderr.write(f"[retention] could not remove {directory}: {exc}\n")
 
-    return removed
+    # The tombstone ledger records only removals that actually happened, so a
+    # citation never resolves to a tombstone for a directory that still exists.
+    if removed:
+        _record_pruned_directories(runs_dir, removed, now)
+
+    return [path for path, _ in removed]
 
 
 def findings_retention_config(env: Optional[dict] = None) -> int:

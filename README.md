@@ -442,8 +442,13 @@ symlinks are never followed (and are left in place); non-directory files such as
 scheduler's `schedule-*.stdout.log` and the hill-climb `runs/hillclimb-<target>-<run_id>/`
 proposal directories are never swept (they are proposals, not run records). If a run
 crashes mid-way, its partial directory is still the newest entry and survives that pass;
-it is pruned on a later run once it is old enough or falls past the count bound. See
-`lib/retention.py` for the exact policy.
+it is pruned on a later run once it is old enough or falls past the count bound. Every
+removal is recorded as it happens: `prune_run_dirs` appends one JSON tombstone line per
+removed directory to `runs/pruned.jsonl` (name, path, reason `age`/`count`, UTC
+timestamp), so a reference to a pruned run directory — e.g. a bead citing
+`runs/<agent>-<target>-<run_id>/candidates.json` as evidence — resolves to "pruned at T,
+and why" instead of a missing path. The ledger is a plain append-only file and is never
+swept. See `lib/retention.py` for the exact policy.
 
 **Active-run guard** — a concurrently running `factory` (e.g. a scheduled scan) must
 never sweep another process's still-running run directory, even when many fast runs
