@@ -9,7 +9,6 @@ windowed from the top of the file rather than dropped.
 """
 
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,21 +18,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "agents" / "pr-fixer" / "scripts" / "collect_failures.py"
 
+from sandbox_fixtures import copy_station_script  # noqa: E402
+
 
 class TestPrFixerUnknownLine(unittest.TestCase):
     def _sandbox(self, tmp: Path):
         sandbox = tmp / "sandbox"
-        script = sandbox / "agents" / "pr-fixer" / "scripts" / "collect_failures.py"
-        script.parent.mkdir(parents=True)
-        shutil.copyfile(SCRIPT, script)
-        # The script imports the shared path-confinement helper and derives FACTORY_ROOT from its
-        # own location, so the sandbox mirrors the real repo layout. The emit_station_result output
-        # rule (agents-qslz) adds lib/redaction.py to the import set; redaction.py is stdlib-only,
-        # so the copy needs no transitive helpers.
-        helper = sandbox / "lib" / "path_security.py"
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
-        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        # The script derives FACTORY_ROOT from its own location, so the sandbox mirrors the real
+        # repo layout; the shared builder (agents-8ztd) copies the script's lib import closure
+        # rather than a hand-maintained list.
+        copy_station_script(sandbox, SCRIPT, "agents/pr-fixer/scripts/collect_failures.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(

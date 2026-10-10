@@ -9,12 +9,13 @@ tests drive the real pre-pass script in a sandbox and assert those strings never
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from sandbox_fixtures import copy_station_script
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
@@ -47,18 +48,10 @@ def discovery_finding(**overrides):
 class TestVerifierPriming(unittest.TestCase):
     def _sandbox(self, tmp: Path):
         sandbox = tmp / "sandbox"
-        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
-        script.parent.mkdir(parents=True)
-        shutil.copyfile(SCRIPT, script)
-        # prepare_verification.py imports shared lib helpers (path confinement, the line-sentinel
-        # rule); the sandbox mirrors the real repo layout so FACTORY_ROOT resolves to this tree.
-        helper = sandbox / "lib" / "path_security.py"
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
-        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
-        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
-        # script's import set; redaction.py is stdlib-only, so no transitive copies.
-        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        # The sandbox mirrors the real repo layout so the script's FACTORY_ROOT (derived from
+        # __file__) resolves to this tree; the shared builder (agents-8ztd) copies the script's
+        # lib import closure rather than a hand-maintained list.
+        copy_station_script(sandbox, SCRIPT, "agents/vuln-verify/scripts/prepare_verification.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -323,18 +316,8 @@ class TestPathConfinement(unittest.TestCase):
 
     def _sandbox(self, tmp: Path):
         sandbox = tmp / "sandbox"
-        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
-        script.parent.mkdir(parents=True)
-        shutil.copyfile(SCRIPT, script)
-        # prepare_verification.py imports shared lib helpers (path confinement, the line-sentinel
-        # rule); the sandbox mirrors the real repo layout so FACTORY_ROOT resolves to this tree.
-        helper = sandbox / "lib" / "path_security.py"
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
-        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
-        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
-        # script's import set; redaction.py is stdlib-only, so no transitive copies.
-        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        # Shared builder (agents-8ztd): copies the script's lib import closure, not a hand-list.
+        copy_station_script(sandbox, SCRIPT, "agents/vuln-verify/scripts/prepare_verification.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -430,16 +413,8 @@ class TestUnknownLineNumbers(unittest.TestCase):
 
     def _sandbox(self, tmp: Path, app_lines: int = 2):
         sandbox = tmp / "sandbox"
-        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
-        script.parent.mkdir(parents=True)
-        shutil.copyfile(SCRIPT, script)
-        helper = sandbox / "lib" / "path_security.py"
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
-        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
-        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
-        # script's import set; redaction.py is stdlib-only, so no transitive copies.
-        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        # Shared builder (agents-8ztd): copies the script's lib import closure, not a hand-list.
+        copy_station_script(sandbox, SCRIPT, "agents/vuln-verify/scripts/prepare_verification.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         body = "".join(f"const line{i} = {i};\n" for i in range(1, app_lines + 1))
@@ -582,19 +557,8 @@ class TestPathlessCandidates(unittest.TestCase):
 
     def _sandbox(self, tmp: Path):
         sandbox = tmp / "sandbox"
-        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
-        script.parent.mkdir(parents=True)
-        shutil.copyfile(SCRIPT, script)
-        helper = sandbox / "lib" / "path_security.py"
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
-        # agents-ghtz extracted the line-sentinel rule into a shared lib helper, so the sandbox
-        # has to carry it too or the script cannot import at all (found by rebasing, not by
-        # reading: the suite was green on the pre-rebase main).
-        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
-        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
-        # script's import set; redaction.py is stdlib-only, so no transitive copies.
-        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        # Shared builder (agents-8ztd): copies the script's lib import closure, not a hand-list.
+        copy_station_script(sandbox, SCRIPT, "agents/vuln-verify/scripts/prepare_verification.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -744,14 +708,8 @@ class TestStdoutCarriesNoRawSourceLines(unittest.TestCase):
 
     def _sandbox(self, tmp: Path):
         sandbox = tmp / "sandbox"
-        script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
-        script.parent.mkdir(parents=True)
-        shutil.copyfile(SCRIPT, script)
-        helper = sandbox / "lib" / "path_security.py"
-        helper.parent.mkdir(parents=True)
-        shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
-        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
-        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
+        # Shared builder (agents-8ztd): copies the script's lib import closure, not a hand-list.
+        copy_station_script(sandbox, SCRIPT, "agents/vuln-verify/scripts/prepare_verification.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         # The canary sits on a SOURCE LINE inside the candidate's context window. The finding
