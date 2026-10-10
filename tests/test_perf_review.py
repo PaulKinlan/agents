@@ -291,6 +291,13 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(incidental_readfile_counterexample))
 
+        # Reviewer P1 finding: same-sentence mixed-backend claim (fetch positive evidence + readFile mention) must NOT pass
+        same_sentence_mixed_backend = {
+            "snippet": "for (const f of files) await readFile(f);",
+            "remediation": "Node.js fetch supports concurrent requests, so use Promise.all to parallelize readFile calls"
+        }
+        self.assertFalse(has_reentrancy_precondition(same_sentence_mixed_backend))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
