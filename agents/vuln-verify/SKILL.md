@@ -54,6 +54,9 @@ For each candidate:
     placeholder like `unknown`, or names a file that does not exist in the target. You cannot
     disprove (or verify) a claim about code you cannot point at.
   - Set `verdict: "unverifiable"` and say in `reasoning` exactly which location you need.
+  - A candidate may arrive with `location_present: false`: it carries no path at all, and it is
+    still a candidate (agents-nhpb). `unverifiable` is the only correct verdict for it - say in
+    `reasoning` which path you would need. It is NOT a clean result and must not be reported as one.
   - This is mandatory, not optional: a report that returns `verified`/`disproved` for an
     unlocatable record is REJECTED by the dispatcher (agents-0tl).
   - A finding with no single line but a real whole-repo scope ("no SECURITY.md", "no

@@ -181,6 +181,13 @@ while IFS= read -r f; do
       # coverage of its artefact today.
       mapped="$mapped tests/test_candidate_id_emission.py"
       ;;
+    agents/vuln-verify/report.schema.json)
+      # The verifier's output CONTRACT. Nothing else maps a JSON schema, and the case above has no
+      # default arm - so without this a change to the contract maps to nothing and the gate goes
+      # green having run nothing at all. Its own suite pins the schema subset the agents use; the
+      # prepass suite feeds the pathless records the widened property exists for (agents-nhpb).
+      mapped="$mapped tests/test_report_schema.py tests/test_vuln_verify_prepass.py"
+      ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;

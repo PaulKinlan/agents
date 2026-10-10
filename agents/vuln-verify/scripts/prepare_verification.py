@@ -18,7 +18,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
@@ -47,11 +47,47 @@ def location_candidate(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {field: item.get(field) for field in LOCATION_FIELDS if item.get(field) is not None}
 
 
-def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, Any]]:
+def unlocatable_candidate(item: Dict[str, Any]) -> Dict[str, Any]:
+    """One candidate with NO usable path, KEPT and MARKED rather than dropped (agents-nhpb).
+
+    A candidate the scanner produced is still a finding. Dropping it made the station report
+    "nothing to verify" for something it declined to look at, which a reader cannot tell apart
+    from "looked at and clean" - the same class as the silently sliced document and the dropped
+    line number we removed today. The markers are machine-readable so no downstream reader has to
+    infer the reason from prose: `location_present` is False, and `line_number_unknown` is True
+    because a candidate with no path has no line either. The verifier can only return
+    `unverifiable` for these, since agents-0tl rejects `verified`/`disproved` without a resolvable
+    location - which is exactly the verdict this station should be making here.
+    """
+    marked = {
+        "rule_id": item.get("rule_id", "generic-vuln"),
+        "path": None,
+        "line_number": None,
+        "snippet": item.get("snippet", ""),
+        "source_context": "",
+        "location_present": False,
+        "line_number_unknown": True,
+    }
+    # Same two passthroughs as a located candidate, so nothing that survived the reduction is lost
+    # here and an unlocatable candidate stays recognisable as the same finding.
+    if item.get("fingerprint"):
+        marked["fingerprint"] = item["fingerprint"]
+    if item.get("candidate_id"):
+        marked["candidate_id"] = item["candidate_id"]
+    return marked
+
+
+def find_latest_findings(
+    target_name: str, target_dir: Path
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Locate candidate LOCATIONS from the findings store or the most recent discovery runs.
 
     Both sources are reduced to `location_candidate`, and the store is filtered to the
     discovery agents, so no other model's conclusions reach the verifier (SF-08).
+
+    Returns (located, unlocatable). The second list is NOT a discard pile: a discovery
+    candidate with no path is carried out of the reduction marked, so the bundle can keep it and
+    the report can state how many could not be located (agents-nhpb).
     """
     # 1. Check findings store for this target
     store_path = FACTORY_ROOT / "findings" / f"{target_name}.json"
@@ -62,6 +98,7 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
             if isinstance(raw_findings, dict) and raw_findings:
                 # Return unsuppressed, non-fixed discovery findings, locations only.
                 candidates = []
+                unlocatable = []
                 for f in raw_findings.values():
                     if not isinstance(f, dict):
                         continue
@@ -72,8 +109,13 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
                     candidate = location_candidate(f)
                     if candidate:
                         candidates.append(candidate)
-                if candidates:
-                    return candidates
+                    else:
+                        unlocatable.append(unlocatable_candidate(f))
+                # `or unlocatable`: a store whose candidates ALL lack a path must not fall through to
+                # an older run and lose the count, which would report "nothing to verify" for
+                # findings that are sitting right here (agents-nhpb).
+                if candidates or unlocatable:
+                    return candidates, unlocatable
         except Exception as e:
             sys.stderr.write(f"Warning: Could not read findings store {store_path}: {e}\n")
 
@@ -108,11 +150,18 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
                     raw = data
                 if not isinstance(raw, list):
                     continue
-                candidates = [c for c in (location_candidate(i) for i in raw) if c]
-                if candidates:
-                    return candidates
+                candidates = []
+                unlocatable = []
+                for item in raw:
+                    candidate = location_candidate(item)
+                    if candidate:
+                        candidates.append(candidate)
+                    elif isinstance(item, dict):
+                        unlocatable.append(unlocatable_candidate(item))
+                if candidates or unlocatable:
+                    return candidates, unlocatable
 
-    return []
+    return [], []
 
 
 # How much of a file to hand over when the line is unknown. The verifier's contract keys on a
@@ -227,6 +276,7 @@ def main():
 
     # 1. Load candidate findings, reduced to locations the moment they are read
     findings = []
+    unlocatable: List[Dict[str, Any]] = []
     if args.findings:
         input_path = Path(args.findings)
         if input_path.exists():
@@ -234,12 +284,26 @@ def main():
                 data = json.loads(input_path.read_text(encoding="utf-8"))
                 raw = data.get("findings", data if isinstance(data, list) else [])
                 findings = [c for c in (location_candidate(i) for i in raw) if c]
+                # Kept, not dropped (agents-nhpb): an input file whose every candidate lacks a path
+                # still has candidates in it.
+                unlocatable = [unlocatable_candidate(i) for i in raw
+                               if isinstance(i, dict) and not i.get("path")]
             except Exception as e:
                 sys.stderr.write(f"Error reading findings from {input_path}: {e}\n")
 
-    if not findings:
-        findings = find_latest_findings(target_name, target_dir)
+    # `and not unlocatable`: an input file whose candidates ALL lack a path must not send us on to
+    # the store, which would replace those candidates with a different source's and lose the count.
+    if not findings and not unlocatable:
+        findings, unlocatable = find_latest_findings(target_name, target_dir)
 
+    # Carried INTO the bundle rather than discarded (agents-nhpb). The loop below classifies by
+    # path, so these take the marked branch instead of being dropped.
+    findings = findings + unlocatable
+    if unlocatable:
+        sys.stderr.write(
+            f"{len(unlocatable)} candidate finding(s) carry no path and are kept as UNVERIFIABLE "
+            f"(location_present=false); not dropped (agents-nhpb).\n"
+        )
     sys.stderr.write(f"Preparing verification bundle for {len(findings)} candidate findings in {target_name}...\n")
 
     # 2. Enrich each finding with source code context
@@ -248,6 +312,11 @@ def main():
         path = f.get("path")
         line_no = f.get("line_number")
         if not path:
+            # KEPT and marked, not dropped (agents-nhpb): a scanner candidate is still a finding, and
+            # omitting it would let the station report "nothing to verify" for something it declined
+            # to look at. The verifier can only return `unverifiable` for these, because agents-0tl
+            # rejects verified/disproved without a resolvable location - which is correct here.
+            verification_candidates.append(unlocatable_candidate(f))
             continue
 
         file_ctx = load_file_context(target_dir, path, line_no)
@@ -277,6 +346,10 @@ def main():
     result = {
         "target": target_name,
         "candidate_count": len(verification_candidates),
+        # The subset the station could not look at, stated so "not looked at" cannot be read as
+        # "looked at and clean" (agents-nhpb). Machine-readable, so no prose inference is needed.
+        "unlocatable_count": sum(1 for c in verification_candidates
+                                 if c.get("location_present") is False),
         "threat_model_summary": tm_summary,
         "candidates": verification_candidates
     }
