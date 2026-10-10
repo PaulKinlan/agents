@@ -50,11 +50,12 @@ class TestVerifierPriming(unittest.TestCase):
         script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
         script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, script)
-        # prepare_verification.py now imports the shared path-confinement helper; the sandbox
-        # mirrors the real repo layout so the script's FACTORY_ROOT resolves to this tree.
+        # prepare_verification.py imports shared lib helpers (path confinement, the line-sentinel
+        # rule); the sandbox mirrors the real repo layout so FACTORY_ROOT resolves to this tree.
         helper = sandbox / "lib" / "path_security.py"
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -229,11 +230,12 @@ class TestPathConfinement(unittest.TestCase):
         script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
         script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, script)
-        # prepare_verification.py now imports the shared path-confinement helper; the sandbox
-        # mirrors the real repo layout so the script's FACTORY_ROOT resolves to this tree.
+        # prepare_verification.py imports shared lib helpers (path confinement, the line-sentinel
+        # rule); the sandbox mirrors the real repo layout so FACTORY_ROOT resolves to this tree.
         helper = sandbox / "lib" / "path_security.py"
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -335,6 +337,7 @@ class TestUnknownLineNumbers(unittest.TestCase):
         helper = sandbox / "lib" / "path_security.py"
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         body = "".join(f"const line{i} = {i};\n" for i in range(1, app_lines + 1))
@@ -439,15 +442,17 @@ class TestUnknownLineNumbers(unittest.TestCase):
 
         A guard that cannot fail is not a guard, so this mutates the helper back to handing the
         raw value through and asserts the station crashes on the same input the test above
-        passes - if this ever stops crashing, the test above is proving nothing.
+        passes - if this ever stops crashing, the test above is proving nothing. The rule now
+        lives in lib/line_numbers.py (agents-ghtz), so that is the copy to mutate.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             sandbox, target = self._sandbox(Path(tmpdir))
             script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
-            original = script.read_text(encoding="utf-8")
+            helper = sandbox / "lib" / "line_numbers.py"
+            original = helper.read_text(encoding="utf-8")
             anchor = "    if isinstance(value, bool):\n        return None\n"
             self.assertIn(anchor, original, "the mutation anchor moved; fix this probe")
-            script.write_text(original.replace(anchor, "    return value\n"), encoding="utf-8")
+            helper.write_text(original.replace(anchor, "    return value\n"), encoding="utf-8")
 
             out = sandbox / "mutated.json"
             findings_file = sandbox / "findings.json"

@@ -23,6 +23,7 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
+from lib.line_numbers import line_number_sort_key  # noqa: E402
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS as IGNORE_DIRS
@@ -199,12 +200,15 @@ def scan_files(target_dir: Path, priority_files: List[str]) -> List[Dict[str, An
                 })
                 break
 
-    # Sort so findings in recently changed files appear first, with deterministic tie-breakers
+    # Sort so findings in recently changed files appear first, with deterministic tie-breakers.
+    # `line_number_sort_key` puts an unknown location after every known line rather than at an
+    # implicit line 0; today these candidates carry the scanner's own 1-based line ints, so the
+    # order is unchanged, but the safety is declared instead of resting on a truthy `or` (agents-ghtz).
     candidates.sort(key=lambda c: (
         not c["touched_in_recent_commits"],
         c["severity"] != "high",
         c["path"],
-        c.get("line_number") or 0,
+        line_number_sort_key(c.get("line_number")),
         c["rule_id"],
     ))
     return candidates

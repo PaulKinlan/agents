@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.line_numbers import usable_line_number  # noqa: E402
 from lib.path_security import resolve_within_target  # noqa: E402
 
 # The only fields that cross from discovery to verification (SF-08). Everything the discovery
@@ -120,33 +121,9 @@ def find_latest_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
 FILE_VIEW_LINES = 200
 
 
-def usable_line_number(value: Any) -> Optional[int]:
-    """The line as a 1-based int, or None when the location is unknown.
-
-    An unknown line is not a malformed record. `"?"` is the factory's own unknown marker -
-    lib/redaction.publishable_line_number returns it rather than publish a line it cannot
-    trust - so a candidate carrying it is one whose line is unknown. Comparing it to 0 raised
-    TypeError and took the whole station down, which skipped every station after it and left
-    their findings reading UNKNOWN rather than clean (agents-fy26).
-
-    The quieter half of the same defect was the old `None -> 1` fallback: it presented the top
-    of the file as the candidate's location. Neither direction is allowed - unknown stays
-    unknown. Mirrors vuln-triage's `_parse_line_number` (agents-ajt4), where the same assumption
-    lived in a sort key and a proximity comparison: booleans and non-positive numbers are not
-    line numbers either.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if value > 0 else None
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isascii() and stripped.isdigit():
-            number = int(stripped)
-            return number if number > 0 else None
-    return None
-
-
+# `usable_line_number` is the shared line-sentinel rule (lib/line_numbers.py, agents-ghtz): it
+# returns the 1-based line or None, never coercing an unknown location to line 0 or line 1
+# (agents-fy26).
 def load_file_context(target_dir: Path, rel_path: str, line_number: Optional[int]) -> Dict[str, Any]:
     """Read source file and extract rich window around candidate line."""
     filepath = resolve_within_target(target_dir, rel_path)
