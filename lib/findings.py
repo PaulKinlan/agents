@@ -1338,9 +1338,17 @@ def _identity_grade(f: Dict[str, Any]) -> str:
     Rendered rather than only documented: a reader should not have to know this module's vocabulary
     to know how much to trust the key, so every source outside IDENTITY_STABLE_SOURCES is marked
     wherever the key is shown - the full report, the step summary and the Fixed section.
+
+    NOTE ON MISSING IDENTITY_SOURCE (agents-l17v): A row with no `identity_source` (None or missing)
+    deliberately renders no grade suffix because `_identity_grade` is a caveat modifying a displayed
+    key (see `_identity_note`), and with no key there is nothing to annotate. In contrast,
+    `is_unanchored_finding(f)` classifies a missing source as unanchored because it lacks a verified
+    stable anchor for delta metrics and the unanchored-disappearance banner.
     """
     source = f.get("identity_source")
-    if source and source not in IDENTITY_STABLE_SOURCES:
+    if not source:
+        return ""
+    if is_unanchored_finding(f):
         return " (reword-unstable — not evidence on its own)"
     return ""
 
