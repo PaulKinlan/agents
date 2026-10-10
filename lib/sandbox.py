@@ -287,7 +287,20 @@ def _probe() -> bool:
 
 
 def engine_sandboxed(engine: str) -> bool:
-    """Whether runs of `engine` get the OS sandbox on this host."""
+    """Whether runs of `engine` get the OS sandbox on this host.
+
+    THE RULE every conditional on this function (or on sandbox_available) must satisfy
+    (agents-28nn round 6 — four appearances in four mechanisms make this a design
+    property, not a set of bugs: the round-5 effective-pins hoist, the credential broker
+    gate in factory, the pre-pass HTTP_PROXY only-if-sandbox_ok, and the adapter proxy
+    only-if-egress_active): THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
+    MORE-CONFINED PATH. A control that applies only on the confined path leaves the
+    less-confined path with less control — the inverted polarity. Before gating anything
+    on the result of this check, ask what the unsandboxed path gets instead: if the
+    answer is MORE (raw credentials, a wider trust set, an unauthenticated handoff), the
+    control belongs on the OPERATION, not on the path taken to it. Referenced from the
+    credential broker and the hoisted pre-pass pins in factory.
+    """
     return engine in SANDBOXED_ENGINES and sandbox_available()
 
 

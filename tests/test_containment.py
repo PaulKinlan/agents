@@ -480,10 +480,26 @@ class TestBannerAndRecord(unittest.TestCase):
             policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
             engine_env=dict(engine_env, HTTPS_PROXY="http://user:pass@proxy.test"))[
                 "not_enforced"])
-        self.assertIn("env-credentials", policy_record(
+        # agents-28nn round 6: the broker is no longer sandbox-gated, so a verified
+        # placeholder env drops the residual on EITHER path — _broker_covers_engine_env
+        # inspects the engine env itself (placeholders + loopback broker URL, no surviving
+        # credential), which is direct evidence, not an attestation by the sandbox.
+        self.assertNotIn("env-credentials", policy_record(
             policy, "pi", sandbox={**sandbox, "engine_sandboxed": False},
             brokered_providers=("anthropic",), engine_env=engine_env)["not_enforced"],
-            "a sandboxed pre-pass cannot attest to the engine env")
+            "a brokered unsandboxed engine's env holds placeholders only — verified directly")
+        # And with NO sandbox record at all (a sandbox-less host): a started broker whose
+        # swap verified drops the residual and records the grant; one whose swap did NOT
+        # take keeps it.
+        none_record = policy_record(policy, "pi", sandbox=None,
+                                    brokered_providers=("anthropic",), engine_env=engine_env)
+        self.assertNotIn("env-credentials", none_record["not_enforced"])
+        self.assertEqual(none_record["granted"]["credential_broker"]["providers"],
+                         ["anthropic"])
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=None, brokered_providers=("anthropic",),
+            engine_env=child_environment(engine="pi", parent=parent))["not_enforced"],
+            "a broker that did not take (real key survives) is recorded, sandbox or none")
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=(),
             engine_env=child_environment(engine="pi", parent={}))["not_enforced"],
@@ -2369,6 +2385,89 @@ process.stdin.on('end', () => {
                          ["anthropic"])
         self.assertNotIn(real_key, json.dumps(record))
 
+    def test_an_unsandboxed_engine_gets_a_broker_placeholder_not_the_raw_key(self):
+        """agents-28nn round 6, review P1 — the WORST of the inverted-polarity shapes:
+        the credential broker used to start ONLY if engine_sandboxed(engine), so the
+        LESS-confined unsandboxed path handed the engine the RAW API KEY where the
+        confined path hands a placeholder. THE LESS-CONFINED PATH MUST NOT RECEIVE MORE
+        THAN THE MORE-CONFINED PATH (the rule on lib/sandbox.py's engine_sandboxed).
+
+        Forces the unsandboxed path on a sandboxed host (a pins file with NO bwrap entry
+        fails the probe closed; FACTORY_ALLOW_UNSANDBOXED=1 + a trusted private target
+        permits the run) with a real key in the dispatcher's environment, and asserts the
+        engine's environ holds the PLACEHOLDER + the broker's loopback URL and NEVER the
+        raw key, that the broker answers on loopback, and that policy.json records the
+        broker's enforcement rather than the env-credentials residual. The "Sandbox: NOT
+        enforced" banner assertion proves the test exercised the path it claims to cover.
+
+        MUTATION PROOF (performed, not asserted): re-gating the broker on
+        engine_sandboxed(engine) turns this red — ENVKEY is the raw key, PROCENV leaks,
+        and policy.json gains no credential_broker grant.
+        """
+        real_key = "sk-ant-REALKEY-do-not-leak-unsandboxed"
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo \"ENVKEY:${ANTHROPIC_API_KEY:-unset}\"\n"
+            "echo \"ENVBASE:${ANTHROPIC_BASE_URL:-unset}\"\n"
+            # The leak vector: grep the engine's OWN /proc/self/environ for the real key.
+            "if tr '\\0' '\\n' < /proc/self/environ | grep -qF '" + real_key + "'; then\n"
+            "  echo PROCENV:LEAKED\n"
+            "else\n"
+            "  echo PROCENV:CLEAN\n"
+            "fi\n"
+            # Reach the broker over loopback; the root path 404s BEFORE any upstream hop, so
+            # this needs no real provider network.
+            "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf 'GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3\n"
+            "  read -r LINE <&3 && echo \"BROKERLINE:$LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo BROKERLINE:UNREACHABLE\n"
+            "fi\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        # Pin the stub engine by path + content; OMIT bwrap so the probe fails closed and
+        # the trusted-target opt-in takes the UNSANDBOXED path on this sandboxed host.
+        digest = hashlib.sha256(stub.read_bytes()).hexdigest()
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text(f"pi:\n  path: {stub}\n  sha256: {digest}\n", encoding="utf-8")
+        res = self.factory("pi", {"ANTHROPIC_API_KEY": real_key,
+                                  "FACTORY_MODEL": "anthropic/claude-3-5-sonnet",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1",
+                                  "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+                                  "FACTORY_TOOL_PINS": str(pins)},
+                           target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     NOT enforced", res.stdout,
+                      "the test must EXERCISE the unsandboxed path: " + res.stdout)
+        # The engine's environ holds the placeholder, never the real key — the same
+        # guarantee the sandboxed path delivers (the less-confined path must not receive
+        # more).
+        self.assertEqual(self.stub_line("ENVKEY:"), PLACEHOLDER_KEY)
+        self.assertEqual(self.stub_line("PROCENV:"), "CLEAN",
+                         "the real key must not appear in the unsandboxed engine's "
+                         "/proc/self/environ")
+        base = self.stub_line("ENVBASE:")
+        self.assertTrue(base.startswith("http://127.0.0.1:") and base.endswith("/proxy/anthropic"),
+                        f"the engine must be pointed at the localhost broker, got {base!r}")
+        self.assertIn("404", self.stub_line("BROKERLINE:"),
+                      "the unsandboxed engine must reach the broker over loopback")
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertNotIn("env-credentials", record["not_enforced"],
+                         "the brokered engine env must update the record on this path too")
+        self.assertEqual(record["granted"]["credential_broker"]["providers"],
+                         ["anthropic"])
+        self.assertIn("os-sandbox", record["not_enforced"],
+                      "the sandbox is genuinely absent — the record must keep saying so")
+        self.assertNotIn(real_key, json.dumps(record))
+
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_default_pi_run_brokers_only_effective_model_provider(self):
         """agents-3z8: a default pi run's policy.json lists ONLY the effective model's provider
@@ -2644,17 +2743,25 @@ class TestEngineCredentialPinning(TestDispatcher):
     contain the attack rather than describing one, and the assertion sits at the point the
     secret should never arrive — what the fake RECEIVED — not at an exit code (a fake that
     dumps the environment and then fails would pass a nonzero-exit assertion while the
-    leak stands):
+    leak stands). agents-28nn round 6 (review P2) made the assertion SOUND: it cannot sit
+    on the file's EXISTENCE, because the adapter's shell redirection (`> "$OUTPUT_FILE"`,
+    lib/adapters/pi.sh) creates model_output.txt BEFORE the engine executes — a missing
+    or failing engine still leaves the file, so existence is not execution. The assertion
+    is on the file's CONTENT:
 
-    * the attack arm asserts the fake NEVER EXECUTES (no dump exists) and that no run
-      artefact carries the secret;
+    * the attack arm asserts no run artefact's content carries the dump marker or the
+      secret — the fake never executed and the credential never moved;
     * the control arm pins the SAME payload and asserts the run succeeds AND the dump
-      CONTAINS the secret — the credential path is live, so only the pin gates it.
+      PROVES DELIVERY — the credential-bearing environment reached the executed engine.
+      Since round 6 the broker runs on the unsandboxed path too (THE LESS-CONFINED PATH
+      MUST NOT RECEIVE MORE THAN THE MORE-CONFINED PATH), so what the pinned engine
+      receives is the broker PLACEHOLDER + loopback base URL (credential ACCESS, live end
+      to end), and the raw key must NOT appear. Only the pin gates execution.
 
     MUTATION PROOF, both directions (performed, not asserted): dropping the engine
     binaries from TRUSTED_TOOLS turns the attack arm red (the fake resolves, executes and
-    its dump carries the secret); dropping the dispatcher's FACTORY_ENGINE_BIN wiring
-    turns the control arm red (the adapter refuses, nothing is delivered).
+    its dump's CONTENT carries the marker); dropping the dispatcher's FACTORY_ENGINE_BIN
+    wiring turns the control arm red (the adapter refuses, nothing is delivered).
     """
 
     SECRET = "sk-ant-EXFIL-CANARY-28nn"
@@ -2680,10 +2787,22 @@ class TestEngineCredentialPinning(TestDispatcher):
         return env
 
     def _model_outputs(self):
-        """The model_output.txt files that ACTUALLY exist — one is created only when the
-        adapter execs an engine (the redirect target), so existence is execution."""
+        """The model_output.txt files that exist. EXISTENCE IS NOT EXECUTION (agents-28nn
+        round 6, review P2): the adapter's shell redirection creates the file BEFORE the
+        engine executes, so a missing or failing engine still leaves one — assert on
+        CONTENT, never on the file being there."""
         return [run / "model_output.txt" for run in self.run_dirs()
                 if (run / "model_output.txt").exists()]
+
+    def _assert_no_dump_received_the_secret(self):
+        """The sound leak assertion: no run artefact's CONTENT carries the fake's dump
+        marker or the secret — whatever files exist."""
+        for output in self._model_outputs():
+            content = output.read_text(encoding="utf-8", errors="replace")
+            self.assertNotIn("FAKE ENGINE ENVIRONMENT DUMP", content,
+                             f"the fake engine EXECUTED and dumped the environment: {output}")
+            self.assertNotIn(self.SECRET, content,
+                             f"the credential reached a run artefact: {output}")
 
     def test_a_path_planted_fake_engine_never_receives_the_credential(self):
         """The constructed attack, retained: an UNPINNED namesake first on PATH must be
@@ -2699,17 +2818,15 @@ class TestEngineCredentialPinning(TestDispatcher):
         self.assertIn("not pinned", res.stderr,
                       "the refusal must name the pin cause, not some other gate: "
                       + res.stderr)
-        for output in self._model_outputs():
-            self.fail(f"the fake engine EXECUTED and received the environment: "
-                      f"{output} exists; the dump would carry the key "
-                      f"({'key present' if self.SECRET in output.read_text() else 'key absent'})")
+        self._assert_no_dump_received_the_secret()
 
     def test_a_pinned_engine_is_delivered_the_credential(self):
         """The control: the SAME payload, pinned by its sha256, runs and its environment
-        dump CONTAINS the key — the credential path is live end to end, so the attack
-        arm's silence is the pin's doing, not a broken harness. This is also the mutation
-        trap for the delivery half: remove the dispatcher's FACTORY_ENGINE_BIN wiring and
-        the adapter refuses, the dump never appears, and this test goes red."""
+        dump PROVES DELIVERY — since round 6 the broker runs on the unsandboxed path too,
+        so the executed engine receives the broker PLACEHOLDER + loopback base URL
+        (credential access, live end to end) and NEVER the raw key. This is also the
+        mutation trap for the delivery half: remove the dispatcher's FACTORY_ENGINE_BIN
+        wiring and the adapter refuses, the dump never appears, and this test goes red."""
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "budget: {max_minutes: 1}\n")
         self.trusted_target("trusted")
@@ -2725,9 +2842,15 @@ class TestEngineCredentialPinning(TestDispatcher):
         dump = outputs[0].read_text(encoding="utf-8")
         self.assertIn("FAKE ENGINE ENVIRONMENT DUMP", dump,
                       "the pinned payload must have EXECUTED and dumped its environment")
-        self.assertIn(self.SECRET, dump,
-                      "the pinned engine must have RECEIVED the credential — otherwise the "
-                      "attack arm proves nothing about the key")
+        self.assertIn(PLACEHOLDER_KEY, dump,
+                      "the pinned engine must have RECEIVED the brokered credential shape — "
+                      "otherwise the attack arm proves nothing about delivery")
+        self.assertIn("http://127.0.0.1:", dump,
+                      "the broker's loopback base URL must reach the engine — the credential "
+                      "path is live, so only the pin gates execution")
+        self.assertNotIn(self.SECRET, dump,
+                         "the raw key must NOT reach the engine env on ANY path "
+                         "(agents-28nn round 6: the broker is not sandbox-gated)")
 
     def test_an_unpinned_claude_is_refused_before_it_can_receive_the_key(self):
         """Same granter, never-sandboxed engine (agents-ejm): claude's credentials reach
@@ -2740,8 +2863,7 @@ class TestEngineCredentialPinning(TestDispatcher):
         self.assertNotEqual(res.returncode, 0,
                             "an unpinned engine must refuse the run, not exit clean")
         self.assertIn("not pinned", res.stderr)
-        self.assertEqual(self._model_outputs(), [],
-                         "the fake claude must never execute with the credential")
+        self._assert_no_dump_received_the_secret()
 
 
 class TestPrepassEffectivePinsEveryPath(TestDispatcher):

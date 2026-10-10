@@ -497,24 +497,31 @@ def policy_record(policy: Policy, engine: str,
 
     `sandbox` is lib/sandbox.py's sandbox_record(), produced only for an exercised wrap
     (agents-kwi). The credential residual only drops after a broker actually starts and
-    the engine env is verified to contain placeholders rather than real keys (agents-2dj).
-    The dispatcher writes a conservative record before its pre-pass, then replaces it
-    after a successful broker swap and restores those captured bytes after the session.
+    the engine env is verified to contain placeholders rather than real keys (agents-2dj)
+    — on EITHER sandbox state, because the broker is no longer sandbox-gated (agents-28nn
+    round 6). The dispatcher writes a conservative record before its pre-pass, then
+    replaces it after a successful broker swap and restores those captured bytes after
+    the session.
     """
     engine_sandboxed = bool(sandbox and sandbox.get("engine_sandboxed"))
     not_enforced = [] if engine_sandboxed else ["os-sandbox"]
     if engine == "pi" and not engine_sandboxed:
         not_enforced.append("read-scope")
+    # bun/pi can read its own /proc/self/environ. The residual drops only when a running
+    # broker swapped every real credential for a placeholder — verified against the
+    # ACTUAL engine env by _broker_covers_engine_env, which is direct evidence on any
+    # path (agents-28nn round 6: an unsandboxed brokered engine's record must be able to
+    # say so). A sandboxed pre-pass alone is not sufficient (e.g. claude).
+    brokered_env = _broker_covers_engine_env(engine, brokered_providers, engine_env)
     if sandbox is not None:
         if not sandbox.get("network_egress_filtered"):
             not_enforced.append("network-egress")
-        # bun/pi can read its own /proc/self/environ. Record this residual unless an
-        # exercised engine sandbox *and* a running broker swapped every real credential
-        # for a placeholder. A sandboxed pre-pass alone is not sufficient (e.g. claude).
-        brokered_env = (engine_sandboxed and
-                        _broker_covers_engine_env(engine, brokered_providers, engine_env))
         if not brokered_env:
             not_enforced.append("env-credentials")
+    elif brokered_providers and not brokered_env:
+        # No sandbox record exists on a sandbox-less host; a broker that was started but
+        # did NOT take (a real credential survived the swap) is still recorded honestly.
+        not_enforced.append("env-credentials")
     if policy.max_usd is not None and engine not in USD_CAPABLE_ENGINES:
         not_enforced.append("budget.max_usd")
     granted = {
@@ -525,9 +532,9 @@ def policy_record(policy: Policy, engine: str,
     }
     if sandbox is not None:
         granted["os_sandbox"] = dict(sandbox)
-        if brokered_env:
-            granted["credential_broker"] = {"providers": sorted(brokered_providers),
-                                            "enforced": "engine env contains placeholders only"}
+    if brokered_env:
+        granted["credential_broker"] = {"providers": sorted(brokered_providers),
+                                        "enforced": "engine env contains placeholders only"}
     record = {
         "agent": policy.agent,
         "engine": engine,

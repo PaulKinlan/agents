@@ -9,9 +9,13 @@
 # where the reviewer's fake pi put the operator's ANTHROPIC_API_KEY).
 #
 # The defect is not "a wrong binary ran" — it is "a wrong binary WAS GIVEN THE KEY". So
-# the tests assert on what this fixture RECEIVED: with the pin gate in place it must
-# never execute (no dump exists at all); with the fixture itself pinned (the control) it
-# DOES execute and the dump MUST contain the key — proving the credential path is live
+# the tests assert on what this fixture RECEIVED, on the file's CONTENT rather than its
+# existence (agents-28nn round 6: the adapter's `> "$OUTPUT_FILE"` redirection creates
+# model_output.txt BEFORE the engine executes, so existence is not execution): with the
+# pin gate in place no artefact carries the dump marker or the secret; with the fixture
+# itself pinned (the control) it DOES execute and the dump MUST contain the brokered
+# credential shape (placeholder + loopback broker URL — the broker runs on every path
+# since round 6) and MUST NOT contain the raw key — proving the credential path is live
 # and only the pin verification gates it. A nonzero-exit assertion alone would pass a
 # "fix" that still leaked whenever the payload dumps the environment and then fails, so
 # the assertion sits at the point the secret should never arrive.

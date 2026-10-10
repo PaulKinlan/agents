@@ -63,11 +63,16 @@ PROXY_VARS = (
 # engine gets none (fail closed).
 #
 # Trust boundary for UNBROKERED engines (tm-unbrokered-engine-credentials, agents-5d9): a
-# sandboxed engine's keys are replaced by the broker (placeholder + loopback URL), so nothing
-# real crosses into the sandbox. An UNSANDBOXED engine (claude, or a host without bubblewrap)
-# runs as the operator on a trusted+private target and gets its own real key BY DESIGN — that
-# key is the engine's credential needed for its model call, and policy.json already records
-# `env-credentials` in not_enforced for it. Documented behaviour, not a leak.
+# brokered engine's keys are replaced by the broker (placeholder + loopback URL), so nothing
+# real crosses into the child's environ. Brokering is a property of the engine's credential
+# handling, NOT of the sandbox path (agents-28nn round 6: THE LESS-CONFINED PATH MUST NOT
+# RECEIVE MORE THAN THE MORE-CONFINED PATH — the rule on lib/sandbox.py's engine_sandboxed):
+# an unsandboxed pi run holding real env keys is brokered exactly like a sandboxed one. What
+# remains unbrokered BY DESIGN: claude (its session auth lives in $HOME/.claude and its
+# credentials are never brokered — agents-ejm) and any engine outside SANDBOXED_ENGINES, plus
+# the no-env-key unsandboxed run that keeps its own ~/.pi session configuration. Those run as
+# the operator on a trusted+private target with their own real key/session — the engine's
+# credential needed for its model call. Documented behaviour, not a leak.
 ENGINE_CREDENTIALS = {
     "pi": (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",

@@ -1261,12 +1261,18 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # own environment. That composition, not either half alone, is why this path was
         # the priority.
         #
-        # THE RULE this bead works to, stated once here and referenced from the credential
-        # broker below: THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
-        # MORE-CONFINED PATH — a control that applies only on the confined path leaves
-        # the less-confined path with less control, the inverted polarity this bead has
-        # now met four times (the agents-dpt pins forwarding; the round-4 bind
-        # verification; the round-5 merged pins; the round-6 credential broker).
+        # THE RULE this bead works to (stated canonically on lib/sandbox.py's
+        # engine_sandboxed — where the next person adding a conditional meets it — and
+        # referenced from the credential broker below): THE LESS-CONFINED PATH MUST NOT
+        # RECEIVE MORE THAN THE MORE-CONFINED PATH — a control that applies only on the
+        # confined path leaves the less-confined path with less control, the inverted
+        # polarity this bead has now met four times (the round-5 merged pins; the round-6
+        # credential broker; the pre-pass HTTP_PROXY only-if-sandbox_ok; the adapter proxy
+        # only-if-egress_active).
+        #
+        # And the rationale for WHY the unsandboxed half of this fix could not be the
+        # round-5 read-only bind: A CONTROL THAT DEPENDS ON A MOUNT NAMESPACE IS ABSENT ON
+        # THE PATH THAT HAS NONE.
         #
         # WHAT NOW CONTAINS THE RISK ON THE UNSANDBOXED PATH (it is no longer, and never
         # was, the pin's inability to grant):
@@ -1581,21 +1587,38 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # create the throwaway worktree just before the session (so the sandbox's read-write
         # bind of run_dir picks it up), collect the session diff right after — the engine's
         # edits live only there and the target checkout was never touched — and always discard
-        # it. Credential broker (agents-8h4): a sandboxed engine must NOT carry the operator's
-        # real API keys, because bun/pi reads its own /proc/self/environ and a prompt-injected
-        # session would reach them. So when the engine runs inside the OS sandbox and a real
-        # key is present, start a localhost broker and swap the engine's key vars for a
-        # placeholder + the broker base URL; the broker injects the real key host-side and
-        # forwards upstream. Under egress control (agents-2x6) the engine's netns is
-        # isolated, so the broker listens on a UNIX socket that the in-sandbox net_forward
-        # relay — bound at EGRESS_BROKER_PORT on the child's loopback, which base_url()
-        # names — forwards to; without it the sandbox shares the host network and the
-        # broker keeps its TCP loopback. Both are started here — after the pre-pass — and
-        # torn down in the finally, so neither leaks on any failure.
+        # it. Credential broker (agents-8h4): an engine must NOT carry the operator's real
+        # API keys, because bun/pi reads its own /proc/self/environ and a prompt-injected
+        # session would reach them. So when a real key is present, start a localhost broker
+        # and swap the engine's key vars for a placeholder + the broker base URL; the
+        # broker injects the real key host-side and forwards upstream. agents-28nn round 6
+        # (review P1, the WORST of the inverted-polarity shapes): the broker used to start
+        # ONLY if engine_sandboxed(engine), so the LESS-confined unsandboxed path handed
+        # the engine RAW API KEYS where the confined path hands placeholders — an
+        # unsandboxed engine's /proc/self/environ is exactly as readable to a
+        # prompt-injected session as a sandboxed one's. THE LESS-CONFINED PATH MUST NOT
+        # RECEIVE MORE THAN THE MORE-CONFINED PATH (the rule on lib/sandbox.py's
+        # engine_sandboxed, also referenced by the hoisted pre-pass pins above): brokering
+        # is a property of the engine's CREDENTIAL HANDLING, not of the path taken to it,
+        # so the gate is SANDBOXED_ENGINES membership — the engines whose credentials the
+        # factory brokers — and the broker starts for them on EVERY path. Under egress
+        # control (agents-2x6) the engine's netns is isolated, so the broker listens on a
+        # UNIX socket that the in-sandbox net_forward relay — bound at EGRESS_BROKER_PORT
+        # on the child's loopback, which base_url() names — forwards to; otherwise the
+        # broker keeps its TCP loopback (which an unsandboxed engine shares natively).
+        # Both are started here — after the pre-pass — and torn down in the finally, so
+        # neither leaks on any failure.
         broker: Optional[CredentialBroker] = None
         try:
-            if engine_sandboxed(engine):
+            if engine in SANDBOXED_ENGINES:
                 broker_creds = credentials_from_env()
+                # What stays path-dependent, deliberately: with NO real key in the
+                # environment an UNSANDBOXED engine keeps its own session configuration
+                # (~/.pi), so no broker is started for it; a SANDBOXED engine has no
+                # session config at all ($HOME is tmpfs-hidden), so it gets the keyless
+                # managed-endpoint broker even then. A run holding real keys is brokered
+                # on BOTH paths — the raw key never reaches the engine's environ.
+                real_keys_held = bool(broker_creds)
                 # agents-3y2: keyless BYOK providers (the exe.dev managed endpoints) are brokered
                 # even with no real key on the host, so a sandboxed engine reaches them through
                 # the host-side forwarder. Scope to providers this engine's credential allowlist
@@ -1619,7 +1642,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     engine_prov_map = {"deepseek": "deepseek", "claude": "anthropic", "antigravity": "google"}
                     allowed_for_run = [engine_prov_map[engine]]
 
-                if broker_creds:
+                # The broker starts on EVERY path when the run holds real engine keys
+                # (agents-28nn round 6), and on the sandboxed path even without them (the
+                # keyless managed endpoints are a sandboxed engine's ONLY auth channel).
+                if broker_creds and (engine_sandboxed(engine) or real_keys_held):
                     broker = CredentialBroker(broker_creds, allowed_providers=allowed_for_run)
                     try:
                         if egress_active:
@@ -1630,22 +1656,29 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     except Exception as e:  # noqa: BLE001 - fail closed, never leak the key
                         raise StationError(
                             f"{agent_name}: cannot start the credential broker, so the real API "
-                            f"key cannot be kept out of the sandboxed engine's environ; refusing "
+                            f"key cannot be kept out of the engine's environ; refusing "
                             f"the run rather than leaking it: {e}") from e
                     apply_broker_urls(
                         adapter_env, {p: broker.base_url(p) for p in broker.providers})
                     # agents-3z8: ensure no real API keys for non-allowed providers cross into
-                    # the sandboxed engine's environment.
+                    # the engine's environment.
                     for prov, (_placeholder, _base_url, secret_vars) in BROKER_PROVIDERS.items():
                         if prov not in broker.providers:
                             for var in secret_vars:
                                 adapter_env.pop(var, None)
-                    # agents-854: pi ignores *_BASE_URL env vars, so the broker swap above is
-                    # not enough for pi — write the broker routing into its provider config,
-                    # which IS honoured. The provider is whatever the selected model names, so
-                    # the next keyless provider works without touching pi.sh.
-                    _write_pi_models_json(
-                        pi_config_dir, broker, adapter_env["FACTORY_MODEL"].split("/", 1)[0])
+                    if engine == "pi":
+                        # agents-854: pi ignores *_BASE_URL env vars, so the broker swap above
+                        # is not enough for pi — write the broker routing into its provider
+                        # config, which IS honoured. The provider is whatever the selected
+                        # model names, so the next keyless provider works without touching
+                        # pi.sh. agents-28nn round 6: redirect pi's agent dir on EVERY
+                        # brokered path (not only the sandboxed one), or an unsandboxed pi
+                        # keeps reading ~/.pi and the placeholder + broker URL never take
+                        # effect — the raw key would be popped above and NOTHING would
+                        # authenticate the run.
+                        adapter_env["PI_CODING_AGENT_DIR"] = str(pi_config_dir)
+                        _write_pi_models_json(
+                            pi_config_dir, broker, adapter_env["FACTORY_MODEL"].split("/", 1)[0])
                     # agents-2dj: only now can policy.json claim broker enforcement.
                     # The recorder checks the actual adapter env for every remaining
                     # model key and proxy credential, rather than trusting broker startup
