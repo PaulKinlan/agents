@@ -241,6 +241,13 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertTrue(is_concurrency_recommendation(f9))
 
+        # Reviewer P1 finding: concurrent requests on shared session
+        f10 = {
+            "rule_id": "custom-rule",
+            "remediation": "Use concurrent requests on the shared session"
+        }
+        self.assertTrue(is_concurrency_recommendation(f10))
+
     def test_detects_reentrancy_precondition_or_evidence(self):
         """Identify whether finding already carries backend evidence or precondition."""
         without_precondition = {"remediation": "Replace loop with Promise.all"}
@@ -329,6 +336,26 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertTrue(finding2["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
         self.assertIn("Start all forward passes simultaneously", finding2["remediation"])
         self.assertIn("otherwise preserve serial execution", finding2["remediation"])
+
+    def test_post_filter_conditions_proposed_fix_diff_when_unpreconditioned(self):
+        """Reviewer P1 finding: proposed_fix_diff must be conditioned when remediation is guarded."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/session.ts",
+                    "line_number": 25,
+                    "remediation": "Use Promise.all to run requests concurrently",
+                    "proposed_fix_diff": "- for (const r of reqs) await r();\n+ await Promise.all(reqs.map(r => r()));",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        finding = report["findings"][0]
+        self.assertTrue(finding["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
+        self.assertIn("reentrancy", finding["proposed_fix_diff"].lower())
+        self.assertIn("preserve serial execution", finding["proposed_fix_diff"].lower())
 
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
