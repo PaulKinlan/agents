@@ -468,3 +468,33 @@ def stdout_safe_report(report: Any) -> Any:
     return safe
 
 
+def emit_station_result(result: Any, output_path: Optional[str], *, summary: Optional[str] = None) -> None:
+    """The ONE spelling of a station CLI's output rule (agents-qslz): the file gets the raw
+    record, stdout gets the redacted one.
+
+    Every station CLI ends here rather than spelling the branch out itself, because the class of
+    defect this closes cannot be enumerated by grepping print sites - some scripts print a
+    variable - so the rule has to be a shared helper plus the structural test in
+    tests/test_redaction.py that asserts every `--output` script calls it.
+
+    With `output_path`: write the RAW JSON there. It is the local, gitignored record of what
+    matched - what a human needs in order to rotate a credential - so it must stay raw. Print
+    `summary` if one is given.
+
+    Without `output_path`: stdout goes to a terminal or a CI log, which cannot be un-published,
+    so print `stdout_safe_report(result)` and point stderr at `--output`.
+    """
+    if output_path:
+        # The file is the local record of what matched — it is what a human needs in order
+        # to rotate a credential, and it is gitignored. Every published render of a finding
+        # is masked instead, so write the raw record here only.
+        Path(output_path).write_text(json.dumps(result, indent=2), encoding="utf-8")
+        if summary:
+            print(summary)
+    else:
+        # stdout goes to a terminal or a CI log, which cannot be un-published: never emit
+        # match text there, whatever shape the credential turns out to be.
+        print(json.dumps(stdout_safe_report(result), indent=2))
+        sys.stderr.write(
+            "Note: stdout redacts matched values. Use --output <file> for the raw local record.\n"
+        )
