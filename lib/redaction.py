@@ -2,9 +2,11 @@
 """Structural redaction for everything the factory publishes.
 
 A finding's `snippet` is whatever the deterministic scanner matched — for `secret-scan`
-that is the credential itself. Those values leave this machine in three directions:
-the local delta report (which the composite action appends to a public step summary),
-tracker sinks (beads / GitHub Issues), and scanner stdout.
+that is the credential itself. Three boundaries decide what happens to it: the local delta
+report (which the composite action appends to a public step summary), tracker sinks
+(beads / GitHub Issues), and scanner stdout. Scanner stdout is the strict one — it carries
+no matched text at all, dropping the match fields rather than masking them, because a
+terminal or CI log cannot be un-published (see `stdout_safe_report`, agents-qslz).
 
 The rule here is structural, never a prompt. Non-negotiable #2: a model is not a
 containment boundary, so nothing relies on the triage model choosing not to repeat what
