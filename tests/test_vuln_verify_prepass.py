@@ -56,6 +56,9 @@ class TestVerifierPriming(unittest.TestCase):
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -300,6 +303,9 @@ class TestPathConfinement(unittest.TestCase):
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
@@ -402,6 +408,9 @@ class TestUnknownLineNumbers(unittest.TestCase):
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         body = "".join(f"const line{i} = {i};\n" for i in range(1, app_lines + 1))

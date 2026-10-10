@@ -11,6 +11,7 @@ reported as a candidate by the factory's own secret-scan pre-pass on every run, 
 exactly the permanent false positive this work exists to avoid.
 """
 
+import ast
 import json
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
@@ -522,6 +523,78 @@ class TestStdoutChannelDropsDerivedMatchValues(unittest.TestCase):
         self.assertEqual(safe["rule_id"], "github-pat")
         self.assertEqual(safe["path"], "src/config.js")
         self.assertEqual(safe["line_number"], 1)
+
+
+class TestStationStdoutChannelIsStructural(unittest.TestCase):
+    """agents-qslz: EVERY station CLI that accepts --output must route its result through
+    lib.redaction.emit_station_result - the helper next to stdout_safe_report above.
+
+    The class this closes cannot be enumerated by grep: ui-ux-audit printed a VARIABLE
+    (`out = json.dumps(result, indent=2)` then `print(out)`), which is why two text searches
+    missed different subsets of the same leak. So the assertion is POSITIVE and structural -
+    parse each script's AST and require a call to the helper - rather than forbidding
+    particular print strings, which is the check that kept missing sites.
+    """
+
+    # Scripts that accept --output but have NO stdout result path at all: --output is
+    # required, and stdout carries only a one-line human summary. Each entry is a considered
+    # exclusion WITH its reason - an omission and a deliberate exclusion must look different
+    # to the next reader.
+    STDOUT_RESULT_EXCEPTIONS = {
+        "agents/log-check/scripts/parse_logs.py":
+            "--output is required=True; stdout carries only a one-line scan summary, never result JSON",
+        "agents/test-gap/scripts/find_untested.py":
+            "--output is required=True; stdout carries only a one-line deficit summary, never result JSON",
+        "agents/vuln-triage/scripts/triage.py":
+            "--output is required=True; stdout carries only a one-line cluster summary, never result JSON",
+    }
+
+    @staticmethod
+    def _output_scripts():
+        scripts = {}
+        for path in sorted(ROOT.glob("agents/*/scripts/*.py")):
+            source = path.read_text(encoding="utf-8")
+            if '"--output"' in source or "'--output'" in source:
+                scripts[str(path.relative_to(ROOT))] = source
+        return scripts
+
+    @staticmethod
+    def _calls_helper(source: str) -> bool:
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "emit_station_result":
+                    return True
+                if isinstance(func, ast.Attribute) and func.attr == "emit_station_result":
+                    return True
+        return False
+
+    def test_every_output_script_routes_its_result_through_the_helper(self):
+        """Load-bearing: point one station back at a raw print (e.g. revert
+        accessibility/scripts/audit_a11y.py's main() to `print(json.dumps(result, indent=2))`)
+        and this fails with `AssertionError: Lists differ:
+        ['agents/accessibility/scripts/audit_a11y.py'] != []` naming the unconverted script.
+        """
+        scripts = self._output_scripts()
+        self.assertTrue(scripts, "no --output scripts found - the enumeration itself is broken")
+        missing = [rel for rel, source in scripts.items()
+                   if rel not in self.STDOUT_RESULT_EXCEPTIONS and not self._calls_helper(source)]
+        self.assertEqual(missing, [],
+                         "station CLIs with --output that do not call emit_station_result: "
+                         + ", ".join(missing))
+
+    def test_exception_list_is_exact_current_and_reasoned(self):
+        """An exception must still exist, still handle --output, still carry a reason, and
+        must not hide a script that DOES call the helper (a stale exception reads as an
+        omission)."""
+        scripts = self._output_scripts()
+        for rel, reason in self.STDOUT_RESULT_EXCEPTIONS.items():
+            self.assertIn(rel, scripts,
+                          f"exception {rel} no longer handles --output - remove it or the rule changed")
+            self.assertTrue(reason.strip(), f"exception {rel} must state its reason")
+            self.assertFalse(self._calls_helper(scripts[rel]),
+                             f"{rel} calls the helper AND is excepted - drop the stale exception")
+
 
 if __name__ == "__main__":
     unittest.main()
