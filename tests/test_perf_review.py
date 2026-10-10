@@ -457,6 +457,42 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertNotIn("proposed_fix_diff", finding6)
         self.assertIn("Code patch withheld", finding6["remediation"])
 
+        # Case G: Reviewer P1 finding - URL string literal with // does not mask subsequent stateful call
+        report7 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/jobs.ts",
+                    "line_number": 15,
+                    "snippet": "for (const job of jobs) await fetch('https://example.test');",
+                    "remediation": "The Node.js fetch backend is proven reentrant and thread-safe; use Promise.all.",
+                    "proposed_fix_diff": "--- a/jobs.ts\n+++ b/jobs.ts\n@@ -1,2 +1,2 @@\n- for (const job of jobs) await fetch('https://example.test');\n+ await Promise.all(jobs.map(async job => { await fetch('https://example.test'); await job.run(); }));",
+                }
+            ]
+        }
+        notes7 = normalize_report(report7)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes7))
+        finding7 = report7["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding7)
+        self.assertIn("Code patch withheld", finding7["remediation"])
+
+    def test_serial_execution_restoration_patch_retained(self):
+        """Reviewer P2 finding: diffs removing Promise.all to restore serial execution are not guarded."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "race-condition",
+                    "path": "src/state.ts",
+                    "line_number": 42,
+                    "remediation": "Restore serial execution by replacing Promise.all with sequential for-of loop.",
+                    "proposed_fix_diff": "--- a/state.ts\n+++ b/state.ts\n@@ -1,2 +1,2 @@\n- await Promise.all(items.map(f));\n+ for (const item of items) await f(item);",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes))
+        self.assertIn("proposed_fix_diff", report["findings"][0])
+
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
         original_remediation = (
