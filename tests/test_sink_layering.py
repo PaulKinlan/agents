@@ -38,10 +38,26 @@ class TestSinkLayering(unittest.TestCase):
 
     def test_findings_py_imports_the_adapters(self):
         tree = ast.parse((ROOT / "lib" / "findings.py").read_text(encoding="utf-8"))
-        modules = {node.module for node in ast.walk(tree)
-                   if isinstance(node, ast.ImportFrom) and node.module}
-        self.assertIn("lib.sinks.beads", modules)
-        self.assertIn("lib.sinks.github", modules)
+        from_imports = {(node.module, alias.name) for node in ast.walk(tree)
+                        if isinstance(node, ast.ImportFrom) for alias in node.names}
+        plain_imports = {alias.name for node in ast.walk(tree)
+                         if isinstance(node, ast.Import) for alias in node.names}
+        # findings.py delegates via the lib.sinks package rather than embedding tracker logic
+        imports_sinks_pkg = ("lib", "sinks") in from_imports or "lib.sinks" in plain_imports
+        self.assertTrue(imports_sinks_pkg, "lib/findings.py must import the lib.sinks package")
+
+        # Promotion sink is imported from lib.sinks.github
+        self.assertIn(("lib.sinks.github", "promote_issue"), from_imports,
+                      "lib/findings.py must import promote_issue from lib.sinks.github")
+
+        # The lib.sinks package owns and exposes the adapters and promotion interface
+        import lib.sinks as sinks
+        self.assertIsNotNone(sinks.get("beads"), "lib.sinks must register the beads adapter")
+        self.assertIsNotNone(sinks.get("github-issues"), "lib.sinks must register github-issues adapter")
+        self.assertTrue(hasattr(sinks, "BeadsSink") or hasattr(sinks, "_dispatch_beads"),
+                        "lib.sinks must expose the beads adapter")
+        self.assertTrue(hasattr(sinks, "promote_issue"),
+                        "lib.sinks must expose promote_issue")
 
 
 if __name__ == "__main__":
