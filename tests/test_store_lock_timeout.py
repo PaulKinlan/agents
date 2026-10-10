@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -329,3 +330,47 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
                 pass
             shutil.rmtree(fake_bin, ignore_errors=True)
             shutil.rmtree(beads_dir, ignore_errors=True)
+
+    def test_promote_issue_uses_existing_store_without_reopening_file(self):
+        """agents-ynjh: promote_issue uses provided store directly without second open/flock."""
+        import lib.sinks.github as ghmod
+        from lib.findings import FindingsStore
+        target = f"test-ynjh-{int(time.time())}"
+        findings_dir = ROOT / "findings"
+        findings_dir.mkdir(exist_ok=True)
+        fp = "a" * 64
+        # Hold the lock on this target in this process.
+        store = FindingsStore(target, lock_timeout=0)
+        try:
+            mock_store = mock.MagicMock()
+            mock_store.data = {"findings": {fp: {"fingerprint": fp, "title": "Test", "agent": "probe"}}}
+            with mock.patch("lib.findings.FindingsStore") as mock_fs_cls, \
+                 mock.patch("lib.sinks.github.resolve_tool", return_value="/bin/true"), \
+                 mock.patch("lib.sinks.github._gh_api") as mock_gh, \
+                 mock.patch("lib.sinks.github._bd_json") as mock_bd:
+                mock_gh.side_effect = [
+                    {"full_name": "owner/repo", "html_url": "https://github.com/owner/repo", "private": False, "has_issues": True},
+                    {"number": 1, "html_url": "https://github.com/owner/repo/issues/1", "body": f"**Fingerprint**: `{fp}`", "labels": [{"name": "factory-approved"}]},
+                    [],
+                    {},
+                ]
+                mock_bd.side_effect = [
+                    [],  # list returns no beads
+                    {"id": "fixture-1"},  # create returns new bead
+                ]
+                res = ghmod.promote_issue(
+                    target, ROOT, "owner/repo", "public",
+                    "https://github.com/owner/repo/issues/1", ROOT,
+                    store=mock_store,
+                )
+                self.assertEqual(res["status"], "created")
+                self.assertEqual(res["bead_id"], "fixture-1")
+                # FindingsStore was NOT instantiated because store was passed in directly
+                mock_fs_cls.assert_not_called()
+                mock_store.save.assert_called_once()
+        finally:
+            store.close()
+            try:
+                (findings_dir / f"{target}.json.lock").unlink(missing_ok=True)
+            except OSError:
+                pass

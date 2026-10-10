@@ -1652,12 +1652,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         if not args.beads_dir or not args.repo or args.visibility != "public":
             parser.error("promotion needs --beads-dir, --repo and explicit --visibility public")
         try:
-            result = promote_issue(args.target, Path(args.target_dir).resolve(), args.repo,
-                                   args.visibility, args.promote_issue, Path(args.beads_dir))
+            with FindingsStore(target_name=args.target) as store:
+                result = promote_issue(args.target, Path(args.target_dir).resolve(), args.repo,
+                                       args.visibility, args.promote_issue, Path(args.beads_dir),
+                                       store=store)
         except (SuppressionFileError, StoreFileError, StoreBusyError) as e:
-            # The SECOND store-opening site (lib/sinks/github.py): promotion opens the store again
-            # while the outer one is held, so a bounded wait failure has to take the same clean path
-            # rather than a traceback (agents-4sij review, P2).
+            # The store-opening site for promotion: bounded wait failure takes the clean error path
+            # rather than a traceback (agents-4sij, agents-ynjh).
             sys.stderr.write(f"Error: {e}\n")
             sys.exit(2)
         print(json.dumps(result))

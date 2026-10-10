@@ -262,6 +262,14 @@ class TestPromotion(SinkFixture, unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue())["status"], "created")
         self.assertEqual(len(self.state()["beads"]), 1)
 
+    def test_promote_issue_accepts_store_kwarg(self):
+        """agents-ynjh: promote_issue accepts an existing store instance to avoid self-deadlock."""
+        import inspect
+        from lib.sinks.github import promote_issue
+        sig = inspect.signature(promote_issue)
+        self.assertIn("store", sig.parameters, "promote_issue must accept store as a keyword argument")
+        self.assertIsNone(sig.parameters["store"].default, "store must default to None")
+
 
 if __name__ == "__main__":
     unittest.main()
