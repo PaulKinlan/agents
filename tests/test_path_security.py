@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib.path_security import resolve_within_target  # noqa: E402
-from sandbox_fixtures import copy_station_script  # noqa: E402
+from tests.sandbox_fixtures import copy_station_script  # noqa: E402
 
 COLLECT_SCRIPT = ROOT / "agents" / "pr-fixer" / "scripts" / "collect_failures.py"
 

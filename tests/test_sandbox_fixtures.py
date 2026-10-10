@@ -11,8 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import sandbox_fixtures
-from sandbox_fixtures import ROOT, copy_station_script, lib_import_closure
+from tests import sandbox_fixtures
+from tests.sandbox_fixtures import ROOT, copy_station_script, lib_import_closure
 
 COLLECT_FAILURES = ROOT / "agents" / "pr-fixer" / "scripts" / "collect_failures.py"
 PREPARE_VERIFICATION = ROOT / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"

@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sandbox_fixtures import copy_station_script
+from tests.sandbox_fixtures import copy_station_script
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"

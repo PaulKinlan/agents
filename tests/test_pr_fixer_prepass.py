@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "agents" / "pr-fixer" / "scripts" / "collect_failures.py"
 
-from sandbox_fixtures import copy_station_script  # noqa: E402
+from tests.sandbox_fixtures import copy_station_script  # noqa: E402
 
 
 class TestPrFixerUnknownLine(unittest.TestCase):
