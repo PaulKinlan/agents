@@ -40,12 +40,12 @@ while IFS= read -r f; do
       run="$run $f"
       ;;
     factory)
-      # The dispatcher script; covered by the core runner + the truth harness.
-      mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py"
+      # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
+      mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_adapter_auth_failure.py tests/test_line_andon.py tests/test_prompt_exposure.py tests/test_transient_dirs.py"
       ;;
     lib/sinks/*.py)
-      # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, and layering.
-      mapped="$mapped tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py"
+      # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, layering, and adapter registry/commands.
+      mapped="$mapped tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_sink_adapters.py"
       ;;
     lib/findings.py)
       # The findings store and the delta renderer. Its own suite is not enough: the store's record
@@ -55,11 +55,48 @@ while IFS= read -r f; do
       # hard way: the fast gate passed 291 tests while the FULL gate caught a TypeError on a
       # non-scalar line_number, because the redaction contract suite was not in this mapping
       # (agents-q0mt) - the contract is fail-closed, so it is a real consumer of this module.
-      mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py tests/test_redaction.py"
+      # tests/test_suppressions.py asserts the committed suppressions register contract (agents-vt7w).
+      mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py tests/test_redaction.py tests/test_suppressions.py"
+      ;;
+    lib/candidate_identity.py)
+      # Candidate identity generator (agents-rdyb) and pre-pass emission assertion (agents-vt7w).
+      mapped="$mapped tests/test_candidate_identity.py tests/test_candidate_id_emission.py"
+      ;;
+    lib/credential_broker.py)
+      # Credential broker plus end-to-end keyless broker test (agents-vt7w).
+      mapped="$mapped tests/test_credential_broker.py tests/test_pi_keyless_broker.py"
+      ;;
+    lib/sandbox.py)
+      # Bubblewrap sandbox (bwrap isolation, binds, proc/env masking) plus no-bwrap refusal contract (agents-vt7w).
+      mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py"
+      ;;
+    lib/yaml_mini.py)
+      # Mini YAML parser plus GitHub Actions action.yml contract pin (agents-vt7w).
+      mapped="$mapped tests/test_yaml_mini.py tests/test_ci_action.py"
+      ;;
+    lib/adapters/*.sh)
+      # Engine adapters (e.g. claude.sh session auth scrub and precedence) (agents-vt7w).
+      mapped="$mapped tests/test_claude_adapter.py"
       ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.
       mapped="$mapped tests/test_bench_runner.py tests/test_hillclimb.py"
+      ;;
+    lib/report_schema.py)
+      # Report schema validation, post-filters (concurrency guard, unlocatable verdicts), and pipeline gate (agents-vt7w).
+      mapped="$mapped tests/test_report_schema.py tests/test_perf_review.py tests/test_factory_truth_2.py"
+      ;;
+    agents/bundle-size/scripts/measure_bundle.py)
+      mapped="$mapped tests/test_bundle_size.py"
+      ;;
+    agents/threat-model/scripts/mine_history.py)
+      mapped="$mapped tests/test_threat_model_prepass.py"
+      ;;
+    agents/perf-hillclimb/scripts/measure_and_context.py)
+      mapped="$mapped tests/test_hillclimb.py"
+      ;;
+    agents/docs-write/scripts/prepare_docs_fixes.py)
+      mapped="$mapped tests/test_prepass_exclusions.py"
       ;;
     agents/docs-drift/scripts/check_docs.py)
       # agents-q0mt: also emits candidate ids now; the exclusion suite drives this script, and the
@@ -78,9 +115,7 @@ while IFS= read -r f; do
       # The proposer's pre-pass: unknown lines must not reach int() (agents-fy26).
       mapped="$mapped tests/test_pr_fixer_prepass.py"
       ;;
-    agents/perf-review/scripts/scan_perf_changes.py)
-      mapped="$mapped tests/test_perf_review.py"
-      ;;
+
     agents/vuln-discovery/scripts/scan_surface.py)
       # The first station to EMIT a stable candidate identity (agents-rdyb): its own precision
       # suite plus the shared helper's property tests, which are what fail if the id stops being
@@ -137,12 +172,15 @@ while IFS= read -r f; do
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;
+    docs/*)
+      # Documentation pages snapshot and publishing scope (agents-vt7w).
+      mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in
         scheduler)     t="tests/test_schedules.py" ;;
         exclusions)    t="tests/test_prepass_exclusions.py" ;;
-        report_schema) t="tests/test_factory_truth_2.py" ;;
         *)             t="tests/test_${name}.py" ;;
       esac
       if [ -f "$t" ]; then
