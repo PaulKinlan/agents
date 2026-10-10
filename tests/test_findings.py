@@ -387,3 +387,125 @@ class TestStoreRedactsRawMaterialAtRest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIdentityAttribution(unittest.TestCase):
+    """Every row records WHICH KEY produced its fingerprint (agents-x9my).
+
+    A fingerprint is sha256(agent:rule id:path:snippet), and the snippet half falls back to the
+    model's re-quoted prose whenever the scanner candidate cannot be bound - which is exactly when
+    the model's own rule id was refused and blanked to "unclassified", because bind_candidates runs
+    BEFORE the identity lookup and the lookup is keyed on the rule id. Re-wording the prose then
+    books the SAME unchanged finding as both new and fixed in one run.
+
+    Recording the key is what makes a "Fixed" line falsifiable: without it an operator cannot tell a
+    real fix from a reword, which is why the teams reading these reports concluded that nothing may
+    be closed on one.
+    """
+
+    def _index(self, candidates):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "candidates.json"
+            path.write_text(json.dumps({"candidates": candidates}), encoding="utf-8")
+            return findings.load_candidate_index(path)
+
+    def _finding(self, **overrides):
+        item = {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                "snippet": "model wording one", "severity": "low", "title": "t",
+                "description": "d", "remediation": "r"}
+        item.update(overrides)
+        return item
+
+    def _run(self, td, items, candidate_index):
+        store = FindingsStore("target", findings_dir=Path(td))
+        try:
+            processed, stats, fixed = store.process_run(
+                "vuln-discovery", items, candidate_index=candidate_index)
+        finally:
+            store.close()
+        return processed, stats, fixed
+
+    def test_the_source_names_the_exact_candidate_key(self):
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        snippet, source = findings.identity_snippet_binding(
+            self._finding(), "scanner-rule", "a.py", ci)
+        self.assertEqual((snippet, source), ("scanner text", "candidate-exact"))
+
+    def test_the_source_distinguishes_the_unique_and_similar_fallbacks(self):
+        unique = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                               "snippet": "only candidate"}])
+        drifted = self._finding(line_number=99)
+        self.assertEqual(
+            findings.identity_snippet_binding(drifted, "scanner-rule", "a.py", unique),
+            ("only candidate", "candidate-unique"))
+
+        ambiguous = self._index([
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "snippet": "alpha"},
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "snippet": "beta gamma"},
+        ])
+        quoted = self._finding(line_number=99, snippet="the line reads beta gamma here")
+        self.assertEqual(
+            findings.identity_snippet_binding(quoted, "scanner-rule", "a.py", ambiguous),
+            ("beta gamma", "candidate-similar"))
+
+    def test_an_untrusted_rule_id_is_recorded_as_prose_identity(self):
+        """The mechanism: the label is blanked before the lookup, so the scanner cannot be bound."""
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(
+                td, [self._finding(rule_id="model-invented-label")], ci)
+
+            record = processed[0]
+            self.assertEqual(record["rule_id"], "unclassified")
+            self.assertEqual(record["identity_source"], "model-snippet")
+
+    def test_a_trusted_rule_id_binds_and_is_recorded(self):
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [self._finding()], ci)
+
+            record = processed[0]
+            self.assertEqual(record["rule_id"], "scanner-rule")
+            self.assertEqual(record["identity_source"], "candidate-exact")
+            self.assertEqual(record["snippet"], "model wording one")
+
+    def test_no_candidate_index_is_recorded_distinctly(self):
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(td, [self._finding()], None)
+            self.assertEqual(processed[0]["identity_source"], "no-candidate-index")
+
+    def test_a_report_cannot_claim_an_identity_it_does_not_have(self):
+        """identity_source is written from the binder's vocabulary, never read from the input."""
+        with tempfile.TemporaryDirectory() as td:
+            processed, _, _ = self._run(
+                td, [self._finding(identity_source="candidate-exact")], None)
+            self.assertEqual(processed[0]["identity_source"], "no-candidate-index")
+
+    def test_the_delta_attributes_a_fixed_row_to_its_key(self):
+        """A Fixed line that cannot be attributed is unfalsifiable, which is the whole complaint."""
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            self._run(td, [self._finding(rule_id="model-invented-label",
+                                         snippet="wording one")], ci)
+            processed, stats, fixed = self._run(
+                td, [self._finding(rule_id="model-invented-label",
+                                   snippet="completely reworded prose")], ci)
+
+            self.assertEqual(len(fixed), 1)
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("## Resolved in this Run (Fixed)", report)
+            self.assertIn("identity: `model-snippet`", report)
+
+    def test_every_source_belongs_to_the_closed_vocabulary(self):
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        observed = set()
+        with tempfile.TemporaryDirectory() as td:
+            for label, index in (("scanner-rule", ci), ("invented", ci), ("scanner-rule", None)):
+                for item in (self._finding(rule_id=label), self._finding(rule_id=label, line_number=99)):
+                    observed.add(self._run(td, [item], index)[0][0]["identity_source"])
+        self.assertTrue(observed <= set(findings.IDENTITY_SOURCES), observed)

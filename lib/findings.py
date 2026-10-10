@@ -190,33 +190,65 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
             "severities": severities}
 
 
-def identity_snippet(item: Dict[str, Any], rule_id: Any, path: Any,
-                     candidate_index: Optional[Dict[str, Any]]) -> Any:
-    """The snippet a finding is fingerprinted on: the scanner's, when it can be identified.
+# WHICH KEY produced a row's fingerprint, recorded on every finding (agents-x9my).
+#
+# The delta can say "Fixed" without saying what identified the row as the same finding, which
+# makes the claim unfalsifiable - and operators, reasonably, concluded that nothing may be closed
+# on a Fixed line. A fingerprint is sha256(agent:rule id:path:snippet), and the snippet half is
+# either the SCANNER's own match text (stable across runs) or the MODEL's re-quoted prose (not
+# stable): on findings/audit-target-5qe.json 28% of rows carry rule_id "unclassified", which is
+# exactly the population where the scanner binding below cannot fire. Naming the key turns an
+# unfalsifiable line into a graded one: `candidate-exact` is evidence, `model-snippet` is not.
+#
+# Classification, per the four-step field checklist above lib/redaction.py's RENDERED_TEXT_FIELDS:
+# this is a CLOSED vocabulary produced here, never model input, so it is copied verbatim rather
+# than masked; and it is deliberately NOT an input to compute_fingerprint, because identity must
+# not depend on how a finding was recognised - if it did, improving the binder would re-book every
+# row.
+IDENTITY_SOURCES = (
+    "candidate-exact",      # the scanner candidate at (rule id, path, line)
+    "candidate-unique",     # the only candidate for (rule id, path)
+    "candidate-similar",    # the candidate whose text the model's snippet quotes
+    "model-snippet",        # a candidate set existed but nothing bound: identity IS model prose
+    "no-candidate-index",   # no candidate set at all, so there was nothing to bind to
+)
+
+
+def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
+                             candidate_index: Optional[Dict[str, Any]]) -> Tuple[Any, str]:
+    """The snippet a finding is fingerprinted on, and WHICH KEY bound it.
 
     The model re-quotes a candidate's line differently from run to run (masked, truncated,
     the bare match, the whole line), so fingerprinting on its text booked a new+fixed pair on
     a byte-identical file (fleet-oed). The deterministic pre-pass emits the same snippet for
     the same unchanged line every time, so it is used when the finding binds to exactly one
-    candidate location; otherwise the model's snippet is kept, as before.
+    candidate location; otherwise the model's snippet is kept, as before - and that fallback is
+    now NAMED, because it is the difference between a Fixed line that is evidence and one that is
+    an artefact of re-wording (agents-x9my).
     """
     model_snippet = item.get("snippet", "")
     if not candidate_index or not isinstance(rule_id, str):
-        return model_snippet
+        return model_snippet, "no-candidate-index"
     key = (rule_id.strip(), normalize_path(path))
     at = candidate_index.get("snippets_at", {})
     line = item.get("line_number")
     if key + (line,) in at:
-        return at[key + (line,)]
+        return at[key + (line,)], "candidate-exact"
     options = candidate_index.get("snippets_in", {}).get(key, [])
     if len(options) == 1:
-        return options[0]
+        return options[0], "candidate-unique"
     wanted = normalize_text(model_snippet)
     if wanted:
         matching = [o for o in options if wanted in normalize_text(o) or normalize_text(o) in wanted]
         if len(matching) == 1:
-            return matching[0]
-    return model_snippet
+            return matching[0], "candidate-similar"
+    return model_snippet, "model-snippet"
+
+
+def identity_snippet(item: Dict[str, Any], rule_id: Any, path: Any,
+                     candidate_index: Optional[Dict[str, Any]]) -> Any:
+    """The snippet alone, for callers that do not need to know how it was bound."""
+    return identity_snippet_binding(item, rule_id, path, candidate_index)[0]
 
 def identity_raw_match(item: Dict[str, Any], rule_id: Any, path: Any,
                        candidate_index: Optional[Dict[str, Any]]) -> Any:
@@ -572,11 +604,13 @@ class FindingsStore:
             item["severity"] = bind_severity(item, rule_id, path, candidate_index)
             item["raw_match"] = identity_raw_match(item, rule_id, path, candidate_index)
             item["agent"] = agent
+            identity_snip, identity_source = identity_snippet_binding(
+                item, rule_id, path, candidate_index)
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
                 path=path,
-                snippet=identity_snippet(item, rule_id, path, candidate_index)
+                snippet=identity_snip
             )
             # A store or register written before the scanner snippet was the identity holds
             # the model-snippet fingerprint. Honour it once, instead of booking every finding
@@ -619,6 +653,10 @@ class FindingsStore:
             delta_stats["false_positive" if false_positive else change] += 1
             finding_record = {
                 "fingerprint": fp,
+                # Which key produced this fingerprint (agents-x9my). Written from the binder's own
+                # vocabulary, never read out of `item`, so a report cannot claim provenance it
+                # does not have; see IDENTITY_SOURCES for the classification and the checklist.
+                "identity_source": identity_source,
                 "agent": agent,
                 "rule_id": rule_id,
                 # The model's own label, kept only when the store did not accept it as the rule
@@ -908,6 +946,18 @@ def _badge(f: Dict[str, Any]) -> str:
     return f"[{shown.upper()}]"
 
 
+def _identity_note(f: Dict[str, Any]) -> str:
+    """` — identity: `x``, naming the key that produced this row's fingerprint (agents-x9my).
+
+    A Fixed line nobody can attribute is unfalsifiable, which is why the teams reading these
+    reports concluded that nothing may be closed on one. `model-snippet` says the row was
+    recognised by the model's re-quoted prose, so its disappearance is not evidence of a fix, while
+    `candidate-exact` means the scanner's own match text identified it.
+    """
+    source = f.get("identity_source")
+    return f" — identity: `{source}`" if source else ""
+
+
 def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
                          fixed_items: List[Dict[str, Any]], *, step_summary: bool = False,
                          sink_results: Optional[Dict[str, Any]] = None,
@@ -1015,7 +1065,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
             badge = _badge(f)
             if reduced(f):
                 lines.append(f"### {badge} `{f['rule_id']}` (`{f['state']}`)")
-                lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`")
+                lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`{_identity_note(f)}")
                 lines.append("")
                 continue
             lines.append(f"### {badge} {f['title']} (`{f['state']}`)")
@@ -1023,6 +1073,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
             if f.get("model_rule_id"):
                 lines.append(f"- **Model's own label** (not scanner provenance): "
                              f"`{f['model_rule_id']}`")
+            if f.get("identity_source"):
+                lines.append(f"- **Identity**: `{f['identity_source']}`")
             lines.append(f"- **Location**: `{f['path']}:{f.get('line_number', '?')}`")
             lines.append(f"- **Fingerprint**: `{f['fingerprint'][:16]}...`")
             lines.append(f"- **Description**: {f['description']}")
@@ -1036,9 +1088,9 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append("")
         for f in fixed_items:
             if reduced(f):
-                lines.append(f"- **`{f.get('rule_id')}`** (`{f.get('path')}:{f.get('line_number', '?')}`)")
+                lines.append(f"- **`{f.get('rule_id')}`** (`{f.get('path')}:{f.get('line_number', '?')}`){_identity_note(f)}")
                 continue
-            lines.append(f"- **`{f.get('rule_id')}`**: {f.get('title')} (`{f.get('path')}:{f.get('line_number', '?')}`)")
+            lines.append(f"- **`{f.get('rule_id')}`**: {f.get('title')} (`{f.get('path')}:{f.get('line_number', '?')}`){_identity_note(f)}")
         lines.append("")
 
     if unchanged:
