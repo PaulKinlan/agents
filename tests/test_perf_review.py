@@ -746,6 +746,20 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes = normalize_report(report)
         self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
 
+    def test_concurrent_with_trailing_serial_clause_is_concurrency_recommendation(self):
+        """Reviewer P1 finding: 'Run GPU concurrently but setup serially' (no patch) must be guarded."""
+        finding = {
+            "rule_id": "concurrency-hazard",
+            "path": "src/gpu.ts",
+            "line_number": 15,
+            "remediation": "Run GPU concurrently but setup serially."
+        }
+        self.assertTrue(is_concurrency_recommendation(finding))
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+
     def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
         """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""
         report = {
