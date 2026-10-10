@@ -258,7 +258,11 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             self.assertEqual(suppressed[0]["category"], "external-fetch")
 
     def test_third_party_target_sinks_with_schema_tokens_not_suppressed(self):
-        """P3 fix (agents-tj9u): Genuine sinks in third-party code co-located with schema tokens are NOT dropped."""
+        """P3 fix (agents-tj9u): Genuine sinks in third-party code co-located with schema tokens are NOT dropped.
+
+        Exercises the production auto-detection path (no is_self_target passed):
+        is_factory_self_target auto-detects False, and genuine production sinks are found.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             src_dir = tmp_path / "src"
@@ -286,12 +290,47 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             """
             (src_dir / "runner.js").write_text(exec_code, encoding="utf-8")
 
-            results = mine_history.scan_entry_points(tmp_path, is_self_target=False)
+            # Production call path: NO is_self_target argument passed
+            self.assertFalse(mine_history.is_factory_self_target(tmp_path))
+            results = mine_history.scan_entry_points(tmp_path)
             categories = [r["category"] for r in results]
             self.assertIn("server-listener", categories)
             self.assertIn("external-fetch", categories)
             self.assertIn("code-execution", categories)
             self.assertEqual(len(results), 4, f"Expected all 4 genuine sinks to be detected, got: {results}")
+
+    def test_auto_detected_self_target_telemetry_fires(self):
+        """P3 fix (agents-tj9u): Default auto-detection recognizes factory target layout and records telemetry.
+
+        Exercises the production auto-detection path for factory self-targets:
+        is_factory_self_target auto-detects True, self-matches are suppressed, and
+        fail-visible telemetry captures suppressed entry points.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Create factory layout markers so is_factory_self_target auto-detects True
+            (tmp_path / "factory").touch()
+            (tmp_path / "agents" / "threat-model" / "scripts").mkdir(parents=True)
+
+            src_dir = tmp_path / "src"
+            src_dir.mkdir(parents=True)
+            code = (
+                'ENTRY_POINT_PATTERNS = [("test", re.compile(r"fetch\\("))]\n'
+                'rule_dict = {"rule_id": "network", "title": "fetch() without timeout"}\n'
+                'const endpoint = { category: "listener", handler: app.get("/api", h) };\n'
+            )
+            (src_dir / "factory_code.py").write_text(code, encoding="utf-8")
+
+            # Call with NO is_self_target kwarg: auto-detection must identify factory self-target
+            self.assertTrue(mine_history.is_factory_self_target(tmp_path))
+            results, suppressed = mine_history.scan_entry_points(tmp_path, return_suppressed=True)
+            self.assertEqual(len(results), 0, f"Expected self-matches to be suppressed, got: {results}")
+            self.assertGreaterEqual(len(suppressed), 2, f"Expected telemetry for suppressed sinks, got: {suppressed}")
+            categories = {s["category"] for s in suppressed}
+            self.assertIn("external-fetch", categories)
+            self.assertIn("server-listener", categories)
+            for s in suppressed:
+                self.assertEqual(s["suppression_reason"], "self-referential factory pattern")
 
     def test_test_or_fixture_path_narrowing(self):
         """P3 fix (agents-tj9u): Exact directory matching ensures production packages like testing_service are not skipped."""
@@ -312,7 +351,8 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             test_dir.mkdir(parents=True)
             (test_dir / "test_dummy.js").write_text("fetch('/test');\n", encoding="utf-8")
 
-            results = mine_history.scan_entry_points(tmp_path, is_self_target=False)
+            # Production call path: NO is_self_target argument passed
+            results = mine_history.scan_entry_points(tmp_path)
             paths = [r["path"] for r in results]
             self.assertIn("testing_service/server.js", paths)
             self.assertIn("fixtures_client/api.js", paths)
