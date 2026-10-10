@@ -479,9 +479,14 @@ a listed file is one the removal saw disappear between its two observations:
 destroyed by the removal, or moved or renamed out of the snapshot by a concurrent
 writer — the record cannot tell which, so a listed file must never be read as a
 destroyed file. A `symlinks`
-entry with `outside_tree: true` means the link's target was never in the removed tree:
-its contents were NOT removed and are NOT covered by the record — the difference
-between "this evidence is gone" and "this evidence moved or was never in this tree".
+entry records the link and its raw target, and `outside_tree` is three-valued: `true`
+means the target resolved outside the removed tree — its contents were NOT removed and
+are NOT covered by the record (the difference between "this evidence is gone" and "this
+evidence moved or was never in this tree"); `false` means it resolved inside, so the
+evidence is covered by `files` under the target's real paths; `null` means the target
+could not be fully resolved — a symlink loop, a permission boundary, or more links than
+the bounded resolver follows — so the record claims neither survival nor destruction,
+and `null` must never be read as "it survived".
 The deletion-inventory guard (`tests/test_retention.py::TestRunRootDeletionInventory`)
 covers the deletion primitives it knows (`shutil.rmtree(`, `os.unlink(`, `os.remove(`,
 `.unlink(`, `rm -rf`/`rm -fr`); a deletion through a construct the scan does not match

@@ -851,6 +851,138 @@ class TestSymlinkTombstones(unittest.TestCase):
             self.assertIn("alias", tombstone["files"])
 
 
+class TestSymlinkResolutionHonesty(unittest.TestCase):
+    """agents-dm8n round 4, findings 1 (P0) and 2 (P1). The round-3 symlink
+    record resolved each link with Path.resolve(), which (a) raises
+    RuntimeError on a symlink loop - uncaught, it crashed remove_recorded and
+    with it the whole prune path (P0: a crash is worse than a wrong record),
+    and (b) stops SILENTLY at an unreadable boundary and returns the
+    half-resolved path, so a link whose true target is INSIDE the run dir
+    (through a symlink beyond the boundary) is recorded outside_tree=True -
+    the ledger claims the evidence SURVIVED while rmtree destroys it (P1:
+    the record asserts the opposite of reality).
+
+    The fix is three-valued: resolution is bounded and loop-safe
+    (_resolve_bounded), and any resolution that cannot complete records
+    outside_tree=None - unresolvable-and-therefore-uncertain - so the inverse
+    claim is unrepresentable. These tests pin both directions: they crash or
+    invert on the old code and hold on the new.
+    """
+
+    def test_a_symlink_loop_is_recorded_uncertain_and_never_crashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            os.symlink("loop", doomed / "loop")  # self-loop
+            os.symlink("b", doomed / "a")
+            os.symlink("a", doomed / "b")  # mutual loop
+
+            # The P0: on the old code Path.resolve() raised RuntimeError
+            # ("Symlink loop...") uncaught, crashing remove_recorded and the
+            # prune. The removal must complete, and the record must say
+            # UNCERTAIN - never a claimed survival, never a crash.
+            self.assertTrue(remove_recorded(doomed, reason="age"))
+
+            self.assertFalse(doomed.exists())
+            tombstone = read_tombstones(runs)[0]
+            by_path = {s["path"]: s for s in tombstone["symlinks"]}
+            self.assertEqual(set(by_path), {"loop", "a", "b"})
+            for entry in by_path.values():
+                self.assertIsNone(entry["outside_tree"])
+
+    def test_resolution_is_bounded_on_a_long_chain(self):
+        # A chain longer than the resolution bound terminates by the BOUND,
+        # not by an exception or a hang, and records uncertain.
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            depth = 50  # comfortably above _MAX_SYMLINK_DEPTH
+            (doomed / f"l{depth}").write_text("end\n", encoding="utf-8")
+            for i in range(depth, 0, -1):
+                os.symlink(f"l{i}", doomed / f"l{i - 1}")
+
+            self.assertTrue(remove_recorded(doomed, reason="age"))
+
+            tombstone = read_tombstones(runs)[0]
+            by_path = {s["path"]: s for s in tombstone["symlinks"]}
+            self.assertEqual(len(by_path), depth)
+            self.assertIsNone(by_path["l0"]["outside_tree"])
+
+    def test_an_unreadable_boundary_is_recorded_uncertain_not_outside(self):
+        # The reviewer's inversion, constructed: link ->
+        # ../outside/back_in/secret.txt, where `outside` has 000 permissions
+        # but `back_in` is a symlink BACK INTO the run directory. rmtree
+        # destroys the true target; the ledger must not claim it survived.
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("permission boundaries are invisible to root")
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            real = doomed / "real"
+            real.mkdir()
+            (real / "secret.txt").write_text("cited\n", encoding="utf-8")
+            outside = runs / "outside"
+            outside.mkdir()
+            os.symlink(str(real), outside / "back_in")
+            os.chmod(outside, 0)
+            try:
+                os.symlink(os.path.join("..", "outside", "back_in",
+                                        "secret.txt"), doomed / "link")
+                self.assertTrue(remove_recorded(doomed, reason="age"))
+            finally:
+                os.chmod(outside, 0o700)
+
+            # The true target was INSIDE the run dir: rmtree destroyed it.
+            self.assertFalse(doomed.exists())
+            tombstone = read_tombstones(runs)[0]
+            entry = {s["path"]: s for s in tombstone["symlinks"]}["link"]
+            # NOT True (the old inverted claim: "evidence survived") and not
+            # False either - the record could not determine, and says so.
+            self.assertIsNone(entry["outside_tree"])
+
+    def test_an_unreadable_link_records_nothing_and_claims_nothing(self):
+        # A link whose own target cannot be read must claim nothing: null
+        # target AND null outside_tree (the old code recorded
+        # outside_tree=True - "survived" - for a target it had never seen).
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            (doomed / "link").symlink_to("target", target_is_directory=True)
+
+            real_readlink = os.readlink
+
+            def failing_readlink(path, *args, **kwargs):
+                if Path(path).name == "link":
+                    raise OSError("simulated unreadable link")
+                return real_readlink(path, *args, **kwargs)
+
+            with mock.patch.object(os, "readlink", failing_readlink):
+                self.assertTrue(remove_recorded(doomed, reason="age"))
+
+            tombstone = read_tombstones(runs)[0]
+            entry = {s["path"]: s for s in tombstone["symlinks"]}["link"]
+            self.assertIsNone(entry["target"])
+            self.assertIsNone(entry["outside_tree"])
+
+    def test_the_pointer_and_readme_state_outside_tree_is_three_valued(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "old", now - 100)
+            make_dir(runs, "new", now)
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+            pointer = " ".join(
+                (runs / RUNS_POINTER_NAME).read_text(encoding="utf-8").split())
+        self.assertIn("three-valued", pointer)
+        self.assertIn("claims NEITHER survival NOR destruction", pointer)
+        self.assertIn("must never be read as", pointer)
+        content = " ".join(
+            (ROOT / "README.md").read_text(encoding="utf-8").split())
+        self.assertIn("three-valued", content)
+        self.assertIn("claims neither survival nor destruction",
+                      content.lower())
+
+
 class TestFailedApplyRemovalGoesThroughTheChokePoint(unittest.TestCase):
     """agents-dm8n round 2, finding 2: factory's failed --apply cleanup deletes
     runs/hillclimb-<target>-<run_id> OUTSIDE prune_run_dirs. The record must

@@ -73,10 +73,19 @@ The record tells the truth about its own limits (agents-dm8n round 3):
 - Symlinks are recorded with their targets (``symlinks``): os.walk YIELDS a
   symlink to a directory but does not traverse it, so a citation to a file
   reachable only THROUGH a link would otherwise dangle while the record looked
-  complete. A link whose target lived outside the removed tree is marked
-  ``outside_tree`` — its contents were NOT removed and are NOT covered by the
-  record — so a reader can tell "this evidence is gone" from "this evidence
-  moved or was never in this tree".
+  complete. ``outside_tree`` is THREE-VALUED (agents-dm8n round 4, findings
+  1-2): ``true`` means the target resolved outside the removed tree — its
+  contents were NOT removed and are NOT covered; ``false`` means it resolved
+  inside, so the evidence is covered by ``files`` under the target's real
+  paths; ``null`` means the target COULD NOT BE FULLY RESOLVED — a symlink
+  loop, a permission boundary, or more links than the resolution bound — and
+  the record then claims NEITHER survival NOR destruction. Resolution is
+  bounded and loop-safe (``_resolve_bounded``): the round-3 code called
+  ``Path.resolve()``, which raised ``RuntimeError`` on a loop (crashing the
+  prune) and silently STOPPED at an unreadable boundary, returning a
+  half-resolved path that could invert ``outside_tree`` into claiming the
+  evidence survived while ``rmtree`` destroyed it. An unresolvable target must
+  never be recorded as survived — that inverted claim is unrepresentable now.
 
 The ledger lives at ``<factory root>/retention-ledger.jsonl`` — beside the runs
 root, outside every swept subtree (the automatic prune only removes run
@@ -172,9 +181,14 @@ best-effort, not a completeness guarantee. Equally, a listed file is one the
 removal saw disappear BETWEEN its two observations: destroyed by the removal,
 or moved or renamed out of the snapshot by a concurrent writer — the record
 cannot tell which, so `listed` must never be read as `destroyed`. A `symlinks`
-entry records a link and its target; `outside_tree: true` means the target's
-contents were NOT removed and are NOT covered by this record — the evidence
-moved or was never in this tree.
+entry records a link and its raw target; `outside_tree` is three-valued.
+`true`: the target resolved OUTSIDE the removed tree — its contents were NOT
+removed and are NOT covered by this record (the evidence moved or was never in
+this tree). `false`: the target resolved INSIDE — the evidence is gone,
+covered by `files` under the target's real paths. `null`: the target could not
+be fully resolved — a symlink loop, a permission boundary, or more links than
+the resolution bound — so the record claims NEITHER survival NOR destruction,
+and `null` must never be read as `it survived`.
 
 If this whole `runs/` directory was cleared and this pointer is new, see the
 repository README's \"Run Artifact Retention\" section — the ledger itself is
@@ -199,6 +213,74 @@ RECORD_SCOPE = ("best-effort: files observed when the removal began; a file "
                 "must never be read as destroyed")
 
 _SECONDS_PER_DAY = 86400
+
+# The symlink resolution bound (agents-dm8n round 4, finding 1): resolution on
+# the prune path is BOUNDED and LOOP-SAFE. The kernel itself gives up after 40
+# follows (ELOOP); matching that bound keeps a pathological chain cheap, and
+# the explicit seen-set in ``_resolve_bounded`` makes a loop a named outcome
+# (an unresolvable-and-therefore-uncertain record) rather than an uncaught
+# RuntimeError crashing the factory's prune path.
+_MAX_SYMLINK_DEPTH = 40
+
+
+def _resolve_bounded(path: Path) -> Optional[Path]:
+    """Fully resolve ``path``, or return None when that cannot be known.
+
+    Unlike ``Path.resolve(strict=False)`` this NEVER half-resolves: a symlink
+    loop, a chain longer than ``_MAX_SYMLINK_DEPTH``, an unreadable component
+    (a permission boundary) or an unreadable link all return None —
+    unresolvable — rather than a path that merely LOOKS resolved. That is the
+    difference between the record saying "I could not determine" and the
+    record asserting the opposite of reality (agents-dm8n round 4, findings
+    1-2: ``Path.resolve()`` raised ``RuntimeError`` on a loop, and stopped
+    silently at an unreadable boundary, so a link whose true target was INSIDE
+    the removed tree could be recorded as outside it).
+
+    The work is bounded: at most ``_MAX_SYMLINK_DEPTH + 1`` passes over the
+    path, each pass expanding the first symlink component; a link seen twice
+    is a loop and ends resolution immediately. No recursion, no unbounded
+    traversal.
+    """
+    seen = set()
+    current = os.path.abspath(path)
+    for _ in range(_MAX_SYMLINK_DEPTH + 1):
+        parts = current.split(os.sep)
+        prefix = os.sep
+        expanded = False
+        for index, part in enumerate(parts):
+            if not part:
+                continue
+            candidate = os.path.join(prefix, part)
+            try:
+                st = os.lstat(candidate)
+            except OSError:
+                # A component we cannot even lstat — a permission boundary, or
+                # a dangling final component: claim nothing rather than
+                # half-resolve. (os.path.islink would SWALLOW the OSError and
+                # answer False, which is exactly how the round-3 code turned a
+                # permission boundary into an inverted claim.)
+                return None
+            if not stat.S_ISLNK(st.st_mode):
+                prefix = candidate
+                continue
+            key = os.path.normpath(candidate)
+            if key in seen:
+                return None  # an explicit loop, named rather than raised
+            seen.add(key)
+            try:
+                target = os.readlink(candidate)
+            except OSError:
+                return None
+            if not os.path.isabs(target):
+                target = os.path.join(prefix, target)
+            current = os.path.join(target, *parts[index + 1:])
+            expanded = True
+            break
+        if not expanded:
+            # Every component is verified non-symlink, so a lexical normpath
+            # is exact: no `..` can cross a link.
+            return Path(os.path.normpath(current))
+    return None  # more links than the bound: claim nothing
 
 # Findings-directory retention (agents-0ti): the per-target evidence files under
 # ``findings/`` (delta/latest/summary markdown, append-only history and hillclimb
@@ -343,19 +425,29 @@ def _snapshot_symlinks(root: Path) -> dict:
     """Relative POSIX path -> {"target", "outside_tree"} for every symlink under ``root``.
 
     The record must be honest about what it saw (agents-dm8n round 3, finding
-    3): os.walk YIELDS a symlink to a directory but does not traverse it, so a
-    citation to a file reachable only THROUGH a link resolves to nothing in the
-    tombstone while the disappeared==recorded equality holds. Recording the
-    link's target — and whether that target lived inside the removed tree —
-    lets a reader tell "this evidence is gone" from "this evidence moved or was
-    never in this tree". Best-effort like the file snapshot: a link that
-    cannot be read is recorded with a null target and treated as outside the
-    tree — claim nothing the walk could not establish.
+    3; round 4, findings 1-2): os.walk YIELDS a symlink to a directory but
+    does not traverse it, so a citation to a file reachable only THROUGH a
+    link resolves to nothing in the tombstone while the disappeared==recorded
+    equality holds. Recording the link's target — and whether that target
+    lived inside the removed tree — lets a reader tell "this evidence is gone"
+    from "this evidence moved or was never in this tree".
+
+    ``outside_tree`` is THREE-VALUED: True (resolved outside — NOT removed,
+    NOT covered), False (resolved inside — covered by ``files`` under the
+    target's real paths), or None — UNRESOLVABLE-AND-THEREFORE-UNCERTAIN: the
+    resolution could not complete (a loop, a permission boundary, more links
+    than the bound, an unreadable link), so the record claims NEITHER survival
+    NOR destruction. A two-valued answer is what forced an unknown into a
+    claim in round 3: ``Path.resolve()`` stopped at an unreadable boundary and
+    the half-resolved path looked outside the tree, so the ledger claimed the
+    evidence survived while rmtree destroyed it. The third value makes that
+    inversion unrepresentable. Best-effort like the file snapshot: claim
+    nothing the walk could not establish.
     """
     symlinks = {}
     if not root.is_dir() or root.is_symlink():
         return symlinks
-    resolved_root = root.resolve()
+    resolved_root = _resolve_bounded(root)
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
         for name in list(dirnames) + list(filenames):
@@ -366,11 +458,14 @@ def _snapshot_symlinks(root: Path) -> dict:
             try:
                 target = os.readlink(entry)
             except OSError:
-                symlinks[rel] = {"target": None, "outside_tree": True}
+                symlinks[rel] = {"target": None, "outside_tree": None}
                 continue
-            resolved = entry.resolve()
-            outside = (resolved != resolved_root
-                       and resolved_root not in resolved.parents)
+            resolved = _resolve_bounded(entry)
+            if resolved is None or resolved_root is None:
+                outside = None
+            else:
+                outside = (resolved != resolved_root
+                           and resolved_root not in resolved.parents)
             symlinks[rel] = {"target": target, "outside_tree": outside}
     return symlinks
 
@@ -438,9 +533,11 @@ def remove_recorded(directory: Path, *, reason: str,
     the file list is best-effort — a file created DURING the removal window is
     destroyed without ever being observed and cannot be listed), and records
     each disappeared symlink with its target
-    (``symlinks``): a link whose target lived outside the removed tree is
-    marked ``outside_tree`` — its contents were NOT removed and are NOT covered
-    by the record.
+    (``symlinks``), ``outside_tree`` being three-valued: ``true`` = the target
+    resolved outside the removed tree (NOT removed, NOT covered), ``false`` =
+    resolved inside (covered by ``files`` under the target's real paths),
+    ``None`` = unresolvable (a loop, a permission boundary, or too many links)
+    — the record then claims NEITHER survival NOR destruction.
 
     Returns True only when the directory is gone. Refuses symlinks and missing
     directories (warns, returns False): the choke point never follows a link out
