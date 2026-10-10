@@ -264,6 +264,81 @@ class TestCommandSinkReview(CommandSinkCase):
         self.assertFalse(late.exists(), "a background child delivered after the run returned")
 
 
+class TestCommandSinkPinBoundary(CommandSinkCase):
+    """agents-28nn round 3, review P1 — the census escape the round-2 census could not see:
+    sink_command is argv assembled at RUNTIME from the target manifest (shlex.split of a
+    config field), so the tool name never sits beside a subprocess call and a literal
+    call-site census misses it. A configured trusted tool (`sink_command: "git ..."`) used
+    to execute from PATH order with the pin machinery never consulted — proven by the
+    reviewer with a mock sink running a fake git. pin_trusted_argv now routes argv[0]
+    through resolve_tool when it names a trusted tool.
+
+    The behaviour-mutation proof: reverting lib/sinks/command.py to pass the shlex-split
+    argv straight to run_station_command makes all three tests fail — the planted fake
+    executes (its invocation log appears) and the refusal note is never set.
+    """
+
+    FAKE = ('#!/bin/sh\n'
+            'echo ran >> "FAKE_GIT_LOG_PLACEHOLDER"\n'
+            'exit 0\n')
+
+    def setUp(self):
+        super().setUp()
+        import shutil as _shutil
+        self.real_git = _shutil.which("git")
+        if self.real_git is None:
+            self.skipTest("git is not installed on this host")
+        self.fakebin = self.root / "fakebin"
+        self.fakebin.mkdir()
+        self.fake_log = self.root / "fake-git-ran"
+        self.fake_git = self.fakebin / "git"
+        self.fake_git.write_text(self.FAKE.replace("FAKE_GIT_LOG_PLACEHOLDER", str(self.fake_log)),
+                                 encoding="utf-8")
+        self.fake_git.chmod(0o755)
+        self.pins = self.root / "tools.pins.yaml"
+
+    def scan_with_pin(self, items, command, pins_text):
+        self.pins.write_text(pins_text, encoding="utf-8")
+        env_extra = {
+            # The fake is FIRST on PATH: PATH order alone would run it.
+            "PATH": f"{self.fakebin}:/usr/bin:/bin",
+            "FACTORY_TOOL_PINS": str(self.pins),
+        }
+        env_extra.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        return self.scan(items, command=command, env_extra=env_extra)
+
+    def test_a_configured_trusted_tool_cannot_reach_a_path_planted_fake(self):
+        """THE HOLE, CLOSED: a sha256-only pin (resolution still follows PATH order, so the
+        fake IS the resolved candidate) fails the hash check — nothing is sent, the note
+        names the cause, and the fake's log proves it never ran."""
+        from lib.tool_pins import sha256_file
+        result = self.scan_with_pin(
+            [SAMPLE], "git --version",
+            f"git:\n  sha256: {sha256_file(Path(self.real_git))}\n")
+        self.assertIn("cannot be authenticated", result.stdout)
+        self.assertIn("nothing sent", result.stdout)
+        self.assertFalse(self.fake_log.exists(),
+                         "the unauthenticated configured git must be refused BEFORE it executes")
+
+    def test_a_full_pin_runs_the_configured_real_git_not_the_path_order_winner(self):
+        """The positive direction: with path+sha256 pinned, the configured binary runs even
+        when a fake wins PATH order — resolution follows the pin, not the PATH."""
+        from lib.tool_pins import sha256_file
+        result = self.scan_with_pin(
+            [SAMPLE], "git --version",
+            f"git:\n  path: {self.real_git}\n  sha256: {sha256_file(Path(self.real_git))}\n")
+        self.assertIn("published 1", result.stdout)
+        self.assertFalse(self.fake_log.exists(), "the PATH-order winner must not run")
+
+    def test_an_unpinned_configured_trusted_tool_sends_nothing_and_says_why(self):
+        """Fail closed AND named: no pin anywhere, no opt-in — the sink sends nothing and
+        the note records the cause rather than reading like a missing command."""
+        result = self.scan_with_pin([SAMPLE], "git --version", "")
+        self.assertIn("cannot be authenticated", result.stdout)
+        self.assertIn("not pinned", result.stdout)
+        self.assertFalse(self.fake_log.exists())
+
+
 class TestCommandSinkFromManifest(unittest.TestCase):
     """targets/<name>.yaml -> factory run -> command, with only sink_env added to the env."""
 

@@ -26,9 +26,11 @@ FINDINGS_DIR = FACTORY_ROOT / "findings"
 
 try:  # imported as lib.bench.runner, or run as a script
     from lib.child_env import child_environment
+    from lib.tool_pins import ToolPinError, pin_trusted_argv
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.child_env import child_environment
+    from lib.tool_pins import ToolPinError, pin_trusted_argv
 
 # A hung bench command must not hold the hill-climb station forever. Measurement is not an agent
 # station, so there is no budget.max_minutes in scope here: fixed cap, and a timed-out run simply
@@ -145,6 +147,18 @@ def measure_target(target_dir: Path, bench_cmd: Optional[List[str]] = None) -> D
     )
 
     custom_bench_ms: Optional[float] = None
+    if bench_cmd:
+        # bench_cmd is argv assembled at RUNTIME from operator input — the same census
+        # escape as the command sink's sink_command (agents-28nn round 3, review P1): a
+        # trusted tool named here (git, node, npm, ...) would otherwise execute from PATH
+        # order with the pin machinery never consulted. Route argv[0] through the pin;
+        # a tool it cannot authenticate runs NOTHING — the measurement degrades to
+        # static metrics only, with the cause named on stderr.
+        try:
+            bench_cmd = pin_trusted_argv(bench_cmd)
+        except ToolPinError as e:
+            sys.stderr.write(f"bench command's trusted tool cannot be authenticated: {e}\n")
+            bench_cmd = None
     if bench_cmd:
         timings = []
         for _ in range(3):

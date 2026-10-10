@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -556,6 +557,54 @@ class TestPinFailureDegradation(unittest.TestCase):
         reason = sandbox_unavailable_reason()
         self.assertIsNotNone(reason)
         self.assertIn("not pinned", reason)
+
+    def test_a_fifo_where_the_pins_file_is_expected_degrades(self):
+        """agents-28nn round 3: a FIFO as FACTORY_TOOL_PINS. Without the bounded read the
+        probe BLOCKS on the FIFO (or reads attacker-supplied bytes through it); with it
+        the refusal precedes any read and the degradation names the FIFO. The writer
+        keeps the mutation direction bounded: with the refusal removed the read gets
+        content and the probe degrades for the WRONG reason (a hash mismatch), which the
+        reason assertion below rejects."""
+        fifo = self.root / "tools.fifo"
+        os.mkfifo(fifo)
+
+        def writer():
+            # O_NONBLOCK with retries: with the fix no reader ever opens the FIFO (every
+            # attempt fails ENXIO and the thread exits); under the mutation the reader is
+            # blocked in open() waiting for exactly this writer, so one attempt lands. A
+            # single non-blocking open would race the reader's scheduling.
+            fd = None
+            for _ in range(30):
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            if fd is None:
+                return  # the fixed reader never opens the FIFO: ENXIO is expected
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("bwrap:\n  sha256: " + "0" * 64 + "\n")
+            except OSError:
+                pass
+
+        feeder = threading.Thread(target=writer, daemon=True)
+        feeder.start()
+        try:
+            os.environ["FACTORY_TOOL_PINS"] = str(fifo)
+            self._assert_degrades_honestly()
+            self.assertIn("FIFO", sandbox_unavailable_reason())
+        finally:
+            feeder.join(timeout=5)
+        self.assertFalse(feeder.is_alive(),
+                         "the probe must REFUSE the FIFO, never block on it")
+
+    def test_a_device_file_where_the_pins_file_is_expected_degrades(self):
+        """The unbounded-read sibling (/dev/null stands in for /dev/urandom, which must
+        never be read to exhaustion — that read IS the crash being fixed)."""
+        os.environ["FACTORY_TOOL_PINS"] = "/dev/null"
+        self._assert_degrades_honestly()
+        self.assertIn("character device", sandbox_unavailable_reason())
 
 
 class TestSandboxRecord(unittest.TestCase):

@@ -13,12 +13,14 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from lib.tool_pins import (TRUSTED_TOOLS, ToolPinError, allowlisted_path, host_pins_path,
-                           load_tool_pins, resolve_tool, sha256_file, tool_dir, verify_pin)
+from lib.tool_pins import (MAX_PINS_FILE_BYTES, TRUSTED_TOOLS, ToolPinError,
+                           allowlisted_path, host_pins_path, load_tool_pins, resolve_tool,
+                           sha256_file, tool_dir, verify_pin)
 
 
 def _make_tool(directory: Path, name: str, content: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -314,6 +316,75 @@ class GenerateToolPinsSourceTests(unittest.TestCase):
                       "a tool outside the lookup dirs must be skipped with a comment, "
                       "never pinned from the inherited PATH")
 
+    def test_exported_functions_and_a_cwd_planted_binary_cannot_influence_the_pin(self):
+        """agents-28nn round 3, review P1 — the reviewer's own construction: `export -f`
+        the tool AND the hasher (a BASH_FUNC_* line via $GITHUB_ENV reaches a later CI
+        step's bash), drop a CWD-relative namesake, run the generator from that CWD.
+        `command -v` would resolve the FUNCTION and answer with a bare name, the script
+        would hash ./git, and the emitted RELATIVE path would later be expanded by
+        resolve_tool from the factory's CWD. The explicit per-directory filesystem lookup
+        is the only lookup shell state cannot answer for us — and the emit-side
+        absolute-path reject is the hard backstop.
+
+        The behaviour-mutation proof: replacing resolve_in_lookup's body with
+        `command -v "$1"` (the round-2 shape) makes this test fail two ways — with the
+        reject kept, the generator exits 2 on the bare function name; with the reject
+        also removed, the emitted `path: git` fails the absolute-path assertion.
+        """
+        _make_tool(self.fakebin, "bwrap")  # the CWD-planted namesake
+        wrapper = (
+            "git() { echo FUNCTION-GIT; }\n"
+            "bwrap() { echo FUNCTION-BWRAP; }\n"
+            f"sha256sum() {{ echo '{self.BOGUS_HASH}  fake'; }}\n"
+            "export -f git bwrap sha256sum\n"
+            f"cd '{self.fakebin}'\n"
+            f"exec bash '{GenerateToolPinsScriptTests.SCRIPT}' '{self.out}'\n"
+        )
+        env = {"PATH": os.pathsep.join([str(self.fakebin), *self.LOOKUP_DIRS]),
+               "HOME": str(self.tmp)}
+        res = subprocess.run(["bash", "-c", wrapper], env=env, capture_output=True,
+                             text=True, timeout=30)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        body = self.out.read_text(encoding="utf-8")
+        for match in re.finditer(r'^  path: (\S+)$', body, re.MULTILINE):
+            self.assertTrue(match.group(1).startswith("/"),
+                            f"a RELATIVE pin path was emitted: {match.group(1)!r} — "
+                            "resolve_tool would expand it from the factory's CWD")
+        self.assertNotIn(str(self.fakebin), body,
+                         "neither the exported function nor the CWD namesake may be pinned")
+        self.assertNotIn(self.BOGUS_HASH, body,
+                         "the exported hasher function must never feed the pin")
+        system_git = self._system_tool("git")
+        if system_git is not None:
+            match = re.search(r'^git:\n  path: (\S+)\n  sha256: ([0-9a-f]{64})$', body,
+                              re.MULTILINE)
+            self.assertIsNotNone(match, "the real system git must still be pinned")
+            self.assertEqual(match.group(1), str(system_git))
+            self.assertEqual(match.group(2), sha256_file(system_git))
+
+    def test_a_relative_lookup_path_dir_is_never_emitted(self):
+        """The reject's other boundary: --lookup-path with a RELATIVE dir can never yield
+        an absolute pin path, so the tool is reported not found rather than emitted as a
+        CWD-relative pin."""
+        oprel = self.tmp / "oprel"
+        oprel.mkdir()
+        _make_tool(oprel, "git", "#!/bin/sh\necho RELATIVE-GIT\n")
+        env = {"PATH": os.pathsep.join(self.LOOKUP_DIRS), "HOME": str(self.tmp)}
+        res = subprocess.run(
+            ["bash", str(GenerateToolPinsScriptTests.SCRIPT), str(self.out),
+             "--lookup-path", "oprel"],
+            env=env, cwd=self.tmp, capture_output=True, text=True, timeout=30)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        body = self.out.read_text(encoding="utf-8")
+        # The header comment legitimately records the flag's value; the boundary is that
+        # no EMITTED pin path may come from it.
+        paths = re.findall(r'^  path: (\S+)$', body, re.MULTILINE)
+        self.assertFalse(any("oprel" in p for p in paths),
+                         "a relative lookup dir must never produce a pin path")
+        for p in paths:
+            self.assertTrue(p.startswith("/"),
+                            f"a RELATIVE pin path was emitted: {p!r}")
+
     def test_lookup_path_flag_explicitly_admits_an_operator_dir(self):
         """The explicit override works: --lookup-path (a flag on the invocation, which in
         CI lives in the pinned action.yml — never an inherited env var, which
@@ -367,6 +438,98 @@ class PinsFileFailureModeTests(unittest.TestCase):
             self.assertEqual(load_tool_pins(cfg), {})
             with self.assertRaises(ToolPinError):
                 resolve_tool("gh", path_env=str(self.tmp), pins=load_tool_pins(cfg))
+
+    # agents-28nn round 3, review P2: the resource-failure SET. The reader is BOUNDED — a
+    # non-regular file is refused by kind before any read, an over-bound size is refused
+    # unread, and the read is hard-capped so a file that grows past the bound is refused
+    # — because an unbounded read of a FIFO or device file allocates until the machine's
+    # OOM killer, a crash no except clause can catch (verified by execution: /dev/urandom
+    # grew to ~12 GB before the host reaper). Every mode must raise ToolPinError, the
+    # failure shape the sandbox probe degrades on — never hang, never crash.
+
+    def test_a_fifo_where_the_pins_file_is_expected_raises_tool_pin_error(self):
+        fifo = self.tmp / "tools.fifo"
+        os.mkfifo(fifo)
+
+        def writer():
+            # Keeps the MUTATION direction bounded: with the regular-file refusal removed,
+            # the read blocks on the FIFO until this writer feeds it valid pins content —
+            # which then parses cleanly, so the missing ToolPinError fails the test. The
+            # open is O_NONBLOCK with retries: with the fix no reader ever comes (every
+            # attempt fails ENXIO and the thread exits), and under the mutation the reader
+            # is blocked in open() waiting for exactly this writer, so one of the attempts
+            # lands. A single non-blocking open would race the reader's scheduling.
+            import time as _time
+            fd = None
+            for _ in range(30):
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError:
+                    _time.sleep(0.1)
+            if fd is None:
+                return  # the fixed reader never opens the FIFO: ENXIO is expected
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("gh:\n  sha256: " + "a" * 64 + "\n")
+            except OSError:
+                pass
+
+        feeder = threading.Thread(target=writer, daemon=True)
+        feeder.start()
+        try:
+            with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": ""}):
+                with self.assertRaises(ToolPinError) as raised:
+                    load_tool_pins(fifo)
+        finally:
+            feeder.join(timeout=5)
+        self.assertFalse(feeder.is_alive(),
+                         "the reader must REFUSE the FIFO, never block on it")
+        self.assertIn("FIFO", str(raised.exception))
+
+    def test_a_device_file_where_the_pins_file_is_expected_raises_tool_pin_error(self):
+        # /dev/null: st_size 0 and no end — the naive read sees an empty file, the exact
+        # shape that made the round-2 fix look sufficient. /dev/urandom is deliberately
+        # NOT used: reading it to exhaustion is the crash being fixed.
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": ""}):
+            with self.assertRaises(ToolPinError) as raised:
+                load_tool_pins(Path("/dev/null"))
+        self.assertIn("character device", str(raised.exception))
+
+    def test_an_over_bound_pins_file_is_refused_before_it_is_read(self):
+        cfg = self.tmp / "tools.yaml"
+        cfg.write_text("gh:\n  sha256: " + "a" * 64 + "\n" + "# pad\n" * 200_000,
+                       encoding="utf-8")
+        self.assertGreater(cfg.stat().st_size, MAX_PINS_FILE_BYTES)
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": ""}):
+            with self.assertRaises(ToolPinError) as raised:
+                load_tool_pins(cfg)
+        self.assertIn("over the", str(raised.exception))
+        self.assertIn("bound", str(raised.exception))
+
+    def test_a_pins_file_that_grows_past_the_bound_while_being_read_is_refused(self):
+        """The TOCTOU sibling: stat says small, the file is big by the time the read
+        finishes. The read's hard cap — not the stat check — is what catches it."""
+        cfg = self.tmp / "tools.yaml"
+        cfg.write_text("gh:\n  sha256: " + "a" * 64 + "\n" + "# pad\n" * 200_000,
+                       encoding="utf-8")
+        self.assertGreater(cfg.stat().st_size, MAX_PINS_FILE_BYTES)
+        real_stat = Path.stat
+
+        def lying_stat(this, *args, **kwargs):
+            result = real_stat(this, *args, **kwargs)
+            if this == cfg:
+                return os.stat_result((result.st_mode, result.st_ino, result.st_dev,
+                                       result.st_nlink, result.st_uid, result.st_gid, 10,
+                                       int(result.st_atime), int(result.st_mtime),
+                                       int(result.st_ctime)))
+            return result
+
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": ""}), \
+             mock.patch.object(Path, "stat", lying_stat):
+            with self.assertRaises(ToolPinError) as raised:
+                load_tool_pins(cfg)
+        self.assertIn("grew past", str(raised.exception))
 
 
 if __name__ == "__main__":

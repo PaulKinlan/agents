@@ -27,11 +27,15 @@ by-name fallback; it is never the default. A ``path`` pin without a matching ``s
 configuration error (a symlink deref could otherwise redirect the pin outside the trusted
 tree), so it is refused regardless of the opt-in.
 
-**Every failure of the pin machinery is a ``ToolPinError``** (agents-28nn round 2): an
-unreadable pins file, a directory where a file is expected, non-UTF-8 pins content, or a
-binary that cannot be hashed all raise ``ToolPinError``, never a raw ``OSError`` — so a
-caller that handles pin failures (lib/sandbox.py's probe degrading to "cannot sandbox",
-the sinks' honest "tool unavailable" notes) cannot be crashed past by a filesystem error.
+**Every failure of the pin machinery is a ``ToolPinError``** (agents-28nn rounds 2-3): an
+unreadable pins file, a non-regular file where a file is expected (a directory, FIFO,
+device, socket), an over-bound or still-growing pins file (the read is bounded by
+``MAX_PINS_FILE_BYTES`` — an unbounded read of a FIFO or device file allocates until the
+machine's OOM killer, a crash no except clause can catch), non-UTF-8 pins content, or a
+binary that cannot be hashed all raise ``ToolPinError``, never a raw
+``OSError``/``MemoryError`` — so a caller that handles pin failures (lib/sandbox.py's
+probe degrading to "cannot sandbox", the sinks' honest "tool unavailable" notes) cannot
+be crashed past by a filesystem error.
 
 The sandbox binder (lib/sandbox.py ``_executable_binds``) calls ``verify_pin`` for each
 pinned tool before binding it, so a pinned pre-pass tool is authenticated by the same rule.
@@ -48,6 +52,7 @@ than being silently ignored. Generate the file with ``tools/generate-tool-pins.s
 import hashlib
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -95,6 +100,18 @@ class ToolPinError(RuntimeError):
     fails rather than executing an unverified binary."""
 
 
+# A pins file is a handful of tool entries — hundreds of bytes. The read is BOUNDED
+# (agents-28nn round 3, review P2): FACTORY_TOOL_PINS naming a huge regular file makes an
+# unbounded read allocate until MemoryError — which no (OSError, ...) clause catches — and
+# a FIFO or device file (no meaningful size, no end) allocates until the machine's OOM
+# killer arrives: a resource exhaustion the process may never observe as an exception at
+# all (verified by execution: reading /dev/urandom grew to ~12 GB before the host reaper
+# stepped in). So the reader refuses a non-regular file and an over-bound size BEFORE
+# reading, and hard-caps the bytes actually read, every failure surfacing as ToolPinError
+# with the cause named — a degradation, never a crash.
+MAX_PINS_FILE_BYTES = 1 << 20  # 1 MiB is orders of magnitude past any real pins file
+
+
 def sha256_file(path: Path) -> str:
     """SHA-256 of a file's contents, streamed (never loads a whole binary into memory)."""
     digest = hashlib.sha256()
@@ -102,6 +119,50 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_pins_text(path: Path, label: str) -> str:
+    """Read a pins file's text, BOUNDED, with every failure as ``ToolPinError``.
+
+    The bound is the mechanism, not one more except clause (agents-28nn round 3): a FIFO
+    or device file has no trustworthy size and no end, and a huge file's MemoryError is a
+    resource exhaustion the process may never observe — so the refusal happens BEFORE the
+    allocation. stat first: a non-regular file (directory, FIFO, device, socket) is
+    refused by kind; an over-bound size is refused unread; the read itself is hard-capped,
+    so a file that grows past the bound while being read is refused too. MemoryError is
+    still caught as a backstop — with the cap in place it should be unreachable, and the
+    contract ("every pins-file failure is a ToolPinError") must not depend on that.
+    """
+    try:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            kinds = ((stat.S_ISDIR, "a directory"), (stat.S_ISFIFO, "a FIFO"),
+                     (stat.S_ISCHR, "a character device"), (stat.S_ISBLK, "a block device"),
+                     (stat.S_ISSOCK, "a socket"))
+            kind = next((name for test, name in kinds if test(info.st_mode)),
+                        f"not a regular file (mode {oct(info.st_mode)})")
+            raise ToolPinError(
+                f"{label}: the pins path is {kind}, not a pins file; refusing to read it "
+                "as pins (a non-regular file has no trustworthy size and no end)")
+        if info.st_size > MAX_PINS_FILE_BYTES:
+            raise ToolPinError(
+                f"{label}: the pins file is {info.st_size} bytes, over the "
+                f"{MAX_PINS_FILE_BYTES}-byte bound for a pins file; refusing to read it "
+                "rather than allocate unbounded memory")
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_PINS_FILE_BYTES + 1)
+        if len(data) > MAX_PINS_FILE_BYTES:
+            raise ToolPinError(
+                f"{label}: the pins file grew past the {MAX_PINS_FILE_BYTES}-byte bound "
+                "while being read; refusing to trust it")
+        text = data.decode("utf-8")
+    except ToolPinError:
+        raise
+    except (OSError, UnicodeDecodeError, MemoryError) as e:
+        raise ToolPinError(
+            f"{label}: the pins file cannot be read as pins ({type(e).__name__}: {e}); "
+            "failing closed rather than guessing") from e
+    return text
 
 
 def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
@@ -117,21 +178,20 @@ def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
     A missing file is an empty pin set — resolution then fails closed for any trusted tool, so
     a deleted config can never silently widen trust. A malformed entry — a non-string
     path/sha256, a sha256 that is not 64 hex chars, or a path pin without a sha256 — raises
-    ``ToolPinError`` so a bad pin cannot silently not-match. A file that cannot be READ as
-    pins — unreadable (chmod 000), a directory where a file is expected, non-UTF-8 bytes —
-    raises the same ``ToolPinError`` rather than a raw ``OSError``/``PermissionError``
-    escaping to a caller that only handles pin failures: lib/sandbox.py's probe must DEGRADE
-    to "cannot sandbox" on any pin-machinery failure, never crash the factory (agents-28nn
-    round 2, the unreadable-pins P2).
+    ``ToolPinError`` so a bad pin cannot silently not-match. EVERY way the file can fail to
+    be read as pins is the same ``ToolPinError`` with the cause named, never a raw
+    ``OSError``/``MemoryError`` escaping to a caller that only handles pin failures
+    (lib/sandbox.py's probe must DEGRADE to "cannot sandbox", never crash the factory).
+    The resource-failure SET (agents-28nn rounds 2-3), all degrading:
+    unreadable (chmod 000); a non-regular file where a file is expected — a directory, a
+    FIFO, a device file, a socket (a FIFO/device would otherwise block or allocate without
+    bound); a regular file over MAX_PINS_FILE_BYTES (refused before it is read); a file
+    that grows past the bound while being read; non-UTF-8 bytes; and, as a backstop behind
+    the bound, a MemoryError from the read itself.
     """
     if not path.exists():
         return {}
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        raise ToolPinError(
-            f"{label}: the pins file cannot be read as pins ({e}); failing closed rather "
-            f"than guessing") from e
+    text = _read_pins_text(path, label)
     pins: Dict[str, Dict[str, str]] = {}
     current: Optional[str] = None
     for raw in text.splitlines():
@@ -273,6 +333,33 @@ def resolve_tool(name: str, path_env: Optional[str] = None,
         raise ToolPinError(f"trusted tool {name!r} resolves to a non-file: {real}")
     verify_pin(name, real, pins)
     return real
+
+
+def pin_trusted_argv(argv: Sequence[str]) -> List[str]:
+    """Replace argv[0] with its pin-verified resolution when it names a trusted tool.
+
+    A command assembled at RUNTIME from configuration — a target manifest's
+    ``sink_command``, a ``--bench-cmd`` — is invisible to a literal call-site census: the
+    tool name never appears beside the subprocess call, so the pin machinery was never
+    consulted for a trusted tool the config named, and a PATH-planted fake executed with
+    the sink's credentials (agents-28nn round 3, review P1, proven by construction with a
+    config-supplied fake ``git``). A trust list that a config-supplied command ignores is
+    the same false assurance as a call site that ignores it, so when argv[0]'s basename
+    is a trusted tool the pin resolves it: the verified absolute path replaces argv[0],
+    and an unpinned or mismatching tool raises ToolPinError BEFORE it executes.
+
+    A non-trusted argv[0] passes through untouched: pinning every program an operator
+    might configure would be a registry someone must remember to update. An explicit
+    shell (``sh -c ...``, which the command sink documents as its escape hatch) is the
+    operator's own trust decision — intercepting inside a shell string would be a second
+    verification mechanism, not a stronger one.
+    """
+    if not argv:
+        return list(argv)
+    name = os.path.basename(str(argv[0]))
+    if name in TRUSTED_TOOLS:
+        return [resolve_tool(name), *[str(a) for a in argv[1:]]]
+    return [str(a) for a in argv]
 
 
 def tool_dir(name: str, path_env: Optional[str] = None,
