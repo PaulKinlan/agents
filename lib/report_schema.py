@@ -222,8 +222,6 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     rule_id = str(finding.get("rule_id", "")).strip().lower()
     if rule_id == "sequential-await-waterfall":
         return True
-    if rule_id == "render-blocking-head-asset":
-        return False
 
     remediation = str(finding.get("remediation", ""))
     diff = str(finding.get("proposed_fix_diff", ""))
@@ -242,7 +240,9 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     if _EXECUTION_CONCURRENCY_PATTERN.search(remediation) or _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
         return True
 
-    # Otherwise check title and description, excluding pure asset/stylesheet loading
+    # Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above
+    if rule_id == "render-blocking-head-asset":
+        return False
     if _ASSET_CONCURRENCY_EXCLUSIONS.search(remediation) and not _EXECUTION_CONCURRENCY_PATTERN.search(remediation):
         return False
 
@@ -256,16 +256,27 @@ _NON_REENTRANT_SUSPECT_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-_STATELESS_IO_CALLS = {"fetch", "axios", "readfile", "read_file", "https.get", "http.get", "download"}
-
-
-_COMPUTED_OR_INDIRECT_CALL = re.compile(r"\]\s*(?:\?\.)?\s*\(|\)\s*(?:\?\.)?\s*\(")
+_RECOGNIZED_STATELESS_CALLS = {
+    "fetch",
+    "window.fetch",
+    "globalthis.fetch",
+    "axios",
+    "axios.get",
+    "fs.promises.readfile",
+    "fspromises.readfile",
+    "fs.readfile",
+    "readfile",
+    "read_file",
+    "https.get",
+    "http.get",
+    "download",
+}
 
 
 def _is_stateless_call(call: str) -> bool:
-    """Check if an invoked identifier is an inherently stateless I/O call."""
+    """Check if an invoked identifier is an exact recognized stateless I/O API."""
     c = call.lower().replace("?.", ".").strip()
-    return c in _STATELESS_IO_CALLS or ("." in c and c.split(".")[-1] in _STATELESS_IO_CALLS)
+    return c in _RECOGNIZED_STATELESS_CALLS
 
 
 _CONCURRENCY_WRAPPERS = {
@@ -297,6 +308,9 @@ def _strip_comments_safely(code: str) -> str:
         return " "
 
     return _STRING_OR_COMMENT_PATTERN.sub(_repl, code)
+
+
+_COMPUTED_OR_INDIRECT_CALL = re.compile(r"\]\s*(?:\?\.)?\s*\(|\)\s*(?:\?\.)?\s*\(")
 
 
 def _extract_invoked_calls(code: str) -> Optional[Set[str]]:

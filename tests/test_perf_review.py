@@ -514,6 +514,44 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertNotIn("proposed_fix_diff", finding9)
         self.assertIn("Code patch withheld", finding9["remediation"])
 
+        # Case J: Reviewer P1 finding - arbitrary receiver method handle.fetch(url) is not an exact recognized API
+        report10 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/client.ts",
+                    "line_number": 35,
+                    "snippet": "for (const url of urls) await handle.fetch(url);",
+                    "remediation": "The Node.js fetch backend is proven reentrant and thread-safe; use Promise.all.",
+                    "proposed_fix_diff": "--- a/client.ts\n+++ b/client.ts\n@@ -1,2 +1,2 @@\n- for (const url of urls) await handle.fetch(url);\n+ await Promise.all(urls.map(url => handle.fetch(url)));",
+                }
+            ]
+        }
+        notes10 = normalize_report(report10)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes10))
+        finding10 = report10["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding10)
+        self.assertIn("Code patch withheld", finding10["remediation"])
+
+    def test_render_blocking_head_asset_proposing_concurrency_is_guarded(self):
+        """Reviewer P1 finding: render-blocking-head-asset proposing execution concurrency is guarded."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "render-blocking-head-asset",
+                    "path": "src/loader.ts",
+                    "line_number": 15,
+                    "remediation": "Parallelize session loading with Promise.all across models.",
+                    "proposed_fix_diff": "--- a/loader.ts\n+++ b/loader.ts\n@@ -1,2 +1,2 @@\n- for (const m of models) await m.load();\n+ await Promise.all(models.map(m => m.load()));",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        finding = report["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding)
+        self.assertIn("Code patch withheld", finding["remediation"])
+
     def test_serial_execution_restoration_patch_retained(self):
         """Reviewer P2 finding: diffs removing Promise.all to restore serial execution are not guarded."""
         report = {
