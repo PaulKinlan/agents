@@ -363,7 +363,7 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertTrue(any("enforced reentrancy precondition" in n for n in notes1))
         finding1 = report1["findings"][0]
         self.assertNotIn("proposed_fix_diff", finding1)
-        self.assertIn("Code patch withheld until runtime reentrancy is proven safe", finding1["remediation"])
+        self.assertIn("Code patch withheld", finding1["remediation"])
 
         # Case B: preconditioned remediation but unproven backend -> diff still withheld
         report2 = {
@@ -383,7 +383,7 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertNotIn("proposed_fix_diff", finding2)
         self.assertIn("Code patch withheld", finding2["remediation"])
 
-        # Case C: proven backend evidence -> diff is safely retained
+        # Case C: proven backend evidence -> remediation not double-wrapped, diff withheld for manual review
         report3 = {
             "findings": [
                 {
@@ -397,8 +397,11 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
             ]
         }
         notes3 = normalize_report(report3)
-        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes3))
-        self.assertIn("proposed_fix_diff", report3["findings"][0])
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes3))
+        self.assertNotIn("proposed_fix_diff", report3["findings"][0])
+        self.assertIn("Code patch withheld", report3["findings"][0]["remediation"])
+        # Remediation was not double-wrapped with generic precondition because it already had backend evidence
+        self.assertNotIn("IF the underlying runtime/backend is reentrant and thread-safe", report3["findings"][0]["remediation"])
 
         # Case D: Reviewer counterexample - unrelated backend evidence with non-reentrant session runs -> diff withheld
         report4 = {
@@ -532,6 +535,24 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         finding10 = report10["findings"][0]
         self.assertNotIn("proposed_fix_diff", finding10)
         self.assertIn("Code patch withheld", finding10["remediation"])
+
+        # Case K: Reviewer P1 finding - mixed advice ('Keep serial setup; run model inference passes concurrently')
+        report11 = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/setup.ts",
+                    "line_number": 12,
+                    "remediation": "Keep serial setup; run model inference passes concurrently.",
+                    "proposed_fix_diff": "--- a/setup.ts\n+++ b/setup.ts\n@@ -1,2 +1,2 @@\n- for (const m of models) await m.run();\n+ await Promise.all(models.map(m => m.run()));",
+                }
+            ]
+        }
+        notes11 = normalize_report(report11)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes11))
+        finding11 = report11["findings"][0]
+        self.assertNotIn("proposed_fix_diff", finding11)
+        self.assertIn("Code patch withheld", finding11["remediation"])
 
     def test_render_blocking_head_asset_proposing_concurrency_is_guarded(self):
         """Reviewer P1 finding: render-blocking-head-asset proposing execution concurrency is guarded."""

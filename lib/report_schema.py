@@ -232,18 +232,24 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
             if line.startswith("+") and not line.startswith("+++")
         )
 
-    # If the finding explicitly restores serial execution, it is not a concurrency recommendation (Reviewer P2)
-    if _SERIAL_RESTORATION_PATTERN.search(remediation) and not _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
-        return False
-
-    # If remediation or added lines in fix diff specifically recommend execution concurrency, it is an execution concurrency finding
-    if _EXECUTION_CONCURRENCY_PATTERN.search(remediation) or _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
+    # If added diff lines specifically introduce concurrency, it is a concurrency recommendation
+    if _EXECUTION_CONCURRENCY_PATTERN.search(added_diff):
         return True
 
-    # Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above
+    # Strip pure serial restoration clauses (e.g. "replacing Promise.all with sequential for-of")
+    # before checking if the remaining remediation text recommends concurrency (Reviewer P1 & P2).
+    remaining_remediation = _SERIAL_RESTORATION_PATTERN.sub(" ", remediation)
+
+    if _EXECUTION_CONCURRENCY_PATTERN.search(remaining_remediation):
+        return True
+
+    if _SERIAL_RESTORATION_PATTERN.search(remediation):
+        return False
+
+    # 3. Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above.
     if rule_id == "render-blocking-head-asset":
         return False
-    if _ASSET_CONCURRENCY_EXCLUSIONS.search(remediation) and not _EXECUTION_CONCURRENCY_PATTERN.search(remediation):
+    if _ASSET_CONCURRENCY_EXCLUSIONS.search(remediation):
         return False
 
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
@@ -438,23 +444,22 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
 
 
 def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[str]:
-    """Ensure a concurrency recommendation carries its reentrancy precondition.
+    """Ensure a concurrency recommendation carries its reentrancy precondition
+    and withholds automated code patches.
 
-    If the finding recommends concurrency without proven backend evidence:
-    1. If the remediation is not yet preconditioned, wrap it with the explicit reentrancy precondition
-       and add the precondition note to description.
-    2. Withhold proposed_fix_diff: an automated unconditional patch must not be offered for
-       an unverified runtime, preventing tools (like pr-fixer) from blindly applying an
-       unconditional concurrency diff that crashes non-reentrant runtimes (agents-vorw / hub fleet-4inv).
+    1. If the remediation does not carry an explicit reentrancy precondition with serial fallback
+       (or proven backend evidence), wrap it with the explicit precondition.
+    2. ALWAYS withhold proposed_fix_diff: automated tools (like pr-fixer) must never blindly
+       apply concurrency patches (Promise.all / asyncio.gather) without verified runtime
+       reentrancy and binding proof in the target codebase (agents-vorw / hub fleet-4inv).
     """
     if not is_concurrency_recommendation(finding):
         return None
 
-    proven = has_proven_backend_evidence(finding)
     modified = False
 
-    # 1. Enforce precondition on remediation if not already preconditioned or proven
-    if not proven and not has_reentrancy_precondition(finding):
+    # 1. Enforce precondition on remediation if not already preconditioned
+    if not has_reentrancy_precondition(finding):
         remediation = str(finding.get("remediation", "")).strip()
         if remediation:
             finding["remediation"] = (
@@ -474,14 +479,14 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
             )
         modified = True
 
-    # 2. Withhold unconditional proposed_fix_diff unless backend reentrancy is proven
-    if not proven and "proposed_fix_diff" in finding:
+    # 2. ALWAYS withhold proposed_fix_diff for concurrency recommendations
+    if "proposed_fix_diff" in finding:
         diff = finding.pop("proposed_fix_diff", None)
         if diff:
             if "(Code patch withheld" not in finding.get("remediation", ""):
                 finding["remediation"] = (
                     finding.get("remediation", "").rstrip()
-                    + " (Code patch withheld until runtime reentrancy is proven safe)."
+                    + " (Code patch withheld; automated concurrency patches must not be applied without manual verification of runtime reentrancy)."
                 )
             modified = True
 
@@ -500,19 +505,17 @@ def unpreconditioned_concurrency_findings(report: Any) -> List[str]:
         if not isinstance(item, dict):
             continue
         if is_concurrency_recommendation(item):
-            proven = has_proven_backend_evidence(item)
-            if not proven:
-                if not has_reentrancy_precondition(item):
-                    violations.append(
-                        f"$.findings[{i}]: concurrency recommendation (rule {item.get('rule_id', 'unknown')!r}) "
-                        "must cite backend evidence that it tolerates overlap or state its reentrancy precondition "
-                        "('IF this runtime is reentrant... otherwise preserve serial execution')"
-                    )
-                if item.get("proposed_fix_diff"):
-                    violations.append(
-                        f"$.findings[{i}]: proposed_fix_diff for concurrency recommendation must be withheld "
-                        "unless backend reentrancy is proven safe"
-                    )
+            if not has_reentrancy_precondition(item):
+                violations.append(
+                    f"$.findings[{i}]: concurrency recommendation (rule {item.get('rule_id', 'unknown')!r}) "
+                    "must cite backend evidence that it tolerates overlap or state its reentrancy precondition "
+                    "('IF this runtime is reentrant... otherwise preserve serial execution')"
+                )
+            if item.get("proposed_fix_diff"):
+                violations.append(
+                    f"$.findings[{i}]: proposed_fix_diff for concurrency recommendation must be withheld "
+                    "until runtime reentrancy and bindings are verified"
+                )
     return violations
 
 
