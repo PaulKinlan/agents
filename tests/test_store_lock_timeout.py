@@ -211,5 +211,29 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_a_reader_holding_the_shared_lock_does_not_claim_to_be_the_writer(self):
+        """Review out-of-scope note, pinned: the holder metadata describes a WRITER.
+
+        A read-only store that takes the shared lock on a FREE store is not writing anything, so it
+        must leave that line alone - otherwise two concurrent readers clobber each other's line, and
+        a waiter is told that a reader owns the store. Load-bearing: with publishing left
+        unconditional, the first reader writes "pid ... lane ..." and this fails.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            sys.path.insert(0, str(ROOT))
+            from lib.findings import FindingsStore
+
+            lock_file = Path(tmp) / "probe.json.lock"
+            FindingsStore("probe", findings_dir=Path(tmp), read_only=True).close()
+            self.assertEqual(lock_file.read_text(encoding="utf-8").strip(), "",
+                             "a reader published holder metadata describing a writer")
+
+            reader = FindingsStore("probe", findings_dir=Path(tmp), read_only=True)
+            try:
+                self.assertEqual(lock_file.read_text(encoding="utf-8").strip(), "",
+                                 "a second reader wrote a line while the first was open")
+            finally:
+                reader.close()
+
 if __name__ == "__main__":
     unittest.main()

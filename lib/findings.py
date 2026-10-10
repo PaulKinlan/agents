@@ -678,12 +678,21 @@ class FindingsStore:
                         f"retry later or work elsewhere (raise {STORE_LOCK_TIMEOUT_ENV} to wait "
                         f"longer)."
                     ) from None
-                time.sleep(min(STORE_LOCK_POLL_SECONDS, remaining))
+                try:
+                    time.sleep(min(STORE_LOCK_POLL_SECONDS, remaining))
+                except InterruptedError:
+                    # A rare interrupted sleep must not escape as an unhandled error from a path
+                    # whose whole job is to fail predictably (review out-of-scope note).
+                    pass
                 continue
             # The lock is genuinely ours from here, so only from here may the holder metadata be
             # published or cleared.
             self._lock_acquired = True
-            self._publish_lock_holder()
+            if not self.read_only:
+                # A reader holding the SHARED lock is not writing this store, so it must not claim
+                # to be: that line says "pid ... lane ... since ..." about a WRITER, and two
+                # concurrent readers would clobber each other's (review out-of-scope notes).
+                self._publish_lock_holder()
             return
 
     def _publish_lock_holder(self) -> None:
@@ -724,7 +733,8 @@ class FindingsStore:
                 # A read-only store that proceeded unlocked owns neither, and clearing there is
                 # what erased a live writer's diagnostic (agents-4sij review, P1).
                 if self._lock_acquired:
-                    self._clear_lock_holder()
+                    if not self.read_only:
+                        self._clear_lock_holder()
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
                     self._lock_acquired = False
             finally:
