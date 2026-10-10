@@ -142,13 +142,28 @@ def find_latest_findings(
                     continue
                 try:
                     data = json.loads(source_file.read_text(encoding="utf-8"))
-                except Exception:
+                except Exception as e:
+                    sys.stderr.write(f"Warning: Could not read run artifact {source_file}: {e}\n")
                     continue
                 if isinstance(data, dict):
-                    raw = data.get("candidates" if source_name == "candidates.json" else "findings", [])
-                else:
+                    expected_key = "candidates" if source_name == "candidates.json" else "findings"
+                    if expected_key not in data:
+                        sys.stderr.write(
+                            f"Warning: Malformed run artifact {source_file}: missing expected '{expected_key}' key\n"
+                        )
+                        continue
+                    raw = data[expected_key]
+                elif isinstance(data, list):
                     raw = data
+                else:
+                    sys.stderr.write(
+                        f"Warning: Malformed run artifact payload in {source_file}: expected object or list, got {type(data).__name__}\n"
+                    )
+                    continue
                 if not isinstance(raw, list):
+                    sys.stderr.write(
+                        f"Warning: Malformed run artifact payload in {source_file}: expected list, got {type(raw).__name__}\n"
+                    )
                     continue
                 candidates = []
                 unlocatable = []
@@ -279,21 +294,39 @@ def main():
     unlocatable: List[Dict[str, Any]] = []
     if args.findings:
         input_path = Path(args.findings)
-        if input_path.exists():
-            try:
-                data = json.loads(input_path.read_text(encoding="utf-8"))
-                raw = data.get("findings", data if isinstance(data, list) else [])
-                findings = [c for c in (location_candidate(i) for i in raw) if c]
-                # Kept, not dropped (agents-nhpb): an input file whose every candidate lacks a path
-                # still has candidates in it.
-                unlocatable = [unlocatable_candidate(i) for i in raw
-                               if isinstance(i, dict) and not i.get("path")]
-            except Exception as e:
-                sys.stderr.write(f"Error reading findings from {input_path}: {e}\n")
-
-    # `and not unlocatable`: an input file whose candidates ALL lack a path must not send us on to
-    # the store, which would replace those candidates with a different source's and lose the count.
-    if not findings and not unlocatable:
+        if not input_path.exists():
+            sys.stderr.write(f"Error reading findings from {input_path}: File not found\n")
+            sys.exit(1)
+        try:
+            data = json.loads(input_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                if "findings" in data:
+                    raw = data["findings"]
+                elif "candidates" in data:
+                    raw = data["candidates"]
+                else:
+                    raise ValueError(
+                        f"unrecognized payload shape in {input_path}: expected 'findings' or 'candidates' key"
+                    )
+            elif isinstance(data, list):
+                raw = data
+            else:
+                raise ValueError(
+                    f"unrecognized payload shape in {input_path}: expected JSON object or list, got {type(data).__name__}"
+                )
+            if not isinstance(raw, list):
+                raise ValueError(
+                    f"malformed payload in {input_path}: findings/candidates must be a list, got {type(raw).__name__}"
+                )
+            findings = [c for c in (location_candidate(i) for i in raw) if c]
+            # Kept, not dropped (agents-nhpb): an input file whose every candidate lacks a path
+            # still has candidates in it.
+            unlocatable = [unlocatable_candidate(i) for i in raw
+                           if isinstance(i, dict) and not i.get("path")]
+        except Exception as e:
+            sys.stderr.write(f"Error reading findings from {input_path}: {e}\n")
+            sys.exit(1)
+    else:
         findings, unlocatable = find_latest_findings(target_name, target_dir)
 
     # Carried INTO the bundle rather than discarded (agents-nhpb). The loop below classifies by
