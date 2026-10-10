@@ -159,6 +159,12 @@ deliberately names no machine: inside an ephemeral container a hostname is a
 random ID that reads as a stable machine identity while meaning none, so the
 honest noun is THIS LEDGER — all the record can stand behind.
 
+**A cited directory with NO tombstone here admits three readings the record
+cannot distinguish**: it was never pruned at all; it was pruned through
+ANOTHER ledger (ledgers are local and do not sync); or it was pruned before
+this ledger existed. Absence is not evidence of absence, and the record says
+so rather than letting the three readings collapse into one.
+
 **What a line does and does not claim.** `files` is the pre-removal snapshot
 and the line says so (`record_scope`): a file created inside the directory
 DURING the removal window may be destroyed without being listed — the record is

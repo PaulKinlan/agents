@@ -637,6 +637,37 @@ class TestLedgerLocalityTruth(unittest.TestCase):
             self.assertNotIn("host", tombstones[0])
 
 
+class TestAbsentTombstoneTruth(unittest.TestCase):
+    """agents-dm8n round 4, finding 5 (P2): "no tombstone in this ledger means
+    it was not removed here" is TRUE but leaves a reader unable to distinguish
+    three cases that read identically: never pruned at all, pruned through
+    another ledger (ledgers are local and do not sync), or pruned before this
+    ledger existed. A true statement that misleads for want of one more clause
+    is fixed by SAYING SO - these tests pin the sentence.
+    """
+
+    def test_the_pointer_states_the_three_readings_of_an_absent_tombstone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "old", now - 100)
+            make_dir(runs, "new", now)
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+
+            text = " ".join(
+                (runs / RUNS_POINTER_NAME).read_text(encoding="utf-8").split())
+            self.assertIn("three readings the record cannot distinguish", text)
+            self.assertIn("never pruned at all", text)
+            self.assertIn("pruned before this ledger existed", text)
+
+    def test_the_readme_states_the_three_readings_of_an_absent_tombstone(self):
+        content = " ".join(
+            (ROOT / "README.md").read_text(encoding="utf-8").split())
+        self.assertIn("three readings the record cannot distinguish", content)
+        self.assertIn("never pruned at all", content)
+        self.assertIn("pruned before this ledger existed", content)
+
+
 class TestRemovalWindowClaim(unittest.TestCase):
     """agents-dm8n round 3, finding 2 (P2): a file created inside the directory
     AFTER the pre-removal snapshot and BEFORE the removal finishes is destroyed

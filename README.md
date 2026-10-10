@@ -466,7 +466,11 @@ through it**: beads sync across VMs and containers, the ledger does not — so a
 directory with no tombstone in this ledger was not removed by a prune writing to it,
 not that the run never existed. The ledger names no machine: inside an ephemeral
 container a hostname is a random ID that reads as a stable machine identity while
-meaning none, so the honest noun is *this ledger* — all the record can stand behind. The
+meaning none, so the honest noun is *this ledger* — all the record can stand behind.
+A cited directory with **no** tombstone in this ledger admits three readings the
+record cannot distinguish: it was never pruned at all; it was pruned through
+another ledger (ledgers are local and do not sync); or it was pruned before this
+ledger existed — absence is not evidence of absence. The
 record also reads as best-effort where it is best-effort: `files` is the pre-removal
 snapshot (stated on every line as `record_scope`), and a file created inside the
 directory *during* the removal window may be destroyed without being listed — the
