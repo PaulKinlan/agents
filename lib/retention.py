@@ -54,6 +54,27 @@ the pre-removal file set minus the post-removal file set. A removal that fails
 without losing anything writes nothing: a tombstone must never claim a loss that
 did not happen.
 
+The record tells the truth about its own limits (agents-dm8n round 3):
+
+- The ledger is LOCAL TO THE MACHINE THAT PRUNED. Beads sync across VMs; the
+  ledger does not. A cited directory with no tombstone in THIS machine's ledger
+  means this machine did not remove it — not that the run never existed — so
+  every tombstone names the machine that wrote it (``host``) and the discovery
+  documents say the per-VM rule out loud.
+- The file list is a pre-removal snapshot and CANNOT be complete in principle:
+  a file created inside the directory after the snapshot and before the removal
+  finishes is destroyed without ever being observed, and no snapshot ordering
+  closes that window. So every line carries ``record_scope`` saying the list is
+  best-effort — the record reads as best-effort where it is best-effort rather
+  than claiming a completeness the mechanism cannot have.
+- Symlinks are recorded with their targets (``symlinks``): os.walk YIELDS a
+  symlink to a directory but does not traverse it, so a citation to a file
+  reachable only THROUGH a link would otherwise dangle while the record looked
+  complete. A link whose target lived outside the removed tree is marked
+  ``outside_tree`` — its contents were NOT removed and are NOT covered by the
+  record — so a reader can tell "this evidence is gone" from "this evidence
+  moved or was never in this tree".
+
 The ledger lives at ``<factory root>/retention-ledger.jsonl`` — beside the runs
 root, outside every swept subtree (the automatic prune only removes run
 directories, and a human clearing ``runs/`` to reclaim disk cannot reach it). A
@@ -71,6 +92,7 @@ deletion primitive appears in the shipped source without being enumerated.
 import json
 import os
 import shutil
+import socket
 import stat
 import sys
 import time
@@ -125,10 +147,36 @@ no longer exists: every removal is tombstoned in `../retention-ledger.jsonl`
 `runs/` precisely so the record outlives the evidence). Search that ledger for
 the directory name: each line records the directory, the reason (`age`/`count`/
 `apply-worktree-failure`), the UTC time, the outcome (`removed` or `partial`),
-and the exact list of files that disappeared with it. If this whole `runs/`
-directory was cleared and this pointer is new, see the repository README's
-\"Run Artifact Retention\" section — the ledger itself is never inside `runs/`.
+the machine that did the pruning (`host`), and the exact list of files that
+disappeared with it.
+
+**The ledger is LOCAL TO THE MACHINE THAT PRUNED.** Beads sync across VMs; this
+ledger does not. A cited directory with no tombstone in THIS machine's ledger
+means this machine did not remove it — NOT that the run never existed. Check
+the ledger on the machine the citation names; the `host` field on each
+tombstone says which machine wrote it.
+
+**What a line does and does not claim.** `files` is the pre-removal snapshot
+and the line says so (`record_scope`): a file created inside the directory
+DURING the removal window may be destroyed without being listed — the record is
+best-effort, not a completeness guarantee. A `symlinks` entry records a link
+and its target; `outside_tree: true` means the target's contents were NOT
+removed and are NOT covered by this record — the evidence moved or was never in
+this tree.
+
+If this whole `runs/` directory was cleared and this pointer is new, see the
+repository README's \"Run Artifact Retention\" section — the ledger itself is
+never inside `runs/`.
 """
+
+# What a tombstone's file list IS (agents-dm8n round 3, finding 2): the files
+# observed present when the removal BEGAN. The list cannot be complete in
+# principle — a file created inside the directory after the pre-removal snapshot
+# and before the removal finishes is destroyed without ever being observed, and
+# no snapshot ordering closes that window — so every line carries its scope
+# rather than letting a bare ledger line read as a guarantee.
+RECORD_SCOPE = ("best-effort: files observed when the removal began; a file "
+                "created during the removal window may not be listed")
 
 _SECONDS_PER_DAY = 86400
 
@@ -271,6 +319,42 @@ def _snapshot_files(root: Path) -> set:
     return entries
 
 
+def _snapshot_symlinks(root: Path) -> dict:
+    """Relative POSIX path -> {"target", "outside_tree"} for every symlink under ``root``.
+
+    The record must be honest about what it saw (agents-dm8n round 3, finding
+    3): os.walk YIELDS a symlink to a directory but does not traverse it, so a
+    citation to a file reachable only THROUGH a link resolves to nothing in the
+    tombstone while the disappeared==recorded equality holds. Recording the
+    link's target — and whether that target lived inside the removed tree —
+    lets a reader tell "this evidence is gone" from "this evidence moved or was
+    never in this tree". Best-effort like the file snapshot: a link that
+    cannot be read is recorded with a null target and treated as outside the
+    tree — claim nothing the walk could not establish.
+    """
+    symlinks = {}
+    if not root.is_dir() or root.is_symlink():
+        return symlinks
+    resolved_root = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        for name in list(dirnames) + list(filenames):
+            entry = base / name
+            if not entry.is_symlink():
+                continue
+            rel = entry.relative_to(root).as_posix()
+            try:
+                target = os.readlink(entry)
+            except OSError:
+                symlinks[rel] = {"target": None, "outside_tree": True}
+                continue
+            resolved = entry.resolve()
+            outside = (resolved != resolved_root
+                       and resolved_root not in resolved.parents)
+            symlinks[rel] = {"target": target, "outside_tree": outside}
+    return symlinks
+
+
 def _append_tombstone(ledger: Path, record: dict) -> None:
     """Append one tombstone line to the ledger; a write failure warns, never aborts.
 
@@ -325,6 +409,16 @@ def remove_recorded(directory: Path, *, reason: str,
     - ``failed``: nothing disappeared. NO tombstone — the record must never
       claim a loss that did not happen.
 
+    Every tombstone also names the machine that pruned (``host``: the ledger is
+    per-VM local state while a bead is synced, so a reader on another VM must
+    be able to tell which machine's ledger explains a removal), states its own
+    scope (``record_scope``: the file list is best-effort — a file created
+    DURING the removal window is destroyed without ever being observed and
+    cannot be listed), and records each disappeared symlink with its target
+    (``symlinks``): a link whose target lived outside the removed tree is
+    marked ``outside_tree`` — its contents were NOT removed and are NOT covered
+    by the record.
+
     Returns True only when the directory is gone. Refuses symlinks and missing
     directories (warns, returns False): the choke point never follows a link out
     of the runs root and never records a removal of something that was not there.
@@ -336,12 +430,21 @@ def remove_recorded(directory: Path, *, reason: str,
                          "not a real directory\n")
         return False
     before = _snapshot_files(directory)
+    before_symlinks = _snapshot_symlinks(directory)
     try:
         shutil.rmtree(directory)
     except OSError as exc:
         sys.stderr.write(f"[retention] could not remove {directory}: {exc}\n")
-    after = _snapshot_files(directory) if directory.is_dir() else set()
+    if directory.is_dir():
+        after = _snapshot_files(directory)
+        after_symlinks = _snapshot_symlinks(directory)
+    else:
+        after, after_symlinks = set(), {}
     disappeared = sorted(before - after)
+    disappeared_symlinks = [
+        {"path": rel, **before_symlinks[rel]}
+        for rel in sorted(set(before_symlinks) - set(after_symlinks))
+    ]
     if directory.is_dir():
         outcome = "partial" if disappeared else "failed"
     else:
@@ -354,7 +457,10 @@ def remove_recorded(directory: Path, *, reason: str,
         "pruned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
         "reason": reason,
         "outcome": outcome,
+        "host": socket.gethostname(),
         "files": disappeared,
+        "symlinks": disappeared_symlinks,
+        "record_scope": RECORD_SCOPE,
     })
     return outcome == "removed"
 

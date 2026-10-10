@@ -451,6 +451,7 @@ cannot be created — go through one recorded-removal choke point
 (`lib/retention.py::remove_recorded`), which appends one JSON tombstone line per removal
 to **`retention-ledger.jsonl` at the factory root** (never inside `runs/`): directory
 name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome,
+the pruning machine (`host`), every disappeared symlink with its target (`symlinks`),
 and **the exact list of files that disappeared**. A citation is to a *file* — e.g. a bead
 citing `runs/<agent>-<target>-<run_id>/candidates.json` as evidence — so the record counts
 files: a removal that fails *part way* (the directory survives but contents are destroyed)
@@ -460,7 +461,23 @@ subtree because the record must outlive the thing it explains: it survives the a
 prune *and* a human clearing `runs/` to reclaim disk, and beads — which ask the question a
 tombstone answers — outlive the run root. `runs/README.md` (written by the prune, never
 swept) points a reader standing on a dead citation at the ledger; if `runs/` itself was
-cleared, this section is the fallback. Note plainly: the ledger explains removals from the
+cleared, this section is the fallback. The ledger is **local to the machine that
+pruned**: beads sync across VMs, the ledger does not — so a cited directory with no
+tombstone in THIS machine's ledger means *this machine did not remove it*, not that the
+run never existed; the `host` field on each line names the machine that wrote it. The
+record also reads as best-effort where it is best-effort: `files` is the pre-removal
+snapshot (stated on every line as `record_scope`), and a file created inside the
+directory *during* the removal window may be destroyed without being listed — the
+mechanism cannot see it, so the record does not claim completeness there. A `symlinks`
+entry with `outside_tree: true` means the link's target was never in the removed tree:
+its contents were NOT removed and are NOT covered by the record — the difference
+between "this evidence is gone" and "this evidence moved or was never in this tree".
+The deletion-inventory guard (`tests/test_retention.py::TestRunRootDeletionInventory`)
+covers the deletion primitives it knows (`shutil.rmtree(`, `os.unlink(`, `os.remove(`,
+`.unlink(`, `rm -rf`/`rm -fr`); a deletion through a construct the scan does not match
+— e.g. `Path.rmdir()` or a subprocess — will NOT be recorded. That boundary is stated
+rather than scanned harder: the registry cannot be made complete, and pretending
+otherwise is the defect. Note plainly: the ledger explains removals from the
 moment it exists — it **cannot recover what was already lost** before that, and a
 tombstone must never be read as having reclaimed an older citation. See
 `lib/retention.py` for the exact policy.

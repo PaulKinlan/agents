@@ -27,6 +27,11 @@ accumulate without bound. These tests pin the retention contract:
 - every deletion primitive in the shipped source is enumerated in the deletion
   inventory below (coord's third-deleter test): a deleter this suite does not
   know about fails the gate rather than slipping past the record.
+- the record tells the truth about its own limits (agents-dm8n round 3): the
+  discovery text states the ledger is per-VM local state and every tombstone
+  names the machine that wrote it; the record reads as best-effort about the
+  removal window (a file created during it cannot be listed); and symlinks are
+  recorded with their targets, with outside-tree targets explicitly NOT covered.
 """
 
 import contextlib
@@ -36,6 +41,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -61,6 +67,7 @@ from lib.retention import (  # noqa: E402
     prune_findings,
     prune_hillclimb_dirs,
     prune_run_dirs,
+    RECORD_SCOPE,
     remove_recorded,
     retention_config,
     retention_ledger_path,
@@ -574,6 +581,181 @@ class TestLedgerPlacement(unittest.TestCase):
             self.assertEqual(pointer.read_bytes(), first_bytes)
             self.assertNotIn(pointer.name,
                              {d.name for d in run_directories(runs)})
+
+
+class TestCrossVMLedgerTruth(unittest.TestCase):
+    """agents-dm8n round 3, finding 1 (P1): a bead is SYNCED and readable from
+    any VM, but the ledger is per-VM local state. A reader on another VM who
+    follows a dead citation and finds no tombstone must be TOLD that ledgers
+    are per-VM - otherwise "no record here" reads as "the citation was
+    invented". The fix is the document telling the truth about what it is, so
+    these tests assert the TEXT (the failure was that a reader is misled, not
+    that a mechanism is wrong) and that every tombstone names its machine.
+    """
+
+    def test_the_pointer_states_the_ledger_is_local_to_the_pruning_machine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "old", now - 100)
+            make_dir(runs, "new", now)
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+
+            text = (runs / RUNS_POINTER_NAME).read_text(encoding="utf-8")
+            self.assertIn("LOCAL TO THE MACHINE THAT PRUNED", text)
+            self.assertIn("NOT that the run never existed", text)
+            self.assertIn("`host`", text)
+
+    def test_the_readme_states_the_ledger_is_per_vm(self):
+        # Normalize wrapping: the assertion is about what the TEXT says, not
+        # where its lines break.
+        content = " ".join(
+            (ROOT / "README.md").read_text(encoding="utf-8").split())
+        self.assertIn("local to the machine that pruned", content)
+        self.assertIn("not that the run never existed", content)
+
+    def test_every_tombstone_names_the_machine_that_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "old", now - 100)
+            make_dir(runs, "new", now)
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            self.assertEqual(tombstones[0]["host"], socket.gethostname())
+
+
+class TestRemovalWindowClaim(unittest.TestCase):
+    """agents-dm8n round 3, finding 2 (P2): a file created inside the directory
+    AFTER the pre-removal snapshot and BEFORE the removal finishes is destroyed
+    but appears in NEITHER snapshot - the tombstone cannot list it, and no
+    snapshot ordering closes the window. So the record must READ as best-effort
+    where it is best-effort: every line carries its scope, and the pointer and
+    README state the window plainly. These tests pin what the record CLAIMS,
+    not what it cannot know.
+    """
+
+    def test_every_tombstone_carries_its_scope_on_the_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "old", now - 100)
+            make_dir(runs, "new", now)
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            self.assertEqual(tombstones[0]["record_scope"], RECORD_SCOPE)
+            self.assertIn("best-effort", RECORD_SCOPE)
+            self.assertIn("removal window", RECORD_SCOPE)
+
+    def test_the_pointer_and_readme_state_the_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            now = 1_700_000_000.0
+            make_dir(runs, "old", now - 100)
+            make_dir(runs, "new", now)
+            prune_run_dirs(runs, now=now, retain=1, max_age_seconds=float("inf"))
+            pointer = (runs / RUNS_POINTER_NAME).read_text(encoding="utf-8")
+        self.assertIn("DURING the removal window", pointer)
+        self.assertIn("best-effort", pointer)
+        content = " ".join(
+            (ROOT / "README.md").read_text(encoding="utf-8").split())
+        self.assertIn("during* the removal window", content)
+        self.assertIn("best-effort", content)
+
+    def test_a_file_created_during_the_window_is_destroyed_but_not_claimed(self):
+        # The reviewer's construction, driven through the choke point: a file
+        # that appears after the snapshot and before rmtree completes is
+        # destroyed, listed NOWHERE - and the record must not claim it. The
+        # property pinned is honest limitation, not completeness: the ledger
+        # lists only what was observed, and the line carries the scope that
+        # says why that is not a completeness claim.
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            (doomed / "before.txt").write_text("seen\n", encoding="utf-8")
+
+            real_rmtree = shutil.rmtree
+
+            def create_during_removal(path):
+                (Path(path) / "created-during-removal.txt").write_text(
+                    "late\n", encoding="utf-8")
+                real_rmtree(path)
+
+            with mock.patch.object(shutil, "rmtree",
+                                   side_effect=create_during_removal):
+                self.assertTrue(remove_recorded(doomed, reason="age"))
+
+            self.assertFalse(doomed.exists())
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            tombstone = tombstones[0]
+            self.assertEqual(tombstone["files"], ["before.txt", "report.json"])
+            self.assertNotIn("created-during-removal.txt", tombstone["files"])
+            self.assertEqual(tombstone["record_scope"], RECORD_SCOPE)
+
+
+class TestSymlinkTombstones(unittest.TestCase):
+    """agents-dm8n round 3, finding 3 (P2): os.walk YIELDS a symlink to a
+    directory but does not traverse it, so a run dir containing
+    symdir -> /tmp/data recorded "symdir" while a bead citing
+    runs/.../symdir/evidence.txt stayed unresolvable - and the file-granularity
+    equality held perfectly. The record must say what it actually saw: the
+    symlink AND its target, and whether the target's contents were covered.
+    """
+
+    def test_an_external_symlink_is_recorded_with_target_and_not_claimed_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            runs = make_runs(tmp)
+            external = base / "external"
+            external.mkdir()
+            (external / "evidence.txt").write_text("cited\n", encoding="utf-8")
+            doomed = make_dir(runs, "doomed", 1000)
+            (doomed / "symdir").symlink_to(external, target_is_directory=True)
+
+            self.assertTrue(remove_recorded(doomed, reason="age"))
+
+            self.assertFalse(doomed.exists())
+            # The target's contents were never in the removed tree: rmtree
+            # unlinks the LINK, and the evidence survives the removal.
+            self.assertTrue((external / "evidence.txt").exists())
+            tombstones = read_tombstones(runs)
+            self.assertEqual(len(tombstones), 1)
+            tombstone = tombstones[0]
+            # The link itself disappeared with the tree and stays in files...
+            self.assertIn("symdir", tombstone["files"])
+            # ...but a file reachable ONLY through the link is NOT claimed as
+            # removed - "this evidence moved or was never in this tree"...
+            self.assertNotIn("symdir/evidence.txt", tombstone["files"])
+            # ...and the symlink record says so in terms: the target is named
+            # and marked outside the tree, so its contents are not covered.
+            self.assertEqual(tombstone["symlinks"], [
+                {"path": "symdir", "target": str(external),
+                 "outside_tree": True}])
+
+    def test_a_symlink_into_the_tree_is_marked_covered_by_the_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            real = doomed / "real"
+            real.mkdir()
+            (real / "evidence.txt").write_text("cited\n", encoding="utf-8")
+            (doomed / "alias").symlink_to(real, target_is_directory=True)
+
+            self.assertTrue(remove_recorded(doomed, reason="age"))
+
+            tombstone = read_tombstones(runs)[0]
+            self.assertEqual(tombstone["symlinks"], [
+                {"path": "alias", "target": str(real),
+                 "outside_tree": False}])
+            # The target is inside the tree: its files ARE in files under their
+            # real paths, so the record covers them - "this evidence is gone".
+            self.assertIn("real/evidence.txt", tombstone["files"])
+            self.assertIn("alias", tombstone["files"])
 
 
 class TestFailedApplyRemovalGoesThroughTheChokePoint(unittest.TestCase):
