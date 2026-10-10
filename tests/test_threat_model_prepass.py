@@ -357,6 +357,44 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             for s in suppressed:
                 self.assertEqual(s["suppression_reason"], "self-referential factory pattern")
 
+    def test_foreign_repo_nested_inside_factory_root_not_suppressed(self):
+        """P3 fix (agents-760p): Foreign repo with its own .git nested inside FACTORY_ROOT is not self.
+
+        Git identity takes precedence over path containment: if a target has its own repository
+        identity that differs from the factory's, it is treated as third-party and its sinks
+        are NOT suppressed.
+        """
+        import subprocess
+        factory_root = mine_history.FACTORY_ROOT
+        with tempfile.TemporaryDirectory(dir=str(factory_root)) as tmp:
+            nested_repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(nested_repo)], check=True)
+
+            src_dir = nested_repo / "src"
+            src_dir.mkdir(parents=True)
+            route_code = (
+                'const route = {\n'
+                '    category: "api",\n'
+                '    handler: app.get("/api/nested", listItems)\n'
+                '};\n'
+            )
+            (src_dir / "routes.js").write_text(route_code, encoding="utf-8")
+
+            self.assertFalse(mine_history.is_factory_self_target(nested_repo))
+            results = mine_history.scan_entry_points(nested_repo)
+            self.assertEqual(len(results), 1, f"Expected nested foreign repo sink to be found, got: {results}")
+            self.assertEqual(results[0]["category"], "server-listener")
+
+    def test_plain_factory_subdirectory_recognized_as_self(self):
+        """P3 fix (agents-760p non-regression): Plain factory subdirectory without .git is still self.
+
+        When a target inside FACTORY_ROOT has no .git of its own, path containment applies
+        so factory stations, scripts, and components remain properly recognized as self.
+        """
+        threat_model_dir = mine_history.FACTORY_ROOT / "agents" / "threat-model"
+        if threat_model_dir.is_dir():
+            self.assertTrue(mine_history.is_factory_self_target(threat_model_dir))
+
     def test_test_or_fixture_path_narrowing(self):
         """P3 fix (agents-tj9u): Exact directory matching ensures production packages like testing_service are not skipped."""
         with tempfile.TemporaryDirectory() as tmp:

@@ -216,12 +216,23 @@ def is_factory_self_target(target_dir: Path) -> bool:
     """
     try:
         resolved = target_dir.resolve()
+        target_common = _resolve_common_git_dir(resolved)
+
+        # P3 fix (agents-760p): Decide git repository identity before path containment.
+        # If the target carries its own repository identity (a .git dir or worktree gitdir),
+        # it is self ONLY IF that identity matches the factory's. If it carries a different
+        # common git dir, it is a foreign repository that merely lives inside or beside the
+        # factory tree; fail toward third-party immediately so path containment cannot rescue it.
+        if target_common is not None:
+            if FACTORY_COMMON_GIT_DIR is not None and target_common == FACTORY_COMMON_GIT_DIR:
+                return True
+            return False
+
+        # When the target carries NO repository identity of its own (e.g. a plain subdirectory
+        # of the factory or a factory worktree with no nested .git), path containment applies
+        # so factory components and stations continue to be recognized as self.
         if resolved == FACTORY_ROOT.resolve() or FACTORY_ROOT.resolve() in resolved.parents:
             return True
-        if FACTORY_COMMON_GIT_DIR is not None:
-            target_common = _resolve_common_git_dir(resolved)
-            if target_common is not None and target_common == FACTORY_COMMON_GIT_DIR:
-                return True
     except Exception:
         pass
     return False
