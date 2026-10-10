@@ -486,6 +486,10 @@ class TestPathlessCandidates(unittest.TestCase):
         helper = sandbox / "lib" / "path_security.py"
         helper.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "lib" / "path_security.py", helper)
+        # agents-ghtz extracted the line-sentinel rule into a shared lib helper, so the sandbox
+        # has to carry it too or the script cannot import at all (found by rebasing, not by
+        # reading: the suite was green on the pre-rebase main).
+        shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(
