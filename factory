@@ -1617,6 +1617,18 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # If bootstrapping a target with neither an existing document nor a model-supplied document,
     # synthesize a structured provisional document across all 7 core sections so the target is
     # never left without a THREAT_MODEL.md.
+    MAX_BOOTSTRAP_TM_BYTES = 16384
+    agent_tm_doc = report.get("threat_model_markdown")
+    if agent_tm_doc and agent_name == "threat-model":
+        if isinstance(agent_tm_doc, str):
+            tm_bytes = len(agent_tm_doc.encode("utf-8"))
+            if tm_bytes > MAX_BOOTSTRAP_TM_BYTES:
+                _write_run_artifact(run_dir / "rejected_report.json",
+                                    json.dumps(report, indent=2))
+                raise NoVerdictError(
+                    f"{agent_name}: the synthesised document exceeded the bounded slot "
+                    f"({tm_bytes} bytes > {MAX_BOOTSTRAP_TM_BYTES} bytes)"
+                )
     tm_doc = report.get("threat_model_markdown")
     if not tm_doc and agent_name == "threat-model":
         candidates = [

@@ -18,7 +18,8 @@
     },
     "threat_model_markdown": {
       "type": "string",
-      "description": "Optional threat model markdown document or notes (for small summaries only; large documents must not be embedded in JSON)"
+      "maxLength": 16384,
+      "description": "Optional threat model markdown document or notes (for bootstrap summaries only; max 16KB / 16,384 characters; large documents must not be embedded in JSON)"
     },
     "findings": {
       "type": "array",

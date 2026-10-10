@@ -188,6 +188,10 @@ while IFS= read -r f; do
       # prepass suite feeds the pathless records the widened property exists for (agents-nhpb).
       mapped="$mapped tests/test_report_schema.py tests/test_vuln_verify_prepass.py"
       ;;
+    agents/threat-model/report.schema.json)
+      # Output contract for threat-model bootstrap slot (agents-uhru).
+      mapped="$mapped tests/test_report_schema.py tests/test_factory_truth_2.py"
+      ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;

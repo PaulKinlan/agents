@@ -8,7 +8,7 @@ decisions and malformed reports produced findings with None fields that were the
 formatted into delta reports and issue bodies.
 
 The schemas across agents/ use a small JSON Schema subset — type, required, properties,
-items, enum, minimum, maximum — and this project is stdlib-only, so validation lives
+items, enum, minimum, maximum, maxLength, minLength — and this project is stdlib-only, so validation lives
 here as a deliberately small checker rather than a dependency. Unsupported keywords are
 ignored on purpose: a validator that silently passes constructs it does not understand
 is exactly the failure mode this module exists to remove, but the declared schemas are
@@ -78,6 +78,13 @@ def validate(instance: Any, schema: Any, path: str = "$") -> List[str]:
         if isinstance(items, dict):
             for index, item in enumerate(instance):
                 errors.extend(validate(item, items, f"{path}[{index}]"))
+    elif isinstance(instance, str):
+        max_len = schema.get("maxLength")
+        if isinstance(max_len, int) and not isinstance(max_len, bool) and len(instance) > max_len:
+            errors.append(f"{path}: length {len(instance)} exceeds maxLength {max_len}")
+        min_len = schema.get("minLength")
+        if isinstance(min_len, int) and not isinstance(min_len, bool) and len(instance) < min_len:
+            errors.append(f"{path}: length {len(instance)} below minLength {min_len}")
     elif isinstance(instance, (int, float)) and not isinstance(instance, bool):
         if "minimum" in schema and instance < schema["minimum"]:
             errors.append(f"{path}: {instance!r} below minimum {schema['minimum']!r}")

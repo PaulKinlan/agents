@@ -213,6 +213,81 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertIn("Unauthenticated external listener", content)
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_bootstrap_with_bounded_threat_model_markdown_accepted(self):
+        """agents-uhru: synthesised threat_model_markdown at the 16KB bound is accepted."""
+        target_dir = self.box.target
+        for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md",
+                     self.box.root / "findings" / "target-THREAT_MODEL.md"]:
+            if cand.exists():
+                cand.unlink()
+        doc_at_bound = "# TM\n" + "B" * (16384 - 5)
+        self.assertEqual(len(doc_at_bound), 16384)
+        report = {"summary": "Bootstrap audit", "target": "target", "threat_model_markdown": doc_at_bound, "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertTrue(store_tm.exists())
+        self.assertEqual(store_tm.read_text(encoding="utf-8"), doc_at_bound)
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_bootstrap_with_oversized_threat_model_markdown_rejected(self):
+        """agents-uhru: synthesised threat_model_markdown 1 char over 16KB bound is rejected loudly."""
+        target_dir = self.box.target
+        for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md",
+                     self.box.root / "findings" / "target-THREAT_MODEL.md"]:
+            if cand.exists():
+                cand.unlink()
+        doc_over_bound = "# TM\n" + "B" * (16384 - 4)
+        self.assertEqual(len(doc_over_bound), 16385)
+        report = {"summary": "Bootstrap audit", "target": "target", "threat_model_markdown": doc_over_bound, "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        with self.assertRaises(factory_cli.StationError) as caught:
+            self.box.run_agent("threat-model")
+        err_msg = str(caught.exception)
+        self.assertIn("length 16385 exceeds maxLength 16384", err_msg)
+        run_dir = next((self.box.root / "runs").iterdir())
+        schema_errs = json.loads((run_dir / "schema_errors.json").read_text())
+        self.assertTrue(any("length 16385 exceeds maxLength 16384" in e for e in schema_errs))
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertFalse(store_tm.exists())
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_bootstrap_synthesised_document_exceeding_byte_bound_fails_loudly(self):
+        """agents-uhru: document exceeding 16KB byte slot (e.g. multibyte UTF-8) fails loudly with named reason."""
+        target_dir = self.box.target
+        for cand in [target_dir / "THREAT_MODEL.md", target_dir / "docs" / "THREAT_MODEL.md",
+                     self.box.root / "findings" / "target-THREAT_MODEL.md"]:
+            if cand.exists():
+                cand.unlink()
+        # 10,000 3-byte unicode chars (30,000 bytes) -> characters <= 16384, but bytes > 16384
+        multibyte_doc = "€" * 10000
+        self.assertLessEqual(len(multibyte_doc), 16384)
+        self.assertGreater(len(multibyte_doc.encode("utf-8")), 16384)
+        report = {"summary": "Bootstrap audit", "target": "target", "threat_model_markdown": multibyte_doc, "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        with self.assertRaises(factory_cli.StationError) as caught:
+            self.box.run_agent("threat-model")
+        err_msg = str(caught.exception)
+        self.assertIn("the synthesised document exceeded the bounded slot", err_msg)
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertFalse(store_tm.exists())
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_existing_target_large_threat_model_preserved_when_markdown_omitted(self):
+        """agents-uhru: existing target with large THREAT_MODEL.md (>16KB) is preserved when agent omits document."""
+        target_dir = self.box.target
+        large_existing_tm = "# Target Authoritative TM\n" + "Long section content...\n" * 1500
+        self.assertGreater(len(large_existing_tm.encode("utf-8")), 16384)
+        (target_dir / "THREAT_MODEL.md").write_text(large_existing_tm, encoding="utf-8")
+        report = {"summary": "Maintenance audit", "target": "target", "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        self.assertEqual(res["report"]["summary"], "Maintenance audit")
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertTrue(store_tm.exists())
+        self.assertEqual(store_tm.read_text(encoding="utf-8"), large_existing_tm)
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_prompt_carries_the_declared_schema(self):
         self.schema_agent("threat-model", tm_output([]))
         res = self.box.run_agent("threat-model")

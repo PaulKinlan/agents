@@ -86,6 +86,11 @@ class TestValidate(unittest.TestCase):
         self.assertEqual(validate(0.5, {"type": "number", "minimum": 0, "maximum": 1}), [])
         self.assertEqual(len(validate(2, {"maximum": 1})), 1)
 
+    def test_max_length_min_length(self):
+        self.assertEqual(validate("hello", {"type": "string", "maxLength": 5, "minLength": 1}), [])
+        self.assertEqual(validate("", {"type": "string", "minLength": 1}), ["$: length 0 below minLength 1"])
+        self.assertEqual(validate("toolong", {"type": "string", "maxLength": 5}), ["$: length 7 exceeds maxLength 5"])
+
     def test_unknown_keywords_are_ignored(self):
         self.assertEqual(validate("anything", {"description": "d", "title": "t"}), [])
 
@@ -121,7 +126,8 @@ class TestDeclaredSchema(unittest.TestCase):
         shipped schema using anything else would be enforced in part and trusted in full —
         the exact failure mode this module exists to remove."""
         supported = {"$schema", "title", "description", "type", "required",
-                     "properties", "items", "enum", "minimum", "maximum"}
+                     "properties", "items", "enum", "minimum", "maximum",
+                     "maxLength", "minLength"}
         for schema_path in sorted(FACTORY_ROOT.glob("agents/*/report.schema.json")):
             with self.subTest(schema=schema_path):
                 def walk(node):
@@ -466,3 +472,30 @@ class TestUnknownLineIsRepresentable(unittest.TestCase):
         cfg = {"output": {"schema": "report.schema.json"}}
         self.assertEqual(
             validate_agent_report(FACTORY_ROOT / "agents" / "vuln-verify", cfg, report), [])
+
+
+class TestThreatModelSchemaBound(unittest.TestCase):
+    """agents-uhru: threat-model report schema bounds threat_model_markdown to <= 16384 chars."""
+
+    def test_threat_model_markdown_slot_is_bounded_in_schema(self):
+        agent_dir = FACTORY_ROOT / "agents" / "threat-model"
+        cfg = {"output": {"schema": "report.schema.json"}}
+        valid_report = {
+            "summary": "Valid summary",
+            "target": "sample",
+            "findings": [],
+            "threat_model_markdown": "x" * 16384,
+        }
+        self.assertEqual(validate_agent_report(agent_dir, cfg, valid_report), [])
+
+        oversized_report = {
+            "summary": "Valid summary",
+            "target": "sample",
+            "findings": [],
+            "threat_model_markdown": "x" * 16385,
+        }
+        errors = validate_agent_report(agent_dir, cfg, oversized_report)
+        self.assertIsNotNone(errors)
+        self.assertTrue(any("$.threat_model_markdown: length 16385 exceeds maxLength 16384" in e for e in errors),
+                        errors)
+
