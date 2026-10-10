@@ -16,7 +16,9 @@ the file), so a KEPT ledger row could fire on a value not on disk. These tests d
 
 import importlib.machinery
 import importlib.util
+import io
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,6 +60,11 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         self._root_patch.start()
         self.addCleanup(self._findings_patch.stop)
         self.addCleanup(self._root_patch.stop)
+        # Capture stdout so deliberate test blocked messages do not leak into gate logs
+        self._stdout_capture = io.StringIO()
+        self._stdout_patch = mock.patch("sys.stdout", self._stdout_capture)
+        self._stdout_patch.start()
+        self.addCleanup(self._stdout_patch.stop)
 
     def _git_target(self, files):
         target = self.tmp / "target"
@@ -458,6 +465,62 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         patch = list((self.tmp / "factory-root" / "runs").rglob("session.patch"))[0].read_text()
         self.assertIn('src="a.js" defer', patch)
         self.assertIn('src="b.js" defer', patch)
+
+    def test_create_session_worktree_prunes_stale_registration_and_retries(self):
+        """P3 fix (agents-janc): stale worktree registration triggers git worktree prune and succeeds."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        wt_dir = self.tmp / "disposable_worktree_stale"
+
+        # Create a worktree, then rm -rf the directory to leave a stale admin registration
+        subprocess.run(["git", "worktree", "add", "--detach", str(wt_dir)], cwd=target, check=True, capture_output=True)
+        shutil.rmtree(wt_dir)
+
+        # _create_session_worktree must prune the stale entry and succeed on retry
+        admin_gitdir = factory_cli._create_session_worktree(target, wt_dir)
+        self.assertTrue(wt_dir.exists())
+        self.assertTrue(admin_gitdir.exists())
+        factory_cli._remove_session_worktree(target, wt_dir)
+
+    def test_create_session_worktree_retries_on_transient_lock(self):
+        """P3 fix (agents-janc): transient git lock contention retries with backoff and succeeds."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        wt_dir = self.tmp / "disposable_worktree_lock"
+
+        calls = 0
+        real_run_git = factory_cli._run_git
+
+        def fake_run_git(cmd, cwd=None):
+            nonlocal calls
+            if "worktree" in cmd and "add" in cmd:
+                calls += 1
+                if calls == 1:
+                    # First attempt simulates transient lock collision
+                    return subprocess.CompletedProcess(cmd, 128, "", "fatal: Unable to create '.git/index.lock': File exists.")
+            return real_run_git(cmd, cwd)
+
+        with mock.patch.object(factory_cli, "_run_git", side_effect=fake_run_git):
+            with mock.patch("time.sleep") as mock_sleep:
+                admin_gitdir = factory_cli._create_session_worktree(target, wt_dir)
+                self.assertTrue(wt_dir.exists())
+                self.assertTrue(admin_gitdir.exists())
+                self.assertEqual(calls, 2)
+                mock_sleep.assert_called_once()
+        factory_cli._remove_session_worktree(target, wt_dir)
+
+    def test_create_session_worktree_raises_loud_error_on_persistent_failure(self):
+        """P3 fix (agents-janc): persistent failure raises StationError naming the exit code and stderr."""
+        target = self._git_target({"index.html": BLOCKING_HTML})
+        wt_dir = self.tmp / "disposable_worktree_fail"
+
+        def fail_run_git(cmd, cwd=None):
+            if "worktree" in cmd and "add" in cmd:
+                return subprocess.CompletedProcess(cmd, 128, "", "fatal: corrupt git repository")
+            return factory_cli._run_git(cmd, cwd)
+
+        with mock.patch.object(factory_cli, "_run_git", side_effect=fail_run_git):
+            with self.assertRaises(factory_cli.StationError) as ctx:
+                factory_cli._create_session_worktree(target, wt_dir)
+            self.assertIn("git worktree add exited 128: fatal: corrupt git repository", str(ctx.exception))
 
 
 if __name__ == "__main__":
