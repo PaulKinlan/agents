@@ -239,9 +239,9 @@ class TestThreatModelContextSummary(unittest.TestCase):
 
             payload = json.loads(out_file.read_text(encoding="utf-8"))
             summary = payload["threat_model_summary"]
-            self.assertIn("[THREAT_MODEL.md summarised: showing first 3000 of 5015 chars", summary)
+            self.assertIn("[THREAT_MODEL.md summarised: showing first 3000 of 5015 bytes", summary)
             self.assertIn("TRUNCATED", summary)
-            self.assertEqual(payload["threat_model_file"], "THREAT_MODEL.md")
+            self.assertEqual(payload["threat_model_file"], str((target_dir / "THREAT_MODEL.md").resolve()))
 
     def test_findings_store_threat_model_copied_to_output_dir(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -263,8 +263,8 @@ class TestThreatModelContextSummary(unittest.TestCase):
 
                 text, rel = triage.load_threat_model(target_name, target_dir, output_file=out_file)
                 self.assertEqual(text, "# Stored TM Content")
-                self.assertEqual(rel, "THREAT_MODEL.md")
                 copied = out_file.parent / "THREAT_MODEL.md"
+                self.assertEqual(rel, str(copied.resolve()))
                 self.assertTrue(copied.exists())
                 self.assertEqual(copied.read_text(encoding="utf-8"), "# Stored TM Content")
             finally:

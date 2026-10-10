@@ -440,7 +440,8 @@ class TestDiscoverThreatModel(unittest.TestCase):
             tm_file.write_text("# THREAT MODEL\nInvariants...", encoding="utf-8")
             info = mine_history.discover_threat_model(tmp_path)
             self.assertTrue(info["present"])
-            self.assertEqual(info["file"], "THREAT_MODEL.md")
+            self.assertEqual(info["file"], str(tm_file.resolve()))
+            self.assertEqual(info["relative_path"], "THREAT_MODEL.md")
             self.assertGreater(info["size_bytes"], 0)
             self.assertIn("THREAT_MODEL.md", info["note"])
 
@@ -453,7 +454,8 @@ class TestDiscoverThreatModel(unittest.TestCase):
             tm_file.write_text("# DOCS THREAT MODEL\nInvariants...", encoding="utf-8")
             info = mine_history.discover_threat_model(tmp_path)
             self.assertTrue(info["present"])
-            self.assertEqual(info["file"], "docs/THREAT_MODEL.md")
+            self.assertEqual(info["file"], str(tm_file.resolve()))
+            self.assertEqual(info["relative_path"], "docs/THREAT_MODEL.md")
 
     def test_copies_findings_store_threat_model_to_run_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -476,8 +478,8 @@ class TestDiscoverThreatModel(unittest.TestCase):
 
                 info = mine_history.discover_threat_model(target_dir, output_file=out_candidates)
                 self.assertTrue(info["present"])
-                self.assertEqual(info["file"], "THREAT_MODEL.md")
                 copied_file = out_dir / "THREAT_MODEL.md"
+                self.assertEqual(info["file"], str(copied_file.resolve()))
                 self.assertTrue(copied_file.exists())
                 self.assertEqual(copied_file.read_text(encoding="utf-8"), store_tm.read_text(encoding="utf-8"))
             finally:

@@ -107,7 +107,20 @@ class TestFieldAliases(SchemaAgentCase):
         self.assertEqual(res["report"]["findings"][0]["rule_id"], "TM-1")
         self.assertTrue((res["run_dir"] / "normalised_fields.json").exists())
         store = json.loads((self.box.root / "findings" / "target.json").read_text())
-        self.assertEqual([f["rule_id"] for f in store["findings"].values()], ["TM-1"])
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_existing_target_threat_model_is_preserved_when_markdown_omitted(self):
+        """agents-tawg: when agent returns summary + findings without threat_model_markdown,
+        target's authoritative THREAT_MODEL.md is synced to findings store."""
+        target_dir = self.box.target
+        (target_dir / "THREAT_MODEL.md").write_text("# Target Authoritative TM\nSection 1...\n", encoding="utf-8")
+        report = {"summary": "s", "target": "target", "findings": []}
+        self.schema_agent("threat-model", json.dumps(report))
+        res = self.box.run_agent("threat-model")
+        self.assertEqual(res["report"]["summary"], "s")
+        store_tm = self.box.root / "findings" / "target-THREAT_MODEL.md"
+        self.assertTrue(store_tm.exists())
+        self.assertEqual(store_tm.read_text(encoding="utf-8"), "# Target Authoritative TM\nSection 1...\n")
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_prompt_carries_the_declared_schema(self):

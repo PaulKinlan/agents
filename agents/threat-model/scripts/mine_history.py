@@ -410,28 +410,32 @@ def discover_threat_model(target_dir: Path, output_file: Optional[Path] = None) 
                     if output_file is not None:
                         out_tm = output_file.parent / "THREAT_MODEL.md"
                         out_tm.write_text(c.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+                        out_resolved = str(out_tm.resolve())
                         return {
                             "present": True,
-                            "file": "THREAT_MODEL.md",
+                            "file": out_resolved,
                             "size_bytes": tm_size,
-                            "note": f"Existing threat model found ({tm_size} bytes in findings store; copied to run directory). Use read tool to inspect it directly."
+                            "note": f"Existing threat model found ({tm_size} bytes in findings store; copied to {out_resolved}). Use read tool to inspect it directly."
                         }
+                    resolved = str(c.resolve())
                     return {
                         "present": True,
-                        "file": str(c),
+                        "file": resolved,
                         "size_bytes": tm_size,
-                        "note": f"Existing threat model found ({tm_size} bytes). Use read tool to inspect it directly."
+                        "note": f"Existing threat model found ({tm_size} bytes at {resolved}). Use read tool to inspect it directly."
                     }
                 else:
+                    resolved = str(c.resolve())
                     try:
-                        rel = c.relative_to(target_dir)
+                        rel = str(c.relative_to(target_dir))
                     except ValueError:
-                        rel = c
+                        rel = resolved
                     return {
                         "present": True,
-                        "file": str(rel),
+                        "file": resolved,
+                        "relative_path": rel,
                         "size_bytes": tm_size,
-                        "note": f"Existing threat model found ({tm_size} bytes at {rel}). Use read tool to inspect it directly."
+                        "note": f"Existing threat model found ({tm_size} bytes at {resolved}). Use read tool to inspect it directly."
                     }
             except Exception:
                 pass

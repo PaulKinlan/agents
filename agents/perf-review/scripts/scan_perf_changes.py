@@ -116,19 +116,22 @@ def get_recent_git_context(target_dir: Path) -> Dict[str, Any]:
                     if f.strip():
                         changed_files.add(f.strip())
 
-        MAX_DIFF_CHARS = 6000
+        MAX_DIFF_BYTES = 6000
         diff_res = subprocess.run(
             ["git", "diff", "HEAD~1..HEAD", "--unified=2"],
             cwd=str(target_dir), capture_output=True, text=True, timeout=5
         )
         if diff_res.returncode == 0:
             raw_diff = diff_res.stdout
-            if len(raw_diff) > MAX_DIFF_CHARS:
+            raw_bytes = raw_diff.encode("utf-8")
+            if len(raw_bytes) > MAX_DIFF_BYTES:
+                truncated = raw_bytes[:MAX_DIFF_BYTES].decode("utf-8", errors="ignore")
+                kept_bytes = len(truncated.encode("utf-8"))
                 diff_excerpt = (
-                    f"[git diff HEAD~1..HEAD summarised: showing first {MAX_DIFF_CHARS} of {len(raw_diff)} chars. "
+                    f"[git diff HEAD~1..HEAD summarised: showing first {kept_bytes} of {len(raw_bytes)} bytes. "
                     f"Inspect full diff using git diff / read tool.]\n"
-                    + raw_diff[:MAX_DIFF_CHARS]
-                    + f"\n\n... [TRUNCATED: remaining {len(raw_diff) - MAX_DIFF_CHARS} chars omitted]"
+                    + truncated
+                    + f"\n\n... [TRUNCATED: remaining {len(raw_bytes) - kept_bytes} bytes omitted]"
                 )
             else:
                 diff_excerpt = raw_diff

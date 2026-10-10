@@ -70,7 +70,9 @@ You must return a valid JSON object matching `report.schema.json`:
 }
 ```
 
-CRITICAL: Return ONLY `summary`, `target`, and `findings`. Do NOT embed large markdown documents in your JSON report (embedding large documents in JSON strings causes parse failures and output truncation).
+CRITICAL: Return `summary`, `target`, and `findings`. Do NOT embed large markdown documents in your JSON report (embedding large documents in JSON strings causes parse failures and output truncation).
+- When a target already has an authoritative `THREAT_MODEL.md` (on disk or in Scanner Data), return `summary` and `findings`; the factory preserves the authoritative document.
+- When bootstrapping a target without an existing `THREAT_MODEL.md`, you may optionally include a concise `threat_model_markdown` document.
 - Put your high-level evaluation of the target's architecture, trust boundaries, and overall threat posture into `summary`.
 - Put specific gaps, missing controls, or defense weaknesses into `findings`.
 

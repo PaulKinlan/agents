@@ -19,14 +19,14 @@ def load_threat_model(target_name: str, target_dir: Path, output_file: Optional[
     local_tm = target_dir / "THREAT_MODEL.md"
     if local_tm.exists():
         try:
-            return local_tm.read_text(encoding="utf-8", errors="replace"), "THREAT_MODEL.md"
+            return local_tm.read_text(encoding="utf-8", errors="replace"), str(local_tm.resolve())
         except OSError:
             pass
     # 2. Docs THREAT_MODEL.md
     docs_tm = target_dir / "docs" / "THREAT_MODEL.md"
     if docs_tm.exists():
         try:
-            return docs_tm.read_text(encoding="utf-8", errors="replace"), "docs/THREAT_MODEL.md"
+            return docs_tm.read_text(encoding="utf-8", errors="replace"), str(docs_tm.resolve())
         except OSError:
             pass
     # 3. Findings stored THREAT_MODEL.md
@@ -37,10 +37,12 @@ def load_threat_model(target_name: str, target_dir: Path, output_file: Optional[
             # Inside the sandbox, findings/ is masked. Copy to run directory so the agent can read it!
             if output_file is not None:
                 try:
-                    (output_file.parent / "THREAT_MODEL.md").write_text(text, encoding="utf-8")
+                    copied_tm = output_file.parent / "THREAT_MODEL.md"
+                    copied_tm.write_text(text, encoding="utf-8")
+                    return text, str(copied_tm.resolve())
                 except OSError:
                     pass
-            return text, "THREAT_MODEL.md"
+            return text, str(store_tm.resolve())
         except OSError:
             pass
     return "No THREAT_MODEL.md found. Treat all external inputs as untrusted.", ""
@@ -180,13 +182,16 @@ def main():
     active_findings = gather_findings(target_name)
     clusters = cluster_deterministic(active_findings)
 
-    MAX_TM_SUMMARY_CHARS = 3000
-    if len(threat_model_text) > MAX_TM_SUMMARY_CHARS:
+    MAX_TM_SUMMARY_BYTES = 3000
+    raw_tm_bytes = threat_model_text.encode("utf-8")
+    if len(raw_tm_bytes) > MAX_TM_SUMMARY_BYTES:
+        truncated_text = raw_tm_bytes[:MAX_TM_SUMMARY_BYTES].decode("utf-8", errors="ignore")
+        kept_bytes = len(truncated_text.encode("utf-8"))
         threat_model_summary = (
-            f"[THREAT_MODEL.md summarised: showing first {MAX_TM_SUMMARY_CHARS} of {len(threat_model_text)} chars. "
+            f"[THREAT_MODEL.md summarised: showing first {kept_bytes} of {len(raw_tm_bytes)} bytes. "
             f"Full document available to read via file: {tm_path or 'THREAT_MODEL.md'}]\n"
-            + threat_model_text[:MAX_TM_SUMMARY_CHARS]
-            + f"\n\n... [TRUNCATED: remaining {len(threat_model_text) - MAX_TM_SUMMARY_CHARS} chars omitted. Read {tm_path or 'THREAT_MODEL.md'} with read tool.]"
+            + truncated_text
+            + f"\n\n... [TRUNCATED: remaining {len(raw_tm_bytes) - kept_bytes} bytes omitted. Read {tm_path or 'THREAT_MODEL.md'} with read tool.]"
         )
     else:
         threat_model_summary = threat_model_text
