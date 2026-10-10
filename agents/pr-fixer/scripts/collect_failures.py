@@ -45,7 +45,14 @@ def load_active_findings(target_name: str, target_dir: Path) -> List[Dict[str, A
         if not rel_path or not fpath or not fpath.exists() or not fpath.is_file():
             continue
 
-        line_no = int(rec.get("line_number") or 1)
+        # An unknown line must not reach int(): "?" is the factory's OWN marker for a line the
+        # scanner could not name (agents-fy26), and `int("?")` raises ValueError - here, outside
+        # the try below - which takes the whole station down. The finding is still fixable, so it
+        # is windowed from the top of the file rather than dropped or allowed to crash.
+        try:
+            line_no = int(rec.get("line_number") or 1)
+        except (TypeError, ValueError):
+            line_no = 1
         try:
             lines = fpath.read_text(encoding="utf-8", errors="ignore").splitlines()
             start = max(0, line_no - 8)

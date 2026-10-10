@@ -62,6 +62,10 @@ while IFS= read -r f; do
       # (agents-075) are both pinned in this suite.
       mapped="$mapped tests/test_vuln_verify_prepass.py"
       ;;
+    agents/pr-fixer/scripts/collect_failures.py)
+      # The proposer's pre-pass: unknown lines must not reach int() (agents-fy26).
+      mapped="$mapped tests/test_pr_fixer_prepass.py"
+      ;;
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;

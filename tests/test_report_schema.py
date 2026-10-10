@@ -359,3 +359,50 @@ class TestUnlocatableVerdicts(unittest.TestCase):
         """Whole-repo findings cite the nearest EXISTING path (a directory is fine)."""
         (self.target / ".github").mkdir()
         self.assertEqual(unlocatable_verdicts(self._report(path=".github"), self.target), [])
+
+
+class TestUnknownLineIsRepresentable(unittest.TestCase):
+    """agents-fy26: an unknown line must be STATED, and the schema must allow it.
+
+    The verifier's pre-pass hands over `line_number: null` with `line_number_unknown: true` for a
+    candidate whose line is the factory's own "?" marker. If the report schema still demanded an
+    integer, a faithful model report would be rejected as a schema violation and the station would
+    fail anyway - the failure moved rather than removed. Sibling stations (vuln-triage,
+    log-check) already declare ["integer", "null"]; vuln-verify was the outlier.
+    """
+
+    def _errors(self, line_number):
+        report = {
+            "summary": "s",
+            "target": "t",
+            "verifications": [{
+                "rule_id": "r", "path": "src/app.js", "line_number": line_number,
+                "verdict": "disproved", "confidence": "high", "reasoning": "r",
+            }],
+            "findings": [],
+        }
+        cfg = {"output": {"schema": "report.schema.json"}}
+        return validate_agent_report(FACTORY_ROOT / "agents" / "vuln-verify", cfg, report)
+
+    def test_a_null_line_is_accepted(self):
+        self.assertEqual(self._errors(None), [])
+
+    def test_an_integer_line_is_still_accepted(self):
+        self.assertEqual(self._errors(7), [])
+
+    def test_the_sentinel_string_is_still_rejected(self):
+        """null is the stated unknown; the scanner's own marker must not be echoed as a line."""
+        errors = self._errors("?")
+        self.assertTrue(any("line_number" in error for error in errors), errors)
+
+    def test_a_null_line_in_the_findings_array_is_accepted(self):
+        report = {
+            "summary": "s", "target": "t", "verifications": [],
+            "findings": [{
+                "rule_id": "r", "path": "src/app.js", "line_number": None, "snippet": "s",
+                "severity": "high", "title": "t", "description": "d", "remediation": "r",
+            }],
+        }
+        cfg = {"output": {"schema": "report.schema.json"}}
+        self.assertEqual(
+            validate_agent_report(FACTORY_ROOT / "agents" / "vuln-verify", cfg, report), [])
