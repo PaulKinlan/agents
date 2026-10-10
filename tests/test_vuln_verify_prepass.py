@@ -260,7 +260,18 @@ class TestVerifierPriming(unittest.TestCase):
             self.assertIn("unrecognized payload shape", res.stderr)
 
     def test_malformed_run_artifact_records_warning_and_continues(self):
-        """agents-dh5l: unreadable/malformed run artifacts must record a warning on stderr and continue."""
+        """agents-dh5l: unreadable/malformed run artifacts must record a warning on stderr and continue.
+
+        agents-h0mb (coord ruling): a test is a consumer too. The warning is a DIAGNOSTIC the
+        station writes to stderr (prepare_verification.py), a channel redaction never touches,
+        so it must stay visible on the no-output path; the snippet is the confirmation oracle,
+        which stdout must not carry. This test therefore asserts both halves of the contract on
+        the no-output path - warning visible on stderr, payload redacted on stdout - and reads
+        the RAW record through --output, the sanctioned machine channel, to prove the fallback
+        snippet actually flowed through. Asserting '[redacted]' in place of the raw-record check
+        would silently change what this test measures, so the redaction is pinned as a separate
+        assertion instead.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             sandbox, target = self._sandbox(tmp)
@@ -273,13 +284,28 @@ class TestVerifierPriming(unittest.TestCase):
                 discovery_finding(snippet="FALLBACK-VALID-SNIPPET"),
             ]}), encoding="utf-8")
 
-            cmd = [sys.executable, str(sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"),
-                   "--target", str(target)]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            script = sandbox / "agents" / "vuln-verify" / "scripts" / "prepare_verification.py"
+
+            # No --output: the diagnostic survives on stderr and the oracle is redacted on stdout.
+            res = subprocess.run([sys.executable, str(script), "--target", str(target)],
+                                 capture_output=True, text=True, timeout=60)
             self.assertEqual(res.returncode, 0, f"script failed:\n{res.stderr}")
             self.assertIn("Warning: Could not read run artifact", res.stderr)
             self.assertIn("candidates.json", res.stderr)
             bundle = json.loads(res.stdout)
+            self.assertEqual(bundle["candidate_count"], 1)
+            self.assertEqual(bundle["candidates"][0]["snippet"], "[redacted]",
+                             "the confirmation oracle reached the station's stdout unmasked")
+
+            # --output: the raw local record is the machine channel; the fallback snippet must
+            # arrive there intact, and the diagnostic is still recorded on stderr.
+            out = sandbox / "out.json"
+            res = subprocess.run([sys.executable, str(script), "--target", str(target),
+                                  "--output", str(out)],
+                                 capture_output=True, text=True, timeout=60)
+            self.assertEqual(res.returncode, 0, f"script failed:\n{res.stderr}")
+            self.assertIn("Warning: Could not read run artifact", res.stderr)
+            bundle = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(bundle["candidate_count"], 1)
             self.assertEqual(bundle["candidates"][0]["snippet"], "FALLBACK-VALID-SNIPPET")
 
@@ -563,6 +589,9 @@ class TestPathlessCandidates(unittest.TestCase):
         # has to carry it too or the script cannot import at all (found by rebasing, not by
         # reading: the suite was green on the pre-rebase main).
         shutil.copyfile(ROOT / "lib" / "line_numbers.py", sandbox / "lib" / "line_numbers.py")
+        # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the
+        # script's import set; redaction.py is stdlib-only, so no transitive copies.
+        shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
         target = sandbox / "target"
         (target / "src").mkdir(parents=True)
         (target / "src" / "app.js").write_text(

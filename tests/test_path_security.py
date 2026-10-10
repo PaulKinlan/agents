@@ -35,6 +35,9 @@ def _copy_script_and_helper(sandbox: Path, script_src: Path, script_rel: str) ->
     helper = sandbox / "lib" / "path_security.py"
     helper.parent.mkdir(parents=True)
     shutil.copyfile(PATH_SECURITY, helper)
+    # The emit_station_result output rule (agents-qslz) adds lib/redaction.py to the converted
+    # scripts' import set; redaction.py is stdlib-only, so the copy needs no transitive helpers.
+    shutil.copyfile(ROOT / "lib" / "redaction.py", sandbox / "lib" / "redaction.py")
     return script
 
 
