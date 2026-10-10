@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
@@ -23,6 +24,28 @@ sys.path.insert(0, str(FACTORY_ROOT))
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+
+
+def _gitleaks_binary() -> Optional[str]:
+    """The pin-authenticated gitleaks binary, or None when gitleaks is genuinely absent.
+
+    gitleaks is a trusted tool (lib/tool_pins.TRUSTED_TOOLS), so a gitleaks PRESENT on
+    PATH that the pin cannot authenticate is a loud failure — never a silent fallback to
+    the built-in scan and never an execution from PATH order (agents-28nn round 4, review
+    P1: a station script's own trusted-tool launch is a census kind of its own; the
+    pre-pass used to shutil.which and execute without consulting the pin). A wrong answer
+    that looks like a normal one is the finding family's defect: 'no gitleaks findings'
+    must mean the pinned gitleaks ran. A genuinely ABSENT gitleaks keeps the documented
+    builtin-regex fallback — the result's `scanner` field names which actually ran.
+    """
+    try:
+        return resolve_tool("gitleaks")
+    except ToolPinError as e:
+        if shutil.which("gitleaks") is None:
+            return None  # not installed at all: the documented builtin fallback
+        sys.stderr.write(f"Error: gitleaks is present but cannot be authenticated: {e}\n")
+        sys.exit(2)
 
 # Built-in high-confidence regex patterns for when gitleaks is not installed
 PATTERNS = [
@@ -76,12 +99,13 @@ IGNORE_EXTENSIONS = {
 GITLEAKS_TIMEOUT_SECONDS = 150
 
 
-def scan_with_gitleaks(target_dir: Path) -> list:
-    if not shutil.which("gitleaks"):
+def scan_with_gitleaks(target_dir: Path) -> Optional[list]:
+    gitleaks_bin = _gitleaks_binary()
+    if not gitleaks_bin:
         return None
-    
+
     cmd = [
-        "gitleaks", "detect",
+        gitleaks_bin, "detect",
         "--source", str(target_dir),
         "--no-git",
         "--report-format", "json",
@@ -190,8 +214,12 @@ def main():
         sys.exit(1)
 
     candidates = scan_with_gitleaks(target_dir)
+    scanner = "gitleaks"
     if candidates is None:
         candidates = scan_with_builtin(target_dir)
+        # The label names the scanner that ACTUALLY ran — not a second PATH probe, which
+        # could disagree with the scan (agents-28nn round 4).
+        scanner = "builtin-regex"
 
     # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
     # COPY it rather than reconstruct identity from the model's label and prose.
@@ -200,7 +228,7 @@ def main():
     result = {
         **artefact_scheme_fields(),
         "target": str(target_dir),
-        "scanner": "gitleaks" if shutil.which("gitleaks") else "builtin-regex",
+        "scanner": scanner,
         "candidate_count": len(candidates),
         "candidates": candidates
     }

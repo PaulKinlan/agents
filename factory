@@ -44,7 +44,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
-    from lib.tool_pins import ToolPinError, allowlisted_path, resolve_tool
+    from lib.tool_pins import (HOST_PINS_ENV, ToolPinError, allowlisted_path, resolve_tool,
+                               write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -68,7 +69,8 @@ except ImportError:
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
-    from lib.tool_pins import ToolPinError, allowlisted_path, resolve_tool
+    from lib.tool_pins import (HOST_PINS_ENV, ToolPinError, allowlisted_path, resolve_tool,
+                               write_effective_pins)
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -1192,6 +1194,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             prepass_env["HTTP_PROXY"] = prepass_env["HTTPS_PROXY"] = \
                 f"http://127.0.0.1:{EGRESS_PROXY_PORT}"
             prepass_env["NO_PROXY"] = "localhost,127.0.0.1"
+            # The pre-pass scripts re-authenticate their own trusted tools through
+            # resolve_tool (agents-28nn round 4: a station script's own trusted-tool
+            # launch is a census kind of its own — the bind boundary authenticates at
+            # WRAP time; the script re-verifies at EXEC time). The host pins file lives
+            # under $HOME, tmpfs-hidden inside the wrap, so the child gets the EFFECTIVE
+            # pins the host just verified, written into the rw-bound run directory and
+            # named by its FACTORY_TOOL_PINS — paths and hashes, not secrets.
+            prepass_env[HOST_PINS_ENV] = str(write_effective_pins(
+                run_dir / "tool-pins.effective.yaml"))
             try:
                 prepass_cmd = sandbox_command(
                     prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,

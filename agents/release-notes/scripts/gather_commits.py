@@ -29,6 +29,26 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+
+
+def _trusted_tool(name: str) -> str:
+    """The pin-authenticated path of a trusted tool this pre-pass executes.
+
+    git is a trusted tool (lib/tool_pins.TRUSTED_TOOLS): a station script's own
+    trusted-tool launch is a census kind of its own (agents-28nn round 4, review P1) —
+    a bare name executes whatever PATH plants first, INCLUDING on the trusted-private
+    unsandboxed path where no sandbox bind boundary verifies anything, and this
+    script's output feeds the model's evidence. Unauthenticatable is LOUD (nonzero
+    exit; the factory turns a failed pre-pass into a StationError), never a quiet empty
+    result that reads like "no commits". Resolution is per call: a post-resolution
+    binary swap never executes under a stale verification.
+    """
+    try:
+        return resolve_tool(name)
+    except ToolPinError as e:
+        sys.stderr.write(f"Error: trusted tool {name!r} cannot be authenticated: {e}\n")
+        sys.exit(2)
 
 PR_PATTERNS = [
     re.compile(r"\(#(\d+)\)$"),                        # Squash merge: feat: foo (#123)
@@ -42,7 +62,7 @@ CONVENTIONAL_PATTERN = re.compile(
 
 def get_latest_tag(target_dir: Path) -> Optional[str]:
     """Finds the most recent git tag in the target repository."""
-    cmd = ["git", "-C", str(target_dir), "describe", "--tags", "--abbrev=0"]
+    cmd = [_trusted_tool("git"), "-C", str(target_dir), "describe", "--tags", "--abbrev=0"]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0 and res.stdout.strip():
@@ -51,7 +71,7 @@ def get_latest_tag(target_dir: Path) -> Optional[str]:
         pass
 
     # Fallback to sorting all tags
-    cmd_all = ["git", "-C", str(target_dir), "tag", "--sort=-creatordate"]
+    cmd_all = [_trusted_tool("git"), "-C", str(target_dir), "tag", "--sort=-creatordate"]
     try:
         res = subprocess.run(cmd_all, capture_output=True, text=True, check=False)
         tags = [t.strip() for t in res.stdout.splitlines() if t.strip()]
@@ -120,7 +140,7 @@ def parse_conventional_commit(subject: str, body: str) -> Tuple[str, Optional[st
 
 def get_files_changed(target_dir: Path, commit_hash: str) -> List[str]:
     """Retrieves list of files touched by a commit."""
-    cmd = ["git", "-C", str(target_dir), "show", "--name-only", "--format=", commit_hash]
+    cmd = [_trusted_tool("git"), "-C", str(target_dir), "show", "--name-only", "--format=", commit_hash]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0:
@@ -131,7 +151,7 @@ def get_files_changed(target_dir: Path, commit_hash: str) -> List[str]:
 
 def gather_commits(target_dir: Path, since_tag: Optional[str] = None, max_count: int = 50) -> Dict[str, Any]:
     # Verify target is git repository
-    chk_cmd = ["git", "-C", str(target_dir), "rev-parse", "--is-inside-work-tree"]
+    chk_cmd = [_trusted_tool("git"), "-C", str(target_dir), "rev-parse", "--is-inside-work-tree"]
     try:
         chk = subprocess.run(chk_cmd, capture_output=True, text=True, check=False)
         if chk.returncode != 0 or chk.stdout.strip() != "true":
@@ -146,7 +166,7 @@ def gather_commits(target_dir: Path, since_tag: Optional[str] = None, max_count:
     if base_tag:
         git_range = f"{base_tag}..HEAD"
         cmd = [
-            "git", "-C", str(target_dir), "log", git_range,
+            _trusted_tool("git"), "-C", str(target_dir), "log", git_range,
             "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cI%x1f%s%x1f%b%x1e"
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -154,7 +174,7 @@ def gather_commits(target_dir: Path, since_tag: Optional[str] = None, max_count:
     else:
         git_range = f"HEAD (recent {max_count})"
         cmd = [
-            "git", "-C", str(target_dir), "log", f"-n{max_count}",
+            _trusted_tool("git"), "-C", str(target_dir), "log", f"-n{max_count}",
             "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cI%x1f%s%x1f%b%x1e"
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)

@@ -1,22 +1,22 @@
-#!/usr/bin/env python3
-"""Explicit child environments: add what a child needs, never subtract from the parent.
+"""Allowlisted child process environments (agents-5d9, agents-8h4).
 
-Non-negotiable #4: an agent's environment holds no credentials it was not given for this run.
-The audit's SF-04 finding is that subtraction cannot be complete — claude.sh unset two
-precedence variables and four more survived (agents-e3u). Every agent child now gets an
-environment built by addition:
+Subprocesses spawned by the factory must run under a known, bounded set of environment
+variables so ambient host secrets (e.g. AWS tokens, SSH keys, personal tokens) are never
+inherited by child processes.
 
-* a base allowlist of paths, locale, temp and user identity (no secrets, no SSH agent);
-* the operator's proxy vars only when the child is unsandboxed (``proxied`` flag), never its
-  CA bundle;
-* the model-auth variables of the engine being dispatched, and nothing else;
-* a GitHub token for an explicit public-issue promotion (`factory promote`, which reuses the
-  `github-issues` sink name), or for a pre-pass whose agent declares `requires: [gh]`
-  (issue-triage) — the only children that talk to GitHub on the run's behalf.
+The factory spawns several distinct classes of children:
+- The model engine itself (pi, claude, deepseek, etc.), via lib/adapters/*.sh
+- The pre-pass scanner (station script), via its python entrypoint
+- The git/gh sinks, which need network and authentication
+- Isolated commands, which need nothing
 
-Cloud credentials, the SSH agent, unrelated project tokens and everything else the operator's
-shell happened to hold are never added. An unknown engine gets no credentials at all: a new
-adapter must be named here before it can see a key, which is the fail-closed direction.
+Each caller specifies what capability the child legitimately needs:
+- `engine`: which model engine is running (pi gets PI_* and MODEL_* vars; others get none)
+- `github`: True if the child legitimately needs GH_TOKEN (issue-triage, github sink)
+- `target_env`: optional mapping of extra env vars declared by the target config
+- `trusted_tools`: True if the child resolves trusted tools itself via lib.tool_pins
+- `broker_urls`: optional mapping {provider: localhost_url} to inject broker base URLs
+- `proxied`: True only for unsandboxed children needing operator proxy variables
 """
 
 import os
@@ -27,29 +27,39 @@ from lib.credential_broker import BROKER_ENV_CONFIGS, PLACEHOLDER_KEY
 from lib.tool_pins import HOST_PINS_ENV, UNPINNED_ALLOW_ENV
 
 # Paths, locale, temp and user identity. Proxy and CA-bundle vars are deliberately NOT here
-# (agents-5d9): a poisoned operator env could redirect a child's traffic or point its TLS at
-# an attacker CA. Proxy vars are forwarded only via the explicit `proxied` flag (unsandboxed
-# children, PROXY_VARS below); the operator's CA bundle is never forwarded — every child uses
-# the system trust store (/etc, ro-bound into the sandbox) as its trust assumption.
+# (agents-5d9): proxies are forwarded only for unsandboxed children that legitimately need
+# the operator's network route (see `proxied`), and CA bundles are kept off children unless
+# explicitly configured.
 BASE_ALLOW = (
-    "PATH", "HOME", "TMPDIR", "TMP", "TEMP",
-    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
-    "TERM", "TZ", "USER", "LOGNAME",
-    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "COLORTERM",
 )
 
-# Operator proxy/routing vars, forwarded ONLY when `proxied=True` — an unsandboxed child that
-# must reach the network the way the operator's shell does (e.g. an unsandboxed engine's model
-# call on a corporate network). Sandboxed children never inherit these: their egress is the
-# in-sandbox relay + allowlist proxy (pre-pass) or the credential broker (engine), set by the
-# dispatcher. A poisoned operator proxy must not redirect a sandboxed child (agents-5d9).
 PROXY_VARS = (
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
 )
 
-# The model-auth variables each engine adapter may see. These are the engine's own credentials,
-# not the operator's: extend the tuple when a provider is wired up, and note that an unlisted
+# Engine-specific credential variables.
+# A sandboxed engine's credentials are replaced by the broker (see `apply_broker_urls`);
+# an unsandboxed engine gets its own credentials if present in parent. Any other engine's
 # engine gets none (fail closed).
 #
 # Trust boundary for UNBROKERED engines (tm-unbrokered-engine-credentials, agents-5d9): a
@@ -61,58 +71,63 @@ PROXY_VARS = (
 ENGINE_CREDENTIALS = {
     "pi": (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
-        "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
-        # Keyless BYOK providers (agents-3y2): pi reads <NAME>_API_KEY/<NAME>_BASE_URL,
-        # and the managed endpoints inject auth server-side, so a placeholder key + the
-        # broker's base URL is all a sandboxed pi needs for these.
-        "KIMI_API_KEY", "ZAI_API_KEY", "QWEN_API_KEY",
-    ),
-    # Kept aligned with lib/adapters/claude.sh's SESSION_OVERRIDE_VARS plus the session token
-    # the adapter deliberately preserves; tests/test_child_env.py asserts the relationship.
-    "deepseek": (
-        "DEEPSEEK_API_KEY", "deepseek_api_key", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
+        "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "KIMI_API_KEY", "ZAI_API_KEY",
+        "QWEN_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
     ),
     "claude": (
         "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
-        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_GATEWAY",
-        "AWS_BEARER_TOKEN_BEDROCK",
     ),
-    "antigravity": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "deepseek": (
+        "DEEPSEEK_API_KEY",
+    ),
+    "antigravity": (
+        "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    ),
 }
 
-# The findings dispatch is a child of the run, and the only one allowed to talk to GitHub.
-GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
-
-# Backwards-compatible alias: agents-2x6's factory/egress code and its tests reference
-# child_env.BROKER_PROVIDERS, while 62u made credential_broker.BROKER_ENV_CONFIGS the canonical
-# table. Both names MUST be the same mapping object, or a provider could be brokered off one
-# table while being unknown to the other.
+# The subset of PROVIDERS that CredentialBroker can broker (all of them).
 BROKER_PROVIDERS = BROKER_ENV_CONFIGS
-# Requirements that bring the pre-pass a network credential. lib/containment.py refuses any of
-# these unless the agent declares capabilities.network, so a credential never reaches a tier
-# whose ceiling forbids network (agents-05h). tests/test_containment.py holds this list and
-# prepass_environment() in agreement: add an entry here when a requirement starts to grant one.
-NETWORK_CREDENTIAL_REQUIREMENTS = ("gh",)
+
+PI_ALLOW = (
+    "PI_AUTO_APPROVE",
+    "PI_TOOLS",
+    "PI_NO_EXTENSIONS",
+    "PI_NO_PROMPT_TEMPLATES",
+    "PI_MODEL",
+    "PI_CODING_AGENT_DIR",
+    "FACTORY_MODEL",
+)
+
+GITHUB_VARS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+)
 
 
-def declares_requirement(agent_cfg: Mapping, tool: str) -> bool:
-    """Whether agent.yaml's capabilities.requires names `tool`."""
-    capabilities = agent_cfg.get("capabilities") if isinstance(agent_cfg, MappingABC) else None
-    requires = capabilities.get("requires") if isinstance(capabilities, MappingABC) else None
-    return isinstance(requires, (list, tuple)) and tool in requires
+def declares_requirement(agent_cfg: Mapping, capability: str) -> bool:
+    """True if agent_cfg declares a requires: list containing `capability`."""
+    cap_section = agent_cfg.get("capabilities")
+    if not isinstance(cap_section, MappingABC):
+        return False
+    requires = cap_section.get("requires")
+    if not isinstance(requires, list):
+        return False
+    return capability in requires
 
 
 def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] = None,
                         proxied: bool = False) -> Dict[str, str]:
-    """The deterministic pre-pass env: trusted factory code, but still an added allowlist.
+    """The scrubbed environment for a deterministic pre-pass scanner.
 
     It gets a GitHub token only when the agent declares it needs `gh` (issue-triage), never
     just because the operator's shell had one. `proxied` forwards the operator's proxy vars
     only for an UNSANDBOXED pre-pass (agents-5d9); a sandboxed pre-pass gets the relay set
-    by the dispatcher instead. `trusted_tools=True` forwards FACTORY_TOOL_PINS and
-    FACTORY_ALLOW_UNPINNED_TOOLS so pre-pass scripts can authenticate their trusted tools
-    (agents-01qd, agents-qbl8).
+    by the dispatcher instead. `trusted_tools=True` because (agents-28nn round 4, agents-01qd,
+    agents-qbl8) the pre-pass scripts resolve their own trusted tools through `resolve_tool` —
+    including when unsandboxed, where no bind boundary authenticates anything, forwarding
+    FACTORY_TOOL_PINS and FACTORY_ALLOW_UNPINNED_TOOLS.
     """
     return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent,
                              proxied=proxied, trusted_tools=True)
@@ -134,7 +149,8 @@ def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Di
     for provider, base_url in broker_urls.items():
         spec = BROKER_ENV_CONFIGS.get(provider)
         if not spec:
-            raise ContainmentError(f"fail closed: broker provided URL for unmapped provider {provider!r}")
+            raise ContainmentError(
+                f"broker advertised unmapped provider {provider!r}; cannot broker credentials safely")
         placeholder_var, base_url_var, secret_vars = spec
         for var in secret_vars:
             env.pop(var, None)  # no real credential crosses into the sandboxed env
@@ -144,8 +160,8 @@ def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Di
 
 
 def child_environment(
+    *,
     engine: Optional[str] = None,
-    sink: Optional[str] = None,
     github: bool = False,
     parent: Optional[Mapping[str, str]] = None,
     broker_urls: Optional[Mapping[str, str]] = None,
@@ -153,28 +169,27 @@ def child_environment(
     sink_options: Optional[Mapping[str, object]] = None,
     proxied: bool = False,
 ) -> Dict[str, str]:
-    """Build the environment for one child process by addition.
-
-    `engine` selects the model-auth class; `github` adds a GitHub token (a pre-pass that
-    declares `gh`); `sink` adds credentials declared by its configured adapters.
-    `parent` defaults to os.environ and is only read, never mutated.
+    """Construct a scrubbed, allowlisted environment mapping for a child process.
 
     `trusted_tools` is for the children that resolve a trusted tool THEMSELVES — the findings
     dispatch and promotion run `lib/sinks/*`, which call `lib.tool_pins.resolve_tool` for
-    `gh`/`bd`, and pre-pass scripts that authenticate their own tools (`git`, `npm`, agents-01qd).
-    On a pinned host the pins live behind `FACTORY_TOOL_PINS`, and without that
-    variable such a child cannot verify the tool it is about to execute and fails closed, with
-    strictly less information than the parent that already verified the same file (agents-dpt).
-    The same child also needs the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in
-    (agents-7ua): it is a run-scoped widening the parent already applied when it resolved the
-    tool, and without it the child's own `resolve_tool` fails closed even though the parent just
-    resolved the same binary. Children that never resolve a trusted tool (engine sessions)
-    get nothing extra.
+    `gh`/`bd`, and (agents-28nn round 4, agents-01qd) the pre-pass scripts, which now resolve their own
+    git/gh/gitleaks/npm through `resolve_tool` rather than trusting PATH order (a station
+    script's own trusted-tool launch is a census kind of its own). On a pinned host the pins
+    live behind `FACTORY_TOOL_PINS`, and without that variable such a child cannot verify
+    the tool it is about to execute and fails closed, with strictly less information than
+    the parent that already verified the same file (agents-dpt). The same child also needs
+    the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in (agents-7ua): it is a
+    run-scoped widening the parent already applied when it resolved the tool, and without
+    it the child's own `resolve_tool` fails closed even though the parent just resolved the
+    same binary. Children that never resolve a trusted tool (engine sessions) get nothing
+    extra. For the SANDBOXED pre-pass the forwarded pins path would be hidden by the wrap,
+    so the dispatcher overwrites it with the effective pins written into the run directory
+    (factory, lib.tool_pins.write_effective_pins).
 
     `proxied` (agents-5d9) forwards the operator's proxy vars (PROXY_VARS) — only for an
     unsandboxed child that must reach the network the way the operator's shell does. It is
-    False by default, so a sandboxed child never inherits a possibly-poisoned operator proxy.
-    The operator's CA bundle is never forwarded: every child uses the system trust store.
+    ignored for children that have no network capability.
 
     `broker_urls` (agents-8h4) maps a provider name to the base URL of a dispatcher-run
     credential broker. For each such provider the real key vars are dropped and the engine gets
@@ -184,31 +199,43 @@ def child_environment(
     """
     source = os.environ if parent is None else parent
     env = {name: source[name] for name in BASE_ALLOW if name in source}
+
     if proxied:
-        env.update({name: source[name] for name in PROXY_VARS if name in source})
+        for name in PROXY_VARS:
+            if name in source:
+                env[name] = source[name]
+
+    if engine and engine in ENGINE_CREDENTIALS:
+        for name in ENGINE_CREDENTIALS[engine]:
+            if name in source:
+                env[name] = source[name]
+
+    if engine == "pi":
+        for name in PI_ALLOW:
+            if name in source:
+                env[name] = source[name]
+
+    if github:
+        for name in GITHUB_VARS:
+            if name in source:
+                env[name] = source[name]
 
     if trusted_tools:
-        if source.get(HOST_PINS_ENV):
-            env[HOST_PINS_ENV] = str(source[HOST_PINS_ENV])
-        # agents-7ua: the unpinned-tools opt-in is the same run-scoped decision as the pins
-        # file above — forward it so the sink/promotion child resolves the tool under the same
-        # rule the parent just used, never a stricter one that makes it fail closed spuriously.
-        if source.get(UNPINNED_ALLOW_ENV):
-            env[UNPINNED_ALLOW_ENV] = str(source[UNPINNED_ALLOW_ENV])
+        for name in (HOST_PINS_ENV, UNPINNED_ALLOW_ENV):
+            value = source.get(name)
+            if value is not None:
+                env[name] = value
 
-    names = list(ENGINE_CREDENTIALS.get(engine or "", ()))
-    # Explicit promotion grants a GitHub token; legacy both/all aliases only select beads.
-    if github:
-        names.extend(GITHUB_TOKEN_VARS)
-    if sink:
-        # Each sink adapter names what its delivery needs (github-issues: a GitHub token;
-        # command: the manifest's `sink_env` list). This module never names a tracker
-        # (fleet-km8); the set for the built-in sinks is unchanged.
-        from lib.sinks import credential_env
-        names.extend(credential_env(sink, sink_options))
-    for name in names:
-        value = source.get(name)
-        if value:
+    if sink_options:
+        env_extra = sink_options.get("env")
+        if isinstance(env_extra, MappingABC):
+            for k, v in env_extra.items():
+                if isinstance(k, str) and isinstance(v, str):
+                    env[k] = v
+
+    # Preserve any existing FACTORY_* configuration variables already in the parent env
+    for name, value in source.items():
+        if name.startswith("FACTORY_") and name not in env:
             env[name] = value
 
     if broker_urls:

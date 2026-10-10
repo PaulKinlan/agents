@@ -264,6 +264,37 @@ def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
     return repo
 
 
+def write_effective_pins(path: Path,
+                         pins: Optional[Dict[str, Dict[str, str]]] = None) -> Path:
+    """Write the EFFECTIVE merged pins (repo ``tools.yaml`` under the host file) as one
+    pins file a child process can point ``FACTORY_TOOL_PINS`` at.
+
+    The sandboxed pre-pass re-authenticates its own trusted tools through
+    ``resolve_tool`` (agents-28nn round 4: a station script's own trusted-tool launch is
+    a census kind of its own), but the host pins file typically lives under ``$HOME`` —
+    tmpfs-hidden inside the wrap. The dispatcher therefore writes the merged view it just
+    verified into the run directory (rw-bound at the same host path) and points the
+    child's ``FACTORY_TOOL_PINS`` at it, so the child re-verifies against EXACTLY what
+    the host verified. Pins are paths and hashes — not secret — and only the pre-pass
+    reads this file, before any engine session starts.
+    """
+    if pins is None:
+        pins = load_tool_pins()
+    lines = [
+        "# Effective tool pins for one pre-pass child, written by the dispatcher",
+        "# (agents-28nn round 4): the merged view the host itself verified.",
+    ]
+    for name in sorted(pins):
+        entry = pins[name]
+        lines.append(f"{name}:")
+        if entry.get("path"):
+            lines.append(f"  path: {entry['path']}")
+        if entry.get("sha256"):
+            lines.append(f"  sha256: {entry['sha256']}")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return Path(path)
+
+
 def _require_pin(name: str, entry: Dict[str, str]) -> None:
     """Fail closed when a trusted tool has no content pin, unless the dev opt-in is set.
 
