@@ -199,8 +199,10 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_fast_gate_mapping.py"
       ;;
     docs/*)
-      # Documentation pages snapshot and publishing scope (agents-vt7w).
-      mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py"
+      # Documentation pages snapshot and publishing scope (agents-vt7w). tests/test_docs_drift.py
+      # pins docs/INTEGRATION.md by content (its Section 5 script table at :191 and its section
+      # anchors at :485-492), so it belongs in this union (agents-9nir review).
+      mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py tests/test_docs_drift.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"
@@ -235,6 +237,31 @@ while IFS= read -r f; do
       # (ROOT / "findings" / SUPPRESSIONS_FILENAME), so a change here is a contract change.
       mapped="$mapped tests/test_suppressions.py"
       ;;
+    agents/*/SKILL.md)
+      # The docs-drift scanner os.walk()s every committed .md outside IGNORE_DIRS
+      # (agents/docs-drift/scripts/check_docs.py:466-478) and its real-tree suite pins the
+      # agents/*/SKILL.md candidate set by count (tests/test_docs_drift.py:384-394). A path
+      # grep cannot see this consumer - a walker consumes a CLASS of paths (agents-9nir review).
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
+    agents/*/agent.yaml)
+      # Station manifests are read off the real tree: tests/test_docs_design.py:77 globs
+      # agents/*/agent.yaml to check stations.html, and tests/test_containment.py:300 globs
+      # them for the credential-grant drift guard (agents-9nir review).
+      mapped="$mapped tests/test_docs_design.py tests/test_containment.py"
+      ;;
+    lines/*.yaml)
+      # Line manifests are read off the real tree: tests/test_docs_design.py:78 globs
+      # lines/*.yaml to check lines.html (agents-9nir review).
+      mapped="$mapped tests/test_docs_design.py"
+      ;;
+    tools.yaml)
+      # Runtime tool pins. lib/tool_pins.py reads the committed file at CONFIG_PATH when
+      # FACTORY_TOOL_PINS is unset, and tests/test_child_env.py's resolve probes run against
+      # the real repo WITHOUT the override, so the committed contents are asserted (a bd pin
+      # would flip the fail-closed expectation); tests/test_tool_pins.py is the pins contract.
+      mapped="$mapped tests/test_tool_pins.py tests/test_child_env.py"
+      ;;
     # --- Ignore list (agents-9nir) -----------------------------------------------------
     # RULE: an ignore must be a DELIBERATE CASE ARM WITH A REASON, never a default.
     # "No arm" used to mean two different things - a considered exclusion and an
@@ -243,10 +270,25 @@ while IFS= read -r f; do
     # suite. The *) arm at the bottom fails loudly and NAMES any file no arm claims;
     # the smoke fallback after the loop is for ignored docs/config-only changes ONLY.
     # To exempt a path, add an arm here with the reason it needs no suite.
-    *.md)
-      # Prose documentation. No suite executes prose; docs/*.md never reaches here (the
-      # docs/* arm above maps it to the docs suites) and README.md is mapped above
-      # because a suite pins its content.
+    # WARNING, learned the hard way (agents-9nir review): a path grep cannot prove a path
+    # class is consumer-free, because a WALKER consumes a CLASS of paths - the docs-drift
+    # scanner os.walk()s every committed .md outside IGNORE_DIRS, which is why the original
+    # canvas `*.md` ignore arm was false. Check for globs and directory walks too.
+    .beads/*)
+      # Beads tooling state (config, hooks, metadata.json) maintained by bd itself, not by
+      # us; the scanner excludes it (dot-dir skip plus IGNORE_DIRS) and tests only ever
+      # mkdir their own tmp .beads fixtures - no suite reads the committed files.
+      ;;
+    targets/*.yaml)
+      # Target inventory data read by factory at run time. No suite reads the committed
+      # files: every targets/ reference in tests writes its own tmp fixture (verified by
+      # glob/walk search, not a filename grep). NOTE targets/README.md is NOT here - the
+      # scanner walks it, so it fails loudly until someone makes that call deliberately.
+      ;;
+    *.gitkeep)
+      # Empty placeholders keeping otherwise-gitignored dirs (findings/, lines/,
+      # schedules/) tracked. lib/retention.py:78 protects findings/.gitkeep by name, but
+      # no suite reads the committed files (test_retention.py uses tmp fixtures).
       ;;
     .gitignore)
       # VCS metadata, consumed only by git itself. Tests mention .gitignore only as

@@ -8,7 +8,10 @@ Validates:
 4. tools/fast-gate.sh itself maps to this verification suite.
 5. agents-9nir: the ignore list is deliberate - ignored docs/config-only paths still fall
    back quietly, and any changed file matching NEITHER a mapping arm NOR the ignore list
-   FAILS LOUDLY, naming the file, even when other changed files do map.
+   FAILS LOUDLY, naming the file, even when other changed files do map. Markdown is NOT a
+   prose-only class: the docs-drift scanner os.walk()s every committed .md outside
+   IGNORE_DIRS (agents/docs-drift/scripts/check_docs.py:466-478), so walked-but-unpinned
+   markdown fails loudly rather than being silently absorbed by a canvas ignore arm.
 """
 
 import os
@@ -148,17 +151,62 @@ class TestFastGateMapping(unittest.TestCase):
         mapped = resolve_fast_gate(["findings/suppressions.yaml"])
         self.assertIn("tests/test_suppressions.py", mapped, "suppressions register contract omitted (agents-9nir)")
 
+    def test_skill_md_maps_to_docs_drift(self):
+        """agents/*/SKILL.md is walked by the docs-drift scanner and pinned by count (agents-9nir P0)."""
+        mapped = resolve_fast_gate(["agents/docs-drift/SKILL.md"])
+        self.assertIn("tests/test_docs_drift.py", mapped, "SKILL.md walker suite omitted (agents-9nir)")
+
+    def test_agent_yaml_maps_to_docs_design_and_containment(self):
+        """agents/*/agent.yaml is globbed off the real tree by two suites (agents-9nir review)."""
+        mapped = resolve_fast_gate(["agents/vuln-verify/agent.yaml"])
+        self.assertIn("tests/test_docs_design.py", mapped, "stations.html glob omitted (test_docs_design.py:77)")
+        self.assertIn("tests/test_containment.py", mapped, "credential-grant drift guard omitted (test_containment.py:300)")
+
+    def test_lines_yaml_maps_to_docs_design(self):
+        """lines/*.yaml is globbed off the real tree by the lines.html check (agents-9nir review)."""
+        mapped = resolve_fast_gate(["lines/web-excellence.yaml"])
+        self.assertIn("tests/test_docs_design.py", mapped, "lines.html glob omitted (test_docs_design.py:78)")
+
+    def test_tools_yaml_maps_to_pins_and_child_env(self):
+        """tools.yaml is read at CONFIG_PATH when FACTORY_TOOL_PINS is unset; the child-env probes assert on it."""
+        mapped = resolve_fast_gate(["tools.yaml"])
+        self.assertIn("tests/test_tool_pins.py", mapped)
+        self.assertIn("tests/test_child_env.py", mapped, "fail-closed probe reads the committed tools.yaml (agents-9nir)")
+
+    def test_docs_change_maps_to_docs_drift(self):
+        """docs/* must include the suite that pins docs/INTEGRATION.md by content (agents-9nir review)."""
+        mapped = resolve_fast_gate(["docs/INTEGRATION.md"])
+        self.assertIn("tests/test_docs_design.py", mapped)
+        self.assertIn("tests/test_pages_publish_scope.py", mapped)
+        self.assertIn("tests/test_docs_drift.py", mapped, "INTEGRATION.md anchor/table pin omitted (agents-9nir)")
+
     def test_ignored_docs_and_vcs_metadata_fall_back_quietly(self):
         """Ignore-list paths resolve to nothing and exit 0, so the real run takes the smoke fallback quietly."""
-        for path in ("AGENTS.md", "agents/vuln-verify/README.md", "reports/factory-security-audit.md", ".gitignore"):
+        for path in (".gitignore", ".beads/metadata.json", "targets/voicebox.yaml",
+                     "findings/.gitkeep", "schedules/.gitkeep"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertEqual(res.returncode, 0, f"{path}: ignored path must not fail (agents-9nir): {res.stderr}")
                 self.assertEqual(res.stdout.strip(), "", f"{path}: ignored path must map to no suite (agents-9nir)")
 
+    def test_walked_but_unpinned_markdown_fails_loudly(self):
+        """Markdown the scanner walks but no assertion pins must NOT be silently ignored (agents-9nir P0).
+
+        The docs-drift scanner walks every committed .md outside IGNORE_DIRS, so "prose, no
+        consumer" is an unverifiable reason for walked markdown: neither ignore (a canvas
+        with a false reason) nor map (a suite whose assertions cannot fail on the file) is
+        honest, so the deliberate behaviour is the loud failure.
+        """
+        for path in ("agents/vuln-verify/README.md", "AGENTS.md", "targets/README.md",
+                     "reports/factory-security-audit.md"):
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
+                self.assertIn(path, res.stderr, f"{path}: the failure must name the file (agents-9nir)")
+
     def test_unmatched_file_fails_loudly_naming_the_file(self):
         """A changed file matching neither a mapping arm nor the ignore list must fail and name itself."""
-        for path in ("agents/vuln-verify/agent.yaml", "targets/voicebox.yaml"):
+        for path in ("package.json", "install.sh", ".agents/skills/beads/SKILL.md"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0, f"{path}: unmatched file must fail loudly (agents-9nir)")
@@ -167,9 +215,9 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
-        res = run_fast_gate(["lib/sandbox.py", "targets/voicebox.yaml"])
+        res = run_fast_gate(["lib/sandbox.py", "install.sh"])
         self.assertNotEqual(res.returncode, 0, "unmatched file masked by a mapped sibling (agents-9nir)")
-        self.assertIn("targets/voicebox.yaml", res.stderr, "the failure must name the unmatched file")
+        self.assertIn("install.sh", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
 
