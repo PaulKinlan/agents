@@ -852,7 +852,7 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     return max(pool, key=lambda o: o[0])[1]
 
 _TRANSIENT_DIRS: List[Path] = []
-_TRANSIENT_DIR_PREFIXES = ("factory-sock-", "factory-pi-")
+_TRANSIENT_DIR_PREFIXES = ("factory-sock-", "factory-pi-", "factory-pins-")
 _TRANSIENT_DIR_MAX_AGE_SECONDS = 24 * 3600  # agents-uxs: far beyond any legitimate run lifetime
 
 
@@ -906,6 +906,29 @@ def _make_socket_dir() -> Path:
     _sweep_stale_transient_dirs()  # agents-uxs: reap hard-kill orphans at the point of creation
     d = Path(tempfile.mkdtemp(prefix="factory-sock-", dir="/tmp"))
     os.chmod(d, 0o700)  # mkdtemp is 0700 by default; be explicit against umask drift
+    _TRANSIENT_DIRS.append(d)
+    return d
+
+
+def _make_pins_dir() -> Path:
+    """Allocate a short, private, per-run directory for the EFFECTIVE tool pins
+    (agents-28nn round 5, review P0 — the TOCTOU on the effective pins).
+
+    PROJECT RULE: A FILE THE PIN RESOLVER TRUSTS MUST NOT BE A FILE THE PINNED PROCESS CAN
+    REWRITE — trust is not a property of WHAT is read, it is a property of WHO CAN WRITE
+    WHAT IS READ. The merged pins used to be written into the run directory, which the
+    sandbox binds READ-WRITE at the same host path, so code running in the child could
+    overwrite the file that constrains it and then have resolve_tool validate the
+    injected hash (constructed by the round-4 reviewer: a station script wrote a fake git
+    hash to the path named by FACTORY_TOOL_PINS before calling resolve_tool("git"), which
+    accepted it). The pins therefore get their own per-run directory OUTSIDE the run
+    directory; the pre-pass wrap binds the file READ-ONLY through sandbox_command's
+    ro_binds — the bind machinery this codebase already has, reused rather than a second
+    mechanism — so the kernel, not the file's location by convention, enforces who can
+    write it. 0700 and reaped like the socket/pi dirs.
+    """
+    d = Path(tempfile.mkdtemp(prefix="factory-pins-", dir="/tmp"))
+    os.chmod(d, 0o700)
     _TRANSIENT_DIRS.append(d)
     return d
 
@@ -1235,15 +1258,22 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # launch is a census kind of its own — the bind boundary authenticates at
             # WRAP time; the script re-verifies at EXEC time). The host pins file lives
             # under $HOME, tmpfs-hidden inside the wrap, so the child gets the EFFECTIVE
-            # pins the host just verified, written into the rw-bound run directory and
-            # named by its FACTORY_TOOL_PINS — paths and hashes, not secrets.
-            prepass_env[HOST_PINS_ENV] = str(write_effective_pins(
-                run_dir / "tool-pins.effective.yaml"))
+            # pins the host just verified — paths and hashes, not secrets.
+            # agents-28nn round 5 (review P0): the pins file must NOT be one the child
+            # can rewrite (the rule on _make_pins_dir), so it lives in its own per-run
+            # dir OUTSIDE the rw-bound run directory and is bound into the wrap
+            # READ-ONLY at the same absolute path — the child that rewrites the file it
+            # was handed gets EROFS, and resolve_tool keeps validating what the host
+            # verified.
+            effective_pins = write_effective_pins(
+                _make_pins_dir() / "tool-pins.effective.yaml")
+            prepass_env[HOST_PINS_ENV] = str(effective_pins)
             try:
                 prepass_cmd = sandbox_command(
                     prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                     run_dir=run_dir, env=prepass_env,
                     executables=tuple(PREPASS_EXECUTABLES) + tuple(policy.requires),
+                    ro_binds=[str(effective_pins)],
                     egress_forwards=[(EGRESS_PROXY_PORT, str(proxy_sock))])
             except SandboxError as e:
                 raise StationError(f"{agent_name}: cannot sandbox the pre-pass: {e}") from e

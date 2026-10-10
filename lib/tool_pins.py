@@ -284,10 +284,15 @@ def write_effective_pins(path: Path,
     ``resolve_tool`` (agents-28nn round 4: a station script's own trusted-tool launch is
     a census kind of its own), but the host pins file typically lives under ``$HOME`` —
     tmpfs-hidden inside the wrap. The dispatcher therefore writes the merged view it just
-    verified into the run directory (rw-bound at the same host path) and points the
-    child's ``FACTORY_TOOL_PINS`` at it, so the child re-verifies against EXACTLY what
-    the host verified. Pins are paths and hashes — not secret — and only the pre-pass
-    reads this file, before any engine session starts.
+    verified and points the child's ``FACTORY_TOOL_PINS`` at it, so the child re-verifies
+    against EXACTLY what the host verified. Pins are paths and hashes — not secret — and
+    only the pre-pass reads this file, before any engine session starts.
+
+    agents-28nn round 5 (review P0): the file is written OUTSIDE the run directory (the
+    run dir is rw-bound into the wrap — a pins file there is one the pinned process can
+    rewrite, and the resolver would then validate injected hashes) and bound into the
+    pre-pass wrap READ-ONLY. A file the pin resolver trusts must not be a file the
+    pinned process can rewrite.
     """
     if pins is None:
         pins = load_tool_pins()

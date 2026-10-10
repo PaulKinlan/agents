@@ -184,8 +184,10 @@ def child_environment(
     it the child's own `resolve_tool` fails closed even though the parent just resolved the
     same binary. Children that never resolve a trusted tool (engine sessions) get nothing
     extra. For the SANDBOXED pre-pass the forwarded pins path would be hidden by the wrap,
-    so the dispatcher overwrites it with the effective pins written into the run directory
-    (factory, lib.tool_pins.write_effective_pins).
+    so the dispatcher overwrites it with the effective pins written OUTSIDE the run
+    directory and bound into the wrap read-only (factory, lib.tool_pins.write_effective_pins
+    — agents-28nn round 5: a file the pin resolver trusts must not be a file the pinned
+    process can rewrite).
 
     `proxied` (agents-5d9) forwards the operator's proxy vars (PROXY_VARS) — only for an
     unsandboxed child that must reach the network the way the operator's shell does. It is

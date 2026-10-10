@@ -585,6 +585,7 @@ def sandbox_command(
     executables: Sequence[str] = (),
     egress_forwards: Optional[Sequence[Tuple[int, str]]] = None,
     rw_binds: Sequence[str] = (),
+    ro_binds: Sequence[str] = (),
     mask_findings: bool = False,
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
@@ -660,6 +661,24 @@ def sandbox_command(
     # (models.json + an empty auth.json), so writability does not weaken containment.
     for path in rw_binds:
         plan.rw_bind(path)
+
+    # agents-28nn round 5 (review P0 — the effective-pins TOCTOU): caller-declared
+    # READ-ONLY binds, applied after the run directory's rw-bind. PROJECT RULE: A FILE THE
+    # PIN RESOLVER TRUSTS MUST NOT BE A FILE THE PINNED PROCESS CAN REWRITE — trust is not
+    # a property of WHAT is read, it is a property of WHO CAN WRITE WHAT IS READ. The
+    # effective pins were written into the rw-bound run directory, so code in the child
+    # could overwrite the file that constrains it and resolve_tool then validated the
+    # injected hash (constructed by the round-4 reviewer). The read-only bind is the
+    # codebase's own machinery REUSED — bwrap's ro-bind makes the kernel, not a
+    # convention, enforce who can write — and the alternative (over-mounting a file that
+    # still lives inside the rw-bound run dir) is worse twice over: _BindPlan treats an
+    # rw ancestor as already covering an ro request (the over-mount would be silently
+    # skipped), and a correct over-mount would still leave the file exposed to every
+    # OTHER wrap that rw-binds the run dir, the engine session included. The file must
+    # live OUTSIDE every rw-bound tree and be bound here, read-only, at the same absolute
+    # path the child's FACTORY_TOOL_PINS names.
+    for path in ro_binds:
+        plan.ro_bind(path)
 
     # agents-x8l: egress sockets may live outside run_dir (a short per-run dir under /tmp,
     # because run_dir embeds the worktree path and can exceed AF_UNIX's sun_path limit). Bind

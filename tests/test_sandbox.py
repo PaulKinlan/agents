@@ -15,6 +15,7 @@ The dispatcher-level guarantee (banner + policy.json say what was enforced) live
 tests/test_containment.py, which holds the stub-engine harness.
 """
 
+import errno
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
@@ -477,6 +478,136 @@ class TestBwrapPinBoundary(unittest.TestCase):
             sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
                             run_dir=self.run_dir, env=dict(os.environ))
         self.assertFalse(self.fake_log.exists())
+
+
+@unittest.skipUnless(LIVE, "the ro-bind boundary needs a real bwrap wrap")
+class TestEffectivePinsBoundary(unittest.TestCase):
+    """agents-28nn round 5, review P0 — the TOCTOU on the effective pins.
+
+    PROJECT RULE: A FILE THE PIN RESOLVER TRUSTS MUST NOT BE A FILE THE PINNED PROCESS CAN
+    REWRITE — trust is not a property of WHAT is read, it is a property of WHO CAN WRITE
+    WHAT IS READ. The dispatcher used to write the merged tool-pins.effective.yaml into
+    the run directory, which the wrap binds READ-WRITE at the same host path; the round-4
+    reviewer CONSTRUCTED the hole by having a station script write a fake git hash to the
+    path named by FACTORY_TOOL_PINS before calling resolve_tool("git"), which validated
+    the injected hash. The fix keeps the pins OUTSIDE every rw-bound tree and binds the
+    file into the wrap READ-ONLY (sandbox_command's ro_binds — the existing bind
+    machinery, reused).
+
+    These tests ARE the constructed case, run against a real wrap: a child that rewrites
+    the file it was handed. The boundary arm (ro_binds) must leave resolve_tool validating
+    the REAL git; the control arm (the old shape — the pins file rw-bound inside the run
+    directory) must show the SAME child succeeding, so the boundary arm's refusal is the
+    bind's doing, not a broken harness. MUTATION PROOF, both directions (performed, not
+    asserted): dropping the dispatcher's ro_binds wiring makes the file rw inside the wrap
+    and the boundary arm goes red (OVERWRITE-SUCCEEDED, the fake resolves); restoring it
+    turns it green.
+    """
+
+    # The child: plant a fake git in the (rw-bound) run dir, FORGE a pins file vouching
+    # for it at the FACTORY_TOOL_PINS path it was handed, then resolve — exactly the
+    # reviewer's construction.
+    ATTACK_CHILD = r"""
+import hashlib, os, sys
+from pathlib import Path
+sys.path.insert(0, {factory!r})
+pins = Path(os.environ["FACTORY_TOOL_PINS"])
+fake = Path({run_dir!r}) / "git"
+fake.write_text("#!/bin/sh\necho PWNED\n")
+fake.chmod(0o755)
+forged = "git:\n  path: %s\n  sha256: %s\n" % (
+    fake, hashlib.sha256(fake.read_bytes()).hexdigest())
+try:
+    pins.write_text(forged)
+    print("OVERWRITE-SUCCEEDED")
+except OSError as e:
+    print("OVERWRITE-REFUSED:%s" % e.errno)
+from lib.tool_pins import resolve_tool, ToolPinError
+try:
+    print("RESOLVED:%s" % resolve_tool("git"))
+except ToolPinError as e:
+    print("REFUSED:%s" % e)
+"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-toctou-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory-root"
+        (self.factory / "runs").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.run_dir = self.factory / "runs" / "run1"
+        self.run_dir.mkdir(parents=True)
+        # The REAL git, pinned by path + content — what the host verified and wrote as
+        # the child's effective pins.
+        self.real_git = os.path.realpath(shutil.which("git"))
+        from lib.tool_pins import sha256_file
+        self.real_sha = sha256_file(Path(self.real_git))
+        # The child imports lib.tool_pins from the REAL factory root (ro-bound by every
+        # wrap at its host path), not the scratch factory dir the wrap masks runs/ under.
+        self.child = self.run_dir / "attack_child.py"
+        self.child.write_text(
+            self.ATTACK_CHILD.format(factory=str(ROOT), run_dir=str(self.run_dir)),
+            encoding="utf-8")
+
+    def _run_child(self, pins_path: Path, ro_binds=()):
+        pins_path.write_text(
+            f"git:\n  path: {self.real_git}\n  sha256: {self.real_sha}\n",
+            encoding="utf-8")
+        env = {"PATH": "/usr/bin:/bin",
+               # The properties pinned here are exactly what the dev/test opt-in waives.
+               "FACTORY_TOOL_PINS": str(pins_path)}
+        argv = sandbox_command(
+            [sys.executable, str(self.child)],
+            target_dir=self.target, factory_root=self.factory, run_dir=self.run_dir,
+            env=env,
+            # ROOT (the real repo, under tmpfs-hidden /home) is bound read-only so the
+            # child can import lib.tool_pins — the same visibility the real pre-pass
+            # gets from factory_root.
+            ro_binds=[str(p) for p in ro_binds] + [str(ROOT)])
+        # The env must ride the EXEC, not only the wrap build: bwrap inherits the
+        # process environment, so omitting env= here would hand the child the OPERATOR's
+        # FACTORY_TOOL_PINS instead of the file under test.
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+
+    def test_a_child_cannot_rewrite_the_read_only_pins_it_is_handed(self):
+        """THE FILED HOLE, CLOSED: the pins file lives OUTSIDE the rw-bound run dir and is
+        bound read-only, so the forged write fails EROFS and resolve_tool keeps
+        validating the REAL git — the injected hash never enters what the resolver
+        trusts."""
+        pins = self.root / "factory-pins-test" / "tool-pins.effective.yaml"
+        pins.parent.mkdir()
+        original = f"git:\n  path: {self.real_git}\n  sha256: {self.real_sha}\n"
+        res = self._run_child(pins, ro_binds=[pins])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"OVERWRITE-REFUSED:{errno.EROFS}", res.stdout,
+                      "the read-only bind must refuse the forged write with EROFS "
+                      "specifically — an ENOENT would mean the file never reached the "
+                      "child and the test proves nothing: " + res.stdout)
+        self.assertNotIn("OVERWRITE-SUCCEEDED", res.stdout)
+        self.assertIn(f"RESOLVED:{self.real_git}", res.stdout,
+                      "resolve_tool must keep validating what the host verified: "
+                      + res.stdout)
+        self.assertEqual(pins.read_text(encoding="utf-8"), original,
+                         "the pins the host wrote must be byte-identical afterwards")
+        # The fake git was planted but is never what the resolver returns.
+        self.assertNotIn(str(self.run_dir / "git"), res.stdout.split("RESOLVED:")[-1])
+
+    def test_control_the_run_dir_shape_rewrites_the_pins_and_validates_the_fake(self):
+        """The constructed attack against the OLD shape (pins rw-bound inside the run dir,
+        no ro-bind): the same child OVERWRITES the file it was handed and resolve_tool
+        validates the injected hash. This is the mutation trap for the fix: reintroduce
+        the old shape and the boundary test above goes red exactly this way."""
+        pins = self.run_dir / "tool-pins.effective.yaml"
+        res = self._run_child(pins)  # no ro_binds — the pre-fix shape
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("OVERWRITE-SUCCEEDED", res.stdout,
+                      "the old shape must still be attackable, or the boundary test "
+                      "proves nothing: " + res.stdout)
+        self.assertIn(f"RESOLVED:{self.run_dir / 'git'}", res.stdout,
+                      "the forged pin must be VALIDATED against the rewritten file — the "
+                      "attack the rule now forbids: " + res.stdout)
 
 
 class TestPinFailureDegradation(unittest.TestCase):
