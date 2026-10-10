@@ -25,6 +25,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib.findings import FindingsStore  # noqa: E402
+from lib.report_schema import (  # noqa: E402
+    guard_concurrency_finding,
+    has_reentrancy_precondition,
+    is_concurrency_recommendation,
+    normalize_report,
+    unpreconditioned_concurrency_findings,
+    validate_agent_report,
+)
 
 SCANNER_SCRIPT = ROOT / "agents" / "perf-review" / "scripts" / "scan_perf_changes.py"
 
@@ -175,6 +183,125 @@ class TestPerfReviewVerdictReproducibility(unittest.TestCase):
             )
             self.assertEqual(processed1[0]["severity"], "high")
             self.assertEqual(processed1[1]["severity"], "medium")
+
+
+class TestConcurrencyRecommendationGuard(unittest.TestCase):
+    """agents-vorw / hub fleet-4inv: Concurrency recommendation reentrancy guard."""
+
+    def test_scanner_rule_suggestion_carries_reentrancy_precondition(self):
+        """scan_perf_changes.py rule suggestion must state reentrancy precondition."""
+        mod = load_scanner_module()
+        rule = next(r for r in mod.PERF_RULES if r["rule_id"] == "sequential-await-waterfall")
+        self.assertIn("reentrant", rule["suggestion"])
+        self.assertIn("thread-safe", rule["suggestion"])
+        self.assertIn("serial execution", rule["suggestion"])
+
+    def test_detects_concurrency_recommendation(self):
+        """Identify findings that recommend concurrency or parallelization."""
+        f1 = {"rule_id": "sequential-await-waterfall", "remediation": "Batch items"}
+        self.assertTrue(is_concurrency_recommendation(f1))
+
+        f2 = {"rule_id": "custom-rule", "remediation": "Use Promise.all to fetch in parallel"}
+        self.assertTrue(is_concurrency_recommendation(f2))
+
+        f3 = {"rule_id": "custom-rule", "description": "Run asyncio.gather on background tasks"}
+        self.assertTrue(is_concurrency_recommendation(f3))
+
+        f4 = {"rule_id": "layout-thrashing-forced-reflow", "remediation": "Batch geometry reads"}
+        self.assertFalse(is_concurrency_recommendation(f4))
+
+    def test_detects_reentrancy_precondition_or_evidence(self):
+        """Identify whether finding already carries backend evidence or precondition."""
+        without_precondition = {"remediation": "Replace loop with Promise.all"}
+        self.assertFalse(has_reentrancy_precondition(without_precondition))
+
+        with_precondition = {
+            "remediation": "IF this runtime is reentrant and thread-safe, use Promise.all; otherwise keep serial execution."
+        }
+        self.assertTrue(has_reentrancy_precondition(with_precondition))
+
+        with_evidence = {
+            "remediation": "Node.js fetch is thread-safe and reentrant; use Promise.all."
+        }
+        self.assertTrue(has_reentrancy_precondition(with_evidence))
+
+        with_mutex_caveat = {
+            "remediation": "Runtime uses a non-reentrant mutex, so preserve serial execution."
+        }
+        self.assertTrue(has_reentrancy_precondition(with_mutex_caveat))
+
+    def test_post_filter_enforces_reentrancy_precondition_on_unpreconditioned_finding(self):
+        """Post-filter must prepend reentrancy precondition to unchecked concurrency recommendation."""
+        report = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/onnx_runner.ts",
+                    "line_number": 42,
+                    "title": "Sequential Model Inference Waterfall",
+                    "description": "Sequential await in loop slows down execution",
+                    "remediation": "Replace loop with await Promise.all(items.map(runInference))",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+
+        finding = report["findings"][0]
+        self.assertTrue(finding["remediation"].startswith("Precondition: Verify backend reentrancy before applying."))
+        self.assertIn("IF the underlying runtime/backend is reentrant and thread-safe", finding["remediation"])
+        self.assertIn("ONNX Runtime _OrtRun", finding["remediation"])
+        self.assertIn("otherwise preserve serial execution", finding["remediation"])
+        self.assertIn("[Precondition Note:", finding["description"])
+
+    def test_post_filter_leaves_preconditioned_finding_intact(self):
+        """Post-filter must not double-wrap an already preconditioned finding."""
+        original_remediation = (
+            "IF the WebGPU runtime backend is reentrant and supports concurrent queue submission, "
+            "use Promise.all; otherwise preserve serial execution."
+        )
+        report = {
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/compute.ts",
+                    "line_number": 12,
+                    "remediation": original_remediation,
+                    "description": "Model check",
+                }
+            ]
+        }
+        notes = normalize_report(report)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes))
+        self.assertEqual(report["findings"][0]["remediation"], original_remediation)
+
+    def test_validator_rejects_unpreconditioned_concurrency_if_normalization_bypassed(self):
+        """validate_agent_report must reject an un-preconditioned concurrency finding if un-normalized."""
+        raw_report = {
+            "summary": "Perf review report",
+            "target": "sample-target",
+            "findings": [
+                {
+                    "rule_id": "sequential-await-waterfall",
+                    "path": "src/model.ts",
+                    "line_number": 20,
+                    "snippet": "for (const e of exercises) await e.run();",
+                    "severity": "high",
+                    "title": "Waterfall",
+                    "description": "Slow loop",
+                    "remediation": "Use Promise.all to run all exercises concurrently",
+                }
+            ]
+        }
+        perf_dir = ROOT / "agents" / "perf-review"
+        perf_cfg = {"output": {"schema": "report.schema.json"}}
+        violations = validate_agent_report(perf_dir, perf_cfg, raw_report)
+        self.assertTrue(any("concurrency recommendation" in v and "reentrancy precondition" in v for v in violations))
+
+        # Once normalized through normalize_report, violations must be cleared
+        normalize_report(raw_report)
+        violations_after = validate_agent_report(perf_dir, perf_cfg, raw_report)
+        self.assertEqual(violations_after, [])
 
 
 class TestFactorySamplingParams(unittest.TestCase):

@@ -154,6 +154,103 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
     return violations
 
 
+# ---------------------------------------------------------------------------------------------
+# Concurrency recommendation guard (agents-vorw / hub fleet-4inv)
+#
+# Concurrency recommendations (e.g. replacing loops with Promise.all / asyncio.gather)
+# must either name the backend and cite evidence that it tolerates overlap, or carry
+# their reentrancy precondition ("IF this runtime is reentrant..."). Unchecked concurrency
+# recommendations on non-reentrant runtimes (like ONNX Runtime Web wasm with its module-level
+# _OrtRun mutex, WebGPU compute passes, or transactional handles) crash the application.
+# ---------------------------------------------------------------------------------------------
+
+_CONCURRENCY_PATTERN = re.compile(
+    r"\b(?:Promise\.(?:all|allSettled)|asyncio\.gather|in\s+parallel|parallelize|parallel\s+execution|concurrently|concurrent\s+execution|overlapping)\b",
+    re.IGNORECASE
+)
+
+_REENTRANCY_EVIDENCE_PATTERN = re.compile(
+    r"\b(?:reentrant|reentrancy|thread-safe|threadsafe|thread\s+safe|mutex|non-reentrant|if\s+(?:the\s+)?(?:runtime|backend)|if\s+reentrant|if\s+supported|verify\s+(?:the\s+)?(?:runtime|backend|reentrancy)|supports?\s+(?:concurrency|concurrent|overlap)|tolerates?\s+overlap)\b",
+    re.IGNORECASE
+)
+
+
+def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
+    """Return True if a finding proposes concurrent / parallel execution."""
+    if not isinstance(finding, dict):
+        return False
+    rule_id = str(finding.get("rule_id", "")).strip().lower()
+    if rule_id == "sequential-await-waterfall":
+        return True
+    text = " ".join([
+        str(finding.get("title", "")),
+        str(finding.get("description", "")),
+        str(finding.get("remediation", "")),
+        str(finding.get("proposed_fix_diff", "")),
+    ])
+    return bool(_CONCURRENCY_PATTERN.search(text))
+
+
+def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
+    """Return True if a finding cites backend reentrancy evidence or states its precondition."""
+    if not isinstance(finding, dict):
+        return False
+    text = " ".join([
+        str(finding.get("remediation", "")),
+        str(finding.get("description", "")),
+        str(finding.get("title", "")),
+    ])
+    return bool(_REENTRANCY_EVIDENCE_PATTERN.search(text))
+
+
+def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[str]:
+    """Ensure a concurrency recommendation carries its reentrancy precondition.
+
+    If the finding recommends concurrency without citing backend evidence or stating
+    a reentrancy precondition, wrap/prepend the remediation and description with the
+    explicit precondition so applying it will not crash on non-reentrant runtimes
+    (agents-vorw / hub fleet-4inv).
+    """
+    if not is_concurrency_recommendation(finding) or has_reentrancy_precondition(finding):
+        return None
+
+    remediation = str(finding.get("remediation", "")).strip()
+    if remediation:
+        finding["remediation"] = (
+            "Precondition: Verify backend reentrancy before applying. "
+            f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {remediation}; otherwise preserve serial execution."
+        )
+    else:
+        finding["remediation"] = (
+            "Precondition: Verify backend reentrancy before applying. "
+            "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
+        )
+
+    desc = str(finding.get("description", "")).strip()
+    if desc and "[Precondition Note:" not in desc:
+        finding["description"] = (
+            desc + "\n[Precondition Note: Concurrency advice requires verified backend reentrancy; if the runtime is non-reentrant, serial execution must be preserved.]"
+        )
+    return f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
+
+
+def unpreconditioned_concurrency_findings(report: Any) -> List[str]:
+    """Check if any finding makes an unchecked concurrency recommendation without a precondition."""
+    violations: List[str] = []
+    if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
+        return violations
+    for i, item in enumerate(report["findings"]):
+        if not isinstance(item, dict):
+            continue
+        if is_concurrency_recommendation(item) and not has_reentrancy_precondition(item):
+            violations.append(
+                f"$.findings[{i}]: concurrency recommendation (rule {item.get('rule_id', 'unknown')!r}) "
+                "must cite backend evidence that it tolerates overlap or state its reentrancy precondition "
+                "('IF this runtime is reentrant...')"
+            )
+    return violations
+
+
 def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
                           target_dir: Optional[Path] = None) -> Optional[List[str]]:
     """Validate a model report against the agent's declared schema.
@@ -162,8 +259,9 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
     declares no output schema and there is nothing to check against. A declared schema that
     cannot be loaded is returned as a violation so the dispatcher fails closed.
 
-    Cross-field rules the schema cannot express are applied on top (agents-0tl): a verdict
-    about a location must have a location.
+    Cross-field rules the schema cannot express are applied on top:
+    - a verdict about a location must have a location (agents-0tl)
+    - a concurrency recommendation must carry its reentrancy precondition or cite backend evidence (agents-vorw)
     """
     try:
         schema = declared_schema(agent_dir, agent_cfg)
@@ -171,7 +269,11 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
         return [f"$: {exc}"]
     if schema is None:
         return None
-    return validate(report, schema) + unlocatable_verdicts(report, target_dir)
+    return (
+        validate(report, schema)
+        + unlocatable_verdicts(report, target_dir)
+        + unpreconditioned_concurrency_findings(report)
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -258,6 +360,9 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
             if lowered != severity and (not isinstance(enum, list) or lowered in enum):
                 item["severity"] = lowered
                 notes.append(f"findings[{index}]: severity {severity!r} -> {lowered!r}")
+        guard_note = guard_concurrency_finding(item, index)
+        if guard_note:
+            notes.append(guard_note)
     return notes
 
 

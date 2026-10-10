@@ -49,7 +49,7 @@ PERF_RULES = [
         "pattern": re.compile(r"(?:for\s*\([^)]*\)|while\s*\([^)]*\))[\s\S]{0,160}\bawait\s+"),
         "severity": "high",
         "category": "Latency / Waterfall",
-        "suggestion": "Replace sequential `await` inside loops with concurrent execution via `await Promise.all(items.map(...))` (or `asyncio.gather` in Python) where operations are independent."
+        "suggestion": "IF the underlying runtime/backend is reentrant and thread-safe (verify it does not use a non-reentrant mutex or shared state like ONNX Runtime wasm _OrtRun or WebGPU queues), and operations are independent, consider concurrent execution via `await Promise.all(items.map(...))` (or `asyncio.gather` in Python); otherwise preserve documented serial execution."
     },
     {
         "rule_id": "render-blocking-head-asset",
