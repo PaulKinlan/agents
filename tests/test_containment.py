@@ -35,11 +35,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from lib.containment import (  # noqa: E402
-    ENGINE_TOOL_POLICIES, GRANTABLE_POLICIES, READ_ONLY, WORKTREE_WRITE, ContainmentError, banner_lines,
+    ENGINE_READ_SCOPE, ENGINE_TOOL_POLICIES, GRANTABLE_POLICIES, READ_ONLY, WORKTREE_WRITE,
+    WORKTREE_WRITE_UNVERIFIED_ENGINES, ContainmentError, banner_lines,
     budget_note, check_engine, downgrade_network_to_withheld, egress_allowlist, load_policy,
     policy_record,
 )
-from lib.sandbox import sandbox_available, sandbox_command  # noqa: E402
+from lib.sandbox import SANDBOXED_ENGINES, sandbox_available, sandbox_command  # noqa: E402
 from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
 from lib.child_env import child_environment  # noqa: E402
 from lib import egress_proxy  # noqa: E402
@@ -359,6 +360,44 @@ class TestBannerAndRecord(unittest.TestCase):
         # agents-js7: the claude adapter enforces a declared cap via --max-budget-usd.
         self.assertEqual(policy_record(policy, "claude")["not_enforced"],
                          ["os-sandbox"])
+
+    def test_every_write_capable_engine_is_sandbox_verified_or_named_unverified(self):
+        """agents-dpbc: pin the CLAIM of the ENGINE_TOOL_POLICIES worktree-write rows, not
+        their text. The runtime delivers a write grant only when engine_sandboxed(engine)
+        holds (factory downgrades to read-only otherwise), and engine_sandboxed is decided
+        by lib/sandbox.py SANDBOXED_ENGINES. So an engine whose row grants WORKTREE_WRITE
+        must be in that runtime-verified set, or be named in
+        WORKTREE_WRITE_UNVERIFIED_ENGINES — the explicit list of engines whose adapter
+        implements the flags but which never receive the grant. Adding the next engine to
+        a worktree-write row without sandbox verification fails this test unless its
+        author names it unverified, in code."""
+        write_capable = {e for e, policies in ENGINE_TOOL_POLICIES.items()
+                         if WORKTREE_WRITE in policies}
+        self.assertEqual(write_capable,
+                         set(SANDBOXED_ENGINES) | set(WORKTREE_WRITE_UNVERIFIED_ENGINES),
+                         "a worktree-write row is a write grant the runtime can deliver "
+                         "only to a SANDBOXED_ENGINES engine; any other engine with the "
+                         "row must be named in WORKTREE_WRITE_UNVERIFIED_ENGINES")
+        # The two sets partition the write-capable engines: no engine is both verified
+        # and named unverified.
+        self.assertFalse(set(SANDBOXED_ENGINES) & set(WORKTREE_WRITE_UNVERIFIED_ENGINES))
+        # Every sandbox-verified engine is a known engine in the table.
+        self.assertLessEqual(set(SANDBOXED_ENGINES), set(ENGINE_TOOL_POLICIES))
+        # Every engine named unverified really does carry the row it is excused for, and
+        # is really absent from the runtime's verified set (host-independent: membership,
+        # not engine_sandboxed(), which also depends on this host having bubblewrap).
+        for engine in WORKTREE_WRITE_UNVERIFIED_ENGINES:
+            with self.subTest(engine=engine):
+                self.assertIn(WORKTREE_WRITE, ENGINE_TOOL_POLICIES.get(engine, frozenset()))
+                self.assertNotIn(engine, SANDBOXED_ENGINES)
+        # And every table engine the OS sandbox does not cover must already say plainly,
+        # in its read-scope claim, that it is NOT confined.
+        for engine in set(ENGINE_TOOL_POLICIES) - set(SANDBOXED_ENGINES):
+            with self.subTest(read_scope=engine):
+                self.assertIn("NOT", ENGINE_READ_SCOPE.get(engine, ""),
+                              f"{engine} is not in SANDBOXED_ENGINES, so its "
+                              f"ENGINE_READ_SCOPE entry must say plainly that it is not "
+                              f"kernel-confined")
 
     def test_the_record_documents_the_transport_trust_assumption(self):
         # agents-5d9: policy.json records the previously-invisible ambient proxy/CA

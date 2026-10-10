@@ -59,6 +59,10 @@ BUDGET_KEYS = frozenset({"max_minutes", "max_usd"})
 # Tool policies the factory can grant a model session, and which adapter enforces which.
 # lib/adapters/<engine>.sh reads FACTORY_TOOL_POLICY and refuses anything it cannot enforce;
 # tests/test_containment.py asserts the adapters and this table agree.
+# This table says NOTHING about OS sandboxing: a WORKTREE_WRITE row means only that the
+# adapter implements the policy's flags. The sandbox-verified set is lib/sandbox.py
+# SANDBOXED_ENGINES, and the runtime delivers a write grant solely when the run is
+# engine_sandboxed — factory downgrades it to read-only otherwise.
 READ_ONLY = "read-only"
 # A write grant runs the engine in a disposable per-session git worktree (agents-6ce): the
 # model may edit files, but only inside the throwaway worktree — the target checkout is bound
@@ -70,11 +74,24 @@ GRANTABLE_POLICIES = (READ_ONLY, WORKTREE_WRITE)
 VALID_CLASSES = ("observer", "proposer", "optimizer")
 ENGINE_TOOL_POLICIES: Dict[str, frozenset] = {
     "pi": frozenset({READ_ONLY, WORKTREE_WRITE}),
+    # claude's adapter enforces the worktree-write FLAGS, but claude is NOT OS-sandbox-
+    # verified (not in lib/sandbox.py SANDBOXED_ENGINES — its session auth needs $HOME,
+    # which the sandbox hides), so the write grant is never delivered to it: factory
+    # downgrades a claude worktree-write to read-only on every host. The row stays because
+    # check_engine runs before that downgrade — without it a claude write-agent would be
+    # refused outright instead of downgraded honestly.
     "claude": frozenset({READ_ONLY, WORKTREE_WRITE}),
     "deepseek": frozenset({READ_ONLY}),
     # `agentapi new-conversation` takes a prompt and nothing else: no tool controls.
     "antigravity": frozenset(),
 }
+# Engines whose adapter implements the worktree-write tool policy but which are NOT
+# OS-sandbox-verified, so the runtime never delivers the grant to them. Named here so the
+# table cannot be read as a verification claim (agents-dpbc); tests/test_containment.py
+# pins that a WORKTREE_WRITE row above implies membership in lib/sandbox.py
+# SANDBOXED_ENGINES or in this set, so the next engine added to the wrong column fails
+# the test unless its author names it unverified here, in code.
+WORKTREE_WRITE_UNVERIFIED_ENGINES = frozenset({"claude"})
 
 # How each adapter enforces each grantable policy, and what that leaves open. Stated in the
 # banner and in policy.json so the operator reads the enforcement, not an adjective.
