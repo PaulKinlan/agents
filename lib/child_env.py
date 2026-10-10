@@ -110,10 +110,12 @@ def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] 
     It gets a GitHub token only when the agent declares it needs `gh` (issue-triage), never
     just because the operator's shell had one. `proxied` forwards the operator's proxy vars
     only for an UNSANDBOXED pre-pass (agents-5d9); a sandboxed pre-pass gets the relay set
-    by the dispatcher instead.
+    by the dispatcher instead. `trusted_tools=True` forwards FACTORY_TOOL_PINS and
+    FACTORY_ALLOW_UNPINNED_TOOLS so pre-pass scripts can authenticate their trusted tools
+    (agents-01qd, agents-qbl8).
     """
     return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent,
-                             proxied=proxied)
+                             proxied=proxied, trusted_tools=True)
 
 
 def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Dict[str, str]:

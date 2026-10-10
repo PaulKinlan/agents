@@ -19,6 +19,24 @@ sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.path_security import resolve_within_target  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+
+
+def _trusted_tool(name: str) -> str:
+    """The pin-authenticated path of a trusted tool this pre-pass executes (agents-01qd).
+
+    git is a trusted tool (lib/tool_pins.TRUSTED_TOOLS): a station script's own
+    trusted-tool launch is a census kind of its own (agents-28nn round 4, review P1) —
+    a bare name executes whatever PATH plants first, including on the trusted-private
+    unsandboxed path where no sandbox bind boundary verifies anything.
+    Unauthenticatable is LOUD (nonzero exit; the factory turns a failed pre-pass into a
+    StationError), never a quiet fallback that defaults to 'main'.
+    """
+    try:
+        return resolve_tool(name)
+    except ToolPinError as e:
+        sys.stderr.write(f"Error: trusted tool {name!r} cannot be authenticated: {e}\n")
+        sys.exit(2)
 
 FINDINGS_DIR = FACTORY_ROOT / "findings"
 
@@ -100,10 +118,11 @@ def main():
 
     fixable_findings = load_active_findings(target_name, target_dir)
 
+    git_bin = _trusted_tool("git")
     git_branch = "main"
     try:
         res = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            [git_bin, "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(target_dir), capture_output=True, text=True, timeout=3
         )
         if res.returncode == 0:

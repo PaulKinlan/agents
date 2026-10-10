@@ -23,8 +23,26 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
-
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
+
+
+def _npm_binary() -> Optional[str]:
+    """The pin-authenticated npm binary, or None when npm is genuinely absent.
+
+    npm is a trusted tool (lib/tool_pins.TRUSTED_TOOLS), so an npm PRESENT on PATH that the
+    pin cannot authenticate is a loud failure — never a silent fallback or execution from
+    unverified PATH order (agents-01qd). A genuinely ABSENT npm returns None, but any other
+    pin or configuration failure (mismatch, unpinned, malformed pins file) exits 2 (agents-syhp).
+    """
+    try:
+        return resolve_tool("npm")
+    except ToolPinError as e:
+        msg = str(e)
+        if "could not be resolved on PATH" in msg and shutil.which("npm") is None:
+            return None
+        sys.stderr.write(f"Error: npm cannot be authenticated: {e}\n")
+        sys.exit(2)
 
 # Exclude standard ignored directories including vendor/ (third-party vendored code)
 # and factory artifact dirs (findings, runs) to avoid scanning non-first-party dependencies.
@@ -446,7 +464,7 @@ def audit_npm(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     manifests.extend(shipped_manifests)
 
     # 3. Run npm audit --json
-    npm_bin = shutil.which("npm")
+    npm_bin = _npm_binary()
     raw_audit = None
     if npm_bin:
         cmd = [npm_bin, "audit", "--json"]

@@ -182,8 +182,8 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_vuln_verify_prepass.py"
       ;;
     agents/pr-fixer/scripts/collect_failures.py)
-      # The proposer's pre-pass: unknown lines must not reach int() (agents-fy26).
-      mapped="$mapped tests/test_pr_fixer_prepass.py"
+      # The proposer's pre-pass: unknown lines must not reach int() (agents-fy26); pin resolution (agents-01qd).
+      mapped="$mapped tests/test_pr_fixer_prepass.py tests/test_station_trusted_tool_pins.py"
       ;;
 
     agents/vuln-discovery/scripts/scan_surface.py)
@@ -203,8 +203,8 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_modern_web.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
       ;;
     agents/deps-supply-chain/scripts/audit_deps.py)
-      # agents-q0mt: emits candidate ids; the pre-pass exclusion suite exercises it too.
-      mapped="$mapped tests/test_audit_deps.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
+      # agents-q0mt: emits candidate ids; the pre-pass exclusion suite exercises it too; pin resolution (agents-01qd).
+      mapped="$mapped tests/test_audit_deps.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py tests/test_station_trusted_tool_pins.py"
       ;;
     agents/ui-ux-audit/scripts/scan_ui_ux.py)
       # agents-q0mt: emits candidate ids; this station's output is pinned as the pre-pass truth
@@ -221,8 +221,8 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_candidate_binding.py tests/test_candidate_id_emission.py"
       ;;
     agents/perf-review/scripts/scan_perf_changes.py)
-      # agents-q0mt: emits candidate ids; its own review suite plus the emission pin.
-      mapped="$mapped tests/test_perf_review.py tests/test_candidate_id_emission.py"
+      # agents-q0mt: emits candidate ids; its own review suite plus the emission pin; pin resolution (agents-01qd).
+      mapped="$mapped tests/test_perf_review.py tests/test_candidate_id_emission.py tests/test_station_trusted_tool_pins.py"
       ;;
     agents/qa-station/scripts/audit_factory_quality.py)
       # agents-q0mt: emits candidate ids. The truth harnesses assert its payload shape, which is

@@ -529,6 +529,7 @@ def sandbox_command(
     egress_forwards: Optional[Sequence[Tuple[int, str]]] = None,
     rw_binds: Sequence[str] = (),
     mask_findings: bool = False,
+    ro_binds: Sequence[str] = (),
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
 
@@ -600,6 +601,8 @@ def sandbox_command(
     # (models.json + an empty auth.json), so writability does not weaken containment.
     for path in rw_binds:
         plan.rw_bind(path)
+    for path in ro_binds:
+        plan.ro_bind(path)
 
     # agents-x8l: egress sockets may live outside run_dir (a short per-run dir under /tmp,
     # because run_dir embeds the worktree path and can exceed AF_UNIX's sun_path limit). Bind
@@ -628,6 +631,16 @@ def sandbox_command(
         else:
             plan.ro_bind(str(root))
     _executable_binds(plan, executables, child_env.get("PATH", ""), home)
+
+    # Host tool pins file (agents-ebm7): when child_env forwards FACTORY_TOOL_PINS,
+    # the target file is often under $HOME (e.g. ~/.config/factory/tools.pins.yaml).
+    # Since $HOME and /home are tmpfs'd above, bind the pins file into the wrap
+    # read-only at the exact host path so the sandboxed child can authenticate its tools.
+    pins_env = child_env.get("FACTORY_TOOL_PINS")
+    if pins_env:
+        pins_path = Path(os.path.expanduser(pins_env)).resolve()
+        if pins_path.is_file():
+            plan.ro_bind(str(pins_path), dest=str(pins_path))
 
     # agents-4zg: the findings store aggregates raw scanner matches from EVERY target, so a run
     # for target A could read target B's credentials from it. The engine has no reason to read

@@ -132,6 +132,18 @@ class TestFastGateMapping(unittest.TestCase):
         mapped = resolve_fast_gate(["tools/fast-gate.sh"])
         self.assertIn("tests/test_fast_gate_mapping.py", mapped)
 
+    def test_station_trusted_tool_pins_mapped_for_prepass_scripts(self):
+        """Pre-pass scripts launching trusted tools must map tests/test_station_trusted_tool_pins.py (agents-01qd)."""
+        for path in (
+            "agents/perf-review/scripts/scan_perf_changes.py",
+            "agents/pr-fixer/scripts/collect_failures.py",
+            "agents/deps-supply-chain/scripts/audit_deps.py",
+        ):
+            with self.subTest(path=path):
+                mapped = resolve_fast_gate([path])
+                self.assertIn("tests/test_station_trusted_tool_pins.py", mapped,
+                              f"{path} missing pin resolution suite (agents-01qd)")
+
     # --- agents-9nir: the ignore list is deliberate, and "no arm" fails loudly ----------
 
     def test_root_markdown_maps_to_docs_drift(self):
