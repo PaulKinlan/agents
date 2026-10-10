@@ -888,11 +888,46 @@ class TestDirectoryRenameDuringPrune(unittest.TestCase):
             tombstone = tombstones[0]
             self.assertEqual(tombstone["name"], "doomed")
             self.assertEqual(tombstone["outcome"], "moved")
-            # files lists DESTROYED files: it must be empty!
-            self.assertEqual(tombstone["files"], [])
+            # files & symlinks are uncertain (None/null): claims neither complete destruction nor survival
+            self.assertIsNone(tombstone["files"])
+            self.assertIsNone(tombstone["symlinks"])
             # moved_files preserves the pre-removal snapshot
             self.assertEqual(tombstone["moved_files"], ["data.txt", "report.json"])
             self.assertEqual(tombstone["appeared"], [])
+
+    def test_partial_delete_then_rename_during_prune_records_outcome_moved_with_uncertain_files(self):
+        """Reviewer finding P1: if rmtree unlinks a file before an external rename causes ENOENT,
+        the record must not claim the unlinked file survived; files remains None (uncertain)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            doomed = make_dir(runs, "doomed", 1000)
+            (doomed / "deleted.txt").write_text("deleted\n", encoding="utf-8")
+            (doomed / "survivor.txt").write_text("survived\n", encoding="utf-8")
+
+            renamed_target = Path(tmp) / "rescued_partial"
+
+            def partial_delete_then_rename(path):
+                # rmtree unlinks one file before the rename happens
+                (Path(path) / "deleted.txt").unlink()
+                # another actor moves the directory
+                Path(path).rename(renamed_target)
+                raise FileNotFoundError(errno.ENOENT, "No such file", str(path))
+
+            with mock.patch.object(shutil, "rmtree", side_effect=partial_delete_then_rename):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    removed = remove_recorded(doomed, reason="age")
+
+            self.assertFalse(removed)
+            # deleted.txt is gone from rescued directory
+            self.assertFalse((renamed_target / "deleted.txt").exists())
+            self.assertTrue((renamed_target / "survivor.txt").exists())
+
+            tombstone = read_tombstones(runs)[0]
+            self.assertEqual(tombstone["outcome"], "moved")
+            # Because rmtree might have deleted files before the rename, files is explicitly uncertain (None)
+            self.assertIsNone(tombstone["files"])
+            self.assertIsNone(tombstone["symlinks"])
+            self.assertEqual(tombstone["moved_files"], ["deleted.txt", "report.json", "survivor.txt"])
 
     def test_prune_run_dirs_excludes_moved_directory_from_returned_removed_list(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -918,7 +953,7 @@ class TestDirectoryRenameDuringPrune(unittest.TestCase):
             tombstones = read_tombstones(runs)
             self.assertEqual(len(tombstones), 1)
             self.assertEqual(tombstones[0]["outcome"], "moved")
-            self.assertEqual(tombstones[0]["files"], [])
+            self.assertIsNone(tombstones[0]["files"])
             self.assertEqual(tombstones[0]["moved_files"], ["file.txt", "report.json"])
 
 

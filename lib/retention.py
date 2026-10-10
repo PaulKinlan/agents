@@ -518,9 +518,11 @@ def remove_recorded(directory: Path, *, reason: str,
     - ``removed``: the directory is gone and rmtree succeeded. Tombstone lists
       everything it held.
     - ``moved``: the directory disappeared because it was moved or renamed externally
-      during removal (rmtree failed with ENOENT). The files were not destroyed by
-      this pass. Tombstone records ``outcome: "moved"`` with ``files: []`` and
-      ``moved_files`` listing the pre-removal snapshot (agents-5qz7).
+      during removal (rmtree failed with ENOENT). Because rmtree may have partially
+      deleted files before the move occurred, the record cannot determine which files
+      were destroyed versus moved; ``files`` and ``symlinks`` are recorded as None (null),
+      claiming neither destruction nor survival, and ``moved_files`` records the
+      pre-removal snapshot (agents-5qz7).
     - ``partial``: the removal failed part way (e.g. a permission bound) — the
       directory survives but some contents are gone. Tombstone lists exactly the
       lost files with ``outcome: "partial"`` and records any newly appeared files
@@ -575,20 +577,21 @@ def remove_recorded(directory: Path, *, reason: str,
         {"path": rel, **before_symlinks[rel]}
         for rel in sorted(set(before_symlinks) - set(after_symlinks))
     ]
-    moved_files: List[str] = []
+    moved_files: Optional[List[str]] = None
     if directory.is_dir():
         outcome = "partial" if (disappeared or appeared) else "failed"
     elif rmtree_err is not None and getattr(rmtree_err, "errno", None) == errno.ENOENT:
         # A directory rename or move during removal (agents-5qz7): rmtree failed
-        # with ENOENT and the directory is gone. The ENOENT guarantees that files
-        # were moved or renamed externally before removal rather than destroyed
-        # by this pass. Over-claiming ignorance by reporting outcome "removed"
-        # and listing files as disappeared would be false; record outcome "moved",
-        # leave files empty, and preserve moved_files as the pre-removal snapshot.
+        # with ENOENT and the directory is gone. Because rmtree may have removed
+        # some entries before the directory was moved, the record cannot distinguish
+        # files destroyed by rmtree from files that survived in the moved tree.
+        # Following the dm8n third-state principle (like outside_tree=None), record
+        # outcome "moved" with files=None and symlinks=None — claiming neither
+        # destruction nor survival — and preserve moved_files as the pre-removal snapshot.
         outcome = "moved"
         moved_files = disappeared
-        disappeared = []
-        disappeared_symlinks = []
+        disappeared = None
+        disappeared_symlinks = None
     else:
         outcome = "removed"
     if outcome == "failed":
