@@ -358,11 +358,11 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
                 self.assertEqual(s["suppression_reason"], "self-referential factory pattern")
 
     def test_foreign_repo_nested_inside_factory_root_not_suppressed(self):
-        """P3 fix (agents-760p): Foreign repo with its own .git nested inside FACTORY_ROOT is not self.
+        """P3 fix (agents-760p & agents-i4ra): Foreign repo and its subdirectories nested inside FACTORY_ROOT are not self.
 
-        Git identity takes precedence over path containment: if a target has its own repository
-        identity that differs from the factory's, it is treated as third-party and its sinks
-        are NOT suppressed.
+        Enclosing git repository identity takes precedence over path containment: if a target
+        belongs to a foreign repository (even one nested deeply inside FACTORY_ROOT), it is treated
+        as third-party and its sinks are NOT suppressed.
         """
         import subprocess
         factory_root = mine_history.FACTORY_ROOT
@@ -370,7 +370,7 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             nested_repo = Path(tmp)
             subprocess.run(["git", "init", "-q", str(nested_repo)], check=True)
 
-            src_dir = nested_repo / "src"
+            src_dir = nested_repo / "src" / "deep"
             src_dir.mkdir(parents=True)
             route_code = (
                 'const route = {\n'
@@ -380,10 +380,16 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
             )
             (src_dir / "routes.js").write_text(route_code, encoding="utf-8")
 
+            # 1. Root of nested foreign repo (agents-760p)
             self.assertFalse(mine_history.is_factory_self_target(nested_repo))
-            results = mine_history.scan_entry_points(nested_repo)
-            self.assertEqual(len(results), 1, f"Expected nested foreign repo sink to be found, got: {results}")
-            self.assertEqual(results[0]["category"], "server-listener")
+            results_root = mine_history.scan_entry_points(nested_repo)
+            self.assertEqual(len(results_root), 1)
+
+            # 2. Subdirectory of nested foreign repo (agents-i4ra)
+            self.assertFalse(mine_history.is_factory_self_target(src_dir))
+            results_sub = mine_history.scan_entry_points(src_dir)
+            self.assertEqual(len(results_sub), 1, f"Expected nested foreign repo subdirectory sink to be found, got: {results_sub}")
+            self.assertEqual(results_sub[0]["category"], "server-listener")
 
     def test_plain_factory_subdirectory_recognized_as_self(self):
         """P3 fix (agents-760p non-regression): Plain factory subdirectory without .git is still self.
@@ -394,6 +400,7 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
         threat_model_dir = mine_history.FACTORY_ROOT / "agents" / "threat-model"
         if threat_model_dir.is_dir():
             self.assertTrue(mine_history.is_factory_self_target(threat_model_dir))
+        self.assertTrue(mine_history.is_factory_self_target(mine_history.FACTORY_ROOT))
 
     def test_test_or_fixture_path_narrowing(self):
         """P3 fix (agents-tj9u): Exact directory matching ensures production packages like testing_service are not skipped."""
