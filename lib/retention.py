@@ -54,8 +54,8 @@ contents deleted) cannot satisfy the record falsely: the tombstone is written
 with ``outcome: "partial"`` listing exactly the files that were lost, computed as
 the pre-removal file set minus the post-removal file set (with any newly appeared
 files recorded in ``appeared``). A removal that fails without losing anything
-(and where the directory was not moved externally) writes nothing: a tombstone
-must never claim an event that did not happen.
+(and where the directory was not moved externally and no files appeared) writes
+nothing: a tombstone must never claim an event that did not happen.
 
 The record tells the truth about its own limits (agents-dm8n round 3):
 
@@ -523,8 +523,8 @@ def remove_recorded(directory: Path, *, reason: str,
 
     - ``removed``: the directory is gone and rmtree succeeded. Tombstone lists
       everything it held.
-    - ``moved``: the directory disappeared because it was moved or renamed externally
-      during removal (rmtree failed with ENOENT). Because rmtree may have partially
+    - ``moved``: the directory disappeared after rmtree failed with an error (e.g.
+      renamed or moved externally during removal). Because rmtree may have partially
       deleted files before the move occurred, the record cannot determine which files
       were destroyed versus moved; ``files`` and ``symlinks`` are recorded as None (null),
       claiming neither destruction nor survival, and ``moved_files`` records the
@@ -588,9 +588,12 @@ def remove_recorded(directory: Path, *, reason: str,
     moved_files: Optional[List[str]] = None
     if directory.is_dir():
         outcome = "partial" if (disappeared or appeared) else "failed"
-    elif rmtree_err is not None and getattr(rmtree_err, "errno", None) == errno.ENOENT:
+    elif rmtree_err is not None and (
+        isinstance(rmtree_err, FileNotFoundError)
+        or getattr(rmtree_err, "errno", None) in (errno.ENOENT, errno.ENOTDIR)
+    ):
         # A directory rename or move during removal (agents-5qz7): rmtree failed
-        # with ENOENT and the directory is gone. Because rmtree may have removed
+        # with ENOENT/ENOTDIR and the directory is gone. Because rmtree may have removed
         # some entries before the directory was moved, the record cannot distinguish
         # files destroyed by rmtree from files that survived in the moved tree.
         # Following the dm8n third-state principle (like outside_tree=None), record
@@ -636,12 +639,13 @@ def prune_run_dirs(runs_dir: Path, *, now: Optional[float] = None,
 
     Every removal goes through ``remove_recorded`` (agents-dm8n): each directory
     actually removed — and each removal that failed PART WAY (losing files but
-    leaving the directory) or where the directory disappeared externally (recorded
-    with ``outcome: "moved"``) — is recorded as a tombstone line in the ledger BESIDE
-    the runs root (``retention_ledger_path``), at file granularity, so a citation
-    to a pruned run directory (or to a file inside one) resolves to an explanation
-    rather than dangling. Only fully removed directories are returned; partial
-    removals and moved directories return False and are not listed in removed.
+    leaving the directory) or where the directory was moved externally during
+    removal with ENOENT (recorded with ``outcome: "moved"``) — is recorded as a
+    tombstone line in the ledger BESIDE the runs root (``retention_ledger_path``), at
+    file granularity, so a citation to a pruned run directory (or to a file inside one)
+    resolves to an explanation rather than dangling. Only fully removed directories
+    are returned; partial removals and moved directories return False and are not
+    listed in removed.
 
     ``now`` is injectable for deterministic TTL tests; it defaults to the current
     wall-clock time. ``retain``, ``max_age_seconds`` and ``active_grace`` default to
