@@ -44,6 +44,8 @@ from lib.sandbox import SANDBOXED_ENGINES, sandbox_available, sandbox_command  #
 from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
 from lib.child_env import child_environment  # noqa: E402
 from lib import egress_proxy  # noqa: E402
+from lib import containment as containment_module  # noqa: E402
+from lib import sandbox as sandbox_module  # noqa: E402
 from lib.egress_proxy import EgressProxy  # noqa: E402
 
 # Whether THIS host can run bubblewrap. The confinement acceptance test needs it; the
@@ -370,16 +372,26 @@ class TestBannerAndRecord(unittest.TestCase):
         WORKTREE_WRITE_UNVERIFIED_ENGINES — the explicit list of engines whose adapter
         implements the flags but which never receive the grant. Adding the next engine to
         a worktree-write row without sandbox verification fails this test unless its
-        author names it unverified, in code."""
+        author names it unverified, in code.
+
+        The relation is a SUBSET, not an equality (agents-dpbc review P1): being
+        sandbox-verified does not imply being write-capable, so a purely read-only
+        OS-sandboxed engine is legitimate — under strict equality the only way to keep
+        such an engine passing would be to FORGE a WORKTREE_WRITE row for an engine that
+        does not have the capability, and a guard that can only be satisfied by a false
+        claim is worse than no guard. The reviewer's counterexample is pinned as a
+        permanent accepted case in
+        test_a_read_only_sandboxed_engine_needs_no_write_row below."""
         write_capable = {e for e, policies in ENGINE_TOOL_POLICIES.items()
                          if WORKTREE_WRITE in policies}
-        self.assertEqual(write_capable,
-                         set(SANDBOXED_ENGINES) | set(WORKTREE_WRITE_UNVERIFIED_ENGINES),
-                         "a worktree-write row is a write grant the runtime can deliver "
-                         "only to a SANDBOXED_ENGINES engine; any other engine with the "
-                         "row must be named in WORKTREE_WRITE_UNVERIFIED_ENGINES")
-        # The two sets partition the write-capable engines: no engine is both verified
-        # and named unverified.
+        self.assertLessEqual(write_capable,
+                             set(SANDBOXED_ENGINES) | set(WORKTREE_WRITE_UNVERIFIED_ENGINES),
+                             "a worktree-write row is a write grant the runtime can deliver "
+                             "only to a SANDBOXED_ENGINES engine; any other engine with the "
+                             "row must be named in WORKTREE_WRITE_UNVERIFIED_ENGINES. This "
+                             "is deliberately a subset: a sandboxed engine is not required "
+                             "to be write-capable")
+        # The two sets stay disjoint: no engine is both verified and named unverified.
         self.assertFalse(set(SANDBOXED_ENGINES) & set(WORKTREE_WRITE_UNVERIFIED_ENGINES))
         # Every sandbox-verified engine is a known engine in the table.
         self.assertLessEqual(set(SANDBOXED_ENGINES), set(ENGINE_TOOL_POLICIES))
@@ -398,6 +410,34 @@ class TestBannerAndRecord(unittest.TestCase):
                               f"{engine} is not in SANDBOXED_ENGINES, so its "
                               f"ENGINE_READ_SCOPE entry must say plainly that it is not "
                               f"kernel-confined")
+
+    def test_a_read_only_sandboxed_engine_needs_no_write_row(self):
+        """agents-dpbc review P1, the counterexample as a permanent ACCEPTED case: an
+        engine that is in SANDBOXED_ENGINES but has NO worktree-write row (a purely
+        read-only OS-sandboxed engine) must satisfy the write-capable claim guard above.
+        Sandbox verification does not imply write capability, so the guard must not force
+        a forged WORKTREE_WRITE row onto such an engine. The tables are monkeypatched —
+        the engine never enters the real sets — so this proves the guard's shape, not the
+        current table contents."""
+        read_only_engine = "readonly-sandboxed"
+        patched_policies = dict(ENGINE_TOOL_POLICIES)
+        patched_policies[read_only_engine] = frozenset({READ_ONLY})
+        patched_sandboxed = set(SANDBOXED_ENGINES) | {read_only_engine}
+        with mock.patch.object(containment_module, "ENGINE_TOOL_POLICIES",
+                               patched_policies), \
+                mock.patch.object(sandbox_module, "SANDBOXED_ENGINES",
+                                  patched_sandboxed):
+            # The guard's own computation, against the patched tables: the read-only
+            # sandboxed engine adds nothing to write_capable, and the subset holds.
+            write_capable = {e for e, policies in
+                             containment_module.ENGINE_TOOL_POLICIES.items()
+                             if WORKTREE_WRITE in policies}
+            self.assertNotIn(read_only_engine, write_capable)
+            self.assertLessEqual(
+                write_capable,
+                set(sandbox_module.SANDBOXED_ENGINES) | set(WORKTREE_WRITE_UNVERIFIED_ENGINES),
+                "a read-only sandboxed engine must be ACCEPTED: the guard is a subset, "
+                "not an equality that would force a forged write row")
 
     def test_the_record_documents_the_transport_trust_assumption(self):
         # agents-5d9: policy.json records the previously-invisible ambient proxy/CA
@@ -576,6 +616,27 @@ class TestAdapters(unittest.TestCase):
                 self.assertEqual(argv[argv.index("--append-system-prompt-file") + 1],
                                  str(self.skill / "SKILL.md"))
                 self.assertNotIn("--plugin-dir", argv)
+
+    def test_claude_never_honours_worktree_write_until_sandbox_verified(self):
+        """agents-dpbc review P1: the dispatcher downgrades a claude worktree-write grant to
+        read-only because claude is not in SANDBOXED_ENGINES, but the adapter is a second
+        entry point — a direct invocation sets FACTORY_TOOL_POLICY itself and used to reach
+        the engine with Edit,Write, the sandbox check bypassed entirely. The invariant now
+        lives at the layer that turns the policy into flags: claude.sh applies the SAME
+        downgrade the dispatcher would, with the dispatcher's reason string, so every caller
+        gets the read-only run. The engine still runs (exit 0, so
+        test_the_adapters_agree_with_the_policy_table keeps the load-bearing row), but with
+        the read-only tool set only."""
+        res, argv = self.run_adapter("claude", "worktree-write")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Downgrading tool policy 'worktree-write' to 'read-only'", res.stderr)
+        self.assertIn("will not run inside the OS sandbox", res.stderr)
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob",
+                         "a direct worktree-write invocation must not reach claude with "
+                         "Edit,Write — the adapter self-downgrades like the dispatcher")
+        self.assertIn("--restricted", argv)
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertIn("Tool policy: read-only", res.stdout)
 
     def test_claude_combines_the_skill_and_the_system_directive(self):
         """agents-m2n: with FACTORY_SYSTEM_DIRECTIVE_FILE set, claude.sh concatenates

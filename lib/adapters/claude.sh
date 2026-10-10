@@ -57,13 +57,26 @@ case "$TOOL_POLICY" in
   read-only) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob" --strict-mcp-config) ;;
   # worktree-write (agents-6ce): Edit,Write are added and --restricted confines the file tools
   # to the working directory — which the dispatcher sets to a disposable git worktree — so
-  # edits land there, not in the target. NOTE: claude gets NO OS sandbox (its adapter is not in
-  # lib/sandbox.py SANDBOXED_ENGINES), so --restricted (claude's own confinement, not a kernel
-  # boundary) would be the only thing keeping the target read-only. run_agent therefore
-  # downgrades a claude worktree-write grant to read-only unless the run is engine_sandboxed
-  # (review P1-2, agents-6ce); this arm is reached only once claude is sandbox-verified. Bash
-  # stays off; the worktree is discarded after the session.
-  worktree-write) POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob,Edit,Write" --strict-mcp-config) ;;
+  # edits land there, not in the target. claude gets NO OS sandbox (its adapter is not in
+  # lib/sandbox.py SANDBOXED_ENGINES — its session auth needs $HOME, which the sandbox hides),
+  # so --restricted (claude's own confinement, not a kernel boundary) would be the only thing
+  # keeping the target read-only. run_agent therefore downgrades a claude worktree-write grant
+  # to read-only unless the run is engine_sandboxed (review P1-2, agents-6ce).
+  #
+  # That guard lived ONLY in the dispatcher, and this adapter is a second entry point: a
+  # direct invocation sets FACTORY_TOOL_POLICY itself and bypassed the downgrade entirely
+  # (agents-dpbc review P1, proven by `FACTORY_TOOL_POLICY=worktree-write ./lib/adapters/
+  # claude.sh ...` reaching the engine with Edit,Write). The invariant belongs at the layer
+  # that turns the policy into flags, so this arm applies the SAME downgrade the dispatcher
+  # would, with the dispatcher's reason string — every caller, not just the one that
+  # remembers, gets the read-only run. Until claude is sandbox-verified there is deliberately
+  # NO path from this script to a write-capable claude; when verification lands, this arm
+  # changes to deliver Edit,Write. Bash stays off; the worktree is discarded after the session.
+  worktree-write)
+    echo "[claude adapter] Downgrading tool policy 'worktree-write' to 'read-only': the engine session will not run inside the OS sandbox on this host (no bubblewrap, or an engine whose adapter is not sandbox-verified), so nothing kernel-enforces the target staying read-only; the engine runs read-only and returns patches in its report" >&2
+    TOOL_POLICY="read-only"
+    POLICY_FLAGS=(--restricted --tools "Read,Grep,Glob" --strict-mcp-config)
+    ;;
   *)
     echo "[claude adapter] Refusing: tool policy '$TOOL_POLICY' cannot be enforced by this adapter." >&2
     exit 3

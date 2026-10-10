@@ -76,10 +76,12 @@ ENGINE_TOOL_POLICIES: Dict[str, frozenset] = {
     "pi": frozenset({READ_ONLY, WORKTREE_WRITE}),
     # claude's adapter enforces the worktree-write FLAGS, but claude is NOT OS-sandbox-
     # verified (not in lib/sandbox.py SANDBOXED_ENGINES — its session auth needs $HOME,
-    # which the sandbox hides), so the write grant is never delivered to it: factory
-    # downgrades a claude worktree-write to read-only on every host. The row stays because
-    # check_engine runs before that downgrade — without it a claude write-agent would be
-    # refused outright instead of downgraded honestly.
+    # which the sandbox hides), so the write grant is never delivered to it: the factory
+    # dispatcher downgrades a claude worktree-write to read-only on every host, and the
+    # adapter applies the SAME downgrade itself (agents-dpbc review P1), so a direct
+    # adapter invocation with FACTORY_TOOL_POLICY=worktree-write cannot bypass the guard.
+    # The row stays because check_engine runs before that downgrade — without it a claude
+    # write-agent would be refused outright instead of downgraded honestly.
     "claude": frozenset({READ_ONLY, WORKTREE_WRITE}),
     "deepseek": frozenset({READ_ONLY}),
     # `agentapi new-conversation` takes a prompt and nothing else: no tool controls.
@@ -103,8 +105,13 @@ ENGINE_ENFORCEMENT: Dict[str, Dict[str, str]] = {
     },
     "claude": {
         READ_ONLY: "claude --restricted --tools Read,Grep,Glob --strict-mcp-config",
-        WORKTREE_WRITE: ("claude --restricted --tools Read,Grep,Glob,Edit,Write "
-                         "--strict-mcp-config in a disposable worktree"),
+        # Never delivered: claude is not sandbox-verified, so the dispatcher downgrades a
+        # claude worktree-write grant to read-only before the banner, and the adapter
+        # self-downgrades a direct worktree-write invocation the same way (agents-dpbc
+        # review P1) — no caller reaches claude with Edit,Write.
+        WORKTREE_WRITE: ("never delivered: downgraded to the read-only flags by the "
+                         "dispatcher, and by the adapter itself on a direct invocation "
+                         "(claude is not sandbox-verified)"),
     },
     "deepseek": {READ_ONLY: "deepseek-api read-only payload triage"},
 }
