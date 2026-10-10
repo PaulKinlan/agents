@@ -101,6 +101,7 @@ tests/test_retention.py's deletion-inventory guard fails the gate if any other
 deletion primitive appears in the shipped source without being enumerated.
 """
 
+import errno
 import json
 import os
 import shutil
@@ -157,7 +158,7 @@ no longer exists: every removal is tombstoned in `../retention-ledger.jsonl`
 (beside this directory, at the factory root — it survives a full clear of
 `runs/` precisely so the record outlives the evidence). Search that ledger for
 the directory name: each line records the directory, the reason (`age`/`count`/
-`apply-worktree-failure`), the UTC time, the outcome (`removed` or `partial`),
+`apply-worktree-failure`), the UTC time, the outcome (`removed`, `moved` or `partial`),
 and the exact list of files that disappeared with it.
 
 **This ledger records only removals made through it.** Beads sync across VMs
@@ -512,16 +513,22 @@ def remove_recorded(directory: Path, *, reason: str,
     The record is at FILE granularity, in the harm's own terms: the tombstone
     lists exactly the files that disappeared (the pre-removal file set minus the
     post-removal file set), so a bead citation to a FILE inside the directory
-    resolves to an explanation. Three outcomes:
+    resolves to an explanation. Four outcomes:
 
-    - ``removed``: the directory is gone. Tombstone lists everything it held.
+    - ``removed``: the directory is gone and rmtree succeeded. Tombstone lists
+      everything it held.
+    - ``moved``: the directory disappeared because it was moved or renamed externally
+      during removal (rmtree failed with ENOENT). The files were not destroyed by
+      this pass. Tombstone records ``outcome: "moved"`` with ``files: []`` and
+      ``moved_files`` listing the pre-removal snapshot (agents-5qz7).
     - ``partial``: the removal failed part way (e.g. a permission bound) — the
       directory survives but some contents are gone. Tombstone lists exactly the
-      lost files with ``outcome: "partial"``, so the loss is VISIBLE instead of
+      lost files with ``outcome: "partial"`` and records any newly appeared files
+      (``appeared``), so the loss and within-directory renames are VISIBLE instead of
       silently satisfying a directory-level check (the round-1 defect: the
       directory survived, so "directories removed == directories tombstoned"
       held while the cited file was already destroyed).
-    - ``failed``: nothing disappeared. NO tombstone — the record must never
+    - ``failed``: nothing disappeared or changed. NO tombstone — the record must never
       claim a loss that did not happen.
 
     Every tombstone states what the record can stand behind and no more: the
@@ -551,9 +558,11 @@ def remove_recorded(directory: Path, *, reason: str,
         return False
     before = _snapshot_files(directory)
     before_symlinks = _snapshot_symlinks(directory)
+    rmtree_err: Optional[OSError] = None
     try:
         shutil.rmtree(directory)
     except OSError as exc:
+        rmtree_err = exc
         sys.stderr.write(f"[retention] could not remove {directory}: {exc}\n")
     if directory.is_dir():
         after = _snapshot_files(directory)
@@ -561,26 +570,43 @@ def remove_recorded(directory: Path, *, reason: str,
     else:
         after, after_symlinks = set(), {}
     disappeared = sorted(before - after)
+    appeared = sorted(after - before)
     disappeared_symlinks = [
         {"path": rel, **before_symlinks[rel]}
         for rel in sorted(set(before_symlinks) - set(after_symlinks))
     ]
+    moved_files: List[str] = []
     if directory.is_dir():
-        outcome = "partial" if disappeared else "failed"
+        outcome = "partial" if (disappeared or appeared) else "failed"
+    elif rmtree_err is not None and getattr(rmtree_err, "errno", None) == errno.ENOENT:
+        # A directory rename or move during removal (agents-5qz7): rmtree failed
+        # with ENOENT and the directory is gone. The ENOENT guarantees that files
+        # were moved or renamed externally before removal rather than destroyed
+        # by this pass. Over-claiming ignorance by reporting outcome "removed"
+        # and listing files as disappeared would be false; record outcome "moved",
+        # leave files empty, and preserve moved_files as the pre-removal snapshot.
+        outcome = "moved"
+        moved_files = disappeared
+        disappeared = []
+        disappeared_symlinks = []
     else:
         outcome = "removed"
     if outcome == "failed":
         return False
-    _append_tombstone(retention_ledger_path(directory.parent), {
+    record = {
         "name": directory.name,
         "path": str(directory),
         "pruned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
         "reason": reason,
         "outcome": outcome,
         "files": disappeared,
+        "appeared": appeared,
         "symlinks": disappeared_symlinks,
         "record_scope": RECORD_SCOPE,
-    })
+    }
+    if outcome == "moved":
+        record["moved_files"] = moved_files
+    _append_tombstone(retention_ledger_path(directory.parent), record)
     return outcome == "removed"
 
 

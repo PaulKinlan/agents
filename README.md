@@ -450,7 +450,7 @@ cleanup that deletes `runs/hillclimb-<target>-<run_id>/` when the disposable wor
 cannot be created — go through one recorded-removal choke point
 (`lib/retention.py::remove_recorded`), which appends one JSON tombstone line per removal
 to **`retention-ledger.jsonl` at the factory root** (never inside `runs/`): directory
-name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome,
+name, absolute path, reason (`age`/`count`/`apply-worktree-failure`), UTC time, outcome (`removed`, `moved` or `partial`),
 every disappeared symlink with its target (`symlinks`),
 and **the exact list of files that disappeared**. A citation is to a *file* — e.g. a bead
 citing `runs/<agent>-<target>-<run_id>/candidates.json` as evidence — so the record counts
