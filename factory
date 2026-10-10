@@ -1653,16 +1653,27 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # process can dial — and an unauthenticated broker there is an OPEN PROXY that
         # injects the raw credentials upstream for whoever asks (the verdict constructed
         # it with a plain curl that came back from the real provider authenticated as
-        # us). The reachability the inversion created is now authenticated rather than
-        # re-asymmetric: the placeholder is a per-run random secret the broker generates
-        # and demands back on EVERY request (403 before any upstream hop otherwise), so
-        # possession of the placeholder IS the licence to use the broker and only this
-        # run's children are ever handed it. Chosen over a UNIX socket with filesystem
-        # permissions (the unsandboxed engine runs as the operator's uid — the same uid
-        # as every local process that could abuse the broker, so ownership cannot
-        # distinguish served from attacker; knowledge of a per-run secret can) and over
-        # binding only for the engine's lifetime (the broker already lives exactly that
-        # long; the exposure window IS the run). Detail on lib/credential_broker.py.
+        # us). Round 7 authenticated that reachability with the placeholder turned
+        # per-run secret — and round 8's verdict falsified the secret as THE boundary,
+        # by construction: the unsandboxed engine runs as the operator's uid, the same
+        # uid as every process that could abuse the broker, so the placeholder in the
+        # engine's environ (or in the models.json the engine reads) is readable by any
+        # same-uid process via /proc/<pid>/environ — the reviewer's pre-pass-spawned
+        # attacker read exactly that value and authenticated with it. A secret confines
+        # by KNOWLEDGE; between processes of one uid there is no knowledge asymmetry.
+        # So the broker now gates the TCP listener on the kernel's attribution of the
+        # connecting PEER (lib/credential_broker.py — /proc/net/tcp's inode to its
+        # owning pid, then the ppid chain; the TCP analogue of SO_PEERCRED), accepting
+        # only this dispatcher's process tree, narrowed to the ENGINE SESSION's tree the
+        # moment the engine is spawned (run_station_command's on_spawn below). WHO CAN
+        # REACH the broker is a property of the OPERATION, not of the OS environment's
+        # uid rules. Chosen over a UNIX socket with SO_PEERCRED — the engine's SDK dials
+        # a TCP base URL and cannot dial a UNIX socket, so a relay would sit on the same
+        # shared loopback needing this same check; the check is the mechanism — and over
+        # failing closed, which remains the posture when /proc is unreadable: the gate
+        # refuses, never opens. The placeholder stays as the SECOND factor; its presence
+        # in the engine's environ and in models.json (which pi still needs) no longer
+        # confers authority by itself.
         # Both are started here — after the pre-pass — and torn down in the finally, so
         # neither leaks on any failure.
         broker: Optional[CredentialBroker] = None
@@ -1756,9 +1767,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 # _collect_session_diff (host-side, after the session) can produce it.
                 (run_dir / "session.patch").unlink(missing_ok=True)
                 (run_dir / "session.patch.tmp").unlink(missing_ok=True)
-            adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
-                                              input=prompt, capture_output=True, text=True,
-                                              check=False, env=adapter_env)
+            # agents-28nn round 8: the moment the engine exists, the broker's peer gate
+            # narrows from this dispatcher's tree to the ENGINE SESSION's tree — the
+            # broker serves exactly the process it was started for and no other
+            # descendant of the dispatcher.
+            adapter_res = run_station_command(
+                adapter_cmd, budget, f"engine '{engine}'",
+                input=prompt, capture_output=True, text=True,
+                check=False, env=adapter_env,
+                on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
+                          if broker is not None else None))
             # The adapter states what it enforced ("Tool policy: ..."): show the operator the
             # enforcement point's own words, not only the dispatcher's. Adapter stdout is
             # status lines only; the model's output goes to model_output.txt.

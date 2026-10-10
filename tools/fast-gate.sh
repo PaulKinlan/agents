@@ -296,6 +296,13 @@ while IFS= read -r f; do
       # anchors at :485-492), so it belongs in this union (agents-9nir review).
       mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py tests/test_docs_drift.py"
       ;;
+    lib/budget.py)
+      # The station-command runner (agents-28nn round 8 grew on_spawn, the dispatcher's
+      # engine-pid handoff to the credential broker's peer gate): its own unit suite, the
+      # dispatcher suites that consume run_station_command, and the broker suite whose
+      # peer-gate contract the handoff serves.
+      mapped="$mapped tests/test_budget.py tests/test_factory_core.py tests/test_credential_broker.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in

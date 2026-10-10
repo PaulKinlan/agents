@@ -9,7 +9,9 @@ import http.client
 import io
 import os
 import shutil
+import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -886,6 +888,212 @@ class TestBodyBoundAndBudget(BrokerTestBase):
             while cb._aggregate_body_bytes > 0 and time.time() < deadline:
                 time.sleep(0.05)
         self.assertEqual(cb._aggregate_body_bytes, 0)
+
+
+# ── agents-28nn round 8: the peer-identity gate (the verdict's reopened P0) ──────────
+
+# One probe script drives every subprocess the gate tests need. Modes:
+#   sleep       — the engine stand-in: a live process HOLDING the placeholder in its
+#                 environ (the thing the reviewer's attacker read via /proc)
+#   call        — dial the broker from THIS process with the environ's placeholder
+#   spawn-call  — dial the broker from a CHILD process (the descendant arm)
+#   steal <pid> — the reviewer's construction, verbatim in shape: a same-uid background
+#                 process reads the placeholder AND the port from the victim's
+#                 /proc/<pid>/environ and presents them to the broker
+_PEER_PROBE = r'''
+import os, subprocess, sys, time
+import urllib.error, urllib.request
+
+def call(env):
+    req = urllib.request.Request(
+        env["ANTHROPIC_BASE_URL"] + "/v1/messages", data=b'{"probe": true}',
+        headers={"x-api-key": env["ANTHROPIC_API_KEY"],
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+            print("STATUS", resp.status, flush=True)
+    except urllib.error.HTTPError as e:
+        e.read()
+        print("STATUS", e.code, flush=True)
+
+mode = sys.argv[1]
+if mode == "sleep":
+    time.sleep(60)
+elif mode == "call":
+    call(os.environ)
+elif mode == "spawn-call":
+    res = subprocess.run([sys.executable, os.path.abspath(__file__), "call"],
+                         capture_output=True, text=True, timeout=60)
+    sys.stdout.write(res.stdout)
+    sys.stdout.flush()
+elif mode == "steal":
+    with open("/proc/" + sys.argv[2] + "/environ", "rb") as fh:
+        env = dict(kv.split(b"=", 1) for kv in fh.read().split(b"\0") if b"=" in kv)
+    call({k.decode(): v.decode() for k, v in env.items()})
+'''
+
+
+class TestPeerIdentityGate(BrokerTestBase):
+    """agents-28nn round 8 (the verdict's reopened P0): on the unsandboxed path the
+    placeholder is readable by ANY same-uid process — the engine runs as the operator,
+    so /proc/<pid>/environ (and models.json) hand the secret to a pre-pass-spawned
+    attacker, and knowledge cannot confine between processes of one uid. The broker's
+    TCP listener therefore gates on the kernel's attribution of the connecting PEER
+    (_established_tcp_peer_pids + _pid_in_tree — the TCP analogue of SO_PEERCRED),
+    accepting only the run's own process tree; the per-run secret is the second factor.
+    These tests run REAL broker calls over a REAL loopback listener with REAL
+    subprocesses — the constructed attack, not a mock; only the provider upstream is
+    faked, so the no-upstream-hop half of the refusal is observable.
+
+    MUTATION PROOF (performed, not merely asserted): with the _peer_is_trusted() gate
+    removed from _broker (the reverted fix), the refusal test below goes red — the
+    attacker authenticates with the stolen placeholder and the (faked) upstream hop
+    happens, the round-7 open proxy exactly; with the gate refusing EVERY peer, the
+    two serving tests go red.
+    """
+
+    def _probe_script(self, tmpdir):
+        script = Path(tmpdir) / "peer_probe.py"
+        script.write_text(_PEER_PROBE, encoding="utf-8")
+        return str(script)
+
+    def _engine_env(self, broker):
+        # The shape the dispatcher hands the engine: placeholder under the key var,
+        # broker base URL under the base-URL var — both visible in /proc/<pid>/environ.
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "ANTHROPIC_API_KEY": broker.placeholder,
+                "ANTHROPIC_BASE_URL": broker.base_url("anthropic")}
+
+    def test_a_same_uid_attacker_holding_the_stolen_placeholder_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker = self.start_broker({"anthropic": REAL["anthropic"]})
+            engine = subprocess.Popen([sys.executable, script, "sleep"],
+                                      env=self._engine_env(broker))
+            try:
+                # The dispatcher's narrowing: the broker serves the ENGINE SESSION's
+                # tree, no other descendant of the dispatcher — the attacker below is a
+                # child of THIS process (the dispatcher stand-in), exactly like the
+                # reviewer's pre-pass-spawned attacker.
+                broker.restrict_peer_root(engine.pid)
+                res = subprocess.run([sys.executable, script, "steal", str(engine.pid)],
+                                     capture_output=True, text=True, timeout=60)
+                self.assertIn("STATUS 403", res.stdout,
+                              f"attacker output: {res.stdout} {res.stderr}")
+                self.assertEqual(_FakeHTTPSConnection.calls, [],
+                                 "the refused attacker must not cause an upstream hop")
+            finally:
+                engine.kill()
+                engine.wait()
+
+    def test_the_engine_process_itself_is_served(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker = self.start_broker({"anthropic": REAL["anthropic"]})
+            engine = subprocess.Popen([sys.executable, script, "call"],
+                                      env=self._engine_env(broker),
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True)
+            broker.restrict_peer_root(engine.pid)
+            out, err = engine.communicate(timeout=60)
+            self.assertIn("STATUS 200", out, f"engine output: {out} {err}")
+            self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
+            self.assertEqual(_FakeHTTPSConnection.calls[0]["headers"]["x-api-key"],
+                             REAL["anthropic"])
+
+    def test_a_descendant_of_the_engine_is_served(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker = self.start_broker({"anthropic": REAL["anthropic"]})
+            engine = subprocess.Popen([sys.executable, script, "spawn-call"],
+                                      env=self._engine_env(broker),
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True)
+            broker.restrict_peer_root(engine.pid)
+            out, err = engine.communicate(timeout=60)
+            self.assertIn("STATUS 200", out, f"engine output: {out} {err}")
+            self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
+
+    def test_the_gate_defaults_to_the_owning_process_tree(self):
+        # Before any narrowing, the broker serves the tree of the process that started
+        # it (the dispatcher's) — which is why existing in-process callers keep working
+        # and why the engine, a child of the dispatcher, is served from birth.
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        self.assertEqual(broker._server.peer_gate_root, os.getpid())
+        status, _, _ = _client_request(
+            broker.port, "POST", "/proxy/anthropic/v1/messages",
+            headers={"x-api-key": broker.placeholder, "content-length": "2"}, body=b"{}")
+        self.assertEqual(status, 200)
+
+    def test_the_unix_listener_carries_no_peer_gate(self):
+        # The sandboxed path's boundary is the netns; the relay is an ANCESTOR of the
+        # engine, so a descendant check there would refuse the run's own traffic.
+        broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            broker.start(unix_path=os.path.join(tmpdir, "broker.sock"), child_port=8384)
+            self.addCleanup(broker.stop)
+            self.assertFalse(hasattr(broker._server, "peer_gate_root"))
+
+
+class TestPeerIdentityHelpers(unittest.TestCase):
+    """Unit pins for the kernel-truth helpers the gate is built from."""
+
+    def test_pid_in_tree_accepts_the_root_itself_and_a_descendant(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            self.assertTrue(cb._pid_in_tree(os.getpid(), os.getpid()))
+            self.assertTrue(cb._pid_in_tree(child.pid, os.getpid()))
+            self.assertFalse(cb._pid_in_tree(os.getpid(), child.pid))
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_pid_in_tree_refuses_an_orphaned_background_process(self):
+        # The reviewer's attacker shape exactly: a background process that outlives its
+        # spawner is re-parented to init and is NOT in the spawner's tree — even though
+        # it started life as the spawner's grandchild.
+        src = ("import os\n"
+               "pid = os.fork()\n"
+               "if pid:\n"
+               "    print(pid, flush=True)\n"
+               "else:\n"
+               "    import time; time.sleep(60)\n")
+        proc = subprocess.Popen([sys.executable, "-c", src],
+                                stdout=subprocess.PIPE, text=True)
+        orphan_pid = int(proc.stdout.readline())
+        proc.stdout.close()
+        proc.wait()  # the spawner exits; the orphan is re-parented before wait() returns
+        try:
+            self.assertFalse(cb._pid_in_tree(orphan_pid, os.getpid()))
+        finally:
+            os.kill(orphan_pid, signal.SIGKILL)
+
+    def test_pid_in_tree_fails_closed_for_a_dead_pid(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        self.assertFalse(cb._pid_in_tree(child.pid, os.getpid()))
+
+    def test_established_tcp_peer_pids_attributes_a_live_loopback_connection(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        client = socket.create_connection(listener.getsockname(), timeout=10)
+        conn, _ = listener.accept()
+        try:
+            pids = cb._established_tcp_peer_pids(client.getsockname()[1])
+            self.assertIn(os.getpid(), pids)
+        finally:
+            conn.close()
+            client.close()
+            listener.close()
+
+    def test_established_tcp_peer_pids_fails_closed_for_an_unheld_port(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        self.assertEqual(cb._established_tcp_peer_pids(port), set())
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ import os
 import signal
 import subprocess
 import time
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 # Used only when an agent.yaml omits budget.max_minutes, or declares something that is not a
 # positive finite number. Never unbounded, never zero.
@@ -105,6 +105,7 @@ def run_station_command(
     step: str,
     check: bool = False,
     kill_group_on_exit: bool = False,
+    on_spawn: Optional[Callable[[subprocess.Popen], None]] = None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """Run one station command under `budget`, killing its whole process group on expiry.
@@ -115,6 +116,12 @@ def run_station_command(
     `kill_group_on_exit` also kills (and waits out) whatever the command left running in its
     group when it exits normally — for a command holding delivery credentials, where a
     lingering descendant could still act after its result was recorded (command sink).
+
+    `on_spawn` fires with the live Popen the instant the child exists — before
+    communicate() blocks — for a caller that must bind something to the child's pid
+    (agents-28nn round 8: the credential broker narrows its loopback peer gate to the
+    engine session's own process tree, so no other descendant of the dispatcher is
+    served).
     """
     timeout = budget.timeout_for(step)
     # `capture_output` and `input` are subprocess.run conveniences, not Popen arguments.
@@ -125,6 +132,8 @@ def run_station_command(
     if stdin_data is not None:
         kwargs.setdefault("stdin", subprocess.PIPE)
     proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    if on_spawn is not None:
+        on_spawn(proc)
     try:
         stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
     except subprocess.TimeoutExpired:

@@ -21,28 +21,35 @@ so SSE is not buffered. No credential shape then exists in the engine's env, fs 
 ``/proc``, because the only provider secret lives in this process, on the host side
 of the sandbox boundary.
 
-The placeholder is the authentication (agents-28nn round 7, the verdict's P0)
---------------------------------------------------------------------------
-The broker no longer starts only on the sandboxed path (round 6 closed that
-inverted polarity), and on the UNSANDBOXED path its TCP loopback is the HOST's
-loopback — a shared interface any local process can dial. An unauthenticated
-listener there is an open proxy that injects the raw credentials upstream for
-whoever asks (the verdict constructed exactly that with a plain curl). So the
-placeholder is now a per-run random secret generated with the broker, and EVERY
-request must present it in the provider's auth header (``x-api-key`` /
-``Authorization: Bearer`` / ``x-goog-api-key`` / ``api-key``) or be refused with
-403 before any upstream hop: possession of the placeholder IS the licence to use
-the broker, and only the run's own children are ever handed it. Chosen over the
-two alternatives: a UNIX socket with filesystem permissions cannot help on the
-unsandboxed path, because the engine runs as the operator's uid and the attacker
-population — any local process, including every other lane on the VM — shares
-that uid, so ownership cannot distinguish the served process from them (knowledge
-of a per-run secret can); and binding only for the duration of the engine's
-process narrows nothing, because the broker already lives exactly as long as the
-engine session — the exposure window IS the run. The secret is run-scoped and
-provider-less: exfiltrating it yields only what the engine itself already has —
-broker access, for the run's own lifetime, to the run's own allowed providers —
-never the raw provider key.
+Peer identity first, the placeholder second (agents-28nn round 8, the verdict's P0)
+----------------------------------------------------------------------------------
+The broker no longer starts only on the sandboxed path (round 6 closed that inverted
+polarity), and on the UNSANDBOXED path its TCP loopback is the HOST's loopback — a
+shared interface any local process can dial. Round 7 authenticated that reachability
+with the placeholder turned per-run random secret — and round 8's verdict falsified
+the secret as THE boundary, by construction: the unsandboxed engine runs as the
+operator's uid, the same uid as every process that could abuse the broker, so the
+placeholder in the engine's environ (or in the models.json the engine reads) is
+readable by any same-uid process via /proc/<pid>/environ — the reviewer's
+pre-pass-spawned attacker read exactly that value and authenticated with it. A secret
+confines by KNOWLEDGE, and between processes of one uid there is no knowledge
+asymmetry: any value the engine can see, the attacker can see. So the TCP listener
+authenticates by PEER IDENTITY first: the kernel's own attribution of the connecting
+socket (/proc/net/tcp's inode -> /proc/<pid>/fd owner, then the ppid chain — the TCP
+analogue of SO_PEERCRED on a UNIX socket), accepting only the dispatcher's process
+tree, narrowed to the ENGINE SESSION's tree the moment the engine exists
+(restrict_peer_root). WHO CAN REACH the broker is thereby a property of the OPERATION
+— which process is calling — not of the OS environment's uid rules. Chosen over moving
+the transport to a UNIX socket with SO_PEERCRED: the engine's SDK dials a TCP base URL
+and cannot dial a UNIX socket, so a TCP->UNIX relay would have to sit on the same
+shared loopback and would itself need this same peer check — the check IS the
+mechanism; the socket move would only relocate it and add a process. Chosen over
+failing closed on the unsandboxed path: that posture remains for when the kernel's
+tables are unreadable (the gate refuses, never opens), but with /proc present the
+operation can confine the broker itself. The per-run secret stays as the second
+factor — and as the only check the UNIX listener needs, its boundary being the sandbox
+netns. Both gates live in _broker, so GET and POST are gated alike, and the secret
+comparison stays constant-time.
 
 Design (detail on the agents-8h4 bead)
 --------------------------------------
@@ -218,6 +225,90 @@ def keyless_providers() -> Tuple[str, ...]:
     return tuple(p for p, (_base, auth, _vars) in PROVIDERS.items() if auth == "none")
 
 
+def _established_tcp_peer_pids(peer_port: int, proc_root: str = "/proc") -> Set[int]:
+    """The pids holding an ESTABLISHED 127.0.0.1:<peer_port> TCP socket — the kernel's own
+    record of who is on the other end of a loopback connection (agents-28nn round 8).
+
+    /proc/net/tcp maps the connection's local address to a socket inode; /proc/<pid>/fd
+    maps the inode to its owning processes. Both are kernel truth a same-uid process
+    cannot forge: it can rename itself or its argv, but it cannot make the kernel
+    attribute its socket to another pid. Anything unreadable — no row, no fd owner, no
+    /proc at all — yields an EMPTY set, so the caller fails closed.
+    """
+    inodes: Set[str] = set()
+    want = f"0100007F:{peer_port:04X}"  # 127.0.0.1:<port>, /proc/net/tcp hex
+    try:
+        with open(f"{proc_root}/net/tcp", "r", encoding="ascii") as fh:
+            rows = fh.readlines()[1:]
+    except OSError:
+        return set()
+    for row in rows:
+        parts = row.split()
+        # sl, local_address, rem_address, st, ..., inode. 01 is ESTABLISHED — the state
+        # accept() returns a connection in; a TIME_WAIT (06) socket has no owning fd and
+        # so can never attribute a pid, and a 4-tuple can be held ESTABLISHED by exactly
+        # one connection, so the port identifies this connection and no other.
+        if len(parts) < 10 or parts[3] != "01" or parts[1] != want:
+            continue
+        inodes.add(parts[9])
+    if not inodes:
+        return set()
+    pids: Set[int] = set()
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return set()
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        fd_dir = os.path.join(proc_root, entry, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue  # the process exited mid-scan, or its fds are unreadable
+        for fd in fds:
+            try:
+                target = os.readlink(os.path.join(fd_dir, fd))
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                pids.add(int(entry))
+                break
+    return pids
+
+
+def _pid_in_tree(pid: int, root: int, proc_root: str = "/proc", _limit: int = 128) -> bool:
+    """Whether `pid` is `root` or one of its descendants, by the kernel's ppid chain
+    (agents-28nn round 8). A process cannot re-parent itself INTO a tree — ppid only
+    ever moves toward init (orphaning) — so the chain is forgery-proof, and a
+    pre-pass-spawned attacker that outlived the pre-pass reads as a child of init, not
+    of the engine. The walk reads only LIVE /proc state, so a reused pid answers for
+    the process that holds it now; a dead or unreadable link fails closed. `_limit`
+    bounds the walk against a corrupt chain."""
+    current = pid
+    for _ in range(_limit):
+        if current == root:
+            return True
+        if current <= 1:
+            return False
+        try:
+            with open(f"{proc_root}/{current}/stat", "r", encoding="ascii") as fh:
+                stat = fh.read()
+        except OSError:
+            return False  # the process exited mid-check: nothing left to trust
+        close = stat.rfind(")")  # comm is parenthesised and may contain spaces or ')'
+        if close < 0:
+            return False
+        fields = stat[close + 1:].split()  # field 3 (state) onward; ppid is next
+        if len(fields) < 2:
+            return False
+        try:
+            current = int(fields[1])
+        except ValueError:
+            return False
+    return False
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Forwards one engine request to its provider, injecting the real credential.
 
@@ -362,7 +453,31 @@ class _Handler(BaseHTTPRequestHandler):
                 candidates.append(authorization[7:].strip())
         return any(hmac.compare_digest(candidate, secret) for candidate in candidates)
 
+    def _peer_is_trusted(self) -> bool:
+        """Whether the process holding THIS connection is inside the process tree the
+        broker serves (agents-28nn round 8, the verdict's reopened P0). Identity before
+        knowledge: on the host's shared loopback the per-run secret is readable by any
+        same-uid process (the engine's /proc/<pid>/environ, models.json), so possession
+        cannot distinguish the engine from an attacker — the kernel's attribution of
+        the connecting socket can. The gate exists only where no stronger kernel
+        boundary already does the work: the UNIX listener serves the in-sandbox relay
+        behind the netns boundary and never carries peer_gate_root."""
+        root = getattr(self.server, "peer_gate_root", None)
+        if root is None:
+            return True
+        if self.client_address[0] != "127.0.0.1":
+            return False
+        pids = _established_tcp_peer_pids(self.client_address[1])
+        return any(_pid_in_tree(pid, root) for pid in pids)
+
     def _broker(self, method: str) -> None:
+        if not self._peer_is_trusted():
+            # Refused BEFORE the secret is even consulted and before any path processing
+            # or upstream hop: a same-uid process outside the run's process tree holding
+            # the STOLEN placeholder gets the same 403 as one holding nothing.
+            return self._respond_error(
+                403, "the credential broker serves only the run's own process tree; "
+                     "this connection's peer is not in it")
         if not self._request_authenticated():
             # Refused BEFORE any path processing or upstream hop: an unauthenticated
             # caller learns nothing (not even whether a provider is configured) and
@@ -511,7 +626,8 @@ class CredentialBroker:
         self._credentials: Dict[str, Optional[str]] = dict(credentials)
         # The per-run secret the engine receives as its placeholder API key and the
         # broker demands back on every request. Generated here so each run — and each
-        # test — gets a value no other process can know in advance.
+        # test — gets a value no other process can know in advance. Round 8: the
+        # second factor on the TCP listener, not the boundary — the peer gate is.
         self._placeholder = PLACEHOLDER_PREFIX + secrets.token_urlsafe(18)
         self._server: Optional[socketserver.BaseServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -523,10 +639,13 @@ class CredentialBroker:
 
     @property
     def placeholder(self) -> str:
-        """The run's per-run secret: the engine's placeholder API key AND the
-        credential the broker requires on every request. Not a provider key —
-        exfiltrating it yields only broker access, for this run's lifetime, to this
-        run's allowed providers."""
+        """The run's per-run secret: the engine's placeholder API key AND the second
+        factor the broker requires on every request. On the unsandboxed path it is NOT
+        the boundary — a same-uid process can read it from the engine's environ — the
+        peer gate is (agents-28nn round 8); the secret remains as defence in depth and
+        as the only check the UNIX listener needs, its boundary being the sandbox
+        netns. Not a provider key — exfiltrating it yields only broker access, for this
+        run's lifetime, to this run's allowed providers."""
         return self._placeholder
 
     @property
@@ -579,11 +698,30 @@ class CredentialBroker:
             self.port = None
         else:
             self._server = _BrokerServer(("127.0.0.1", 0), handler)
+            # agents-28nn round 8 (the verdict's reopened P0): this TCP listener sits on
+            # the HOST's shared loopback, so it is peer-gated from birth — it serves only
+            # connections whose owning process is in THIS process's tree (the
+            # dispatcher's; the engine session it is about to spawn is a child of it).
+            # The dispatcher narrows the gate to the engine session's own pid the moment
+            # the engine exists (restrict_peer_root, via run_station_command's on_spawn).
+            self._server.peer_gate_root = os.getpid()
             self.port = self._server.server_address[1]
         self._thread = threading.Thread(target=self._server.serve_forever,
                                         name="credential-broker", daemon=True)
         self._thread.start()
         return self.port or 0
+
+    def restrict_peer_root(self, pid: int) -> None:
+        """Narrow the TCP listener's peer gate to `pid`'s subtree (agents-28nn round 8):
+        the dispatcher calls this with the engine session's pid the moment the engine is
+        spawned, so the broker serves exactly the process it was started for — the
+        engine and its descendants — and no other descendant of the dispatcher. A no-op
+        on a UNIX listener: that listener's boundary is the sandbox netns, and its peer
+        is the in-sandbox relay, an ANCESTOR of the engine rather than a descendant, so
+        a tree check there would refuse the run's own traffic."""
+        server = self._server
+        if server is not None and hasattr(server, "peer_gate_root"):
+            server.peer_gate_root = pid
 
     def base_url(self, provider: str) -> str:
         """The engine-side base URL for `provider` (points at this broker). In UNIX mode
