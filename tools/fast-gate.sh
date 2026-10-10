@@ -262,6 +262,23 @@ while IFS= read -r f; do
       # would flip the fail-closed expectation); tests/test_tool_pins.py is the pins contract.
       mapped="$mapped tests/test_tool_pins.py tests/test_child_env.py"
       ;;
+    targets/*.yaml)
+      # Target inventory. lib/scheduler.py:140-144 GLOBS FACTORY_ROOT/"targets"/*.yaml, and
+      # tests/test_schedules.py:200-213 and :311-360 spawn the REAL factory (FACTORY_ROOT is
+      # derived from __file__, unmockable) as `schedule generate/list/--install --target
+      # voicebox --agent secret-scan`, asserting "Generated (launchd):" - so the committed
+      # targets/voicebox.yaml is load-bearing for that suite. Consumed WITHOUT BEING NAMED:
+      # a subprocess with a default glob, invisible to a grep of the test file (agents-9nir
+      # review round 2).
+      mapped="$mapped tests/test_schedules.py"
+      ;;
+    reports/*.md)
+      # Generated audit reports. reports/ is NOT in DEFAULT_IGNORE_DIRS (lib/exclusions.py:23-43
+      # excludes findings/ and runs/ via FACTORY_ARTIFACT_DIRS at :11-15, not reports/), so the
+      # docs-drift scanner DOES walk these files, and the real-tree fleet-resolution assertions
+      # (tests/test_docs_drift.py:101-113) bind any walked .md that names a bare agent directory.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
     # --- Ignore list (agents-9nir) -----------------------------------------------------
     # RULE: an ignore must be a DELIBERATE CASE ARM WITH A REASON, never a default.
     # "No arm" used to mean two different things - a considered exclusion and an
@@ -270,20 +287,24 @@ while IFS= read -r f; do
     # suite. The *) arm at the bottom fails loudly and NAMES any file no arm claims;
     # the smoke fallback after the loop is for ignored docs/config-only changes ONLY.
     # To exempt a path, add an arm here with the reason it needs no suite.
-    # WARNING, learned the hard way (agents-9nir review): a path grep cannot prove a path
-    # class is consumer-free, because a WALKER consumes a CLASS of paths - the docs-drift
-    # scanner os.walk()s every committed .md outside IGNORE_DIRS, which is why the original
-    # canvas `*.md` ignore arm was false. Check for globs and directory walks too.
+    # WARNING, learned the hard way (agents-9nir review, three instances in one bead): a
+    # path grep cannot prove a path class is consumer-free, because a file can be consumed
+    # WITHOUT BEING NAMED - by a WALKER (agents/*/SKILL.md via check_docs.py's os.walk),
+    # by a GLOB (targets/*.yaml via lib/scheduler.py:140-144), and by a SUBPROCESS WITH A
+    # DEFAULT PATH (tools.yaml via lib/tool_pins.py:46 read in test_child_env.py's probes).
+    # So the reason in an ignore arm must record the SEARCH PERFORMED AND ITS RESULT,
+    # never a judgement about who reads the path - a judgement is unfalsifiable, and that
+    # is what made the original canvas `*.md` ignore arm's reason false.
     .beads/*)
-      # Beads tooling state (config, hooks, metadata.json) maintained by bd itself, not by
-      # us; the scanner excludes it (dot-dir skip plus IGNORE_DIRS) and tests only ever
-      # mkdir their own tmp .beads fixtures - no suite reads the committed files.
+      # The scanner never sees these: it skips dot dirs and .beads is in DEFAULT_IGNORE_DIRS
+      # (lib/exclusions.py:23-43). Search performed: every .beads reference in tests mkdirs
+      # its own tmp fixture (test_bd_json_contract.py:64, test_factory_core.py:537,
+      # test_sinks.py:88, test_store_lock_timeout.py:273) - none reads the committed files.
       ;;
-    targets/*.yaml)
-      # Target inventory data read by factory at run time. No suite reads the committed
-      # files: every targets/ reference in tests writes its own tmp fixture (verified by
-      # glob/walk search, not a filename grep). NOTE targets/README.md is NOT here - the
-      # scanner walks it, so it fails loudly until someone makes that call deliberately.
+    findings/*.md)
+      # findings/ is in FACTORY_ARTIFACT_DIRS (lib/exclusions.py:11-15), so the docs-drift
+      # scanner never walks it; and findings/* is gitignored (only .gitkeep and
+      # suppressions.yaml are force-tracked), so this arm only fires on a force-added file.
       ;;
     *.gitkeep)
       # Empty placeholders keeping otherwise-gitignored dirs (findings/, lines/,

@@ -180,9 +180,21 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_pages_publish_scope.py", mapped)
         self.assertIn("tests/test_docs_drift.py", mapped, "INTEGRATION.md anchor/table pin omitted (agents-9nir)")
 
+    def test_targets_yaml_maps_to_schedules(self):
+        """targets/*.yaml is globbed by lib/scheduler.py:140-144 and asserted via real-factory subprocesses."""
+        mapped = resolve_fast_gate(["targets/voicebox.yaml"])
+        self.assertIn("tests/test_schedules.py", mapped,
+                      "scheduler glob consumer omitted (lib/scheduler.py:140-144, test_schedules.py:200-213) (agents-9nir)")
+
+    def test_reports_markdown_maps_to_docs_drift(self):
+        """reports/ is NOT in DEFAULT_IGNORE_DIRS, so the scanner walks it and the fleet assertions bind it."""
+        mapped = resolve_fast_gate(["reports/factory-security-audit.md"])
+        self.assertIn("tests/test_docs_drift.py", mapped,
+                      "reports/*.md is walked (lib/exclusions.py:23-43 excludes findings/,runs/ - not reports/) (agents-9nir)")
+
     def test_ignored_docs_and_vcs_metadata_fall_back_quietly(self):
         """Ignore-list paths resolve to nothing and exit 0, so the real run takes the smoke fallback quietly."""
-        for path in (".gitignore", ".beads/metadata.json", "targets/voicebox.yaml",
+        for path in (".gitignore", ".beads/metadata.json", "findings/scan-notes.md",
                      "findings/.gitkeep", "schedules/.gitkeep"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
@@ -197,8 +209,7 @@ class TestFastGateMapping(unittest.TestCase):
         with a false reason) nor map (a suite whose assertions cannot fail on the file) is
         honest, so the deliberate behaviour is the loud failure.
         """
-        for path in ("agents/vuln-verify/README.md", "AGENTS.md", "targets/README.md",
-                     "reports/factory-security-audit.md"):
+        for path in ("agents/vuln-verify/README.md", "AGENTS.md", "targets/README.md"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
