@@ -59,7 +59,10 @@ from lib.sinks.github import promote_issue
 
 # Keys of a per-run delta. `false_positive` counts findings the triage itself declared false
 # positives: they are recorded, never counted as new/unchanged work (journal-35w).
-DELTA_KEYS = ("new", "regressed", "fixed", "unchanged", "suppressed", "false_positive")
+DELTA_KEYS = ("new", "regressed", "fixed", "unchanged", "suppressed", "false_positive",
+              # Not a table column: a one-time identity re-key count, announced as its own banner so
+              # a migration wave cannot be read as discoveries (agents-x9my step 2, agents-1ukp).
+              "migrated")
 
 def normalize_text(text: Any) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting.
@@ -148,6 +151,11 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     # the triage model chose to quote the line this time (fleet-oed).
     snippets_at: Dict[Tuple[str, str, Any], str] = {}
     snippets_in: Dict[Tuple[str, str], List[str]] = {}
+    # The same snippet indexed by LOCATION ALONE, for findings whose rule label bound nothing - the
+    # population where identity used to rest on the model's re-wording (agents-x9my step 2). Only
+    # UNAMBIGUOUS locations are kept: a (path, line), or a path, with exactly one distinct snippet.
+    by_path_at: Dict[Tuple[str, Any], List[str]] = {}
+    by_path: Dict[str, List[str]] = {}
     # The scanner's raw match per location, so deterministic dummy detection can see the exact
     # matched value even when the triage model masks its snippet (agents-3r7).
     raw_matches_at: Dict[Tuple[str, str, Any], str] = {}
@@ -171,6 +179,8 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
             snippets_in.setdefault(key, [])
             if snippet not in snippets_in[key]:
                 snippets_in[key].append(snippet)
+            by_path_at.setdefault((path, candidate.get("line_number",)), []).append(snippet)
+            by_path.setdefault(path, []).append(snippet)
         raw_match = candidate.get("raw_match")
         if isinstance(rule_id, str) and path and isinstance(raw_match, str) and raw_match.strip():
             key = (rule_id.strip(), path)
@@ -186,6 +196,8 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
         return None
     return {"rule_ids": rule_ids, "paths": paths,
             "snippets_at": snippets_at, "snippets_in": snippets_in,
+            "snippets_by_path_at": {k: v[0] for k, v in by_path_at.items() if len(set(v)) == 1},
+            "snippets_by_path": {p: v[0] for p, v in by_path.items() if len(set(v)) == 1},
             "raw_matches_at": raw_matches_at, "raw_matches_in": raw_matches_in,
             "severities": severities}
 
@@ -208,14 +220,31 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
 # than masked; and it is deliberately NOT an input to compute_fingerprint, because identity must
 # not depend on how a finding was recognised - if it did, improving the binder would re-book every
 # row.
+# Which identity binding wrote the KEYS in a findings store. Bump this when a change re-keys
+# stored rows, because the run that first applies a bump re-books them: it reports a one-time
+# new+fixed wave that is bookkeeping, not discovery, and the delta announces it in those words
+# (agents-x9my step 2; announcement agents-1ukp). Scheme 1 = the scanner snippet bound by rule id
+# (fleet-oed, agents-x9my step 1); scheme 2 = plus the location fallback (agents-x9my step 2).
+IDENTITY_SCHEME = 2
+
 IDENTITY_SOURCES = (
     "candidate-exact",      # the scanner candidate at (rule id, path, line)
     "candidate-unique",     # the only candidate for (rule id, path)
     "candidate-similar-by-model-snippet",  # the candidate whose text the MODEL's snippet quotes
+    "unmatched-rule-location-unique",  # rule label bound nothing; ONE candidate at (path, line)
+    "unmatched-rule-path-unique",      # rule label bound nothing; ONE candidate at the path
     "model-snippet",        # a candidate set existed but nothing bound: identity IS model prose
     "no-candidate-index",   # no candidate set at all, so there was nothing to bind to
 )
 
+# The two `unmatched-rule-*` sources bind on LOCATION ALONE: the model's rule label matched no
+# candidate, so they say "there is exactly one scanner candidate here", NOT "the scanner agrees
+# with the model's rule". They are deliberately not named `candidate-*`, for the reason above - a
+# reader must not take them for the rule-keyed bindings - and they are stable for the same reason
+# `candidate-exact` is: the model's snippet plays no part in choosing them. They fire only where the
+# location is unambiguous AND only when this run reports a single finding at that path, so two rows
+# cannot be handed the same scanner snippet and collapse into one (which would lose a finding).
+#
 # Sources that are EVIDENCE that two runs describe the same finding, as opposed to sources that
 # merely say how a row was recognised. `candidate-similar-by-model-snippet` is scanner text SELECTED
 # BY the model's wording, so re-wording can select a different candidate: it is only partly stable,
@@ -223,11 +252,13 @@ IDENTITY_SOURCES = (
 # agents-x9my) - a reader seeing any `candidate-*` name could infer "scanner-derived, therefore
 # trustworthy", which is the inference this vocabulary exists to make impossible. Neither it, nor
 # `model-snippet`, nor `no-candidate-index` is sufficient to close on a Fixed line.
-IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique")
+IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
+                           "unmatched-rule-location-unique", "unmatched-rule-path-unique")
 
 
 def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
-                             candidate_index: Optional[Dict[str, Any]]) -> Tuple[Any, str]:
+                             candidate_index: Optional[Dict[str, Any]], *,
+                             path_unambiguous: bool = True) -> Tuple[Any, str]:
     """The snippet a finding is fingerprinted on, and WHICH KEY bound it.
 
     The model re-quotes a candidate's line differently from run to run (masked, truncated,
@@ -237,11 +268,22 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
     candidate location; otherwise the model's snippet is kept, as before - and that fallback is
     now NAMED, because it is the difference between a Fixed line that is evidence and one that is
     an artefact of re-wording (agents-x9my).
+
+    STEP 2, and why it is keyed on location rather than on the rule: the rule-keyed lookups above
+    cannot fire when the model does not echo the scanner's rule id, which by measurement is the
+    MAJORITY of rows (agents-x9my), so those rows rested on re-wording no matter how good the
+    scanner binding was. A location that holds exactly one candidate is unambiguous on its own, so
+    it is used there - still without the model's prose, which is what makes these sources stable.
+    `path_unambiguous` is the run-level guard: when THIS RUN reports more than one finding for the
+    path, the fallback is refused, because two rows sharing a path and a blanked rule label would
+    be handed the same snippet, get the same fingerprint, and silently collapse into one - losing a
+    finding rather than merely mislabelling it.
     """
     model_snippet = item.get("snippet", "")
     if not candidate_index or not isinstance(rule_id, str):
         return model_snippet, "no-candidate-index"
-    key = (rule_id.strip(), normalize_path(path))
+    norm_path = normalize_path(path)
+    key = (rule_id.strip(), norm_path)
     at = candidate_index.get("snippets_at", {})
     line = item.get("line_number")
     if key + (line,) in at:
@@ -249,6 +291,15 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
     options = candidate_index.get("snippets_in", {}).get(key, [])
     if len(options) == 1:
         return options[0], "candidate-unique"
+    if path_unambiguous:
+        # The rule label bound nothing: the model renamed the rule, or the binder blanked a label it
+        # could not verify. Identity must not fall back to the model's re-wording merely because the
+        # LABEL moved, so bind on location - preferring the sharper statement, that the model's own
+        # line points at exactly one candidate, over the coarser one that the path holds exactly one.
+        if (norm_path, line) in candidate_index.get("snippets_by_path_at", {}):
+            return candidate_index["snippets_by_path_at"][(norm_path, line)], "unmatched-rule-location-unique"
+        if norm_path in candidate_index.get("snippets_by_path", {}):
+            return candidate_index["snippets_by_path"][norm_path], "unmatched-rule-path-unique"
     wanted = normalize_text(model_snippet)
     if wanted:
         matching = [o for o in options if wanted in normalize_text(o) or normalize_text(o) in wanted]
@@ -444,7 +495,17 @@ class FindingsStore:
         self._lock_fh = open(self._lock_path, "a+", encoding="utf-8")
         try:
             fcntl.flock(self._lock_fh.fileno(), fcntl.LOCK_EX)
+            # A store written before this field existed predates the stamp, so it was written by
+            # some older scheme: treat it as 1 rather than as current, so the first run after the
+            # change announces the re-key instead of passing it off as discoveries. A store that
+            # does not exist yet has nothing to re-key and is simply stamped (agents-x9my step 2).
+            had_store = self.store_file.exists()
             self.data: Dict[str, Any] = self._load_store()
+            raw_scheme = self.data.get("identity_scheme")
+            if isinstance(raw_scheme, int) and not isinstance(raw_scheme, bool):
+                self.identity_scheme_from = raw_scheme
+            else:
+                self.identity_scheme_from = (IDENTITY_SCHEME - 1) if had_store else IDENTITY_SCHEME
             self.suppressions: Dict[str, Any] = self._load_suppressions()
         except BaseException:
             self._lock_fh.close()
@@ -585,8 +646,18 @@ class FindingsStore:
         """
         now = datetime.now(timezone.utc).isoformat()
         current_fps = set()
+        migrated_in_place = 0
         delta_stats = {key: 0 for key in DELTA_KEYS}
         processed = []
+
+        # How many findings THIS RUN reports per path, so a location fallback cannot merge two of
+        # them onto one scanner snippet (see identity_snippet_binding).
+        path_counts: Dict[str, int] = {}
+        for item in raw_findings:
+            if isinstance(item, dict):
+                norm = normalize_path(item.get("path"))
+                if norm:
+                    path_counts[norm] = path_counts.get(norm, 0) + 1
 
         # 1. Process observed findings
         for item in raw_findings:
@@ -616,8 +687,10 @@ class FindingsStore:
             item["severity"] = bind_severity(item, rule_id, path, candidate_index)
             item["raw_match"] = identity_raw_match(item, rule_id, path, candidate_index)
             item["agent"] = agent
+            norm_path = normalize_path(path)
+            path_unambiguous = bool(norm_path) and path_counts.get(norm_path, 0) == 1
             identity_snip, identity_source = identity_snippet_binding(
-                item, rule_id, path, candidate_index)
+                item, rule_id, path, candidate_index, path_unambiguous=path_unambiguous)
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
@@ -627,6 +700,15 @@ class FindingsStore:
             # A store or register written before the scanner snippet was the identity holds
             # the model-snippet fingerprint. Honour it once, instead of booking every finding
             # new and its old record fixed on the upgrade run (fleet-oed).
+            #
+            # WHY THE STEP-2 WAVE IS NOT FULLY BRIDGED, stated here because this is where a reader
+            # will look for it: this bridge can only recompute an older key from TODAY's inputs, and
+            # the population step 2 re-keys is exactly the population whose stored key came from the
+            # model's WORDING - which the re-wording changes, so the old key usually cannot be
+            # recomputed from this run at all. A looser match (same agent and path) was considered
+            # and REJECTED: it would silently absorb a genuinely NEW finding at a location an older
+            # row had left, trading a visible wave for one nobody can see. The wave is announced
+            # instead, once, by the scheme stamp below.
             legacy_fp = compute_fingerprint(agent=agent, rule_id=rule_id, path=path,
                                             snippet=item.get("snippet", ""))
             if legacy_fp != fp and fp not in self.data["findings"] and fp not in self.suppressions:
@@ -637,6 +719,7 @@ class FindingsStore:
                     migrated["fingerprint"] = fp
                     migrated["legacy_fingerprint"] = legacy_fp
                     self.data["findings"][fp] = migrated
+                    migrated_in_place += 1
             if fp in current_fps:
                 continue
             current_fps.add(fp)
@@ -723,6 +806,19 @@ class FindingsStore:
                     existing["fixed_at"] = now
                     delta_stats["fixed"] += 1
                     fixed_items.append(existing)
+
+        # This store was written by an older identity binding, so the rows it retires may be RE-KEYS
+        # rather than resolved findings. Count only the ones whose stored identity was NOT stable:
+        # a row recognised by the model's wording is a re-key, while a row recognised by the scanner
+        # being genuinely fixed is an ordinary result, and calling that a migration would tell triage
+        # not to look at a real fix. Stamp the store so the announcement happens once
+        # (agents-x9my step 2; announcement agents-1ukp).
+        delta_stats["migrated"] = migrated_in_place
+        if self.identity_scheme_from < IDENTITY_SCHEME:
+            delta_stats["migrated"] += sum(
+                1 for row in fixed_items
+                if row.get("identity_source") not in IDENTITY_STABLE_SOURCES)
+        self.data["identity_scheme"] = IDENTITY_SCHEME
 
         self.save()
 
@@ -989,6 +1085,29 @@ def _identity_note(f: Dict[str, Any]) -> str:
     return f" — identity: `{source}`{_identity_grade(f)}" if source else ""
 
 
+def _migration_note(stats: Dict[str, int]) -> List[str]:
+    """The one-time identity-migration announcement, for a run that re-keyed stored rows.
+
+    A migration re-books rows, so the run that performs it reports a new+fixed wave that is
+    BOOKKEEPING rather than discovery. Without this line the wave is indistinguishable from real
+    findings, and every VM's triage spends the next morning on it - the exact false-new/false-fixed
+    confusion this change exists to end (agents-x9my step 2, agents-1ukp).
+    """
+    migrated = int(stats.get("migrated", 0) or 0)
+    if migrated <= 0:
+        return []
+    return [
+        f"> **Identity migration (one-time)**: this findings store was written by an older identity "
+        f"binding, so {migrated} row(s) it held were re-keyed in this run. Identity now comes from "
+        "the scanner candidate at a row's LOCATION instead of from the model's wording, so a row that "
+        "disappears as Fixed and reappears as New in the same run is the SAME finding moving key - "
+        "BOOKKEEPING, not findings. Do not triage that wave: it happens on this run only, because the "
+        "store is now stamped with the binding that wrote it. Old keys stay on the records as "
+        "`legacy_fingerprint`. (agents-x9my step 2; announcement agents-1ukp.)",
+        "",
+    ]
+
+
 def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
                          fixed_items: List[Dict[str, Any]], *, step_summary: bool = False,
                          sink_results: Optional[Dict[str, Any]] = None,
@@ -1060,6 +1179,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     elif not env_failure and not env_failed and stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
         lines.append("> **Clean Delta**: No new, regressed, or resolved findings in this run.")
         lines.append("")
+
+    lines += _migration_note(stats)
 
     if stations is not None:
         lines.append("## Stations")

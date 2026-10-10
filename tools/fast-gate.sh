@@ -47,6 +47,13 @@ while IFS= read -r f; do
       # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, and layering.
       mapped="$mapped tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py"
       ;;
+    lib/findings.py)
+      # The findings store and the delta renderer. Its own suite is not enough: the store's record
+      # and stats shape is what the sink/record layers assert, and a change here broke
+      # tests/test_sinks' exact stats expectation while the generic test_findings-only mapping ran
+      # (agents-x9my step 2).
+      mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py"
+      ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.
       mapped="$mapped tests/test_bench_runner.py tests/test_hillclimb.py"
