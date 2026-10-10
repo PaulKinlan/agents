@@ -63,13 +63,17 @@ def _issue_identity(issue: Dict[str, Any], repo: str) -> Tuple[str, int]:
 _PROMOTION_APPROVAL_LABEL = "factory-approved"
 
 def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str,
-                  issue_url: str, beads_dir: Path) -> Dict[str, str]:
+                  issue_url: str, beads_dir: Path, *,
+                  store: Optional[Any] = None) -> Dict[str, str]:
     """Explicit human-approved issue -> ONE linked bead; safe to call again after partial failure.
 
     Publication never calls this function. A future approved automation can call the same
     function only after a human has added `factory-approved` to the verified public issue.
     The store lock serialises promotion attempts in this checkout; bd's repo-scoped external
     reference repairs a lost local receipt or failed issue backlink on retry.
+
+    Pass `store` (an open FindingsStore instance) to avoid opening a second file descriptor and
+    self-deadlocking in the same process (agents-ynjh).
     """
     if visibility != "public" or not isinstance(repo, str) or not _PUBLIC_REPO.fullmatch(repo):
         raise ValueError("promotion requires explicit public visibility and OWNER/REPO")
@@ -107,12 +111,8 @@ def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str
     fp, = fingerprints
     external_ref = f"factory:github.com/{repo.lower()}:{fp}"
 
-    # Lazy import: lib.sinks.github <- lib.findings would be a cycle at module import time
-    # (findings.py imports promote_issue from here), so import the store only when promotion runs.
-    from lib.findings import FindingsStore
-
-    with FindingsStore(target_name=target_name) as store:
-        finding = store.data["findings"].get(fp)
+    def _apply_with_store(s: Any) -> Dict[str, str]:
+        finding = s.data["findings"].get(fp)
         if not isinstance(finding, dict) or finding.get("fingerprint") != fp:
             raise ValueError("issue fingerprint is not a finding in this target's local store")
         if finding.get("false_positive") or finding.get("state") == "wontfix":
@@ -175,7 +175,7 @@ def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str
         finding["bead_id"] = bead_id
         finding["promoted_issue"] = issue_url
         finding["github_issue"] = {"url": verified_url, "number": number, "repo": repo}
-        store.save()  # persist the bead side before attempting the GitHub backlink
+        s.save()  # persist the bead side before attempting the GitHub backlink
         marker = f"<!-- factory-promotion:{external_ref}:{bead_id} -->"
         comments = _gh_pages(_gh_api(gh_bin, target_dir,
             f"repos/{repo}/issues/{number}/comments?per_page=100", paginate=True))
@@ -185,3 +185,13 @@ def promote_issue(target_name: str, target_dir: Path, repo: str, visibility: str
             })
         return {"status": "created" if created else "already_promoted", "bead_id": bead_id,
                 "issue": issue_url, "external_ref": external_ref}
+
+    if store is not None:
+        return _apply_with_store(store)
+
+    # Lazy import: lib.sinks.github <- lib.findings would be a cycle at module import time
+    # (findings.py imports promote_issue from here), so import the store only when promotion runs.
+    from lib.findings import FindingsStore
+
+    with FindingsStore(target_name=target_name) as s:
+        return _apply_with_store(s)
