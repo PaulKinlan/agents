@@ -176,14 +176,16 @@ ANOTHER ledger (ledgers are local and do not sync); or it was pruned before
 this ledger existed. Absence is not evidence of absence, and the record says
 so rather than letting the three readings collapse into one.
 
-**What a line does and does not claim.** `files` is the pre-removal snapshot
-and the line says so (`record_scope`): a file created inside the directory
-DURING the removal window may be destroyed without being listed — the record is
-best-effort, not a completeness guarantee. Equally, a listed file is one the
+**What a line does and does not claim.** For `removed` and `partial`, `files`
+is the pre-removal snapshot and the line says so (`record_scope`): a file
+created inside the directory DURING the removal window may be destroyed without
+being listed — the record is best-effort, not a completeness guarantee (for
+`moved`, `files` and `symlinks` are `null` and `moved_files` records the
+pre-removal snapshot). Equally, a listed file is one the
 removal saw disappear BETWEEN its two observations: destroyed by the removal,
 or moved or renamed out of the snapshot by a concurrent writer — the record
 cannot tell which, so `listed` must never be read as `destroyed`. A `symlinks`
-entry records a link and its raw target; `outside_tree` is three-valued.
+entry (for `removed` and `partial`) records a link and its raw target; `outside_tree` is three-valued.
 `true`: the target resolved OUTSIDE the removed tree — its contents were NOT
 removed and are NOT covered by this record (the evidence moved or was never in
 this tree). `false`: the target resolved INSIDE — the evidence is gone,
