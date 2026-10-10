@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS,
-                           NETWORK_CREDENTIAL_REQUIREMENTS, PLACEHOLDER_KEY)
+                           NETWORK_CREDENTIAL_REQUIREMENTS)
 
 # docs/PLAN.md section 5. The ceiling is what an agent at that tier may *declare*.
 #   t0-readonly  no network, read-only checkout
@@ -450,15 +450,19 @@ def budget_note(policy: Policy, engine: str) -> str:
 
 
 def _broker_covers_engine_env(engine: str, brokered_providers: Tuple[str, ...],
-                              engine_env: Optional[Mapping[str, str]]) -> bool:
+                              engine_env: Optional[Mapping[str, str]],
+                              expected_placeholder: Optional[str] = None) -> bool:
     """Report broker enforcement only when no real engine credential survives the swap.
 
     Provider labels are not proof by themselves: the broker must have started, the
     adapter must have received its placeholder and loopback URL, and *every* model
     credential exposed by child_environment must be removed or replaced. URL userinfo in
     inherited proxy settings also remains a credential in the child's environment.
+    `expected_placeholder` must be the running broker's per-run secret (agents-28nn
+    round 7): the env holding ANY other value — including the retired static
+    placeholder constant — is not evidence of a broker that will answer.
     """
-    if not brokered_providers or engine_env is None:
+    if not brokered_providers or engine_env is None or not expected_placeholder:
         return False
     covered = set()
     for provider in brokered_providers:
@@ -468,7 +472,7 @@ def _broker_covers_engine_env(engine: str, brokered_providers: Tuple[str, ...],
         placeholder_var, base_var, secret_vars = spec
         try:
             base = urlsplit(engine_env.get(base_var, ""))
-            if (engine_env.get(placeholder_var) != PLACEHOLDER_KEY
+            if (engine_env.get(placeholder_var) != expected_placeholder
                     or base.scheme != "http" or base.hostname != "127.0.0.1"
                     or not base.port or base.path != f"/proxy/{provider}"):
                 return False
@@ -477,7 +481,7 @@ def _broker_covers_engine_env(engine: str, brokered_providers: Tuple[str, ...],
         covered.update(secret_vars)
     for var in ENGINE_CREDENTIALS.get(engine, ()):
         value = engine_env.get(var)
-        if value and (var not in covered or value != PLACEHOLDER_KEY):
+        if value and (var not in covered or value != expected_placeholder):
             return False
     for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         try:
@@ -492,7 +496,8 @@ def policy_record(policy: Policy, engine: str,
                   sandbox: Optional[Dict[str, Any]] = None,
                   unsandboxed_note: Optional[str] = None,
                   brokered_providers: Tuple[str, ...] = (),
-                  engine_env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+                  engine_env: Optional[Mapping[str, str]] = None,
+                  expected_placeholder: Optional[str] = None) -> Dict[str, Any]:
     """The machine-readable account written to the run directory as policy.json.
 
     `sandbox` is lib/sandbox.py's sandbox_record(), produced only for an exercised wrap
@@ -512,7 +517,8 @@ def policy_record(policy: Policy, engine: str,
     # ACTUAL engine env by _broker_covers_engine_env, which is direct evidence on any
     # path (agents-28nn round 6: an unsandboxed brokered engine's record must be able to
     # say so). A sandboxed pre-pass alone is not sufficient (e.g. claude).
-    brokered_env = _broker_covers_engine_env(engine, brokered_providers, engine_env)
+    brokered_env = _broker_covers_engine_env(engine, brokered_providers, engine_env,
+                                             expected_placeholder)
     if sandbox is not None:
         if not sandbox.get("network_egress_filtered"):
             not_enforced.append("network-egress")

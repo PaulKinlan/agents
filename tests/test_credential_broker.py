@@ -125,7 +125,7 @@ class TestRoutingAndInjection(BrokerTestBase):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, headers, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY, "anthropic-version": "2023-06-01",
+            headers={"x-api-key": broker.placeholder, "anthropic-version": "2023-06-01",
                      "content-type": "application/json", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 200)
@@ -136,7 +136,7 @@ class TestRoutingAndInjection(BrokerTestBase):
         self.assertEqual(call["method"], "POST")
         # The real key is injected; the engine's placeholder is gone.
         self.assertEqual(call["headers"]["x-api-key"], REAL["anthropic"])
-        self.assertNotIn(cb.PLACEHOLDER_KEY, call["headers"].values())
+        self.assertNotIn(broker.placeholder, call["headers"].values())
         # The engine's own Host/Content-Length are not forwarded (http.client sets them).
         self.assertNotIn("host", {k.lower() for k in call["headers"]})
         # A passthrough header survives.
@@ -148,20 +148,20 @@ class TestRoutingAndInjection(BrokerTestBase):
     def test_openai_uses_bearer_and_a_v1_upstream_base(self):
         broker = self.start_broker({"openai": REAL["openai"]})
         _client_request(broker.port, "POST", "/proxy/openai/chat/completions",
-                        headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}",
+                        headers={"authorization": f"Bearer {broker.placeholder}",
                                  "content-type": "application/json", "content-length": "2"},
                         body=b"{}")
         call = _FakeHTTPSConnection.calls[0]
         self.assertEqual(call["host"], "api.openai.com")
         self.assertEqual(call["path"], "/v1/chat/completions")  # upstream base carries /v1
         self.assertEqual(call["headers"]["Authorization"], f"Bearer {REAL['openai']}")
-        self.assertNotIn(cb.PLACEHOLDER_KEY, call["headers"]["Authorization"])
+        self.assertNotIn(broker.placeholder, call["headers"]["Authorization"])
 
     def test_google_uses_x_goog_api_key(self):
         broker = self.start_broker({"google": REAL["google"]})
         _client_request(broker.port, "POST",
                         "/proxy/google/v1beta/models/gemini:generateContent",
-                        headers={"x-goog-api-key": cb.PLACEHOLDER_KEY, "content-length": "2"},
+                        headers={"x-goog-api-key": broker.placeholder, "content-length": "2"},
                         body=b"{}")
         call = _FakeHTTPSConnection.calls[0]
         self.assertEqual(call["host"], "generativelanguage.googleapis.com")
@@ -171,7 +171,7 @@ class TestRoutingAndInjection(BrokerTestBase):
     def test_query_string_is_preserved(self):
         broker = self.start_broker({"google": REAL["google"]})
         _client_request(broker.port, "GET", "/proxy/google/v1beta/models?pageSize=1",
-                        headers={"x-goog-api-key": cb.PLACEHOLDER_KEY})
+                        headers={"x-goog-api-key": broker.placeholder})
         self.assertEqual(_FakeHTTPSConnection.calls[0]["path"],
                          "/v1beta/models?pageSize=1")
 
@@ -183,7 +183,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/openai/chat/completions",
-            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            headers={"authorization": f"Bearer {broker.placeholder}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 502)
         self.assertEqual(_FakeHTTPSConnection.calls, [], "nothing may be forwarded")
@@ -208,7 +208,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         # Send headers with Content-Length > 32 MiB, but no massive payload body
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json",
+            headers={"x-api-key": broker.placeholder, "content-type": "application/json",
                      "content-length": str(oversized)},
             body=None)
         self.assertEqual(status, 413)
@@ -220,7 +220,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json",
+            headers={"x-api-key": broker.placeholder, "content-type": "application/json",
                      "content-length": "-10"},
             body=None)
         self.assertEqual(status, 400)
@@ -232,7 +232,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json",
+            headers={"x-api-key": broker.placeholder, "content-type": "application/json",
                      "content-length": "not-a-number"},
             body=None)
         self.assertEqual(status, 400)
@@ -259,7 +259,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         # 1. Allowed provider request succeeds (positive case)
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": "2"},
+            headers={"x-api-key": broker.placeholder, "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 200)
         self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
@@ -270,7 +270,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         # Assert clean denial: 403 status, no credentials returned or leaked in body, no upstream call
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/openai/chat/completions",
-            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            headers={"authorization": f"Bearer {broker.placeholder}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
@@ -290,7 +290,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         # Path traversal attempting to reach openai via allowed anthropic prefix
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/../openai/chat/completions",
-            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            headers={"authorization": f"Bearer {broker.placeholder}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
@@ -299,7 +299,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         # URL-encoded provider name (%6f%70%65%6e%61%69 == openai)
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/%6f%70%65%6e%61%69/chat/completions",
-            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            headers={"authorization": f"Bearer {broker.placeholder}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
@@ -308,7 +308,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         # Case variation (/proxy/OpenAI/...)
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/OpenAI/chat/completions",
-            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            headers={"authorization": f"Bearer {broker.placeholder}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
@@ -317,7 +317,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         # Double-slash normalization (/proxy//openai/...)
         status, _, body = _client_request(
             broker.port, "POST", "/proxy//openai/chat/completions",
-            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            headers={"authorization": f"Bearer {broker.placeholder}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
@@ -336,7 +336,7 @@ class TestFailClosedAndEdgeCases(BrokerTestBase):
         status, _, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
             headers={
-                "x-api-key": cb.PLACEHOLDER_KEY,
+                "x-api-key": broker.placeholder,
                 "x-provider": "openai",
                 "x-forwarded-host": "api.openai.com",
                 "host": "api.openai.com",
@@ -382,7 +382,7 @@ class TestStreaming(BrokerTestBase):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, headers, body = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": "2"}, body=b"{}")
+            headers={"x-api-key": broker.placeholder, "content-length": "2"}, body=b"{}")
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("Content-Type"), "text/event-stream")
         self.assertEqual(body, b"".join(sse))
@@ -515,7 +515,7 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         # The engine's env, built the way run_agent will: placeholder + base URL, no real key.
         env = child_environment(engine="pi", parent=parent,
                                 broker_urls={"anthropic": broker.base_url("anthropic")})
-        self.assertEqual(env["ANTHROPIC_API_KEY"], cb.PLACEHOLDER_KEY)
+        self.assertEqual(env["ANTHROPIC_API_KEY"], broker.placeholder)
         self.assertNotIn(REAL["anthropic"], env.values())
         # Simulate the engine's SDK: POST {base_url}/v1/messages with the placeholder key.
         split = urlsplit(env["ANTHROPIC_BASE_URL"])
@@ -530,7 +530,7 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         self.assertEqual(call["path"], "/v1/messages")
         # The broker stripped the placeholder the engine sent and injected the real key.
         self.assertEqual(call["headers"]["x-api-key"], REAL["anthropic"])
-        self.assertNotIn(cb.PLACEHOLDER_KEY, call["headers"].values())
+        self.assertNotIn(broker.placeholder, call["headers"].values())
         # And the real key never comes back to the engine side.
         self.assertNotIn(REAL["anthropic"].encode(), body)
 
@@ -542,7 +542,7 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         broker = self.start_broker({"deepseek": None})
         env = child_environment(engine="pi", parent=parent,
                                 broker_urls={"deepseek": broker.base_url("deepseek")})
-        self.assertEqual(env["DEEPSEEK_API_KEY"], cb.PLACEHOLDER_KEY)
+        self.assertEqual(env["DEEPSEEK_API_KEY"], broker.placeholder)
         split = urlsplit(env["DEEPSEEK_BASE_URL"])
         status, _, body = _client_request(
             split.port, "POST", split.path + "/chat/completions",
@@ -581,7 +581,7 @@ class TestUnixSocketMode(BrokerTestBase):
         broker, sock = self._start_unix({"anthropic": REAL["anthropic"]})
         status, _, body = _unix_client_request(
             sock, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY, "anthropic-version": "2023-06-01",
+            headers={"x-api-key": broker.placeholder, "anthropic-version": "2023-06-01",
                      "content-type": "application/json", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 200)
@@ -605,7 +605,7 @@ class TestUnixSocketMode(BrokerTestBase):
 
         status, _, body = _unix_client_request(
             sock, "POST", "/proxy/openai/chat/completions",
-            headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}", "content-length": "2"},
+            headers={"authorization": f"Bearer {broker.placeholder}", "content-length": "2"},
             body=b"{}")
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
@@ -633,7 +633,7 @@ class TestUnixSocketMode(BrokerTestBase):
         # (auth style "none"); openrouter stays a bearer-keyed provider.
         broker = self.start_broker({"deepseek": None, "openrouter": "or-real"})
         _client_request(broker.port, "POST", "/proxy/deepseek/chat/completions",
-                        headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}",
+                        headers={"authorization": f"Bearer {broker.placeholder}",
                                  "content-type": "application/json", "content-length": "2"},
                         body=b"{}")
         call = _FakeHTTPSConnection.calls[0]
@@ -642,7 +642,7 @@ class TestUnixSocketMode(BrokerTestBase):
         self.assertNotIn("Authorization", call["headers"])  # keyless: no key injected
         _FakeHTTPSConnection.calls = []
         _client_request(broker.port, "POST", "/proxy/openrouter/chat/completions",
-                        headers={"authorization": f"Bearer {cb.PLACEHOLDER_KEY}",
+                        headers={"authorization": f"Bearer {broker.placeholder}",
                                  "content-type": "application/json", "content-length": "2"},
                         body=b"{}")
         call = _FakeHTTPSConnection.calls[0]
@@ -673,7 +673,7 @@ class TestBodyBoundAndBudget(BrokerTestBase):
         for bad in ("1_0", "+5", "0x10", "1e3", "1.0"):
             status, _, body = _client_request(
                 broker.port, "POST", "/proxy/anthropic/v1/messages",
-                headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": bad},
+                headers={"x-api-key": broker.placeholder, "content-length": bad},
                 body=None)
             self.assertEqual(status, 400, bad)
             self.assertIn(b"invalid content-length", body.lower(), bad)
@@ -684,7 +684,7 @@ class TestBodyBoundAndBudget(BrokerTestBase):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, headers, _ = _client_request(
             broker.port, "POST", "/proxy/anthropic/v1/messages",
-            headers={"x-api-key": cb.PLACEHOLDER_KEY,
+            headers={"x-api-key": broker.placeholder,
                      "content-length": str(cb.MAX_BROKER_BODY_BYTES + 1)},
             body=None)
         self.assertEqual(status, 413)
@@ -725,7 +725,7 @@ class TestBodyBoundAndBudget(BrokerTestBase):
         with mock.patch.object(cb, "MAX_BROKER_AGGREGATE_BODY_BYTES", 10):
             status, _, body = _client_request(
                 broker.port, "POST", "/proxy/anthropic/v1/messages",
-                headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-type": "application/json"},
+                headers={"x-api-key": broker.placeholder, "content-type": "application/json"},
                 body=b"x" * 20)
             self.assertEqual(status, 413)
             self.assertIn(b"aggregate", body.lower())
@@ -748,7 +748,7 @@ class TestBodyBoundAndBudget(BrokerTestBase):
             self.assertEqual(cb._aggregate_body_bytes, 60)
             status, _, body = _client_request(
                 broker.port, "POST", "/proxy/anthropic/v1/messages",
-                headers={"x-api-key": cb.PLACEHOLDER_KEY, "content-length": "60"},
+                headers={"x-api-key": broker.placeholder, "content-length": "60"},
                 body=None)
             self.assertEqual(status, 413)
             self.assertIn(b"aggregate", body.lower())

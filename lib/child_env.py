@@ -23,7 +23,7 @@ import os
 from collections.abc import Mapping as MappingABC
 from typing import Dict, Mapping, Optional
 
-from lib.credential_broker import BROKER_ENV_CONFIGS, PLACEHOLDER_KEY
+from lib.credential_broker import BROKER_ENV_CONFIGS
 from lib.tool_pins import HOST_PINS_ENV, UNPINNED_ALLOW_ENV
 
 # Paths, locale, temp and user identity. Proxy and CA-bundle vars are deliberately NOT here
@@ -145,19 +145,29 @@ def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] 
                              proxied=proxied, trusted_tools=True)
 
 
-def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Dict[str, str]:
-    """Swap brokered providers' real key vars in `env` for a placeholder + the broker base URL.
+def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str],
+                      placeholder: Optional[str] = None) -> Dict[str, str]:
+    """Swap brokered providers' real key vars in `env` for the run's placeholder + the broker base URL.
 
     Mutates and returns `env`. For each provider in `broker_urls` that BROKER_ENV_CONFIGS maps,
-    every var that could carry a real secret is dropped and the engine gets PLACEHOLDER_KEY
+    every var that could carry a real secret is dropped and the engine gets `placeholder`
     under the var it reads plus the base-URL var pointed at the dispatcher's broker, so a
     sandboxed engine's /proc/self/environ holds no credential shape while model calls still
-    authenticate (the broker injects the real key host-side).
-    
+    authenticate (the broker injects the real key host-side). `placeholder` must be the
+    RUNNING broker's per-run secret (CredentialBroker.placeholder — agents-28nn round 7):
+    the broker demands it back on every request, so any other value would fail closed at
+    the broker, and a missing value here fails closed NOW rather than handing the engine
+    an env whose model calls can never authenticate.
+
     If the broker advertised a URL for a provider that we cannot broker (unmapped), we FAIL CLOSED
     by raising ContainmentError, because continuing would leave the raw key in the environment.
     """
     from lib.containment import ContainmentError
+    if not placeholder:
+        raise ContainmentError(
+            "fail closed: apply_broker_urls requires the running broker's per-run "
+            "placeholder secret (agents-28nn round 7) — the broker refuses requests "
+            "without it, so a swap without it would strand the engine unauthenticated")
     for provider, base_url in broker_urls.items():
         spec = BROKER_ENV_CONFIGS.get(provider)
         if not spec:
@@ -166,7 +176,7 @@ def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Di
         placeholder_var, base_url_var, secret_vars = spec
         for var in secret_vars:
             env.pop(var, None)  # no real credential crosses into the sandboxed env
-        env[placeholder_var] = PLACEHOLDER_KEY
+        env[placeholder_var] = placeholder
         env[base_url_var] = base_url
     return env
 
@@ -177,6 +187,7 @@ def child_environment(
     github: bool = False,
     parent: Optional[Mapping[str, str]] = None,
     broker_urls: Optional[Mapping[str, str]] = None,
+    broker_placeholder: Optional[str] = None,
     trusted_tools: bool = False,
     sink_options: Optional[Mapping[str, object]] = None,
     proxied: bool = False,
@@ -207,9 +218,11 @@ def child_environment(
 
     `broker_urls` (agents-8h4) maps a provider name to the base URL of a dispatcher-run
     credential broker. For each such provider the real key vars are dropped and the engine gets
-    a non-secret placeholder + the base URL, so a sandboxed engine's /proc/self/environ holds no
+    the run's placeholder + the base URL, so a sandboxed engine's /proc/self/environ holds no
     credential shape while model calls still authenticate (the broker injects the real key on the
-    host side). Providers absent from broker_urls are untouched.
+    host side). Providers absent from broker_urls are untouched. `broker_placeholder` must be
+    the running broker's per-run secret (agents-28nn round 7); apply_broker_urls fails
+    closed without it.
     """
     source = os.environ if parent is None else parent
     env = {name: source[name] for name in BASE_ALLOW if name in source}
@@ -253,5 +266,5 @@ def child_environment(
             env[name] = value
 
     if broker_urls:
-        apply_broker_urls(env, broker_urls)
+        apply_broker_urls(env, broker_urls, placeholder=broker_placeholder)
     return env

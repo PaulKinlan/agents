@@ -956,13 +956,14 @@ def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
     pi ignores *_BASE_URL env vars, so the broker swap alone cannot redirect a sandboxed pi:
     its provider baseUrl is hardcoded. pi DOES honour models.json in its agent directory, so
     the dispatcher writes an override for the SELECTED provider — baseUrl from the broker's own
-    descriptor (broker.base_url), a placeholder apiKey, the provider's api type, and the
-    endpoint's model ids (PI_KEYLESS_MODELS). The models array is what makes `--model kimi/k3`
-    resolve: the bundled pi registry has no provider named `kimi`, so without the explicit
-    model list pi reports "Model not found" (agents-0ld). Nothing here is provider-specific:
-    `provider` is whatever the station's model resolves to.
+    descriptor (broker.base_url), the broker's per-run placeholder as apiKey (agents-28nn
+    round 7: the broker demands that secret back on every request, so models.json must carry
+    exactly it), the provider's api type, and the endpoint's model ids (PI_KEYLESS_MODELS).
+    The models array is what makes `--model kimi/k3` resolve: the bundled pi registry has no
+    provider named `kimi`, so without the explicit model list pi reports "Model not found"
+    (agents-0ld). Nothing here is provider-specific: `provider` is whatever the station's
+    model resolves to.
     """
-    from lib.credential_broker import PLACEHOLDER_KEY
     if provider not in broker.providers or provider not in PI_PROVIDER_API:
         # agents-3z8 [P2 latent]: fail-closed if the run's broker does not allow this provider
         # or if the provider is not a supported keyless endpoint.
@@ -972,7 +973,7 @@ def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
             provider: {
                 "baseUrl": broker.base_url(provider),
                 "api": PI_PROVIDER_API[provider],
-                "apiKey": PLACEHOLDER_KEY,
+                "apiKey": broker.placeholder,
                 "models": [{"id": model_id, "samplingParams": {"temperature": 0.1}}
                            for model_id in PI_KEYLESS_MODELS.get(provider, [])],
             },
@@ -1634,6 +1635,21 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # UNIX socket that the in-sandbox net_forward relay — bound at EGRESS_BROKER_PORT
         # on the child's loopback, which base_url() names — forwards to; otherwise the
         # broker keeps its TCP loopback (which an unsandboxed engine shares natively).
+        # agents-28nn round 7 (the verdict's P0, a regression round 6 introduced): on the
+        # unsandboxed path that TCP loopback is the HOST's — a shared interface any local
+        # process can dial — and an unauthenticated broker there is an OPEN PROXY that
+        # injects the raw credentials upstream for whoever asks (the verdict constructed
+        # it with a plain curl that came back from the real provider authenticated as
+        # us). The reachability the inversion created is now authenticated rather than
+        # re-asymmetric: the placeholder is a per-run random secret the broker generates
+        # and demands back on EVERY request (403 before any upstream hop otherwise), so
+        # possession of the placeholder IS the licence to use the broker and only this
+        # run's children are ever handed it. Chosen over a UNIX socket with filesystem
+        # permissions (the unsandboxed engine runs as the operator's uid — the same uid
+        # as every local process that could abuse the broker, so ownership cannot
+        # distinguish served from attacker; knowledge of a per-run secret can) and over
+        # binding only for the engine's lifetime (the broker already lives exactly that
+        # long; the exposure window IS the run). Detail on lib/credential_broker.py.
         # Both are started here — after the pre-pass — and torn down in the finally, so
         # neither leaks on any failure.
         broker: Optional[CredentialBroker] = None
@@ -1687,7 +1703,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             f"key cannot be kept out of the engine's environ; refusing "
                             f"the run rather than leaking it: {e}") from e
                     apply_broker_urls(
-                        adapter_env, {p: broker.base_url(p) for p in broker.providers})
+                        adapter_env, {p: broker.base_url(p) for p in broker.providers},
+                        placeholder=broker.placeholder)
                     # agents-3z8: ensure no real API keys for non-allowed providers cross into
                     # the engine's environment.
                     for prov, (_placeholder, _base_url, secret_vars) in BROKER_PROVIDERS.items():
@@ -1715,7 +1732,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         policy_record(policy, engine, sandbox=sandbox,
                                       unsandboxed_note=unsandboxed_note,
                                       brokered_providers=tuple(broker.providers),
-                                      engine_env=adapter_env), indent=2)
+                                      engine_env=adapter_env,
+                                      expected_placeholder=broker.placeholder), indent=2)
                     _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)

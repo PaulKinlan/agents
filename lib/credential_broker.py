@@ -14,12 +14,35 @@ sandbox-gated (agents-28nn round 6).
 The broker removes the secret from the sandbox. The dispatcher runs this localhost
 HTTP proxy *outside* the sandbox. The sandboxed engine is given only a base URL
 pointing here (``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` / ``GOOGLE_GEMINI_BASE_URL``)
-and a NON-SECRET placeholder key. The proxy injects the real credential — read from
+and a PER-RUN placeholder key. The proxy injects the real credential — read from
 the dispatcher's own environment, which never crosses into the sandbox — and
 forwards the request to the real provider over HTTPS, streaming the response back
 so SSE is not buffered. No credential shape then exists in the engine's env, fs or
-``/proc``, because the only secret lives in this process, on the host side of the
-sandbox boundary.
+``/proc``, because the only provider secret lives in this process, on the host side
+of the sandbox boundary.
+
+The placeholder is the authentication (agents-28nn round 7, the verdict's P0)
+--------------------------------------------------------------------------
+The broker no longer starts only on the sandboxed path (round 6 closed that
+inverted polarity), and on the UNSANDBOXED path its TCP loopback is the HOST's
+loopback — a shared interface any local process can dial. An unauthenticated
+listener there is an open proxy that injects the raw credentials upstream for
+whoever asks (the verdict constructed exactly that with a plain curl). So the
+placeholder is now a per-run random secret generated with the broker, and EVERY
+request must present it in the provider's auth header (``x-api-key`` /
+``Authorization: Bearer`` / ``x-goog-api-key`` / ``api-key``) or be refused with
+403 before any upstream hop: possession of the placeholder IS the licence to use
+the broker, and only the run's own children are ever handed it. Chosen over the
+two alternatives: a UNIX socket with filesystem permissions cannot help on the
+unsandboxed path, because the engine runs as the operator's uid and the attacker
+population — any local process, including every other lane on the VM — shares
+that uid, so ownership cannot distinguish the served process from them (knowledge
+of a per-run secret can); and binding only for the duration of the engine's
+process narrows nothing, because the broker already lives exactly as long as the
+engine session — the exposure window IS the run. The secret is run-scoped and
+provider-less: exfiltrating it yields only what the engine itself already has —
+broker access, for the run's own lifetime, to the run's own allowed providers —
+never the raw provider key.
 
 Design (detail on the agents-8h4 bead)
 --------------------------------------
@@ -41,9 +64,11 @@ around a sandboxed engine run.
 """
 from __future__ import annotations
 
+import hmac
 import http.client
 import os
 import posixpath
+import secrets
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,7 +87,7 @@ __all__ = [
     "BrokerPayloadTooLarge",
     "MAX_BROKER_BODY_BYTES",
     "MAX_BROKER_AGGREGATE_BODY_BYTES",
-    "PLACEHOLDER_KEY",
+    "PLACEHOLDER_PREFIX",
 ]
 
 MAX_BROKER_BODY_BYTES = 32 * 1024 * 1024  # 32 MiB per-request hard limit (agents-ce2)
@@ -148,10 +173,13 @@ _MANAGED_REQUEST = frozenset({
 # so the upstream's framing headers are dropped.
 _MANAGED_RESPONSE = frozenset({"content-length", "transfer-encoding", "connection"})
 
-# A non-secret value that satisfies an SDK's "api key must be non-empty" check while
-# carrying no credential shape (no vendor prefix, no key=value form), so nothing in the
-# sandbox environ looks like a secret to lib/redaction.py or a prompt-injected engine.
-PLACEHOLDER_KEY = "factory-broker-placeholder"
+# The placeholder prefix. The placeholder itself is NOT a constant (agents-28nn round 7):
+# each CredentialBroker generates its own at construction — `factory-broker-` plus a
+# random token — and demands it back on every request, so the value the engine carries
+# is the run's authentication, not a publicly known string. The prefix keeps the value
+# recognisably non-vendor-shaped (no sk-/AIza/ghp_ form) for redaction and log scanning
+# while the random suffix is what an unauthenticated local process cannot guess.
+PLACEHOLDER_PREFIX = "factory-broker-"
 
 # Generous upstream read timeout: a model generation can run for minutes. The
 # engine's own budget (lib/budget.py) bounds the whole run; this only stops a wedged
@@ -201,6 +229,10 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "factory-credential-broker/1.0"
     credentials: Dict[str, Optional[str]] = {}
     allowed_providers: Optional[Set[str]] = None
+    # The run's per-run secret (agents-28nn round 7), bound by start(). Every request
+    # must present it in a provider auth header; without it the listener is an open
+    # proxy that injects the raw credentials for any local process that dials.
+    run_secret: str = ""
 
     # --- helpers -------------------------------------------------------------
     def _respond_error(self, code: int, message: str) -> None:
@@ -300,7 +332,37 @@ class _Handler(BaseHTTPRequestHandler):
         return headers
 
     # --- the broker hop ------------------------------------------------------
+    def _request_authenticated(self) -> bool:
+        """Whether the request presented the run's per-run secret in a provider auth
+        header (agents-28nn round 7, the verdict's P0). On the unsandboxed path this
+        listener sits on the HOST's loopback — a shared interface — so possession of
+        the placeholder is what distinguishes the engine the broker serves from any
+        other local process. Constant-time comparison; any of the auth header shapes
+        the SDKs use counts (x-api-key / Authorization Bearer / x-goog-api-key /
+        api-key), and the broker strips and re-sets them all downstream regardless."""
+        secret = self.run_secret
+        if not secret:  # pragma: no cover - start() always binds one
+            return False
+        candidates = []
+        for name in ("x-api-key", "x-goog-api-key", "api-key"):
+            value = self.headers.get(name)
+            if value:
+                candidates.append(value.strip())
+        authorization = (self.headers.get("authorization") or "").strip()
+        if authorization:
+            candidates.append(authorization)
+            if authorization.lower().startswith("bearer "):
+                candidates.append(authorization[7:].strip())
+        return any(hmac.compare_digest(candidate, secret) for candidate in candidates)
+
     def _broker(self, method: str) -> None:
+        if not self._request_authenticated():
+            # Refused BEFORE any path processing or upstream hop: an unauthenticated
+            # caller learns nothing (not even whether a provider is configured) and
+            # the broker never injects a credential on its behalf.
+            return self._respond_error(
+                403, "the credential broker requires the run's per-run secret; "
+                     "unauthenticated requests are refused")
         path_only, _, query = self.path.partition("?")
         decoded_path = posixpath.normpath(unquote(path_only))
         segments = [s for s in decoded_path.split("/") if s != ""]
@@ -413,11 +475,15 @@ class CredentialBroker:
         creds = credentials_from_env()          # {'anthropic': 'sk-ant-...'}
         with CredentialBroker(creds) as broker:
             url = broker.base_url("anthropic")  # http://127.0.0.1:<port>/proxy/anthropic
-            # hand `url` + PLACEHOLDER_KEY to the sandboxed engine's env
+            # hand `url` + broker.placeholder to the engine's env
 
-    The real keys live only in this object (host side); the engine gets `url` and a
-    placeholder. stop() is idempotent and always runs (context manager / finally), so
-    no listener leaks.
+    The real keys live only in this object (host side); the engine gets `url` and the
+    per-run placeholder, which IS the run's authentication: the broker refuses any
+    request that does not present it (agents-28nn round 7 — on the unsandboxed path
+    the listener sits on the host's shared loopback, so an unauthenticated broker
+    would be an open proxy injecting the raw credentials for any local process).
+    stop() is idempotent and always runs (context manager / finally), so no listener
+    leaks.
     """
 
     def __init__(self, credentials: Mapping[str, Optional[str]],
@@ -436,6 +502,10 @@ class CredentialBroker:
         # Keyless providers (auth "none") carry a None value: the broker forwards them
         # without a key (agents-3y2). Keyed providers carry the real key, held only here.
         self._credentials: Dict[str, Optional[str]] = dict(credentials)
+        # The per-run secret the engine receives as its placeholder API key and the
+        # broker demands back on every request. Generated here so each run — and each
+        # test — gets a value no other process can know in advance.
+        self._placeholder = PLACEHOLDER_PREFIX + secrets.token_urlsafe(18)
         self._server: Optional[socketserver.BaseServer] = None
         self._thread: Optional[threading.Thread] = None
         self.port: Optional[int] = None
@@ -443,6 +513,14 @@ class CredentialBroker:
         # In UNIX mode the sandboxed child dials the net_forward relay's port, not the
         # broker; the dispatcher passes that port so base_url() can name it (agents-2x6).
         self._child_port: Optional[int] = None
+
+    @property
+    def placeholder(self) -> str:
+        """The run's per-run secret: the engine's placeholder API key AND the
+        credential the broker requires on every request. Not a provider key —
+        exfiltrating it yields only broker access, for this run's lifetime, to this
+        run's allowed providers."""
+        return self._placeholder
 
     @property
     def providers(self) -> Tuple[str, ...]:
@@ -470,7 +548,8 @@ class CredentialBroker:
             raise BrokerError("refusing to start a broker with no credentials")
         handler = type("_BoundBrokerHandler", (_Handler,),
                        {"credentials": dict(self._credentials),
-                        "allowed_providers": set(self._allowed_providers) if self._allowed_providers is not None else None})
+                        "allowed_providers": set(self._allowed_providers) if self._allowed_providers is not None else None,
+                        "run_secret": self._placeholder})
         if unix_path is not None:
             if child_port is None:
                 raise BrokerError("unix_path requires child_port (the net_forward relay "
