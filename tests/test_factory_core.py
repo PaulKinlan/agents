@@ -453,6 +453,45 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         self.assertEqual(prepass["GH_TOKEN"], "ghs_ci_token")
         self.assertNotIn("GH_TOKEN", engine)
 
+    @mock.patch("lib.sandbox._probe_result", False)
+    def test_every_prepass_child_receives_the_egress_allowlist_proxy_unsandboxed(self):
+        """agents-28nn round 7 (verdict P1): the allowlist proxy control belongs to the
+        pre-pass OPERATION, not to the sandbox path. An UNSANDBOXED pre-pass must egress
+        through the run's allowlist proxy on host loopback exactly like the sandboxed one
+        does through the netns relay — and the operator's own proxy vars must NOT ride
+        along (they are the uncontrolled egress this round removed). Mutation proof,
+        both directions: deleting the dispatcher's unsandboxed proxy assignment turns
+        this red (no HTTP_PROXY in the child's env); restoring the old proxied=True
+        inheritance turns it red too (operator-proxy.invalid would survive)."""
+        prepass, _engine = self._run_probe(
+            env_overrides={"FACTORY_ALLOW_UNSANDBOXED": "1",
+                           "HTTP_PROXY": "http://operator-proxy.invalid:3128",
+                           "HTTPS_PROXY": "http://operator-proxy.invalid:3128"},
+            target_arg="trusted")
+        proxy = prepass.get("HTTP_PROXY", "")
+        self.assertTrue(proxy.startswith("http://127.0.0.1:"),
+                        f"the unsandboxed pre-pass must egress via the loopback allowlist "
+                        f"proxy, got HTTP_PROXY={proxy!r}")
+        self.assertNotIn("operator-proxy", proxy)
+        self.assertEqual(prepass.get("HTTPS_PROXY"), proxy)
+        self.assertEqual(prepass.get("NO_PROXY"), "localhost,127.0.0.1")
+        self.assertNotIn("operator-proxy", json.dumps(prepass),
+                         "the operator's own proxy config must not reach ANY pre-pass "
+                         "child on either path")
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_every_prepass_child_receives_the_egress_allowlist_proxy_sandboxed(self):
+        """The confined direction of the same property: the sandboxed pre-pass dials the
+        relay's fixed port, and the operator's proxy vars do not survive there either."""
+        prepass, _engine = self._run_probe(
+            env_overrides={"HTTP_PROXY": "http://operator-proxy.invalid:3128"})
+        self.assertEqual(prepass.get("HTTP_PROXY"),
+                         f"http://127.0.0.1:{factory_cli.EGRESS_PROXY_PORT}")
+        self.assertEqual(prepass.get("HTTPS_PROXY"),
+                         f"http://127.0.0.1:{factory_cli.EGRESS_PROXY_PORT}")
+        self.assertEqual(prepass.get("NO_PROXY"), "localhost,127.0.0.1")
+        self.assertNotIn("operator-proxy", json.dumps(prepass))
+
 
 @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
 class TestDispatcherCandidateBinding(unittest.TestCase):

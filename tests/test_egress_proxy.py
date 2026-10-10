@@ -239,6 +239,65 @@ class ProxyLifecycleTest(unittest.TestCase):
         self.assertIn("107", str(cm.exception))
 
 
+class TcpLoopbackTest(unittest.TestCase):
+    """agents-28nn round 7 (verdict P1): the UNSANDBOXED pre-pass has no netns relay, so
+    it reaches the SAME allowlist proxy on host TCP loopback. The enforcement asserted
+    here is identical to the UNIX-socket path's — one handler, one allowlist — so the
+    less-confined path receives exactly the control the confined path receives."""
+
+    def test_tcp_loopback_binds_a_dynamic_port_and_creates_no_socket_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "proxy.sock")
+            proxy = ep.EgressProxy(["allowed.test"], path)
+            proxy.start(tcp_loopback=True)
+            try:
+                self.assertIsInstance(proxy.tcp_port, int)
+                self.assertGreater(proxy.tcp_port, 0)
+                self.assertFalse(os.path.exists(path),
+                                 "TCP-loopback mode must not bind the UNIX socket")
+            finally:
+                proxy.stop()
+            self.assertIsNone(proxy.tcp_port)
+
+    def _recv_to_close(self, sock) -> bytes:
+        # The denial is headers + body and the proxy closes (Connection: close), so read
+        # to EOF: asserting on the first recv races the body's arrival.
+        sock.settimeout(5)
+        chunks = []
+        while True:
+            try:
+                data = sock.recv(65536)
+            except socket.timeout:
+                break
+            if not data:
+                break
+            chunks.append(data)
+        return b"".join(chunks)
+
+    def test_tcp_loopback_enforces_the_same_allowlist(self):
+        # Both directions, DNS-independent (the denial MESSAGES differ): a host outside
+        # the allowlist is refused at the allowlist gate; an allowlisted host passes that
+        # gate and only then fails resolution. If the TCP listener served without the
+        # allowlist attached, the first assertion would read the resolution refusal
+        # instead — the mutation this guards.
+        with tempfile.TemporaryDirectory() as d:
+            proxy = ep.EgressProxy(["allowed.test"], os.path.join(d, "proxy.sock"))
+            proxy.start(tcp_loopback=True)
+            try:
+                c = socket.create_connection(("127.0.0.1", proxy.tcp_port), timeout=5)
+                c.sendall(b"CONNECT denied.test:443 HTTP/1.1\r\nHost: denied.test:443\r\n\r\n")
+                self.assertIn(b"not on this run's egress allowlist", self._recv_to_close(c))
+                c.close()
+                c = socket.create_connection(("127.0.0.1", proxy.tcp_port), timeout=5)
+                c.sendall(b"CONNECT allowed.test:443 HTTP/1.1\r\nHost: allowed.test:443\r\n\r\n")
+                body = self._recv_to_close(c)
+                self.assertIn(b"does not resolve", body)
+                self.assertNotIn(b"not on this run's egress allowlist", body)
+                c.close()
+            finally:
+                proxy.stop()
+
+
 class ProxyEnforcementTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

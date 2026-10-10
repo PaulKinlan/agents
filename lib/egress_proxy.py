@@ -42,7 +42,7 @@ import select
 import socket
 import socketserver
 import threading
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
@@ -416,6 +416,20 @@ class _EgressServer(socketserver.ThreadingUnixStreamServer):
     block_on_close = False
 
 
+class _EgressTCPServer(ThreadingHTTPServer):
+    """The TCP-loopback twin of _EgressServer, for the UNSANDBOXED pre-pass (agents-28nn
+    round 7): with no network namespace there is no net_forward relay, so the child dials
+    the proxy on host 127.0.0.1 directly. Same handler, same allowlist, same SSRF guard,
+    same daemon-thread teardown. The listener needs NO authentication, and this is the
+    deliberate asymmetry with the credential broker's loopback listener (which requires
+    the run secret): this proxy injects no credential and only ever RESTRICTS where a
+    caller may connect (host allowlist + port gate + public-IP SSRF check), so any other
+    host-local process that found the port gains nothing it cannot already dial directly.
+    The broker HANDS OUT authority; this proxy only ever takes it away."""
+    daemon_threads = True
+    block_on_close = False
+
+
 class EgressProxy:
     """A dispatcher-side, UNIX-socket HTTP(S) forward proxy with a per-run allowlist.
 
@@ -427,25 +441,38 @@ class EgressProxy:
     def __init__(self, allowlist: Iterable[str], socket_path: str):
         self.allowlist = Allowlist(allowlist)
         self.socket_path = socket_path
-        self._server: Optional[_EgressServer] = None
+        self._server: Optional[socketserver.BaseServer] = None
         self._thread: Optional[threading.Thread] = None
+        # In TCP-loopback mode (agents-28nn round 7, the unsandboxed pre-pass) the bound
+        # port, so the dispatcher can name it in the child's HTTP(S)_PROXY.
+        self.tcp_port: Optional[int] = None
 
-    def start(self) -> str:
+    def start(self, tcp_loopback: bool = False) -> str:
+        """Bind and serve on a daemon thread. By default bind the UNIX socket at
+        ``socket_path`` (the sandboxed pre-pass reaches it through the net_forward
+        relay). With ``tcp_loopback=True`` (agents-28nn round 7: an UNSANDBOXED pre-pass
+        has no netns relay, and the control belongs to the pre-pass OPERATION, not to
+        the path taken to it) bind host 127.0.0.1 on a dynamic TCP port instead and
+        record it on ``self.tcp_port``; no socket file is created."""
         if self._server is not None:
             return self.socket_path
-        # agents-x8l: AF_UNIX sun_path holds at most 107 bytes; refuse a long path loudly
-        # instead of failing bind() with a cryptic ENAMETOOLONG deep in the server thread.
-        if len(self.socket_path) > SUN_PATH_LIMIT:
-            raise OSError(
-                f"UNIX socket path {self.socket_path!r} is {len(self.socket_path)} bytes, over "
-                f"the {SUN_PATH_LIMIT}-byte AF_UNIX sun_path limit; use a shorter socket path")
-        # A stale socket file from a crashed run would make bind() fail with EADDRINUSE.
-        try:
-            if os.path.exists(self.socket_path):
-                os.unlink(self.socket_path)
-        except OSError:
-            pass
-        self._server = _EgressServer(self.socket_path, _ProxyHandler)
+        if tcp_loopback:
+            self._server = _EgressTCPServer(("127.0.0.1", 0), _ProxyHandler)
+            self.tcp_port = self._server.server_address[1]
+        else:
+            # agents-x8l: AF_UNIX sun_path holds at most 107 bytes; refuse a long path loudly
+            # instead of failing bind() with a cryptic ENAMETOOLONG deep in the server thread.
+            if len(self.socket_path) > SUN_PATH_LIMIT:
+                raise OSError(
+                    f"UNIX socket path {self.socket_path!r} is {len(self.socket_path)} bytes, over "
+                    f"the {SUN_PATH_LIMIT}-byte AF_UNIX sun_path limit; use a shorter socket path")
+            # A stale socket file from a crashed run would make bind() fail with EADDRINUSE.
+            try:
+                if os.path.exists(self.socket_path):
+                    os.unlink(self.socket_path)
+            except OSError:
+                pass
+            self._server = _EgressServer(self.socket_path, _ProxyHandler)
         self._server.allowlist = self.allowlist  # set before serving: no accept yet
         self._thread = threading.Thread(target=self._server.serve_forever,
                                         name="egress-proxy", daemon=True)
@@ -467,6 +494,7 @@ class EgressProxy:
                 os.unlink(self.socket_path)
         except OSError:
             pass
+        self.tcp_port = None
 
     def hosts(self) -> Tuple[str, ...]:
         return self.allowlist.hosts()

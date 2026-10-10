@@ -129,10 +129,17 @@ def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] 
     It gets a GitHub token only when the agent declares it needs `gh` (issue-triage), never
     just because the operator's shell had one. `proxied` forwards the operator's proxy vars
     only for an UNSANDBOXED pre-pass (agents-5d9); a sandboxed pre-pass gets the relay set
-    by the dispatcher instead. `trusted_tools=True` because (agents-28nn round 4, agents-01qd,
-    agents-qbl8) the pre-pass scripts resolve their own trusted tools through `resolve_tool` —
-    including when unsandboxed, where no bind boundary authenticates anything, forwarding
-    FACTORY_TOOL_PINS and FACTORY_ALLOW_UNPINNED_TOOLS.
+    It gets a GitHub token only when the agent declares it needs `gh` (issue-triage), never
+    just because the operator's shell had one. `proxied` forwards the operator's proxy vars
+    only for an UNSANDBOXED pre-pass (agents-5d9); a sandboxed pre-pass gets the relay set
+    by the dispatcher instead. (agents-28nn round 7: the dispatcher no longer passes
+    `proxied` for the pre-pass at all — EVERY pre-pass child, sandboxed or not, gets the
+    run's egress-allowlist proxy from the dispatcher, so the less-confined path no longer
+    inherits more network freedom than the confined one; the parameter remains for
+    child_environment's other callers.) `trusted_tools=True` because (agents-28nn round 4,
+    agents-01qd, agents-qbl8) the pre-pass scripts resolve their own trusted tools through
+    `resolve_tool` — including when unsandboxed, where no bind boundary authenticates anything,
+    forwarding FACTORY_TOOL_PINS and FACTORY_ALLOW_UNPINNED_TOOLS.
     """
     return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent,
                              proxied=proxied, trusted_tools=True)
