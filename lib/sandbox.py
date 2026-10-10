@@ -290,14 +290,21 @@ def engine_sandboxed(engine: str) -> bool:
     """Whether runs of `engine` get the OS sandbox on this host.
 
     THE RULE every conditional on this function (or on sandbox_available) must satisfy
-    (agents-28nn round 6 — four appearances in four mechanisms make this a design
-    property, not a set of bugs: the round-5 effective-pins hoist, the credential broker
-    gate in factory, the pre-pass HTTP_PROXY only-if-sandbox_ok, and the adapter env's
-    proxied=not engine_sandboxed, which handed the operator's HTTP(S)_PROXY/NO_PROXY to
-    the UNSANDBOXED engine only until round 8 dropped it; the round-6 enumeration's own
-    fourth entry — an adapter proxy gated on egress_active — was falsified by the
-    round-7 verdict: no such gate exists, the adapter's proxy is a UNIX-socket forward
-    for the broker): THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
+    (agents-28nn — the NAMED, VERIFIABLE appearances are four: the round-5
+    effective-pins hoist, the round-6 credential broker gate in factory, the round-7
+    pre-pass HTTP_PROXY only-if-sandbox_ok, and the round-8 adapter env's
+    proxied=not engine_sandboxed, which handed the operator's HTTP(S)_PROXY/NO_PROXY
+    to the UNSANDBOXED engine only until round 8 dropped it. The bead's record uses
+    higher ordinals — third at round 5, six at the round-8 verdict — because earlier
+    verdicts counted shapes they never named into the record (the round-6 verdict
+    reported three further shapes and named only the broker); an unnamed shape cannot
+    be enumerated, so this comment enumerates what the record names and asserts no
+    total it cannot verify (searched at the round-8 attestation: the bead's
+    verdict/coord comments for "polarity", and every conditional on
+    engine_sandboxed/sandbox_available/sandbox_ok in factory and lib/ — no live
+    inverted instance remains). One alleged instance was resolved by FALSIFICATION:
+    no adapter proxy is gated on egress_active — the adapter's proxy is a UNIX-socket
+    forward for the broker): THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
     MORE-CONFINED PATH. A control that applies only on the confined path leaves the
     less-confined path with less control — the inverted polarity. Before gating anything
     on the result of this check, ask what the unsandboxed path gets instead: if the

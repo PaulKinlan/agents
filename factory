@@ -1271,15 +1271,26 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # referenced from the credential broker below): THE LESS-CONFINED PATH MUST NOT
         # RECEIVE MORE THAN THE MORE-CONFINED PATH — a control that applies only on the
         # confined path leaves the less-confined path with less control, the inverted
-        # polarity this bead has now met four times (the round-5 merged pins; the round-6
-        # credential broker; the pre-pass HTTP_PROXY only-if-sandbox_ok, closed in
-        # round 7 below by putting the allowlist proxy on EVERY pre-pass child; and the
-        # round-8 adapter env's proxied=not engine_sandboxed, closed below at the
-        # adapter env build). The round-7 verdict corrected a fourth alleged instance
-        # this comment used to name: there is NO adapter proxy gated on egress_active —
-        # the adapter's proxy is a UNIX-socket forward for the broker. The count is
-        # four, kept honest here where the next person adding a conditional will
-        # recount it. The follow-on shape this file has now met TWICE is the moved
+        # polarity. The NAMED, VERIFIABLE instances are four (the round-5 merged pins;
+        # the round-6 credential broker; the pre-pass HTTP_PROXY only-if-sandbox_ok,
+        # closed in round 7 below by putting the allowlist proxy on EVERY pre-pass
+        # child; and the round-8 adapter env's proxied=not engine_sandboxed, closed
+        # below at the adapter env build). The bead's own record uses HIGHER ordinals
+        # — the round-5 dispatch called the pins hoist the THIRD appearance, the
+        # round-6 verdict reported THREE further shapes but named only the broker into
+        # the record, and the round-8 verdict called the adapter env the SIXTH, while
+        # f1cf323's commit message says the FOURTH — because earlier rounds counted
+        # shapes they did not name, and an unnamed shape cannot be enumerated. So this
+        # comment asserts no total it cannot verify: searched (agents-28nn round 8
+        # attestation) were the bead's verdict and coord comments for "polarity" —
+        # yielding the four named instances above, which are the floor, not the count
+        # — plus every conditional on engine_sandboxed/sandbox_available/sandbox_ok in
+        # factory and lib/, among which NO LIVE inverted instance remains (each is a
+        # refusal, a downgrade, or a control mounted on the operation). The one alleged
+        # instance the record resolved by FALSIFICATION is kept named too: there is NO
+        # adapter proxy gated on egress_active — the adapter's proxy is a UNIX-socket
+        # forward for the broker (round-7 verdict). The follow-on shape this file has
+        # now met TWICE is the moved
         # control's lost boundary: a control moved off the confined path must be asked
         # WHO CAN REACH IT FROM HERE
         # (the round-6 broker move, whose host loopback round 7 authenticates with the

@@ -461,7 +461,21 @@ class _Handler(BaseHTTPRequestHandler):
         cannot distinguish the engine from an attacker — the kernel's attribution of
         the connecting socket can. The gate exists only where no stronger kernel
         boundary already does the work: the UNIX listener serves the in-sandbox relay
-        behind the netns boundary and never carries peer_gate_root."""
+        behind the netns boundary and never carries peer_gate_root.
+
+        THE LEVEL THESIS THIS GATE IMPLEMENTS (coord, round 8): the reachability
+        question must be asked about the new level in the new level's OWN TERMS — a
+        namespace answers "everything inside it", a secret answers "everyone who does
+        not know it", and those are different questions; that is why the netns's
+        confinement vanished the moment the control moved to a secret. Peer identity
+        is the PRIMARY mechanism — it converts WHO CAN REACH the broker from a hope
+        into a kernel-supplied fact — and it binds LIFETIME as a second layer, never
+        a substitute: the moment the gate's root exits, its descendants re-parent
+        toward init and their ppid chains no longer contain it, so the gate closes
+        WITH THE SESSION rather than at teardown (constructed: an orphaned descendant
+        still holding the placeholder is refused, no upstream hop). Lifetime binding
+        only narrows the window; the peer attack needs no window, only the engine
+        running — so the identity check, not the lifetime, carries the weight."""
         root = getattr(self.server, "peer_gate_root", None)
         if root is None:
             return True

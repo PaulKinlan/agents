@@ -931,6 +931,22 @@ elif mode == "steal":
     with open("/proc/" + sys.argv[2] + "/environ", "rb") as fh:
         env = dict(kv.split(b"=", 1) for kv in fh.read().split(b"\0") if b"=" in kv)
     call({k.decode(): v.decode() for k, v in env.items()})
+elif mode == "spawn-orphan":
+    # The lifetime probe's engine stand-in: fork a descendant that waits out THIS
+    # process's death before dialling, name it, then stay alive as the gate's root.
+    child = subprocess.Popen([sys.executable, os.path.abspath(__file__),
+                              "orphan-call", str(os.getpid())])
+    print(f"ORPHAN {child.pid}", flush=True)
+    time.sleep(60)
+elif mode == "orphan-call":
+    # Wait out the engine: re-parenting moves getppid() off the dead root (to init or
+    # a subreaper), which is the only signal needed — then dial with the placeholder
+    # still in this orphan's environ.
+    parent = int(sys.argv[2])
+    while os.getppid() == parent:
+        time.sleep(0.1)
+    time.sleep(0.5)  # let the re-parent settle before the dial
+    call(os.environ)
 '''
 
 
@@ -1025,6 +1041,45 @@ class TestPeerIdentityGate(BrokerTestBase):
             broker.port, "POST", "/proxy/anthropic/v1/messages",
             headers={"x-api-key": broker.placeholder, "content-length": "2"}, body=b"{}")
         self.assertEqual(status, 200)
+
+    def test_the_gate_closes_with_the_engine_sessions_lifetime(self):
+        # agents-28nn round 8, coord's second layer: LIFETIME BINDING composes with the
+        # peer check and is NOT a substitute for it — the peer attack needs no window,
+        # only the engine running. The binding is emergent from the ppid-chain walk:
+        # the moment the engine session exits, its descendants re-parent toward init,
+        # their chains no longer contain the root, and the gate closes WITH THE
+        # SESSION rather than at teardown. Constructed: an orphaned descendant still
+        # holding the placeholder is refused, with no upstream hop. The serving half —
+        # the same descendant dial is ACCEPTED while the engine lives — is pinned by
+        # test_a_descendant_of_the_engine_is_served above.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker = self.start_broker({"anthropic": REAL["anthropic"]})
+            engine = subprocess.Popen([sys.executable, script, "spawn-orphan"],
+                                      env=self._engine_env(broker),
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True)
+            try:
+                broker.restrict_peer_root(engine.pid)
+                first = engine.stdout.readline()
+                self.assertTrue(first.startswith("ORPHAN "), first)
+                orphan_pid = int(first.split()[1])
+                engine.kill()
+                engine.wait(timeout=10)
+                # The orphan holds the pipe's write end and prints its dial after
+                # re-parenting, then exits — read() returns when it does.
+                out = engine.stdout.read()
+                self.assertIn("STATUS 403", out,
+                              f"orphaned descendant output: {out}")
+                self.assertEqual(_FakeHTTPSConnection.calls, [],
+                                 "the refused orphan must not cause an upstream hop")
+            finally:
+                engine.kill()
+                engine.wait()
+                try:
+                    os.kill(orphan_pid, signal.SIGKILL)
+                except (ProcessLookupError, UnboundLocalError):
+                    pass
 
     def test_the_unix_listener_carries_no_peer_gate(self):
         # The sandboxed path's boundary is the netns; the relay is an ANCESTOR of the
