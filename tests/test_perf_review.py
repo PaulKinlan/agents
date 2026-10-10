@@ -324,6 +324,12 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertFalse(has_reentrancy_precondition(fallback_advocating_concurrency))
 
+        # Reviewer P1 finding: unconditioned concurrency advice before conditional block must NOT pass
+        unconditioned_prefix = {
+            "remediation": "Use Promise.any for ONNX sessions. IF fetch is reentrant, use Promise.all for fetches; otherwise preserve serial execution"
+        }
+        self.assertFalse(has_reentrancy_precondition(unconditioned_prefix))
+
         # Reviewer P1 finding: empty snippet and plural sessions/models must NOT pass backend evidence
         empty_snippet_plural = {
             "snippet": "",
@@ -775,6 +781,23 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         notes = normalize_report(report)
         self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
         self.assertNotIn("proposed_fix_diff", report["findings"][0])
+
+    def test_concurrency_hazard_warning_title_is_not_concurrency_recommendation(self):
+        """Reviewer P2 finding: 'Concurrent execution of inference sessions is unsafe' is a hazard warning, not recommendation."""
+        finding = {
+            "rule_id": "thread-safety-hazard",
+            "path": "src/onnx.ts",
+            "line_number": 30,
+            "title": "Concurrent execution of inference sessions is unsafe",
+            "description": "Multiple threads running inference can corrupt internal engine state.",
+            "remediation": "Add a mutex around the run call.",
+            "proposed_fix_diff": "--- a/run.ts\n+++ b/run.ts\n@@ -1,2 +1,3 @@\n+ await mutex.acquire();\n  await session.run();\n+ mutex.release();"
+        }
+        self.assertFalse(is_concurrency_recommendation(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertFalse(any("enforced reentrancy precondition" in n for n in notes))
+        self.assertIn("proposed_fix_diff", report["findings"][0])
 
     def test_overlap_model_inference_through_pool_of_workers_is_guarded(self):
         """Reviewer P1 finding: overlap advice through worker pool phrasing is guarded."""

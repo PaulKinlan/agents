@@ -272,7 +272,10 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     if _ASSET_CONCURRENCY_EXCLUSIONS.search(remediation):
         return False
 
+    # Fallback to title/description only for affirmative recommendations, not hazard/vulnerability warnings (Reviewer P2)
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
+    if re.search(r"\b(?:unsafe|hazard|race\s+condition|risk|conflict|corrupt|deadlock|defect|flaw)\b", text, re.IGNORECASE):
+        return False
     return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
 
 
@@ -504,13 +507,18 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
         return False
 
     # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
-    # The entire fallback branch must preserve serial execution and must not advocate concurrency.
-    if _STRUCTURED_PRECONDITION_PATTERN.search(remediation):
-        otherwise_parts = re.split(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
-        if len(otherwise_parts) >= 2:
-            fallback_branch = otherwise_parts[-1]
-            if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_branch):
-                return True
+    # The condition must govern every concurrency recommendation in remediation (no unconditioned prefix/suffix),
+    # and the fallback branch must preserve serial execution without advocating concurrency.
+    match = _STRUCTURED_PRECONDITION_PATTERN.search(remediation)
+    if match:
+        prefix = remediation[:match.start()]
+        suffix = remediation[match.end():]
+        if not _EXECUTION_CONCURRENCY_PATTERN.search(prefix) and not _EXECUTION_CONCURRENCY_PATTERN.search(suffix):
+            otherwise_parts = re.split(r"\b(?:otherwise|else)\b", match.group(0), flags=re.IGNORECASE)
+            if len(otherwise_parts) >= 2:
+                fallback_branch = otherwise_parts[-1]
+                if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_branch):
+                    return True
 
     # Case 2: Named backend citing proven evidence of overlap tolerance
     if has_proven_backend_evidence(finding):
