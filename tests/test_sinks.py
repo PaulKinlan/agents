@@ -77,6 +77,10 @@ class SinkFixture:
         self.root = Path(temporary.name).resolve()
         self.factory = self.root / "factory"
         (self.factory / "lib").mkdir(parents=True)
+        # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - this drives
+        # the lib/findings.py CLI directly, so the copy set is that CLI's runtime (plus the
+        # lib/sinks package directory it delegates to), which the station-script builder in
+        # tests/sandbox_fixtures.py does not derive. Different case; not routed through it.
         for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "line_numbers.py"):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.

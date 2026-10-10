@@ -92,6 +92,9 @@ class CommandSinkCase(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
         self.factory = self.root / "factory"
+        # agents-r2ne census: a WHOLE-tree copy of lib/ (minus pycache/bench/adapters) for the
+        # findings CLI's runtime - there is no hand-maintained enumeration to go stale, and no
+        # station script is involved, so tests/sandbox_fixtures.py does not apply.
         shutil.copytree(ROOT / "lib", self.factory / "lib",
                         ignore=shutil.ignore_patterns("__pycache__", "bench", "adapters"))
         self.target = self.root / "target"
@@ -267,6 +270,9 @@ class TestCommandSinkFromManifest(unittest.TestCase):
     def test_manifest_configures_the_command(self):
         with tempfile.TemporaryDirectory(prefix="factory-cmd-manifest-") as tmp:
             box = Sandbox(Path(tmp).resolve())
+            # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - the
+            # copies are the lib/sinks package directory and budget.py for the factory run,
+            # which the station-script builder deliberately does not derive. Different case.
             shutil.copytree(ROOT / "lib" / "sinks", box.root / "lib" / "sinks", dirs_exist_ok=True)
             shutil.copyfile(ROOT / "lib" / "budget.py", box.root / "lib" / "budget.py")  # command sink
             (box.target / "receiver.py").write_text(RECEIVER)

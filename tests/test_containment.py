@@ -814,6 +814,9 @@ class TestDispatcher(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="factory-pnu-dispatch-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        # agents-r2ne census: copies the factory BINARY plus a WHOLE-tree copy of lib/ (a
+        # non-station artefact and no hand-maintained enumeration), so the station-script
+        # builder in tests/sandbox_fixtures.py does not apply. Different case.
         shutil.copyfile(ROOT / "factory", self.root / "factory")
         shutil.copytree(ROOT / "lib", self.root / "lib",
                         ignore=shutil.ignore_patterns("__pycache__"))

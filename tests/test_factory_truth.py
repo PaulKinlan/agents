@@ -64,7 +64,13 @@ def report(*findings):
 
 
 class Sandbox:
-    """A factory root with probe agents whose model output is a file we control."""
+    """A factory root with probe agents whose model output is a file we control.
+
+    agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - the copy set is
+    the factory dispatcher's own runtime (the shell adapter, the lib/sinks package directory,
+    budget.py and friends), which tests/sandbox_fixtures.py:copy_station_script deliberately
+    does not derive (it follows ONE station script's Python import closure). Different case.
+    """
 
     def __init__(self, root: Path):
         self.root = root
@@ -287,6 +293,8 @@ class TestNoVerdictIsAnError(SandboxCase):
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_the_cli_exits_non_zero_on_no_verdict(self):
+        # agents-r2ne census: copies the factory BINARY (a non-station artefact), not station
+        # code - the shared station-script builder does not apply.
         shutil.copyfile(ROOT / "factory", self.box.root / "factory")
         self.box.agent("garbled", "nothing parseable")
         env = dict(os.environ, PATH=f"{self.box.bin}{os.pathsep}/usr/bin:/bin")

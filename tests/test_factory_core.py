@@ -169,6 +169,10 @@ class TestDispatcherBudget(unittest.TestCase):
                 "budget: {max_minutes: 0.25}\n",  # 15 s: headroom so pre-pass + sandbox bind setup finishes before the engine step
                 encoding="utf-8",
             )
+            # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - the
+            # copies are the dispatcher's shell adapter plus the egress-wrap runtime, not a
+            # station script's dependencies, so tests/sandbox_fixtures.py:copy_station_script
+            # (which derives ONE station script's Python import closure) does not apply here.
             (sandbox / "lib" / "adapters").mkdir(parents=True)
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
@@ -226,6 +230,10 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - the copy
+            # set is the factory dispatcher's own runtime (shell adapters, the lib/sinks package
+            # directory, budget.py and friends), which tests/sandbox_fixtures.py:copy_station_script
+            # deliberately does not derive (it follows ONE station script's Python import closure).
             (sandbox / "lib" / "adapters").mkdir(parents=True)
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
@@ -379,6 +387,9 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
                 }],
             }), encoding="utf-8")
 
+            # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - same
+            # classification as the dispatcher-runtime copy blocks above: the set is the
+            # factory's own runtime, which the shared builder deliberately does not derive.
             (sandbox / "lib" / "adapters").mkdir(parents=True)
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
@@ -495,6 +506,9 @@ class TestRawTargetVisibilityDispatch(unittest.TestCase):
             }],
         }), encoding="utf-8")
 
+        # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - same
+        # classification as the dispatcher-runtime copy blocks above: the set is the
+        # factory's own runtime, which the shared builder deliberately does not derive.
         (sandbox / "lib" / "adapters").mkdir(parents=True)
         adapter = sandbox / "lib" / "adapters" / "pi.sh"
         shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
@@ -593,6 +607,9 @@ class TestPerStationEngine(unittest.TestCase):
                 "  probe: pi\n",
                 encoding="utf-8",
             )
+            # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - same
+            # classification as the dispatcher-runtime copy blocks above: the set is the
+            # factory's own runtime, which the shared builder deliberately does not derive.
             (sandbox / "lib" / "adapters").mkdir(parents=True)
             for engine in ("pi", "claude"):
                 adapter = sandbox / "lib" / "adapters" / f"{engine}.sh"

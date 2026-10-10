@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agents" / "vuln-triage" / "scripts"))
 
 import triage  # noqa: E402
+from tests.sandbox_fixtures import copy_station_script  # noqa: E402
 
 
 class TestVulnTriageClustering(unittest.TestCase):
@@ -199,19 +200,18 @@ class TestVulnTriageClustering(unittest.TestCase):
 
     def test_end_to_end_script_execution(self):
         """triage.py runs end-to-end via CLI in an isolated sandbox, loading threat model and clusters."""
-        import shutil
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             mock_root = tmp_path / "mock_root"
-            mock_script = mock_root / "agents" / "vuln-triage" / "scripts" / "triage.py"
-            mock_script.parent.mkdir(parents=True)
-            shutil.copyfile(ROOT / "agents" / "vuln-triage" / "scripts" / "triage.py", mock_script)
-            # triage.py imports the shared line-sentinel rule; mirror the repo layout so its
-            # FACTORY_ROOT resolves to this tree and the lib module is importable (agents-ghtz).
-            mock_lib = mock_root / "lib"
-            mock_lib.mkdir(parents=True)
-            shutil.copyfile(ROOT / "lib" / "line_numbers.py", mock_lib / "line_numbers.py")
+            # The sandbox mirrors the repo layout so the script's FACTORY_ROOT (derived from
+            # __file__) resolves to this tree; the shared builder (agents-8ztd, census in
+            # agents-r2ne) copies triage.py's lib import closure rather than a hand-maintained
+            # list, so a new shared import reaches this sandbox without a fixture edit.
+            mock_script = copy_station_script(
+                mock_root,
+                ROOT / "agents" / "vuln-triage" / "scripts" / "triage.py",
+                "agents/vuln-triage/scripts/triage.py",
+            )
 
             mock_findings = mock_root / "findings"
             mock_findings.mkdir(parents=True)

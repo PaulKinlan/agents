@@ -188,6 +188,11 @@ class TestDispatcherSchemaGate(unittest.TestCase):
         report_src = sandbox / "report-src.json"
         report_src.write_text(json.dumps(report_payload), encoding="utf-8")
 
+        # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - the copy set
+        # is the factory dispatcher's own runtime (the shell adapter, the lib/sinks package
+        # directory, budget.py and friends) plus a fixture-seeded prepass.py above, which
+        # tests/sandbox_fixtures.py:copy_station_script deliberately does not derive (it follows
+        # ONE station script's Python import closure). Different case; not routed through it.
         (sandbox / "lib" / "adapters").mkdir(parents=True)
         adapter = sandbox / "lib" / "adapters" / "pi.sh"
         shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)

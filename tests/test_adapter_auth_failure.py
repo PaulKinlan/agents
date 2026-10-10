@@ -238,6 +238,10 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
             )
 
         (self.root / "lib" / "adapters").mkdir(parents=True)
+        # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - this copies
+        # the factory dispatcher's own runtime (every lib/*.py by GLOB, plus the lib/sinks
+        # package directory), not a station script's dependencies, so
+        # tests/sandbox_fixtures.py:copy_station_script does not apply. Different case.
         for mod in (ROOT / "lib").glob("*.py"):
             shutil.copyfile(mod, self.root / "lib" / mod.name)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
@@ -332,6 +336,8 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
             encoding="utf-8",
         )
         factory_script = self.root / "factory"
+        # agents-r2ne census: copies the factory BINARY (a non-station artefact), not station
+        # code - the shared station-script builder does not apply.
         shutil.copyfile(ROOT / "factory", factory_script)
         factory_script.chmod(0o755)
 

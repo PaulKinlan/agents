@@ -65,6 +65,11 @@ class PromptSandbox:
             encoding="utf-8",
         )
 
+        # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - the copy set
+        # is the factory dispatcher's own runtime (the shell adapter, the lib/sinks package
+        # directory, budget.py and friends) plus a fixture-seeded prepass.py above, which
+        # tests/sandbox_fixtures.py:copy_station_script deliberately does not derive (it follows
+        # ONE station script's Python import closure). Different case; not routed through it.
         (self.root / "lib" / "adapters").mkdir(parents=True)
         adapter = self.root / "lib" / "adapters" / "pi.sh"
         shutil.copyfile(ROOT / "lib" / "adapters" / "pi.sh", adapter)
