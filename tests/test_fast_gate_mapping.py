@@ -98,6 +98,7 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_pi_keyless_broker.py", mapped)
         self.assertIn("tests/test_adapter_auth_failure.py", mapped)
         self.assertIn("tests/test_factory_core.py", mapped)
+        self.assertIn("tests/test_containment.py", mapped, "pi.sh containment suite omitted (agents-71zn)")
 
     def test_other_adapters_map_to_auth_failure_and_core(self):
         """Other adapters must fall back to auth failure detection and factory core."""
@@ -133,10 +134,12 @@ class TestFastGateMapping(unittest.TestCase):
 
     # --- agents-9nir: the ignore list is deliberate, and "no arm" fails loudly ----------
 
-    def test_readme_maps_to_docs_drift(self):
-        """README.md is the one markdown file a suite pins by content (its tree diagram)."""
-        mapped = resolve_fast_gate(["README.md"])
-        self.assertIn("tests/test_docs_drift.py", mapped, "README.md consumer suite omitted (agents-9nir)")
+    def test_root_markdown_maps_to_docs_drift(self):
+        """Root governance and architecture markdown files map to tests/test_docs_drift.py (agents-6hqi)."""
+        for path in ("README.md", "AGENTS.md", "THREAT_MODEL.md", "CLAUDE.md"):
+            with self.subTest(path=path):
+                mapped = resolve_fast_gate([path])
+                self.assertIn("tests/test_docs_drift.py", mapped, f"{path} consumer suite omitted (agents-6hqi)")
 
     def test_github_paths_map_to_ci_suites(self):
         """.github/** is consumed by the CI-action contract and the pages publish scope suites."""
@@ -209,7 +212,7 @@ class TestFastGateMapping(unittest.TestCase):
         with a false reason) nor map (a suite whose assertions cannot fail on the file) is
         honest, so the deliberate behaviour is the loud failure.
         """
-        for path in ("agents/vuln-verify/README.md", "AGENTS.md", "targets/README.md"):
+        for path in ("agents/vuln-verify/README.md", "targets/README.md"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
