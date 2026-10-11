@@ -110,6 +110,17 @@ while IFS= read -r f; do
     tests/test_*.py)
       run="$run $f"
       ;;
+    tools/fast-gate.sh)
+      # agents-8jx1: THE GATE'S OWN SCRIPT HAD AN ARM THAT MAPPED ONLY
+      # tests/test_fast_gate_mapping.py. A change to tools/fast-gate.sh therefore selected the
+      # mapping suite AND OMITTED tests/test_hermetic_env.py - the acceptance suite for the
+      # gate's hermetic environment, which names fast-gate/CHECK_CMD seven times and can be
+      # regressed by a gate edit. Found by the gate's own coverage warning on a green run.
+      # (The old arm this replaces was deleted rather than left in place: the matcher is
+      # FIRST-MATCH, so a second arm for the same path is unreachable dead code that a future
+      # reader would have no way to identify as the stale one.)
+      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py"
+      ;;
     tests/__init__.py|tests/hermetic_env.py)
       # Centralized hermetic test package initialization (agents-v1a2) and shared helper.
       # A change to the package initialization or helper runs the acceptance suite
@@ -332,10 +343,6 @@ while IFS= read -r f; do
       # invocation agree. A change to either must run that test, or the drift guard is
       # decorative on exactly the edit that would break it.
       mapped="$mapped tests/test_check_conf_consistency.py tests/test_gate_entrypoint_config.py"
-      ;;
-    tools/fast-gate.sh)
-      # Fast gate mapping verification test (agents-vt7w).
-      mapped="$mapped tests/test_fast_gate_mapping.py"
       ;;
     docs/*)
       # Documentation pages snapshot and publishing scope (agents-vt7w). tests/test_docs_drift.py
