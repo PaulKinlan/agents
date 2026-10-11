@@ -99,13 +99,31 @@ class TestConfigIsResolvedLoudly(unittest.TestCase):
     """The resolver must REFUSE rather than silently substitute a default."""
 
     def test_a_missing_tracked_config_is_an_error_not_a_fallback(self):
+        """agents-04ag: when the TRACKED config (tools/check.conf) is absent, check-cmd.sh
+        must exit 2 loudly and refuse to invent a fallback command."""
         import subprocess, tempfile, os
         resolver = ROOT / "tools" / "check-cmd.sh"
         self.assertTrue(resolver.is_file(), "tools/check-cmd.sh must exist")
         with tempfile.TemporaryDirectory() as tmp:
-            # Point the resolver at a directory with no tracked config by running it from
-            # a copy of the tree missing that file is heavy; instead assert the failure
-            # path directly: an override naming a BAD file must not be silently ignored.
+            tmp_tools = Path(tmp) / "tools"
+            tmp_tools.mkdir(parents=True)
+            symlink_resolver = tmp_tools / "check-cmd.sh"
+            os.symlink(resolver, symlink_resolver)
+
+            res = subprocess.run(["bash", str(symlink_resolver), "CHECK_CMD"],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(res.returncode, 2,
+                             f"missing TRACKED config must exit 2: {res.stderr}")
+            self.assertIn("the TRACKED gate config is missing", res.stderr,
+                          "the refusal must name the missing tracked file")
+
+    def test_a_missing_override_is_tolerated_and_uses_tracked_defaults(self):
+        """A missing per-VM override is optional; check-cmd.sh must tolerate its absence
+        and resolve values from the tracked configuration."""
+        import subprocess, tempfile, os
+        resolver = ROOT / "tools" / "check-cmd.sh"
+        self.assertTrue(resolver.is_file(), "tools/check-cmd.sh must exist")
+        with tempfile.TemporaryDirectory() as tmp:
             env = dict(os.environ)
             env["FLEET_CHECK_CONF"] = os.path.join(tmp, "does-not-exist.conf")
             res = subprocess.run(["bash", str(resolver), "CHECK_CMD"],
