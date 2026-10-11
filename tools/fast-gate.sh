@@ -427,7 +427,20 @@ if [ -n "$unmatched" ]; then
 fi
 
 # Union, dedupe, deterministic order.
-files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort || true)"
+#
+# NO `|| true` HERE EITHER (agents-c1z0 review): this is the same error-masking shape as
+# the base resolution above, one line later, and the reviewer constructed it. With the
+# trailing `|| true` a failing element of this pipeline (a broken or OOM-killed `sort` or
+# `awk`, a SIGPIPE) suppressed its exit status, `files` evaluated to the empty string, and
+# the smoke fallback below reported PASS - discarding suites that HAD been mapped
+# correctly. Reproduced with GIT_CHANGED="lib/sandbox.py" and a `sort` on PATH that exits 1:
+# the correctly mapped tests/test_sandbox.py was thrown away and the verdict was green.
+# A pipeline that cannot compute the suite list is an ERROR, not an empty suite list.
+if ! files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort)"; then
+  echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
+  echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
+  exit 1
+fi
 
 # Dry-run support for testing mapping resolution without invoking unittest.
 if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then

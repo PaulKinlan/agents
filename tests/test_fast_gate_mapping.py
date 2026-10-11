@@ -16,6 +16,7 @@ Validates:
 
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -304,6 +305,29 @@ class TestFastGateMapping(unittest.TestCase):
         res = run_fast_gate_with_base("HEAD~1")
         self.assertEqual(res.returncode, 0, f"a real base with a real delta must resolve: {res.stderr}")
         self.assertNotIn("is not a commit", res.stderr, "HEAD~1 must resolve as a commit")
+
+    def test_a_failing_dedupe_pipeline_is_an_error_not_an_empty_suite_list(self):
+        """A pipeline that cannot compute the suite list must FAIL LOUDLY (agents-c1z0 review).
+
+        The dedupe pipeline used to end in `|| true`, which is the same error-masking shape
+        as the base resolution fixed by this change, one line later: a failing `sort` or
+        `awk` (OOM, a broken executable on PATH, SIGPIPE) suppressed its status, `files`
+        became the empty string, and the smoke fallback reported PASS - discarding suites
+        that HAD been mapped correctly. Constructed by the reviewer with GIT_CHANGED set to
+        a mapped file and a `sort` earlier on PATH that exits 1: tests/test_sandbox.py was
+        thrown away and the verdict was green. A UNKNOWN suite list is not an empty one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_sort = Path(tmp) / "sort"
+            fake_sort.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fake_sort.chmod(0o755)
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = "lib/sandbox.py"
+            env["PATH"] = f"{tmp}{os.pathsep}{env.get('PATH', '')}"
+            res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0, "a failing dedupe pipeline must not fall back to the smoke subset (agents-c1z0 review)")
+        self.assertIn("dedupe pipeline failed", res.stderr, "the failure must name the broken pipeline")
+        self.assertNotIn("test_factory_core.py", res.stdout + res.stderr, "the mapped suite must not be silently replaced by the smoke subset")
 
     def test_fast_gate_execution_reports_passed_terminal_signal_on_success(self):
         """tools/fast-gate.sh must leave an explicit 'fast-gate: passed:' terminal signal on success (agents-7zts)."""
