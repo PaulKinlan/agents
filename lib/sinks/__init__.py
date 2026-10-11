@@ -21,7 +21,7 @@ SINKS: Dict[str, Sink] = {sink.name: sink for sink in (
     FileSink(), BeadsSink(), GitHubIssuesSink(), CommandSink(),
 )}
 
-# Legacy spellings: a spec containing one of these means exactly this set (as before).
+# Legacy spellings: an alias expands in-place to its member sinks (agents-3ngh).
 ALIASES = {"both": ("beads",), "all": ("beads",)}
 
 # Sink discovery from target guidance, in this order (AGENTS.md "Sinks").
@@ -36,12 +36,19 @@ def get(name: str) -> Optional[Sink]:
 
 
 def expand(spec: Optional[str]) -> List[str]:
-    """`"beads,github-issues"` -> names; an alias replaces the whole list, as it always did."""
-    names = [s.strip() for s in (spec or "").split(",") if s.strip()]
-    for alias, members in ALIASES.items():
-        if alias in names:
-            return list(members)
-    return names
+    """`"beads,github-issues"` -> names; an alias expands in-place to its member sinks (agents-3ngh)."""
+    expanded: List[str] = []
+    for s in (spec or "").split(","):
+        name = s.strip()
+        if not name:
+            continue
+        if name in ALIASES:
+            for member in ALIASES[name]:
+                if member not in expanded:
+                    expanded.append(member)
+        elif name not in expanded:
+            expanded.append(name)
+    return expanded
 
 
 def credential_env(spec: Optional[str], options: Optional[Mapping[str, Any]] = None) -> List[str]:

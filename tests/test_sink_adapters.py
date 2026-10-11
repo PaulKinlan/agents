@@ -60,10 +60,18 @@ if mode == "silent":
 class TestRegistry(unittest.TestCase):
     def test_spellings_are_unchanged(self):
         self.assertEqual(sinks.expand("both"), ["beads"])
-        self.assertEqual(sinks.expand("file,all"), ["beads"])
+        self.assertEqual(sinks.expand("all"), ["beads"])
         self.assertEqual(sinks.expand(" beads , github-issues "), ["beads", "github-issues"])
         self.assertEqual(sinks.expand("file"), ["file"])
         self.assertEqual(sorted(sinks.SINKS), ["beads", "command", "file", "github-issues"])
+
+    def test_alias_in_sink_list_does_not_drop_other_sinks(self):
+        """agents-3ngh: an alias in a sink list must expand in-place without dropping declared sinks."""
+        self.assertEqual(sinks.expand("command,both"), ["command", "beads"])
+        self.assertEqual(sinks.expand("both,command"), ["beads", "command"])
+        self.assertEqual(sinks.expand("file,all"), ["file", "beads"])
+        self.assertEqual(sinks.expand("beads,both"), ["beads"])
+        self.assertEqual(sinks.expand("command,both,file"), ["command", "beads", "file"])
 
     def test_credential_grants_are_unchanged(self):
         parent = {"PATH": "/bin", "GH_TOKEN": "g", "GITHUB_TOKEN": "h", "TRACKER_TOKEN": "t"}
@@ -107,12 +115,12 @@ class CommandSinkCase(unittest.TestCase):
         (self.target / "receiver.py").write_text(RECEIVER)
         self.log = self.target / "receiver.log"
 
-    def scan(self, items, mode="ok", visibility="public", command=None, extra=(), env_extra=None):
+    def scan(self, items, mode="ok", visibility="public", command=None, extra=(), env_extra=None, sink="command"):
         raw = self.root / "input.json"
         raw.write_text(json.dumps({"findings": items}))
         command = command if command is not None else f"{sys.executable} receiver.py {mode}"
         cmd = [sys.executable, str(self.factory / "lib" / "findings.py"), "--target", "fx",
-               "--agent", "lint", "--input", str(raw), "--sink", "command",
+               "--agent", "lint", "--input", str(raw), "--sink", sink,
                "--target-dir", str(self.target),
                "--sink-option", f"sink_command={command}", *extra]
         if visibility is not None:
@@ -169,6 +177,13 @@ class TestCommandSink(CommandSinkCase):
         record, = self.store().values()
         self.assertNotIn("command", record.get("dispatched_sinks", []))
         self.assertIn("**command**: published 0, failed 1", self.report())
+
+    def test_multi_sink_with_alias_invokes_command_and_does_not_drop_it(self):
+        """agents-3ngh: --sink command,both must invoke command sink and not drop it for beads."""
+        result = self.scan([SAMPLE], sink="command,both")
+        self.assertIn("[Sink command]", result.stdout)
+        self.assertIn("[Sink beads]", result.stdout)
+        self.assertEqual(len(self.received()), 1, "command sink must be invoked and deliver")
 
     def test_a_failing_command_delivers_nothing_and_is_retried(self):
         result = self.scan([SAMPLE], mode="fail")
