@@ -326,6 +326,13 @@ while IFS= read -r f; do
     tools/gen_site.py)
       mapped="$mapped tests/test_gen_site.py"
       ;;
+    tools/check.conf|tools/check-cmd.sh)
+      # The gate's own command configuration and its resolver (agents-ia3p): the tracked
+      # default, and the test that asserts the TRACKED config and the deployed CI
+      # invocation agree. A change to either must run that test, or the drift guard is
+      # decorative on exactly the edit that would break it.
+      mapped="$mapped tests/test_check_conf_consistency.py tests/test_gate_entrypoint_config.py"
+      ;;
     tools/fast-gate.sh)
       # Fast gate mapping verification test (agents-vt7w).
       mapped="$mapped tests/test_fast_gate_mapping.py"
