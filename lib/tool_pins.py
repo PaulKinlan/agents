@@ -48,6 +48,21 @@ cannot carry host-specific hashes (every machine's binaries differ). A deployer 
 file wins per tool. An unset env var or a missing host file leaves the repo pins as-is (so
 the fail-closed default is unchanged); a *malformed* host file raises ``ToolPinError`` rather
 than being silently ignored. Generate the file with ``tools/generate-tool-pins.sh``.
+
+    A HOST WHOSE TRUSTED TOOLS LIVE OUTSIDE THE GENERATOR'S CONFINED SYSTEM DIRS MUST PASS
+    ``--lookup-path`` FOR THOSE DIRS. The generator confines its lookup to system bin dirs
+    deliberately - they are the ones an earlier CI step cannot reach - so a trusted tool
+    installed elsewhere is CORRECTLY omitted rather than pinned from an unsafe PATH, and
+    ``_require_pin`` then refuses it at resolve time. The omission is the CALLER's, not the
+    generator's: do not loosen the confinement to make it go away.
+
+    Worked example: ``bd`` lives in ``$HOME/fleet/bin``, outside the confined dirs, so a pins
+    file generated without the flag has no ``bd`` entry and ``resolve_tool("bd")`` refuses
+    with "trusted tool 'bd' is not pinned". Regenerate with
+    ``tools/generate-tool-pins.sh --lookup-path "$HOME/fleet/bin"`` and it is pinned.
+
+    THE FAILURE IS SILENT AT GENERATION TIME and only appears later as a refusal, which is why
+    it is worth stating here: nothing warns when a trusted tool is skipped.
 """
 
 import hashlib
