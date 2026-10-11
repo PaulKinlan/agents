@@ -1329,20 +1329,22 @@ class TestUnixPeerIdentityGate(BrokerTestBase):
 
     def test_a_connection_handed_to_an_out_of_tree_process_keeps_its_grant(self):
         # THE STATED LIMIT OF THE SESSION BOUNDARY (agents-28nn round 9, judged and kept
-        # by the round-9 verdict rather than closed): the decision is made ONCE, AT
-        # CONNECT, so the capability it grants is the CONNECTION, not the process. The
-        # connector here is inside the permitted tree; the process that USES the
-        # connection is this test process, which is NOT in it. The request is served —
+        # by the round-9 verdict rather than closed): the kernel's ATTRIBUTION is fixed at
+        # connect, so a hand-off keeps the identity of whoever opened the socket — the
+        # capability travels with the DESCRIPTOR, not with the process. The connector here
+        # is inside the permitted tree; the process that USES the connection is this test
+        # process, which is NOT in it. The request is served —
         # and that is the right shape for an engine holding a long-lived client, not a
         # hole: an engine able to pass its socket could proxy the request itself, so a
         # helper reaches nothing the engine could not reach directly. Pinned by
         # behaviour so the next reader inherits a fact rather than a sentence.
         #
         # NOTE, precisely: the CONNECTOR stays alive while the request is made. The pid
-        # the gate checks is the one the kernel recorded at connect, but the tree walk
-        # itself reads LIVE /proc state at request time, so what this pins is a grant
-        # that survives a hand-off — not a connection that outlives the process which
-        # opened it. Round 10 closes that sentence by construction:
+        # the gate checks is the one the kernel recorded at connect, but the GATE IS
+        # DECIDED PER REQUEST and the tree walk reads LIVE /proc (and, round 11, the
+        # root's pinned start time) at request time, so what this pins is a grant that
+        # survives a hand-off — not a connection that outlives the process which opened
+        # it. Round 10 closes that sentence by construction:
         # test_the_gate_follows_the_root_out_of_existence runs this same hand-off with the
         # connector waited out, and it is refused.
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1465,7 +1467,10 @@ class TestUnixPeerIdentityGate(BrokerTestBase):
             broker, sock = self._broker_on_unix(tmpdir)
 
             # ARM 1 — the root is ALIVE: the identical hand-off is SERVED. If this arm
-            # fails, the arm below says nothing about liveness.
+            # fails, the arm below says nothing about liveness. Round 11: this is also
+            # the POSITIVE arm for the root's start-time pin — restrict_peer_root
+            # captured the live root's start time and the walk found it MATCHING, so a
+            # pin that refused everything would fail here.
             served = self._hand_off_and_request(script, broker, sock, "unix-handoff",
                                                 root_exits=False)
             self.assertIn(
@@ -1493,9 +1498,11 @@ class TestPeerIdentityHelpers(unittest.TestCase):
     def test_pid_in_tree_accepts_the_root_itself_and_a_descendant(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
-            self.assertTrue(cb._pid_in_tree(os.getpid(), os.getpid()))
-            self.assertTrue(cb._pid_in_tree(child.pid, os.getpid()))
-            self.assertFalse(cb._pid_in_tree(os.getpid(), child.pid))
+            root_start = cb._proc_start_time(os.getpid())
+            self.assertTrue(cb._pid_in_tree(os.getpid(), os.getpid(), root_start))
+            self.assertTrue(cb._pid_in_tree(child.pid, os.getpid(), root_start))
+            self.assertFalse(cb._pid_in_tree(os.getpid(), child.pid,
+                                             cb._proc_start_time(child.pid)))
         finally:
             child.kill()
             child.wait()
@@ -1516,14 +1523,16 @@ class TestPeerIdentityHelpers(unittest.TestCase):
         proc.stdout.close()
         proc.wait()  # the spawner exits; the orphan is re-parented before wait() returns
         try:
-            self.assertFalse(cb._pid_in_tree(orphan_pid, os.getpid()))
+            self.assertFalse(cb._pid_in_tree(orphan_pid, os.getpid(),
+                                             cb._proc_start_time(os.getpid())))
         finally:
             os.kill(orphan_pid, signal.SIGKILL)
 
     def test_pid_in_tree_fails_closed_for_a_dead_pid(self):
         child = subprocess.Popen([sys.executable, "-c", "pass"])
         child.wait()
-        self.assertFalse(cb._pid_in_tree(child.pid, os.getpid()))
+        self.assertFalse(cb._pid_in_tree(child.pid, os.getpid(),
+                                         cb._proc_start_time(os.getpid())))
 
     def test_established_tcp_peer_pids_attributes_a_live_loopback_connection(self):
         listener = socket.socket()
@@ -1570,9 +1579,128 @@ class TestPeerIdentityHelpers(unittest.TestCase):
     def test_peer_is_permitted_refuses_an_empty_attribution_and_a_root_that_is_not_a_pid(self):
         # The deleted no-op's replacement DIRECTION: no attribution is a refusal, and a
         # root that is not a pid (a listener that somehow never got one) refuses every
-        # peer rather than trusting it — the gate refuses, never opens.
-        self.assertFalse(cb._peer_is_permitted(set(), os.getpid()))
-        self.assertFalse(cb._peer_is_permitted({os.getpid()}, None))
+        # peer rather than trusting it — the gate refuses, never opens. Round 11 adds the
+        # root's missing half: a pid WITHOUT its captured start time refuses too, because
+        # the pid alone is not an identity.
+        self.assertFalse(cb._peer_is_permitted(set(), os.getpid(),
+                                               cb._proc_start_time(os.getpid())))
+        self.assertFalse(cb._peer_is_permitted({os.getpid()}, None, None))
+        self.assertFalse(cb._peer_is_permitted({os.getpid()}, os.getpid(), None))
+
+
+class TestRootIdentityIsPinnedToItsStartTime(unittest.TestCase):
+    """agents-28nn round 11 (the round-10 verdict's P1): the ROOT's identity.
+
+    A DESCENDANT whose pid is recycled is refused by the walk itself — the ppid chain of
+    the pid that holds it now does not reach the root. The ROOT had no such protection:
+    the walk proved only that /proc/<root>/stat could be OPENED and then returned True on
+    `current == root` without parsing it, so a pid later handed to an unrelated process
+    read as the same root, and a stale connection became usable again.
+
+    The root is now identified by (pid, START TIME): restrict_peer_root captures the
+    start time from the live process when it establishes the root, and the walk requires
+    it to MATCH when it reaches the root. A PID IS REUSED AND A START TIME IS NOT.
+
+    The recycle is constructed with a MOCKED /proc root in which the pid is present with
+    a DIFFERENT start time — racing the kernel for a pid is not deterministic, and the
+    question "who holds this pid now" is the same one either way. The matching-start-time
+    arm is the positive control; its served end is round 10's ARM 1
+    (test_the_gate_follows_the_root_out_of_existence), which drives a REAL broker against
+    a REAL live root through this pin.
+    """
+
+    ROOT_PID = 4999999
+    CHILD_PID = 4999998
+    ROOT_START = 987654321
+
+    @staticmethod
+    def _stat(pid, start_time, ppid=1, comm="engine"):
+        """A /proc/<pid>/stat line with field 22 (starttime) set to `start_time`. Field 3
+        (state) is fields[0] after the LAST ')', so field 22 is index 19: state, ppid,
+        seventeen filler fields, then the start time."""
+        after = ["S", str(ppid)] + ["0"] * 17 + [str(start_time)]
+        return f"{pid} ({comm}) " + " ".join(after) + " 0 0 0\n"
+
+    def _fake_proc(self, stats):
+        """A /proc root holding ONLY the given {pid: stat line}, so every source of truth
+        the walk can reach is one this test chose."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for pid, stat in stats.items():
+            entry = Path(tmp.name) / str(pid)
+            entry.mkdir()
+            (entry / "stat").write_text(stat, encoding="ascii")
+        return tmp.name
+
+    def test_a_recycled_root_pid_is_refused(self):
+        # The pid is still present — some process holds it — but it is NOT the root: its
+        # start time differs from the one captured when the root was established. Under
+        # the pid-only gate this was accepted, which is the finding.
+        proc = self._fake_proc({
+            self.ROOT_PID: self._stat(self.ROOT_PID, self.ROOT_START + 1)})
+        self.assertFalse(
+            cb._pid_in_tree(self.ROOT_PID, self.ROOT_PID, self.ROOT_START, proc_root=proc),
+            "the pid is held by a process with a DIFFERENT start time and was accepted "
+            "as the root: the pid alone was treated as an identity")
+
+    def test_the_same_pid_with_the_captured_start_time_is_accepted(self):
+        proc = self._fake_proc({
+            self.ROOT_PID: self._stat(self.ROOT_PID, self.ROOT_START)})
+        self.assertTrue(
+            cb._pid_in_tree(self.ROOT_PID, self.ROOT_PID, self.ROOT_START, proc_root=proc))
+
+    def test_the_roots_own_tree_is_refused_too_when_the_root_pid_was_recycled(self):
+        # The descendant's own identifier is unchanged in both calls; only the ROOT's
+        # identity differs, and that alone decides.
+        proc = self._fake_proc({
+            self.ROOT_PID: self._stat(self.ROOT_PID, self.ROOT_START),
+            self.CHILD_PID: self._stat(self.CHILD_PID, 111, ppid=self.ROOT_PID)})
+        self.assertTrue(cb._pid_in_tree(self.CHILD_PID, self.ROOT_PID, self.ROOT_START,
+                                        proc_root=proc))
+        self.assertFalse(cb._pid_in_tree(self.CHILD_PID, self.ROOT_PID, self.ROOT_START + 1,
+                                         proc_root=proc))
+
+    def test_a_root_start_time_that_could_not_be_read_refuses(self):
+        # FAIL CLOSED: the stat is readable and a pid-only check would accept it, but no
+        # identity was captured, so the root is refused rather than trusted.
+        proc = self._fake_proc({
+            self.ROOT_PID: self._stat(self.ROOT_PID, self.ROOT_START)})
+        self.assertFalse(cb._pid_in_tree(self.ROOT_PID, self.ROOT_PID, None, proc_root=proc))
+
+    def test_an_unreadable_or_malformed_stat_yields_no_identity(self):
+        proc = self._fake_proc({})
+        self.assertIsNone(cb._proc_start_time(self.ROOT_PID, proc_root=proc))
+        self.assertIsNone(cb._stat_start_time(f"{self.ROOT_PID} (engine) S 1"))
+        self.assertIsNone(cb._stat_start_time(f"{self.ROOT_PID} (no close"))
+        self.assertIsNone(cb._stat_start_time(self._stat(self.ROOT_PID, "not-a-number")))
+
+    def test_the_field_22_parse_matches_the_kernels_own_stat_line(self):
+        stat = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="ascii")
+        manual = int(stat[stat.rfind(")") + 1:].split()[19])
+        self.assertEqual(cb._stat_start_time(stat), manual)
+        self.assertEqual(cb._proc_start_time(os.getpid()), manual)
+
+    def test_restrict_peer_root_captures_the_live_roots_start_time(self):
+        # Where the pinned value comes from: start() pins the dispatcher's own pid, and
+        # restrict_peer_root re-pins the pair to the process it narrows to — read from the
+        # LIVE process, never carried over from the previous root.
+        broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            broker.start(unix_path=os.path.join(tmpdir, "broker.sock"), child_port=8384)
+            self.addCleanup(broker.stop)
+            self.assertEqual(broker._server.peer_gate_root, os.getpid())
+            self.assertEqual(broker._server.peer_gate_root_start,
+                             cb._proc_start_time(os.getpid()))
+            root = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            try:
+                broker.restrict_peer_root(root.pid)
+                self.assertEqual(broker._server.peer_gate_root, root.pid)
+                self.assertIsNotNone(broker._server.peer_gate_root_start)
+                self.assertEqual(broker._server.peer_gate_root_start,
+                                 cb._proc_start_time(root.pid))
+            finally:
+                root.kill()
+                root.wait()
 
 
 if __name__ == "__main__":
