@@ -45,8 +45,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
     from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
-                               allowlisted_path, prepass_tool_env, resolve_tool,
-                               write_effective_pins)
+                               UNPINNED_ALLOW_ENV, allowlisted_path, prepass_tool_env, resolve_tool,
+                               unpinned_allowed, write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -71,8 +71,8 @@ except ImportError:
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
     from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
-                               allowlisted_path, prepass_tool_env, resolve_tool,
-                               write_effective_pins)
+                               UNPINNED_ALLOW_ENV, allowlisted_path, prepass_tool_env, resolve_tool,
+                               unpinned_allowed, write_effective_pins)
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -1500,10 +1500,19 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # demonstrated by the verified wrap.
         sandbox = sandbox_record(engine, egress_filtered=egress_active)
 
+    # agents-onf6: an unpinned run waives content verification for trusted tools.
+    # Name the waiver prominently in the run banner and in policy.json.
+    unpinned_note = (
+        f"explicit {UNPINNED_ALLOW_ENV}=1 dev/test opt-in active: trusted tools "
+        f"({', '.join(sorted(TRUSTED_TOOLS))}) resolved by PATH order without sha256 verification"
+        if unpinned_allowed() else None
+    )
+
     print(f"\n[Software Factory] Run Initialized")
     print(f"  Agent:       {agent_name} ({agent_cfg.get('class', 'observer')})")
     for line in banner_lines(policy, engine, sandbox=sandbox,
-                             unsandboxed_note=unsandboxed_note):
+                             unsandboxed_note=unsandboxed_note,
+                             unpinned_note=unpinned_note):
         print(line)
     print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy, engine)}")
     print(f"  Target:      {target_name} ({target_dir})")
@@ -1518,7 +1527,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # record is updated. It is REWRITTEN from those captured bytes after the session
     # (agents-7ik): a granted-write session could otherwise tamper with its record.
     policy_record_json = json.dumps(
-        policy_record(policy, engine, sandbox=sandbox, unsandboxed_note=unsandboxed_note),
+        policy_record(policy, engine, sandbox=sandbox, unsandboxed_note=unsandboxed_note,
+                      unpinned_note=unpinned_note),
         indent=2)
     _write_run_artifact(run_dir / "policy.json", policy_record_json)
 
@@ -1803,7 +1813,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                       unsandboxed_note=unsandboxed_note,
                                       brokered_providers=tuple(broker.providers),
                                       engine_env=adapter_env,
-                                      expected_placeholder=broker.placeholder), indent=2)
+                                      expected_placeholder=broker.placeholder,
+                                      unpinned_note=unpinned_note), indent=2)
                     _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)

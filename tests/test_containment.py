@@ -536,6 +536,27 @@ class TestBannerAndRecord(unittest.TestCase):
         self.assertEqual(record["not_enforced"], ["os-sandbox", "read-scope"])
         self.assertNotIn("unsandboxed_opt_in", policy_record(policy, "pi", sandbox=None))
 
+    def test_an_unpinned_tools_opt_in_run_records_its_waiver(self):
+        """agents-onf6: when FACTORY_ALLOW_UNPINNED_TOOLS waives content verification for
+        trusted tools, the banner and policy.json must record the explicit opt-in text
+        and include 'trusted-tool-pins' in not_enforced, so an unpinned run is auditable."""
+        policy = load_policy("probe", manifest())
+        note = ("explicit FACTORY_ALLOW_UNPINNED_TOOLS=1 dev/test opt-in active: "
+                "trusted tools resolved by PATH order without sha256 verification")
+        banner = "\n".join(banner_lines(policy, "pi", sandbox=None, unpinned_note=note))
+        self.assertIn(f"Tool pins:   NOT enforced — {note}", banner)
+        record = policy_record(policy, "pi", sandbox=None, unpinned_note=note)
+        self.assertEqual(record["unpinned_tools_opt_in"], note)
+        self.assertIn("trusted-tool-pins", record["not_enforced"])
+
+        # When tool pins are enforced (unpinned_note=None), the waiver is absent
+        # and the banner states that tool pins are enforced.
+        normal_banner = "\n".join(banner_lines(policy, "pi", sandbox=None))
+        self.assertIn("Tool pins:   enforced (tools.yaml / FACTORY_TOOL_PINS)", normal_banner)
+        normal_record = policy_record(policy, "pi", sandbox=None)
+        self.assertNotIn("unpinned_tools_opt_in", normal_record)
+        self.assertNotIn("trusted-tool-pins", normal_record["not_enforced"])
+
     def test_the_budget_line_names_the_enforcement_state_per_engine(self):
         policy = load_policy("probe", manifest(budget={"max_minutes": 5, "max_usd": 0.5}))
         self.assertIn("$0.50 enforced by the claude adapter (--max-budget-usd)",
@@ -1299,6 +1320,20 @@ class TestDispatcher(unittest.TestCase):
         self.assertIn("NOT enforced (the pi adapter has no per-run budget flag)", res.stdout)
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
         self.assertIn("budget.max_usd", record["not_enforced"])
+
+    def test_an_unpinned_run_is_auditable_in_policy_json_and_banner(self):
+        """agents-onf6: an unpinned-tools run must record the waiver in the run banner
+        and in policy.json (in not_enforced and unpinned_tools_opt_in) so it is auditable."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\nbudget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        res = self.factory("pi", {"FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1"}, target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Tool pins:   NOT enforced — explicit FACTORY_ALLOW_UNPINNED_TOOLS=1", res.stdout)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertIn("trusted-tool-pins", record["not_enforced"])
+        self.assertIn("unpinned_tools_opt_in", record)
+        self.assertIn("FACTORY_ALLOW_UNPINNED_TOOLS=1", record["unpinned_tools_opt_in"])
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
     def test_the_engine_cannot_read_outside_the_target(self):

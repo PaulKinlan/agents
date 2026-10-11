@@ -33,6 +33,7 @@ from urllib.parse import urlsplit
 
 from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS,
                            NETWORK_CREDENTIAL_REQUIREMENTS)
+from lib.tool_pins import TRUSTED_TOOLS, UNPINNED_ALLOW_ENV, unpinned_allowed
 
 # docs/PLAN.md section 5. The ceiling is what an agent at that tier may *declare*.
 #   t0-readonly  no network, read-only checkout
@@ -400,7 +401,8 @@ def check_engine(policy: Policy, engine: str) -> None:
 
 
 def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] = None,
-                 unsandboxed_note: Optional[str] = None) -> List[str]:
+                 unsandboxed_note: Optional[str] = None,
+                 unpinned_note: Optional[str] = None) -> List[str]:
     """The run banner's containment block: declared, enforced, withheld, not enforced.
 
     `sandbox` is lib/sandbox.py's sandbox_record(): None on hosts without a sandbox (the
@@ -410,6 +412,8 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
     `unsandboxed_note` (agents-bp0) names the explicit FACTORY_ALLOW_UNSANDBOXED opt-in on
     a trusted target — a deliberate exception the operator attested to, so it is printed
     prominently instead of the generic gap text.
+    `unpinned_note` (agents-onf6) names the explicit FACTORY_ALLOW_UNPINNED_TOOLS opt-in
+    when content verification for host trusted tools was waived.
     """
     tier_note = "declared" if policy.tier_declared else "not declared; strictest tier assumed"
     engine_sandboxed = bool(sandbox and sandbox.get("engine_sandboxed"))
@@ -435,6 +439,10 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
         lines.append(f"  Sandbox:     enforced ({tool}): {coverage} — target read-only, "
                      f"factory repo and system dirs read-only, $HOME hidden (auth via env only), "
                      f"private PID namespace (host /proc invisible); {egress}")
+    if unpinned_note:
+        lines.append(f"  Tool pins:   NOT enforced — {unpinned_note}")
+    else:
+        lines.append("  Tool pins:   enforced (tools.yaml / FACTORY_TOOL_PINS)")
     return lines
 
 
@@ -497,7 +505,8 @@ def policy_record(policy: Policy, engine: str,
                   unsandboxed_note: Optional[str] = None,
                   brokered_providers: Tuple[str, ...] = (),
                   engine_env: Optional[Mapping[str, str]] = None,
-                  expected_placeholder: Optional[str] = None) -> Dict[str, Any]:
+                  expected_placeholder: Optional[str] = None,
+                  unpinned_note: Optional[str] = None) -> Dict[str, Any]:
     """The machine-readable account written to the run directory as policy.json.
 
     `sandbox` is lib/sandbox.py's sandbox_record(), produced only for an exercised wrap
@@ -561,6 +570,12 @@ def policy_record(policy: Policy, engine: str,
     # not_enforced either way; this field never upgrades them.
     if unsandboxed_note:
         record["unsandboxed_opt_in"] = unsandboxed_note
+    # agents-onf6: an unpinned-tools opt-in run (FACTORY_ALLOW_UNPINNED_TOOLS) records
+    # the waiver in policy.json and lists 'trusted-tool-pins' in not_enforced, so an
+    # unpinned run is auditable from the record alone.
+    if unpinned_note:
+        not_enforced.append("trusted-tool-pins")
+        record["unpinned_tools_opt_in"] = unpinned_note
     # agents-5d9: record the child-transport trust assumption that was previously invisible.
     # The operator's CA bundle is never forwarded (children use the system trust store), and
     # the operator's proxy reaches only unsandboxed children (sandboxed children get the
