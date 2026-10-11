@@ -118,6 +118,9 @@ PREPASS_EXECUTABLES = (
 # a resolved symlink's package root is the first ancestor that is not one of these.
 _STRUCTURAL = frozenset({"bin", "sbin", "lib", "lib32", "lib64", "libx32", "libexec", "share"})
 
+# Shared user directories that are structural or generic storage (not dedicated tool trees):
+_SHARED_USER_DIRS = _STRUCTURAL | frozenset({"state", "etc", "include", "var"})
+
 # Roots that hold user credentials and are therefore never bound, only tmpfs'd over.
 _HIDDEN_ROOTS = ("/home", "/root")
 
@@ -539,28 +542,31 @@ def _package_root(path: Path) -> Optional[Path]:
 
 
 def _is_tool_install_root(p: Path, home: Path) -> bool:
-    """Whether p is a tool's dedicated install tree under ~/.local rather than a broad user workspace.
-    Dedicated tool trees under ~/.local (e.g. ~/.local/pi) or dedicated tool directories
-    whose only role is housing that tool are exempt from the depth-2 broad root refusal,
-    provided they are not top-level structural directories (~/.local/bin, ~/.local/share)
-    or general user workspaces (work, fleet, src, projects, etc.) (agents-n5qp)."""
+    """Whether p is a tool's dedicated install tree under ~/.local or a hidden prefix.
+    A directory is recognized as a tool install root only when:
+      (1) It sits at depth 2 under $HOME within a hidden tool/system prefix (e.g. .local/<tool>
+          or .<prefix>/<tool>);
+      (2) Its directory name is NOT a shared system or XDG directory (bin, lib, share, state, etc.);
+      (3) It actually houses the tool's entrypoint: an executable file named after the
+          directory exists at p/<name> (e.g. ~/.local/pi/pi) or p/bin/<name> (agents-yfqg)."""
     try:
         rel = p.resolve().relative_to(home.resolve())
     except ValueError:
         return False
     parts = rel.parts
     if len(parts) == 2:
-        # Dedicated tool directories under ~/.local (e.g. ~/.local/pi)
-        if parts[0] == ".local" and parts[1] not in _STRUCTURAL:
-            return True
-        # If the directory is under a hidden prefix and named after its executable
-        if parts[0].startswith(".") and parts[0] not in _STRUCTURAL and parts[1] not in _STRUCTURAL:
-            try:
-                exe = p / parts[1]
-                if exe.is_file() and os.access(exe, os.X_OK):
-                    return True
-            except OSError:
-                pass
+        prefix, name = parts[0], parts[1]
+        if not prefix.startswith("."):
+            return False
+        if prefix in _SHARED_USER_DIRS or name in _SHARED_USER_DIRS:
+            return False
+        try:
+            exe = p / name
+            exe_bin = p / "bin" / name
+            if (exe.is_file() and os.access(exe, os.X_OK)) or (exe_bin.is_file() and os.access(exe_bin, os.X_OK)):
+                return True
+        except OSError:
+            pass
     return False
 
 

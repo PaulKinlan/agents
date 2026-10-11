@@ -1274,15 +1274,78 @@ class TestIsBroadRoot(unittest.TestCase):
         self.assertTrue(_is_broad_root(Path("/tmp/area/home/work/proj"), "/tmp/area/home"))
 
     def test_tool_install_tree_under_dot_local_is_exempt_from_broad_root(self):
-        """agents-n5qp: ~/.local/<tool> (e.g. ~/.local/pi) is a dedicated tool install tree,
-        not a broad workspace, so its resources (themes, assets) must resolve in sandbox."""
+        """agents-n5qp, agents-yfqg: ~/.local/<tool> (e.g. ~/.local/pi) is a dedicated tool install tree,
+        not a broad workspace, so its resources (themes, assets) must resolve in sandbox.
+        A directory qualifies only by role (housing the namesake executable), not mere placement:
+        shared directories (.local/bin, .local/share, .local/state) and directories without a
+        namesake executable remain broad."""
         from lib.sandbox import _is_broad_root
-        self.assertFalse(_is_broad_root(Path("/home/u/.local/pi"), "/home/u"))
-        self.assertFalse(_is_broad_root(Path("/opt/pi"), "/home/u"))
-        # But structural shared directories under ~/.local are still broad:
-        self.assertTrue(_is_broad_root(Path("/home/u/.local/bin"), "/home/u"))
-        self.assertTrue(_is_broad_root(Path("/home/u/.local/lib"), "/home/u"))
-        self.assertTrue(_is_broad_root(Path("/home/u/.local/share"), "/home/u"))
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            # Dedicated tool install tree with namesake executable:
+            pi_tree = home / ".local" / "pi"
+            pi_tree.mkdir(parents=True)
+            exe = pi_tree / "pi"
+            exe.write_text("#!/bin/sh\n")
+            exe.chmod(0o755)
+
+            self.assertFalse(_is_broad_root(pi_tree, str(home)))
+            self.assertFalse(_is_broad_root(Path("/opt/pi"), str(home)))
+
+            # Structural and shared XDG directories under ~/.local are still broad:
+            self.assertTrue(_is_broad_root(home / ".local" / "bin", str(home)))
+            self.assertTrue(_is_broad_root(home / ".local" / "lib", str(home)))
+            self.assertTrue(_is_broad_root(home / ".local" / "share", str(home)))
+            self.assertTrue(_is_broad_root(home / ".local" / "state", str(home)))
+
+            # User directory without namesake executable is broad:
+            notes = home / ".local" / "notes"
+            notes.mkdir(parents=True)
+            self.assertTrue(_is_broad_root(notes, str(home)))
+
+        # Also assert against live host path if present on this host
+        if Path("/home/exedev/.local/pi/pi").is_file():
+            self.assertFalse(_is_broad_root(Path("/home/exedev/.local/pi"), "/home/exedev"))
+            self.assertTrue(_is_broad_root(Path("/home/exedev/.local/state"), "/home/exedev"))
+            self.assertTrue(_is_broad_root(Path("/home/exedev/.local/share"), "/home/exedev"))
+            self.assertTrue(_is_broad_root(Path("/home/exedev/.local/bin"), "/home/exedev"))
+            self.assertTrue(_is_broad_root(Path("/home/exedev/work/proj"), "/home/exedev"))
+
+    def test_hidden_prefix_tool_install_tree_requires_executable_role(self):
+        """agents-yfqg: test the hidden-prefix arm of _is_tool_install_root. A depth-2 directory
+        under a hidden prefix (e.g. ~/.custom/tool) is exempt only when it houses its namesake
+        executable; without the executable or under a non-hidden prefix, it is broad."""
+        from lib.sandbox import _is_broad_root
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            # Hidden prefix with namesake executable -> exempt
+            tool_dir = home / ".custom" / "mytool"
+            tool_dir.mkdir(parents=True)
+            exe = tool_dir / "mytool"
+            exe.write_text("#!/bin/sh\n")
+            exe.chmod(0o755)
+            self.assertFalse(_is_broad_root(tool_dir, str(home)))
+
+            # Hidden prefix with bin/<name> executable -> exempt
+            tool_bin_dir = home / ".custom" / "bintool"
+            (tool_bin_dir / "bin").mkdir(parents=True)
+            exe_bin = tool_bin_dir / "bin" / "bintool"
+            exe_bin.write_text("#!/bin/sh\n")
+            exe_bin.chmod(0o755)
+            self.assertFalse(_is_broad_root(tool_bin_dir, str(home)))
+
+            # Hidden prefix directory WITHOUT executable -> broad
+            not_a_tool = home / ".custom" / "empty_dir"
+            not_a_tool.mkdir(parents=True)
+            self.assertTrue(_is_broad_root(not_a_tool, str(home)))
+
+            # Non-hidden prefix directory with executable -> broad (workspace rule)
+            workspace_tool = home / "workspace" / "mytool"
+            workspace_tool.mkdir(parents=True)
+            w_exe = workspace_tool / "mytool"
+            w_exe.write_text("#!/bin/sh\n")
+            w_exe.chmod(0o755)
+            self.assertTrue(_is_broad_root(workspace_tool, str(home)))
 
     def test_depth_3_or_deeper_is_not_broad(self):
         from lib.sandbox import _is_broad_root
