@@ -41,7 +41,7 @@ from lib.containment import (  # noqa: E402
     policy_record,
 )
 from lib.sandbox import SANDBOXED_ENGINES, sandbox_available, sandbox_command  # noqa: E402
-from lib.credential_broker import PLACEHOLDER_KEY  # noqa: E402
+from lib.credential_broker import PLACEHOLDER_PREFIX  # noqa: E402
 from lib.child_env import child_environment  # noqa: E402
 from lib import egress_proxy  # noqa: E402
 from lib import containment as containment_module  # noqa: E402
@@ -454,10 +454,15 @@ class TestBannerAndRecord(unittest.TestCase):
         sandbox = {"engine_sandboxed": True, "network_egress_filtered": True,
                    "engine_read_scope": "OS sandbox"}
         parent = {"ANTHROPIC_API_KEY": "not-a-real-provider-key"}
+        # agents-28nn round 7: the record only drops the residual when the env holds the
+        # RUNNING broker's per-run placeholder (any other value — including a retired
+        # static placeholder — is not evidence of a broker that will answer).
+        run_placeholder = "factory-broker-the-run-placeholder"
         engine_env = child_environment(engine="pi", parent=parent, broker_urls={
-            "anthropic": "http://127.0.0.1:8384/proxy/anthropic"})
+            "anthropic": "http://127.0.0.1:8384/proxy/anthropic"},
+            broker_placeholder=run_placeholder)
         kwargs = {"sandbox": sandbox, "brokered_providers": ("anthropic",),
-                  "engine_env": engine_env}
+                  "engine_env": engine_env, "expected_placeholder": run_placeholder}
         record = policy_record(policy, "pi", **kwargs)
         self.assertNotIn("env-credentials", record["not_enforced"])
         self.assertEqual(record["granted"]["credential_broker"]["providers"], ["anthropic"])
@@ -471,19 +476,43 @@ class TestBannerAndRecord(unittest.TestCase):
             "a provider name without apply_broker_urls must not upgrade policy.json")
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
-            engine_env=dict(engine_env, ANTHROPIC_BASE_URL="http://[invalid"))[
-                "not_enforced"])
+            engine_env=dict(engine_env, ANTHROPIC_BASE_URL="http://[invalid"),
+            expected_placeholder=run_placeholder)["not_enforced"])
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
-            engine_env=dict(engine_env, OPENAI_API_KEY="unbrokered"))["not_enforced"])
+            engine_env=dict(engine_env, OPENAI_API_KEY="unbrokered"),
+            expected_placeholder=run_placeholder)["not_enforced"])
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=("anthropic",),
-            engine_env=dict(engine_env, HTTPS_PROXY="http://user:pass@proxy.test"))[
-                "not_enforced"])
+            engine_env=dict(engine_env, HTTPS_PROXY="http://user:pass@proxy.test"),
+            expected_placeholder=run_placeholder)["not_enforced"])
+        # agents-28nn round 7: a placeholder that is NOT the running broker's per-run
+        # secret is not evidence of enforcement either.
         self.assertIn("env-credentials", policy_record(
+            policy, "pi", **{**kwargs, "expected_placeholder": "factory-broker-other-run"})[
+                "not_enforced"])
+        # agents-28nn round 6: the broker is no longer sandbox-gated, so a verified
+        # placeholder env drops the residual on EITHER path — _broker_covers_engine_env
+        # inspects the engine env itself (placeholders + loopback broker URL, no surviving
+        # credential), which is direct evidence, not an attestation by the sandbox.
+        self.assertNotIn("env-credentials", policy_record(
             policy, "pi", sandbox={**sandbox, "engine_sandboxed": False},
-            brokered_providers=("anthropic",), engine_env=engine_env)["not_enforced"],
-            "a sandboxed pre-pass cannot attest to the engine env")
+            brokered_providers=("anthropic",), engine_env=engine_env,
+            expected_placeholder=run_placeholder)["not_enforced"],
+            "a brokered unsandboxed engine's env holds placeholders only — verified directly")
+        # And with NO sandbox record at all (a sandbox-less host): a started broker whose
+        # swap verified drops the residual and records the grant; one whose swap did NOT
+        # take keeps it.
+        none_record = policy_record(policy, "pi", sandbox=None,
+                                    brokered_providers=("anthropic",), engine_env=engine_env,
+                                    expected_placeholder=run_placeholder)
+        self.assertNotIn("env-credentials", none_record["not_enforced"])
+        self.assertEqual(none_record["granted"]["credential_broker"]["providers"],
+                         ["anthropic"])
+        self.assertIn("env-credentials", policy_record(
+            policy, "pi", sandbox=None, brokered_providers=("anthropic",),
+            engine_env=child_environment(engine="pi", parent=parent))["not_enforced"],
+            "a broker that did not take (real key survives) is recorded, sandbox or none")
         self.assertIn("env-credentials", policy_record(
             policy, "pi", sandbox=sandbox, brokered_providers=(),
             engine_env=child_environment(engine="pi", parent={}))["not_enforced"],
@@ -550,6 +579,13 @@ class TestAdapters(unittest.TestCase):
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                "ANTHROPIC_API_KEY": "stub-key",
                "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
+        # agents-28nn round 5: adapters exec ONLY the dispatcher-verified FACTORY_ENGINE_BIN
+        # and refuse a by-name PATH lookup. The test stands in for the dispatcher: hand the
+        # adapter the stub's absolute path. Conditional because deepseek's Python-API
+        # fallback tests UNLINK the stub to force the no-binary path.
+        binary = self.bin / self.ENGINE_BINARY.get(engine, engine)
+        if binary.exists():
+            env["FACTORY_ENGINE_BIN"] = str(binary)
         if policy is not None:
             env["FACTORY_TOOL_POLICY"] = policy
         if budget_usd is not None:
@@ -700,6 +736,8 @@ class TestAdapters(unittest.TestCase):
         (test_a_write_agent_edits_a_disposable_worktree_and_leaves_the_target_untouched)."""
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                "ANTHROPIC_API_KEY": "stub-key", "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+               # agents-28nn round 5: the adapter execs only this dispatcher-verified path.
+               "FACTORY_ENGINE_BIN": str(self.bin / "pi"),
                "FACTORY_TOOL_POLICY": "worktree-write", "FACTORY_SANDBOXED": "1"}
         res = subprocess.run(
             ["bwrap", "--dev-bind", "/", "/", "--ro-bind", str(ROOT), str(ROOT),
@@ -2319,11 +2357,21 @@ process.stdin.on('end', () => {
             "else\n"
             "  echo PROCENV:CLEAN\n"
             "fi\n"
-            # Reach the broker over loopback; the root path 404s BEFORE any upstream hop, so
-            # this needs no real provider network.
+            # Reach the broker over loopback. agents-28nn round 7 (the verdict's P0): the
+            # listener now AUTHENTICATES — an unauthenticated local call is refused 403
+            # before any upstream hop, and only the run's per-run placeholder (which the
+            # engine carries as ANTHROPIC_API_KEY) is served; the root path then 404s
+            # before any upstream hop, so this still needs no real provider network.
             "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
             "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
             "  printf 'GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3\n"
+            "  read -r LINE <&3 && echo \"NOAUTHLINE:$LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo NOAUTHLINE:UNREACHABLE\n"
+            "fi\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf \"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nx-api-key: ${ANTHROPIC_API_KEY}\\r\\nConnection: close\\r\\n\\r\\n\" >&3\n"
             "  read -r LINE <&3 && echo \"BROKERLINE:$LINE\"\n"
             "  exec 3>&-\n"
             "else\n"
@@ -2339,15 +2387,21 @@ process.stdin.on('end', () => {
         res = self.factory("pi", {"ANTHROPIC_API_KEY": real_key,
                                   "FACTORY_MODEL": "anthropic/claude-3-5-sonnet"})
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        # The engine's environ holds the placeholder, never the real key.
-        self.assertEqual(self.stub_line("ENVKEY:"), PLACEHOLDER_KEY)
+        # The engine's environ holds the run's per-run placeholder, never the real key.
+        self.assertTrue(self.stub_line("ENVKEY:").startswith(PLACEHOLDER_PREFIX),
+                        f"the engine must carry a per-run placeholder, got {self.stub_line('ENVKEY:')!r}")
         self.assertEqual(self.stub_line("PROCENV:"), "CLEAN",
                          "the real key must not appear in the sandboxed engine's /proc/self/environ")
         base = self.stub_line("ENVBASE:")
         self.assertTrue(base.startswith("http://127.0.0.1:") and base.endswith("/proxy/anthropic"),
                         f"the engine must be pointed at the localhost broker, got {base!r}")
-        # And it can actually reach the broker through the sandbox network: a 404 on the root
-        # path proves the listener answered (no upstream hop involved).
+        # agents-28nn round 7 (the verdict's P0): an UNAUTHENTICATED local call is refused
+        # (403 before any upstream hop) ...
+        self.assertIn("403", self.stub_line("NOAUTHLINE:"),
+                      "the broker must refuse a request that does not present the run's secret")
+        # ... and the engine, holding the placeholder, reaches the broker through the
+        # sandbox network: a 404 on the root path proves the listener answered (no upstream
+        # hop involved).
         self.assertIn("404", self.stub_line("BROKERLINE:"),
                       "the sandboxed engine must reach the broker over loopback")
         record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
@@ -2358,6 +2412,107 @@ process.stdin.on('end', () => {
         # not an unrestricted fail-open list of all host credentials.
         self.assertEqual(record["granted"]["credential_broker"]["providers"],
                          ["anthropic"])
+        self.assertNotIn(real_key, json.dumps(record))
+
+    def test_an_unsandboxed_engine_gets_a_broker_placeholder_not_the_raw_key(self):
+        """agents-28nn round 6, review P1 — the WORST of the inverted-polarity shapes:
+        the credential broker used to start ONLY if engine_sandboxed(engine), so the
+        LESS-confined unsandboxed path handed the engine the RAW API KEY where the
+        confined path hands a placeholder. THE LESS-CONFINED PATH MUST NOT RECEIVE MORE
+        THAN THE MORE-CONFINED PATH (the rule on lib/sandbox.py's engine_sandboxed).
+
+        Forces the unsandboxed path on a sandboxed host (a pins file with NO bwrap entry
+        fails the probe closed; FACTORY_ALLOW_UNSANDBOXED=1 + a trusted private target
+        permits the run) with a real key in the dispatcher's environment, and asserts the
+        engine's environ holds the PLACEHOLDER + the broker's loopback URL and NEVER the
+        raw key, that the broker answers on loopback, and that policy.json records the
+        broker's enforcement rather than the env-credentials residual. The "Sandbox: NOT
+        enforced" banner assertion proves the test exercised the path it claims to cover.
+
+        MUTATION PROOF (performed, not asserted): re-gating the broker on
+        engine_sandboxed(engine) turns this red — ENVKEY is the raw key, PROCENV leaks,
+        and policy.json gains no credential_broker grant.
+        """
+        real_key = "sk-ant-REALKEY-do-not-leak-unsandboxed"
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo \"ENVKEY:${ANTHROPIC_API_KEY:-unset}\"\n"
+            "echo \"ENVBASE:${ANTHROPIC_BASE_URL:-unset}\"\n"
+            # The leak vector: grep the engine's OWN /proc/self/environ for the real key.
+            "if tr '\\0' '\\n' < /proc/self/environ | grep -qF '" + real_key + "'; then\n"
+            "  echo PROCENV:LEAKED\n"
+            "else\n"
+            "  echo PROCENV:CLEAN\n"
+            "fi\n"
+            # Reach the broker over loopback. agents-28nn round 7 (the verdict's P0): the
+            # listener now AUTHENTICATES — an unauthenticated local call is refused 403
+            # before any upstream hop, and only the run's per-run placeholder (which the
+            # engine carries as ANTHROPIC_API_KEY) is served; the root path then 404s
+            # before any upstream hop, so this still needs no real provider network.
+            "PORT=${ANTHROPIC_BASE_URL#http://127.0.0.1:}; PORT=${PORT%%/*}\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf 'GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3\n"
+            "  read -r LINE <&3 && echo \"NOAUTHLINE:$LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo NOAUTHLINE:UNREACHABLE\n"
+            "fi\n"
+            "if exec 3<>/dev/tcp/127.0.0.1/$PORT 2>/dev/null; then\n"
+            "  printf \"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nx-api-key: ${ANTHROPIC_API_KEY}\\r\\nConnection: close\\r\\n\\r\\n\" >&3\n"
+            "  read -r LINE <&3 && echo \"BROKERLINE:$LINE\"\n"
+            "  exec 3>&-\n"
+            "else\n"
+            "  echo BROKERLINE:UNREACHABLE\n"
+            "fi\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        # Pin the stub engine by path + content; OMIT bwrap so the probe fails closed and
+        # the trusted-target opt-in takes the UNSANDBOXED path on this sandboxed host.
+        digest = hashlib.sha256(stub.read_bytes()).hexdigest()
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text(f"pi:\n  path: {stub}\n  sha256: {digest}\n", encoding="utf-8")
+        res = self.factory("pi", {"ANTHROPIC_API_KEY": real_key,
+                                  "FACTORY_MODEL": "anthropic/claude-3-5-sonnet",
+                                  "FACTORY_ALLOW_UNSANDBOXED": "1",
+                                  "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+                                  "FACTORY_TOOL_PINS": str(pins)},
+                           target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     NOT enforced", res.stdout,
+                      "the test must EXERCISE the unsandboxed path: " + res.stdout)
+        # The engine's environ holds the run's per-run placeholder, never the real key — the same
+        # guarantee the sandboxed path delivers (the less-confined path must not receive
+        # more).
+        self.assertTrue(self.stub_line("ENVKEY:").startswith(PLACEHOLDER_PREFIX),
+                        f"the engine must carry a per-run placeholder, got {self.stub_line('ENVKEY:')!r}")
+        self.assertEqual(self.stub_line("PROCENV:"), "CLEAN",
+                         "the real key must not appear in the unsandboxed engine's "
+                         "/proc/self/environ")
+        base = self.stub_line("ENVBASE:")
+        self.assertTrue(base.startswith("http://127.0.0.1:") and base.endswith("/proxy/anthropic"),
+                        f"the engine must be pointed at the localhost broker, got {base!r}")
+        # agents-28nn round 7 (the verdict's P0, the CONSTRUCTED surface): on this path the
+        # broker's loopback is the HOST's — an unauthenticated local call must be refused
+        # (403 before any upstream hop) ...
+        self.assertIn("403", self.stub_line("NOAUTHLINE:"),
+                      "on the unsandboxed path the broker sits on the host's shared loopback; "
+                      "a request without the run's secret must be refused")
+        # ... while the engine, holding the run's placeholder, is served.
+        self.assertIn("404", self.stub_line("BROKERLINE:"),
+                      "the unsandboxed engine must reach the broker over loopback")
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertNotIn("env-credentials", record["not_enforced"],
+                         "the brokered engine env must update the record on this path too")
+        self.assertEqual(record["granted"]["credential_broker"]["providers"],
+                         ["anthropic"])
+        self.assertIn("os-sandbox", record["not_enforced"],
+                      "the sandbox is genuinely absent — the record must keep saying so")
         self.assertNotIn(real_key, json.dumps(record))
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
@@ -2428,7 +2583,7 @@ process.stdin.on('end', () => {
         # …which holds the broker-routed provider override, readable inside the sandbox.
         models = self.stub_line("MODELSJSON:")
         self.assertIn("proxy/deepseek", models)
-        self.assertIn("factory-broker-placeholder", models)
+        self.assertIn(f'"apiKey": "{PLACEHOLDER_PREFIX}', models)
         self.assertIn("openai-completions", models)
 
     @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
@@ -2619,6 +2774,326 @@ except OSError:
 
 print("EGRESS:" + json.dumps(results, sort_keys=True))
 """
+
+
+class TestEngineCredentialPinning(TestDispatcher):
+    """agents-28nn round 5, review P0 — the DEMONSTRATED credential exfiltration.
+
+    The adapter is the LAST GRANTER BEFORE THE KEY: it hands the run's model credentials
+    to whatever binary it executes, so an unpinned engine is an EXFILTRATION PATH, not
+    merely an unverified binary. The round-4 reviewer proved it by construction: a fake
+    `pi` planted first on PATH, run via `factory run --engine pi` under the trusted-target
+    FACTORY_ALLOW_UNSANDBOXED opt-in with ANTHROPIC_API_KEY set, EXECUTED and dumped the
+    environment — key included — into model_output.txt.
+
+    The attack payload is CHECKED IN as tests/fixtures/fake_engine.sh, so these tests
+    contain the attack rather than describing one, and the assertion sits at the point the
+    secret should never arrive — what the fake RECEIVED — not at an exit code (a fake that
+    dumps the environment and then fails would pass a nonzero-exit assertion while the
+    leak stands). agents-28nn round 6 (review P2) made the assertion SOUND: it cannot sit
+    on the file's EXISTENCE, because the adapter's shell redirection (`> "$OUTPUT_FILE"`,
+    lib/adapters/pi.sh) creates model_output.txt BEFORE the engine executes — a missing
+    or failing engine still leaves the file, so existence is not execution. The assertion
+    is on the file's CONTENT:
+
+    * the attack arm asserts no run artefact's content carries the dump marker or the
+      secret — the fake never executed and the credential never moved;
+    * the control arm pins the SAME payload and asserts the run succeeds AND the dump
+      PROVES DELIVERY — the credential-bearing environment reached the executed engine.
+      Since round 6 the broker runs on the unsandboxed path too (THE LESS-CONFINED PATH
+      MUST NOT RECEIVE MORE THAN THE MORE-CONFINED PATH), so what the pinned engine
+      receives is the broker PLACEHOLDER + loopback base URL (credential ACCESS, live end
+      to end), and the raw key must NOT appear. Only the pin gates execution.
+
+    MUTATION PROOF, both directions (performed, not asserted): dropping the engine
+    binaries from TRUSTED_TOOLS turns the attack arm red (the fake resolves, executes and
+    its dump's CONTENT carries the marker); dropping the dispatcher's FACTORY_ENGINE_BIN
+    wiring turns the control arm red (the adapter refuses, nothing is delivered).
+    """
+
+    SECRET = "sk-ant-EXFIL-CANARY-28nn"
+    FIXTURE = ROOT / "tests" / "fixtures" / "fake_engine.sh"
+
+    def _plant_fake_engine(self, name="pi"):
+        """Install the checked-in attack payload as an engine namesake FIRST on PATH."""
+        evil = self.root / "evilbin"
+        evil.mkdir(exist_ok=True)
+        fake = evil / name
+        shutil.copyfile(self.FIXTURE, fake)
+        fake.chmod(0o755)
+        return evil, fake
+
+    def _attack_env(self, evil, extra=None):
+        env = {"PATH": f"{evil}{os.pathsep}{self.bin}{os.pathsep}/usr/bin:/bin",
+               "FACTORY_ALLOW_UNSANDBOXED": "1",
+               # The dev/test opt-in must NOT rescue resolution: this is the pinned-host
+               # posture the attack ran under.
+               "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+               "ANTHROPIC_API_KEY": self.SECRET}
+        env.update(extra or {})
+        return env
+
+    def _model_outputs(self):
+        """The model_output.txt files that exist. EXISTENCE IS NOT EXECUTION (agents-28nn
+        round 6, review P2): the adapter's shell redirection creates the file BEFORE the
+        engine executes, so a missing or failing engine still leaves one — assert on
+        CONTENT, never on the file being there."""
+        return [run / "model_output.txt" for run in self.run_dirs()
+                if (run / "model_output.txt").exists()]
+
+    def _assert_no_dump_received_the_secret(self):
+        """The sound leak assertion: no run artefact's CONTENT carries the fake's dump
+        marker or the secret — whatever files exist."""
+        for output in self._model_outputs():
+            content = output.read_text(encoding="utf-8", errors="replace")
+            self.assertNotIn("FAKE ENGINE ENVIRONMENT DUMP", content,
+                             f"the fake engine EXECUTED and dumped the environment: {output}")
+            self.assertNotIn(self.SECRET, content,
+                             f"the credential reached a run artefact: {output}")
+
+    def test_a_path_planted_fake_engine_never_receives_the_credential(self):
+        """The constructed attack, retained: an UNPINNED namesake first on PATH must be
+        refused BEFORE it executes — the assertion is that the credential never reaches
+        it, not that the run exits nonzero."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        evil, _fake = self._plant_fake_engine()
+        res = self.factory("pi", self._attack_env(evil), target_arg="trusted")
+        self.assertNotEqual(res.returncode, 0,
+                            "an unpinned engine must refuse the run, not exit clean")
+        self.assertIn("not pinned", res.stderr,
+                      "the refusal must name the pin cause, not some other gate: "
+                      + res.stderr)
+        self._assert_no_dump_received_the_secret()
+
+    def test_a_pinned_engine_is_delivered_the_credential(self):
+        """The control: the SAME payload, pinned by its sha256, runs and its environment
+        dump PROVES DELIVERY — since round 6 the broker runs on the unsandboxed path too,
+        so the executed engine receives the broker PLACEHOLDER + loopback base URL
+        (credential access, live end to end) and NEVER the raw key. This is also the
+        mutation trap for the delivery half: remove the dispatcher's FACTORY_ENGINE_BIN
+        wiring and the adapter refuses, the dump never appears, and this test goes red."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        evil, fake = self._plant_fake_engine()
+        digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text(f"pi:\n  sha256: {digest}\n", encoding="utf-8")
+        res = self.factory("pi", self._attack_env(
+            evil, {"FACTORY_TOOL_PINS": str(pins)}), target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        outputs = self._model_outputs()
+        self.assertEqual(len(outputs), 1)
+        dump = outputs[0].read_text(encoding="utf-8")
+        self.assertIn("FAKE ENGINE ENVIRONMENT DUMP", dump,
+                      "the pinned payload must have EXECUTED and dumped its environment")
+        self.assertIn(PLACEHOLDER_PREFIX, dump,
+                      "the pinned engine must have RECEIVED the brokered credential shape — "
+                      "otherwise the attack arm proves nothing about delivery")
+        self.assertIn("http://127.0.0.1:", dump,
+                      "the broker's loopback base URL must reach the engine — the credential "
+                      "path is live, so only the pin gates execution")
+        self.assertNotIn(self.SECRET, dump,
+                         "the raw key must NOT reach the engine env on ANY path "
+                         "(agents-28nn round 6: the broker is not sandbox-gated)")
+
+    def test_an_unpinned_claude_is_refused_before_it_can_receive_the_key(self):
+        """Same granter, never-sandboxed engine (agents-ejm): claude's credentials reach
+        the adapter UNBROKERED by design, so the pin is the whole boundary."""
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        self.trusted_target("trusted")
+        evil, _fake = self._plant_fake_engine("claude")
+        res = self.factory("claude", self._attack_env(evil), target_arg="trusted")
+        self.assertNotEqual(res.returncode, 0,
+                            "an unpinned engine must refuse the run, not exit clean")
+        self.assertIn("not pinned", res.stderr)
+        self._assert_no_dump_received_the_secret()
+
+
+class TestPrepassEffectivePinsEveryPath(TestDispatcher):
+    """agents-28nn round 5, review P1 — THE CONTROL MUST BE A PROPERTY OF THE OPERATION,
+    NOT OF THE PATH TAKEN TO IT.
+
+    This is the THIRD appearance of the inverted-polarity shape in this bead (the
+    agents-dpt pins forwarding to children; the round-4 verdict's bind verification only
+    when sandbox_ok; and this one), so it is fixed as a design rule, not patched as a
+    slip: the merged effective pins were written ONLY inside the `if sandbox_ok:` block,
+    so the LESS-confined unsandboxed pre-pass had LESS control — it re-derived its pins
+    from the forwarded host path instead of verifying against EXACTLY what the host
+    verified (a snapshot a host-pins swap between host resolution and child exec cannot
+    widen).
+
+    The constructed case forces the unsandboxed path on a sandboxed host — a host pins
+    file with NO bwrap entry fails the probe closed, and FACTORY_ALLOW_UNSANDBOXED=1 plus
+    a trusted private target permits the run — and the pre-pass records the
+    FACTORY_TOOL_PINS it was handed. The control must hold on this path too: the env
+    names the dispatcher's effective pins file (a factory-pins-*/ dir, NOT the run dir,
+    NOT the forwarded host file) and its content is the merged view.
+
+    MUTATION PROOF (performed, not asserted): reverting the hoist — the effective-pins
+    write back inside `if sandbox_ok:` — turns this red: the pre-pass then records the
+    FORWARDED host pins path, which fails the effective-file assertions below.
+    """
+
+    RECORDER = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        "pins = os.environ.get('FACTORY_TOOL_PINS', '')\n"
+        "Path(out).write_text(json.dumps({\n"
+        "    'candidates': [],\n"
+        "    'pins_env': pins,\n"
+        "    'pins_exists': bool(pins) and Path(pins).exists(),\n"
+        "    'pins_content': Path(pins).read_text() if pins and Path(pins).exists() else '',\n"
+        "}))\n")
+
+    def _present_trusted_prepass_pin_lines(self):
+        """Path+sha256 pins for every TRUSTED tool in PREPASS_EXECUTABLES that is PRESENT
+        on the harness PATH (agents-28nn round 6): the dispatcher verifies the pre-pass's
+        whole trusted-tool set host-side on EVERY path — exactly what the sandboxed path's
+        bind boundary does at wrap time (lib/sandbox.py _executable_binds verify_pins every
+        pinned tool) — so a present-but-unauthenticatable tool refuses the run and these
+        pins must exist. Genuinely ABSENT tools are skipped (the script fails closed or
+        takes its documented fallback, as on the sandboxed path).
+        MUST be called BEFORE planting any fake on the harness PATH: a pin IS a grant, so
+        the pinned path must be the real system binary, never the plant."""
+        import hashlib
+        from lib.sandbox import PREPASS_EXECUTABLES
+        from lib.tool_pins import TRUSTED_TOOLS
+        lines = []
+        for name in sorted(set(PREPASS_EXECUTABLES) & set(TRUSTED_TOOLS)):
+            tool = shutil.which(name, path=f"{self.bin}{os.pathsep}/usr/bin:/bin")
+            if tool is None:
+                continue
+            digest = hashlib.sha256(Path(tool).read_bytes()).hexdigest()
+            lines.append(f"{name}:\n  path: {tool}\n  sha256: {digest}\n")
+        return "".join(lines)
+
+    def test_a_child_rewriting_the_pins_cannot_redirect_the_credential_handoff(self):
+        """agents-28nn round 6, review P1 — the effective-pins TOCTOU on the UNSANDBOXED
+        path, COMPOSED with the falsified polarity argument (a pin IS a grant):
+        A CONTROL THAT DEPENDS ON A MOUNT NAMESPACE IS ABSENT ON THE PATH THAT HAS NONE.
+
+        The constructed case, kept as a regression test: an unsandboxed pre-pass child
+        REWRITES the FACTORY_TOOL_PINS file it was handed, injecting a pin that names a
+        planted fake git by path+hash — the round-6 reviewer's exact construction — and
+        then asks lib.tool_pins which git it may execute. On the round-5 tree the
+        resolver validated the injected pin and the fake would have run with the
+        pre-pass's credentials. The fix: the credential handoff must not depend on a
+        file the child can write — the dispatcher resolves the pre-pass's trusted tools
+        HOST-SIDE, before the handoff, and the verified absolute paths ride the
+        fork-time env (FACTORY_RESOLVED_TOOL_*), so prepass_tool returns the REAL git
+        and the injected pin is never consulted.
+
+        MUTATION PROOF (performed, not asserted): reverting prepass_tool's dispatcher
+        preference (unsandboxed arm falls through to resolve_tool against the pins file)
+        turns this red — the recorded resolution names the FAKE.
+        """
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        scripts = self.root / "agents" / "probe" / "scripts"
+        scripts.mkdir(parents=True)
+        self.trusted_target("trusted")
+        import hashlib
+        stub = self.bin / "pi"
+        digest = hashlib.sha256(stub.read_bytes()).hexdigest()
+        host_pins = self.root / "tools.pins.yaml"
+        host_pins.write_text(
+            f"pi:\n  path: {stub}\n  sha256: {digest}\n" + self._present_trusted_prepass_pin_lines(),
+            encoding="utf-8")
+        fake = self.bin / "git"
+        fake.write_text("#!/bin/sh\necho PWNED\n", encoding="utf-8")
+        fake.chmod(0o755)
+        # The fake's path is embedded in the script (the pre-pass env is an allowlist, so
+        # a test-only variable would never reach the child).
+        rewriter = (
+            "import hashlib, json, os, sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parents[3]))\n"
+            "from lib.tool_pins import prepass_tool\n"
+            "out = sys.argv[sys.argv.index('--output') + 1]\n"
+            "pins = Path(os.environ['FACTORY_TOOL_PINS'])\n"
+            f"fake = {str(fake)!r}\n"
+            "digest = hashlib.sha256(Path(fake).read_bytes()).hexdigest()\n"
+            # THE ATTACK: rewrite the pins file in place, granting the fake the git role.
+            "pins.write_text('git:\\n  path: %s\\n  sha256: %s\\n' % (fake, digest))\n"
+            "Path(out).write_text(json.dumps({\n"
+            "    'candidates': [],\n"
+            "    'resolved_git': prepass_tool('git'),\n"
+            "    'dispatcher_env': os.environ.get('FACTORY_RESOLVED_TOOL_GIT', ''),\n"
+            "}))\n")
+        (scripts / "rewrite_pins.py").write_text(rewriter, encoding="utf-8")
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1",
+                                  "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+                                  "FACTORY_TOOL_PINS": str(host_pins)},
+                           target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     NOT enforced", res.stdout,
+                      "the test must EXERCISE the unsandboxed path: " + res.stdout)
+        runs = self.run_dirs()
+        self.assertEqual(len(runs), 1)
+        record = json.loads((runs[0] / "candidates.json").read_text(encoding="utf-8"))
+        self.assertTrue(record["dispatcher_env"],
+                        "the dispatcher must hand the child a host-verified git path")
+        self.assertNotEqual(record["resolved_git"], str(fake),
+                            "the injected pin redirected the handoff: the rewritten pins "
+                            "file decided which binary receives the credentials")
+        self.assertEqual(record["resolved_git"], record["dispatcher_env"],
+                         "the child must execute the dispatcher-verified path, never "
+                         "what the rewritten pins file names")
+
+    def test_the_unsandboxed_prepass_verifies_against_the_same_effective_pins(self):
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "budget: {max_minutes: 1}\n")
+        scripts = self.root / "agents" / "probe" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "record_pins.py").write_text(self.RECORDER, encoding="utf-8")
+        self.trusted_target("trusted")
+        # Pin the stub engine by path + content; OMIT bwrap so the probe fails closed and
+        # the trusted-target opt-in takes the UNSANDBOXED path on this sandboxed host.
+        # Every PRESENT trusted pre-pass tool must ALSO be pinned (agents-28nn round 6):
+        # the dispatcher now verifies the pre-pass's whole trusted-tool set host-side on
+        # EVERY path, and a present-but-unauthenticatable tool refuses the run — exactly
+        # what the sandboxed path's bind boundary does at wrap time.
+        import hashlib
+        stub = self.bin / "pi"
+        digest = hashlib.sha256(stub.read_bytes()).hexdigest()
+        host_pins = self.root / "tools.pins.yaml"
+        host_pins.write_text(
+            f"pi:\n  path: {stub}\n  sha256: {digest}\n"
+            + self._present_trusted_prepass_pin_lines(),
+            encoding="utf-8")
+        res = self.factory("pi", {"FACTORY_ALLOW_UNSANDBOXED": "1",
+                                  "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
+                                  "FACTORY_TOOL_PINS": str(host_pins)},
+                           target_arg="trusted")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Sandbox:     NOT enforced", res.stdout,
+                      "the test must EXERCISE the unsandboxed path, or it proves nothing "
+                      "about it: " + res.stdout)
+        runs = self.run_dirs()
+        self.assertEqual(len(runs), 1)
+        record = json.loads((runs[0] / "candidates.json").read_text(encoding="utf-8"))
+        pins_env = record["pins_env"]
+        self.assertTrue(record["pins_exists"],
+                        "the unsandboxed pre-pass must receive a pins file that EXISTS")
+        self.assertEqual(Path(pins_env).name, "tool-pins.effective.yaml",
+                         "every path's child must verify against the EFFECTIVE pins the "
+                         "host wrote, not a re-derived merge of the forwarded host file: "
+                         + pins_env)
+        self.assertTrue(Path(pins_env).parent.name.startswith("factory-pins-"),
+                        "the effective pins live in their own per-run dir: " + pins_env)
+        self.assertNotIn(str(runs[0]), pins_env,
+                         "the pins file must not live in the rw run dir (the round-5 P0)")
+        self.assertNotEqual(pins_env, str(host_pins),
+                            "the child gets the host's merged snapshot, not the host file "
+                            "itself (a swap between host resolution and child exec must "
+                            "not widen what the child trusts)")
+        self.assertIn(digest, record["pins_content"],
+                      "the effective pins must carry the host's merge (the pi pin)")
 
 
 class TestEgressEndToEnd(unittest.TestCase):

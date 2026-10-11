@@ -30,6 +30,11 @@ import importlib.util
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# agents-28nn round 5: run_agent pin-verifies the engine binary before the adapter may
+# execute it; these tests drive run_agent in-process with stub adapters, so they run
+# under the same documented dev/test opt-in the other in-process harnesses use.
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")
+
 loader = importlib.machinery.SourceFileLoader("factory_cli_auth", str(ROOT / "factory"))
 spec = importlib.util.spec_from_loader("factory_cli_auth", loader)
 factory_module = importlib.util.module_from_spec(spec)

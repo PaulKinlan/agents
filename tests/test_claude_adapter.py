@@ -89,6 +89,9 @@ class ClaudeAdapterTestCase(unittest.TestCase):
             "HOME": str(self.home),
             "PATH": f"{self.bindir}:{os.environ['PATH']}",
             "FAKE_ENV_DUMP": str(self.env_dump),
+            # agents-28nn round 5: the adapter execs only the dispatcher-verified
+            # FACTORY_ENGINE_BIN; the test stands in for the dispatcher.
+            "FACTORY_ENGINE_BIN": str(self.bindir / "claude"),
         })
         if unset_home:
             env.pop("HOME", None)

@@ -1,5 +1,7 @@
 """Tests for tools/gen_site.py (site generator and contract checks)."""
 
+import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-28nn round 2: gen_site resolves git through the pin rule; tests use the host git unpinned
 import html
 from html.parser import HTMLParser
 from pathlib import Path

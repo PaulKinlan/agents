@@ -101,6 +101,21 @@ class TestRunStationCommand(unittest.TestCase):
         res = run_station_command(failed, budget, "fail", check=False, capture_output=True, text=True)
         self.assertEqual(res.returncode, 3)
 
+    def test_on_spawn_fires_with_the_live_child(self):
+        # agents-28nn round 8: the dispatcher binds the credential broker's peer gate to
+        # the engine session's pid through this hook, so it must fire with the live
+        # Popen — the child running, its pid allocated — BEFORE communicate() blocks.
+        budget = StationBudget(1)
+        seen = []
+        res = run_station_command(
+            [sys.executable, "-c", "pass"], budget, "spawn",
+            on_spawn=lambda proc: seen.append((proc.pid, proc.poll() is None)),
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0][1], "on_spawn fired before the child was running")
+        self.assertGreater(seen[0][0], 0)
+
     def test_expiry_raises_station_timeout(self):
         budget = StationBudget(0.01, label="hung")  # 0.6 s
         started = time.monotonic()

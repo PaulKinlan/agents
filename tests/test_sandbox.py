@@ -15,12 +15,14 @@ The dispatcher-level guarantee (banner + policy.json say what was enforced) live
 tests/test_containment.py, which holds the stub-engine harness.
 """
 
+import errno
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -30,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from lib.sandbox import (  # noqa: E402
     SANDBOXED_ENGINES, SandboxError, engine_sandboxed, sandbox_available, sandbox_command,
-    sandbox_record,
+    sandbox_record, sandbox_unavailable_reason,
 )
 from lib import sandbox as sandbox_module  # noqa: E402
 
@@ -339,6 +341,401 @@ class TestWrapVerification(unittest.TestCase):
         self.assertEqual(argv[0], shutil.which("bwrap"))
         self.assertEqual(argv[-1], "/bin/true")
         self.assertEqual(list(self.run_dir.iterdir()), [])
+
+
+@unittest.skipUnless(LIVE, "the pin boundary is exercised against a real, functional bwrap")
+class TestBwrapPinBoundary(unittest.TestCase):
+    """agents-28nn: the child's-write proof CANNOT catch a fake bwrap — the run directory is
+    bound at the SAME host path inside and outside the wrap, so a PATH-planted fake that
+    shifts to `--` and execs the child natively satisfies the proof (the token write, the
+    exit status, the confined-looking argv; established by execution). The boundary
+    assertion is therefore on the deliverer, not on anything the deliverer executes: bwrap
+    is a pinned trusted tool, resolved and hash-verified BEFORE it runs, and an
+    unauthenticated bwrap is refused without being executed.
+
+    These tests remove FACTORY_ALLOW_UNPINNED_TOOLS (the module-level dev/test opt-in the
+    other suites use) because the properties they pin are exactly what the opt-in waives.
+    """
+
+    FAKE = ('#!/bin/sh\n'
+            # Log every invocation: refusal must PRECEDE any execution of the untrusted
+            # binary, so the log existing at all fails the refusal tests.
+            'echo ran >> "$FAKE_BWRAP_LOG"\n'
+            'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+            '[ "$1" = "--" ] && shift\n'
+            'exec "$@"\n')
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-pin-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory-root"
+        (self.factory / "runs").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.run_dir = self.factory / "runs" / "run1"
+        self.run_dir.mkdir(parents=True)
+        # Resolve the REAL bwrap before any PATH tampering, and pin it by content.
+        self.real_bwrap = os.path.realpath(shutil.which("bwrap"))
+        from lib.tool_pins import sha256_file
+        self.real_sha = sha256_file(Path(self.real_bwrap))
+        self.pins = self.root / "tools.pins.yaml"
+        # The proof-satisfying fake, planted in its own directory.
+        self.fake_dir = self.root / "fakebin"
+        self.fake_dir.mkdir()
+        self.fake_log = self.root / "fake-bwrap-ran"
+        stub = self.fake_dir / "bwrap"
+        stub.write_text(self.FAKE, encoding="utf-8")
+        stub.chmod(0o755)
+        # Environment: deterministic pins file, NO dev/test opt-in, PATH under control.
+        self._saved = {k: os.environ.get(k)
+                       for k in ("PATH", "FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS")}
+        self.addCleanup(self._restore_env)
+        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        os.environ["FAKE_BWRAP_LOG"] = str(self.fake_log)
+        self.addCleanup(os.environ.pop, "FAKE_BWRAP_LOG", None)
+        # The probe result is process-cached: every test here re-probes.
+        sandbox_module._probe_result = None
+        self.addCleanup(setattr, sandbox_module, "_probe_result", None)
+
+    def _restore_env(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _plant_fake_first_on_path(self):
+        os.environ["PATH"] = f"{self.fake_dir}{os.pathsep}{self._saved['PATH']}"
+
+    def _write_pins(self, body):
+        self.pins.write_text(body, encoding="utf-8")
+        sandbox_module._probe_result = None
+
+    def test_a_path_planted_fake_bwrap_that_would_satisfy_the_proof_is_refused(self):
+        """THE FILED HOLE, CLOSED: a fake bwrap that execs the child natively satisfies the
+        child's-write proof, so it must be stopped at RESOLUTION. With only the real
+        bwrap's content pinned (no `path` pin, so resolution still follows PATH order),
+        the planted fake is resolved, fails the hash check, and is refused — never
+        executed. sandbox_available() reports the host as unable to sandbox (the factory
+        then refuses or honestly downgrades) and sandbox_command() fails closed."""
+        self._write_pins(f"bwrap:\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        self.assertFalse(sandbox_available(),
+                         "an unauthenticated bwrap must read as 'cannot sandbox', never as "
+                         "'sandboxed' — the overclaim is the hole")
+        with self.assertRaises(SandboxError) as raised:
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+        self.assertIn("bwrap", str(raised.exception))
+        self.assertFalse(self.fake_log.exists(),
+                         "the unauthenticated bwrap must be refused BEFORE it executes")
+        self.assertEqual(list(self.run_dir.iterdir()), [],
+                         "no verification artifact may be left behind")
+
+    def test_a_full_pin_bypasses_the_planted_fake_and_the_wrap_still_confines(self):
+        """The positive direction: with `path` + `sha256` pinned, the configured path wins
+        over PATH order, so the planted fake is not even resolved; the REAL bwrap builds
+        the wrap, and the wrap still does what the pin vouches for — a write to the
+        'read-only' target fails inside it."""
+        self._write_pins(f"bwrap:\n  path: {self.real_bwrap}\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        self.assertTrue(sandbox_available())
+        argv = sandbox_command(
+            ["/bin/sh", "-c", f"echo x > {self.target}/marker"],
+            target_dir=self.target, factory_root=self.factory, run_dir=self.run_dir,
+            env=dict(os.environ))
+        self.assertEqual(argv[0], self.real_bwrap,
+                         "the pinned path must win over the PATH-planted fake")
+        res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        self.assertNotEqual(res.returncode, 0, "the ro-bound target must reject the write")
+        self.assertFalse((self.target / "marker").exists(),
+                         "the authenticated wrap still confines the child")
+        self.assertFalse(self.fake_log.exists(),
+                         "the PATH-planted fake must not execute even on the success path")
+
+    def test_a_pin_mismatch_refuses_even_the_real_bwrap(self):
+        """Fail closed the other way: a bwrap whose content does not match its pin — a
+        swapped or rebuilt binary at the pinned location — is refused exactly like the
+        planted fake, and is never executed."""
+        self._write_pins(f"bwrap:\n  path: {self.real_bwrap}\n  sha256: {'0' * 64}\n")
+        self.assertFalse(sandbox_available())
+        with self.assertRaises(SandboxError):
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+
+    def test_no_bwrap_pin_at_all_fails_closed(self):
+        """The fail-closed composition end to end: NO bwrap pin configured anywhere (empty
+        pins file, no dev opt-in) and the fake planted on PATH. Refusal here is what
+        bwrap's TRUSTED_TOOLS membership buys — dropping the membership (not just the
+        wiring) must fail this test."""
+        self._write_pins("")  # no bwrap entry anywhere
+        self._plant_fake_first_on_path()
+        self.assertFalse(sandbox_available(),
+                         "an unpinned bwrap must fail closed, never resolve by PATH order")
+        with self.assertRaises(SandboxError):
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+        self.assertFalse(self.fake_log.exists())
+
+
+@unittest.skipUnless(LIVE, "the ro-bind boundary needs a real bwrap wrap")
+class TestEffectivePinsBoundary(unittest.TestCase):
+    """agents-28nn round 5, review P0 — the TOCTOU on the effective pins.
+
+    PROJECT RULE: A FILE THE PIN RESOLVER TRUSTS MUST NOT BE A FILE THE PINNED PROCESS CAN
+    REWRITE — trust is not a property of WHAT is read, it is a property of WHO CAN WRITE
+    WHAT IS READ. The dispatcher used to write the merged tool-pins.effective.yaml into
+    the run directory, which the wrap binds READ-WRITE at the same host path; the round-4
+    reviewer CONSTRUCTED the hole by having a station script write a fake git hash to the
+    path named by FACTORY_TOOL_PINS before calling resolve_tool("git"), which validated
+    the injected hash. The fix keeps the pins OUTSIDE every rw-bound tree and binds the
+    file into the wrap READ-ONLY (sandbox_command's ro_binds — the existing bind
+    machinery, reused).
+
+    These tests ARE the constructed case, run against a real wrap: a child that rewrites
+    the file it was handed. The boundary arm (ro_binds) must leave resolve_tool validating
+    the REAL git; the control arm (the old shape — the pins file rw-bound inside the run
+    directory) must show the SAME child succeeding, so the boundary arm's refusal is the
+    bind's doing, not a broken harness. MUTATION PROOF, both directions (performed, not
+    asserted): dropping the dispatcher's ro_binds wiring makes the file rw inside the wrap
+    and the boundary arm goes red (OVERWRITE-SUCCEEDED, the fake resolves); restoring it
+    turns it green.
+    """
+
+    # The child: plant a fake git in the (rw-bound) run dir, FORGE a pins file vouching
+    # for it at the FACTORY_TOOL_PINS path it was handed, then resolve — exactly the
+    # reviewer's construction.
+    ATTACK_CHILD = r"""
+import hashlib, os, sys
+from pathlib import Path
+sys.path.insert(0, {factory!r})
+pins = Path(os.environ["FACTORY_TOOL_PINS"])
+fake = Path({run_dir!r}) / "git"
+fake.write_text("#!/bin/sh\necho PWNED\n")
+fake.chmod(0o755)
+forged = "git:\n  path: %s\n  sha256: %s\n" % (
+    fake, hashlib.sha256(fake.read_bytes()).hexdigest())
+try:
+    pins.write_text(forged)
+    print("OVERWRITE-SUCCEEDED")
+except OSError as e:
+    print("OVERWRITE-REFUSED:%s" % e.errno)
+from lib.tool_pins import resolve_tool, ToolPinError
+try:
+    print("RESOLVED:%s" % resolve_tool("git"))
+except ToolPinError as e:
+    print("REFUSED:%s" % e)
+"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-toctou-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory-root"
+        (self.factory / "runs").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.run_dir = self.factory / "runs" / "run1"
+        self.run_dir.mkdir(parents=True)
+        # The REAL git, pinned by path + content — what the host verified and wrote as
+        # the child's effective pins.
+        self.real_git = os.path.realpath(shutil.which("git"))
+        from lib.tool_pins import sha256_file
+        self.real_sha = sha256_file(Path(self.real_git))
+        # The child imports lib.tool_pins from the REAL factory root (ro-bound by every
+        # wrap at its host path), not the scratch factory dir the wrap masks runs/ under.
+        self.child = self.run_dir / "attack_child.py"
+        self.child.write_text(
+            self.ATTACK_CHILD.format(factory=str(ROOT), run_dir=str(self.run_dir)),
+            encoding="utf-8")
+
+    def _run_child(self, pins_path: Path, ro_binds=()):
+        pins_path.write_text(
+            f"git:\n  path: {self.real_git}\n  sha256: {self.real_sha}\n",
+            encoding="utf-8")
+        env = {"PATH": "/usr/bin:/bin",
+               # The properties pinned here are exactly what the dev/test opt-in waives.
+               "FACTORY_TOOL_PINS": str(pins_path)}
+        argv = sandbox_command(
+            [sys.executable, str(self.child)],
+            target_dir=self.target, factory_root=self.factory, run_dir=self.run_dir,
+            env=env,
+            # ROOT (the real repo, under tmpfs-hidden /home) is bound read-only so the
+            # child can import lib.tool_pins — the same visibility the real pre-pass
+            # gets from factory_root.
+            ro_binds=[str(p) for p in ro_binds] + [str(ROOT)])
+        # The env must ride the EXEC, not only the wrap build: bwrap inherits the
+        # process environment, so omitting env= here would hand the child the OPERATOR's
+        # FACTORY_TOOL_PINS instead of the file under test.
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+
+    def test_a_child_cannot_rewrite_the_read_only_pins_it_is_handed(self):
+        """THE FILED HOLE, CLOSED: the pins file lives OUTSIDE the rw-bound run dir and is
+        bound read-only, so the forged write fails EROFS and resolve_tool keeps
+        validating the REAL git — the injected hash never enters what the resolver
+        trusts."""
+        pins = self.root / "factory-pins-test" / "tool-pins.effective.yaml"
+        pins.parent.mkdir()
+        original = f"git:\n  path: {self.real_git}\n  sha256: {self.real_sha}\n"
+        res = self._run_child(pins, ro_binds=[pins])
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"OVERWRITE-REFUSED:{errno.EROFS}", res.stdout,
+                      "the read-only bind must refuse the forged write with EROFS "
+                      "specifically — an ENOENT would mean the file never reached the "
+                      "child and the test proves nothing: " + res.stdout)
+        self.assertNotIn("OVERWRITE-SUCCEEDED", res.stdout)
+        self.assertIn(f"RESOLVED:{self.real_git}", res.stdout,
+                      "resolve_tool must keep validating what the host verified: "
+                      + res.stdout)
+        self.assertEqual(pins.read_text(encoding="utf-8"), original,
+                         "the pins the host wrote must be byte-identical afterwards")
+        # The fake git was planted but is never what the resolver returns.
+        self.assertNotIn(str(self.run_dir / "git"), res.stdout.split("RESOLVED:")[-1])
+
+    def test_control_the_run_dir_shape_rewrites_the_pins_and_validates_the_fake(self):
+        """The constructed attack against the OLD shape (pins rw-bound inside the run dir,
+        no ro-bind): the same child OVERWRITES the file it was handed and resolve_tool
+        validates the injected hash. This is the mutation trap for the fix: reintroduce
+        the old shape and the boundary test above goes red exactly this way."""
+        pins = self.run_dir / "tool-pins.effective.yaml"
+        res = self._run_child(pins)  # no ro_binds — the pre-fix shape
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("OVERWRITE-SUCCEEDED", res.stdout,
+                      "the old shape must still be attackable, or the boundary test "
+                      "proves nothing: " + res.stdout)
+        self.assertIn(f"RESOLVED:{self.run_dir / 'git'}", res.stdout,
+                      "the forged pin must be VALIDATED against the rewritten file — the "
+                      "attack the rule now forbids: " + res.stdout)
+
+
+class TestPinFailureDegradation(unittest.TestCase):
+    """agents-28nn round 2, review P2: EVERY failure of the pin machinery must degrade the
+    probe to 'cannot sandbox' — the honest refusal/downgrade path — instead of crashing
+    the factory with a raw OSError. Before the fix, an UNREADABLE pins file (chmod 000)
+    raised PermissionError out of _parse_pins_file, and _probe() caught only ToolPinError,
+    so the whole factory crashed rather than degrading. The fix makes the pin machinery's
+    failures all surface as ToolPinError, and the probe records WHY so the refusal names
+    the cause (a quiet downgrade that looks like an ordinary bwrap-less host is a trap).
+
+    The mutations that prove these tests guard the behaviour: reverting _parse_pins_file
+    to let OSError escape makes the first two tests raise PermissionError/
+    IsADirectoryError instead of observing the degradation; removing the probe's reason
+    recording makes the reason assertions fail.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-degrade-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.factory = self.root / "factory-root"
+        (self.factory / "runs").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.run_dir = self.factory / "runs" / "run1"
+        self.run_dir.mkdir(parents=True)
+        self._saved = {k: os.environ.get(k)
+                       for k in ("FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS")}
+        self.addCleanup(self._restore_env)
+        os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        sandbox_module._probe_result = None
+        self.addCleanup(setattr, sandbox_module, "_probe_result", None)
+
+    def _restore_env(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _assert_degrades_honestly(self):
+        """The probe returns False (no exception), names WHY, and the wrap build fails
+        closed with SandboxError naming bwrap — the same path as a missing pin."""
+        self.assertFalse(sandbox_available(),
+                         "a pins-file failure must degrade to 'cannot sandbox', never raise")
+        reason = sandbox_unavailable_reason()
+        self.assertIsNotNone(reason, "a refused/downgraded run must NAME the cause")
+        self.assertIn("bwrap", reason)
+        with self.assertRaises(SandboxError) as raised:
+            sandbox_command(["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                            run_dir=self.run_dir, env=dict(os.environ))
+        self.assertIn("bwrap", str(raised.exception))
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores file permission bits")
+    def test_an_unreadable_pins_file_degrades_instead_of_crashing(self):
+        """The reviewer's P2 by construction: chmod 000 the host pins file."""
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text("bwrap:\n  sha256: " + "0" * 64 + "\n", encoding="utf-8")
+        pins.chmod(0o000)
+        self.addCleanup(pins.chmod, 0o644)
+        os.environ["FACTORY_TOOL_PINS"] = str(pins)
+        self._assert_degrades_honestly()
+
+    def test_a_directory_where_the_pins_file_is_expected_degrades(self):
+        """The other unreadable shape: FACTORY_TOOL_PINS names a directory."""
+        os.environ["FACTORY_TOOL_PINS"] = str(self.root / "pins.d")
+        (self.root / "pins.d").mkdir()
+        self._assert_degrades_honestly()
+
+    def test_an_empty_pins_file_fails_closed_and_degrades(self):
+        """An empty pins file is zero pins: unpinned bwrap fails closed, and the probe
+        degrades with the 'not pinned' cause named."""
+        pins = self.root / "tools.pins.yaml"
+        pins.write_text("", encoding="utf-8")
+        os.environ["FACTORY_TOOL_PINS"] = str(pins)
+        self.assertFalse(sandbox_available())
+        reason = sandbox_unavailable_reason()
+        self.assertIsNotNone(reason)
+        self.assertIn("not pinned", reason)
+
+    def test_a_fifo_where_the_pins_file_is_expected_degrades(self):
+        """agents-28nn round 3: a FIFO as FACTORY_TOOL_PINS. Without the bounded read the
+        probe BLOCKS on the FIFO (or reads attacker-supplied bytes through it); with it
+        the refusal precedes any read and the degradation names the FIFO. The writer
+        keeps the mutation direction bounded: with the refusal removed the read gets
+        content and the probe degrades for the WRONG reason (a hash mismatch), which the
+        reason assertion below rejects."""
+        fifo = self.root / "tools.fifo"
+        os.mkfifo(fifo)
+
+        def writer():
+            # O_NONBLOCK with retries: with the fix no reader ever opens the FIFO (every
+            # attempt fails ENXIO and the thread exits); under the mutation the reader is
+            # blocked in open() waiting for exactly this writer, so one attempt lands. A
+            # single non-blocking open would race the reader's scheduling.
+            fd = None
+            for _ in range(30):
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            if fd is None:
+                return  # the fixed reader never opens the FIFO: ENXIO is expected
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("bwrap:\n  sha256: " + "0" * 64 + "\n")
+            except OSError:
+                pass
+
+        feeder = threading.Thread(target=writer, daemon=True)
+        feeder.start()
+        try:
+            os.environ["FACTORY_TOOL_PINS"] = str(fifo)
+            self._assert_degrades_honestly()
+            self.assertIn("FIFO", sandbox_unavailable_reason())
+        finally:
+            feeder.join(timeout=5)
+        self.assertFalse(feeder.is_alive(),
+                         "the probe must REFUSE the FIFO, never block on it")
+
+    def test_a_device_file_where_the_pins_file_is_expected_degrades(self):
+        """The unbounded-read sibling (/dev/null stands in for /dev/urandom, which must
+        never be read to exhaustion — that read IS the crash being fixed)."""
+        os.environ["FACTORY_TOOL_PINS"] = "/dev/null"
+        self._assert_degrades_honestly()
+        self.assertIn("character device", sandbox_unavailable_reason())
 
 
 class TestSandboxRecord(unittest.TestCase):

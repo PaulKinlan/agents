@@ -23,7 +23,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lib.credential_broker import PLACEHOLDER_KEY
+from lib.credential_broker import PLACEHOLDER_PREFIX
 from lib.sandbox import sandbox_available
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -477,7 +477,7 @@ class TestLineAndon(unittest.TestCase):
                              "only the flaky station should retry")
             for run in runs:
                 text = (run / "model_output.txt").read_text(encoding="utf-8")
-                self.assertIn(f"KEY:{PLACEHOLDER_KEY}", text,
+                self.assertIn(f"KEY:{PLACEHOLDER_PREFIX}", text,
                               f"attempt {run.name} must see the brokered placeholder, not the real key")
                 self.assertNotIn("stub-key", text)
                 base = next(line for line in text.splitlines() if line.startswith("BASE:"))

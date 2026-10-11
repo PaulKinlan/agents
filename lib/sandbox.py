@@ -29,9 +29,18 @@ What the sandbox does (allowlist, not denylist — everything unbound is invisib
 * **Executables re-bound by resolution.** PATH directories outside the visible roots are
   ro-bound, and symlinks inside them are resolved to their package root (``bin/``-style
   directory names walked past), so launcher shims and versioned installs (nvm, ``~/.local``)
-  work inside without binding whole home subtrees. A pinned trusted tool (gh/bd/git/semgrep/
-  gitleaks/node/npm/npx, agents-7bj) has its SHA-256 verified before it is bound; a mismatch
-  fails the wrap closed.
+  work inside without binding whole home subtrees. A pinned trusted tool (bwrap/gh/bd/git/
+  semgrep/gitleaks/node/npm/npx, agents-7bj) has its SHA-256 verified before it is bound; a
+  mismatch fails the wrap closed.
+* **bwrap itself is pinned (agents-28nn).** The wrap's own binary is resolved and
+  authenticated by the same tool-pin rule BEFORE it executes: ``_verify_wrap``'s
+  child's-write proof cannot catch a fake bwrap, because the run directory is bound at the
+  SAME host path inside and outside the wrap, so a fake that execs the child natively
+  satisfies the proof (verified by execution with a planted stub). No check run *through*
+  an unauthenticated binary can catch that binary lying about namespaces it never created,
+  so the assertion is on the deliverer: an unpinned or pin-mismatching bwrap makes the
+  sandbox unavailable (the factory then refuses or honestly downgrades) and fails
+  ``sandbox_command()`` closed.
 
 What it does NOT do, stated plainly because policy.json must never overclaim:
 
@@ -59,7 +68,6 @@ the wrapper; an unlisted engine runs unsandboxed and its banner says so.
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -67,8 +75,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 # Integrity pins for host-side trusted tools (agents-7bj): a pinned tool's content is
 # authenticated (SHA-256) before it is bound into the sandbox (see _executable_binds).
+# agents-28nn: bwrap itself is resolved through the same pin rule (resolve_tool) — the
+# binary that delivers the sandbox must be authenticated before it executes.
 from lib.tool_pins import TRUSTED_TOOLS as PINNED_TOOLS
-from lib.tool_pins import verify_pin
+from lib.tool_pins import ToolPinError, resolve_tool, verify_pin
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
@@ -136,6 +146,7 @@ class SandboxError(RuntimeError):
 
 
 _probe_result: Optional[bool] = None
+_probe_reason: Optional[str] = None
 
 
 def sandbox_available() -> bool:
@@ -145,6 +156,19 @@ def sandbox_available() -> bool:
     if _probe_result is None:
         _probe_result = _probe()
     return _probe_result
+
+
+def sandbox_unavailable_reason() -> Optional[str]:
+    """WHY the probe said this host cannot sandbox, or None when it can (agents-28nn round 2).
+
+    A refusal or an honest downgrade must NAME the cause — a quiet downgrade that reads
+    like a normal no-bwrap host hides a pin refusal (e.g. a deployer who forgot to
+    regenerate host pins, or an unreadable pins file) behind an innocent-looking message.
+    Probes here record their failure reason; the factory's refusal and banner then say
+    exactly why the boundary is absent."""
+    if sandbox_available():
+        return None
+    return _probe_reason
 
 
 def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", *,
@@ -211,11 +235,38 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
             f"shown to start its child")
 
 
+def _resolve_bwrap() -> str:
+    """The bwrap binary, authenticated by the trusted-tool pin rule (agents-28nn).
+
+    bwrap is the binary the whole sandbox claim stands on, and it cannot be verified by
+    any probe run THROUGH it: ``_verify_wrap``'s proof is the sentinel's write through the
+    run-directory bind, but the plan binds that directory at the SAME host path inside and
+    outside the wrap, so a PATH-planted fake that just execs the child natively satisfies
+    the proof — the write, the exit status, everything (verified by execution with a
+    planted stub). The only sound assertion is on the deliverer: resolve + SHA-256 pin via
+    lib/tool_pins, failing closed when unpinned (the explicit
+    FACTORY_ALLOW_UNPINNED_TOOLS=1 dev/test opt-in excepted, as for gh/git).
+    Raises ToolPinError when the resolved bwrap is unpinned or does not match its pin.
+    """
+    return resolve_tool(BWRAP)
+
+
 def _probe() -> bool:
+    global _probe_reason
+    _probe_reason = None
     if not sys.platform.startswith("linux"):
+        _probe_reason = "not a Linux host (bubblewrap is Linux-only)"
         return False
-    bwrap = shutil.which(BWRAP)
-    if not bwrap:
+    try:
+        bwrap = _resolve_bwrap()
+    except ToolPinError as e:
+        # An unpinned or pin-mismatching bwrap cannot be trusted to deliver a sandbox, so
+        # this host is reported as unable to sandbox: the factory then refuses the run
+        # (pi) or runs honestly unsandboxed under the explicit attestation — it never
+        # overclaims a sandbox an unauthenticated binary claimed to build (agents-28nn).
+        # The reason is recorded for the loud refusal/downgrade: a pin failure must never
+        # read like an ordinary bwrap-less host (round 2).
+        _probe_reason = f"bwrap cannot be authenticated: {e}"
         return False
     plan = _BindPlan()
     _system_binds(plan)
@@ -224,13 +275,43 @@ def _probe() -> bool:
     argv = [bwrap, *plan.argv, "--die-with-parent", "--new-session", "--", "/bin/true"]
     try:
         res = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as e:
+        _probe_reason = f"the bwrap probe could not execute: {e}"
         return False
-    return res.returncode == 0
+    if res.returncode != 0:
+        detail = (res.stderr or "").strip().splitlines()
+        _probe_reason = (f"the bwrap probe exited {res.returncode}"
+                         + (f" ({detail[-1][:200]})" if detail else ""))
+        return False
+    return True
 
 
 def engine_sandboxed(engine: str) -> bool:
-    """Whether runs of `engine` get the OS sandbox on this host."""
+    """Whether runs of `engine` get the OS sandbox on this host.
+
+    THE RULE every conditional on this function (or on sandbox_available) must satisfy
+    (agents-28nn — the NAMED, VERIFIABLE appearances are four: the round-5
+    effective-pins hoist, the round-6 credential broker gate in factory, the round-7
+    pre-pass HTTP_PROXY only-if-sandbox_ok, and the round-8 adapter env's
+    proxied=not engine_sandboxed, which handed the operator's HTTP(S)_PROXY/NO_PROXY
+    to the UNSANDBOXED engine only until round 8 dropped it. The bead's record uses
+    higher ordinals — third at round 5, six at the round-8 verdict — because earlier
+    verdicts counted shapes they never named into the record (the round-6 verdict
+    reported three further shapes and named only the broker); an unnamed shape cannot
+    be enumerated, so this comment enumerates what the record names and asserts no
+    total it cannot verify (searched at the round-8 attestation: the bead's
+    verdict/coord comments for "polarity", and every conditional on
+    engine_sandboxed/sandbox_available/sandbox_ok in factory and lib/ — no live
+    inverted instance remains). One alleged instance was resolved by FALSIFICATION:
+    no adapter proxy is gated on egress_active — the adapter's proxy is a UNIX-socket
+    forward for the broker): THE LESS-CONFINED PATH MUST NOT RECEIVE MORE THAN THE
+    MORE-CONFINED PATH. A control that applies only on the confined path leaves the
+    less-confined path with less control — the inverted polarity. Before gating anything
+    on the result of this check, ask what the unsandboxed path gets instead: if the
+    answer is MORE (raw credentials, a wider trust set, an unauthenticated handoff), the
+    control belongs on the OPERATION, not on the path taken to it. Referenced from the
+    credential broker and the hoisted pre-pass pins in factory.
+    """
     return engine in SANDBOXED_ENGINES and sandbox_available()
 
 
@@ -528,6 +609,7 @@ def sandbox_command(
     executables: Sequence[str] = (),
     egress_forwards: Optional[Sequence[Tuple[int, str]]] = None,
     rw_binds: Sequence[str] = (),
+    ro_binds: Sequence[str] = (),
     mask_findings: bool = False,
 ) -> List[str]:
     """Wrap `inner` (adapter or pre-pass argv) in a bubblewrap invocation.
@@ -553,9 +635,12 @@ def sandbox_command(
     default) to keep the host network shared — the honest fallback when a run cannot broker
     every provider, where policy.json must keep reporting network-egress as not enforced.
     """
-    bwrap = shutil.which(BWRAP)
-    if not bwrap:
-        raise SandboxError(f"{BWRAP} not found on PATH")
+    try:
+        bwrap = _resolve_bwrap()
+    except ToolPinError as e:
+        # Fail the station loudly, like the bwrap-missing path: a wrap built by an
+        # unauthenticated bwrap is no wrap at all (agents-28nn).
+        raise SandboxError(f"{BWRAP} cannot be authenticated: {e}") from e
     if not inner:
         raise SandboxError("empty command")
 
@@ -601,6 +686,24 @@ def sandbox_command(
     for path in rw_binds:
         plan.rw_bind(path)
 
+    # agents-28nn round 5 (review P0 — the effective-pins TOCTOU): caller-declared
+    # READ-ONLY binds, applied after the run directory's rw-bind. PROJECT RULE: A FILE THE
+    # PIN RESOLVER TRUSTS MUST NOT BE A FILE THE PINNED PROCESS CAN REWRITE — trust is not
+    # a property of WHAT is read, it is a property of WHO CAN WRITE WHAT IS READ. The
+    # effective pins were written into the rw-bound run directory, so code in the child
+    # could overwrite the file that constrains it and resolve_tool then validated the
+    # injected hash (constructed by the round-4 reviewer). The read-only bind is the
+    # codebase's own machinery REUSED — bwrap's ro-bind makes the kernel, not a
+    # convention, enforce who can write — and the alternative (over-mounting a file that
+    # still lives inside the rw-bound run dir) is worse twice over: _BindPlan treats an
+    # rw ancestor as already covering an ro request (the over-mount would be silently
+    # skipped), and a correct over-mount would still leave the file exposed to every
+    # OTHER wrap that rw-binds the run dir, the engine session included. The file must
+    # live OUTSIDE every rw-bound tree and be bound here, read-only, at the same absolute
+    # path the child's FACTORY_TOOL_PINS names.
+    for path in ro_binds:
+        plan.ro_bind(path)
+
     # agents-x8l: egress sockets may live outside run_dir (a short per-run dir under /tmp,
     # because run_dir embeds the worktree path and can exceed AF_UNIX's sun_path limit). Bind
     # each socket's parent dir so the in-sandbox net_forward relay reaches the host-side
@@ -627,7 +730,16 @@ def sandbox_command(
             plan.ro_bind(str(interpreter))
         else:
             plan.ro_bind(str(root))
-    _executable_binds(plan, executables, child_env.get("PATH", ""), home)
+    try:
+        _executable_binds(plan, executables, child_env.get("PATH", ""), home)
+    except ToolPinError as e:
+        # A trusted tool whose content stopped matching its pin between the probe and this
+        # wrap build fails the wrap closed — exactly like an unauthenticated bwrap, the
+        # station fails loudly rather than binding an unverified binary (agents-28nn round
+        # 2: with the pin machinery's failures all surfaced as ToolPinError, no filesystem
+        # error can crash past this boundary either).
+        raise SandboxError(
+            f"a trusted tool bound into the sandbox cannot be authenticated: {e}") from e
 
     # Host tool pins file (agents-ebm7): when child_env forwards FACTORY_TOOL_PINS,
     # the target file is often under $HOME (e.g. ~/.config/factory/tools.pins.yaml).

@@ -41,8 +41,15 @@ if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
   fi
 fi
 
-# If a stub 'deepseek' binary is in PATH (e.g. during containment unit tests), invoke it
-if command -v deepseek >/dev/null 2>&1; then
+# The CLI path is taken ONLY with a dispatcher-verified binary (agents-28nn round 5,
+# review P0 — credential exfiltration): this process's environment carries the run's
+# DEEPSEEK_API_KEY, so the binary it execs decides who receives the key — a by-name
+# `command -v` lookup would hand it to whatever an attacker planted first on PATH. The
+# dispatcher resolves and pin-verifies the binary (lib/tool_pins.resolve_tool; deepseek
+# is in TRUSTED_TOOLS) and passes the verified absolute path as FACTORY_ENGINE_BIN. With
+# no verified binary the adapter falls through to the Python HTTP path below, which is
+# the factory's own code — no PATH-resolved binary is ever handed the credential.
+if [ -n "${FACTORY_ENGINE_BIN:-}" ]; then
   # agents-m2n (review P1-2): the CLI path has NO system-prompt interface — it pipes the
   # prompt and nothing else — so it cannot carry the system directive. Fail closed for a
   # directive-bearing run rather than silently dropping the rule.
@@ -50,7 +57,7 @@ if command -v deepseek >/dev/null 2>&1; then
     echo "[deepseek adapter] Error: the 'deepseek' CLI path has no system-prompt interface and cannot carry the system directive; refusing to run without it." >&2
     exit 2
   fi
-  echo "$PROMPT" | deepseek "$@" > "$OUTPUT_FILE" 2>&1 || exit $?
+  echo "$PROMPT" | "$FACTORY_ENGINE_BIN" "$@" > "$OUTPUT_FILE" 2>&1 || exit $?
   echo "$OUTPUT_FILE"
   exit 0
 fi

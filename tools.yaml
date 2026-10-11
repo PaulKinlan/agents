@@ -1,9 +1,12 @@
 # Integrity pins for the factory's host-side trusted tools (agents-7bj).
 #
-# A trusted tool (gh, bd, git, semgrep, gitleaks, node, npm, npx) is resolved by
+# A trusted tool (bwrap, gh, bd, git, semgrep, gitleaks, node, npm, npx, and the engine
+# binaries pi, claude, agentapi, deepseek) is resolved by
 # lib/tool_pins.resolve_tool(): the configured `path` (if set) is preferred, otherwise it is
 # found by name across PATH, and its SHA-256 is verified against `sha256`. A mismatch fails
-# the run closed — the factory refuses to execute an unverified binary.
+# the run closed — the factory refuses to execute an unverified binary. bwrap heads the
+# list because it delivers the OS sandbox itself: an unpinned or mismatched bwrap makes the
+# host read as unable to sandbox (agents-28nn).
 #
 #   path:   (optional) absolute path the tool MUST resolve to.
 #   sha256: (REQUIRED) 64-hex SHA-256 the resolved binary MUST hash to (this IS the
@@ -22,6 +25,9 @@
 #   export FACTORY_TOOL_PINS="$HOME/.config/factory/tools.pins.yaml"
 #
 # Generate a single pin by hand with:  sha256sum "$(command -v gh)"
+bwrap:
+  # path: /usr/bin/bwrap
+  # sha256: <64 hex>
 gh:
   # path: /usr/local/bin/gh
   # sha256: <64 hex>
@@ -45,4 +51,21 @@ npm:
   # sha256: <64 hex>
 npx:
   # path: /usr/bin/npx
+  # sha256: <64 hex>
+# The engine binaries the adapters execute (agents-28nn round 5, review P0): the adapter is
+# the LAST GRANTER BEFORE THE KEY — it hands the run's model credentials to whatever binary
+# it execs, so an unpinned engine is an exfiltration path, not merely an unverified binary.
+# Engines usually install OUTSIDE the system dirs (e.g. ~/.local/pi), so the generator only
+# finds them when their directory is passed explicitly via --lookup-path.
+pi:
+  # path: /home/operator/.local/bin/pi
+  # sha256: <64 hex>
+claude:
+  # path: /usr/local/bin/claude
+  # sha256: <64 hex>
+agentapi:
+  # path: /usr/local/bin/agentapi
+  # sha256: <64 hex>
+deepseek:
+  # path: /usr/local/bin/deepseek
   # sha256: <64 hex>

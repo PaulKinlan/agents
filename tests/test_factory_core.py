@@ -19,8 +19,9 @@ from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
 from lib.child_env import child_environment
-from lib.credential_broker import PLACEHOLDER_KEY
+from lib.credential_broker import PLACEHOLDER_PREFIX
 from lib.sandbox import sandbox_available
+from lib.tool_pins import ToolPinError
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader("factory_cli", str(FACTORY_ROOT / "factory"))
@@ -146,6 +147,100 @@ class TestSoftwareFactoryCore(unittest.TestCase):
             self.assertEqual(parsed["schedule"]["secret-scan"]["hour"], 7)
         finally:
             tf_path.unlink(missing_ok=True)
+
+
+class TestGitPinBoundary(unittest.TestCase):
+    """agents-28nn round 2, review P1: git IS in TRUSTED_TOOLS, but the factory's own git
+    plumbing (_run_git — worktree creation, the session diff, cleanup) executed
+    ["git", ...] by NAME across the operator's PATH, so the pin machinery was never
+    consulted for a nominally trusted tool and a PATH-planted fake git ran unverified
+    with the factory's privileges. A trust list that some call sites ignore is a comment.
+
+    The boundary is at the deliverer: _run_git resolves git through
+    lib.tool_pins.resolve_tool BEFORE every invocation. These tests remove
+    FACTORY_ALLOW_UNPINNED_TOOLS (the module-level dev/test opt-in the other suites use)
+    because the properties they pin are exactly what the opt-in waives.
+
+    The behaviour-mutation proof: reverting _run_git to prepend the literal "git"
+    (PATH-order resolution) makes the first test fail both ways at once — no ToolPinError
+    is raised AND the planted fake's invocation log appears.
+    """
+
+    FAKE = ('#!/bin/sh\n'
+            # Log every invocation: refusal must PRECEDE any execution of the untrusted
+            # binary, so the log existing at all fails the refusal tests. Exits 0 so the
+            # mutation (by-name resolution) looks like a SUCCESSFUL git call — the test
+            # notices via the log and the missing ToolPinError, not via an error code.
+            'echo ran >> "$FAKE_GIT_LOG"\n'
+            'exit 0\n')
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-28nn-git-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # Resolve the REAL git before any PATH tampering, and pin it by content.
+        self.real_git = os.path.realpath(shutil.which("git"))
+        from lib.tool_pins import sha256_file
+        self.real_sha = sha256_file(Path(self.real_git))
+        self.pins = self.root / "tools.pins.yaml"
+        # The proof-satisfying fake, planted in its own directory.
+        self.fake_dir = self.root / "fakebin"
+        self.fake_dir.mkdir()
+        self.fake_log = self.root / "fake-git-ran"
+        stub = self.fake_dir / "git"
+        stub.write_text(self.FAKE, encoding="utf-8")
+        stub.chmod(0o755)
+        # Environment: deterministic pins file, NO dev/test opt-in, PATH under control.
+        self._saved = {k: os.environ.get(k)
+                       for k in ("PATH", "FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS",
+                                 "FAKE_GIT_LOG")}
+        self.addCleanup(self._restore_env)
+        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+        os.environ["FAKE_GIT_LOG"] = str(self.fake_log)
+
+    def _restore_env(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _plant_fake_first_on_path(self):
+        os.environ["PATH"] = f"{self.fake_dir}{os.pathsep}{self._saved['PATH']}"
+
+    def _write_pins(self, body):
+        self.pins.write_text(body, encoding="utf-8")
+
+    def test_a_path_planted_fake_git_is_refused_before_it_executes(self):
+        """THE FILED HOLE, CLOSED: with only the real git's content pinned (no `path` pin,
+        so resolution still follows PATH order), the planted fake is resolved, fails the
+        hash check, and is refused — never executed."""
+        self._write_pins(f"git:\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        with self.assertRaises(ToolPinError) as raised:
+            factory_cli._run_git(["status", "--porcelain"], self.root)
+        self.assertIn("git", str(raised.exception))
+        self.assertFalse(self.fake_log.exists(),
+                         "the unauthenticated git must be refused BEFORE it executes")
+
+    def test_a_full_pin_bypasses_the_planted_fake_and_runs_the_real_git(self):
+        """The positive direction: with `path` + `sha256` pinned, the configured path wins
+        over PATH order, so the planted fake is not even resolved and the REAL git runs."""
+        self._write_pins(f"git:\n  path: {self.real_git}\n  sha256: {self.real_sha}\n")
+        self._plant_fake_first_on_path()
+        res = factory_cli._run_git(["--version"], self.root)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("git version", res.stdout)
+        self.assertFalse(self.fake_log.exists(),
+                         "the PATH-planted fake must not execute even on the success path")
+
+    def test_an_unpinned_git_fails_closed(self):
+        """The fail-closed composition for git itself: no pin anywhere and no dev opt-in,
+        so even the REAL git is refused rather than resolved by PATH order."""
+        self._write_pins("")  # no git entry anywhere
+        with self.assertRaises(ToolPinError):
+            factory_cli._run_git(["--version"], self.root)
 
 
 @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
@@ -315,10 +410,23 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                 with self.subTest(child=child, name=name):
                     self.assertNotIn(name, env)
         self.assertNotIn("ANTHROPIC_API_KEY", prepass)
-        
-        # When unsandboxed, the engine gets the real key directly (no broker),
-        # so we ensure it gets the model key but NOT the unrelated ones.
-        self.assertEqual(engine["ANTHROPIC_API_KEY"], "sk-ant-ci")
+
+        # agents-28nn round 6: the broker starts on EVERY path when the run holds a real
+        # key, so an UNSANDBOXED engine is now brokered too — it carries a non-secret
+        # placeholder + the broker's loopback base URL for the run's provider, and the
+        # operator's raw keys never reach its environ (the leak the round closed; the
+        # old assertion here — "unsandboxed gets the real key directly, no broker" —
+        # encoded exactly that leak).
+        self.assertTrue(engine["DEEPSEEK_API_KEY"].startswith(PLACEHOLDER_PREFIX),
+                        engine.get("DEEPSEEK_API_KEY"))
+        self.assertTrue(engine["DEEPSEEK_BASE_URL"].startswith("http://127.0.0.1:"),
+                        engine.get("DEEPSEEK_BASE_URL"))
+        # The harm the finding named: the raw keys must not appear anywhere in the
+        # child's environment — neither under their own names nor any other.
+        self.assertNotIn("ANTHROPIC_API_KEY", engine)
+        self.assertNotIn("GEMINI_API_KEY", engine)
+        self.assertNotIn("sk-ant-ci", engine.values())
+        self.assertNotIn("gem-ci", engine.values())
 
     @unittest.skipUnless(sandbox_available(),
                          "the pi run is refused without bubblewrap, and brokering (agents-8h4) "
@@ -329,7 +437,8 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
         # dispatcher brokers it — the engine's environ (and so its /proc/self/environ, the leak
         # vector THREAT_MODEL §6.1 names) holds a non-secret placeholder + the localhost broker
         # base URL, and the real key is injected host-side only. Non-allowed credentials are stripped.
-        self.assertEqual(engine["ANTHROPIC_API_KEY"], PLACEHOLDER_KEY)
+        self.assertTrue(engine["ANTHROPIC_API_KEY"].startswith(PLACEHOLDER_PREFIX),
+                        engine.get("ANTHROPIC_API_KEY"))
         self.assertNotIn("GEMINI_API_KEY", engine)
         self.assertNotIn("sk-ant-ci", engine.values())
         self.assertNotIn("gem-ci", engine.values())
@@ -345,6 +454,66 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
                                           containment="t1-fetch")
         self.assertEqual(prepass["GH_TOKEN"], "ghs_ci_token")
         self.assertNotIn("GH_TOKEN", engine)
+
+    @mock.patch("lib.sandbox._probe_result", False)
+    def test_every_prepass_child_receives_the_egress_allowlist_proxy_unsandboxed(self):
+        """agents-28nn round 7 (verdict P1): the allowlist proxy control belongs to the
+        pre-pass OPERATION, not to the sandbox path. An UNSANDBOXED pre-pass must egress
+        through the run's allowlist proxy on host loopback exactly like the sandboxed one
+        does through the netns relay — and the operator's own proxy vars must NOT ride
+        along (they are the uncontrolled egress this round removed). Mutation proof,
+        both directions: deleting the dispatcher's unsandboxed proxy assignment turns
+        this red (no HTTP_PROXY in the child's env); restoring the old proxied=True
+        inheritance turns it red too (operator-proxy.invalid would survive)."""
+        prepass, _engine = self._run_probe(
+            env_overrides={"FACTORY_ALLOW_UNSANDBOXED": "1",
+                           "HTTP_PROXY": "http://operator-proxy.invalid:3128",
+                           "HTTPS_PROXY": "http://operator-proxy.invalid:3128"},
+            target_arg="trusted")
+        proxy = prepass.get("HTTP_PROXY", "")
+        self.assertTrue(proxy.startswith("http://127.0.0.1:"),
+                        f"the unsandboxed pre-pass must egress via the loopback allowlist "
+                        f"proxy, got HTTP_PROXY={proxy!r}")
+        self.assertNotIn("operator-proxy", proxy)
+        self.assertEqual(prepass.get("HTTPS_PROXY"), proxy)
+        self.assertEqual(prepass.get("NO_PROXY"), "localhost,127.0.0.1")
+        self.assertNotIn("operator-proxy", json.dumps(prepass),
+                         "the operator's own proxy config must not reach ANY pre-pass "
+                         "child on either path")
+
+    @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+    def test_every_prepass_child_receives_the_egress_allowlist_proxy_sandboxed(self):
+        """The confined direction of the same property: the sandboxed pre-pass dials the
+        relay's fixed port, and the operator's proxy vars do not survive there either."""
+        prepass, _engine = self._run_probe(
+            env_overrides={"HTTP_PROXY": "http://operator-proxy.invalid:3128"})
+        self.assertEqual(prepass.get("HTTP_PROXY"),
+                         f"http://127.0.0.1:{factory_cli.EGRESS_PROXY_PORT}")
+        self.assertEqual(prepass.get("HTTPS_PROXY"),
+                         f"http://127.0.0.1:{factory_cli.EGRESS_PROXY_PORT}")
+        self.assertEqual(prepass.get("NO_PROXY"), "localhost,127.0.0.1")
+        self.assertNotIn("operator-proxy", json.dumps(prepass))
+
+    @mock.patch("lib.sandbox._probe_result", False)
+    def test_engine_children_never_inherit_the_operator_proxy_on_the_unsandboxed_path(self):
+        """agents-28nn round 8 (verdict P1, the fourth inverted-polarity instance): the
+        adapter env used to pass proxied=not engine_sandboxed(engine), forwarding the
+        operator's HTTP_PROXY/HTTPS_PROXY/NO_PROXY to the UNSANDBOXED engine only — the
+        less-confined path given more network configuration freedom than the confined
+        one, the exact shape the rule on lib/sandbox.py's engine_sandboxed condemns.
+        The engine's model traffic goes through the host-side credential broker or its
+        own ~/.pi session, never an inherited operator proxy. Mutation proof, both
+        directions: restoring proxied=not engine_sandboxed(engine) at the adapter env
+        build turns this red (operator-proxy.invalid survives into the engine's env);
+        the sandboxed sibling test above pins that the confined path never had them."""
+        _prepass, engine = self._run_probe(
+            env_overrides={"FACTORY_ALLOW_UNSANDBOXED": "1",
+                           "HTTP_PROXY": "http://operator-proxy.invalid:3128",
+                           "HTTPS_PROXY": "http://operator-proxy.invalid:3128"},
+            target_arg="trusted")
+        self.assertNotIn("operator-proxy", json.dumps(engine),
+                         "the operator's own proxy config must not reach the engine child "
+                         "on the less-confined path")
 
 
 @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
@@ -690,6 +859,8 @@ class TestEngineAdapterAuth(unittest.TestCase):
             res, run_dir = self._run_claude_adapter(tmp, {
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "ANTHROPIC_API_KEY": "synthetic-test-key",
+                # agents-28nn round 5: the adapter execs only this dispatcher-verified path.
+                "FACTORY_ENGINE_BIN": str(bindir / "claude"),
             }, prompt="x" * 200000)
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn('"summary":"stub"', (run_dir / "model_output.txt").read_text())
@@ -706,6 +877,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
             res, run_dir = self._run_claude_adapter(tmp, {
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "ANTHROPIC_API_KEY": "sk-ant-stale-key",
+                "FACTORY_ENGINE_BIN": str(bindir / "claude"),
             })
 
             self.assertEqual(res.returncode, 0, res.stderr)
@@ -722,6 +894,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
             res, _ = self._run_claude_adapter(tmp, {
                 "PATH": f"{bindir}:{os.environ['PATH']}",
                 "ANTHROPIC_API_KEY": "sk-ant-ci-key",
+                "FACTORY_ENGINE_BIN": str(bindir / "claude"),
             })
 
             self.assertEqual(res.returncode, 0, res.stderr)
@@ -747,21 +920,25 @@ class TestEngineAdapterAuth(unittest.TestCase):
     @unittest.skipIf(shutil.which("agentapi"), "agentapi installed; missing-binary path not reachable")
     def test_antigravity_fails_loudly_when_agentapi_is_missing(self):
         """A missing engine must abort the run, never write a placeholder the dispatcher
-        would then store as a clean, zero-finding report."""
+        would then store as a clean, zero-finding report. agents-28nn round 5: "missing"
+        now surfaces as FACTORY_ENGINE_BIN unset — the dispatcher could not resolve and
+        pin-verify agentapi — and the adapter REFUSES (exit 3) rather than falling back
+        to a by-name PATH lookup, which is the exfiltration path this round closed."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             run_dir = tmp / "run"
             adapter = FACTORY_ROOT / "lib" / "adapters" / "antigravity.sh"
             env = dict(os.environ)
             env["PATH"] = "/usr/bin:/bin"
+            env.pop("FACTORY_ENGINE_BIN", None)
 
             res = subprocess.run(
                 ["bash", str(adapter), "probe", str(tmp), str(tmp), str(run_dir)],
                 input="prompt", capture_output=True, text=True, env=env, timeout=60,
             )
 
-            self.assertEqual(res.returncode, 1)
-            self.assertIn("agentapi", res.stderr)
+            self.assertEqual(res.returncode, 3)
+            self.assertIn("FACTORY_ENGINE_BIN", res.stderr)
             self.assertFalse((run_dir / "model_output.txt").exists())
 
 

@@ -9,7 +9,6 @@ Outputs a structured JSON payload containing candidate issues for agent triage.
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +19,7 @@ if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.redaction import emit_station_result, mask_literals, mask_text  # noqa: E402
+from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
 
 
 def _redact_stderr(raw_stderr: str) -> str:
@@ -31,6 +31,7 @@ def _redact_stderr(raw_stderr: str) -> str:
         and isinstance(v, str) and len(v.strip()) >= 8
     }
     return mask_literals(mask_text(raw_stderr), literals)
+
 
 def fetch_beads_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
     """Extract open issues from .beads/issues.jsonl if the target uses beads."""
@@ -92,12 +93,26 @@ def fetch_beads_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
 
     return candidates
 
+
 def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
-    """Fetch open issues using the GitHub CLI (gh) if available."""
-    gh_bin = shutil.which("gh")
-    if not gh_bin:
-        sys.stderr.write("Note: gh CLI not found in PATH.\n")
-        return None
+    """Fetch open issues using the GitHub CLI (gh), resolved THROUGH THE PIN.
+
+    gh is a trusted tool (lib/tool_pins.TRUSTED_TOOLS) and this pre-pass holds GH_TOKEN,
+    so the binary must be authenticated BEFORE it executes — including on the
+    trusted-private UNSANDBOXED path, where no sandbox bind boundary verifies anything
+    (agents-28nn round 4, review P1: a PATH-planted fake gh ran with GH_TOKEN in its
+    environment and its result was accepted). And the failure must be LOUD: a gh that was
+    not the pinned gh, or that failed, must NOT look like "there are no open issues" — a
+    wrong answer that looks like a normal one. So an unauthenticated gh and a failed gh
+    both exit nonzero (the factory turns a nonzero pre-pass into a StationError: "no scan
+    was performed"), never a quiet None that main() would report as an empty source.
+    """
+    try:
+        gh_bin = prepass_tool("gh")
+    except ToolPinError as e:
+        redacted_err = _redact_stderr(str(e))
+        sys.stderr.write(f"Error: trusted tool 'gh' cannot be authenticated: {redacted_err}\n")
+        sys.exit(2)
 
     cmd = [
         gh_bin, "issue", "list",
@@ -109,8 +124,8 @@ def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
         res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False)
         if res.returncode != 0:
             redacted_err = _redact_stderr(res.stderr.strip())
-            sys.stderr.write(f"Note: gh issue list failed (code {res.returncode}): {redacted_err}\n")
-            return None
+            sys.stderr.write(f"Error: gh issue list failed (code {res.returncode}): {redacted_err}\n")
+            sys.exit(2)
 
         raw_issues = json.loads(res.stdout or "[]")
         candidates = []
@@ -150,8 +165,9 @@ def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
         return candidates
     except Exception as e:
         redacted_err = _redact_stderr(str(e))
-        sys.stderr.write(f"Warning: unexpected error executing gh CLI: {redacted_err}\n")
-        return None
+        sys.stderr.write(f"Error: unexpected error executing gh CLI: {redacted_err}\n")
+        sys.exit(2)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Deterministic issue fetcher for issue-triage agent")
@@ -186,6 +202,7 @@ def main():
     }
 
     emit_station_result(result, args.output)
+
 
 if __name__ == "__main__":
     main()

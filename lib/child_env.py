@@ -23,7 +23,7 @@ import os
 from collections.abc import Mapping as MappingABC
 from typing import Dict, Mapping, Optional
 
-from lib.credential_broker import BROKER_ENV_CONFIGS, PLACEHOLDER_KEY
+from lib.credential_broker import BROKER_ENV_CONFIGS
 from lib.tool_pins import HOST_PINS_ENV, UNPINNED_ALLOW_ENV
 
 # Paths, locale, temp and user identity. Proxy and CA-bundle vars are deliberately NOT here
@@ -53,11 +53,16 @@ PROXY_VARS = (
 # engine gets none (fail closed).
 #
 # Trust boundary for UNBROKERED engines (tm-unbrokered-engine-credentials, agents-5d9): a
-# sandboxed engine's keys are replaced by the broker (placeholder + loopback URL), so nothing
-# real crosses into the sandbox. An UNSANDBOXED engine (claude, or a host without bubblewrap)
-# runs as the operator on a trusted+private target and gets its own real key BY DESIGN — that
-# key is the engine's credential needed for its model call, and policy.json already records
-# `env-credentials` in not_enforced for it. Documented behaviour, not a leak.
+# brokered engine's keys are replaced by the broker (placeholder + loopback URL), so nothing
+# real crosses into the child's environ. Brokering is a property of the engine's credential
+# handling, NOT of the sandbox path (agents-28nn round 6: THE LESS-CONFINED PATH MUST NOT
+# RECEIVE MORE THAN THE MORE-CONFINED PATH — the rule on lib/sandbox.py's engine_sandboxed):
+# an unsandboxed pi run holding real env keys is brokered exactly like a sandboxed one. What
+# remains unbrokered BY DESIGN: claude (its session auth lives in $HOME/.claude and its
+# credentials are never brokered — agents-ejm) and any engine outside SANDBOXED_ENGINES, plus
+# the no-env-key unsandboxed run that keeps its own ~/.pi session configuration. Those run as
+# the operator on a trusted+private target with their own real key/session — the engine's
+# credential needed for its model call. Documented behaviour, not a leak.
 ENGINE_CREDENTIALS = {
     "pi": (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
@@ -110,27 +115,42 @@ def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] 
     It gets a GitHub token only when the agent declares it needs `gh` (issue-triage), never
     just because the operator's shell had one. `proxied` forwards the operator's proxy vars
     only for an UNSANDBOXED pre-pass (agents-5d9); a sandboxed pre-pass gets the relay set
-    by the dispatcher instead. `trusted_tools=True` forwards FACTORY_TOOL_PINS and
-    FACTORY_ALLOW_UNPINNED_TOOLS so pre-pass scripts can authenticate their trusted tools
-    (agents-01qd, agents-qbl8).
+    by the dispatcher instead. (agents-28nn round 7: the dispatcher no longer passes
+    `proxied` for the pre-pass at all — EVERY pre-pass child, sandboxed or not, gets the
+    run's egress-allowlist proxy from the dispatcher, so the less-confined path no longer
+    inherits more network freedom than the confined one; the parameter remains for
+    child_environment's other callers.) `trusted_tools=True` because (agents-28nn round 4)
+    the
+    pre-pass scripts resolve their own trusted tools through `resolve_tool` — including
+    when unsandboxed, where no bind boundary authenticates anything.
     """
     return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent,
                              proxied=proxied, trusted_tools=True)
 
 
-def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Dict[str, str]:
-    """Swap brokered providers' real key vars in `env` for a placeholder + the broker base URL.
+def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str],
+                      placeholder: Optional[str] = None) -> Dict[str, str]:
+    """Swap brokered providers' real key vars in `env` for the run's placeholder + the broker base URL.
 
     Mutates and returns `env`. For each provider in `broker_urls` that BROKER_ENV_CONFIGS maps,
-    every var that could carry a real secret is dropped and the engine gets PLACEHOLDER_KEY
+    every var that could carry a real secret is dropped and the engine gets `placeholder`
     under the var it reads plus the base-URL var pointed at the dispatcher's broker, so a
     sandboxed engine's /proc/self/environ holds no credential shape while model calls still
-    authenticate (the broker injects the real key host-side).
-    
+    authenticate (the broker injects the real key host-side). `placeholder` must be the
+    RUNNING broker's per-run secret (CredentialBroker.placeholder — agents-28nn round 7):
+    the broker demands it back on every request, so any other value would fail closed at
+    the broker, and a missing value here fails closed NOW rather than handing the engine
+    an env whose model calls can never authenticate.
+
     If the broker advertised a URL for a provider that we cannot broker (unmapped), we FAIL CLOSED
     by raising ContainmentError, because continuing would leave the raw key in the environment.
     """
     from lib.containment import ContainmentError
+    if not placeholder:
+        raise ContainmentError(
+            "fail closed: apply_broker_urls requires the running broker's per-run "
+            "placeholder secret (agents-28nn round 7) — the broker refuses requests "
+            "without it, so a swap without it would strand the engine unauthenticated")
     for provider, base_url in broker_urls.items():
         spec = BROKER_ENV_CONFIGS.get(provider)
         if not spec:
@@ -138,7 +158,7 @@ def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str]) -> Di
         placeholder_var, base_url_var, secret_vars = spec
         for var in secret_vars:
             env.pop(var, None)  # no real credential crosses into the sandboxed env
-        env[placeholder_var] = PLACEHOLDER_KEY
+        env[placeholder_var] = placeholder
         env[base_url_var] = base_url
     return env
 
@@ -149,6 +169,7 @@ def child_environment(
     github: bool = False,
     parent: Optional[Mapping[str, str]] = None,
     broker_urls: Optional[Mapping[str, str]] = None,
+    broker_placeholder: Optional[str] = None,
     trusted_tools: bool = False,
     sink_options: Optional[Mapping[str, object]] = None,
     proxied: bool = False,
@@ -161,15 +182,21 @@ def child_environment(
 
     `trusted_tools` is for the children that resolve a trusted tool THEMSELVES — the findings
     dispatch and promotion run `lib/sinks/*`, which call `lib.tool_pins.resolve_tool` for
-    `gh`/`bd`, and pre-pass scripts that authenticate their own tools (`git`, `npm`, agents-01qd).
-    On a pinned host the pins live behind `FACTORY_TOOL_PINS`, and without that
-    variable such a child cannot verify the tool it is about to execute and fails closed, with
-    strictly less information than the parent that already verified the same file (agents-dpt).
-    The same child also needs the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in
-    (agents-7ua): it is a run-scoped widening the parent already applied when it resolved the
-    tool, and without it the child's own `resolve_tool` fails closed even though the parent just
-    resolved the same binary. Children that never resolve a trusted tool (engine sessions)
-    get nothing extra.
+    `gh`/`bd`, and (agents-28nn round 4) the pre-pass scripts, which now resolve their own
+    git/gh/gitleaks/npm through `resolve_tool` rather than trusting PATH order (a station
+    script's own trusted-tool launch is a census kind of its own). On a pinned host the pins
+    live behind `FACTORY_TOOL_PINS`, and without that variable such a child cannot verify
+    the tool it is about to execute and fails closed, with strictly less information than
+    the parent that already verified the same file (agents-dpt). The same child also needs
+    the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in (agents-7ua): it is a
+    run-scoped widening the parent already applied when it resolved the tool, and without
+    it the child's own `resolve_tool` fails closed even though the parent just resolved the
+    same binary. Children that never resolve a trusted tool (engine sessions) get nothing
+    extra. For the SANDBOXED pre-pass the forwarded pins path would be hidden by the wrap,
+    so the dispatcher overwrites it with the effective pins written OUTSIDE the run
+    directory and bound into the wrap read-only (factory, lib.tool_pins.write_effective_pins
+    — agents-28nn round 5: a file the pin resolver trusts must not be a file the pinned
+    process can rewrite).
 
     `proxied` (agents-5d9) forwards the operator's proxy vars (PROXY_VARS) — only for an
     unsandboxed child that must reach the network the way the operator's shell does. It is
@@ -178,9 +205,11 @@ def child_environment(
 
     `broker_urls` (agents-8h4) maps a provider name to the base URL of a dispatcher-run
     credential broker. For each such provider the real key vars are dropped and the engine gets
-    a non-secret placeholder + the base URL, so a sandboxed engine's /proc/self/environ holds no
+    the run's placeholder + the base URL, so a sandboxed engine's /proc/self/environ holds no
     credential shape while model calls still authenticate (the broker injects the real key on the
-    host side). Providers absent from broker_urls are untouched.
+    host side). Providers absent from broker_urls are untouched. `broker_placeholder` must be
+    the running broker's per-run secret (agents-28nn round 7); apply_broker_urls fails
+    closed without it.
     """
     source = os.environ if parent is None else parent
     env = {name: source[name] for name in BASE_ALLOW if name in source}
@@ -212,5 +241,5 @@ def child_environment(
             env[name] = value
 
     if broker_urls:
-        apply_broker_urls(env, broker_urls)
+        apply_broker_urls(env, broker_urls, placeholder=broker_placeholder)
     return env

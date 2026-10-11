@@ -962,6 +962,7 @@ class TestFactorySamplingParams(unittest.TestCase):
 
         class DummyBroker:
             providers = ["deepseek"]
+            placeholder = "factory-broker-placeholder"
             def base_url(self, provider):
                 return "http://127.0.0.1:8384/proxy/deepseek"
 

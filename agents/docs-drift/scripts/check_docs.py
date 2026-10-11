@@ -28,6 +28,23 @@ if str(FACTORY_ROOT) not in sys.path:
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 from lib.redaction import emit_station_result  # noqa: E402
+from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
+
+
+def _trusted_tool(name: str) -> str:
+    """The pin-authenticated path of a trusted tool this pre-pass executes (agents-28nn
+    round 4, review P1: a station script's own trusted-tool launch is a census kind of
+    its own — a bare name executes whatever PATH plants first, INCLUDING on the
+    trusted-private unsandboxed path where no sandbox bind boundary verifies anything).
+    Unauthenticatable is LOUD (nonzero exit; the factory turns a failed pre-pass into a
+    StationError), never a quiet empty result that reads like "no drift". Resolution is
+    per call: a post-resolution binary swap never executes under a stale verification.
+    """
+    try:
+        return prepass_tool(name)
+    except ToolPinError as e:
+        sys.stderr.write(f"Error: trusted tool {name!r} cannot be authenticated: {e}\n")
+        sys.exit(2)
 
 try:
     from lib.exclusions import DEFAULT_IGNORE_DIRS
@@ -190,9 +207,9 @@ def _git_paths(target_dir: Path, kind: str) -> List[str]:
     key = (str(target_dir), kind)
     if key not in _GIT_INDEX_CACHE:
         if kind == "tracked":
-            cmd = ["git", "-C", str(target_dir), "ls-files", "-z"]
+            cmd = [_trusted_tool("git"), "-C", str(target_dir), "ls-files", "-z"]
         else:
-            cmd = ["git", "-C", str(target_dir), "log", "--all", "--name-only", "--format=", "-z"]
+            cmd = [_trusted_tool("git"), "-C", str(target_dir), "log", "--all", "--name-only", "--format=", "-z"]
         paths: Set[str] = set()
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, check=False,

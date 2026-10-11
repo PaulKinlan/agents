@@ -43,8 +43,10 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
-                             sandbox_command, sandbox_record)
-    from lib.tool_pins import ToolPinError, allowlisted_path
+                             sandbox_command, sandbox_record, sandbox_unavailable_reason)
+    from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
+                               allowlisted_path, prepass_tool_env, resolve_tool,
+                               write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -67,8 +69,10 @@ except ImportError:
                                prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
-                             sandbox_command, sandbox_record)
-    from lib.tool_pins import ToolPinError, allowlisted_path
+                             sandbox_command, sandbox_record, sandbox_unavailable_reason)
+    from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
+                               allowlisted_path, prepass_tool_env, resolve_tool,
+                               write_effective_pins)
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -221,8 +225,18 @@ def detect_adapter_auth_failure(raw_output: str, stderr: str, stdout: str = "") 
 GIT_TIMEOUT_SECONDS = 120
 
 
-def _run_git(cmd, cwd):
-    """Run local git plumbing with a hard timeout; expiry is a non-zero (124) result."""
+def _run_git(args, cwd):
+    """Run local git plumbing with a hard timeout; expiry is a non-zero (124) result.
+
+    `args` EXCLUDE the binary name: the git executable is resolved and authenticated by
+    lib.tool_pins.resolve_tool on EVERY call (agents-28nn round 2, review P1) — git is in
+    TRUSTED_TOOLS, so a by-name invocation would run whichever git the operator's PATH
+    orders first, unverified, and a trust list that some call sites ignore is a comment
+    (the bwrap lesson generalised). A pin failure raises ToolPinError BEFORE any git
+    executes; re-resolving per call (a few MB hashed) keeps a post-probe binary swap from
+    being executed under a stale verification.
+    """
+    cmd = [resolve_tool("git"), *args]
     try:
         return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
                               check=False, timeout=GIT_TIMEOUT_SECONDS, env=child_environment())
@@ -255,13 +269,13 @@ def _create_session_worktree(target_dir: Path, worktree_dir: Path) -> Path:
     max_attempts = 3
     res = None
     for attempt in range(1, max_attempts + 1):
-        res = _run_git(["git", "worktree", "add", "--detach", str(worktree_dir)], target_dir)
+        res = _run_git(["worktree", "add", "--detach", str(worktree_dir)], target_dir)
         if res.returncode == 0:
             break
         stderr = (res.stderr or "").strip()
         # If failure is due to a stale worktree registration, prune and retry immediately
         if "already registered worktree" in stderr or "use 'prune'" in stderr:
-            _run_git(["git", "worktree", "prune"], target_dir)
+            _run_git(["worktree", "prune"], target_dir)
         elif "lock" in stderr.lower() and attempt < max_attempts:
             time.sleep(0.05 * (2 ** (attempt - 1)))
         else:
@@ -271,7 +285,7 @@ def _create_session_worktree(target_dir: Path, worktree_dir: Path) -> Path:
         raise StationError(
             f"cannot create the disposable session worktree at {worktree_dir}: git worktree "
             f"add exited {getattr(res, 'returncode', 'unknown')}: {(getattr(res, 'stderr', '') or '').strip()}")
-    gitdir = _run_git(["git", "rev-parse", "--absolute-git-dir"], worktree_dir)
+    gitdir = _run_git(["rev-parse", "--absolute-git-dir"], worktree_dir)
     if gitdir.returncode != 0 or not gitdir.stdout.strip():
         raise StationError(
             f"cannot resolve the session worktree's admin gitdir at {worktree_dir}: git "
@@ -344,7 +358,7 @@ def _collect_session_diff(worktree_dir: Path, run_dir: Path, gitdir: Path) -> Op
     `base-commit:` header (the trailer git itself uses) so a proposal can never be
     applied blind against a moved HEAD; `git apply` skips it, verified."""
     _validate_worktree_marker(worktree_dir, gitdir)
-    pinned = ["git", f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
+    pinned = [f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
     add = _run_git(pinned + ["add", "-A", "--intent-to-add"], worktree_dir)
     if add.returncode != 0:
         raise StationError(
@@ -469,7 +483,7 @@ def _worktree_has_ignored_edits(worktree_dir: Path, gitdir: Path) -> bool:
     target's .gitignore, so edits that land ONLY in ignored paths produce an empty diff
     ("no file edits") while files DID change. Used for the honest message — the ignored
     files themselves are still not proposal content."""
-    pinned = ["git", f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
+    pinned = [f"--git-dir={gitdir}", f"--work-tree={worktree_dir}"]
     status = _run_git(pinned + ["status", "--porcelain", "--ignored=matching",
                                 "--untracked-files=all"], worktree_dir)
     if status.returncode != 0:
@@ -486,7 +500,7 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
     .git marker; if the git remove still fails, the directory is deleted directly (it is under
     the run dir) and pruned, so no leak survives."""
     try:
-        res = _run_git(["git", "worktree", "remove", "--force", str(worktree_dir)], target_dir)
+        res = _run_git(["worktree", "remove", "--force", str(worktree_dir)], target_dir)
         if res.returncode != 0:
             sys.stderr.write(
                 f"[factory] worktree cleanup 'remove' exited {res.returncode}: "
@@ -498,7 +512,7 @@ def _remove_session_worktree(target_dir: Path, worktree_dir: Path) -> None:
         # under the run dir, so removing it directly is safe; prune then clears the admin entry.
         shutil.rmtree(worktree_dir, ignore_errors=True)
     try:
-        prune = _run_git(["git", "worktree", "prune"], target_dir)
+        prune = _run_git(["worktree", "prune"], target_dir)
         if prune.returncode != 0:
             sys.stderr.write(
                 f"[factory] worktree cleanup 'prune' exited {prune.returncode}: "
@@ -517,7 +531,7 @@ def _apply_workspace_mismatch(target_dir: Path) -> Optional[str]:
     individually (unlike `--ignored=matching`, which collapses ignored directories)."""
     from lib.bench.runner import ASSET_EXTS, IGNORE_DIRS
 
-    status = _run_git(["git", "status", "--porcelain", "--untracked-files=all"], target_dir)
+    status = _run_git(["status", "--porcelain", "--untracked-files=all"], target_dir)
     if status.returncode != 0:
         return "could not read the target's git status (fail closed rather than assume a clean tree)"
     if status.stdout.strip():
@@ -529,7 +543,7 @@ def _apply_workspace_mismatch(target_dir: Path) -> Optional[str]:
     # -z emits NUL-delimited raw paths: `git ls-files` quotes a path containing a newline
     # ("assets/slow\n.html"), which would otherwise be parsed with a trailing quote and a
     # mismatched suffix — an ignored measured asset would slip past the refusal below.
-    ignored = _run_git(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
+    ignored = _run_git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard"],
                        target_dir)
     if ignored.returncode != 0:
         return "could not enumerate the target's ignored files (fail closed rather than assume a clean tree)"
@@ -755,6 +769,42 @@ def choose_engine(requested_engine: str) -> str:
 
     return "pi"
 
+
+# The binary each engine's adapter EXECUTES (agents-28nn round 5, review P0 — a demonstrated
+# credential exfiltration). The engine name is not always the binary name: antigravity is
+# dispatched headless through `agentapi`. The adapter is the LAST GRANTER BEFORE THE KEY — it
+# hands the run's model credentials to whatever binary it executes, so an unpinned engine is
+# an EXFILTRATION PATH, not merely an unverified binary: a PATH-planted namesake runs with
+# the key in its environment (proven by construction with a fake `pi` that dumped its env).
+# Every engine binary is therefore in lib.tool_pins.TRUSTED_TOOLS: the dispatcher resolves and
+# pin-verifies it via resolve_tool BEFORE the adapter runs and hands the verified absolute
+# path to the adapter as FACTORY_ENGINE_BIN; the adapter refuses to run without it, so a
+# by-name PATH lookup can never be handed the credential. The sandbox binder re-verifies the
+# same pin at wrap time (lib/sandbox.py _executable_binds) before binding the engine in.
+ENGINE_BINARIES = {"pi": "pi", "claude": "claude", "antigravity": "agentapi",
+                   "deepseek": "deepseek"}
+
+
+def _resolve_engine_bin(engine: str) -> Optional[str]:
+    """Resolve the engine's executed binary to a pin-verified absolute path, or None.
+
+    Raises ToolPinError when the binary is unpinned, mismatched, or unresolvable — the run
+    fails closed rather than handing credentials to an unverified binary. deepseek is the
+    one engine whose binary is OPTIONAL: with no `deepseek` CLI installed its adapter falls
+    back to the factory's own Python HTTP client, which is station code with no binary to
+    pin, so an absent binary resolves to None (no FACTORY_ENGINE_BIN) rather than failing.
+    A deepseek binary that IS present but unpinned still fails closed — a resolvable but
+    unverifiable binary must never be silently skipped while the adapter could reach it.
+    """
+    binary = ENGINE_BINARIES.get(engine)
+    if binary is None:
+        # An engine with no adapter on this station gets no credentials (lib/child_env.py
+        # fails closed the same way) and its adapter script will not exist; nothing to pin.
+        return None
+    if engine == "deepseek" and shutil.which(binary) is None:
+        return None
+    return resolve_tool(binary)
+
 # Bounds the scan of a pathological output (a truncated report with thousands of braces).
 MAX_JSON_DECODE_ATTEMPTS = 20000
 
@@ -804,7 +854,7 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     return max(pool, key=lambda o: o[0])[1]
 
 _TRANSIENT_DIRS: List[Path] = []
-_TRANSIENT_DIR_PREFIXES = ("factory-sock-", "factory-pi-")
+_TRANSIENT_DIR_PREFIXES = ("factory-sock-", "factory-pi-", "factory-pins-")
 _TRANSIENT_DIR_MAX_AGE_SECONDS = 24 * 3600  # agents-uxs: far beyond any legitimate run lifetime
 
 
@@ -862,6 +912,29 @@ def _make_socket_dir() -> Path:
     return d
 
 
+def _make_pins_dir() -> Path:
+    """Allocate a short, private, per-run directory for the EFFECTIVE tool pins
+    (agents-28nn round 5, review P0 — the TOCTOU on the effective pins).
+
+    PROJECT RULE: A FILE THE PIN RESOLVER TRUSTS MUST NOT BE A FILE THE PINNED PROCESS CAN
+    REWRITE — trust is not a property of WHAT is read, it is a property of WHO CAN WRITE
+    WHAT IS READ. The merged pins used to be written into the run directory, which the
+    sandbox binds READ-WRITE at the same host path, so code running in the child could
+    overwrite the file that constrains it and then have resolve_tool validate the
+    injected hash (constructed by the round-4 reviewer: a station script wrote a fake git
+    hash to the path named by FACTORY_TOOL_PINS before calling resolve_tool("git"), which
+    accepted it). The pins therefore get their own per-run directory OUTSIDE the run
+    directory; the pre-pass wrap binds the file READ-ONLY through sandbox_command's
+    ro_binds — the bind machinery this codebase already has, reused rather than a second
+    mechanism — so the kernel, not the file's location by convention, enforces who can
+    write it. 0700 and reaped like the socket/pi dirs.
+    """
+    d = Path(tempfile.mkdtemp(prefix="factory-pins-", dir="/tmp"))
+    os.chmod(d, 0o700)
+    _TRANSIENT_DIRS.append(d)
+    return d
+
+
 def _make_pi_config_dir() -> Path:
     """Allocate a short, private, per-run directory for pi's provider config (agents-854).
 
@@ -883,13 +956,14 @@ def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
     pi ignores *_BASE_URL env vars, so the broker swap alone cannot redirect a sandboxed pi:
     its provider baseUrl is hardcoded. pi DOES honour models.json in its agent directory, so
     the dispatcher writes an override for the SELECTED provider — baseUrl from the broker's own
-    descriptor (broker.base_url), a placeholder apiKey, the provider's api type, and the
-    endpoint's model ids (PI_KEYLESS_MODELS). The models array is what makes `--model kimi/k3`
-    resolve: the bundled pi registry has no provider named `kimi`, so without the explicit
-    model list pi reports "Model not found" (agents-0ld). Nothing here is provider-specific:
-    `provider` is whatever the station's model resolves to.
+    descriptor (broker.base_url), the broker's per-run placeholder as apiKey (agents-28nn
+    round 7: the broker demands that secret back on every request, so models.json must carry
+    exactly it), the provider's api type, and the endpoint's model ids (PI_KEYLESS_MODELS).
+    The models array is what makes `--model kimi/k3` resolve: the bundled pi registry has no
+    provider named `kimi`, so without the explicit model list pi reports "Model not found"
+    (agents-0ld). Nothing here is provider-specific: `provider` is whatever the station's
+    model resolves to.
     """
-    from lib.credential_broker import PLACEHOLDER_KEY
     if provider not in broker.providers or provider not in PI_PROVIDER_API:
         # agents-3z8 [P2 latent]: fail-closed if the run's broker does not allow this provider
         # or if the provider is not a supported keyless endpoint.
@@ -899,7 +973,7 @@ def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
             provider: {
                 "baseUrl": broker.base_url(provider),
                 "api": PI_PROVIDER_API[provider],
-                "apiKey": PLACEHOLDER_KEY,
+                "apiKey": broker.placeholder,
                 "models": [{"id": model_id, "samplingParams": {"temperature": 0.1}}
                            for model_id in PI_KEYLESS_MODELS.get(provider, [])],
             },
@@ -1030,6 +1104,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # A public/unknown-visibility target, or a raw --target path with no manifest, always
     # refuses; the banner and policy.json then report the session NOT confined.
     sandbox_ok = sandbox_available()
+    # WHY the sandbox is unavailable, for the loud refusal / honest downgrade below: a pin
+    # refusal (deployer forgot to regenerate host pins, an unreadable pins file, a
+    # mismatched bwrap) must NEVER read like an ordinary bwrap-less host (agents-28nn
+    # round 2) — the message names the cause so the failure is a warning, not a trap.
+    sandbox_why = None if sandbox_ok else sandbox_unavailable_reason()
     allow_unsandboxed = os.environ.get("FACTORY_ALLOW_UNSANDBOXED", "").strip().lower() \
         in ("1", "true", "yes", "on")
     trusted_opt_in = (allow_unsandboxed
@@ -1041,7 +1120,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                if allow_unsandboxed else "and no FACTORY_ALLOW_UNSANDBOXED opt-in was given")
         raise ContainmentError(
             f"engine '{engine}' relies on the OS filesystem sandbox to confine its read "
-            f"scope to the target, but bubblewrap cannot run on this host {why}; refusing "
+            f"scope to the target, but the OS sandbox is unavailable on this host"
+            f"{f' — {sandbox_why}' if sandbox_why else ''} {why}; refusing "
             f"an unsandboxed run (the model's read tool would reach any file the operator "
             f"can read). The opt-in exists only for a target that declares `trusted: true` "
             f"with `visibility: private` in its manifest (THREAT_MODEL.md section 7); the "
@@ -1054,6 +1134,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         f"'{Path(target_arg).name}' "
         f"(visibility private; THREAT_MODEL.md section 7): the engine process and the "
         f"pre-pass run as the operator"
+        + (f"; the OS sandbox is unavailable because {sandbox_why}" if sandbox_why else "")
         if engine in SANDBOXED_ENGINES and not sandbox_ok else None)
 
     # agents-ejm: claude is NEVER kernel-sandboxed — its adapter is not in SANDBOXED_ENGINES
@@ -1158,28 +1239,174 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     scripts_dir = agent_dir / "scripts"
     prepass_scripts = sorted(scripts_dir.glob("*.py")) if scripts_dir.exists() else []
     prepass_script = prepass_scripts[0] if prepass_scripts else None
-    prepass_env = prepass_environment(agent_cfg, proxied=not sandbox_ok)
+    # agents-28nn round 7 (verdict P1): the operator's proxy vars are no longer forwarded
+    # to the unsandboxed pre-pass (proxied dropped) — EVERY pre-pass child gets the run's
+    # egress-allowlist proxy from the dispatcher below, so the less-confined path no
+    # longer receives more network freedom than the more-confined one.
+    prepass_env = prepass_environment(agent_cfg)
     prepass_cmd = None
     if prepass_script and prepass_script.exists():
         prepass_cmd = _prepass_argv(prepass_script, read_dir, target_name,
                                     candidates_file, agent_name)
-        # Egress control applies to the pre-pass whenever the host can sandbox (agents-2x6):
-        # its netns is isolated and its only egress is the allowlist proxy, reached through
-        # the net_forward relay. The proxy itself starts later, just before execution; the
-        # socket path is deterministic (run_dir, already rw-bound) so the wrap is built here,
-        # before the banner, exactly like the sandbox wrap. The proxy env vars are set by the
-        # dispatcher below (agents-5d9 removed them from child_environment's BASE_ALLOW; a
-        # sandboxed pre-pass never inherits the operator's proxy).
-        prepass_egress = sandbox_ok
+        # agents-28nn round 6 (review P0, the round-5 polarity argument FALSIFIED):
+        # WHENEVER A RESOLVER'S OUTPUT DETERMINES WHO RECEIVES A SECRET, THE RESOLVER IS A
+        # GRANTING MECHANISM. The round-5 report claimed pins only ever RESTRICT which
+        # binaries may run as trusted and never GRANT capability; the round-6 reviewer
+        # falsified that by construction — a pin naming `path: /tmp/evil` made
+        # resolve_tool(engine) authorise that path, and the evil binary executed and
+        # RECEIVED THE CREDENTIALS despite being in no PATH and on no allowlist. So a
+        # trusted pin IS an authorisation to hand credentials to the named path — and the
+        # pin's granularity is the binary, so a pinned LAUNCHER (a shell, env, an
+        # interpreter) confers whatever that launcher can reach; pins decide WHICH FILE
+        # RUNS and are silent about WHAT THAT FILE CAN DO. And the two findings COMPOSE:
+        # the round-5 read-only bind is a control that depends on a mount namespace, and
+        # on the unsandboxed path there is none — the child runs as the operator and can
+        # rewrite /tmp/factory-pins-* — so a rewritten pin PLUS a pin being a grant meant
+        # the unsandboxed credential handoff was protected by NOTHING but the operator's
+        # own environment. That composition, not either half alone, is why this path was
+        # the priority.
+        #
+        # THE RULE this bead works to (stated canonically on lib/sandbox.py's
+        # engine_sandboxed — where the next person adding a conditional meets it — and
+        # referenced from the credential broker below): THE LESS-CONFINED PATH MUST NOT
+        # RECEIVE MORE THAN THE MORE-CONFINED PATH — a control that applies only on the
+        # confined path leaves the less-confined path with less control, the inverted
+        # polarity. The NAMED, VERIFIABLE instances are four (the round-5 merged pins;
+        # the round-6 credential broker; the pre-pass HTTP_PROXY only-if-sandbox_ok,
+        # closed in round 7 below by putting the allowlist proxy on EVERY pre-pass
+        # child; and the round-8 adapter env's proxied=not engine_sandboxed, closed
+        # below at the adapter env build). The bead's own record uses HIGHER ordinals
+        # — the round-5 dispatch called the pins hoist the THIRD appearance, the
+        # round-6 verdict reported THREE further shapes but named only the broker into
+        # the record, and the round-8 verdict called the adapter env the SIXTH, while
+        # f1cf323's commit message says the FOURTH — because earlier rounds counted
+        # shapes they did not name, and an unnamed shape cannot be enumerated. So this
+        # comment asserts no total it cannot verify: searched (agents-28nn round 8
+        # attestation) were the bead's verdict and coord comments for "polarity" —
+        # yielding the four named instances above, which are the floor, not the count
+        # — plus every conditional on engine_sandboxed/sandbox_available/sandbox_ok in
+        # factory and lib/, among which NO LIVE inverted instance remains (each is a
+        # refusal, a downgrade, or a control mounted on the operation). The one alleged
+        # instance the record resolved by FALSIFICATION is kept named too: there is NO
+        # adapter proxy gated on egress_active — the adapter's proxy is a UNIX-socket
+        # forward for the broker (round-7 verdict). The follow-on shape this file has
+        # now met TWICE is the moved
+        # control's lost boundary: a control moved off the confined path must be asked
+        # WHO CAN REACH IT FROM HERE
+        # (the round-6 broker move, whose host loopback round 7 authenticates with the
+        # run secret; the round-7 pre-pass proxy move, reachable by any local process
+        # but handing out no authority).
+        #
+        # And the rationale for WHY the unsandboxed half of this fix could not be the
+        # round-5 read-only bind: A CONTROL THAT DEPENDS ON A MOUNT NAMESPACE IS ABSENT ON
+        # THE PATH THAT HAS NONE.
+        #
+        # WHAT NOW CONTAINS THE RISK ON THE UNSANDBOXED PATH (it is no longer, and never
+        # was, the pin's inability to grant):
+        #  1. THE HANDOFF DOES NOT DEPEND ON A FILE THE CHILD CAN WRITE. Every trusted
+        #     tool the pre-pass may execute is resolved and pin-verified HOST-SIDE below,
+        #     BEFORE the credentials leave, and the verified absolute paths ride the
+        #     fork-time env (FACTORY_RESOLVED_TOOL_*, lib.tool_pins.prepass_tool_env);
+        #     the scripts execute those paths (lib.tool_pins.prepass_tool). Chosen over
+        #     the two alternatives: making the pins file immutable WITHOUT a mount
+        #     namespace cannot work (no userspace mechanism keeps a file immutable to a
+        #     process running with the operator's own uid — stated in round 5 and still
+        #     true); and a sealed memfd inherited by the child (the third option) WOULD
+        #     give same-uid immutability on Linux, but it is Linux-only, needs
+        #     fd-inheritance plumbed through run_station_command and the wrap, and makes
+        #     /proc/self/fd part of the resolver's trust root — a second trust mechanism
+        #     where removing the dependency is simpler and platform-independent.
+        #  2. NO RE-ENTRY: nothing the pins authorise can write what the resolver reads,
+        #     and a pinned tool's output never feeds resolution. On the sandboxed path
+        #     the effective pins are ro-bound and $HOME (the host pins) is tmpfs-hidden;
+        #     on the unsandboxed path the resolver's inputs are the fork-time env and the
+        #     host's own pins, which a pinned child process cannot reach retroactively.
+        #     "Pins only restrict" is TRUE of which file runs; NO RE-ENTRY is what makes
+        #     that restriction SUFFICIENT rather than merely true.
+        #  3. The path exists only behind the explicit FACTORY_ALLOW_UNSANDBOXED=1 opt-in
+        #     plus a manifest declaring trusted: true with visibility: private.
+        #  4. STATED, NOT CLAIMED AWAY: the unsandboxed pre-pass's extra capability —
+        #     operator uid reach, forwarded proxy networking, no mount namespace — is a
+        #     FACT ABOUT THE PLATFORM, not a defect anyone failed to prevent; the safety
+        #     above is a property of the MECHANISM, not of the path. An unsandboxed
+        #     pre-pass is a credential-holding process running as the operator: code
+        #     executing inside it already holds the credentials, so this mechanism's
+        #     guarantee is scoped — the binary the HANDOFF authenticates is host-verified
+        #     and honest code is never fooled by the filesystem. It is not confinement.
+        #
+        # The merged effective pins are still written for EVERY pre-pass (round 5: the
+        # sandboxed child re-verifies against EXACTLY the bytes the host verified; pins
+        # are paths and hashes, not secrets) and still live OUTSIDE the rw-bound run dir
+        # (the rule on _make_pins_dir). On the sandboxed path the wrap binds them
+        # READ-ONLY and FACTORY_PINS_RO_BOUND tells prepass_tool that exec-time
+        # re-verification against them is sound (below). On the unsandboxed path the file
+        # remains only as the fail-closed backstop for tools outside the pre-resolved
+        # set — the grant no longer routes through it.
+        effective_pins = write_effective_pins(
+            _make_pins_dir() / "tool-pins.effective.yaml")
+        prepass_env[HOST_PINS_ENV] = str(effective_pins)
+        # Host-side verification of the pre-pass's whole trusted-tool set, on EVERY path
+        # (the control is a property of the operation, not of the path taken to it).
+        # A PRESENT-BUT-UNAUTHENTICATABLE tool refuses the run here — exactly what the
+        # sandboxed path's bind boundary does at wrap time (lib/sandbox.py
+        # _executable_binds); a genuinely ABSENT tool is skipped, and the script fails
+        # closed or takes its documented fallback, again as the sandboxed path does.
+        try:
+            prepass_env.update(prepass_tool_env(
+                sorted(set(PREPASS_EXECUTABLES) | set(policy.requires))))
+        except ToolPinError as e:
+            raise StationError(
+                f"{agent_name}: a trusted tool the pre-pass may execute is present but "
+                f"cannot be authenticated: {e}; refusing the run — the sandboxed path "
+                f"refuses this state at the wrap's bind boundary, and the less-confined "
+                f"path must not receive more than the more-confined path") from e
+        # Egress control applies to the pre-pass on EVERY path (agents-2x6 for the
+        # sandboxed half; agents-28nn round 7 for the unsandboxed half — the verdict's
+        # P1, the third instance of the polarity shape enumerated above: the control
+        # used to exist only under `if sandbox_ok`, so the less-confined pre-pass
+        # inherited the operator's own proxy vars and ran with MORE network freedom
+        # than the confined one). The control is a property of the pre-pass OPERATION,
+        # not of the path taken to it. The sandboxed child's netns is isolated and its
+        # only egress is the allowlist proxy, reached through the net_forward relay at
+        # the fixed EGRESS_PROXY_PORT — named here because the wrap must be built
+        # before the banner. The unsandboxed child gets the SAME allowlist proxy bound
+        # on host TCP loopback (lib/egress_proxy.py _EgressTCPServer); its port is
+        # dynamic, so its proxy env vars are set in the pre-pass execution block
+        # below, the moment they become knowable. The loopback listener needs no
+        # authentication: it injects no credential and only ever RESTRICTS where a
+        # caller may connect, so a host-local process gains nothing from it that it
+        # cannot already dial directly — the exact opposite of the credential broker,
+        # whose loopback listener hands out authority and so requires the run secret
+        # (round 7 P0). The proxy itself starts later, just before execution; the
+        # socket path is deterministic (run_dir, already rw-bound) so the wrap is
+        # built here, before the banner, exactly like the sandbox wrap. The proxy env
+        # vars are set by the dispatcher (agents-5d9 removed them from
+        # child_environment's BASE_ALLOW; a pre-pass never inherits the operator's
+        # proxy on EITHER path now).
         if sandbox_ok:
             prepass_env["HTTP_PROXY"] = prepass_env["HTTPS_PROXY"] = \
                 f"http://127.0.0.1:{EGRESS_PROXY_PORT}"
             prepass_env["NO_PROXY"] = "localhost,127.0.0.1"
+            # The pre-pass scripts re-authenticate their own trusted tools (agents-28nn
+            # round 4: a station script's own trusted-tool launch is a census kind of its
+            # own — the bind boundary authenticates at WRAP time; the script re-verifies
+            # at EXEC time). The host pins file lives under $HOME, tmpfs-hidden inside the
+            # wrap, so the child reads the EFFECTIVE pins the host just verified, bound
+            # READ-ONLY into the wrap at the same absolute path — a child that rewrites
+            # the file it was handed gets EROFS, and resolve_tool keeps validating what
+            # the host verified (round 5, the P0 that round's first commit closed).
+            # FACTORY_PINS_RO_BOUND (round 6) is what licenses prepass_tool to re-verify
+            # against the pins file at exec time: it is set ONLY here, where the kernel
+            # enforces the file's integrity — on the unsandboxed path the same file is
+            # operator-writable and the handoff rests on the dispatcher-resolved paths
+            # instead.
+            prepass_env[PINS_RO_BOUND_ENV] = "1"
             try:
                 prepass_cmd = sandbox_command(
                     prepass_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                     run_dir=run_dir, env=prepass_env,
                     executables=tuple(PREPASS_EXECUTABLES) + tuple(policy.requires),
+                    ro_binds=[str(effective_pins)],
                     egress_forwards=[(EGRESS_PROXY_PORT, str(proxy_sock))])
             except SandboxError as e:
                 raise StationError(f"{agent_name}: cannot sandbox the pre-pass: {e}") from e
@@ -1191,9 +1418,29 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     adapter_cmd = [str(adapter_script), agent_name, str(engine_cwd), str(skill_dir), str(run_dir)]
     # The tool policy is set here, explicitly. child_environment is an allowlist, so an
     # ambient FACTORY_TOOL_POLICY in the operator's shell never reaches the adapter.
-    adapter_env = child_environment(engine=engine,
-                                    proxied=not engine_sandboxed(engine))
+    # agents-28nn round 8 (verdict P1, the fourth inverted-polarity instance this bead has
+    # met — enumerated on the rule comment at the pre-pass pins hoist above): this env used
+    # to pass proxied=not engine_sandboxed(engine), forwarding the operator's HTTP_PROXY /
+    # HTTPS_PROXY / NO_PROXY to the UNSANDBOXED engine only, so the less-confined path had
+    # MORE network configuration freedom than the confined one. The engine's model API
+    # traffic goes through the credential broker (host-side) or its own ~/.pi session, never
+    # through an inherited operator proxy — the flag is dropped, not re-gated.
+    adapter_env = child_environment(engine=engine)
     adapter_env["FACTORY_TOOL_POLICY"] = policy.tool_policy
+    # agents-28nn round 5 (review P0 — credential exfiltration): the adapter is the LAST
+    # GRANTER BEFORE THE KEY, so the binary it executes is pin-verified HERE, before the
+    # credential-bearing env is handed over. The adapter execs ONLY this verified absolute
+    # path (it refuses without it); a PATH-planted namesake is never executed, so it can
+    # never receive the run's credentials. Failure is a station error naming the pin cause,
+    # never a fallback to PATH order.
+    try:
+        engine_bin = _resolve_engine_bin(engine)
+    except ToolPinError as e:
+        raise StationError(
+            f"{agent_name}: engine '{engine}'s binary cannot be authenticated: {e}; "
+            f"refusing to hand the run's credentials to an unverified binary") from e
+    if engine_bin is not None:
+        adapter_env["FACTORY_ENGINE_BIN"] = engine_bin
     if engine == "pi":
         # agents-3y2: name the model explicitly so a sandboxed pi runs deepseek/deepseek-flash
         # (the keyless BYOK path) instead of falling back to its Anthropic default and asking
@@ -1272,23 +1519,28 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # (lib/containment.py egress_allowlist); an agent that declares no network tools
         # gets an empty allowlist, which under --unshare-net means no egress at all — the
         # t0 promise, now kernel-enforced instead of conventional.
-        egress_proxy: Optional[EgressProxy] = None
-        if prepass_egress:
-            egress_proxy = EgressProxy(egress_allowlist(policy.requires),
-                                       str(proxy_sock))
-            try:
-                egress_proxy.start()
-            except OSError as e:
-                raise StationError(
-                    f"{agent_name}: cannot start the egress allowlist proxy for the "
-                    f"pre-pass; refusing to run it with unfiltered egress: {e}") from e
+        # agents-28nn round 7 (verdict P1): the SAME proxy also serves the UNSANDBOXED
+        # pre-pass, bound on host TCP loopback — the control rides the operation, not the
+        # sandbox path. Its port is dynamic, so the unsandboxed child's proxy env vars
+        # are set here, the moment they become knowable (the sandboxed child names the
+        # relay's fixed EGRESS_PROXY_PORT because its wrap had to be built earlier).
+        egress_proxy = EgressProxy(egress_allowlist(policy.requires), str(proxy_sock))
+        try:
+            egress_proxy.start(tcp_loopback=not sandbox_ok)
+        except OSError as e:
+            raise StationError(
+                f"{agent_name}: cannot start the egress allowlist proxy for the "
+                f"pre-pass; refusing to run it with unfiltered egress: {e}") from e
+        if not sandbox_ok:
+            prepass_env["HTTP_PROXY"] = prepass_env["HTTPS_PROXY"] = \
+                f"http://127.0.0.1:{egress_proxy.tcp_port}"
+            prepass_env["NO_PROXY"] = "localhost,127.0.0.1"
         try:
             res = run_station_command(prepass_cmd, budget, f"{prepass_script.name} pre-pass",
                                       capture_output=True, text=True, check=False,
                                       env=prepass_env)
         finally:
-            if egress_proxy is not None:
-                egress_proxy.stop()
+            egress_proxy.stop()
         if res.returncode != 0:
             # A pre-pass that failed scanned nothing. Carrying on with zero candidates let a
             # short-circuiting station report "Clean scan" (journal-idy, journal-wog).
@@ -1388,21 +1640,75 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # create the throwaway worktree just before the session (so the sandbox's read-write
         # bind of run_dir picks it up), collect the session diff right after — the engine's
         # edits live only there and the target checkout was never touched — and always discard
-        # it. Credential broker (agents-8h4): a sandboxed engine must NOT carry the operator's
-        # real API keys, because bun/pi reads its own /proc/self/environ and a prompt-injected
-        # session would reach them. So when the engine runs inside the OS sandbox and a real
-        # key is present, start a localhost broker and swap the engine's key vars for a
-        # placeholder + the broker base URL; the broker injects the real key host-side and
-        # forwards upstream. Under egress control (agents-2x6) the engine's netns is
-        # isolated, so the broker listens on a UNIX socket that the in-sandbox net_forward
-        # relay — bound at EGRESS_BROKER_PORT on the child's loopback, which base_url()
-        # names — forwards to; without it the sandbox shares the host network and the
-        # broker keeps its TCP loopback. Both are started here — after the pre-pass — and
-        # torn down in the finally, so neither leaks on any failure.
+        # it. Credential broker (agents-8h4): an engine must NOT carry the operator's real
+        # API keys, because bun/pi reads its own /proc/self/environ and a prompt-injected
+        # session would reach them. So when a real key is present, start a localhost broker
+        # and swap the engine's key vars for a placeholder + the broker base URL; the
+        # broker injects the real key host-side and forwards upstream. agents-28nn round 6
+        # (review P1, the WORST of the inverted-polarity shapes): the broker used to start
+        # ONLY if engine_sandboxed(engine), so the LESS-confined unsandboxed path handed
+        # the engine RAW API KEYS where the confined path hands placeholders — an
+        # unsandboxed engine's /proc/self/environ is exactly as readable to a
+        # prompt-injected session as a sandboxed one's. THE LESS-CONFINED PATH MUST NOT
+        # RECEIVE MORE THAN THE MORE-CONFINED PATH (the rule on lib/sandbox.py's
+        # engine_sandboxed, also referenced by the hoisted pre-pass pins above): brokering
+        # is a property of the engine's CREDENTIAL HANDLING, not of the path taken to it,
+        # so the gate is SANDBOXED_ENGINES membership — the engines whose credentials the
+        # factory brokers — and the broker starts for them on EVERY path. Under egress
+        # control (agents-2x6) the engine's netns is isolated, so the broker listens on a
+        # UNIX socket that the in-sandbox net_forward relay — bound at EGRESS_BROKER_PORT
+        # on the child's loopback, which base_url() names — forwards to; otherwise the
+        # broker keeps its TCP loopback (which an unsandboxed engine shares natively).
+        # agents-28nn round 7 (the verdict's P0, a regression round 6 introduced): on the
+        # unsandboxed path that TCP loopback is the HOST's — a shared interface any local
+        # process can dial — and an unauthenticated broker there is an OPEN PROXY that
+        # injects the raw credentials upstream for whoever asks (the verdict constructed
+        # it with a plain curl that came back from the real provider authenticated as
+        # us). Round 7 authenticated that reachability with the placeholder turned
+        # per-run secret — and round 8's verdict falsified the secret as THE boundary,
+        # by construction: the unsandboxed engine runs as the operator's uid, the same
+        # uid as every process that could abuse the broker, so the placeholder in the
+        # engine's environ (or in the models.json the engine reads) is readable by any
+        # same-uid process via /proc/<pid>/environ — the reviewer's pre-pass-spawned
+        # attacker read exactly that value and authenticated with it. A secret confines
+        # by KNOWLEDGE; between processes of one uid there is no knowledge asymmetry.
+        # So the broker gates on the kernel's attribution of the connecting PEER — the
+        # TCP listener through /proc/net/tcp's inode -> owning pid and then the ppid
+        # chain, the UNIX listener through getsockopt(SO_PEERCRED) (agents-28nn round 9)
+        # — accepting only this dispatcher's process tree, narrowed to the ENGINE
+        # SESSION's tree the moment the engine is spawned (run_station_command's
+        # on_spawn below). Round 9's verdict found the UNIX listener UNGATED: its socket
+        # FILE is created on the host filesystem before its directory is bind-mounted
+        # into the sandbox, so the netns protects nothing there and a same-uid host
+        # process could read the placeholder out of the session's environ, read the
+        # socket path and dial the host socket directly (constructed: a 502, i.e. past
+        # the gate and onto the wire). Both listeners now reach ONE peer decision in
+        # lib/credential_broker.py, because two code paths is how one of them came to be
+        # exempt from the check the other performed. WHO CAN REACH the broker is a
+        # property of the OPERATION, not of the OS environment's uid rules. Chosen over
+        # moving the unsandboxed transport to a UNIX socket with SO_PEERCRED: the
+        # engine's SDK dials a TCP base URL and cannot dial a UNIX socket, so a relay
+        # would sit on the same shared loopback needing this same check — the check is
+        # the mechanism. Chosen over failing closed, which remains the posture whenever
+        # the peer cannot be attributed at all: the gate refuses, never opens. The
+        # default root is this dispatcher's pid and is safe because the pre-pass has
+        # been reaped before the broker starts (the line below runs after it) and an
+        # orphan re-parents to init, outside the tree. The placeholder stays as the
+        # SECOND factor on both listeners; its presence in the engine's environ and in
+        # models.json (which pi still needs) no longer confers authority by itself.
+        # Both are started here — after the pre-pass — and torn down in the finally, so
+        # neither leaks on any failure.
         broker: Optional[CredentialBroker] = None
         try:
-            if engine_sandboxed(engine):
+            if engine in SANDBOXED_ENGINES:
                 broker_creds = credentials_from_env()
+                # What stays path-dependent, deliberately: with NO real key in the
+                # environment an UNSANDBOXED engine keeps its own session configuration
+                # (~/.pi), so no broker is started for it; a SANDBOXED engine has no
+                # session config at all ($HOME is tmpfs-hidden), so it gets the keyless
+                # managed-endpoint broker even then. A run holding real keys is brokered
+                # on BOTH paths — the raw key never reaches the engine's environ.
+                real_keys_held = bool(broker_creds)
                 # agents-3y2: keyless BYOK providers (the exe.dev managed endpoints) are brokered
                 # even with no real key on the host, so a sandboxed engine reaches them through
                 # the host-side forwarder. Scope to providers this engine's credential allowlist
@@ -1426,7 +1732,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     engine_prov_map = {"deepseek": "deepseek", "claude": "anthropic", "antigravity": "google"}
                     allowed_for_run = [engine_prov_map[engine]]
 
-                if broker_creds:
+                # The broker starts on EVERY path when the run holds real engine keys
+                # (agents-28nn round 6), and on the sandboxed path even without them (the
+                # keyless managed endpoints are a sandboxed engine's ONLY auth channel).
+                if broker_creds and (engine_sandboxed(engine) or real_keys_held):
                     broker = CredentialBroker(broker_creds, allowed_providers=allowed_for_run)
                     try:
                         if egress_active:
@@ -1437,22 +1746,30 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     except Exception as e:  # noqa: BLE001 - fail closed, never leak the key
                         raise StationError(
                             f"{agent_name}: cannot start the credential broker, so the real API "
-                            f"key cannot be kept out of the sandboxed engine's environ; refusing "
+                            f"key cannot be kept out of the engine's environ; refusing "
                             f"the run rather than leaking it: {e}") from e
                     apply_broker_urls(
-                        adapter_env, {p: broker.base_url(p) for p in broker.providers})
+                        adapter_env, {p: broker.base_url(p) for p in broker.providers},
+                        placeholder=broker.placeholder)
                     # agents-3z8: ensure no real API keys for non-allowed providers cross into
-                    # the sandboxed engine's environment.
+                    # the engine's environment.
                     for prov, (_placeholder, _base_url, secret_vars) in BROKER_PROVIDERS.items():
                         if prov not in broker.providers:
                             for var in secret_vars:
                                 adapter_env.pop(var, None)
-                    # agents-854: pi ignores *_BASE_URL env vars, so the broker swap above is
-                    # not enough for pi — write the broker routing into its provider config,
-                    # which IS honoured. The provider is whatever the selected model names, so
-                    # the next keyless provider works without touching pi.sh.
-                    _write_pi_models_json(
-                        pi_config_dir, broker, adapter_env["FACTORY_MODEL"].split("/", 1)[0])
+                    if engine == "pi":
+                        # agents-854: pi ignores *_BASE_URL env vars, so the broker swap above
+                        # is not enough for pi — write the broker routing into its provider
+                        # config, which IS honoured. The provider is whatever the selected
+                        # model names, so the next keyless provider works without touching
+                        # pi.sh. agents-28nn round 6: redirect pi's agent dir on EVERY
+                        # brokered path (not only the sandboxed one), or an unsandboxed pi
+                        # keeps reading ~/.pi and the placeholder + broker URL never take
+                        # effect — the raw key would be popped above and NOTHING would
+                        # authenticate the run.
+                        adapter_env["PI_CODING_AGENT_DIR"] = str(pi_config_dir)
+                        _write_pi_models_json(
+                            pi_config_dir, broker, adapter_env["FACTORY_MODEL"].split("/", 1)[0])
                     # agents-2dj: only now can policy.json claim broker enforcement.
                     # The recorder checks the actual adapter env for every remaining
                     # model key and proxy credential, rather than trusting broker startup
@@ -1461,7 +1778,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         policy_record(policy, engine, sandbox=sandbox,
                                       unsandboxed_note=unsandboxed_note,
                                       brokered_providers=tuple(broker.providers),
-                                      engine_env=adapter_env), indent=2)
+                                      engine_env=adapter_env,
+                                      expected_placeholder=broker.placeholder), indent=2)
                     _write_run_artifact(run_dir / "policy.json", policy_record_json)
             if worktree_dir is not None:
                 worktree_gitdir = _create_session_worktree(target_dir, worktree_dir)
@@ -1471,9 +1789,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 # _collect_session_diff (host-side, after the session) can produce it.
                 (run_dir / "session.patch").unlink(missing_ok=True)
                 (run_dir / "session.patch.tmp").unlink(missing_ok=True)
-            adapter_res = run_station_command(adapter_cmd, budget, f"engine '{engine}'",
-                                              input=prompt, capture_output=True, text=True,
-                                              check=False, env=adapter_env)
+            # agents-28nn round 8: the moment the engine exists, the broker's peer gate
+            # narrows from this dispatcher's tree to the ENGINE SESSION's tree — the
+            # broker serves exactly the process it was started for and no other
+            # descendant of the dispatcher.
+            adapter_res = run_station_command(
+                adapter_cmd, budget, f"engine '{engine}'",
+                input=prompt, capture_output=True, text=True,
+                check=False, env=adapter_env,
+                on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
+                          if broker is not None else None))
             # The adapter states what it enforced ("Tool policy: ..."): show the operator the
             # enforcement point's own words, not only the dispatcher's. Adapter stdout is
             # status lines only; the model's output goes to model_output.txt.
@@ -2720,5 +3045,10 @@ if __name__ == "__main__":
     except ContainmentError as e:
         # Refused before any station work: nothing was scanned, so never a clean run.
         sys.stderr.write(f"\n[containment] Refusing the run: {e}\n")
+        sys.exit(3)
+    except ToolPinError as e:
+        # A trusted tool (bwrap/gh/bd/git/…) could not be authenticated — refuse rather
+        # than execute an unverified binary, and NAME the pin failure (agents-28nn).
+        sys.stderr.write(f"\n[tool pin] Refusing the run: {e}\n")
         sys.exit(3)
 

@@ -2,12 +2,16 @@
 """Integrity-pinned resolution of the factory's host-side trusted tools (agents-7bj).
 
 The factory is the highest-privilege component in a run: it resolves its trusted tools
-(``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``) by *name*
-across ``PATH`` and executes them host-side for the pre-pass, the findings dispatch and bead
-promotion. A trojaned binary earlier on ``PATH`` — or a hijacked install tree — would run
-with the factory's GitHub token and write access, and because these tools are the audit's own
-ground truth a compromised one can both fake evidence and act on it (threat-model
-``tm-external-tool-integrity``).
+(``bwrap``, ``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``,
+and the engine binaries ``pi``/``claude``/``agentapi``/``deepseek``)
+by *name* across ``PATH`` and executes them host-side for the pre-pass, the findings
+dispatch, bead promotion — and, for ``bwrap``, the OS sandbox itself. A trojaned binary
+earlier on ``PATH`` — or a hijacked install tree — would run with the factory's GitHub
+token and write access, and because these tools are the audit's own ground truth a
+compromised one can both fake evidence and act on it (threat-model
+``tm-external-tool-integrity``). For ``bwrap`` the stakes are the boundary itself: a fake
+``bwrap`` that execs its child natively satisfies every check the sandbox module can run
+*through* it (agents-28nn), so the binary must be authenticated before it is executed.
 
 So each trusted tool is resolved to an **absolute path** and pinned by **SHA-256** from
 factory configuration (``tools.yaml`` under ``FACTORY_ROOT``):
@@ -24,6 +28,16 @@ by-name fallback; it is never the default. A ``path`` pin without a matching ``s
 configuration error (a symlink deref could otherwise redirect the pin outside the trusted
 tree), so it is refused regardless of the opt-in.
 
+**Every failure of the pin machinery is a ``ToolPinError``** (agents-28nn rounds 2-3): an
+unreadable pins file, a non-regular file where a file is expected (a directory, FIFO,
+device, socket), an over-bound or still-growing pins file (the read is bounded by
+``MAX_PINS_FILE_BYTES`` — an unbounded read of a FIFO or device file allocates until the
+machine's OOM killer, a crash no except clause can catch), non-UTF-8 pins content, or a
+binary that cannot be hashed all raise ``ToolPinError``, never a raw
+``OSError``/``MemoryError`` — so a caller that handles pin failures (lib/sandbox.py's
+probe degrading to "cannot sandbox", the sinks' honest "tool unavailable" notes) cannot
+be crashed past by a filesystem error.
+
 The sandbox binder (lib/sandbox.py ``_executable_binds``) calls ``verify_pin`` for each
 pinned tool before binding it, so a pinned pre-pass tool is authenticated by the same rule.
 
@@ -39,6 +53,7 @@ than being silently ignored. Generate the file with ``tools/generate-tool-pins.s
 import hashlib
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -58,9 +73,22 @@ HOST_PINS_ENV = "FACTORY_TOOL_PINS"
 UNPINNED_ALLOW_ENV = "FACTORY_ALLOW_UNPINNED_TOOLS"
 
 # Host-side tools the factory must resolve + pin before it trusts them.
-# `bd`/`git` are the findings store and the worktree/admin; `gh` fetches issues and drives
-# promotion; `semgrep`/`gitleaks` and `node`/`npm`/`npx` are the pre-pass scanners.
-TRUSTED_TOOLS: Tuple[str, ...] = ("gh", "bd", "git", "semgrep", "gitleaks", "node", "npm", "npx")
+# `bwrap` is the sandbox wrapper — the one binary whose integrity decides whether any
+# sandbox exists at all (agents-28nn). `bd`/`git` are the findings store and the
+# worktree/admin; `gh` fetches issues and drives promotion; `semgrep`/`gitleaks` and
+# `node`/`npm`/`npx` are the pre-pass scanners.
+#
+# `pi`/`claude`/`agentapi`/`deepseek` are the ENGINE BINARIES the adapters execute
+# (agents-28nn round 5, review P0 — a demonstrated credential exfiltration): the adapter
+# is the LAST GRANTER BEFORE THE KEY — it hands the run's model credentials to whatever
+# binary it executes, so an unpinned engine is an EXFILTRATION PATH, not merely an
+# unverified binary: a PATH-planted namesake runs with ANTHROPIC_API_KEY et al. in its
+# environment (proven by construction with a fake `pi` that dumped its env). `agentapi`
+# is the antigravity engine's headless binary; `deepseek`'s CLI is optional (the adapter
+# falls back to the factory's own Python HTTP client, which has no binary to pin).
+TRUSTED_TOOLS: Tuple[str, ...] = ("bwrap", "gh", "bd", "git", "semgrep", "gitleaks",
+                                  "node", "npm", "npx",
+                                  "pi", "claude", "agentapi", "deepseek")
 
 def _unpinned_allowed() -> bool:
     """The explicit, auditable dev/test opt-in: resolves unpinned trusted tools by name
@@ -83,6 +111,115 @@ class ToolPinError(RuntimeError):
     fails rather than executing an unverified binary."""
 
 
+# agents-28nn round 6 (review P1 — the effective-pins TOCTOU on the UNSANDBOXED path):
+# the dispatcher resolves every trusted tool the pre-pass may execute HOST-SIDE and hands
+# the child the verified absolute paths under this env prefix. On the unsandboxed path no
+# mount namespace exists, so the merged pins file is operator-writable and the child runs
+# as the operator — a file the child can rewrite cannot be what the credential handoff
+# depends on. The fork-time env is the one artefact neither the child nor any other
+# operator-uid process can rewrite from outside, so THAT is what the handoff rests on.
+DISPATCHER_RESOLVED_PREFIX = "FACTORY_RESOLVED_TOOL_"
+
+# Set by the dispatcher ONLY on the sandboxed pre-pass path, where the wrap binds the
+# effective pins READ-ONLY: there exec-time re-verification against the pins is sound
+# (the kernel enforces the file's integrity), and it catches a post-wrap binary swap.
+# Everywhere else prepass_tool trusts the dispatcher-resolved path, never the writable
+# pins file.
+PINS_RO_BOUND_ENV = "FACTORY_PINS_RO_BOUND"
+
+
+def dispatcher_resolved_name(name: str) -> str:
+    """The env var under which the dispatcher hands a pre-pass child `name`'s verified path."""
+    return DISPATCHER_RESOLVED_PREFIX + name.upper().replace("-", "_")
+
+
+def tool_present(name: str, pins: Optional[Dict[str, Dict[str, str]]] = None) -> bool:
+    """Whether `name` is genuinely available to resolve (a configured pin path, or on PATH).
+
+    Distinguishes ABSENT (the pre-pass script fails closed or takes its documented
+    fallback, exactly as on the sandboxed path where the binder skips unresolvable names)
+    from PRESENT-BUT-UNAUTHENTICATABLE (the sandboxed path refuses at the wrap's bind
+    boundary, so every other path must refuse too — the control is a property of the
+    operation, not of the path taken to it).
+    """
+    if pins is None:
+        pins = load_tool_pins()
+    if pins.get(name, {}).get("path"):
+        return True
+    return shutil.which(name) is not None
+
+
+def prepass_tool_env(names: Sequence[str],
+                     pins: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, str]:
+    """HOST-SIDE (the dispatcher): resolve and pin-verify each trusted tool a pre-pass may
+    execute, returning the ``{env_name: absolute_path}`` mapping for the child's env.
+
+    Raises ``ToolPinError`` for a PRESENT-BUT-UNAUTHENTICATABLE tool (the caller turns it
+    into a run refusal, mirroring the sandbox bind boundary); a genuinely ABSENT tool is
+    skipped (the script's own resolution then fails closed or falls back per its
+    documented contract — e.g. secret-scan's builtin-regex when gitleaks is absent).
+    """
+    if pins is None:
+        pins = load_tool_pins()
+    env: Dict[str, str] = {}
+    for name in names:
+        if name not in TRUSTED_TOOLS:
+            continue
+        try:
+            env[dispatcher_resolved_name(name)] = resolve_tool(name, pins=pins)
+        except ToolPinError:
+            if tool_present(name, pins):
+                raise
+    return env
+
+
+def prepass_tool(name: str) -> str:
+    """CHILD-SIDE (a pre-pass script): the authenticated absolute path of a trusted tool.
+
+    WHENEVER A RESOLVER'S OUTPUT DETERMINES WHO RECEIVES A SECRET, THE RESOLVER IS A
+    GRANTING MECHANISM — this resolution decides which binary runs with the pre-pass's
+    credentials (GH_TOKEN et al.), so WHAT IT READS decides who gets them:
+
+    * Sandboxed pre-pass (``FACTORY_PINS_RO_BOUND`` set by the dispatcher): the effective
+      pins are bound READ-ONLY by the wrap, so re-verifying at exec time is sound and
+      catches a post-wrap binary swap — resolve_tool against them, as before.
+    * Unsandboxed pre-pass: no mount namespace exists, the pins file is operator-writable
+      and this process runs as the operator, so the file CANNOT be what the handoff
+      depends on (agents-28nn round 6, constructed: the child rewrote FACTORY_TOOL_PINS
+      in place and resolve_tool validated the injected pin). Use the dispatcher-resolved
+      path from the fork-time env — verified host-side BEFORE the credentials were
+      handed over, and unreachable to anything outside this process afterwards.
+    * No dispatcher variable (a tool outside PREPASS_EXECUTABLES + the manifest's
+      ``requires``): fall back to resolve_tool against the pins file. CONDITION that ends
+      this justification: the tool set the scripts use stays inside the dispatcher's
+      pre-resolved set; a script that adopts a NEW trusted tool must add it to
+      PREPASS_EXECUTABLES (lib/sandbox.py), which the sandboxed path needs anyway.
+    """
+    if os.environ.get(PINS_RO_BOUND_ENV, "").strip():
+        return resolve_tool(name)
+    resolved = os.environ.get(dispatcher_resolved_name(name), "").strip()
+    if resolved:
+        real = os.path.realpath(os.path.expanduser(resolved))
+        if not os.path.isfile(real):
+            raise ToolPinError(
+                f"dispatcher-resolved trusted tool {name!r} is not a file: {real}; the "
+                f"handoff named a binary that does not exist")
+        return real
+    return resolve_tool(name)
+
+
+# A pins file is a handful of tool entries — hundreds of bytes. The read is BOUNDED
+# (agents-28nn round 3, review P2): FACTORY_TOOL_PINS naming a huge regular file makes an
+# unbounded read allocate until MemoryError — which no (OSError, ...) clause catches — and
+# a FIFO or device file (no meaningful size, no end) allocates until the machine's OOM
+# killer arrives: a resource exhaustion the process may never observe as an exception at
+# all (verified by execution: reading /dev/urandom grew to ~12 GB before the host reaper
+# stepped in). So the reader refuses a non-regular file and an over-bound size BEFORE
+# reading, and hard-caps the bytes actually read, every failure surfacing as ToolPinError
+# with the cause named — a degradation, never a crash.
+MAX_PINS_FILE_BYTES = 1 << 20  # 1 MiB is orders of magnitude past any real pins file
+
+
 def sha256_file(path: Path) -> str:
     """SHA-256 of a file's contents, streamed (never loads a whole binary into memory)."""
     digest = hashlib.sha256()
@@ -90,6 +227,62 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_pins_text(path: Path, label: str) -> str:
+    """Read a pins file's text, BOUNDED, with every failure as ``ToolPinError``.
+
+    The bound is the mechanism, not one more except clause (agents-28nn round 3): a FIFO
+    or device file has no trustworthy size and no end, and a huge file's MemoryError is a
+    resource exhaustion the process may never observe — so the refusal happens BEFORE the
+    allocation.
+
+    The checks run against the OPENED DESCRIPTOR, never the path (agents-28nn round 4,
+    review P2): a stat-then-open BY NAME is two syscalls with a swap window between them —
+    a regular file swapped for a FIFO after the stat turns the kind refusal into a
+    BLOCKING open (the reviewer reproduced the block; the byte cap bounds a read, not an
+    open, and a blocking read on this path is the same resource class as the unbounded
+    allocation the reaper killed). So the file is opened NONBLOCKING first — a FIFO open
+    with O_NONBLOCK returns immediately instead of waiting for a writer — and fstat on
+    the descriptor then validates the very object the read will consume: a non-regular
+    file (directory, FIFO, device, socket) is refused by kind, an over-bound size is
+    refused unread, and the read itself is hard-capped, so a file that grows past the
+    bound while being read is refused too. There is no stat/open window left to swap in:
+    the object validated is the object read. MemoryError is still caught as a backstop —
+    with the cap in place it should be unreachable, and the contract ("every pins-file
+    failure is a ToolPinError") must not depend on that.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            info = os.fstat(fh.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                kinds = ((stat.S_ISDIR, "a directory"), (stat.S_ISFIFO, "a FIFO"),
+                         (stat.S_ISCHR, "a character device"), (stat.S_ISBLK, "a block device"),
+                         (stat.S_ISSOCK, "a socket"))
+                kind = next((name for test, name in kinds if test(info.st_mode)),
+                            f"not a regular file (mode {oct(info.st_mode)})")
+                raise ToolPinError(
+                    f"{label}: the pins path is {kind}, not a pins file; refusing to read it "
+                    "as pins (a non-regular file has no trustworthy size and no end)")
+            if info.st_size > MAX_PINS_FILE_BYTES:
+                raise ToolPinError(
+                    f"{label}: the pins file is {info.st_size} bytes, over the "
+                    f"{MAX_PINS_FILE_BYTES}-byte bound for a pins file; refusing to read it "
+                    "rather than allocate unbounded memory")
+            data = fh.read(MAX_PINS_FILE_BYTES + 1)
+        if len(data) > MAX_PINS_FILE_BYTES:
+            raise ToolPinError(
+                f"{label}: the pins file grew past the {MAX_PINS_FILE_BYTES}-byte bound "
+                "while being read; refusing to trust it")
+        text = data.decode("utf-8")
+    except ToolPinError:
+        raise
+    except (OSError, UnicodeDecodeError, MemoryError) as e:
+        raise ToolPinError(
+            f"{label}: the pins file cannot be read as pins ({type(e).__name__}: {e}); "
+            "failing closed rather than guessing") from e
+    return text
 
 
 def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
@@ -105,13 +298,23 @@ def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
     A missing file is an empty pin set — resolution then fails closed for any trusted tool, so
     a deleted config can never silently widen trust. A malformed entry — a non-string
     path/sha256, a sha256 that is not 64 hex chars, or a path pin without a sha256 — raises
-    ``ToolPinError`` so a bad pin cannot silently not-match.
+    ``ToolPinError`` so a bad pin cannot silently not-match. EVERY way the file can fail to
+    be read as pins is the same ``ToolPinError`` with the cause named, never a raw
+    ``OSError``/``MemoryError`` escaping to a caller that only handles pin failures
+    (lib/sandbox.py's probe must DEGRADE to "cannot sandbox", never crash the factory).
+    The resource-failure SET (agents-28nn rounds 2-3), all degrading:
+    unreadable (chmod 000); a non-regular file where a file is expected — a directory, a
+    FIFO, a device file, a socket (a FIFO/device would otherwise block or allocate without
+    bound); a regular file over MAX_PINS_FILE_BYTES (refused before it is read); a file
+    that grows past the bound while being read; non-UTF-8 bytes; and, as a backstop behind
+    the bound, a MemoryError from the read itself.
     """
     if not path.exists():
         return {}
+    text = _read_pins_text(path, label)
     pins: Dict[str, Dict[str, str]] = {}
     current: Optional[str] = None
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in text.splitlines():
         line = raw.split("#", 1)[0].rstrip()
         if not line.strip():
             continue
@@ -169,6 +372,42 @@ def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
     return repo
 
 
+def write_effective_pins(path: Path,
+                         pins: Optional[Dict[str, Dict[str, str]]] = None) -> Path:
+    """Write the EFFECTIVE merged pins (repo ``tools.yaml`` under the host file) as one
+    pins file a child process can point ``FACTORY_TOOL_PINS`` at.
+
+    The sandboxed pre-pass re-authenticates its own trusted tools through
+    ``resolve_tool`` (agents-28nn round 4: a station script's own trusted-tool launch is
+    a census kind of its own), but the host pins file typically lives under ``$HOME`` —
+    tmpfs-hidden inside the wrap. The dispatcher therefore writes the merged view it just
+    verified and points the child's ``FACTORY_TOOL_PINS`` at it, so the child re-verifies
+    against EXACTLY what the host verified. Pins are paths and hashes — not secret — and
+    only the pre-pass reads this file, before any engine session starts.
+
+    agents-28nn round 5 (review P0): the file is written OUTSIDE the run directory (the
+    run dir is rw-bound into the wrap — a pins file there is one the pinned process can
+    rewrite, and the resolver would then validate injected hashes) and bound into the
+    pre-pass wrap READ-ONLY. A file the pin resolver trusts must not be a file the
+    pinned process can rewrite.
+    """
+    if pins is None:
+        pins = load_tool_pins()
+    lines = [
+        "# Effective tool pins for one pre-pass child, written by the dispatcher",
+        "# (agents-28nn round 4): the merged view the host itself verified.",
+    ]
+    for name in sorted(pins):
+        entry = pins[name]
+        lines.append(f"{name}:")
+        if entry.get("path"):
+            lines.append(f"  path: {entry['path']}")
+        if entry.get("sha256"):
+            lines.append(f"  sha256: {entry['sha256']}")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return Path(path)
+
+
 def _require_pin(name: str, entry: Dict[str, str]) -> None:
     """Fail closed when a trusted tool has no content pin, unless the dev opt-in is set.
 
@@ -216,7 +455,14 @@ def verify_pin(name: str, real_path: str,
                 f"{pinned_path}")
     pinned_sha = entry.get("sha256")
     if pinned_sha is not None:
-        actual = sha256_file(Path(real_path))
+        try:
+            actual = sha256_file(Path(real_path))
+        except OSError as e:
+            # A binary that cannot be read cannot be authenticated (agents-28nn round 2):
+            # fail closed as a pin failure, never as a raw OSError escaping the machinery.
+            raise ToolPinError(
+                f"trusted tool {name!r} at {real_path} could not be hashed ({e}); refusing "
+                "to run an unverified binary") from e
         if actual.lower() != pinned_sha.lower():
             raise ToolPinError(
                 f"trusted tool {name!r} at {real_path} hashes to {actual[:16]}…, not the configured "
@@ -243,6 +489,76 @@ def resolve_tool(name: str, path_env: Optional[str] = None,
         raise ToolPinError(f"trusted tool {name!r} resolves to a non-file: {real}")
     verify_pin(name, real, pins)
     return real
+
+
+def pin_trusted_argv(argv: Sequence[str]) -> List[str]:
+    """Route a config-supplied command through the pins: the PINNED THING IS THE EXECUTED
+    ARGV, not its first element.
+
+    A command assembled at RUNTIME from configuration — a target manifest's
+    ``sink_command``, a ``--bench-cmd`` — is invisible to a literal call-site census: the
+    tool name never appears beside the subprocess call, so the pin machinery was never
+    consulted for a trusted tool the config named, and a PATH-planted fake executed with
+    the sink's credentials (agents-28nn round 3, review P1, proven by construction with a
+    config-supplied fake ``git``). A trust list that a config-supplied command ignores is
+    the same false assurance as a call site that ignores it.
+
+    THE POLICY (agents-28nn round 4, review P1 — ``['env', 'git', '--version']`` rode past
+    a first-element check unchanged and a PATH-planted fake git executed under it, proven
+    by construction with FACTORY_ALLOW_UNPINNED_TOOLS=0):
+
+    * A trusted tool may appear ONLY in COMMAND POSITION (argv[0]). There the pin
+      resolves it: the verified absolute path replaces argv[0], and an unpinned or
+      mismatching tool raises ToolPinError BEFORE it executes.
+    * A trusted-tool basename ANYWHERE ELSE in the argv is REFUSED, with the offending
+      element and its index named. ``['env', 'git', ...]`` is not ``git`` — it is the
+      ENVIRONMENT running ``git`` — so the moment a check inspects a PREFIX of what will
+      be executed, the remainder is unguarded: ``env``/``nice``/``sudo`` (and every
+      launcher not yet invented) would interpose between the pin and the tool. The scan
+      needs no launcher list — it is complete over the argv by construction.
+
+    Why refusal rather than the alternatives:
+
+    * UNWRAP the launcher and route the inner tool: unsound for the form that matters.
+      ``env NAME=VALUE git`` does not just launch — it REWRITES the child's environment
+      (``PATH``, ``LD_PRELOAD``, ``GIT_CONFIG_*``), so even the pinned binary would run
+      under attacker-chosen loader and config influence; authenticating the inner argv[0]
+      would authenticate the wrong thing. Unwrapping is also a per-launcher flag language
+      (``env -S``, ``sudo -u``, ``timeout --signal``) — a registry someone must remember
+      to update, the wrong-shape census in miniature.
+    * ALLOW ONLY AN EXPLICIT LAUNCHER LIST: same registry failure, plus each admitted
+      launcher's own flag semantics decides what executes. A blocklist of launchers is
+      enumerating instances again; the position rule needs none.
+    * SHELLS: ``sh -c ...`` remains the command sink's documented escape hatch — the
+      shell STRING is opaque to the pin BY DESIGN, and using it is the operator's
+      explicit trust decision (intercepting inside the string would be a second
+      verification mechanism, not a stronger one). INTERPRETERS: ``node`` is itself a
+      trusted tool, so ``node script.js`` in command position is routed as above; a
+      script's CONTENTS (what a python3/node script execs) are the same opaque boundary
+      as a shell string, stated here rather than claimed covered.
+
+    A non-trusted argv[0] with no trusted tool elsewhere passes through untouched:
+    pinning every program an operator might configure would be a registry someone must
+    remember to update. The false-positive direction (a trusted NAME as pure DATA, e.g.
+    ``mysink --compare git``) refuses closed with the element named — the ``sh -c``
+    escape hatch is the operator's way to say they meant it.
+    """
+    if not argv:
+        return list(argv)
+    name = os.path.basename(str(argv[0]))
+    if name in TRUSTED_TOOLS:
+        return [resolve_tool(name), *[str(a) for a in argv[1:]]]
+    for index, element in enumerate(argv[1:], start=1):
+        base = os.path.basename(str(element))
+        if base in TRUSTED_TOOLS:
+            raise ToolPinError(
+                f"config command's trusted tool {base!r} sits at argv[{index}], not in "
+                f"command position — {str(argv[0])!r} would LAUNCH it unverified (a check "
+                "that inspects a prefix of the executed argv leaves the remainder "
+                "unguarded). Name the tool directly so the pin can authenticate it, or "
+                "use the documented 'sh -c' escape hatch as an explicit operator trust "
+                "decision")
+    return [str(a) for a in argv]
 
 
 def tool_dir(name: str, path_env: Optional[str] = None,

@@ -50,6 +50,15 @@ from lib.budget import StationBudget, StationTimeout, run_station_command
 from lib.embargo import effective_severity
 from lib.redaction import mask_literals, mask_text, redact_finding
 from lib.sinks.base import Sink, SinkContext, new_result
+# The manifest's sink_command is argv assembled at RUNTIME from config — invisible to a
+# literal call-site census (agents-28nn round 3, review P1: a configured `git`/`gh`/...
+# executed from PATH order, the pin never consulted, with this sink's credentials in its
+# environment). pin_trusted_argv routes argv[0] through resolve_tool when it names a
+# trusted tool — and refuses a trusted tool anywhere ELSE in the argv, because the pinned
+# thing is the executed argv, not its first element (agents-28nn round 4: 'env git ...'
+# is the environment running git): the pinned binary runs, or nothing does and the note
+# says why.
+from lib.tool_pins import ToolPinError, pin_trusted_argv
 
 PROTOCOL = "factory-sink/1"
 DEFAULT_TIMEOUT_SECONDS = 120.0
@@ -119,6 +128,15 @@ class CommandSink(Sink):
         if not argv:
             result["failed"] = len(pending)
             result["note"] = "sink_command is not configured in the target manifest: nothing sent"
+            return result
+        try:
+            argv = pin_trusted_argv(argv)
+        except ToolPinError as e:
+            # Fail closed, but never silently (same honest-failure shape as the other
+            # sinks): a trusted tool the pin cannot authenticate is never executed from
+            # PATH order, and the note names the cause.
+            result["failed"] = len(pending)
+            result["note"] = f"sink_command's trusted tool cannot be authenticated ({e}): nothing sent"
             return result
         try:
             timeout = float(ctx.options.get("sink_timeout") or DEFAULT_TIMEOUT_SECONDS)

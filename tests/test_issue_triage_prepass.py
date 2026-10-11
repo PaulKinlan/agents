@@ -56,21 +56,22 @@ class TestIssueTriageGhStderrRedaction(unittest.TestCase):
             target_repo = tmppath / "repo"
             target_repo.mkdir()
 
-            # Execute with PATH pointing to fake_gh and ambient GH_TOKEN set
+            # Execute with FACTORY_RESOLVED_TOOL_GH pointing to fake_gh and ambient GH_TOKEN set
             orig_path = os.environ.get("PATH", "")
             orig_gh_token = os.environ.get("GH_TOKEN")
+            orig_resolved = os.environ.get("FACTORY_RESOLVED_TOOL_GH")
             try:
                 os.environ["PATH"] = f"{fake_bin}:{orig_path}"
                 os.environ["GH_TOKEN"] = ambient_secret
+                os.environ["FACTORY_RESOLVED_TOOL_GH"] = str(fake_gh)
 
                 stderr_capture = io.StringIO()
                 with patch("sys.stderr", stderr_capture):
-                    result = fetch_github_issues(target_repo)
+                    with self.assertRaises(SystemExit) as ctx:
+                        fetch_github_issues(target_repo)
+                self.assertEqual(ctx.exception.code, 2)
 
                 captured = stderr_capture.getvalue()
-
-                # Result must be None on failure
-                self.assertIsNone(result)
 
                 # ASSERT ABSENCE: Neither the PATs nor the ambient secret literal may appear
                 self.assertNotIn(classic_pat, captured,
@@ -91,6 +92,10 @@ class TestIssueTriageGhStderrRedaction(unittest.TestCase):
                     os.environ["GH_TOKEN"] = orig_gh_token
                 else:
                     os.environ.pop("GH_TOKEN", None)
+                if orig_resolved is not None:
+                    os.environ["FACTORY_RESOLVED_TOOL_GH"] = orig_resolved
+                else:
+                    os.environ.pop("FACTORY_RESOLVED_TOOL_GH", None)
 
     def test_fetch_issues_cli_invocation_redacts_stderr_end_to_end(self):
         """End-to-end subprocess execution of fetch_issues.py must not leak secrets to stderr."""
@@ -118,6 +123,7 @@ class TestIssueTriageGhStderrRedaction(unittest.TestCase):
             env = dict(os.environ)
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
             env["GITHUB_TOKEN"] = env_secret
+            env["FACTORY_RESOLVED_TOOL_GH"] = str(fake_gh)
 
             res = subprocess.run(
                 [sys.executable, str(SCRIPT), "--target", str(target_repo)],
@@ -154,17 +160,24 @@ class TestIssueTriageGhStderrRedaction(unittest.TestCase):
             target_repo.mkdir()
 
             orig_path = os.environ.get("PATH", "")
+            orig_resolved = os.environ.get("FACTORY_RESOLVED_TOOL_GH")
             try:
                 os.environ["PATH"] = f"{fake_bin}:{orig_path}"
+                os.environ["FACTORY_RESOLVED_TOOL_GH"] = str(fake_gh)
                 stderr_capture = io.StringIO()
                 with patch("sys.stderr", stderr_capture):
-                    result = fetch_github_issues(target_repo)
+                    with self.assertRaises(SystemExit) as ctx:
+                        fetch_github_issues(target_repo)
+                self.assertEqual(ctx.exception.code, 2)
                 captured = stderr_capture.getvalue()
-                self.assertIsNone(result)
                 self.assertIn(error_msg, captured)
-                self.assertIn("Note: gh issue list failed (code 1):", captured)
+                self.assertIn("Error: gh issue list failed (code 1):", captured)
             finally:
                 os.environ["PATH"] = orig_path
+                if orig_resolved is not None:
+                    os.environ["FACTORY_RESOLVED_TOOL_GH"] = orig_resolved
+                else:
+                    os.environ.pop("FACTORY_RESOLVED_TOOL_GH", None)
 
     def test_fetch_github_issues_success_path_extracts_candidates_without_leak(self):
         """When gh succeeds, candidate issues are extracted cleanly."""
@@ -196,8 +209,10 @@ class TestIssueTriageGhStderrRedaction(unittest.TestCase):
             target_repo.mkdir()
 
             orig_path = os.environ.get("PATH", "")
+            orig_resolved = os.environ.get("FACTORY_RESOLVED_TOOL_GH")
             try:
                 os.environ["PATH"] = f"{fake_bin}:{orig_path}"
+                os.environ["FACTORY_RESOLVED_TOOL_GH"] = str(fake_gh)
                 stderr_capture = io.StringIO()
                 with patch("sys.stderr", stderr_capture):
                     result = fetch_github_issues(target_repo)
@@ -208,6 +223,10 @@ class TestIssueTriageGhStderrRedaction(unittest.TestCase):
                 self.assertEqual(stderr_capture.getvalue(), "")
             finally:
                 os.environ["PATH"] = orig_path
+                if orig_resolved is not None:
+                    os.environ["FACTORY_RESOLVED_TOOL_GH"] = orig_resolved
+                else:
+                    os.environ.pop("FACTORY_RESOLVED_TOOL_GH", None)
 
 
 if __name__ == "__main__":

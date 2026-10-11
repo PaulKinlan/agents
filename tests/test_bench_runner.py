@@ -7,19 +7,25 @@ proposal ever feeds it, a shell turns that into arbitrary code execution with no
 code change. These tests pin the safe shape: argv in, direct exec, timeout enforced.
 """
 
+import contextlib
+import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
 
 import lib.bench.runner as bench_runner  # noqa: E402
 from lib.bench.runner import measure_target  # noqa: E402
+from lib.tool_pins import sha256_file  # noqa: E402
 
 
 class TestBenchCmd(unittest.TestCase):
@@ -88,6 +94,76 @@ class TestBenchCmd(unittest.TestCase):
         metrics = measure_target(self.tree, ["definitely-not-a-real-binary-ywe"])
 
         self.assertIsNone(metrics["custom_bench_ms"])
+
+
+class TestBenchCmdPinBoundary(unittest.TestCase):
+    """agents-28nn round 3, review P1 — the second runtime-constructed site with the
+    command sink's shape: --bench-cmd is shlex.split of operator input and its argv[0]
+    used to execute from PATH order with the pin machinery never consulted, so
+    `--bench-cmd "git ..."` ran whichever git PATH ordered first. pin_trusted_argv now
+    routes a trusted argv[0] through resolve_tool; a tool it cannot authenticate runs
+    NOTHING — the measurement degrades to static metrics with the cause named on stderr.
+
+    The behaviour-mutation proof: reverting lib/bench/runner.py to execute bench_cmd as
+    given makes all three tests fail — the planted fake runs (its log appears) and a
+    timing is recorded for it.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-bench-pin-")
+        self.addCleanup(temporary.cleanup)
+        self.tree = Path(temporary.name)
+        self.real_git = shutil.which("git")
+        if self.real_git is None:
+            self.skipTest("git is not installed on this host")
+        self.fakebin = self.tree / "fakebin"
+        self.fakebin.mkdir()
+        self.fake_log = self.tree / "fake-git-ran"
+        fake_git = self.fakebin / "git"
+        fake_git.write_text(f'#!/bin/sh\necho ran >> "{self.fake_log}"\nexit 0\n',
+                            encoding="utf-8")
+        fake_git.chmod(0o755)
+        self.pins = self.tree / "tools.pins.yaml"
+
+    def measure(self, pins_text):
+        self.pins.write_text(pins_text, encoding="utf-8")
+        env = {"PATH": f"{self.fakebin}{os.pathsep}{os.environ.get('PATH', '')}",
+               "FACTORY_TOOL_PINS": str(self.pins),
+               # The dev/test opt-in this repo's suites sometimes set must NOT leak in:
+               # these properties pin exactly what it waives.
+               "FACTORY_ALLOW_UNPINNED_TOOLS": ""}
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(stderr):
+            metrics = measure_target(self.tree, ["git", "--version"])
+        return metrics, stderr.getvalue()
+
+    def test_a_configured_trusted_tool_cannot_reach_a_path_planted_fake(self):
+        """THE HOLE, CLOSED: a sha256-only pin (resolution follows PATH order, so the fake
+        IS the resolved candidate) fails the hash check — no timing is recorded, the
+        cause is named on stderr, and the fake never ran."""
+        metrics, stderr = self.measure(
+            f"git:\n  sha256: {sha256_file(Path(self.real_git))}\n")
+        self.assertIsNone(metrics["custom_bench_ms"])
+        self.assertIn("cannot be authenticated", stderr)
+        self.assertFalse(self.fake_log.exists(),
+                         "the unauthenticated configured git must be refused BEFORE it executes")
+
+    def test_a_full_pin_runs_the_configured_real_git_not_the_path_order_winner(self):
+        """The positive direction: with path+sha256 pinned, the real git runs even when a
+        fake wins PATH order — resolution follows the pin, not the PATH."""
+        metrics, _stderr = self.measure(
+            f"git:\n  path: {self.real_git}\n  sha256: {sha256_file(Path(self.real_git))}\n")
+        self.assertIsNotNone(metrics["custom_bench_ms"],
+                             "the pinned real git ran and was timed")
+        self.assertFalse(self.fake_log.exists(), "the PATH-order winner must not run")
+
+    def test_an_unpinned_configured_trusted_tool_runs_nothing_and_says_why(self):
+        """Fail closed AND named: no pin anywhere, no opt-in — nothing runs and stderr
+        records the cause rather than reading like a missing binary."""
+        metrics, stderr = self.measure("")
+        self.assertIsNone(metrics["custom_bench_ms"])
+        self.assertIn("not pinned", stderr)
+        self.assertFalse(self.fake_log.exists())
 
 
 if __name__ == "__main__":

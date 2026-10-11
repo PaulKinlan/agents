@@ -22,6 +22,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 
+try:
+    from lib.tool_pins import resolve_tool
+except ImportError:
+    sys.path.insert(0, str(ROOT))
+    from lib.tool_pins import resolve_tool
+
 # Valid enums per AGENTS.md / THREAT_MODEL.md
 VALID_CLASSES = {"observer", "proposer", "optimizer"}
 VALID_PLANES = {"local", "ci", "both"}
@@ -519,9 +525,12 @@ def render_install_auth() -> str:
 
 def render_install_action(repo_root: Path) -> str:
     """Render GENERATED:install-action with pinned commit and input contract."""
-    # Verify commit exists in git
+    # Verify commit exists in git. git is a pinned trusted tool (agents-28nn round 2):
+    # resolve + authenticate it rather than trusting PATH order — the pages workflow
+    # generates host pins before this step, and a dev machine uses the same pins file as
+    # the factory (or the explicit FACTORY_ALLOW_UNPINNED_TOOLS=1 dev/test opt-in).
     res = subprocess.run(
-        ["git", "cat-file", "-e", f"{ACTION_PIN}^{{commit}}"],
+        [resolve_tool("git"), "cat-file", "-e", f"{ACTION_PIN}^{{commit}}"],
         cwd=repo_root,
         capture_output=True,
         text=True,

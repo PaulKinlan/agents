@@ -75,6 +75,14 @@ while IFS= read -r f; do
     tests/test_*.py)
       run="$run $f"
       ;;
+    tests/fixtures/*)
+      # Checked-in test payloads (agents-28nn round 5): fake_engine.sh is the contained
+      # engine-exfiltration attack asserted on by tests/test_containment.py
+      # TestEngineCredentialPinning. Search recorded: `grep -rln fixtures tests/
+      # --include='*.py'` -> tests/test_containment.py is the only consumer of
+      # tests/fixtures/ (the other hits name tests/sandbox_fixtures.py or tmp-tree dirs).
+      mapped="$mapped tests/test_containment.py"
+      ;;
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
       mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_adapter_auth_failure.py tests/test_line_andon.py tests/test_prompt_exposure.py tests/test_transient_dirs.py"
@@ -119,6 +127,27 @@ while IFS= read -r f; do
       # Bubblewrap sandbox (bwrap isolation, binds, proc/env masking) plus no-bwrap refusal contract (agents-vt7w).
       mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py"
       ;;
+    lib/tool_pins.py)
+      # Trusted-tool pinning (agents-7bj). Since agents-28nn this module also authenticates
+      # bwrap itself, and the property that an unauthenticated bwrap is refused BEFORE it
+      # executes lives in tests/test_sandbox.py (TestBwrapPinBoundary) — the pins contract
+      # alone cannot see a sandbox-side regression.
+      mapped="$mapped tests/test_tool_pins.py tests/test_sandbox.py"
+      ;;
+    tools/generate-tool-pins.sh)
+      # Operator-run pin generator (never invoked by the factory — its own header). SEARCH
+      # PERFORMED (agents-28nn): `grep -rn "generate-tool-pins" tests/` named no suite before
+      # this bead; agents-28nn adds the assertion that its TOOLS list covers every
+      # TRUSTED_TOOLS entry to tests/test_tool_pins.py, which owns the pins contract.
+      mapped="$mapped tests/test_tool_pins.py"
+      ;;
+    THREAT_MODEL.md)
+      # Root markdown the docs-drift scanner WALKS (check_docs.py os.walk()s every committed
+      # .md outside IGNORE_DIRS). SEARCH PERFORMED (agents-28nn): `grep -rn 'ROOT /
+      # "THREAT_MODEL' tests/` finds no direct reader; the test_threat_model_prepass.py hits
+      # are fixture strings for the findings-store recognizer, not the committed file.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
     lib/yaml_mini.py)
       # Mini YAML parser plus GitHub Actions action.yml contract pin (agents-vt7w).
       mapped="$mapped tests/test_yaml_mini.py tests/test_ci_action.py"
@@ -158,21 +187,19 @@ while IFS= read -r f; do
     agents/docs-drift/scripts/check_docs.py)
       # agents-q0mt: also emits candidate ids now; the exclusion suite drives this script, and the
       # emission pin reads the id out of a real artefact.
-      mapped="$mapped tests/test_docs_drift.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
+      mapped="$mapped tests/test_docs_drift.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py tests/test_prepass_pin_boundary.py"
       ;;
     agents/vuln-triage/scripts/triage.py)
       mapped="$mapped tests/test_vuln_triage_prepass.py"
       ;;
     agents/issue-triage/scripts/fetch_issues.py)
-      mapped="$mapped tests/test_issue_triage_prepass.py tests/test_redaction.py tests/test_docs_drift.py"
+      mapped="$mapped tests/test_issue_triage_prepass.py tests/test_prepass_pin_boundary.py tests/test_redaction.py tests/test_docs_drift.py"
       ;;
     agents/release-notes/scripts/gather_commits.py)
-      # Prose surface only (--help text and module docstrings). SEARCH PERFORMED: `grep -ln
-      # "gather_commits" tests/*.py` returns nothing, so no suite names this script - but
-      # tests/test_redaction.py PARSES every agents/*/scripts/*.py as an AST, so it does consume
-      # it, and tests/test_docs_drift.py owns the prose. Mapped rather than ignored so a future
-      # BEHAVIOUR change is not silently absorbed (agents-fq92).
-      mapped="$mapped tests/test_redaction.py tests/test_docs_drift.py"
+      # agents-28nn round 4: gather_commits resolves git through the pin, pinned by
+      # tests/test_prepass_pin_boundary.py. tests/test_redaction.py parses every agents/*/scripts/*.py,
+      # and tests/test_docs_drift.py owns the prose.
+      mapped="$mapped tests/test_prepass_pin_boundary.py tests/test_redaction.py tests/test_docs_drift.py"
       ;;
     tests/sandbox_fixtures.py)
       # Shared fixture builder for tests (agents-8ztd); its own suite pins the property that a new
@@ -198,7 +225,9 @@ while IFS= read -r f; do
     agents/secret-scan/scripts/scan.py)
       # The secret pre-pass. Both producer paths (gitleaks and the builtin fallback) meet at one
       # artefact assembly point, so the candidate-identity conversion is one call (agents-q0mt).
-      mapped="$mapped tests/test_secret_scanner.py tests/test_candidate_id_emission.py"
+      # agents-28nn round 4: gitleaks is resolved through the pin (present-but-unauthenticatable
+      # is loud; genuinely absent keeps the builtin fallback) - pinned by the boundary suite.
+      mapped="$mapped tests/test_secret_scanner.py tests/test_candidate_id_emission.py tests/test_prepass_pin_boundary.py"
       ;;
     agents/modern-web/scripts/scan_modern_web.py)
       # agents-q0mt: the station now emits a candidate id; its own suite plus the pre-pass
@@ -265,6 +294,13 @@ while IFS= read -r f; do
       # pins docs/INTEGRATION.md by content (its Section 5 script table at :191 and its section
       # anchors at :485-492), so it belongs in this union (agents-9nir review).
       mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py tests/test_docs_drift.py"
+      ;;
+    lib/budget.py)
+      # The station-command runner (agents-28nn round 8 grew on_spawn, the dispatcher's
+      # engine-pid handoff to the credential broker's peer gate): its own unit suite, the
+      # dispatcher suites that consume run_station_command, and the broker suite whose
+      # peer-gate contract the handoff serves.
+      mapped="$mapped tests/test_budget.py tests/test_factory_core.py tests/test_credential_broker.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"
