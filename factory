@@ -754,6 +754,15 @@ def detect_sink(target_path: Path, target_cfg: Dict[str, Any], explicit_sink: Op
     return "file"
 
 def choose_engine(requested_engine: str) -> str:
+    """Select the engine to execute the agent.
+
+    When `requested_engine` is not 'auto', the requested engine is used as-is.
+    When 'auto', candidate engines on PATH are checked in order: 'pi', 'claude',
+    then 'agentapi' (selecting 'antigravity'). If none of these engine binaries is present on PATH,
+    an explicit dev/test fallback is checked via FACTORY_DEFAULT_ENGINE; if unset,
+    the dispatcher refuses the run (StationError) rather than silently defaulting
+    to 'pi' (agents-cxno: success-by-absence is refused).
+    """
     if requested_engine != "auto":
         return requested_engine
 
@@ -767,7 +776,16 @@ def choose_engine(requested_engine: str) -> str:
     if shutil.which("agentapi"):
         return "antigravity"
 
-    return "pi"
+    # agents-cxno: absence is a refusal, never a silent fallback to 'pi' (success-by-absence).
+    # If an engine is explicitly specified for a dev/test path via FACTORY_DEFAULT_ENGINE,
+    # honour it; otherwise fail closed rather than assuming an engine that does not exist.
+    explicit_default = os.environ.get("FACTORY_DEFAULT_ENGINE", "").strip()
+    if explicit_default:
+        return explicit_default
+
+    raise StationError(
+        "No engine binary found on PATH (checked pi, claude, agentapi); "
+        "specify --engine explicitly or install an engine binary")
 
 
 # The binary each engine's adapter EXECUTES (agents-28nn round 5, review P0 — a demonstrated
