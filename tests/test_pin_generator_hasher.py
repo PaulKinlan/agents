@@ -177,3 +177,158 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+@unittest.skipUnless(GENERATOR.exists(), "generator not present")
+class TestTheIndependentDigestMustAgree(unittest.TestCase):
+    """agents-0poh: the digest is computed twice, by two different implementations, and they
+    must AGREE. A substituted external hasher can no longer choose the pin's reference value -
+    it must also substitute the interpreter, a different binary in a different implementation.
+
+    THE ATTACK THIS CLOSES IS NOT THE ONE ABOVE. The wrong-PATH arm plants a hasher in an
+    OPERATOR dir; this arm plants a wrong-DIGEST hasher that the confined lookup would ACCEPT,
+    and the confinement alone cannot catch it, because a compromised hasher in a system dir is
+    inside the confinement by definition. That is why it needs the second implementation.
+    """
+
+    def _copy_with_confined_lookup(self, tmp, planted_dir):
+        """A test-local copy whose confined lookup includes `planted_dir`.
+
+        The generator's lookup string is a CONSTANT, so a system-dir plant cannot be reached
+        from a test; rewriting that one line is what makes the arm reachable. It changes the
+        LOOKUP LIST only - the resolution logic, the cross-check and the emit path are the
+        generator's own bytes, so this discharges the arm's reachability rather than stubbing
+        the behaviour under test.
+        """
+        text = GENERATOR.read_text(encoding="utf-8")
+        new, n = re.subn(
+            r'^SYSTEM_LOOKUP_PATH="[^"]*"$',
+            f'SYSTEM_LOOKUP_PATH="{planted_dir}:/usr/local/bin:/usr/bin:/bin"',
+            text, count=1, flags=re.M)
+        self.assertEqual(n, 1, "the confined lookup line must exist to be rewritten")
+        self.assertNotIn(str(planted_dir), text, "the rewrite must be the only change")
+        copy = Path(tmp) / "generate-tool-pins.sh"
+        copy.write_text(new, encoding="utf-8")
+        return copy
+
+    def _run(self, tmp, copy):
+        out = Path(tmp) / "out"
+        out.mkdir()
+        return subprocess.run(
+            ["bash", str(copy), str(out / "pins.yaml")],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp})
+
+    def test_a_wrong_digest_hasher_is_refused_rather_than_trusted(self):
+        with tempfile.TemporaryDirectory(prefix="0poh-") as tmp:
+            binp = Path(tmp) / "bin"
+            binp.mkdir()
+            fake = binp / "sha256sum"
+            fake.write_text(f'#!/bin/sh\necho "{FAKE_HASH}  $2"\n', encoding="utf-8")
+            fake.chmod(0o755)
+            # ASSERT THE PLANT LANDED BEFORE READING ANY RESULT: a plant that never existed
+            # reads exactly like a control that passed (the oc3q probe, 2026-10-11).
+            ran = subprocess.run(["bash", str(fake), "/etc/hostname"],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertIn(FAKE_HASH, ran.stdout, "the planted hasher must be the one on the path")
+            res = self._run(tmp, self._copy_with_confined_lookup(tmp, binp))
+            self.assertEqual(res.returncode, 2,
+                             f"a wrong DIGEST must be refused, not emitted: {res.stdout}{res.stderr}")
+            self.assertIn("digest disagreement", res.stderr,
+                          "the refusal must SAY the two hashers disagreed, so the operator knows "
+                          "which of the two is not trustworthy")
+            self.assertNotIn(FAKE_HASH, (Path(tmp) / "out" / "pins.yaml").read_text(
+                encoding="utf-8") if (Path(tmp) / "out" / "pins.yaml").exists() else "",
+                "no pin may carry a value one of the two hashers contradicted")
+
+    def test_the_same_copy_without_the_plant_still_generates(self):
+        """THE CONTROL: identical code path, no plant - so the refusal above is attributable to
+        the hasher and not to the copy."""
+        with tempfile.TemporaryDirectory(prefix="0poh-ctl-") as tmp:
+            empty = Path(tmp) / "bin"
+            empty.mkdir()
+            res = self._run(tmp, self._copy_with_confined_lookup(tmp, empty))
+            self.assertEqual(res.returncode, 0, f"no plant, so nothing to disagree: {res.stderr}")
+            self.assertIn("sha256: ", (Path(tmp) / "out" / "pins.yaml").read_text(encoding="utf-8"))
+
+@unittest.skipUnless(GENERATOR.exists(), "generator not present")
+class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
+    """agents-lm6r: 'an independent implementation' is not enough if the DEFENDED PARTY CAN SHADOW
+    IT. hashlib is reachable AS A FILE - a hashlib.py on PYTHONPATH or in the generator's CWD
+    shadows stdlib - so the independent digest could itself be supplied by the party the pin
+    defends against, and the cross-check would compare the attacker against the attacker.
+
+    THE SAME RULE ONE LEVEL DEEPER than agents-aeav: there the anchor was text a comment could
+    impersonate; here the reference value is code a FILE can impersonate. The remedy is python3
+    -I, isolated mode: PYTHONPATH is dropped and the CWD is kept off sys.path.
+
+    WHAT THIS ASSERTS AND WHY IT IS NOT 'REFUSES': with -I the shadow is INVISIBLE, so there is
+    nothing to disagree with and the run SUCCEEDS WITH CORRECT HASHES. Asserting a refusal here
+    would be asserting the wrong outcome. The shadow is detected by its ABSENCE FROM THE OUTPUT -
+    if the planted digest appears in any pin, the shadow won.
+    """
+
+    SHADOW = ("def sha256(data):\n"
+              "    class _R:\n"
+              "        def hexdigest(self):\n"
+              "            return '0' * 64\n"
+              "    return _R()\n")
+
+    def test_a_hashlib_py_on_pythonpath_cannot_supply_the_digest(self):
+        with tempfile.TemporaryDirectory(prefix="lm6r-path-") as tmp:
+            shadow = Path(tmp) / "shadow"
+            shadow.mkdir()
+            (shadow / "hashlib.py").write_text(self.SHADOW, encoding="utf-8")
+            # ASSERT THE PLANT SHADOWS BEFORE READING ANY RESULT (the oc3q-probe lesson).
+            probe = subprocess.run(
+                ["python3", "-c", "import hashlib;print(hashlib.sha256(b'x').hexdigest())"],
+                capture_output=True, text=True, timeout=60,
+                env={"PYTHONPATH": str(shadow), "PATH": "/usr/local/bin:/usr/bin:/bin"})
+            self.assertEqual(probe.stdout.strip(), "0" * 64,
+                             "the plant must actually shadow stdlib, or this test proves nothing")
+            out = Path(tmp) / "out"
+            out.mkdir()
+            res = subprocess.run(
+                ["bash", str(GENERATOR), str(out / "pins.yaml")],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                env={"PYTHONPATH": str(shadow), "PATH": "/usr/local/bin:/usr/bin:/bin",
+                     "HOME": tmp})
+            self.assertEqual(res.returncode, 0,
+                             f"with -I the shadow is invisible, so generation must succeed: {res.stderr}")
+            text = (out / "pins.yaml").read_text(encoding="utf-8")
+            hashes = re.findall(r"^\s+sha256: ([0-9a-f]{64})$", text, re.M)
+            self.assertTrue(hashes, f"expected pins, got:\n{text}")
+            self.assertNotIn("0" * 64, hashes,
+                             "a hashlib.py on PYTHONPATH supplied the digest:' python3 -I is what "
+                             "keeps the reference value out of the defended party's hands "
+                             "(agents-lm6r)")
+
+    def test_a_hashlib_py_in_the_cwd_cannot_supply_the_digest(self):
+        """The SECOND channel - the generator's own working directory - closed by the same flag.
+
+        WHAT THIS ARM IS AND IS NOT, STATED HERE RATHER THAN LEFT AS A WEAKNESS (agents-lm6r):
+        the PYTHONPATH arm above REPRODUCES an exploit - it plants a shadow, proves the shadow is
+        reached, and shows -I is what stops it. THIS arm asserts a GUARANTEE: that -I keeps the CWD
+        off sys.path. It does not reproduce a shadow REACHING the generator's digest through the
+        cwd, so it is A GUARD AGAINST REGRESSION, NOT A DEMONSTRATED EXPLOIT. Two different jobs,
+        and the weaker one says so rather than borrowing the stronger one's evidence.
+        """
+        with tempfile.TemporaryDirectory(prefix="lm6r-cwd-") as tmp:
+            (Path(tmp) / "hashlib.py").write_text(self.SHADOW, encoding="utf-8")
+            probe = subprocess.run(
+                ["python3", "-c", "import hashlib;print(hashlib.sha256(b'x').hexdigest())"],
+                cwd=tmp, capture_output=True, text=True, timeout=60,
+                env={"PATH": "/usr/local/bin:/usr/bin:/bin"})
+            self.assertEqual(probe.stdout.strip(), "0" * 64,
+                             "the CWD plant must shadow stdlib before this test means anything")
+            out = Path(tmp) / "out"
+            out.mkdir()
+            res = subprocess.run(
+                ["bash", str(GENERATOR), str(out / "pins.yaml")],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp})
+            self.assertEqual(res.returncode, 0, f"generation must succeed: {res.stderr}")
+            hashes = re.findall(r"^\s+sha256: ([0-9a-f]{64})$",
+                                (out / "pins.yaml").read_text(encoding="utf-8"), re.M)
+            self.assertNotIn("0" * 64, hashes,
+                             "a hashlib.py in the CWD supplied the digest (agents-lm6r)")
+
