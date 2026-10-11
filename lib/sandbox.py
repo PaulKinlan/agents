@@ -78,7 +78,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 # agents-28nn: bwrap itself is resolved through the same pin rule (resolve_tool) — the
 # binary that delivers the sandbox must be authenticated before it executes.
 from lib.tool_pins import TRUSTED_TOOLS as PINNED_TOOLS
-from lib.tool_pins import ToolPinError, resolve_tool, verify_pin
+from lib.tool_pins import SYSTEM_BIN_DIRS, ToolPinError, resolve_tool, verify_pin
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
@@ -517,6 +517,28 @@ def _is_broad_root(pkg: Path, home: Optional[str]) -> bool:
     return False
 
 
+def _is_system_executable(path: Path) -> bool:
+    """Whether `path` resides in standard root-owned system binary directories.
+
+    review P1 (agents-2xf7): untrusted execution utilities (bash/sh/env/python3) must resolve
+    to system directories (SYSTEM_BIN_DIRS, or sys.executable for the runner), independently
+    of whether the path happens to be inside an already-mounted target or install tree.
+    """
+    try:
+        real = path.resolve()
+    except OSError:
+        return False
+    if real == Path(sys.executable).resolve():
+        return True
+    for system_dir in SYSTEM_BIN_DIRS:
+        try:
+            if real.parent == Path(system_dir).resolve():
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _resolutions(name: str, path_env: str) -> List[str]:
     """Every executable path for `name` across PATH, like `which -a` — a launcher shim in
     one directory often execs the real binary in another, and both launch paths must exist
@@ -601,10 +623,18 @@ def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
             # before binding it into the child. A pinned tool whose binary does not hash-match,
             # or whose real path is not the configured path, fails the wrap closed rather than
             # binding an unverified binary. A trusted tool with NO pin also fails closed here
-            # (unless FACTORY_ALLOW_UNPINNED_TOOLS=1) — see lib.tool_pins._require_pin. Untrusted
-            # names (bash/sh/env/python3) are never passed to verify_pin and need no pin.
+            # (unless FACTORY_ALLOW_UNPINNED_TOOLS=1) — see lib.tool_pins._require_pin.
             if name in PINNED_TOOLS:
                 verify_pin(name, str(real))
+            elif name in ("bash", "sh", "env", "python3"):
+                # agents-2xf7 (review P1): untrusted shell and execution utilities must resolve
+                # under standard root-owned system directories (SYSTEM_BIN_DIRS), verified independently
+                # of whether the parent tree happens to be visible in the plan (an untrusted binary
+                # planted in an already-mounted target or install tree must not be accepted).
+                if not _is_system_executable(real):
+                    raise SandboxError(
+                        f"untrusted executable '{name}' resolved to {real} outside system "
+                        f"directories; refusing to bind an unverified binary into the sandbox")
             # Bind the tool's own install tree when it is tool-specific (node's versioned
             # tree, pi's ~/.local/pi), so the real binary and its siblings resolve at their
             # true paths. A tree that is really a top-level user prefix (~/.local) is too

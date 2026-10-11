@@ -1134,5 +1134,78 @@ class ToolPinBindTests(unittest.TestCase):
             self.assertTrue(plan.visible(str(fake.resolve())))
 
 
+class TestUntrustedExecutableSandboxBind(unittest.TestCase):
+    """agents-2xf7: untrusted executables (bash, env, sh, python3) must resolve under
+    standard system directories (/usr, /bin); any untrusted binary outside system dirs
+    (e.g. planted on PATH) fails closed rather than being bound into the sandbox."""
+
+    def test_untrusted_executable_outside_system_dirs_fails_closed(self):
+        from lib.sandbox import _BindPlan, _executable_binds, _system_binds, SandboxError
+        tmp = Path(tempfile.mkdtemp(prefix="planted-shell-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        planted_bash = tmp / "bash"
+        planted_bash.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        planted_bash.chmod(planted_bash.stat().st_mode | 0o111)
+
+        plan = _BindPlan()
+        _system_binds(plan)
+        fake_path = f"{tmp}{os.pathsep}/usr/bin{os.pathsep}/bin"
+        with self.assertRaises(SandboxError) as ctx:
+            _executable_binds(plan, ("bash",), fake_path, None)
+        self.assertIn("untrusted executable 'bash' resolved to", str(ctx.exception))
+        self.assertIn("outside system directories; refusing to bind an unverified binary",
+                      str(ctx.exception))
+
+    def test_untrusted_executable_in_already_visible_target_fails_closed(self):
+        """Review P1 (agents-2xf7): an untrusted executable (e.g. planted bash) inside an
+        already-mounted directory (such as the target) must NOT pass just because
+        plan.visible() is True — it must independently resolve to a system directory."""
+        from lib.sandbox import _BindPlan, _executable_binds, _system_binds, SandboxError
+        tmp = Path(tempfile.mkdtemp(prefix="target-with-shell-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        planted_bash = tmp / "bin" / "bash"
+        planted_bash.parent.mkdir()
+        planted_bash.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        planted_bash.chmod(planted_bash.stat().st_mode | 0o111)
+
+        plan = _BindPlan()
+        _system_binds(plan)
+        # Mount the target directory into the plan (simulating target ro-bind)
+        plan.ro_bind(str(tmp))
+        self.assertTrue(plan.visible(str(planted_bash)), "target path is visible in plan")
+
+        fake_path = f"{tmp / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin"
+        with self.assertRaises(SandboxError) as ctx:
+            _executable_binds(plan, ("bash",), fake_path, None)
+        self.assertIn("untrusted executable 'bash' resolved to", str(ctx.exception))
+        self.assertIn("outside system directories; refusing to bind an unverified binary",
+                      str(ctx.exception))
+
+    def test_untrusted_env_outside_system_dirs_fails_closed(self):
+        from lib.sandbox import _BindPlan, _executable_binds, _system_binds, SandboxError
+        tmp = Path(tempfile.mkdtemp(prefix="planted-env-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        planted_env = tmp / "env"
+        planted_env.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        planted_env.chmod(planted_env.stat().st_mode | 0o111)
+
+        plan = _BindPlan()
+        _system_binds(plan)
+        fake_path = f"{tmp}{os.pathsep}/usr/bin{os.pathsep}/bin"
+        with self.assertRaises(SandboxError) as ctx:
+            _executable_binds(plan, ("env",), fake_path, None)
+        self.assertIn("untrusted executable 'env' resolved to", str(ctx.exception))
+
+    def test_system_bash_succeeds_without_extra_binds(self):
+        from lib.sandbox import _BindPlan, _executable_binds, _system_binds
+        plan = _BindPlan()
+        _system_binds(plan)
+        initial_argv = list(plan.argv)
+        _executable_binds(plan, ("bash", "sh", "env"), "/usr/bin:/bin", None)
+        # Because system binaries under /usr are already visible from _system_binds,
+        # _executable_binds does not append any new ro-bind mounts for them.
+        self.assertEqual(plan.argv, initial_argv)
+
+
 if __name__ == "__main__":
     unittest.main()
