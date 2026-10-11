@@ -92,10 +92,6 @@ fi
 # prompt; whitespace-only stdin with no directive is not. That is a predicate change, not
 # a move, and it is filed separately (see the tracker) rather than made here.
 PROMPT="$(cat)"
-if [ -z "$PROMPT" ]; then
-  echo "[antigravity adapter] Error: empty prompt on stdin." >&2
-  exit 2
-fi
 
 echo "[antigravity adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
@@ -109,6 +105,26 @@ echo "[antigravity adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'.
 if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
   PROMPT="$(cat "$FACTORY_SYSTEM_DIRECTIVE_FILE")"$'\n\n'"${PROMPT}"
 fi
+
+# agents-ut3v: THE GUARD TESTS THE PROMPT THAT IS ACTUALLY RUN, AND IT TESTS CONTENT.
+# It used to sit above this point, testing the value read from stdin for EMPTINESS - so a
+# prompt of spaces passed, and it tested a string the reassembly above may have replaced.
+# Two cases, and they differ:
+#   WITH a directive, the reassembled prompt carries the directive's content, so a
+#   whitespace-only stdin is a legitimate run and MUST be admitted - the directive is the
+#   instruction. Measured: arm A runs.
+#   WITH NO directive, nothing is reassembled, so a whitespace-only stdin leaves an engine
+#   with nothing to act on - and an emptiness test admitted it. Measured before this fix:
+#   arm B ran with rc=0. It must be refused.
+# A content test covers both with one rule; moving the emptiness test down would not,
+# because it never asks whether what REMAINS has content.
+case "$PROMPT" in
+  *[![:space:]]*) ;;
+  *)
+    echo "[antigravity adapter] Error: the prompt has no content (blank or whitespace only) after reassembly; refusing to run the engine with nothing to act on (agents-ut3v)." >&2
+    exit 2
+    ;;
+esac
 
 cd "$TARGET_DIR"
 
