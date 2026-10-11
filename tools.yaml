@@ -1,7 +1,7 @@
 # Integrity pins for the factory's host-side trusted tools (agents-7bj).
 #
 # A trusted tool (bwrap, gh, bd, git, semgrep, gitleaks, node, npm, npx, and the engine
-# binaries pi, claude, agentapi, deepseek) is resolved by
+# binaries pi, claude, agentapi; deepseek has no CLI binary, agents-mhv7) is resolved by
 # lib/tool_pins.resolve_tool(): the configured `path` (if set) is preferred, otherwise it is
 # found by name across PATH, and its SHA-256 is verified against `sha256`. A mismatch fails
 # the run closed — the factory refuses to execute an unverified binary. bwrap heads the
@@ -65,7 +65,4 @@ claude:
   # sha256: <64 hex>
 agentapi:
   # path: /usr/local/bin/agentapi
-  # sha256: <64 hex>
-deepseek:
-  # path: /usr/local/bin/deepseek
   # sha256: <64 hex>

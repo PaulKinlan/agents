@@ -41,25 +41,29 @@ if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
   fi
 fi
 
-# The CLI path is taken ONLY with a dispatcher-verified binary (agents-28nn round 5,
-# review P0 — credential exfiltration): this process's environment carries the run's
-# DEEPSEEK_API_KEY, so the binary it execs decides who receives the key — a by-name
-# `command -v` lookup would hand it to whatever an attacker planted first on PATH. The
-# dispatcher resolves and pin-verifies the binary (lib/tool_pins.resolve_tool; deepseek
-# is in TRUSTED_TOOLS) and passes the verified absolute path as FACTORY_ENGINE_BIN. With
-# no verified binary the adapter falls through to the Python HTTP path below, which is
-# the factory's own code — no PATH-resolved binary is ever handed the credential.
-if [ -n "${FACTORY_ENGINE_BIN:-}" ]; then
-  # agents-m2n (review P1-2): the CLI path has NO system-prompt interface — it pipes the
-  # prompt and nothing else — so it cannot carry the system directive. Fail closed for a
-  # directive-bearing run rather than silently dropping the rule.
-  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
-    echo "[deepseek adapter] Error: the 'deepseek' CLI path has no system-prompt interface and cannot carry the system directive; refusing to run without it." >&2
-    exit 2
-  fi
-  echo "$PROMPT" | "$FACTORY_ENGINE_BIN" "$@" > "$OUTPUT_FILE" 2>&1 || exit $?
-  echo "$OUTPUT_FILE"
-  exit 0
+# agents-mhv7: DeepSeek has NO CLI arm — it is strictly payload-only via the Python
+# stdlib HTTP call below. Executing a PATH-planted binary or an arbitrary CLI would violate
+# the containment doctrine (lib/containment.py: deepseek is payload-only, with no file
+# tools and no filesystem read scope) and risk credential exfiltration or fabricated
+# verdicts. Even if FACTORY_ENGINE_BIN is passed or a namesake exists on PATH, this
+# adapter NEVER executes a host binary.
+#
+# Finding P1 (agents-mhv7 review): The Python interpreter running this station client
+# MUST be the dispatcher-verified python binary (FACTORY_PYTHON_BIN) or an absolute system
+# path (/usr/bin/python3, /usr/local/bin/python3). NEVER resolve python3 across the
+# inherited PATH — a PATH-planted python3 would otherwise receive the run's DEEPSEEK_API_KEY.
+PYTHON_BIN="${FACTORY_PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  for p in /usr/bin/python3 /usr/local/bin/python3 /bin/python3; do
+    if [ -x "$p" ]; then
+      PYTHON_BIN="$p"
+      break
+    fi
+  done
+fi
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "[deepseek adapter] Error: no trusted python3 binary found in system dirs (/usr/bin/python3)." >&2
+  exit 2
 fi
 
 # Execute via Python stdlib HTTP call to DeepSeek API
@@ -69,7 +73,7 @@ export PYTHONUNBUFFERED=1
 STATUS=0
 # agents-w8z: the heredoc below owns this process's stdin (it IS the program), so the
 # prompt cannot ride stdin. Pass it explicitly as PROMPT in the environment instead.
-PROMPT="$PROMPT" python3 - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
+PROMPT="$PROMPT" "$PYTHON_BIN" - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
 import json
 import os
 import sys
