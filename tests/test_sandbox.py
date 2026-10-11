@@ -1156,6 +1156,31 @@ class TestUntrustedExecutableSandboxBind(unittest.TestCase):
         self.assertIn("outside system directories; refusing to bind an unverified binary",
                       str(ctx.exception))
 
+    def test_untrusted_executable_in_already_visible_target_fails_closed(self):
+        """Review P1 (agents-2xf7): an untrusted executable (e.g. planted bash) inside an
+        already-mounted directory (such as the target) must NOT pass just because
+        plan.visible() is True — it must independently resolve to a system directory."""
+        from lib.sandbox import _BindPlan, _executable_binds, _system_binds, SandboxError
+        tmp = Path(tempfile.mkdtemp(prefix="target-with-shell-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        planted_bash = tmp / "bin" / "bash"
+        planted_bash.parent.mkdir()
+        planted_bash.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        planted_bash.chmod(planted_bash.stat().st_mode | 0o111)
+
+        plan = _BindPlan()
+        _system_binds(plan)
+        # Mount the target directory into the plan (simulating target ro-bind)
+        plan.ro_bind(str(tmp))
+        self.assertTrue(plan.visible(str(planted_bash)), "target path is visible in plan")
+
+        fake_path = f"{tmp / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin"
+        with self.assertRaises(SandboxError) as ctx:
+            _executable_binds(plan, ("bash",), fake_path, None)
+        self.assertIn("untrusted executable 'bash' resolved to", str(ctx.exception))
+        self.assertIn("outside system directories; refusing to bind an unverified binary",
+                      str(ctx.exception))
+
     def test_untrusted_env_outside_system_dirs_fails_closed(self):
         from lib.sandbox import _BindPlan, _executable_binds, _system_binds, SandboxError
         tmp = Path(tempfile.mkdtemp(prefix="planted-env-"))
