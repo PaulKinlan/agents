@@ -36,7 +36,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-_REFUSAL_ANCHOR = "agentapi has no tool controls"
 ROOT = Path(__file__).resolve().parent.parent
 ADAPTERS = ROOT / "lib" / "adapters"
 
