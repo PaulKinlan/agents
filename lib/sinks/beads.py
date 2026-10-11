@@ -12,6 +12,7 @@ direct call stays safe.
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -91,7 +92,7 @@ def reconcile_closed_bead_sightings(
     findings: List[Dict[str, Any]],
     beads_dir: Optional[Path] = None,
     target_dir: Optional[Path] = None,
-) -> None:
+) -> Optional[str]:
     """Reconcile all observed findings against the tracker before report rendering (agents-3sl6).
 
     Never create a second bead for a matching fingerprint, and never auto-reopen a closed one.
@@ -99,9 +100,10 @@ def reconcile_closed_bead_sightings(
     count of post-close observations on the finding record (post_close_sightings).
     If the tracker cannot be listed, leave closure status alone (never claim closure status on
     an unreadable tracker).
+    Returns an explanatory skip note if reconciliation could not run (agents-j9mc), else None.
     """
     if not findings:
-        return
+        return None
 
     if beads_dir is None and target_dir is not None:
         candidate = Path(target_dir) / ".beads"
@@ -109,21 +111,29 @@ def reconcile_closed_bead_sightings(
             beads_dir = Path(target_dir)
 
     if beads_dir is None:
-        return
+        return None
 
     beads_dir = Path(beads_dir).expanduser().resolve()
     if not beads_dir.is_dir() or not (beads_dir / ".beads").is_dir():
-        return
+        return None
 
     try:
-        from lib.tool_pins import resolve_tool
+        from lib.tool_pins import ToolPinError, resolve_tool
         bd_bin = resolve_tool("bd")
-    except Exception:
-        return
+    except ToolPinError as e:
+        msg = f"bd unavailable or unverified: {e}"
+        print(f"Warning: beads reconciliation skipped ({msg})", file=sys.stderr)
+        return msg
+    except Exception as e:
+        msg = f"bd resolution failed: {e}"
+        print(f"Warning: beads reconciliation skipped ({msg})", file=sys.stderr)
+        return msg
 
     existing = _existing_bead_fingerprints(bd_bin, beads_dir)
     if existing is None:
-        return
+        msg = "bd list failed to read tracker"
+        print(f"Warning: beads reconciliation skipped ({msg})", file=sys.stderr)
+        return msg
 
     for f in findings:
         fp = f.get("fingerprint")
