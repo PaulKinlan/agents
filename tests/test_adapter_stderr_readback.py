@@ -204,7 +204,22 @@ class TestAntigravityIsRefusedToday(unittest.TestCase):
         adapter = ADAPTERS / "antigravity.sh"
         text = adapter.read_text(encoding="utf-8")
         refusal = text.index("agentapi has no tool controls")
-        guard = text.index('if [ -z "$PROMPT" ]; then')
+        # THE GUARD ANCHOR MOVED WITH agents-ut3v: the emptiness test was replaced by a
+        # content case below the reassembly, so indexing the old text raised ValueError
+        # BEFORE this test asserted anything. Anchored on the NEW guard, and on the case arm
+        # rather than the exact spacing, so a future reflow does not break the anchor the way
+        # this one did. agents-ut3v review, found by the merger on the union - each branch was
+        # red ALONE - and this is the measured version, replacing a claim that was FALSE.
+        # I first wrote "each branch was green alone, which is why a per-branch fast gate did
+        # not see it". The merger measured the opposite: git archive of the earlier tip into a
+        # temp dir shows that tree's OWN adapter has zero hits for the old anchor text, the
+        # readback test IS present in it, and the suite FAILS there (Ran 5, FAILED errors=1).
+        # SO THE TIP WAS RED BY ITSELF AND A FAST GATE AT THE TIP WOULD HAVE CAUGHT IT - it
+        # was not a cross-branch interaction invisible to a per-branch gate, it was the gate
+        # not being run at the tip. The author ran only the new test file. Recording the miss
+        # rather than an exoneration of the tool, because a comment that teaches the wrong
+        # lesson is worse than no comment: it closes the question.
+        guard = text.index('factory: prompt-content guard')
         redirect = text.index('new-conversation "$PROMPT"')
         self.assertLess(refusal, guard,
                         "the tool-policy refusal must precede the prompt guard")
