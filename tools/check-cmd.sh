@@ -44,11 +44,21 @@ fi
 if [ "${1:-}" = "--install" ]; then
   dest="${OVERRIDE}"
   mkdir -p "$(dirname "$dest")"
+
+  # agents-f6no: ~/.fleet/check.conf is machine-global. Warn if replacing a file
+  # not stamped by agents-factory (e.g. another project on a shared-HOME host).
+  if [ -f "$dest" ] && ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
+    echo "check-cmd: WARNING: overwriting $dest which was not stamped by agents-factory (shared-HOME host)" >&2
+  fi
+
   {
-    printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p)."
+    printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p, agents-f6no)."
+    printf '%s\n' "# Project: agents-factory ($ROOT)"
+    printf '%s\n' "# WARNING: This file is MACHINE-GLOBAL (~/.fleet/check.conf). fleet-check reads this file"
+    printf '%s\n' "# for any repo invoked on this host; running --install replaces the active gate command."
     printf '%s\n' "# DO NOT HAND-EDIT FOR TUNING: a hand-edit and a stale install are indistinguishable"
     printf '%s\n' "# from the files alone, and tests/test_gate_entrypoint_config.py fails on any divergence"
-    printf '%s\n' "# from the tracked command. Tune per-machine with FLEET_CHECK_CONF."
+    printf '%s\n' "# from the tracked command. To tune, edit tools/check.conf and re-run --install."
     printf 'CHECK_CMD="%s"\n' "$CHECK_CMD"
     printf 'CHECK_FAST_CMD="%s"\n' "${CHECK_FAST_CMD:-}"
     printf 'CHECK_TIMEOUT=%s\n' "${CHECK_TIMEOUT:-}"
