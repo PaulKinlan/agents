@@ -1327,6 +1327,12 @@ class TestUnixPeerIdentityGate(BrokerTestBase):
         # hole: an engine able to pass its socket could proxy the request itself, so a
         # helper reaches nothing the engine could not reach directly. Pinned by
         # behaviour so the next reader inherits a fact rather than a sentence.
+        #
+        # NOTE, precisely: the CONNECTOR stays alive while the request is made. The pid
+        # the gate checks is the one the kernel recorded at connect, but the tree walk
+        # itself reads LIVE /proc state at request time, so what this pins is a grant
+        # that survives a hand-off — not a connection that outlives the process which
+        # opened it.
         with tempfile.TemporaryDirectory() as tmpdir:
             script = self._probe_script(tmpdir)
             broker, sock = self._broker_on_unix(tmpdir)
