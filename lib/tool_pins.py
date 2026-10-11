@@ -3,7 +3,7 @@
 
 The factory is the highest-privilege component in a run: it resolves its trusted tools
 (``bwrap``, ``gh``, ``bd``, ``git``, ``semgrep``, ``gitleaks``, ``node``/``npm``/``npx``,
-and the engine binaries ``pi``/``claude``/``agentapi``/``deepseek``)
+and the engine binaries ``pi``/``claude``/``agentapi``; ``deepseek`` has no CLI binary, agents-mhv7)
 by *name* across ``PATH`` and executes them host-side for the pre-pass, the findings
 dispatch, bead promotion — and, for ``bwrap``, the OS sandbox itself. A trojaned binary
 earlier on ``PATH`` — or a hijacked install tree — would run with the factory's GitHub

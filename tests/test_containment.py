@@ -15,6 +15,7 @@ Engines are stubs that record their argv: deterministic, no model call, no crede
 """
 
 import hashlib
+import http.server
 import importlib.machinery
 import importlib.util
 import json
@@ -572,12 +573,34 @@ class TestAdapters(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
 
+        # Local hermetic HTTP stub for deepseek adapter calls
+        class _DeepseekStubHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                reply = json.dumps({"choices": [{"message": {"content":
+                    json.dumps({"summary": "stub", "findings": []})}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args):  # noqa: N802
+                pass
+
+        self._ds_server = http.server.HTTPServer(("127.0.0.1", 0), _DeepseekStubHandler)
+        self.addCleanup(self._ds_server.shutdown)
+        self.addCleanup(self._ds_server.server_close)
+        threading.Thread(target=self._ds_server.serve_forever, daemon=True).start()
+
     def run_adapter(self, engine, policy=None, skill_dir=None, budget_usd=None,
                     directive_file=None, env_overrides=None):
         if self.argv_log.exists():
             self.argv_log.unlink()
         env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                "ANTHROPIC_API_KEY": "stub-key",
+               "DEEPSEEK_BASE_URL": f"http://127.0.0.1:{self._ds_server.server_address[1]}",
                "FACTORY_ALLOW_UNPINNED_TOOLS": "1"}
         # agents-28nn round 5: adapters exec ONLY the dispatcher-verified FACTORY_ENGINE_BIN
         # and refuse a by-name PATH lookup. The test stands in for the dispatcher: hand the
@@ -2945,20 +2968,42 @@ class TestEngineCredentialPinning(TestDispatcher):
         self.trusted_target("trusted")
         evil, _fake_ds = self._plant_fake_engine("deepseek")
         _evil, _fake_py = self._plant_fake_engine("python3")
+
+        captured = {"called": False}
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                captured["called"] = True
+                reply = json.dumps({"choices": [{"message": {"content":
+                    json.dumps({"summary": "stub", "findings": []})}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args):  # noqa: N802
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
         res = self.factory(
             "deepseek",
             self._attack_env(
                 evil,
                 {
                     "DEEPSEEK_API_KEY": self.SECRET,
-                    "DEEPSEEK_BASE_URL": "http://127.0.0.1:9",
+                    "DEEPSEEK_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}",
                 }
             ),
             target_arg="trusted"
         )
-        # Verify the adapter actually ran and attempted the DeepSeek API call
-        self.assertIn("DeepSeek API", res.stdout + res.stderr,
-                      "the deepseek adapter was not exercised!")
+        # Verify the adapter actually ran and issued the API request to our local stub
+        self.assertTrue(captured["called"],
+                        "the deepseek adapter was not exercised / did not issue HTTP request!")
         self._assert_no_dump_received_the_secret()
 
 
