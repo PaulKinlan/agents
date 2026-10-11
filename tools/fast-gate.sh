@@ -201,7 +201,6 @@ while IFS= read -r f; do
       # and tests/test_docs_drift.py owns the prose.
       mapped="$mapped tests/test_prepass_pin_boundary.py tests/test_redaction.py tests/test_docs_drift.py"
       ;;
-      ;;
     tests/sandbox_fixtures.py)
       # Shared fixture builder for tests (agents-8ztd); its own suite pins the property that a new
       # lib import reaches a sandbox without a fixture change.
