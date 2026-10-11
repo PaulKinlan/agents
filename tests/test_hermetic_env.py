@@ -21,10 +21,38 @@ ROOT = Path(__file__).resolve().parent.parent
 class TestHermeticEnvironmentDeclaration(unittest.TestCase):
     def test_package_init_isolates_operator_config(self):
         """tests/__init__.py must ensure FACTORY_TOOL_PINS is unset and FACTORY_ALLOW_UNPINNED_TOOLS=1."""
-        self.assertNotIn("FACTORY_TOOL_PINS", os.environ,
+        # agents-3cm4: assert on key presence only; never assertNotIn(k, os.environ)
+        # which dumps the entire host environment and ambient credentials on failure.
+        self.assertFalse("FACTORY_TOOL_PINS" in os.environ,
                          "tests/__init__.py must scrub ambient FACTORY_TOOL_PINS")
         self.assertEqual(os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS"), "1",
                          "tests/__init__.py must establish dev/test opt-in")
+
+    def test_assertion_failure_does_not_leak_ambient_environment_values(self):
+        """agents-3cm4: when hermetic assertions fail, they must assert on key presence only
+        and never format the surrounding environment dictionary or ambient secrets into the message."""
+        fake_secret = "npm_test_secret_token_never_leak_xyz"
+        test_case = TestHermeticEnvironmentDeclaration()
+        prev_pins = os.environ.get("FACTORY_TOOL_PINS")
+        prev_npm = os.environ.get("NPM_TOKEN")
+        try:
+            os.environ["FACTORY_TOOL_PINS"] = "/tmp/bad-pins.yaml"
+            os.environ["NPM_TOKEN"] = fake_secret
+            with self.assertRaises(AssertionError) as ctx:
+                test_case.test_package_init_isolates_operator_config()
+            err_msg = str(ctx.exception)
+            self.assertNotIn(fake_secret, err_msg, "assertion message leaked ambient credential value!")
+            self.assertNotIn("NPM_TOKEN", err_msg, "assertion message leaked ambient environment keys!")
+            self.assertIn("FACTORY_TOOL_PINS", err_msg, "assertion message must name the offending key")
+        finally:
+            if prev_pins is None:
+                os.environ.pop("FACTORY_TOOL_PINS", None)
+            else:
+                os.environ["FACTORY_TOOL_PINS"] = prev_pins
+            if prev_npm is None:
+                os.environ.pop("NPM_TOKEN", None)
+            else:
+                os.environ["NPM_TOKEN"] = prev_npm
 
     def test_unscrubbed_module_resolves_synthetic_tool_under_host_pins(self):
         """Acceptance test (agents-v1a2 requirement 2):
@@ -114,7 +142,7 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
             "import os, unittest\n"
             "class TestEnv(unittest.TestCase):\n"
             "    def test_runner_environment(self):\n"
-            "        self.assertNotIn('FACTORY_TOOL_PINS', os.environ)\n"
+            "        self.assertFalse('FACTORY_TOOL_PINS' in os.environ, 'ambient FACTORY_TOOL_PINS must be scrubbed')\n"
             "        self.assertEqual(os.environ.get('FACTORY_ALLOW_UNPINNED_TOOLS'), '1')\n",
             encoding="utf-8"
         )
