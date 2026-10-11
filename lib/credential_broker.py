@@ -37,7 +37,12 @@ asymmetry: any value the engine can see, the attacker can see. So BOTH listeners
 authenticate by PEER IDENTITY first: a connection is accepted only when the kernel's
 own attribution of its peer puts that peer inside the dispatcher's process tree,
 narrowed to the ENGINE SESSION's tree the moment the engine exists
-(restrict_peer_root). The decision is ONE function (_peer_is_permitted); each
+(restrict_peer_root). The root is identified by (pid, process start time) and not by
+the pid alone — a pid is reused and a start time is not — so a recycled pid cannot
+stand in for the root it was narrowed to (agents-28nn round 11); reaching the broker
+still requires holding a connection the kernel attributes into that tree, and the
+identity decides which connections those are. The decision is ONE function
+(_peer_is_permitted); each
 transport only names the mechanism that supplies the peer's identity — the UNIX
 listener asks the connecting socket for the peer's credentials
 (getsockopt(SOL_SOCKET, SO_PEERCRED): pid/uid/gid recorded by the kernel at connect,
@@ -301,17 +306,60 @@ def _established_tcp_peer_pids(peer_port: int, proc_root: str = "/proc") -> Set[
     return pids
 
 
-def _pid_in_tree(pid: int, root: int, proc_root: str = "/proc", _limit: int = 128) -> bool:
+def _stat_start_time(stat: str) -> Optional[int]:
+    """Field 22 of a /proc/<pid>/stat line — the process's START TIME, in clock ticks
+    since boot — or None when the line is too short or malformed, which the callers treat
+    as "no identity" and refuse (agents-28nn round 11).
+
+    `comm` is the parenthesised second field and may itself contain spaces or a ')', so
+    every index is counted from the LAST ')' : field 3 (state) is fields[0] and field 22
+    (starttime) is fields[19] (proc(5))."""
+    close = stat.rfind(")")
+    if close < 0:
+        return None
+    fields = stat[close + 1:].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def _proc_start_time(pid: int, proc_root: str = "/proc") -> Optional[int]:
+    """The start time of the process holding `pid` NOW — captured from /proc, never
+    inferred (agents-28nn round 11). This is the half of the peer root's identity that a
+    pid cannot supply: the kernel reuses pids, so two different processes answer to one
+    pid at different times, and only the start time tells them apart. Returns None when
+    /proc/<pid>/stat cannot be read or parsed; the gate REFUSES every peer in that case
+    rather than falling back to trusting the pid, so an unestablishable identity fails
+    closed."""
+    try:
+        with open(f"{proc_root}/{pid}/stat", "r", encoding="ascii") as fh:
+            stat = fh.read()
+    except OSError:
+        return None
+    return _stat_start_time(stat)
+
+
+def _pid_in_tree(pid: int, root: Optional[int], root_start: Optional[int],
+                 proc_root: str = "/proc", _limit: int = 128) -> bool:
     """Whether `pid` is `root` or one of its descendants, by the kernel's ppid chain
     (agents-28nn round 8). A process cannot re-parent itself INTO a tree — ppid only
     ever moves toward init (orphaning) — so the chain is forgery-proof, and a
     pre-pass-spawned attacker that outlived the pre-pass reads as a child of init, not
-    of the engine. The walk reads only LIVE /proc state, so a reused pid answers for
-    the process that holds it now; a dead or unreadable link fails closed. `_limit`
-    bounds the walk against a corrupt chain."""
+    of the engine. The walk reads only LIVE /proc state, so a dead or unreadable link
+    fails closed, and a REUSED pid is refused: for a descendant because its ppid chain no
+    longer reaches the root, and for THE ROOT because its start time no longer matches
+    `root_start`, the value captured when the root was set (agents-28nn round 11 — the
+    root is the one link the chain cannot vouch for, so it is pinned to (pid, start
+    time); a root_start of None REFUSES). `_limit` bounds the walk against a corrupt
+    chain."""
     current = pid
     for _ in range(_limit):
         if current <= 1:
+            # A root of pid 1 is refused here before the root check below, and that is
+            # unreachable BY CONSTRUCTION: restrict_peer_root receives a spawned child's pid.
             return False
         try:
             with open(f"{proc_root}/{current}/stat", "r", encoding="ascii") as fh:
@@ -319,9 +367,12 @@ def _pid_in_tree(pid: int, root: int, proc_root: str = "/proc", _limit: int = 12
         except OSError:
             return False  # the process exited mid-check: nothing left to trust
         # Below the /proc read on purpose: a short-circuit before a verification is an
-        # unverified path — the root must not skip whether it still EXISTS.
+        # unverified path — the root must not skip whether it still EXISTS, nor WHICH
+        # process holds that pid. A PID IS REUSED AND A START TIME IS NOT, so the root is
+        # (pid, start time): a recycled pid has a different start time and is refused. An
+        # unreadable start time (None) refuses too, never a fall-back to trusting the pid.
         if current == root:
-            return True
+            return root_start is not None and _stat_start_time(stat) == root_start
         close = stat.rfind(")")  # comm is parenthesised and may contain spaces or ')'
         if close < 0:
             return False
@@ -375,7 +426,8 @@ def _peer_pids(connection: socket.socket, client_address) -> Set[int]:
     return set()
 
 
-def _peer_is_permitted(pids: Iterable[int], root: int) -> bool:
+def _peer_is_permitted(pids: Iterable[int], root: Optional[int],
+                       root_start: Optional[int]) -> bool:
     """THE decision every transport reaches (agents-28nn rounds 8-9): a connection is
     served only when the kernel attributes its peer to `root` or to a descendant of it.
 
@@ -383,10 +435,13 @@ def _peer_is_permitted(pids: Iterable[int], root: int) -> bool:
     the two listeners had two code paths and one of them answered "trusted" without
     checking anything; a second decision is a second place for that to happen. `root` is
     the permitted process root the broker was started with, which restrict_peer_root
-    narrows to the engine session; a root that is not a pid (never set) and an empty
-    attribution both REFUSE.
+    narrows to the engine session, and `root_start` is that process's start time
+    (agents-28nn round 11): the root is identified by the PAIR, because a pid alone can be
+    reused by an unrelated process and would otherwise stand in for the root. A root that
+    is not a pid (never set), a start time that could not be read, and an empty
+    attribution all REFUSE.
     """
-    return any(_pid_in_tree(pid, root) for pid in pids)
+    return any(_pid_in_tree(pid, root, root_start) for pid in pids)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -555,13 +610,16 @@ class _Handler(BaseHTTPRequestHandler):
         * a connection whose peer cannot be attributed yields no pids and is REFUSED,
           never assumed good: an unattributable peer on a host-visible socket is the
           attacker, not the engine;
-        * the decision is made ONCE, AT CONNECT, so the capability it grants is the
-          CONNECTION and not the process: the process that opened it may use it, and
-          anything that inherits or is handed that connected socket inherits the grant.
-          That suits an engine holding a long-lived client, and it is a STATED LIMIT OF
-          THE SESSION BOUNDARY rather than a hole — an engine able to pass its socket
-          could proxy the request itself, so a helper reaches nothing the engine could
-          not reach directly (pinned by the FD test).
+        * the kernel fixes the peer's ATTRIBUTION at connect (SO_PEERCRED) while the
+          GATE IS DECIDED PER REQUEST, not per connection: every GET and POST reaches
+          this decision again, and it is answered from LIVE /proc during request
+          processing (http.server reads all request headers before dispatching to
+          do_GET/do_POST). So the capability is not the CONNECTION — a socket served
+          once is refused on a later request once its peer's identity no longer holds,
+          and round 10 constructed a request IN FLIGHT as the root exited and it was
+          refused. A hand-off still works, because attribution follows the socket: the
+          process that opened it may use it, and anything it hands that socket to
+          reaches nothing the engine could not reach directly (pinned by the FD test).
 
         KEPT AS JUDGED (round 9), each recorded so a reader need not re-derive it:
         * the default root — this process's own pid — is safe because nothing untrusted
@@ -586,7 +644,8 @@ class _Handler(BaseHTTPRequestHandler):
         only narrows the window; the peer attack needs no window, only the engine
         running — so the identity check, not the lifetime, carries the weight."""
         return _peer_is_permitted(_peer_pids(self.connection, self.client_address),
-                                  self.server.peer_gate_root)
+                                  self.server.peer_gate_root,
+                                  self.server.peer_gate_root_start)
 
     def _broker(self, method: str) -> None:
         if not self._peer_is_trusted():
@@ -699,8 +758,17 @@ class _PeerGated:
     "trusted" without checking anything, so a new transport must now take this attribute
     or fail in a way no reader can mistake for a review. None is NOT an exemption — a
     root that is not a pid refuses every peer (see _peer_is_permitted) — and start()
-    always sets the dispatcher's own pid."""
+    always sets the dispatcher's own pid.
+
+    THE ROOT IS A PAIR, NEVER A PID ALONE (agents-28nn round 11): `peer_gate_root` is the
+    pid and `peer_gate_root_start` is that process's start time, read from /proc when the
+    root is set, and the gate requires BOTH to match. A pid is reused by the kernel and a
+    start time is not, so a pid on its own cannot say which process holds it; any site
+    that sets `peer_gate_root` must set `peer_gate_root_start` from that same live
+    process, and a start time that could not be read (None) refuses every peer rather
+    than falling back to trusting the pid."""
     peer_gate_root: Optional[int] = None
+    peer_gate_root_start: Optional[int] = None
 
 
 class _BrokerServer(_PeerGated, ThreadingHTTPServer):
@@ -845,7 +913,10 @@ class CredentialBroker:
         # (the dispatcher's; the engine session it is about to spawn is a child of it),
         # and the dispatcher narrows it to the engine session's own pid the moment the
         # engine exists (restrict_peer_root, via run_station_command's on_spawn).
+        # Round 11: the default root is pinned the same way a narrowed one is — the pid
+        # AND the start time of this process, read live here.
         self._server.peer_gate_root = os.getpid()
+        self._server.peer_gate_root_start = _proc_start_time(os.getpid())
         self._thread = threading.Thread(target=self._server.serve_forever,
                                         name="credential-broker", daemon=True)
         self._thread.start()
@@ -864,10 +935,19 @@ class CredentialBroker:
         wrap, or the command itself), and the in-sandbox net_forward relay is INSIDE
         that tree — the wrap's tree is wrap -> relay -> engine — so narrowing serves the
         run's own relay, while the socket file on the host filesystem stops being
-        reachable by everything else."""
+        reachable by everything else.
+
+        The root is pinned to (pid, START TIME) as well as named by pid (agents-28nn
+        round 11): the pid alone is not an identity, because the kernel reuses pids, so a
+        root that exits and whose pid is later handed to an unrelated process would
+        otherwise be found "alive" by the gate. The start time is captured HERE, from the
+        live process, at the moment the root is established. If it cannot be read, the
+        gate fails CLOSED: the start time is left as None, which refuses every peer (see
+        _pid_in_tree) rather than falling back to trusting the pid."""
         server = self._server
         if server is not None:
             server.peer_gate_root = pid
+            server.peer_gate_root_start = _proc_start_time(pid)
 
     def base_url(self, provider: str) -> str:
         """The engine-side base URL for `provider` (points at this broker). In UNIX mode
