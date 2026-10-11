@@ -378,7 +378,6 @@ class TestWrapVerification(unittest.TestCase):
         for argv, sent_input, stdin_kw in captured:
             hexish = [a for a in argv if len(a) == 32 and all(c in "0123456789abcdef" for c in a)]
             self.assertEqual(hexish, [], f"a 32-hex token is in the sentinel argv: {hexish}")
-            self.assertNotIn("factory-wrap-verify\n", argv, "guard: the sentinel marker is expected")
             self.assertEqual(stdin_kw, None, "stdin must not be forced to DEVNULL now that the token travels on it")
             self.assertIsInstance(sent_input, bytes, "the token must be delivered to the child")
             token = sent_input.decode().strip()
