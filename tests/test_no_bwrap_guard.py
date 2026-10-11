@@ -19,11 +19,13 @@ from pathlib import Path
 # environment was not hermetic. See tests/hermetic_env.py.
 #
 # THE ROOT INSERT MUST COME FIRST (agents-21ap review P2): `from tests import ...` needs the
-# repo root on sys.path, and in the other nine modules that was already true before line 1
-# because they insert it for their own reasons. Here it was not, so the bare import broke the
-# documented direct-run entry point - `python3 tests/test_no_bwrap_guard.py` failed with
-# ModuleNotFoundError while `-m unittest` was fine. The gate and CI use -m unittest, so this
-# was a dev entry point only, which is exactly the kind of breakage that goes unnoticed.
+# repo root on sys.path, so this module now puts it there before the import. THIS MODULE'S
+# BREAK WAS NEWLY INTRODUCED BY THIS BEAD - `python3 tests/test_no_bwrap_guard.py` worked
+# before it and raised ModuleNotFoundError after, while `-m unittest` stayed fine, which is
+# how it went unnoticed until review. The reviewer also measured the justifying claim I first
+# wrote here ("in the other nine modules that was already true") and found it wrong: two of
+# the ten do not insert the repo root at all and are independently unrunnable as scripts, so
+# the honest statement is the narrow one - this module regressed, and it is fixed.
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

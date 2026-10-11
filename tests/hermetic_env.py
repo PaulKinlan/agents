@@ -41,7 +41,7 @@ THAT ATTRIBUTION. The pre-fix tree with FACTORY_TOOL_PINS UNSET is `Ran 77 ... O
 reproduced only by deleting THIS module's opt-out line. So the truth is simpler and
 narrower: these modules ALREADY installed the opt-out themselves with
 os.environ.setdefault(...) before this helper existed (test_sandbox.py:20,
-test_factory_core.py:8, test_pi_keyless_broker.py:30, all citing agents-7bj), and
+test_factory_core.py:8, test_pi_keyless_broker.py:30), and
 what this module does is REMOVE the operator's pins file and then PUT THAT OPT-OUT
 BACK, because the removal would otherwise take it with it. The design conclusion is
 unchanged - a test must state its environment rather than inherit one - but the
