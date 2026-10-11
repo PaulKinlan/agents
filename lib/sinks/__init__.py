@@ -21,7 +21,7 @@ SINKS: Dict[str, Sink] = {sink.name: sink for sink in (
     FileSink(), BeadsSink(), GitHubIssuesSink(), CommandSink(),
 )}
 
-# Legacy spellings: a spec containing one of these means exactly this set (as before).
+# Legacy spellings: an alias expands in-place to its member sinks (agents-3ngh).
 ALIASES = {"both": ("beads",), "all": ("beads",)}
 
 # Sink discovery from target guidance, in this order (AGENTS.md "Sinks").
