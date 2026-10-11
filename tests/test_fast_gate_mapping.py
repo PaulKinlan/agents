@@ -32,6 +32,20 @@ def run_fast_gate(changed_files: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
 
 
+def run_fast_gate_with_base(base: str) -> subprocess.CompletedProcess:
+    """Execute tools/fast-gate.sh resolving the DELTA ITSELF against `base` (no GIT_CHANGED).
+
+    The GIT_CHANGED override short-circuits the delta resolution, so it cannot exercise
+    the base/ref handling at all - which is why the hole this covers survived a suite that
+    used GIT_CHANGED everywhere.
+    """
+    env = os.environ.copy()
+    env.pop("GIT_CHANGED", None)
+    env["GIT_BASE"] = base
+    env["FAST_GATE_DRY_RUN"] = "1"
+    return subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+
+
 def resolve_fast_gate(changed_files: list[str]) -> list[str]:
     """Execute tools/fast-gate.sh with simulated changed files and extract mapped suites."""
     res = run_fast_gate(changed_files)
@@ -251,6 +265,45 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0, "unmatched file masked by a mapped sibling (agents-9nir)")
         self.assertIn("install.sh", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
+
+    def test_an_unresolvable_base_is_an_error_not_an_empty_delta(self):
+        """A base that is not a commit must FAIL LOUDLY, never fall back to the smoke subset (agents-c1z0 P1).
+
+        The delta used to be resolved with `git diff --name-only "$BASE"...HEAD 2>/dev/null || true`.
+        `git diff` with an unresolvable base or no merge base exits non-zero and prints nothing
+        on stdout, so "I could not determine the delta" reached the empty-change-set path, took
+        the bounded smoke fallback and reported PASS for a suite unrelated to the change. On the
+        same tree a VALID base produced a named refusal. A fallback that swallows an error must
+        produce a DISTINCT value, so this is an error and it fails is the only honest outcome.
+        """
+        for base in ("origin/main-does-not-exist", "refs/heads/also-missing"):
+            with self.subTest(base=base):
+                res = run_fast_gate_with_base(base)
+                self.assertNotEqual(res.returncode, 0, f"unresolvable base '{base}' must fail loudly (agents-c1z0)")
+                self.assertIn(base, res.stderr, "the failure must name the base it could not resolve")
+                self.assertIn("ERROR", res.stderr, "the message must say this is an error, not an empty delta")
+
+    def test_a_real_base_with_no_delta_still_falls_back_quietly(self):
+        """A base that IS a commit and a delta that is genuinely empty must still resolve (agents-c1z0).
+
+        The guard must not over-correct: the smoke fallback is legitimate for a real base with
+        no delta, and the docs/config-only ignore path depends on it. HEAD is a commit and
+        HEAD...HEAD is empty by construction, so this pins the distinction - ERRORS are refused,
+        ABSENCE OF A DELTA is not.
+        """
+        res = run_fast_gate_with_base("HEAD")
+        self.assertEqual(res.returncode, 0, f"an empty delta against a real base must not fail: {res.stderr}")
+        self.assertEqual(res.stdout.strip(), "", "an empty delta must resolve to no suites (the smoke fallback applies to the real run)")
+
+    def test_a_real_base_with_a_real_delta_resolves_that_delta(self):
+        """The same code path, with an actual delta against a real base, must map the real files (agents-c1z0).
+
+        This is the third arm of the construction: the guard must not have replaced the
+        resolution with a constant. `HEAD~1` is a real commit on any checkout with history.
+        """
+        res = run_fast_gate_with_base("HEAD~1")
+        self.assertEqual(res.returncode, 0, f"a real base with a real delta must resolve: {res.stderr}")
+        self.assertNotIn("is not a commit", res.stderr, "HEAD~1 must resolve as a commit")
 
     def test_fast_gate_execution_reports_passed_terminal_signal_on_success(self):
         """tools/fast-gate.sh must leave an explicit 'fast-gate: passed:' terminal signal on success (agents-7zts)."""
