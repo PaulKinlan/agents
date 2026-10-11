@@ -39,9 +39,25 @@ own attribution of its peer puts that peer inside the dispatcher's process tree,
 narrowed to the ENGINE SESSION's tree the moment the engine exists
 (restrict_peer_root). The root is identified by (pid, process start time) and not by
 the pid alone — a pid is reused and a start time is not — so a recycled pid cannot
-stand in for the root it was narrowed to (agents-28nn round 11); reaching the broker
-still requires holding a connection the kernel attributes into that tree, and the
-identity decides which connections those are. The decision is ONE function
+stand in for the root it was narrowed to (agents-28nn round 11).
+
+THE IDENTITY CHECK IS THE ATTRIBUTION, NOT A DECORATION BESIDE ONE (agents-up8y).
+The kernel supplies facts about a connection — SO_PEERCRED gives the pid/uid/gid it
+recorded at connect, and /proc/net/tcp gives an inode whose owner is a pid — but a
+fact is not an attribution: the kernel will report whatever pid actually opened the
+socket, including an attacker's, and it reports the pid WITHOUT saying whether that
+pid is the engine, something the engine spawned, or a stranger that happens to sit
+inside the permitted tree. The permitted tree is not a passive filter applied after
+the fact either: _peer_is_permitted is what TURNS the kernel's pid into "this is the
+engine session", and nothing else in the broker does that. That is why the
+(pid, start time) pin is load-bearing rather than a hardening detail. An attacker
+opens a NEW connection, so the kernel attributes it to the ATTACKER's pid, and if
+that pid were reused from a root whose entry has since gone the pin is the only
+thing standing between a recycled number and a connection accepted as the engine —
+the round-11 reviewer settled that question against the earlier reading that a
+reused pid alone was insufficient to matter. So: reaching the broker requires holding
+a connection the kernel attributes into that tree, AND the identity check is what
+decides whether the attribution means anything. The decision is ONE function
 (_peer_is_permitted); each
 transport only names the mechanism that supplies the peer's identity — the UNIX
 listener asks the connecting socket for the peer's credentials
