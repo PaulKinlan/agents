@@ -5,6 +5,7 @@ with no network and no real credential: they assert what the broker FORWARDS (th
 reconstructed upstream URL and the injected real key) and what it RETURNS to the
 engine (the streamed body, with the real key never appearing on the engine side).
 """
+import array
 import http.client
 import io
 import os
@@ -114,6 +115,13 @@ class BrokerTestBase(unittest.TestCase):
         self._patcher = mock.patch.object(http.client, "HTTPSConnection", _FakeHTTPSConnection)
         self._patcher.start()
         self.addCleanup(self._patcher.stop)
+
+    def _probe_script(self, tmpdir):
+        # _PEER_PROBE drives every subprocess the peer-gate suites spawn (TCP arms in
+        # TestPeerIdentityGate, UNIX arms in TestUnixPeerIdentityGate).
+        script = Path(tmpdir) / "peer_probe.py"
+        script.write_text(_PEER_PROBE, encoding="utf-8")
+        return str(script)
 
     def start_broker(self, credentials):
         broker = cb.CredentialBroker(credentials)
@@ -901,7 +909,7 @@ class TestBodyBoundAndBudget(BrokerTestBase):
 #                 process reads the placeholder AND the port from the victim's
 #                 /proc/<pid>/environ and presents them to the broker
 _PEER_PROBE = r'''
-import os, subprocess, sys, time
+import array, http.client, os, socket, subprocess, sys, time
 import urllib.error, urllib.request
 
 def call(env):
@@ -917,6 +925,33 @@ def call(env):
         e.read()
         print("STATUS", e.code, flush=True)
 
+class _UnixConnection(http.client.HTTPConnection):
+    """HTTP over the broker's UNIX socket, the way the in-sandbox relay dials it."""
+    def __init__(self, path):
+        super().__init__("localhost", timeout=15)
+        self._path = path
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
+
+def unix_call(env):
+    conn = _UnixConnection(env["FACTORY_BROKER_SOCKET"])
+    try:
+        conn.request("POST", "/proxy/anthropic/v1/messages", body=b'{"probe": true}',
+                     headers={"x-api-key": env["ANTHROPIC_API_KEY"],
+                              "Content-Type": "application/json"})
+        resp = conn.getresponse()
+        resp.read()
+        print("STATUS", resp.status, flush=True)
+    finally:
+        conn.close()
+
+def victim_env(pid):
+    with open("/proc/" + str(pid) + "/environ", "rb") as fh:
+        raw = dict(kv.split(b"=", 1) for kv in fh.read().split(b"\0") if b"=" in kv)
+    return {k.decode(): v.decode() for k, v in raw.items()}
+
 mode = sys.argv[1]
 if mode == "sleep":
     time.sleep(60)
@@ -928,9 +963,7 @@ elif mode == "spawn-call":
     sys.stdout.write(res.stdout)
     sys.stdout.flush()
 elif mode == "steal":
-    with open("/proc/" + sys.argv[2] + "/environ", "rb") as fh:
-        env = dict(kv.split(b"=", 1) for kv in fh.read().split(b"\0") if b"=" in kv)
-    call({k.decode(): v.decode() for k, v in env.items()})
+    call(victim_env(sys.argv[2]))
 elif mode == "spawn-orphan":
     # The lifetime probe's engine stand-in: fork a descendant that waits out THIS
     # process's death before dialling, name it, then stay alive as the gate's root.
@@ -947,6 +980,43 @@ elif mode == "orphan-call":
         time.sleep(0.1)
     time.sleep(0.5)  # let the re-parent settle before the dial
     call(os.environ)
+elif mode == "unix-call":
+    # The session's own dialer on the UNIX path: this process, with the placeholder and
+    # the socket path the dispatcher put in its environ.
+    unix_call(os.environ)
+elif mode == "unix-spawn-call":
+    res = subprocess.run([sys.executable, os.path.abspath(__file__), "unix-call"],
+                         capture_output=True, text=True, timeout=60)
+    sys.stdout.write(res.stdout)
+    sys.stdout.flush()
+elif mode == "steal-unix":
+    # agents-28nn round 9, the reviewer's construction verbatim in shape: a same-uid
+    # HOST process reads the socket path AND the placeholder out of the victim's environ
+    # and dials the host UNIX socket DIRECTLY — no sandbox, no relay.
+    unix_call(victim_env(sys.argv[2]))
+elif mode == "spawn-orphan-unix":
+    # The pre-pass attacker shape on the UNIX path: a descendant that outlives its
+    # spawner and dials after re-parenting, holding the stolen placeholder.
+    child = subprocess.Popen([sys.executable, os.path.abspath(__file__),
+                              "orphan-unix-call", str(os.getpid())])
+    print(f"ORPHAN {child.pid}", flush=True)
+    time.sleep(60)
+elif mode == "orphan-unix-call":
+    parent = int(sys.argv[2])
+    while os.getppid() == parent:
+        time.sleep(0.1)
+    time.sleep(0.5)
+    unix_call(os.environ)
+elif mode == "unix-handoff":
+    # Connect to the broker, hand the CONNECTED socket to this process's parent over the
+    # inherited socketpair fd, then hold the connection open.
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.connect(os.environ["FACTORY_BROKER_SOCKET"])
+    sender = socket.socket(fileno=int(sys.argv[2]))
+    sender.sendmsg([b"H"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                             array.array("i", [conn.fileno()]).tobytes())])
+    print("SENT", flush=True)
+    time.sleep(60)
 '''
 
 
@@ -968,11 +1038,6 @@ class TestPeerIdentityGate(BrokerTestBase):
     happens, the round-7 open proxy exactly; with the gate refusing EVERY peer, the
     two serving tests go red.
     """
-
-    def _probe_script(self, tmpdir):
-        script = Path(tmpdir) / "peer_probe.py"
-        script.write_text(_PEER_PROBE, encoding="utf-8")
-        return str(script)
 
     def _engine_env(self, broker):
         # The shape the dispatcher hands the engine: placeholder under the key var,
@@ -1081,14 +1146,228 @@ class TestPeerIdentityGate(BrokerTestBase):
                 except (ProcessLookupError, UnboundLocalError):
                     pass
 
-    def test_the_unix_listener_carries_no_peer_gate(self):
-        # The sandboxed path's boundary is the netns; the relay is an ANCESTOR of the
-        # engine, so a descendant check there would refuse the run's own traffic.
+    def test_the_unix_listener_carries_the_peer_gate_too(self):
+        # agents-28nn round 9 (the verdict's P0): the UNIX listener used to carry NO
+        # peer root at all — the gate returned True for it on a docstring's assumption
+        # that the netns protected the socket file, which is created on the host
+        # filesystem. It now carries the same root and the same decision as TCP; the
+        # attack and the served case are constructed in TestUnixPeerIdentityGate below.
         broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
         with tempfile.TemporaryDirectory() as tmpdir:
             broker.start(unix_path=os.path.join(tmpdir, "broker.sock"), child_port=8384)
             self.addCleanup(broker.stop)
-            self.assertFalse(hasattr(broker._server, "peer_gate_root"))
+            self.assertEqual(broker._server.peer_gate_root, os.getpid())
+
+
+class TestUnixPeerIdentityGate(BrokerTestBase):
+    """agents-28nn round 9 (the verdict's P0): the UNIX listener — the SANDBOXED path —
+    carried no peer check at all. It was exempted in a docstring that assumed the
+    sandbox's network namespace protected it, but the socket file is created on the HOST
+    filesystem (a per-run /tmp directory, mode 0700) before its directory is bind-mounted
+    into the sandbox, so a same-uid HOST process can read the placeholder out of the
+    engine session's environ, read the socket path, dial the host socket directly and
+    reach the upstream hop (the reviewer's construction got a 502 back).
+
+    These tests run the REAL broker on a REAL UNIX socket with REAL subprocesses and the
+    reviewer's own attack shape — no mock broker and no mock socket; only the provider
+    upstream is faked, so "reached the upstream hop" is observable. Both directions are
+    pinned, because a fix that refuses everything is a lockout rather than a fix: the host
+    attacker is refused BEFORE the secret is consulted, and the session's own dialer (the
+    in-sandbox relay that carries the engine's traffic) is still served.
+
+    MUTATION PROOF (performed, not merely asserted): with _peer_is_trusted reverted to
+    round 8's form — the root-is-None no-op — the attacker test below goes RED: the
+    attacker authenticates with the stolen placeholder and the (faked) upstream hop
+    happens. Restored, it is refused with no hop.
+    """
+
+    def _broker_on_unix(self, tmpdir):
+        sock = os.path.join(tmpdir, "broker.sock")
+        broker = cb.CredentialBroker({"anthropic": REAL["anthropic"]})
+        broker.start(unix_path=sock, child_port=8384)
+        self.addCleanup(broker.stop)
+        return broker, sock
+
+    def _session_env(self, broker, sock):
+        # The shape the dispatcher hands a sandboxed engine session: the per-run
+        # placeholder under an engine key var, plus the broker's socket path (what the
+        # in-sandbox relay dials) — both readable by ANY same-uid process through
+        # /proc/<pid>/environ, which is why knowledge cannot be the boundary here.
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "ANTHROPIC_API_KEY": broker.placeholder,
+                "FACTORY_BROKER_SOCKET": sock}
+
+    def test_the_unix_listener_is_peer_gated_from_birth(self):
+        # Before any narrowing the gate serves the tree of the process that started the
+        # broker (the dispatcher's) — the dispatcher's own process IS the root, so an
+        # in-process dial is served, exactly as on the TCP listener.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            broker, sock = self._broker_on_unix(tmpdir)
+            self.assertEqual(broker._server.peer_gate_root, os.getpid())
+            status, _, _ = _unix_client_request(
+                sock, "POST", "/proxy/anthropic/v1/messages",
+                headers={"x-api-key": broker.placeholder, "content-length": "2"},
+                body=b"{}")
+            self.assertEqual(status, 200)
+
+    def test_restrict_peer_root_narrows_the_unix_listener_too(self):
+        # The narrowing is what makes the UNIX gate load-bearing: the moment the engine
+        # session exists, the gate serves THAT session's tree. A dispatcher descendant
+        # that is outside the session — the shape that beat this broker twice — is
+        # refused (403) even though it holds the placeholder and the socket path.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            broker, sock = self._broker_on_unix(tmpdir)
+            session = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            try:
+                broker.restrict_peer_root(session.pid)
+                self.assertEqual(broker._server.peer_gate_root, session.pid)
+                status, _, _ = _unix_client_request(
+                    sock, "POST", "/proxy/anthropic/v1/messages",
+                    headers={"x-api-key": broker.placeholder, "content-length": "2"},
+                    body=b"{}")
+                self.assertEqual(status, 403)
+                self.assertEqual(_FakeHTTPSConnection.calls, [])
+            finally:
+                session.kill()
+                session.wait()
+
+    def test_a_same_uid_host_attacker_dialling_the_unix_socket_is_refused(self):
+        # THE CONSTRUCTED ATTACK (agents-28nn round 9). A same-uid HOST process — a child
+        # of the dispatcher, outside the engine session — reads the socket path and the
+        # placeholder out of the session's /proc/<pid>/environ and dials the host UNIX
+        # socket directly with http.client. Round 9's verdict got a 502 from exactly
+        # this shape: past the gate and onto the wire. It must now be refused BEFORE the
+        # secret is consulted and BEFORE any upstream hop, and the test asserts the hop
+        # did not happen rather than only the status code.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker, sock = self._broker_on_unix(tmpdir)
+            victim = subprocess.Popen([sys.executable, script, "sleep"],
+                                      env=self._session_env(broker, sock))
+            try:
+                broker.restrict_peer_root(victim.pid)
+                res = subprocess.run([sys.executable, script, "steal-unix", str(victim.pid)],
+                                     capture_output=True, text=True, timeout=60)
+                self.assertIn("STATUS 403", res.stdout,
+                              f"attacker output: {res.stdout} {res.stderr}")
+                self.assertEqual(_FakeHTTPSConnection.calls, [],
+                                 "the refused attacker must not cause an upstream hop")
+            finally:
+                victim.kill()
+                victim.wait()
+
+    def test_the_engine_sessions_own_dialer_is_served_on_the_unix_socket(self):
+        # The positive half, and the reason the fix is a gate rather than a lockout. The
+        # process that dials the UNIX socket in production is the in-sandbox net_forward
+        # relay, which lives INSIDE the engine session's tree (the wrap's tree is
+        # wrap -> relay -> engine), so a descendant dial is served and the real key is
+        # injected. Round 8 exempted this listener on the claim that the relay is an
+        # ANCESTOR of the engine and a tree check would refuse the run's own traffic;
+        # the dialer here IS a descendant of the session root, which is what the wrap's
+        # anatomy actually gives, so the claim was wrong and the exemption was the hole.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker, sock = self._broker_on_unix(tmpdir)
+            session = subprocess.Popen([sys.executable, script, "unix-spawn-call"],
+                                       env=self._session_env(broker, sock),
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True)
+            try:
+                broker.restrict_peer_root(session.pid)
+                out, err = session.communicate(timeout=60)
+                self.assertIn("STATUS 200", out, f"session output: {out} {err}")
+                self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
+                self.assertEqual(_FakeHTTPSConnection.calls[0]["headers"]["x-api-key"],
+                                 REAL["anthropic"])
+            finally:
+                session.kill()
+                session.wait()
+
+    def test_a_prepass_spawned_orphan_is_refused_on_the_unix_socket(self):
+        # coord's second round-9 probe, pinned rather than assumed: is a pre-pass process
+        # already inside the root the gate enforces? The pre-pass is reaped before the
+        # broker starts (run_station_command blocks on it), and a process that outlives
+        # its spawner RE-PARENTS AWAY from the spawner's tree (to init), so the DEFAULT
+        # root — the dispatcher's own pid — does not cover it. Asserted with no narrowing
+        # applied at all, which is the strongest form of the claim: even the widest root
+        # this broker ever has refuses the pre-pass attacker shape.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker, sock = self._broker_on_unix(tmpdir)
+            prepass = subprocess.Popen([sys.executable, script, "spawn-orphan-unix"],
+                                       env=self._session_env(broker, sock),
+                                       stdout=subprocess.PIPE, text=True)
+            try:
+                first = prepass.stdout.readline()
+                self.assertTrue(first.startswith("ORPHAN "), first)
+                orphan_pid = int(first.split()[1])
+                prepass.kill()
+                prepass.wait(timeout=10)
+                # The orphan holds the pipe's write end; read() returns when it exits.
+                out = prepass.stdout.read()
+                self.assertIn("STATUS 403", out, f"orphaned pre-pass output: {out}")
+                self.assertEqual(_FakeHTTPSConnection.calls, [],
+                                 "the refused orphan must not cause an upstream hop")
+            finally:
+                prepass.kill()
+                prepass.wait()
+                prepass.stdout.close()
+                try:
+                    os.kill(orphan_pid, signal.SIGKILL)
+                except (ProcessLookupError, UnboundLocalError):
+                    pass
+
+    def test_a_connection_handed_to_an_out_of_tree_process_keeps_its_grant(self):
+        # THE STATED LIMIT OF THE SESSION BOUNDARY (agents-28nn round 9, judged and kept
+        # by the round-9 verdict rather than closed): the decision is made ONCE, AT
+        # CONNECT, so the capability it grants is the CONNECTION, not the process. The
+        # connector here is inside the permitted tree; the process that USES the
+        # connection is this test process, which is NOT in it. The request is served —
+        # and that is the right shape for an engine holding a long-lived client, not a
+        # hole: an engine able to pass its socket could proxy the request itself, so a
+        # helper reaches nothing the engine could not reach directly. Pinned by
+        # behaviour so the next reader inherits a fact rather than a sentence.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker, sock = self._broker_on_unix(tmpdir)
+            handoff_parent, handoff_child = socket.socketpair()
+            self.addCleanup(handoff_parent.close)
+            self.addCleanup(handoff_child.close)
+            connector = subprocess.Popen(
+                [sys.executable, script, "unix-handoff", str(handoff_child.fileno())],
+                env=self._session_env(broker, sock),
+                pass_fds=[handoff_child.fileno()],
+                stdout=subprocess.PIPE, text=True)
+            try:
+                broker.restrict_peer_root(connector.pid)
+                self.assertTrue(connector.stdout.readline().startswith("SENT"))
+                handoff_parent.settimeout(15)
+                _msg, ancdata, _flags, _addr = handoff_parent.recvmsg(
+                    1, socket.CMSG_LEN(array.array("i").itemsize))
+                received = array.array("i")
+                received.frombytes(ancdata[0][2])
+                conn = socket.socket(fileno=received[0])
+                self.addCleanup(conn.close)
+                conn.settimeout(15)
+                conn.sendall(
+                    b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"x-api-key: " + broker.placeholder.encode() + b"\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 2\r\n\r\n{}")
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                self.assertIn(b"200", data.split(b"\r\n")[0],
+                              f"the inherited connection must keep its grant: {data[:120]!r}")
+                self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
+            finally:
+                connector.kill()
+                connector.wait()
+                connector.stdout.close()
 
 
 class TestPeerIdentityHelpers(unittest.TestCase):
@@ -1149,6 +1428,34 @@ class TestPeerIdentityHelpers(unittest.TestCase):
         port = probe.getsockname()[1]
         probe.close()
         self.assertEqual(cb._established_tcp_peer_pids(port), set())
+
+    def test_unix_peer_pids_reads_the_kernels_own_credential(self):
+        # SO_PEERCRED, the UNIX path's mechanism: the kernel records the peer's pid at
+        # connect, in the calling process's pid namespace — here both ends are this test
+        # process, so it reports this pid, with no scan and no parsing.
+        near, far = socket.socketpair()
+        try:
+            self.assertEqual(cb._unix_peer_pids(near), {os.getpid()})
+            self.assertEqual(cb._unix_peer_pids(far), {os.getpid()})
+        finally:
+            near.close()
+            far.close()
+
+    def test_peer_pids_fails_closed_for_an_unattributable_connection(self):
+        # The transport switch is a mechanism choice, never an exemption: an address
+        # family the broker does not know yields NO pids, which the decision refuses.
+        class _UnknownTransport:
+            def getsockopt(self, *args):  # pragma: no cover - must not be reached
+                raise AssertionError("an unknown transport must not be attributed")
+
+        self.assertEqual(cb._peer_pids(_UnknownTransport(), ("127.0.0.1", 1)), set())
+
+    def test_peer_is_permitted_refuses_an_empty_attribution_and_a_root_that_is_not_a_pid(self):
+        # The deleted no-op's replacement DIRECTION: no attribution is a refusal, and a
+        # root that is not a pid (a listener that somehow never got one) refuses every
+        # peer rather than trusting it — the gate refuses, never opens.
+        self.assertFalse(cb._peer_is_permitted(set(), os.getpid()))
+        self.assertFalse(cb._peer_is_permitted({os.getpid()}, None))
 
 
 if __name__ == "__main__":
