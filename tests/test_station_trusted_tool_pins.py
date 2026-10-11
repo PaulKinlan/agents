@@ -236,14 +236,22 @@ class TestStationTrustedToolPins(unittest.TestCase):
         real_git = shutil.which("git")
         if not real_git:
             self.skipTest("git is not installed on this host")
+        real_bwrap = shutil.which("bwrap")
+        if not real_bwrap:
+            self.skipTest("bwrap is not installed on this host")
 
         # Test controls its own fixture under $HOME (which bubblewrap tmpfs hides by default).
-        # We write a valid pins file for git into $HOME, proving sandbox_command explicitly
-        # mounts the host pins file read-only over the sandbox's /home tmpfs.
+        # We write a valid pins file for git and bwrap into $HOME, proving sandbox_command explicitly
+        # mounts the host pins file read-only over the sandbox's /home tmpfs while authenticating bwrap.
         git_sha = hashlib.sha256(Path(real_git).read_bytes()).hexdigest()
+        bwrap_sha = hashlib.sha256(Path(real_bwrap).read_bytes()).hexdigest()
         home_pins = Path.home() / f".test-pins-{os.getpid()}.yaml"
         try:
-            home_pins.write_text(f"git:\n  path: {real_git}\n  sha256: {git_sha}\n", encoding="utf-8")
+            home_pins.write_text(
+                f"git:\n  path: {real_git}\n  sha256: {git_sha}\n"
+                f"bwrap:\n  path: {real_bwrap}\n  sha256: {bwrap_sha}\n",
+                encoding="utf-8"
+            )
         except OSError as e:
             self.skipTest(f"cannot create test pins fixture under $HOME: {e}")
 
