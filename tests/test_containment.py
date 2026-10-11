@@ -949,6 +949,7 @@ class TestAdapters(unittest.TestCase):
             input="   \n", capture_output=True, text=True, timeout=60,
             env={"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
                  "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+                 "DEEPSEEK_BASE_URL": "http://127.0.0.1:9",
                  "DEEPSEEK_API_KEY": "dummy-key"},
         )
         self.assertNotEqual(res.returncode, 0, res.stderr + res.stdout)
@@ -997,6 +998,51 @@ class TestAdapters(unittest.TestCase):
             content = output_file.read_text(encoding="utf-8", errors="ignore")
             self.assertNotIn("MALICIOUS VERDICT", content)
             self.assertNotIn("MALICIOUS PYTHON", content)
+
+    def test_deepseek_refuses_when_base_url_is_unconfigured(self):
+        """agents-sjgq: DEEPSEEK_BASE_URL must not fall back to a hardcoded endpoint;
+        an unconfigured endpoint must refuse closed with exit 2 and not send credentials."""
+        res = subprocess.run(
+            ["bash", str(ROOT / "lib" / "adapters" / "deepseek.sh"), "probe",
+             str(self.target), str(self.skill), str(self.tmp / "run")],
+            input="valid prompt with scanner data\n", capture_output=True, text=True, timeout=60,
+            env={"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
+                 "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+                 "DEEPSEEK_API_KEY": "sk-real-operator-key"},
+        )
+        self.assertEqual(res.returncode, 2, res.stderr + res.stdout)
+        self.assertIn("DEEPSEEK_BASE_URL is not configured", res.stderr)
+        self.assertNotIn("sk-real-operator-key", res.stderr + res.stdout)
+
+    def test_deepseek_refuses_when_base_url_is_unusable(self):
+        """agents-sjgq: an unusable base URL (not starting with http:// or https://)
+        must refuse closed with exit 2."""
+        for bad_url in ("ftp://unsupported", "invalid-no-scheme", "://missing-scheme"):
+            res = subprocess.run(
+                ["bash", str(ROOT / "lib" / "adapters" / "deepseek.sh"), "probe",
+                 str(self.target), str(self.skill), str(self.tmp / "run")],
+                input="valid prompt with scanner data\n", capture_output=True, text=True, timeout=60,
+                env={"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
+                     "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+                     "DEEPSEEK_BASE_URL": bad_url,
+                     "DEEPSEEK_API_KEY": "sk-real-operator-key"},
+            )
+            self.assertEqual(res.returncode, 2, res.stderr + res.stdout)
+            self.assertIn("is unusable (must begin with http:// or https://)", res.stderr)
+
+    def test_deepseek_accepts_factory_default_deepseek_base_url(self):
+        """agents-sjgq: FACTORY_DEFAULT_DEEPSEEK_BASE_URL provides explicit dev/test endpoint override."""
+        res = subprocess.run(
+            ["bash", str(ROOT / "lib" / "adapters" / "deepseek.sh"), "probe",
+             str(self.target), str(self.skill), str(self.tmp / "run")],
+            input="valid prompt with scanner data\n", capture_output=True, text=True, timeout=60,
+            env={"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
+                 "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
+                 "FACTORY_DEFAULT_DEEPSEEK_BASE_URL": "http://127.0.0.1:9",
+                 "DEEPSEEK_API_KEY": "sk-test-key"},
+        )
+        self.assertEqual(res.returncode, 1, res.stderr + res.stdout)
+        self.assertIn("DeepSeek API Request Error", res.stderr + res.stdout)
 
     def test_claude_enforces_a_declared_usd_cap(self):
         """agents-js7: budget.max_usd reaches the engine as --max-budget-usd."""

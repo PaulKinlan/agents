@@ -31,6 +31,23 @@ fi
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
 
+# agents-sjgq: The base URL must be an explicit, operator-supplied configuration.
+# Falling back to a hardcoded default (e.g. deepseek.int.exe.xyz) when DEEPSEEK_API_KEY
+# is set would send the operator's real key to a destination they never chose.
+# Refuse closed if neither DEEPSEEK_BASE_URL nor FACTORY_DEFAULT_DEEPSEEK_BASE_URL is set.
+BASE_URL="${DEEPSEEK_BASE_URL:-${FACTORY_DEFAULT_DEEPSEEK_BASE_URL:-}}"
+if [ -z "$BASE_URL" ]; then
+  echo "[deepseek adapter] Error: DEEPSEEK_BASE_URL is not configured; refusing to send API requests to an unconfigured endpoint (set DEEPSEEK_BASE_URL or FACTORY_DEFAULT_DEEPSEEK_BASE_URL)." >&2
+  exit 2
+fi
+case "$BASE_URL" in
+  http://*|https://*) ;;
+  *)
+    echo "[deepseek adapter] Error: DEEPSEEK_BASE_URL '$BASE_URL' is unusable (must begin with http:// or https://)." >&2
+    exit 2
+    ;;
+esac
+
 # agents-m2n (review P1-1): a set directive variable REQUIRES a readable, nonempty file —
 # the dispatcher no longer puts the directive in the user payload, so silently running
 # without it would drop the untrusted-content rule.
@@ -81,10 +98,8 @@ import urllib.request
 import urllib.error
 
 key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("deepseek_api_key")
-# agents-3y2: the default base URL is the keyless exe.dev managed endpoint
-# (deepseek.int.exe.xyz), which injects auth server-side, so a missing key is valid and no
-# Authorization header is sent. A keyed endpoint reached without a key 401s loudly and is
-# caught by the HTTPError handler below.
+# agents-sjgq: DEEPSEEK_BASE_URL must be explicitly configured (or FACTORY_DEFAULT_DEEPSEEK_BASE_URL
+# provided for dev/test). Refuse rather than guessing or sending secrets to hardcoded defaults.
 
 skill_dir = sys.argv[1] if len(sys.argv) > 1 else ""
 skill_file = os.path.join(skill_dir, "SKILL.md") if skill_dir else ""
@@ -93,7 +108,19 @@ if skill_file and os.path.exists(skill_file):
     with open(skill_file, "r", encoding="utf-8") as f:
         skill_content = f.read()
 
-base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://deepseek.int.exe.xyz/v1").rstrip("/")
+raw_base_url = os.environ.get("DEEPSEEK_BASE_URL") or os.environ.get("FACTORY_DEFAULT_DEEPSEEK_BASE_URL")
+if not raw_base_url or not raw_base_url.strip():
+    sys.stderr.write(
+        "[deepseek adapter] Error: DEEPSEEK_BASE_URL is not configured; refusing to send "
+        "API requests to an unconfigured endpoint (set DEEPSEEK_BASE_URL or FACTORY_DEFAULT_DEEPSEEK_BASE_URL).\n"
+    )
+    sys.exit(2)
+base_url = raw_base_url.strip().rstrip("/")
+if not (base_url.startswith("http://") or base_url.startswith("https://")):
+    sys.stderr.write(
+        f"[deepseek adapter] Error: DEEPSEEK_BASE_URL '{base_url}' is unusable (must begin with http:// or https://).\n"
+    )
+    sys.exit(2)
 model = os.environ.get("DEEPSEEK_MODEL", "deepseek/deepseek-flash")
 
 # agents-w8z: read the prompt from PROMPT, never stdin — the heredoc owns stdin (it IS
@@ -179,7 +206,7 @@ EOF
 if [ $STATUS -ne 0 ]; then
   echo "[deepseek adapter] Error executing DeepSeek API call" >&2
   cat "$OUTPUT_FILE" >&2
-  exit 1
+  exit "$STATUS"
 fi
 
 echo "$OUTPUT_FILE"
