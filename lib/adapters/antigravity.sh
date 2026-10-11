@@ -12,6 +12,10 @@ RUN_DIR="${4}"
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
+# agents-p2ik: the engine's stderr is kept SEPARATE from its stdout, as at the other
+# three adapter sites. Both used to land in $OUTPUT_FILE, so an engine that wrote ONLY
+# to stderr left a non-empty file that the read-back below accepted as the answer.
+STDERR_FILE="$RUN_DIR/model_stderr.txt"
 
 # agentapi is the only supported headless dispatch path. Fail loudly when it is
 # missing: writing a placeholder and exiting 0 made the dispatcher parse no JSON and
@@ -61,6 +65,22 @@ if [ -t 0 ]; then
   echo "[antigravity adapter] Error: prompt expected on stdin." >&2
   exit 2
 fi
+# agents-2iwf PLACEMENT NOTE - RECORDED, NOT EDITED, AND DELIBERATELY NO STRONGER THAN
+# WHAT WAS MEASURED. The guard below tests $PROMPT AS READ FROM STDIN. The run further
+# down uses the FINAL prompt, which this adapter reassembles from the system directive
+# file. The two differ whenever a directive is set.
+#
+# THAT DIFFERENCE IS HARMLESS TODAY, AND THE CONDITION IS SPECIFIC: the directive guard
+# earlier in this file refuses a missing, unreadable or EMPTY directive before anything
+# else runs, so the reassembled prompt always carries the directive's content and an
+# empty or whitespace-only final prompt is unreachable. Measured, not inferred:
+# whitespace stdin alone is refused by that earlier guard; whitespace stdin with a
+# non-empty directive produces "<directive>\n\n<stdin>", which has content - so a
+# content-based guard placed after the reassembly would ADMIT it, correctly.
+#
+# IF THAT EARLIER REFUSAL IS EVER WEAKENED - an empty directive permitted, or the
+# directive made optional - THIS GUARD MUST MOVE BELOW THE REASSEMBLY, because an empty
+# final prompt becomes reachable and this guard would not see it.
 PROMPT="$(cat)"
 if [ -z "$PROMPT" ]; then
   echo "[antigravity adapter] Error: empty prompt on stdin." >&2
@@ -84,10 +104,28 @@ cd "$TARGET_DIR"
 
 # agentapi has no stdin mode, so the prompt is positional here and appears in that engine
 # process's argv for the duration of the run. The dispatcher no longer carries it (agents-pgr).
-"$AGENTAPI_BIN" new-conversation "$PROMPT" > "$OUTPUT_FILE" 2>&1 || {
+"$AGENTAPI_BIN" new-conversation "$PROMPT" > "$OUTPUT_FILE" 2> "$STDERR_FILE" || {
   echo "[antigravity adapter] Error executing agentapi" >&2
   cat "$OUTPUT_FILE" >&2
+  cat "$STDERR_FILE" >&2
   exit 1
 }
 
+# agents-fnij/agents-p2ik: A ZERO EXIT IS NOT EVIDENCE THAT THE AGENT ANSWERED. This
+# adapter had NO read-back at all - it printed the PATH and the dispatcher read that as
+# the model's output - so a run that wrote nothing, or wrote only to stderr, was a
+# delivered run. Measured on pi.sh, which had the same shape: rc=0 with a 0-byte file,
+# and rc=0 with a 44-byte file holding nothing but "provider error: 429 rate limited".
+#
+# THESE LINES ARE NOT REACHABLE TODAY: the tool-policy refusal above exits 3 before
+# this point, for every policy. They are fixed anyway because that refusal is a
+# CONDITION, not a property - if it is ever satisfied this defect becomes live AT ONCE,
+# in a file whose diff says it was reviewed (agents-2iwf; the reachability test in
+# tests/test_adapter_stderr_readback.py asserts the refusal precedes this block).
+if [ ! -s "$OUTPUT_FILE" ]; then
+  echo "[antigravity adapter] Error: agentapi exited 0 but wrote no output to $OUTPUT_FILE; the run produced no result (agents-fnij)." >&2
+  if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
+  exit 1
+fi
+if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
 echo "$OUTPUT_FILE"
