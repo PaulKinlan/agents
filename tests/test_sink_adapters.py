@@ -40,6 +40,9 @@ with open(log, "a") as f:
     f.write(json.dumps({"lines": lines, "secret": os.environ.get("TRACKER_TOKEN"),
                         "leak": os.environ.get("ANTHROPIC_API_KEY")}) + "\n")
 mode = sys.argv[1] if len(sys.argv) > 1 else "ok"
+if mode == "ok":
+    for l in lines[1:]:
+        print(json.dumps({"fingerprint": l["fingerprint"], "status": "published"}))
 if mode == "fail":
     sys.stderr.write("tracker down\n"); sys.exit(7)
 if mode == "refs":
@@ -49,6 +52,8 @@ if mode == "partial":
     print(json.dumps({"fingerprint": lines[1]["fingerprint"], "status": "duplicate"}))
 if mode == "sleep":
     import time; time.sleep(5)
+if mode == "silent":
+    pass
 '''
 
 
@@ -135,7 +140,7 @@ class TestCommandSink(CommandSinkCase):
         call, = self.received()
         header, finding = call["lines"]
         self.assertEqual((header["type"], header["protocol"], header["target"], header["count"]),
-                         ("run", "factory-sink/1", "fx", 1))
+                         ("run", "factory-sink/2", "fx", 1))
         self.assertEqual(header["visibility"], "public")
         self.assertEqual(finding["type"], "finding")
         self.assertEqual((finding["rule_id"], finding["path"], finding["severity"], finding["state"]),
@@ -152,6 +157,18 @@ class TestCommandSink(CommandSinkCase):
         self.scan([SAMPLE], mode="refs")
         record, = self.store().values()
         self.assertEqual(record["sink_refs"], {"command": "SEC-1"})
+
+    def test_silent_exit_zero_is_failure_in_factory_sink_2(self):
+        """agents-ygz8: In factory-sink/2, exit 0 with no status lines must fail closed
+        (failed 1, note recorded, no dispatched_sinks receipt written), rather than the
+        legacy factory-sink/1 behaviour which treated silence as complete success."""
+        result = self.scan([SAMPLE], mode="silent")
+        self.assertIn("failed 1", result.stdout)
+        self.assertIn("emitted no status lines", result.stdout)
+        self.assertIn("factory-sink/2", result.stdout)
+        record, = self.store().values()
+        self.assertNotIn("command", record.get("dispatched_sinks", []))
+        self.assertIn("**command**: published 0, failed 1", self.report())
 
     def test_a_failing_command_delivers_nothing_and_is_retried(self):
         result = self.scan([SAMPLE], mode="fail")
@@ -346,7 +363,7 @@ class TestCommandSinkPinBoundary(CommandSinkCase):
         result = self.scan_with_pin(
             [SAMPLE], "git --version",
             f"git:\n  path: {self.real_git}\n  sha256: {sha256_file(Path(self.real_git))}\n")
-        self.assertIn("published 1", result.stdout)
+        self.assertIn("emitted no status lines", result.stdout)
         self.assertFalse(self.fake_log.exists(), "the PATH-order winner must not run")
 
     def test_an_unpinned_configured_trusted_tool_sends_nothing_and_says_why(self):

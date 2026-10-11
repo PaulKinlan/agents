@@ -14,9 +14,9 @@ plus only the `sink_env` names. Its stderr is never published: it is redacted in
 `sink-command-stderr.log` in the run directory, and the sink note names only the exit status. It is split with shlex and never run through a shell; use
 `sh -c '...'` explicitly if you need one.
 
-Input (stdin), JSON Lines, protocol `factory-sink/1`:
+Input (stdin), JSON Lines, protocol `factory-sink/2`:
 
-    {"type": "run", "protocol": "factory-sink/1", "target": ..., "agent": ..., "visibility": ...,
+    {"type": "run", "protocol": "factory-sink/2", "target": ..., "agent": ..., "visibility": ...,
      "generated": ..., "stats": {...}, "count": N}
     {"type": "finding", "fingerprint": ..., "agent": ..., "rule_id": ..., "path": ...,
      "line_number": ..., "severity": ..., "routing_severity": ..., "title": ..., "description": ...,
@@ -26,17 +26,28 @@ Input (stdin), JSON Lines, protocol `factory-sink/1`:
 Findings are the *published view* (lib/redaction.redact_finding) and only those core's
 embargo allows for this sink: the rules are exactly those for any other tracker.
 
-Output (stdout, optional), JSON Lines, one per finding:
+Output (stdout, required per finding), JSON Lines:
 
     {"fingerprint": ..., "status": "published" | "duplicate" | "failed" | "skipped",
      "ref": "SEC-123", "message": "..."}
 
 - exit non-zero, or a timeout: nothing was delivered (all failed, no receipts);
-- exit 0 with no status lines: every finding was delivered;
+- exit 0 with no status lines: FAILED — a sink that answers nothing did not confirm delivery
+  (breaking change in factory-sink/2, agents-ygz8);
 - exit 0 with status lines: a finding without one was NOT delivered (failed) — a partial
   answer is never read as success.
 Delivered findings get a `command` receipt (and `sink_refs.command` when a ref is given), so
 they are not sent again; `duplicate` is counted and not receipted, like beads.
+
+Migration Note (factory-sink/1 -> factory-sink/2, agents-ygz8):
+In factory-sink/1, exit 0 with no status lines was read as complete success
+(every finding marked published and receipted). Under factory-sink/2, exit 0
+with no status lines is treated as a delivery failure (failed with a note, no
+receipts written). Sink scripts must explicitly emit JSON Lines per finding:
+  {"fingerprint": "<fp>", "status": "published"}
+Historical finding records created under factory-sink/1 with dispatched_sinks: ["command"]
+reflect the legacy tolerance where exit 0 was presumed successful; those records remain
+intact and are not resent unless dispatched_sinks is cleared.
 """
 
 import json
@@ -60,7 +71,7 @@ from lib.sinks.base import Sink, SinkContext, new_result
 # says why.
 from lib.tool_pins import ToolPinError, pin_trusted_argv
 
-PROTOCOL = "factory-sink/1"
+PROTOCOL = "factory-sink/2"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 FINDING_FIELDS = (
     "agent", "rule_id", "path", "line_number", "severity", "title", "description",
@@ -187,12 +198,17 @@ class CommandSink(Sink):
             if isinstance(item, dict) and item.get("status") in STATUSES and item.get("fingerprint"):
                 statuses[str(item["fingerprint"])] = item
 
+        # agents-ygz8 (protocol factory-sink/2): an exit-0 outcome with no status lines
+        # must fail closed rather than being assumed successful. A sink that answers
+        # nothing did not confirm delivery.
+        if not statuses:
+            result["failed"] = len(pending)
+            result["note"] = f"sink_command exited 0 but emitted no status lines: nothing confirmed delivered ({PROTOCOL})"
+            return result
+
         for f in pending:
-            if statuses:
-                answer = statuses.get(f.get("fingerprint"), {"status": "failed",
-                                                             "message": "no status from sink_command"})
-            else:
-                answer = {"status": "published"}
+            answer = statuses.get(f.get("fingerprint"), {"status": "failed",
+                                                         "message": "no status from sink_command"})
             status = answer["status"]
             if status == "published":
                 f.setdefault("dispatched_sinks", []).append(self.name)
@@ -205,7 +221,7 @@ class CommandSink(Sink):
                 result["skipped"] += 1
             else:
                 result["failed"] += 1
-        missing = sum(1 for f in pending if statuses and f.get("fingerprint") not in statuses)
+        missing = sum(1 for f in pending if f.get("fingerprint") not in statuses)
         if missing:
             result["note"] = f"sink_command reported no status for {missing} finding(s): counted as failed"
         return result
