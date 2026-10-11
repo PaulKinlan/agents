@@ -138,6 +138,8 @@ _VERIFY_TIMEOUT = 60
 _VERIFY_TOKEN_NOT_READABLE = 40       # the sentinel got in; the token never arrived on stdin
 _VERIFY_INNER_NOT_EXECUTABLE = 41     # the sentinel got in; the real inner is not runnable there
 _VERIFY_RUN_DIR_NOT_WRITABLE = 42     # the sentinel got in; the run-directory bind is not writable
+_VERIFY_NETNS_NOT_ISOLATED = 43       # the sentinel got in; network namespace was not unshared (agents-8xei)
+_last_verified_netns: Optional[str] = None
 
 
 class SandboxError(RuntimeError):
@@ -173,7 +175,8 @@ def sandbox_unavailable_reason() -> Optional[str]:
 
 
 def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", *,
-                 inner: Sequence[str], run_dir: Path, env: Dict[str, str]) -> None:
+                 inner: Sequence[str], run_dir: Path, env: Dict[str, str],
+                 egress_controlled: bool = False) -> Optional[str]:
     """Start a sentinel child inside the wrap that was just built, and require proof that it
     got in (agents-kwi). Raises SandboxError when the wrap cannot launch its child.
 
@@ -188,6 +191,10 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
     proof is the child's own write and not bwrap's exit status: a bwrap that returns 0 without
     running the child fails too.
 
+    agents-8xei: when `egress_controlled` is True, the wrap must additionally DEMONSTRATE
+    that the network namespace is isolated from the host (child netns != host netns).
+    A fake bwrap that passes flags through to the host fails closed.
+
     What this does and does not establish: it establishes that a child starts inside the wrap
     built for this run, with the real inner resolved there. It does not run the real command
     (that would run the engine), so an inner that starts and then fails on its own is an engine
@@ -195,57 +202,52 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
     """
     token = os.urandom(16).hex()
     token_path = run_dir / f".sandbox-wrap-verify-{token[:8]}"
-    # THE TOKEN ARRIVES ON STDIN AND NEVER IN ARGV (agents-0p3l).
-    #
-    # argv was the leak. The sentinel runs as a child of bwrap, and /proc/<pid>/cmdline is
-    # world-readable (0444), so a token passed as an argument was readable by ANY process on
-    # the host, any uid, for as long as the wrap was being verified - and the run-directory
-    # bind then wrote it to a path. The proof itself is unchanged and deliberately so: it is
-    # still the child's own write into the run directory and not bwrap's exit status, and the
-    # run-directory-write check still needs only the DESTINATION path, which is not a secret
-    # (a random-named file that is unlinked immediately) whereas the token is.
-    #
-    # RESIDUAL, STATED RATHER THAN LEFT TO BE DISCOVERED, AND SCOPED TO WHAT THIS ACTUALLY
-    # CHANGES (corrected after review 868b5311): WHAT THIS REMOVES IS THE WORLD-READABLE
-    # ARGV. The token is no longer in any command line; /proc/<pid>/cmdline is 0444, so
-    # before this change ANY process on the host at any uid could read it, and it cannot now.
-    # WHAT REMAINS, AND AT WHAT PRIVILEGE: (a) a SAME-UID process can still read the token
-    # from /proc/<pid>/fd/0 while this child holds the pipe - confirmed by construction, and
-    # unavoidable because the factory and every process it launches share one uid by design;
-    # (b) the destination path is still in the cmdline, which is not a secret; (c) the proof
-    # FILE this child writes into run_dir is created 0600 below (it inherited the ambient
-    # umask and was measured 0644, which made the world-readable window smaller rather than
-    # closed - the redirection is now umask 077 so the file itself is not readable by other
-    # uids while it exists). Stealing the token by draining the pipe is a read-or-DoS, never a
-    # forgery: it pushes the sentinel to _VERIFY_TOKEN_NOT_READABLE and the run is REFUSED.
-    # So: the token moved from world-readable-in-argv to same-uid-readable, and that is a real
-    # narrowing of one channel rather than a containment boundary.
-    #
-    # `read` needs the newline, hence input=token + '\n' below: without it dash's read
-    # returns non-zero at EOF even though it filled the variable, which would be
-    # indistinguishable from a token that never arrived.
+    host_netns = ""
+    if egress_controlled:
+        try:
+            host_netns = os.readlink("/proc/self/ns/net")
+        except OSError:
+            pass
+
     script = (f'IFS= read -r tok || exit {_VERIFY_TOKEN_NOT_READABLE}\n'
+              'if [ "$3" = "check-netns" ]; then\n'
+              '  IFS= read -r host_ns || host_ns=""\n'
+              '  child_ns="$(readlink /proc/self/ns/net 2>/dev/null || true)"\n'
+              f'  if [ -z "$child_ns" ] || [ -z "$host_ns" ] || [ "$child_ns" = "$host_ns" ]; then\n'
+              f'    exit {_VERIFY_NETNS_NOT_ISOLATED}\n'
+              '  fi\n'
+              'fi\n'
               'if { [ -f "$1" ] && [ -x "$1" ]; } || command -v "$1" >/dev/null 2>&1; '
               f'then :; else exit {_VERIFY_INNER_NOT_EXECUTABLE}; fi\n'
-              # umask 077 first: this file holds the token, and with the ambient umask it was
-              # created 0644 - world-readable for the window between this write and the
-              # parent's read-and-unlink (review 868b5311). Narrowing one channel (argv) while
-              # leaving another (this file) at the old width would make the docstring false.
               'umask 077\n'
-              'printf "%s" "$tok" > "$2" 2>/dev/null || '
-              f'exit {_VERIFY_RUN_DIR_NOT_WRITABLE}\n')
+              'if [ "$3" = "check-netns" ]; then\n'
+              '  printf "%s\\n%s\\n" "$tok" "$child_ns" > "$2" 2>/dev/null || '
+              f'exit {_VERIFY_RUN_DIR_NOT_WRITABLE}\n'
+              'else\n'
+              '  printf "%s" "$tok" > "$2" 2>/dev/null || '
+              f'exit {_VERIFY_RUN_DIR_NOT_WRITABLE}\n'
+              'fi\n')
     sentinel = ["/bin/sh", "-c", script, "factory-wrap-verify", str(inner[0]),
                 str(token_path)]
+    if egress_controlled:
+        sentinel.append("check-netns")
+    stdin_data = token + "\n"
+    if egress_controlled:
+        stdin_data += host_netns + "\n"
     try:
-        res = subprocess.run([*head, *tail(sentinel)], input=(token + "\n").encode(),
+        res = subprocess.run([*head, *tail(sentinel)], input=stdin_data.encode(),
                              capture_output=True, timeout=_VERIFY_TIMEOUT, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise SandboxError(
             f"could not exercise the {BWRAP} wrap before returning it ({e}); refusing to run "
             f"(and to record the run as sandboxed) on a wrap that was never shown to start "
             f"its child") from e
+    child_netns = None
     try:
-        proof = token_path.read_text(encoding="utf-8") == token
+        content = token_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        proof = (lines[0] == token) if lines else False
+        child_netns = lines[1] if len(lines) > 1 else None
     except OSError:
         proof = False
     finally:
@@ -268,6 +270,14 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
             f"the sandbox wrap cannot write to the run directory {run_dir}, so the child's "
             f"output could not be collected; refusing to run (and to record the run as "
             f"sandboxed) on a wrap that was never shown to start its child")
+    if res.returncode == _VERIFY_NETNS_NOT_ISOLATED:
+        raise SandboxError(
+            f"the sandbox wrap did not isolate its network namespace (--unshare-net was "
+            f"ineffective or child network namespace matches host {host_netns or 'unknown'}); "
+            f"refusing to run with unverified egress")
+    if egress_controlled:
+        if not child_netns or (host_netns and child_netns == host_netns):
+            proof = False
     if res.returncode != 0 or not proof:
         detail = (f"{BWRAP} exited 0 without launching the child" if res.returncode == 0
                   else f"{BWRAP} exited {res.returncode}")
@@ -276,6 +286,10 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
             f"({detail}); bwrap being available is not proof that this child starts, so "
             f"refusing to run (and to record the run as sandboxed) on a wrap that was never "
             f"shown to start its child")
+    global _last_verified_netns
+    if egress_controlled:
+        _last_verified_netns = child_netns
+    return child_netns
 
 
 def _resolve_bwrap() -> str:
@@ -358,18 +372,34 @@ def engine_sandboxed(engine: str) -> bool:
     return engine in SANDBOXED_ENGINES and sandbox_available()
 
 
-def sandbox_record(engine: str, egress_filtered: bool = False) -> Optional[Dict[str, Any]]:
+def last_verified_netns() -> Optional[str]:
+    """The network namespace identifier verified by the most recent egress-controlled wrap."""
+    return _last_verified_netns
+
+
+def reset_verified_netns() -> None:
+    """Reset the verified netns state (used by tests to assert unexercised behaviour)."""
+    global _last_verified_netns
+    _last_verified_netns = None
+
+
+def sandbox_record(engine: str, egress_filtered: bool = False,
+                   netns: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """The machine-readable sandbox state for policy.json / the banner, or None when this
     host has no sandbox. `engine_sandboxed` says whether the engine session itself is
     inside it; the pre-pass is sandboxed whenever the host can sandbox at all.
 
-    `egress_filtered` (agents-2x6) reports whether THIS run isolates the network namespace
-    and confines egress to the broker + allowlist proxy. It is per-run and drives whether
-    policy.json drops `network-egress` from not_enforced, so a fallback run that keeps the
-    host network passes False and the record never overclaims."""
+    `egress_filtered` (agents-2x6, agents-8xei) reports whether THIS run isolates the network
+    namespace and confines egress to the broker + allowlist proxy. It is per-run and is
+    a MEASUREMENT, not a declaration: network_egress_filtered is True ONLY when network
+    isolation has actually been demonstrated (via `netns` or an exercised egress wrap in
+    `last_verified_netns()`). If unexercised or not demonstrated, network_egress_filtered
+    is False so policy.json and the banner never overclaim."""
     if not sandbox_available():
         return None
-    return {
+    demonstrated_netns = netns or (last_verified_netns() if egress_filtered else None)
+    is_filtered = bool(egress_filtered and demonstrated_netns)
+    record = {
         "tool": TOOL,
         "engine_sandboxed": engine in SANDBOXED_ENGINES,
         "prepass_sandboxed": True,
@@ -378,12 +408,15 @@ def sandbox_record(engine: str, egress_filtered: bool = False) -> Optional[Dict[
                               "(/usr, /etc); ambient $HOME (ssh, cloud credentials), other runs and the rest of "
                               "the host filesystem are invisible"
                               if engine in SANDBOXED_ENGINES else None),
-        "network_egress_filtered": egress_filtered,
+        "network_egress_filtered": is_filtered,
         "notes": ["host /proc invisible (private PID namespace); the engine's own "
                   "/proc/self/environ is readable by its own read tool, so engine API "
                   "keys reach it only via the lib/child_env.py allowlist and published "
                   "output is redacted (lib/redaction.py)"],
     }
+    if demonstrated_netns:
+        record["netns"] = demonstrated_netns
+    return record
 
 
 def _system_binds(plan: "_BindPlan") -> None:
@@ -859,5 +892,7 @@ def sandbox_command(
     # agents-kwi: never hand back a wrap that has not been shown to start a child inside its
     # own plan. The station builds both wraps before it prints the banner or writes
     # policy.json, so a raise here means no run record ever claims the run was sandboxed.
-    _verify_wrap(head, tail, inner=inner, run_dir=Path(runs), env=child_env)
+    # agents-8xei: egress-controlled wraps must demonstrate netns isolation.
+    _verify_wrap(head, tail, inner=inner, run_dir=Path(runs), env=child_env,
+                 egress_controlled=egress_forwards is not None)
     return argv
