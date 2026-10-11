@@ -2102,7 +2102,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         sink_options = {k: v for k, v in target_cfg.items()
                         if isinstance(k, str) and k.startswith("sink_")}
         for key, value in sink_options.items():
-            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            if isinstance(value, bool):
+                continue
+            # agents-rck1: sink_options values written as lists or tuples (such as the
+            # documented YAML list spelling sink_env: [LINEAR_API_KEY]) must be forwarded
+            # to the findings child as comma-separated values rather than silently dropped,
+            # so the child derives the same secret names and diagnostics redactions.
+            if isinstance(value, (list, tuple)):
+                formatted = ",".join(str(v).strip() for v in value if str(v).strip())
+                findings_cmd += ["--sink-option", f"{key}={formatted}"]
+            elif isinstance(value, (str, int, float)):
                 findings_cmd += ["--sink-option", f"{key}={value}"]
         # The findings child resolves `bd` (and `gh`) itself through lib.sinks, so it needs the
         # same trusted-tool pin source the parent just verified against (agents-dpt).

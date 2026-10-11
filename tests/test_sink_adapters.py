@@ -390,6 +390,52 @@ class TestCommandSinkFromManifest(unittest.TestCase):
             self.assertEqual(call["lines"][0]["visibility"], "private")
             self.assertEqual(call["lines"][1]["title"], "Medium thing")
 
+    def test_manifest_sink_env_as_list_and_string_both_redact_diagnostics_stderr(self):
+        """agents-rck1: sink_env configured as a YAML list (the documented spelling)
+        and as a string must both forward the secret name to the findings child and
+        redact the secret value in sink-command-stderr.log."""
+        for spelling, yaml_sink_env in (("list", "[TRACKER_TOKEN]"),
+                                        ("string", "TRACKER_TOKEN")):
+            with self.subTest(spelling=spelling):
+                with tempfile.TemporaryDirectory(prefix=f"factory-cmd-rck1-{spelling}-") as tmp:
+                    box = Sandbox(Path(tmp).resolve())
+                    shutil.copytree(ROOT / "lib" / "sinks", box.root / "lib" / "sinks", dirs_exist_ok=True)
+                    shutil.copyfile(ROOT / "lib" / "budget.py", box.root / "lib" / "budget.py")
+                    leaky_script = (
+                        "import os, sys\n"
+                        "sys.stdin.read()\n"
+                        "sys.stderr.write('auth failed for ' + os.environ.get('TRACKER_TOKEN', '') + '\\n')\n"
+                        "sys.exit(3)\n"
+                    )
+                    (box.target / "leaky.py").write_text(leaky_script, encoding="utf-8")
+                    (box.root / "targets").mkdir()
+                    (box.root / "targets" / "proj.yaml").write_text(
+                        "name: proj\n"
+                        f"path: {box.target}\n"
+                        "visibility: private\n"
+                        "sink: command\n"
+                        f"sink_command: \"{sys.executable} leaky.py\"\n"
+                        f"sink_env: {yaml_sink_env}\n", encoding="utf-8")
+                    box.agent("lint", report(dict(SAMPLE, severity="high")))
+                    secret_val = "tok-SECRET-1234"
+                    with box.patched(), \
+                         mock.patch.dict(os.environ, {"TRACKER_TOKEN": secret_val,
+                                                      "FACTORY_TOOL_PINS": str(box.root / "no-pins.yaml")}), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        try:
+                            factory_cli.run_agent("lint", "proj", engine_arg="pi")
+                        except subprocess.CalledProcessError:
+                            pass
+
+                    stderr_logs = list(box.root.glob("runs/**/sink-command-stderr.log"))
+                    self.assertTrue(stderr_logs, f"expected sink-command-stderr.log to be written for {spelling}")
+                    for log_path in stderr_logs:
+                        log_text = log_path.read_text(encoding="utf-8")
+                        self.assertNotIn(secret_val, log_text,
+                                         f"secret {secret_val} must be redacted in {spelling} spelling log")
+                        self.assertIn("[redacted:value]", log_text,
+                                      f"masked redaction marker must be present in {spelling} spelling log")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1682,7 +1682,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         key, sep, value = option.partition("=")
         if not sep or not key.startswith("sink_"):
             parser.error("--sink-option requires sink_KEY=VALUE")
-        sink_options[key] = value
+        if key in sink_options and key == "sink_env":
+            sink_options[key] = f"{sink_options[key]},{value}"
+        else:
+            sink_options[key] = value
 
     if args.promote_issue:
         if not args.beads_dir or not args.repo or args.visibility != "public":
