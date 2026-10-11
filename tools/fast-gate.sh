@@ -179,7 +179,12 @@ while IFS= read -r f; do
       # PERFORMED (agents-28nn): `grep -rn "generate-tool-pins" tests/` named no suite before
       # this bead; agents-28nn adds the assertion that its TOOLS list covers every
       # TRUSTED_TOOLS entry to tests/test_tool_pins.py, which owns the pins contract.
-      mapped="$mapped tests/test_tool_pins.py"
+      # agents-oc3q review P2: tests/test_pin_generator_hasher.py is added here because a
+      # BEHAVIOURAL test of THIS script is what catches a re-introduction of the hole - the
+      # suite pins that a planted hasher cannot supply the pin's reference value, and it only
+      # runs on a generator change if this arm names it. Without this, a future edit putting
+      # $PIN_LOOKUP_PATH back at the hasher call site would pass the fast gate.
+      mapped="$mapped tests/test_tool_pins.py tests/test_pin_generator_hasher.py"
       ;;
     THREAT_MODEL.md)
       # Root markdown the docs-drift scanner WALKS (check_docs.py os.walk()s every committed

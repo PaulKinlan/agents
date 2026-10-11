@@ -77,9 +77,15 @@ class TestPinGeneratorHasherIsNotCallerSupplied(unittest.TestCase):
                 "narrows the hasher and the plumbing, not --lookup-path's purpose")
             # and the hash written for it must be the REAL one, not the fake's constant
             block = text[text.index(planted_git):].split("sha256: ", 1)
-            self.assertTrue(block[1][:64] != FAKE_HASH,
-                            "the planted tool was hashed by the planted hasher: the fix "
-                            "narrowed the tool lookup too, or not at all")
+            written = block[1][:64]
+            # Assert a REAL sha256 rather than merely "not the fake's constant" (review P2):
+            # `!= FAKE_HASH` also holds for an empty or garbage 64-char value, so it is the
+            # weaker of the two assertions and arm 1 is what makes the pair sound.
+            self.assertRegex(written, r"^[0-9a-f]{64}$",
+                             "the planted tool's pin must carry a real lowercase hex sha256")
+            self.assertNotEqual(written, FAKE_HASH,
+                                "the planted tool was hashed by the planted hasher: the fix "
+                                "narrowed the tool lookup too, or not at all")
 
 
 if __name__ == "__main__":

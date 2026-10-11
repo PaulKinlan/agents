@@ -48,7 +48,10 @@
 # BASH_FUNC_* variables could shadow echo/printf and corrupt this script's output. That
 # capability is not a new hole in the pin — the same $GITHUB_ENV channel could pre-set
 # FACTORY_TOOL_PINS at the workflow level or redirect this script's output path — so
-# scrubbing functions here would be a half-defense dressed as a full one. The pin's
+# scrubbing functions here would be a half-defense dressed as a full one. BASH_ENV is the
+# same channel and is equally out of scope, for the same reason (review P2): an exported
+# function can shadow printf itself, which is how resolve_in_lookup reports its answer, so
+# narrowing the lookup PATH LIST does not help when the ANSWER is what is intercepted. The pin's
 # anchor is that the CI environment an earlier step controls cannot WRITE the root-owned
 # system dirs the lookup is confined to. Likewise the #!/usr/bin/env bash shebang
 # resolves under the runner's PATH before line 1: a runner whose PATH selects the shell
@@ -79,11 +82,31 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --lookup-path)
       [ $# -ge 2 ] || { echo "error: --lookup-path needs a colon-separated directory list" >&2; exit 2; }
+      # agents-oc3q review P1: the value is interpolated into the emitted file (the
+      # "Lookup confined to:" header), so a directory name containing a NEWLINE breaks out
+      # of that comment and can inject a complete pin entry - path AND sha256 - that the
+      # loader then accepts. CONSTRUCTED: a caller named a directory
+      # "/tmp/x/P\nsemgrep:\n  path: /tmp/fakesemgrep\n  sha256: <hash> #" and the
+      # generated file carried a semgrep pin the generator itself had reported NOT FOUND.
+      # The rule this commit is built on - the party supplying the reference value must not
+      # be the party the reference defends against - is not absolute while the emit side
+      # trusts the flag. Reject control characters outright rather than escaping them: no
+      # legitimate directory name contains a newline, and escaping invites the next mistake.
+      case "$2" in
+        *$'\n'*|*$'\r'*|*$'\t'*)
+          echo "error: --lookup-path must not contain newlines, carriage returns or tabs" >&2
+          exit 2 ;;
+      esac
       # Operator dirs are PREPENDED to the system dirs, never a replacement: the script's
       # own plumbing (mkdir/dirname/date and the hasher) must keep resolving from the
       # system dirs, or the override would hand the hasher to the operator dir.
       PIN_LOOKUP_PATH="$2:$SYSTEM_LOOKUP_PATH"; shift 2 ;;
     --lookup-path=*)
+      case "${1#--lookup-path=}" in
+        *$'\n'*|*$'\r'*|*$'\t'*)
+          echo "error: --lookup-path must not contain newlines, carriage returns or tabs" >&2
+          exit 2 ;;
+      esac
       PIN_LOOKUP_PATH="${1#--lookup-path=}:$SYSTEM_LOOKUP_PATH"; shift ;;
     -*)
       echo "error: unknown flag $1" >&2; exit 2 ;;
