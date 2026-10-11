@@ -524,6 +524,26 @@ class TestSinks(SinkFixture, unittest.TestCase):
         self.assertEqual(self.finding()["state"], "regressed")
         self.assertEqual(len(self.state()["beads"]), 1)
 
+    def test_reconciliation_reports_skip_warning_on_tool_pin_failure(self):
+        """agents-j9mc: when bd fails pin verification in a below-band run (exit 0),
+        reconciliation must not be silently skipped; the skip reason must be reported
+        in stderr, stdout, and the delta report."""
+        pins_file = self.root / "bad_bd_pins.yaml"
+        pins_file.write_text("bd:\n  path: /bin/true\n  sha256: " + "0" * 64 + "\n", encoding="utf-8")
+
+        # Low-severity finding is below-band for beads (so dispatch has nothing to file)
+        low_item = dict(SAMPLE, severity="low")
+        env_extra = {
+            "FACTORY_TOOL_PINS": str(pins_file),
+            "FACTORY_ALLOW_UNPINNED_TOOLS": "",
+        }
+
+        result = self.scan("beads", items=[low_item], extra_env=env_extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Warning: beads reconciliation skipped (bd unavailable or unverified", result.stderr)
+        self.assertIn("reconciliation skipped: bd unavailable or unverified", result.stdout)
+        self.assertIn("reconciliation skipped: bd unavailable or unverified", self.report())
+
     def test_repo_scoped_external_ref_dedupes(self):
         """_existing_bead_fingerprints accepts repo-scoped promote_issue external_ref shape (FIX 4)."""
         self.assertEqual(self.scan("file").returncode, 0)

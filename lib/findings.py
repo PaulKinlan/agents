@@ -1209,17 +1209,19 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
                          "to beads automatically; public-input issue triage is a separate flow")
 
     # Reconcile closed bead sightings for ALL observed findings before dispatching sinks
-    # and rendering reports (agents-3sl6).
+    # and rendering reports (agents-3sl6). Report skip if reconciliation could not run (agents-j9mc).
+    recon_note = None
     if "beads" in names:
         try:
             from lib.sinks.beads import reconcile_closed_bead_sightings
-            reconcile_closed_bead_sightings(
+            recon_note = reconcile_closed_bead_sightings(
                 processed_findings,
                 beads_dir=beads_dir,
                 target_dir=target_dir,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            recon_note = f"beads reconciliation failed ({e})"
+            print(f"Warning: beads reconciliation skipped: {e}", file=sys.stderr)
     context = sinks.SinkContext(target_name=target_name, target_dir=target_dir,
                                 visibility=visibility, agent=agent, stats=dict(stats),
                                 options=dict(sink_options or {}), beads_dir=beads_dir,
@@ -1237,6 +1239,9 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
             result["note"] = f"unknown sink {s!r}: nothing published"
         else:
             result.update(adapter.publish(context, publishable))
+        if s == "beads" and recon_note:
+            prior = result.get("note", "")
+            result["note"] = f"{prior}; reconciliation skipped: {recon_note}".lstrip("; ")
         sink_results[s] = result
         print(f"[Sink {s}] published {result['published']}, failed {result['failed']}, "
               f"duplicate {result['duplicate']}, "
