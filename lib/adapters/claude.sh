@@ -55,13 +55,17 @@ try:
         sys.exit(1)
     access_token = oauth.get("accessToken")
     refresh_token = oauth.get("refreshToken")
-    if not access_token and not refresh_token:
-        sys.exit(1)
     expires_at = oauth.get("expiresAt")
     refresh_expires_at = oauth.get("refreshTokenExpiresAt")
     now_ms = time.time() * 1000
-    has_valid_access = bool(access_token and (not expires_at or expires_at >= now_ms))
-    has_valid_refresh = bool(refresh_token and (not refresh_expires_at or refresh_expires_at >= now_ms))
+    has_valid_access = (
+        isinstance(access_token, str) and bool(access_token.strip())
+        and (expires_at is None or (isinstance(expires_at, (int, float)) and expires_at >= now_ms))
+    )
+    has_valid_refresh = (
+        isinstance(refresh_token, str) and bool(refresh_token.strip())
+        and (refresh_expires_at is None or (isinstance(refresh_expires_at, (int, float)) and refresh_expires_at >= now_ms))
+    )
     if not has_valid_access and not has_valid_refresh:
         sys.exit(1)
     sys.exit(0)
