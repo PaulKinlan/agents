@@ -48,7 +48,10 @@
 # BASH_FUNC_* variables could shadow echo/printf and corrupt this script's output. That
 # capability is not a new hole in the pin — the same $GITHUB_ENV channel could pre-set
 # FACTORY_TOOL_PINS at the workflow level or redirect this script's output path — so
-# scrubbing functions here would be a half-defense dressed as a full one. The pin's
+# scrubbing functions here would be a half-defense dressed as a full one. BASH_ENV is the
+# same channel and is equally out of scope, for the same reason (review P2): an exported
+# function can shadow printf itself, which is how resolve_in_lookup reports its answer, so
+# narrowing the lookup PATH LIST does not help when the ANSWER is what is intercepted. The pin's
 # anchor is that the CI environment an earlier step controls cannot WRITE the root-owned
 # system dirs the lookup is confined to. Likewise the #!/usr/bin/env bash shebang
 # resolves under the runner's PATH before line 1: a runner whose PATH selects the shell
@@ -79,11 +82,31 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --lookup-path)
       [ $# -ge 2 ] || { echo "error: --lookup-path needs a colon-separated directory list" >&2; exit 2; }
+      # agents-oc3q review P1: the value is interpolated into the emitted file (the
+      # "Lookup confined to:" header), so a directory name containing a NEWLINE breaks out
+      # of that comment and can inject a complete pin entry - path AND sha256 - that the
+      # loader then accepts. CONSTRUCTED: a caller named a directory
+      # "/tmp/x/P\nsemgrep:\n  path: /tmp/fakesemgrep\n  sha256: <hash> #" and the
+      # generated file carried a semgrep pin the generator itself had reported NOT FOUND.
+      # The rule this commit is built on - the party supplying the reference value must not
+      # be the party the reference defends against - is not absolute while the emit side
+      # trusts the flag. Reject control characters outright rather than escaping them: no
+      # legitimate directory name contains a newline, and escaping invites the next mistake.
+      case "$2" in
+        *$'\n'*|*$'\r'*|*$'\t'*|*$'\v'*|*$'\f'*|*$'\x1c'*|*$'\x1d'*|*$'\x1e'*|*$'\xc2\x85'*|*$'\xe2\x80\xa8'*|*$'\xe2\x80\xa9'*|*$'\u0085'*|*$'\u2028'*|*$'\u2029'*)
+          echo "error: --lookup-path must not contain newlines, carriage returns or tabs" >&2
+          exit 2 ;;
+      esac
       # Operator dirs are PREPENDED to the system dirs, never a replacement: the script's
       # own plumbing (mkdir/dirname/date and the hasher) must keep resolving from the
       # system dirs, or the override would hand the hasher to the operator dir.
       PIN_LOOKUP_PATH="$2:$SYSTEM_LOOKUP_PATH"; shift 2 ;;
     --lookup-path=*)
+      case "${1#--lookup-path=}" in
+        *$'\n'*|*$'\r'*|*$'\t'*|*$'\v'*|*$'\f'*|*$'\x1c'*|*$'\x1d'*|*$'\x1e'*|*$'\xc2\x85'*|*$'\xe2\x80\xa8'*|*$'\xe2\x80\xa9'*|*$'\u0085'*|*$'\u2028'*|*$'\u2029'*)
+          echo "error: --lookup-path must not contain newlines, carriage returns or tabs" >&2
+          exit 2 ;;
+      esac
       PIN_LOOKUP_PATH="${1#--lookup-path=}:$SYSTEM_LOOKUP_PATH"; shift ;;
     -*)
       echo "error: unknown flag $1" >&2; exit 2 ;;
@@ -105,10 +128,20 @@ PATH="$PIN_LOOKUP_PATH"
 # resolve_tool would later expand from the factory's CWD (agents-28nn round 3, review P1,
 # proven by construction). A relative lookup dir can never yield an absolute pin path,
 # so it is skipped — the emit-side absolute-path reject below is the hard backstop.
+# agents-oc3q: the PATH LIST IS AN ARGUMENT. The script's own plumbing and the HASHER must
+# resolve from $SYSTEM_LOOKUP_PATH ONLY, never from operator-supplied dirs. Before this
+# change the plumbing and the hasher were resolved through $PIN_LOOKUP_PATH, which PREPENDS
+# the operator dirs - so `--lookup-path /attacker` put a planted sha256sum FIRST and the
+# pin's own reference value came from the party the pin defends against. MEASURED, not
+# inferred: with a fake sha256sum in an operator dir, every line of the generated file
+# carried `sha256: 0000...`. The file's own header says "the hash this script writes IS the
+# vouch for the binary", so a hasher chosen by the operator makes every pin worthless AND
+# authoritative. Same rule as the tool lookup: the reference value must not be supplied by
+# the thing being defended against.
 resolve_in_lookup() {
-  local name="$1" dir
+  local name="$1" search_path="$2" dir
   local IFS=:
-  for dir in $PIN_LOOKUP_PATH; do
+  for dir in $search_path; do
     case "$dir" in
       /*) ;;
       *) continue ;;
@@ -124,19 +157,19 @@ resolve_in_lookup() {
 # The hasher feeds the pin, so it is resolved by the same explicit rule — a function or
 # PATH-planted namesake for it would vouch for anything. No hasher in the confined dirs
 # means no safe pin: fail loudly.
-SHA256SUM="$(resolve_in_lookup sha256sum || true)"
+SHA256SUM="$(resolve_in_lookup sha256sum "$SYSTEM_LOOKUP_PATH" || true)"
 SHA256_ARGS=()
 if [ -z "$SHA256SUM" ]; then
-  SHA256SUM="$(resolve_in_lookup shasum || true)"
+  SHA256SUM="$(resolve_in_lookup shasum "$SYSTEM_LOOKUP_PATH" || true)"
   SHA256_ARGS=(-a 256)
 fi
 if [ -z "$SHA256SUM" ]; then
   echo "error: no sha256sum/shasum in the confined lookup dirs — cannot pin safely" >&2
   exit 2
 fi
-MKDIR="$(resolve_in_lookup mkdir || true)"
-DIRNAME_BIN="$(resolve_in_lookup dirname || true)"
-DATE="$(resolve_in_lookup date || true)"
+MKDIR="$(resolve_in_lookup mkdir "$SYSTEM_LOOKUP_PATH" || true)"
+DIRNAME_BIN="$(resolve_in_lookup dirname "$SYSTEM_LOOKUP_PATH" || true)"
+DATE="$(resolve_in_lookup date "$SYSTEM_LOOKUP_PATH" || true)"
 if [ -z "$MKDIR" ] || [ -z "$DIRNAME_BIN" ] || [ -z "$DATE" ]; then
   echo "error: mkdir/dirname/date must resolve in the confined lookup dirs" >&2
   exit 2
@@ -153,7 +186,7 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
   echo "# Resolution is explicit per-directory filesystem tests, never command -v: exported"
   echo "# shell functions and the CWD cannot influence what is hashed or emitted (agents-28nn round 3)"
   for tool in $TOOLS; do
-    path="$(resolve_in_lookup "$tool" || true)"
+    path="$(resolve_in_lookup "$tool" "$PIN_LOOKUP_PATH" || true)"
     if [ -z "$path" ]; then
       echo "# $tool: not found in the pinned lookup dirs — no pin"
       continue
