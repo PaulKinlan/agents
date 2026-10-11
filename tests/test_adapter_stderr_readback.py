@@ -197,98 +197,48 @@ class TestAntigravityIsRefusedToday(unittest.TestCase):
     """The fact that makes the copy legitimate, and the fact that would change first."""
 
     def test_the_policy_refusal_precedes_the_guard_and_the_redirect(self):
-        """agents-2iwf: antigravity refuses EVERY policy at :43-49 and exits 3 before its
-        prompt guard (:65) and its output redirect (:87). That is why its two lines are
-        UNREACHABLE TODAY, and it is the assertion that would fail if someone later gave
-        the case an accepted branch - at which point those defects become LIVE rather
-        than on a timer, and this test is where that change shows up."""
-        adapter = ADAPTERS / "antigravity.sh"
-        text = adapter.read_text(encoding="utf-8")
-        # agents-8l4g: the local `refusal` that used to be computed here was DEAD once the order
-        # assertions moved to the comment-stripped copy (they use refusal_live). A dead local is a
-        # claim with no effect: it reads as though something is bound, and nothing is. Removed
-        # rather than left, and the assertion that needs the position computes it where it is used.
-        # THE GUARD ANCHOR MOVED WITH agents-ut3v: the emptiness test was replaced by a
-        # content case below the reassembly, so indexing the old text raised ValueError
-        # BEFORE this test asserted anything. Anchored on the NEW guard, and on the case arm
-        # rather than the exact spacing, so a future reflow does not break the anchor the way
-        # this one did. agents-ut3v review, found by the merger on the union - the
-        # ut3v tip was red ALONE - and this is the measured version, replacing a claim that was FALSE.
-        # I first wrote "each branch was green alone, which is why a per-branch fast gate did
-        # not see it". The merger measured the opposite: git archive of the earlier tip into a
-        # temp dir shows that tree's OWN adapter has zero hits for the old anchor text, the
-        # readback test IS present in it, and the suite FAILS there (Ran 5, FAILED errors=1).
-        # SO THE TIP WAS RED BY ITSELF AND A FAST GATE AT THE TIP WOULD HAVE CAUGHT IT - it
-        # was not a cross-branch interaction invisible to a per-branch gate, it was the gate
-        # not being run at the tip. The author ran only the new test file. Recording the miss
-        # rather than an exoneration of the tool, because a comment that teaches the wrong
-        # lesson is worse than no comment: it closes the question.
-        # TWO ANCHORS, TWO JOBS (agents-ho6a). THE ORDER OF THE GUARDS IS A PROPERTY OF THE
-        # CODE, SO IT MUST BE ANCHORED ON CODE. The guard line was previously indexed as
-        # text.index('factory: prompt-content guard') - WHICH IS A COMMENT, NOT THE GUARD - so
-        # this assertion compared the refusal's position against a COMMENT's position. MEASURED,
-        # not inferred: a mutant that moved the executable guard ('case "$PROMPT" in' ... its
-        # esac) above the refusal WHILE LEAVING THE MARKER COMMENT IN PLACE left this assertion
-        # SILENT - the test only failed on the exit-code assertion below, which the mutant also
-        # changed. THE MARKER IS STABLE BY DESIGN AND CODE POSITIONS ARE NOT, so each anchor is
-        # kept for the job it can actually do: CODE for ORDER (this assertion), MARKER for
-        # durability of checks that only need to find the region (it cannot reflow with the case
-        # arm without being deliberately deleted). The marker comment stays in the adapter for
-        # that second job; it is simply no longer the thing this assertion measures.
-        #
-        # agents-aeav: text.index MATCHES COMMENTED-OUT CODE. Anchoring on a code string is not
-        # enough on its own - a refactor that moves the guard but leaves the old line commented
-        # out AFTER the refusal would be found by text.index in the comment and this assertion
-        # would pass while execution order was violated. THE ORDER ANCHORS THEREFORE INDEX A
-        # COMMENT-STRIPPED COPY. Full-line comments only: an inline '#' inside a shell word is
-        # left alone, so the strip cannot silently remove executable text.
-        live = "\n".join(
-            line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        #
-        # agents-wj9d: STRIPPING COMMENTS WAS NECESSARY AND NOT SUFFICIENT. live.index still
-        # searches for a SUBSTRING, so an occurrence of the anchor that is not a comment - inside a
-        # string, a heredoc, an echo - IMPERSONATES the guard. The reviewer's vector: move the real
-        # guard above the refusal and leave a decoy of the anchor text AFTER it, and the full suite
-        # stayed GREEN while the order was violated. A SILENT GREEN ON A REAL VIOLATION IS THE
-        # DEFECT THIS BEAD EXISTS TO REMOVE, so the fix is not a better pattern, it is BINDING: each
-        # anchor must match a WHOLE LINE (its stripped content equals the anchor exactly) and must
-        # be UNIQUE. A decoy then makes the test FAIL LOUDLY instead of passing quietly, because a
-        # second occurrence is an error rather than something to search past.
-        def _sole_line_anchor(anchor, label):
-            # Uniqueness is the binding, not the pattern. A decoy occurrence anywhere in the
-            # comment-stripped text makes this the SECOND hit and the test fails loudly; a missing
-            # anchor is the zero case. Either way the assertion names the anchor, so a silent green
-            # is not available on a violated order.
-            hits = [ln for ln in live.splitlines() if anchor in ln]
-            self.assertEqual(
-                len(hits), 1,
-                f"expected exactly one line containing {anchor!r} for the {label} anchor in the "
-                f"comment-stripped adapter, found {len(hits)} - a decoy or a missing anchor must "
-                f"fail loudly rather than be searched past (agents-wj9d)")
-            # position of the FIRST character of that line, in the anchors' coordinate system
-            return live.index(anchor)
+        """agents-hv8d (arch-ho6a ADR): ASSERT THE ORDER BY EXECUTION, NOT BY INDEXING SOURCE.
 
-        guard = _sole_line_anchor('case "$PROMPT" in', "prompt guard")
-        redirect = _sole_line_anchor('new-conversation "$PROMPT"', "output redirect")
-        refusal_live = _sole_line_anchor(_REFUSAL_ANCHOR, "policy refusal")
-        self.assertLess(refusal_live, guard,
-                        "the tool-policy refusal must precede the prompt guard")
-        self.assertLess(refusal_live, redirect,
-                        "the tool-policy refusal must precede the output redirect")
-        #
-        # agents-mh3g: the marker comment is now used for a REAL job instead of being described
-        # and never indexed. Its position in the LIVE text is checked to exist at all - the
-        # durability claim is only meaningful if the marker is actually present and executable-
-        # free, so it is asserted rather than asserted-about.
-        self.assertIn("factory: prompt-content guard", text,
-                      "the marker must remain in the adapter; checks that only need to FIND the "
-                      "region depend on it (agents-mh3g)")
+        FOUR ATTEMPTS AT STRING ANCHORING FAILED, each answering the previous impersonation - a
+        marker comment, then commented-out code, then a substring decoy. That is a design signal,
+        not a tuning signal: text-order anchoring measures a PROXY for the order, and a proxy can
+        be impersonated by any arrangement of text that does not change what the adapter DOES.
+
+        ARM B (refusal vs prompt guard) - a WHITESPACE-ONLY prompt with no system directive file.
+        The refusal fires for every tool policy and exits 3; the prompt-content guard fires only
+        for a prompt empty of content and exits 2. SO rc==3 PROVES THE REFUSAL RAN FIRST: had the
+        guard run, the whitespace prompt would have tripped it and rc would be 2. No arrangement of
+        comments, strings, decoys or heredocs can satisfy this, because the mutants that fake the
+        text change what the adapter DOES and the exit code follows.
+        ARM A (refusal vs engine launch) - a real prompt, so the guard WOULD pass. rc==3 AND the
+        redirect target must not exist: model_output.txt is created only by the engine redirect, so
+        its absence proves the engine was never exec'd.
+        BOTH ARMS CARRY A TRIPWIRE: if the refusal is ever weakened to accept a policy, arm B exits
+        2 and arm A exits 0 with output present, so the "unreachable today" characterisation cannot
+        silently rot.
+        """
+        adapter = ADAPTERS / "antigravity.sh"
+        refusal_text = "agentapi has no tool controls"
         with tempfile.TemporaryDirectory() as tmpdir:
             box = _Sandbox(Path(tmpdir))
-            res = box.invoke(adapter, "a real prompt", box.engine(ANSWERS), {})
-            self.assertEqual(res.returncode, 3,
-                             "the unmodified adapter must refuse before the engine runs")
-            self.assertIn("Refusing", res.stderr)
+            engine = box.engine(ANSWERS)
+            res_b = box.invoke(adapter, "   \n  ", engine, {})
+            self.assertEqual(
+                res_b.returncode, 3,
+                "a whitespace-only prompt must still be refused BY THE TOOL-POLICY REFUSAL "
+                "(exit 3). Exit 2 here means the prompt-content guard ran FIRST, i.e. the order is "
+                "violated - OBSERVED, not inferred (agents-hv8d): "
+                f"stdout={res_b.stdout!r} stderr={res_b.stderr!r}")
+            self.assertIn(refusal_text, res_b.stderr,
+                          "rc==3 must be the TOOL-POLICY refusal, not some other exit-3 path")
+            res_a = box.invoke(adapter, "a real prompt", engine, {})
+            self.assertEqual(res_a.returncode, 3,
+                             f"a real prompt must still be refused (exit 3): {res_a.stderr!r}")
+            self.assertIn(refusal_text, res_a.stderr)
+            self.assertFalse(
+                box.output().exists(),
+                "the engine redirect ran: model_output.txt exists, so execution reached the "
+                "redirect AFTER the refusal - the refusal did not precede it (agents-hv8d)")
 
 
 class TestAntigravityOrderOnACopy(unittest.TestCase):
