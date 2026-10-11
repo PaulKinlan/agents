@@ -104,10 +104,10 @@ def _write_diagnostics(ctx: SinkContext, stderr: str, secret_names: Sequence[str
         path = directory / DIAGNOSTICS_FILENAME
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            try:
-                os.fchmod(fd, 0o600)
-            except OSError:
-                pass
+            os.fchmod(fd, 0o600)
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            if mode != 0o600:
+                raise OSError(f"diagnostics mode {oct(mode)} != 0o600")
             with os.fdopen(fd, "a", encoding="utf-8") as handle:
                 handle.write(f"--- {datetime.now(timezone.utc).isoformat()} {ctx.target_name}/{ctx.agent}\n")
                 handle.write(text if text.endswith("\n") else text + "\n")
@@ -120,13 +120,7 @@ def _write_diagnostics(ctx: SinkContext, stderr: str, secret_names: Sequence[str
     except OSError as e:
         return f"stderr could not be saved ({type(e).__name__})"
 
-    try:
-        st = path.stat()
-        if (stat.S_IMODE(st.st_mode) & 0o077) == 0:
-            return f"stderr logged in {path} (mode 0600)"
-        return f"stderr logged in {path} (mode {oct(stat.S_IMODE(st.st_mode))})"
-    except OSError:
-        return f"stderr logged in {path}"
+    return f"stderr logged in {path} (mode 0600)"
 
 
 def _names(value: Any) -> List[str]:
