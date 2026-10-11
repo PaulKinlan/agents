@@ -538,12 +538,40 @@ def _package_root(path: Path) -> Optional[Path]:
     return current
 
 
+def _is_tool_install_root(p: Path, home: Path) -> bool:
+    """Whether p is a tool's dedicated install tree under ~/.local rather than a broad user workspace.
+    Dedicated tool trees under ~/.local (e.g. ~/.local/pi) or dedicated tool directories
+    whose only role is housing that tool are exempt from the depth-2 broad root refusal,
+    provided they are not top-level structural directories (~/.local/bin, ~/.local/share)
+    or general user workspaces (work, fleet, src, projects, etc.) (agents-n5qp)."""
+    try:
+        rel = p.resolve().relative_to(home.resolve())
+    except ValueError:
+        return False
+    parts = rel.parts
+    if len(parts) == 2:
+        # Dedicated tool directories under ~/.local (e.g. ~/.local/pi)
+        if parts[0] == ".local" and parts[1] not in _STRUCTURAL:
+            return True
+        # If the directory is under a hidden prefix and named after its executable
+        if parts[0].startswith(".") and parts[0] not in _STRUCTURAL and parts[1] not in _STRUCTURAL:
+            try:
+                exe = p / parts[1]
+                if exe.is_file() and os.access(exe, os.X_OK):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
 def _is_broad_root(pkg: Path, home: Optional[str]) -> bool:
     """A package root that is really a top-level user prefix (~/.local, ~/fleet, ~/fleet/sdk-host):
     binding it whole would expose far more than the one tool. Detected when the root itself,
     its parent, or its grandparent is the user's home or a hidden root (/home, /root),
     or when the root is an ancestor of the user's home or a hidden root, so we fall back
-    to binding just the executable file (agents-cdzn)."""
+    to binding just the executable file (agents-cdzn).
+    A tool's dedicated install root under ~/.local (e.g. ~/.local/pi) is exempt from the
+    grandparent check so its resources (themes, assets) resolve inside the sandbox (agents-n5qp)."""
     p = Path(pkg).resolve()
     if p == Path("/"):
         return True
@@ -558,8 +586,11 @@ def _is_broad_root(pkg: Path, home: Optional[str]) -> bool:
             pass
     if home:
         h = Path(home).resolve()
-        if p == h or p.parent == h or p.parent.parent == h:
+        if p == h or p.parent == h:
             return True
+        if p.parent.parent == h:
+            if not _is_tool_install_root(p, h):
+                return True
         try:
             if h.is_relative_to(p):
                 return True

@@ -1273,6 +1273,17 @@ class TestIsBroadRoot(unittest.TestCase):
         self.assertTrue(_is_broad_root(Path("/home/u/fleet/sdk-host"), "/home/u"))
         self.assertTrue(_is_broad_root(Path("/tmp/area/home/work/proj"), "/tmp/area/home"))
 
+    def test_tool_install_tree_under_dot_local_is_exempt_from_broad_root(self):
+        """agents-n5qp: ~/.local/<tool> (e.g. ~/.local/pi) is a dedicated tool install tree,
+        not a broad workspace, so its resources (themes, assets) must resolve in sandbox."""
+        from lib.sandbox import _is_broad_root
+        self.assertFalse(_is_broad_root(Path("/home/u/.local/pi"), "/home/u"))
+        self.assertFalse(_is_broad_root(Path("/opt/pi"), "/home/u"))
+        # But structural shared directories under ~/.local are still broad:
+        self.assertTrue(_is_broad_root(Path("/home/u/.local/bin"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/home/u/.local/lib"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/home/u/.local/share"), "/home/u"))
+
     def test_depth_3_or_deeper_is_not_broad(self):
         from lib.sandbox import _is_broad_root
         self.assertFalse(_is_broad_root(Path("/home/u/work/proj/deep/pkg"), "/home/u"))
