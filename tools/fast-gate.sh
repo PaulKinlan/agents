@@ -214,7 +214,11 @@ while IFS= read -r f; do
       ;;
     lib/adapters/*.sh)
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0). test_antigravity_prompt_content.py is listed EXPLICITLY (agents-nhf0): the wildcard arm already selected this file when the TEST changed, but NOT when the ADAPTER changed - so the suite protecting antigravity.sh's prompt guard did not run for the edits that could regress it. A suite gated only on its own edits is the half-fixed shape.
-      mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_antigravity_prompt_content.py"
+      # test_line_andon.py is listed here (agents-yx7z) because it drives the REAL LINE
+      # RUNNER, which is what DISPATCHES adapters, so an adapter-only change can regress it. It
+      # was mapped in the factory arm (:129) but not this one.
+      # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0).
+      mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_antigravity_prompt_content.py tests/test_line_andon.py"
       ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.
