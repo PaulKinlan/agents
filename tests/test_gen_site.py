@@ -276,6 +276,21 @@ capabilities:
         self.assertIn("found credential (aws-access-key)", str(ctx.exception))
         self.assertNotIn(aws_key, str(ctx.exception))
 
+        # Overlapping path and credential: must trigger credential violation and NOT leak secret
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something in /home/alice/AKIAIOSFODNN7EXAMPLE", "test.html")
+        self.assertIn("found credential (aws-access-key)", str(ctx.exception))
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", str(ctx.exception))
+
+        # Relative paths with slash prefix delimiters (e.g. archive/findings/...)
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something referencing archive/findings/target.json in docs", "test.html")
+        self.assertIn("Internal findings store file path", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something referencing archive/targets/name.yaml in docs", "test.html")
+        self.assertIn("Internal target manifest path", str(ctx.exception))
+
         # Legitimate documented public tool references must pass
         validate_safety("Symlink all 22 factory skills into ~/.gemini and ~/.claude", "test.html")
 
