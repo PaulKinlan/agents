@@ -987,6 +987,42 @@ class TestAgentIntegrationInstructions(unittest.TestCase):
         self.assertNotIn("## 3. Target Enrolment Plane", res.stdout)
 
 
+class TestChooseEngine(unittest.TestCase):
+    """Auto-engine selection (choose_engine) must refuse absence, never silently default (agents-cxno)."""
+
+    def test_explicit_engine_is_returned_as_is(self):
+        for engine in ("pi", "claude", "antigravity", "deepseek"):
+            with self.subTest(engine=engine):
+                self.assertEqual(factory_cli.choose_engine(engine), engine)
+
+    def test_auto_selects_pi_when_pi_on_path(self):
+        with mock.patch("shutil.which", side_effect=lambda x: f"/bin/{x}" if x in ("pi", "claude") else None):
+            self.assertEqual(factory_cli.choose_engine("auto"), "pi")
+
+    def test_auto_selects_claude_when_pi_absent_and_claude_on_path(self):
+        with mock.patch("shutil.which", side_effect=lambda x: f"/bin/{x}" if x in ("claude", "agentapi") else None):
+            self.assertEqual(factory_cli.choose_engine("auto"), "claude")
+
+    def test_auto_selects_antigravity_when_only_agentapi_on_path(self):
+        with mock.patch("shutil.which", side_effect=lambda x: "/bin/agentapi" if x == "agentapi" else None):
+            self.assertEqual(factory_cli.choose_engine("auto"), "antigravity")
+
+    def test_auto_refuses_when_no_engine_found_on_path(self):
+        """agents-cxno: absence is a refusal, never a silent fallback to 'pi'."""
+        with mock.patch("shutil.which", return_value=None), \
+             mock.patch.dict(os.environ, {"FACTORY_DEFAULT_ENGINE": ""}):
+            with self.assertRaises(factory_cli.StationError) as ctx:
+                factory_cli.choose_engine("auto")
+            self.assertIn("No engine binary found on PATH", str(ctx.exception))
+            self.assertIn("checked pi, claude, agentapi", str(ctx.exception))
+
+    def test_auto_honours_explicit_default_engine_env_when_set(self):
+        """If an engine default is needed for dev/test, it must be explicit and named."""
+        with mock.patch("shutil.which", return_value=None), \
+             mock.patch.dict(os.environ, {"FACTORY_DEFAULT_ENGINE": "pi"}):
+            self.assertEqual(factory_cli.choose_engine("auto"), "pi")
+
+
 if __name__ == "__main__":
     unittest.main()
 
