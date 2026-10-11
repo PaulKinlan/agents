@@ -1,30 +1,93 @@
-# Threat Model: The Software Factory
+# THREAT MODEL: The Software Factory (agents)
 
-The Software Factory runs code quality and security agents across target repositories. This document outlines the attack surface, trust boundaries, threat actors, and invariants enforced across stations.
+This threat model defines the trust boundaries, actors, assets, and security invariants for the **Software Factory** (the `agents` repository) itself, as well as the agents and orchestrators executing within it. 
+
+---
 
 ## 1. System Overview & Architecture
 
-The factory operates as a modular, containerized multi-engine audit pipeline. It accepts target repositories, executes configured verification and analysis agents, normalizes findings, and dispatches them to sinks (e.g. `file`, `beads`, `github-issues`).
+The Software Factory is a security-sensitive orchestration layer designed to execute SDLC agents locally (using the developer's active session authentication) and in CI pipelines (using short-lived repository tokens). It consists of:
+- **The `factory` CLI**: A central Python command dispatcher that resolves targets, runs deterministic pre-scanners, and coordinates engine execution.
+- **Deterministic Pre-Pass Scanners**: Lightweight Python scripts (e.g. `agents/secret-scan/scripts/scan.py` and `agents/threat-model/scripts/mine_history.py`) that pre-scan directories to build high-recall datasets.
+- **Engine Adapters**: Bash scripts (`lib/adapters/`) that invoke underlying AI tools (`pi`, `claude`, `antigravity`) non-interactively using host sessions.
+- **Findings Store & Sinks**: A Python module (`lib/findings.py`) that manages finding identities, runs state-machine transitions, deduplicates issues, and dispatches them to sinks (local files, or beads). Public GitHub issues are no longer a finding sink (agents-eyo): findings file to beads; public input is triaged separately.
 
-Key components:
-- **CLI Dispatcher (`factory`)**: Orchestrates runs, validates containment/budget policies, configures sandbox boundaries, routes findings.
-- **Engine Adapters (`lib/adapters/*.sh`)**: Wraps engine execution (`pi`, `claude`, `agentapi`, `deepseek`) with appropriate flags, env sanitization, and protocol normalization.
-- **Containment & Sandbox (`lib/containment.py`, `lib/sandbox.py`)**: Enforces kernel-level bubblewrap boundaries, read scopes, tool policies, PID isolation, and egress restrictions.
-- **Findings Store & Sinks (`lib/findings.py`, `lib/sinks/`)**: Deduplicates, filters, normalizes, and delivers structured findings.
+---
 
-## 2. Threat Actors & Attack Surface
+## 2. Trust Boundaries & Actors
 
-1. **Untrusted / Hostile Repositories**:
-   - Malicious target code containing symlink traps, device nodes, large/infinite file structures, or embedded prompts targeting LLM evaluators (prompt injection).
-2. **Untrusted Sub-processes / Agents**:
-   - Agents attempting unauthorized filesystem access outside the target, credential theft from environment / `$HOME`, or persistence.
-3. **Compromised Tool Dependencies**:
-   - Binaries on the host PATH that may attempt trojan behavior or exfiltration during execution.
+```
+                      [ Host Developer Machine ] (TRUSTED)
+                     +-------------------------------------+
+                     |  • Developer Credentials            |
+                     |  • factory CLI / local schedules    |
+                     +-------------------------------------+
+                                       | (Executes via Bash)
+                                       v
+                     +-------------------------------------+
+                     |  Engine Adapters (claude.sh, pi.sh) |
+                     +-------------------------------------+
+                                       | (Executes model in target CWD)
+                                       v
+[ Untrusted Target Repo ]            [ LLM Runtime Engine ] (PARTIALLY TRUSTED)
++-----------------------+            +----------------------------------------+
+| • Source files        | <--------> | • Interprets prompts & source text      |
+| • Scanned components  |  (Reads)   | • Executes custom tools (if enabled)   |
++-----------------------+            +----------------------------------------+
+```
 
-## 3. Security Invariants & Containment Doctrine
+### Actors:
+- **System Owner / Developer (Host)**: High-privilege actor who maintains the machine, runs schedules, and has access to active API keys and OAuth sessions. Highly trusted.
+- **Target Repository (Audited Code)**: The codebase being analyzed. Untrusted, especially in public or collaborative settings. May contain malicious files, dependencies, or malicious prompt engineering designed to hijack agents.
+- **Agent Engine Runtime (`pi` / `claude` / `antigravity`)**: Evaluates the codebase and runs the skill. Partially trusted, but stochastic and susceptible to prompt injection.
+- **External Attacker**: An adversary who can submit code (PRs, issues) to target repositories, aiming to compromise the host machine or trigger unauthorized findings leakages.
+
+### Key Boundaries:
+1. **Host OS vs. Untrusted Target Code**: The critical boundary separating the developer's private assets (SSH keys, session tokens, AWS credentials) from code running or analyzed in the target directory.
+2. **Inference / Prompt Boundary**: The interface between raw text gathered by deterministic scanners and the LLM engine, which could be subverted via semantic prompt injection.
+3. **Public Disclosure / Sink Boundary**: The line separating private internal logs from public-facing trackers (like GitHub Issues).
+
+---
+
+## 3. Explicitly Trusted (Non-Threats)
+
+To prevent model hallucination and alert fatigue, the following components are defined as **explicitly trusted**:
+- **Local User Configuration**: Files under `targets/*.yaml` and macOS `schedules/*.plist` are under the developer's direct control and are trusted.
+- **Mock Secrets in Test Directories / Findings Store**: Mock tokens (e.g. mock AWS keys `AKIA...` or GitHub PAs `ghp_...` used for redaction tests) are explicit non-vulnerabilities. 
+- **Local Loopback Communication**: Any traffic strictly bound to `127.0.0.1`.
+- **Local Git History**: The integrity of local `.git` metadata for target repositories is assumed authentic.
+
+---
+
+## 4. Untrusted Attack Surfaces
+
+- **Target Codebase Content**: Any scanned file may contain code designed to exploit pre-pass scripts or prompt text designed to hijack the LLM runtime.
+- **Model Responses**: Raw model output is untrusted and must be robustly parsed and structured before execution.
+- **Scanner Pre-Pass Inputs**: File names and relative paths scanned by Python scripts are untrusted and must be sanitized to prevent path traversal or shell injection in downstream processors.
+
+---
+
+## 5. Bug-Shape Hints from History
+
+- **Contamination of Scanned Scope (Feedback Loops)**: Historical fix `6c7fde4f95` indicates that deterministic scanners must strictly exclude their own output directories (`findings/`, `runs/`). Otherwise, they scan past findings, creating a cyclic feedback loop of false positive results.
+- **Findings File to Beads, Not Public Issues** (agents-eyo, reversing agents-559): findings file to the target's Beads DB automatically — no public GitHub issue, no human gate; the only guard is fingerprint dedupe (`external_ref`). Public GitHub issues remain the place for *public input*: the issue-triage station reads them, and `promote_issue` is the explicit, human-approved (`factory-approved` label) issue -> bead link. Missing/invalid `visibility` withholds high/critical from the synced beads tracker.
+- **Credential Redaction at the Publish Boundary**: A finding's `snippet` is whatever the scanner matched, which for `secret-scan` is the credential itself. Every published render (delta report, step summary, tracker sink, scanner stdout) is masked by `lib/redaction.py`; raw values stay only in the gitignored run artifacts and findings store, because a human needs to see what leaked in order to rotate it. Masking is structural, never a prompt instruction — see non-negotiable #2.
+- **Stochastic Drift**: Unchanged target files may occasionally trigger new model findings due to LLM non-determinism. This is normal and must be handled gracefully by the findings store using stable fingerprints.
+
+---
+
+## 6. Security Invariants for Auditors
 
 Discovery and verification agents must check for and respect the following invariants:
-
+1. **Isolate Execution Context (Containment)**: `lib/containment.py` reads each agent's `containment`, `capabilities` and `budget`, and fails closed.
+   - **Refusals.** Any of these refuses the run: an unknown tier, capability or budget key; a non-boolean capability; a malformed budget; a capability above its tier's ceiling; or a `requires` entry that brings the pre-pass a network credential (`gh`) without `capabilities.network`. `t3-sandbox` is refused because no sandbox runner exists.
+   - **The grant.** The tier is a ceiling on what an agent may declare, not a grant. A model session gets the `read-only` tool policy — no write, shell, network, browser or MCP tools — **except** that a *proposer* declaring `write` within a tier that allows it (`t2-local`) is granted `worktree-write` (agents-6ce): the engine runs in a disposable detached git worktree of the target's HEAD, placed under the run directory the OS sandbox already binds read-write, so the model can edit files but only there. The target checkout stays read-only and is never modified, and the staged session diff collected as `run_dir/session.patch` *is* the proposal; the worktree is always discarded afterwards. Because the worktree's `.git` marker file lives
+     inside the writable run directory, a write-enabled model could rewrite it (e.g. to
+     `gitdir: <target>/.git`) to try to redirect the host-side diff collection at the operator's
+     real repo and index. The dispatcher defeats this: it captures the worktree's admin gitdir at
+     creation, refuses collection when the marker no longer matches it, and pins every host-side
+     git call with `--git-dir`/`--work-tree`, so a rewritten marker cannot stage the operator's
+     work (review P1-1, agents-6ce). An *optimizer* (perf-hillclimb) is excepted — it returns structured steps its driver (`run_hillclimb`) applies in its own measure-change-remeasure worktree, so its model session stays read-only. A target that is not a git repository downgrades the grant to `read-only` and re-withholds `write` with that specific reason, so the banner and `policy.json` stay honest. Each engine adapter sets the engine's own flags for the granted policy. For pi, factory runs deliver `edit,write` inside the dispatcher's OS sandbox (a direct invocation accepts the policy unsandboxed and warns on stderr; the adapter verifies nothing itself). For claude, worktree-write is refused outright by the adapter (exit 3) and downgraded to read-only by the dispatcher before invocation because claude is not sandbox-verified. Adapters that cannot enforce a tool policy (deepseek, antigravity) refuse.
    - **The dispatcher.** It sets the policy itself, never from the caller's environment, and records it in the run's `policy.json`.
    - **The OS sandbox (agents-9n7).** On Linux hosts with bubblewrap, the engine session and the deterministic pre-pass run inside `lib/sandbox.py`'s bwrap wrapper: the target is bound read-only, the run directory is writable, the factory root is read-only with runs/ masked (and findings/ masked for the engine session, which keeps it readable for the pre-pass), and everything else — including all of `$HOME` (`~/.pi/auth.json`, `~/.ssh`, `~/.aws`, …) — is invisible. Engine auth crosses the boundary only as the `lib/child_env.py` environment allowlist. A private PID namespace keeps host processes and their environs out of reach. The banner and `policy.json` state exactly what was enforced; on hosts without a sandbox they keep saying NOT confined. (Residual, agents-7ik: claude is NOT in `SANDBOXED_ENGINES` — claude write declarations are downgraded to read-only by the dispatcher, and direct invocations with worktree-write are refused exit 3 by the adapter because claude is not sandbox-verified. Residual, agents-ejm: because claude is therefore never kernel-sandboxed — its read scope is only `--restricted` tool flags, not a kernel boundary, and its credentials are never brokered into placeholders — a claude run is refused unless the target's own manifest declares `trusted: true` + `visibility: private`, the same per-target attestation an unsandboxed pi run requires.)
    - **No arbitrary PATH directories (review P1).** The child's executables are bound by *name* from a narrow allowlist (`lib/sandbox.py` `ENGINE_EXECUTABLES` / `PREPASS_EXECUTABLES` plus the agent's `requires`), resolved across PATH and bound only as their own install tree or launch path — never as whole directories. A directory an operator happens to leave on PATH therefore cannot smuggle a canary or credential file into the engine's read scope; a tool that is not allowlisted simply fails to resolve, which fails the scan loudly rather than widening the sandbox.
@@ -32,3 +95,16 @@ Discovery and verification agents must check for and respect the following invar
    - **Out-of-band host pins (agents-3g6).** Hashes are host-specific, so the repo `tools.yaml` carries the format only; a deployer supplies the actual hashes in a host-local file named by `FACTORY_TOOL_PINS` (e.g. `/etc/factory/tools.pins.yaml` or `$HOME/.config/factory/tools.pins.yaml`), merged *over* `tools.yaml` per tool. An unset var or missing file leaves the repo pins unchanged (still fail-closed); a malformed host file raises — and every pins-file failure (malformed, unreadable, a non-regular file where a file is expected — a directory, FIFO, device, socket — an over-bound file, a file that grows while being read, non-UTF-8 bytes) surfaces as `ToolPinError`, so the sandbox probe degrades to "cannot sandbox" with the cause named rather than crashing the factory (agents-28nn rounds 2-3). The read is BOUNDED (`MAX_PINS_FILE_BYTES`) and the checks run against the OPENED DESCRIPTOR, never the path: the file is opened `O_RDONLY|O_NONBLOCK` and fstat'd on that descriptor — a byte cap bounds a read, not a blocking open, and a stat-then-open BY NAME leaves a swap window (a regular file swapped for a FIFO after the stat turned the kind refusal into a blocking open, agents-28nn round 4, proven by construction) — so the object validated is the object read, a non-regular file is refused by kind before any read, an over-bound size is refused unread, and the bytes read are hard-capped: an unbounded read of a FIFO or device file allocates until the machine's OOM killer — a resource exhaustion no `except` clause can rely on observing — so the refusal happens before the allocation, not after the exception. `tools/generate-tool-pins.sh` generates it (explicit operator step — the factory never auto-generates or relaxes its own pins). The generator never asks the shell what a name means: `command -v` answers exported shell FUNCTIONS before the filesystem PATH (an `export -f bwrap` plus a planted `./bwrap` was hashed and emitted as a CWD-relative pin, agents-28nn round 3, proven by construction), so the lookup tests each confined bin dir explicitly (`[ -f ] && [ -x ]` — a filesystem question shell state cannot answer), resolves the hasher the same way, and REJECTS any non-absolute result rather than emitting it. the composite action runs it on the runner, and the fleet nightly runner exports the var the same way.
    - **Fail closed when the sandbox cannot run (review P0).** For an engine whose read scope is confined *only* by the OS sandbox (`SANDBOXED_ENGINES` — pi's read tool is not path-confined by its own flags), a host where bubblewrap cannot run **refuses the run** before any run directory exists, rather than silently falling back to an unsandboxed session that could read any file the operator can. The single explicit exception is `FACTORY_ALLOW_UNSANDBOXED=1` — and since agents-bp0 that is an **attestation, not a switch**: it unlocks only for a target whose own manifest declares `trusted: true` together with `visibility: private` (`targets/<name>.yaml`), so nothing that can merely set an environment variable (a compromised schedule entry, a malicious CI step, a wrapper script, a documented command) can make the operator's filesystem the read scope. Public/unknown-visibility targets and raw `--target` paths always refuse. An opted-in run is unsandboxed and the banner and `policy.json` then say NOT enforced, naming the opt-in and the trusted target (`unsandboxed_opt_in`); `os-sandbox` and `read-scope` stay in `not_enforced`.
    - **Network egress (agents-2x6).** For a sandboxed run whose model-provider keys are all brokerable, the engine session and the pre-pass run under `--unshare-net` — no route off the network namespace, enforced by the kernel — and their only egress is the per-run egress-allowlist proxy (`lib/egress_proxy.py`, `lib/net_forward.py`): the pre-pass's `HTTP(S)_PROXY` points at an in-sandbox relay to the proxy, which forwards only the hosts the agent's own `requires` declares (gh → api.github.com, npm/npx → registry.npmjs.org; audited git pre-passes are local-only and the model API goes through the broker, not the proxy) and carries an SSRF guard against loopback/private/rebinding upstreams. A run that cannot isolate the netns — no OS sandbox on the host, or a provider key the broker does not map — keeps the shared host network and honestly re-withholds a declared `network` for that run (`network-egress` then stays in `not_enforced`). `tests/test_containment.py` proves both sides end to end: the allowlisted path (the engine reaches the broker through the relay and a pre-pass outside its own allowlist is refused 403, decided before any upstream dial) and the negative (a direct dial off the netns fails with ENETUNREACH and DNS is blocked).
+  - **Still not enforced.** The engine's own `/proc/self/environ` is readable by its own read tool — bun/pi needs a real procfs — so any credential *in the engine's env* is in reach of a prompt-injected session. The credential-broker proxy (agents-8h4) closes that gap for a sandboxed engine's model API keys: the dispatcher holds the real key host-side and hands the engine a per-run placeholder secret plus a broker base URL (`lib/credential_broker.py`, `lib/child_env.py`); the broker injects the real key into the forwarded request, so the key never enters the sandbox. On the unsandboxed path the broker's host-loopback listener refuses any connection whose owning process is outside the engine session's process tree — the kernel's attribution of the connecting socket, not knowledge of the placeholder, which any same-uid process could read (agents-28nn round 8) — and since round 9 (the verdict's P0) the SANDBOXED path's UNIX listener is peer-gated too, by `getsockopt(SO_PEERCRED)`, because that socket file is created on the HOST filesystem before its directory is bind-mounted into the sandbox: the netns confines the sandboxed child, not the host path, so a same-uid host process holding the placeholder read from the session's environ is refused there as well. Both listeners reach that one decision, and both demand the per-run secret on every request as a second factor — never as the boundary. (The peer is decided once, at connect, so the capability granted is the connection: a process the engine hands its connected socket to is served, which is acceptable because an engine able to pass its socket could proxy the request itself.) (`tests/test_containment.py` proves a sandboxed engine's `/proc/self/environ` holds the placeholder, not the key, and reaches the broker through the sandbox relay). Providers the broker does not yet map (bedrock, and the Claude OAuth token) still pass through the env allowlist until their URL construction is verified. Published output is redacted (`lib/redaction.py`). Declared `browser` stays withheld until a localhost-only browser exists (`write` is granted via the disposable worktree, agents-6ce; `network` via the egress allowlist, agents-2x6, when the run actually filters egress).
+   - **Tests.** `tests/test_containment.py` asserts the validation, the adapter flags, the dispatcher's refusals, and — end to end against a stub engine inside the real sandbox — that a canary outside the target is unreadable, that a pi run is *refused* when bubblewrap cannot run, and that the only unsandboxed path is the explicit opt-in. It also asserts that a granted `write` runs in a disposable worktree — the engine's edits are collected as `session.patch`, the worktree is discarded, and the target's `git status` stays clean, both unsandboxed and inside the enforced sandbox — and that a non-git target downgrades to read-only, and that a rewritten worktree `.git` marker is refused without staging the operator's index (review P1-1). `tests/test_sandbox.py` asserts the bwrap argv shape, that only allowlisted executables are bound (never whole PATH directories), and the live confinement probes.
+2. **Sanitize Fingerprints**: The findings store must normalize path structures and text sequences to prevent directory traversals when storing reports.
+3. **Findings -> Beads Boundary**: findings file to the target's Beads DB automatically (agents-eyo). Missing/invalid `visibility` withholds high/critical from the synced tracker (`embargo_reason`); the bead is fingerprint-deduped (`external_ref`), never gated by a human step. Public GitHub issues are no longer a finding sink — public input is triaged separately, and `promote_issue` is the explicit, human-approved issue -> bead link.
+4. **No Ambient Credentials**: Environment variables like `~/.aws/` or `~/.ssh/` must never be mounted inside any execution container or active agent session.
+5. **Published Findings Are Redacted**: Any change to `lib/findings.py`, the sink adapters, `agents/secret-scan/scripts/scan.py`, or the composite action must keep the redaction boundary intact. A credential finding (by agent or by rule id) publishes **scanner-controlled facts only** — rule, location, severity, fingerprint — because prose cannot be checked for an echo of a value whose shape is unknown; its model-written title, description and remediation, plus the matched value, stay in the local run artifact. Every published surface counts, including the bead title/description (automatic and human-promoted alike) and the security guard's own message. Identity fields are **not** trusted: `agent`, `rule_id` and `path` arrive as model-returned strings, so they are masked like any other text and then shape-checked — a long opaque run in a rule id or a path segment makes the field fall back to a placeholder rather than publishing it. Whole-block patterns (PEM) must run before header-only patterns, or the header is replaced first and the body escapes. `tests/test_redaction.py` asserts the value cannot reach a report, a tracker field (title or body), a log line, a rule/path field, or stdout.
+
+---
+
+## 7. Explicit Exclusions (Wontfix / Accepted Risks)
+
+- **Unsandboxed Local Development**: Running local plane tools *directly* (outside `factory run`) on the developer's host machine is accepted for personal convenience, provided that the target repositories are trusted. Through the factory CLI on Linux, the engine and pre-pass run inside the bubblewrap sandbox (agents-9n7). For an engine confined only by that sandbox (pi), a host where bubblewrap cannot run **refuses** the run rather than degrading silently; the explicit `FACTORY_ALLOW_UNSANDBOXED=1` is the one unsandboxed path and is meant only for a **trusted target** — enforced since agents-bp0 as a per-target declaration (`targets/<name>.yaml` `trusted: true` + `visibility: private`), never the ambient environment alone. Every such run's banner and `policy.json` say NOT enforced with the opt-in and target named (`unsandboxed_opt_in`). claude (agents-ejm) is never kernel-sandboxed, so it is likewise accepted only against a manifest declaring `trusted: true` + `visibility: private`; public/unknown-visibility targets and raw `--target` paths refuse it. Containerization or sandboxing (gVisor) is still required when *executing* untrusted code (t3 PoC verification).
+- **Deterministic Scanners False Positives**: Naive regex matches (such as regexes matching other regex patterns) are accepted as low-priority/info findings and must be filtered at the model-triage stage.
