@@ -24,9 +24,11 @@ DOCS = ROOT / "docs"
 
 try:
     from lib.tool_pins import resolve_tool
+    from lib.redaction import ALL_PATTERNS
 except ImportError:
     sys.path.insert(0, str(ROOT))
     from lib.tool_pins import resolve_tool
+    from lib.redaction import ALL_PATTERNS
 
 # Valid enums per AGENTS.md / THREAT_MODEL.md
 VALID_CLASSES = {"observer", "proposer", "optimizer"}
@@ -730,21 +732,36 @@ def replace_region(content: str, marker_name: str, new_inner: str) -> str:
     return f"{prefix}\n{new_inner}\n{suffix}"
 
 
+ALLOWED_TILDE_PATHS = frozenset({"~/.gemini", "~/.claude"})
+
+FORBIDDEN_PATTERNS = [
+    (r"/(?:home|Users|root)/[^\s<>\"'`]+", "Host user filesystem path (/home, /Users, /root)"),
+    (r"/(?:tmp|var/tmp)/[^\s<>\"'`]+", "Host /tmp temporary path"),
+    (r"\$(?:\{HOME\}|HOME)/[^\s<>\"'`]+", "Host environment path ($HOME)"),
+    (r"(?:^|[\s<>\"'`(=])targets/[\w.-]+\.ya?ml", "Internal target manifest path"),
+    (r"(?:^|[\s<>\"'`(=])findings/[\w.-]+", "Internal findings store file path"),
+    (r"(?:^|[\s<>\"'`(=])runs/[\w.-]+", "Internal run directory path"),
+    (r"ghp_[A-Za-z0-9]{36}", "GitHub Personal Access Token"),
+    (r"sk-[A-Za-z0-9_-]{20,}", "API secret token"),
+]
+
+
 def validate_safety(text: str, filename: str) -> None:
-    """Safety checks: public site must not leak host paths, runs, findings, or secrets."""
-    forbidden_patterns = [
-        (r"/(?:home|Users|root)/[^\s<>\"'`]+", "Host user filesystem path (/home, /Users, /root)"),
-        (r"/tmp/[^\s<>\"'`]+", "Host /tmp temporary path"),
-        (r"targets/[\w.-]+\.yaml", "Internal target manifest path"),
-        (r"findings/[\w.-]+\.json", "Internal findings store file path"),
-        (r"runs/[\w.-]+/", "Internal run directory path"),
-        (r"ghp_[A-Za-z0-9]{36}", "GitHub Personal Access Token"),
-        (r"sk-[A-Za-z0-9_-]{20,}", "API secret token"),
-    ]
-    for pattern, label in forbidden_patterns:
+    """Safety checks: public site must not leak host paths, runs, findings, or secrets (agents-h0z8)."""
+    for pattern, label in FORBIDDEN_PATTERNS:
         m = re.search(pattern, text)
         if m:
             raise ValueError(f"Security constraint violation in {filename}: found {label} ({m.group(0)})")
+
+    for m in re.finditer(r"(?:^|[\s<>\"'`(=])(~/[^\s<>\"'`)]+)", text):
+        path = m.group(1).rstrip(".,;:'\"`")
+        if path not in ALLOWED_TILDE_PATHS:
+            raise ValueError(f"Security constraint violation in {filename}: found Host user tilde path ({path})")
+
+    for name, pattern in ALL_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            raise ValueError(f"Security constraint violation in {filename}: found credential ({name}) ({m.group(0)})")
 
 
 def generate_all(repo_root: Path = ROOT, docs_dir: Path = DOCS) -> Dict[str, str]:

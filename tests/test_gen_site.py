@@ -237,6 +237,39 @@ capabilities:
             validate_safety("API token sk-1234567890abcdef1234567890abcdef in docs", "test.html")
         self.assertIn("API secret token", str(ctx.exception))
 
+        # agents-h0z8: extended leak spellings
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something pointing to $HOME/secrets.env in docs", "test.html")
+        self.assertIn("Host environment path ($HOME)", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something pointing to ${HOME}/.ssh/id_rsa in docs", "test.html")
+        self.assertIn("Host environment path ($HOME)", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something pointing to ~/.pi/agent/auth.json in docs", "test.html")
+        self.assertIn("Host user tilde path (~/.pi/agent/auth.json)", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something referencing findings/target-delta.yaml in docs", "test.html")
+        self.assertIn("Internal findings store file path", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("Something referencing runs/probe-target-20261011 in docs", "test.html")
+        self.assertIn("Internal run directory path", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...", "test.html")
+        self.assertIn("found credential (private-key)", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcde1234567890"
+            validate_safety(f"leaked {jwt} token", "test.html")
+        self.assertIn("found credential (jwt-token)", str(ctx.exception))
+
+        # Legitimate documented public tool references must pass
+        validate_safety("Symlink all 22 factory skills into ~/.gemini and ~/.claude", "test.html")
+
     def test_yaml_parser_fails_closed_on_invalid_constructs(self):
         """Stdlib YAML parser must fail closed on tabs, unclosed quotes, and unsupported YAML shapes."""
         from tools.gen_site import load_yaml
