@@ -291,6 +291,33 @@ class TestCommandSinkReview(CommandSinkCase):
         self.assertNotIn("tok-SECRET-BBBB", text)
         self.assertIn("[redacted:value]", text)
 
+    def test_pre_existing_diagnostics_file_mode_clamped_to_0600(self):
+        """agents-oi35: a pre-existing 0644 diagnostics file must be clamped to 0600 via fchmod."""
+        run_dir = self.root / "run_preexisting"
+        run_dir.mkdir(parents=True)
+        log = run_dir / "sink-command-stderr.log"
+        log.write_text("pre-existing unprivileged log\n")
+        log.chmod(0o644)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o644)
+
+        command = self.write_script("leaky_pre.py",
+            "import sys\nsys.stdin.read()\nsys.stderr.write('failure\\n')\nsys.exit(3)\n")
+        result = self.scan([SAMPLE], command=command, extra=["--run-dir", str(run_dir)])
+        self.assertIn("sink_command exited 3: nothing delivered", result.stdout)
+        self.assertIn("(mode 0600)", result.stdout)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+
+    def test_unwritable_diagnostics_dir_does_not_abort_dispatch_and_reports_note(self):
+        """agents-oi35: an OSError writing diagnostics must not abort the dispatch or crash."""
+        bad_run_dir = self.root / "file_as_dir"
+        bad_run_dir.write_text("not a directory")
+
+        command = self.write_script("leaky_unwritable.py",
+            "import sys\nsys.stdin.read()\nsys.stderr.write('failure\\n')\nsys.exit(3)\n")
+        result = self.scan([SAMPLE], command=command, extra=["--run-dir", str(bad_run_dir)])
+        self.assertIn("sink_command exited 3: nothing delivered", result.stdout)
+        self.assertIn("stderr could not be saved", result.stdout)
+
     def test_a_timeout_kills_the_whole_group(self):
         pidfile = self.target / "child.pid"
         command = (f"sh -c 'sleep 60 >/dev/null 2>&1 & echo $! > {pidfile}; sleep 60'")
