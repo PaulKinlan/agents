@@ -303,7 +303,15 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
                              "(agents-lm6r)")
 
     def test_a_hashlib_py_in_the_cwd_cannot_supply_the_digest(self):
-        """The SECOND channel - the generator's own working directory - closed by the same flag."""
+        """The SECOND channel - the generator's own working directory - closed by the same flag.
+
+        WHAT THIS ARM IS AND IS NOT, STATED HERE RATHER THAN LEFT AS A WEAKNESS (agents-lm6r):
+        the PYTHONPATH arm above REPRODUCES an exploit - it plants a shadow, proves the shadow is
+        reached, and shows -I is what stops it. THIS arm asserts a GUARANTEE: that -I keeps the CWD
+        off sys.path. It does not reproduce a shadow REACHING the generator's digest through the
+        cwd, so it is A GUARD AGAINST REGRESSION, NOT A DEMONSTRATED EXPLOIT. Two different jobs,
+        and the weaker one says so rather than borrowing the stronger one's evidence.
+        """
         with tempfile.TemporaryDirectory(prefix="lm6r-cwd-") as tmp:
             (Path(tmp) / "hashlib.py").write_text(self.SHADOW, encoding="utf-8")
             probe = subprocess.run(
