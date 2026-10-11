@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from lib.sandbox import (  # noqa: E402
     SANDBOXED_ENGINES, SandboxError, engine_sandboxed, sandbox_available, sandbox_command,
-    sandbox_record, sandbox_unavailable_reason,
+    sandbox_record, sandbox_unavailable_reason, reset_verified_netns, last_verified_netns,
 )
 from lib import sandbox as sandbox_module  # noqa: E402
 
@@ -291,6 +291,9 @@ class TestWrapVerification(unittest.TestCase):
         self.target.mkdir()
         self.run_dir = self.factory / "runs" / "run1"
         self.run_dir.mkdir(parents=True)
+        lib = self.factory / "lib"
+        lib.mkdir(parents=True)
+        shutil.copyfile(ROOT / "lib" / "net_forward.py", lib / "net_forward.py")
         self.real_path = os.environ.get("PATH", "")
         self.addCleanup(os.environ.__setitem__, "PATH", self.real_path)
         # The probe result is process-cached: every fake-bwrap test must re-probe.
@@ -447,6 +450,41 @@ class TestWrapVerification(unittest.TestCase):
         self.assertEqual(argv[0], shutil.which("bwrap"))
         self.assertEqual(argv[-1], "/bin/true")
         self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    def test_sentinel_fails_closed_when_netns_matches_host_under_egress_control(self):
+        """agents-8xei: when egress control is requested, a bwrap that executes on the host
+        (or fails to unshare the network namespace) must fail closed with SandboxError."""
+        path = self.use_fake_bwrap(
+            '#!/bin/sh\n'
+            'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+            '[ "$1" = "--" ] && shift\n'
+            'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+            '[ "$1" = "--" ] && shift\n'
+            'exec "$@"\n',
+            name="host-fake-bwrap",
+        )
+        with self.assertRaises(SandboxError) as raised:
+            sandbox_command(
+                ["/bin/true"], target_dir=self.target, factory_root=self.factory,
+                run_dir=self.run_dir, env={"PATH": path, "HOME": str(self.root / "home")},
+                egress_forwards=[(8384, str(self.run_dir / "sock"))],
+            )
+        self.assertIn("did not isolate its network namespace", str(raised.exception))
+
+    def test_sandbox_record_never_claims_filtered_without_demonstrated_netns(self):
+        """agents-8xei: sandbox_record must not claim network_egress_filtered=True without
+        an actual verified netns measurement."""
+        reset_verified_netns()
+        record = sandbox_record("pi", egress_filtered=True)
+        self.assertFalse(record["network_egress_filtered"])
+        self.assertNotIn("netns", record)
+
+    def test_sandbox_record_reports_demonstrated_netns_when_verified(self):
+        """agents-8xei: sandbox_record reports network_egress_filtered=True and the netns inode
+        when demonstrated."""
+        record = sandbox_record("pi", egress_filtered=True, netns="net:[4026532264]")
+        self.assertTrue(record["network_egress_filtered"])
+        self.assertEqual(record["netns"], "net:[4026532264]")
 
 
 @unittest.skipUnless(LIVE, "the pin boundary is exercised against a real, functional bwrap")

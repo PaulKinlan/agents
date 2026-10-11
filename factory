@@ -29,7 +29,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                  downgrade_write_to_read_only, egress_allowlist,
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
-                               child_environment, prepass_environment)
+                               child_environment, prepass_environment, survey_egress_credentials)
     from lib.credential_broker import (CredentialBroker, PROVIDERS,
                                   credentials_from_env, keyless_providers)
     from lib.egress_proxy import EgressProxy
@@ -55,7 +55,7 @@ except ImportError:
                                  downgrade_write_to_read_only, egress_allowlist,
                                  load_policy, policy_record)
     from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS, apply_broker_urls,
-                               child_environment, prepass_environment)
+                               child_environment, prepass_environment, survey_egress_credentials)
     from lib.credential_broker import (CredentialBroker, PROVIDERS,
                                   credentials_from_env, keyless_providers)
     from lib.egress_proxy import EgressProxy
@@ -1171,21 +1171,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             f"declares `trusted: true` with `visibility: private` (THREAT_MODEL.md section 7). "
             f"Use a sandboxed engine (pi) for public targets.")
 
-    # Egress control (agents-2x6). The engine session's netns can be isolated only when the
-    # engine is sandboxed AND every model-provider key present in the environment maps to a
-    # brokered provider: under --unshare-net the engine cannot dial a provider directly, so
-    # an unbrokerable key would break its own model calls. Today every pi provider maps
-    # (credential_broker.PROVIDERS); the check stays so a future sandboxed engine fails safe
-    # to the honest fallback — shared host network, network re-withheld, network-egress kept
-    # in not_enforced — instead of silently regressing.
-    _brokerable_vars = set()
-    for _placeholder_var, _base_url_var, _secret_vars in BROKER_PROVIDERS.values():
-        _brokerable_vars.update(_secret_vars)
-        _brokerable_vars.add(_placeholder_var)
-    egress_active = engine_sandboxed(engine) and all(
-        var in _brokerable_vars
-        for var in ENGINE_CREDENTIALS.get(engine, ()) if os.environ.get(var))
-    sandbox = sandbox_record(engine, egress_filtered=egress_active)
+    # Egress control (agents-2x6, agents-8xei). The engine session's netns can be isolated
+    # only when the engine is sandboxed AND every model-provider key present in the
+    # environment maps to a brokered provider: under --unshare-net the engine cannot dial
+    # a provider directly, so an unbrokerable key would break its own model calls.
+    # survey_egress_credentials performs an active key and model survey: if the model or an
+    # active engine key cannot be brokered, egress falls safe to the honest fallback —
+    # shared host network, network re-withheld, network-egress kept in not_enforced.
+    egress_active, egress_reason = survey_egress_credentials(engine, model=model_arg)
+    sandbox = sandbox_record(engine, egress_filtered=False)
     if not egress_active:
         # Honest per-run downgrade (lib/containment.py): the egress-allowlist proxy is not
         # active for this ENGINE session (no OS sandbox, an adapter not verified to run
@@ -1500,6 +1494,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 mask_findings=True)
         except SandboxError as e:
             raise StationError(f"{agent_name}: cannot sandbox engine '{engine}': {e}") from e
+
+        # agents-8xei: update the sandbox record from the exercised wrap measurement.
+        # network_egress_filtered is True only when network namespace isolation was
+        # demonstrated by the verified wrap.
+        sandbox = sandbox_record(engine, egress_filtered=egress_active)
 
     print(f"\n[Software Factory] Run Initialized")
     print(f"  Agent:       {agent_name} ({agent_cfg.get('class', 'observer')})")

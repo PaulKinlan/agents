@@ -21,7 +21,7 @@ adapter must be named here before it can see a key, which is the fail-closed dir
 
 import os
 from collections.abc import Mapping as MappingABC
-from typing import Dict, Mapping, Optional
+from typing import Dict, Mapping, Optional, Tuple
 
 from lib.credential_broker import BROKER_ENV_CONFIGS
 from lib.tool_pins import HOST_PINS_ENV, UNPINNED_ALLOW_ENV
@@ -243,3 +243,40 @@ def child_environment(
     if broker_urls:
         apply_broker_urls(env, broker_urls, placeholder=broker_placeholder)
     return env
+
+
+def survey_egress_credentials(engine: str, model: Optional[str] = None,
+                              parent: Optional[Mapping[str, str]] = None) -> Tuple[bool, Optional[str]]:
+    """Survey whether the engine and model credentials in this run can be brokered under --unshare-net.
+
+    agents-8xei: Under --unshare-net, the child process has NO direct route off the network namespace.
+    Every outbound connection must be forwarded through the credential broker or allowlist proxy.
+    Therefore, egress can only be active if:
+      1. The engine is OS-sandboxed (engine in SANDBOXED_ENGINES and sandbox_available()).
+      2. The model configured for this engine uses a provider that the CredentialBroker supports.
+      3. No active engine credentials in the environment belong to unbrokerable providers (e.g. AWS/Vertex).
+    Returns (True, None) if egress can be isolated, or (False, reason) if it must fall back.
+    """
+    from lib.sandbox import SANDBOXED_ENGINES, sandbox_available
+    if not (engine in SANDBOXED_ENGINES and sandbox_available()):
+        return (False, f"engine '{engine}' is not OS-sandboxed")
+
+    _brokerable_vars = set()
+    for _placeholder_var, _base_url_var, _secret_vars in BROKER_PROVIDERS.values():
+        _brokerable_vars.update(_secret_vars)
+        _brokerable_vars.add(_placeholder_var)
+
+    source = os.environ if parent is None else parent
+    if engine == "pi":
+        effective_model = model or source.get("FACTORY_MODEL") or "deepseek/deepseek-flash"
+        model_prov = effective_model.split("/", 1)[0].lower()
+        if model_prov not in BROKER_PROVIDERS:
+            return (False, f"model provider '{model_prov}' is not supported by the credential broker; direct egress required")
+
+    engine_creds = ENGINE_CREDENTIALS.get(engine, ())
+    for var in engine_creds:
+        if source.get(var) and var not in _brokerable_vars:
+            return (False, f"credential '{var}' is required by engine '{engine}' but cannot be brokered")
+
+    return (True, None)
+

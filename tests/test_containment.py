@@ -2725,6 +2725,22 @@ process.stdin.on('end', () => {
         self.assertEqual(payload["egress"], "http-403",
                          "a host outside the agent's own requires allowlist must be refused")
 
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_unbrokerable_model_downgrades_network_and_reports_egress_unfiltered(self):
+        """agents-8xei: when a run requests an unbrokerable model (e.g. mistral/mistral-large),
+        the key survey recognizes the model provider cannot be brokered under --unshare-net,
+        downgrades network to withheld, and honestly reports network-egress as not enforced."""
+        self.agent("name: probe\nclass: observer\ncontainment: t1-fetch\n"
+                   "capabilities:\n  network: true\n"
+                   "budget: {max_minutes: 1}\n")
+        res = self.factory("pi", {"FACTORY_MODEL": "mistral/mistral-large"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertIn("network-egress", record["not_enforced"])
+        self.assertFalse(record["granted"]["os_sandbox"]["network_egress_filtered"])
+        self.assertIn("network egress NOT filtered", res.stdout)
+        self.assertIn("Withheld:    network", res.stdout)
+
 
 def _mock_http_upstream(port_holder, ready, stop):
     """A plain-HTTP mock upstream for the agents-2x6 end-to-end test: answers every

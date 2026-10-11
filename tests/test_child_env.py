@@ -8,6 +8,8 @@ talks to GitHub.
 """
 
 import hashlib
+import os
+os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # dev/test opt-in for unpinned tools
 import re
 import subprocess
 import sys
@@ -25,6 +27,7 @@ from lib.child_env import (  # noqa: E402
     child_environment,
     declares_requirement,
     prepass_environment,
+    survey_egress_credentials,
 )
 from lib.credential_broker import PLACEHOLDER_PREFIX, BROKER_ENV_CONFIGS  # noqa: E402
 from lib.containment import ContainmentError
@@ -386,6 +389,36 @@ class TestCredentialBrokering(unittest.TestCase):
         # Every credential passed to pi must have a broker entry so a real key
         # never silently leaks into a sandboxed env without being brokered (agents-8k9).
         self.assertTrue(set(ENGINE_CREDENTIALS["pi"]) <= {var for _, _, sv in BROKER_ENV_CONFIGS.values() for var in sv})
+
+
+class TestSurveyEgressCredentials(unittest.TestCase):
+    """agents-8xei: survey_egress_credentials performs an active key and model survey
+    to determine whether egress filtering can be enabled without breaking model calls."""
+
+    def test_pi_with_brokerable_model_and_brokerable_creds_passes(self):
+        active, reason = survey_egress_credentials("pi", model="deepseek/deepseek-flash",
+                                                   parent={"DEEPSEEK_API_KEY": "sk-test"})
+        self.assertTrue(active)
+        self.assertIsNone(reason)
+
+    def test_pi_with_unbrokerable_model_fails_survey(self):
+        active, reason = survey_egress_credentials("pi", model="mistral/mistral-large")
+        self.assertFalse(active)
+        self.assertIn("mistral", str(reason))
+
+    def test_pi_with_unbrokerable_ollama_fails_survey(self):
+        active, reason = survey_egress_credentials("pi", model="ollama/llama3")
+        self.assertFalse(active)
+        self.assertIn("ollama", str(reason))
+
+    def test_unsandboxed_engine_fails_survey(self):
+        active, reason = survey_egress_credentials("claude", parent={"ANTHROPIC_API_KEY": "sk-ant"})
+        self.assertFalse(active)
+        self.assertIn("claude", str(reason))
+
+    def test_engine_with_unbrokerable_credentials_fails_survey(self):
+        active, reason = survey_egress_credentials("claude", parent={"CLAUDE_CODE_USE_BEDROCK": "1"})
+        self.assertFalse(active)
 
 
 if __name__ == "__main__":
