@@ -82,8 +82,12 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertNotIn("GEMINI_API_KEY", claude)
         self.assertNotIn("GITHUB_TOKEN", claude)
 
-        deepseek = child_environment(engine="deepseek", parent=parent_env(DEEPSEEK_API_KEY="ds-key"))
+        deepseek = child_environment(engine="deepseek", parent=parent_env(
+            DEEPSEEK_API_KEY="ds-key",
+            FACTORY_DEFAULT_DEEPSEEK_BASE_URL="http://127.0.0.1:9",
+        ))
         self.assertEqual(deepseek["DEEPSEEK_API_KEY"], "ds-key")
+        self.assertEqual(deepseek["FACTORY_DEFAULT_DEEPSEEK_BASE_URL"], "http://127.0.0.1:9")
         self.assertNotIn("ANTHROPIC_API_KEY", deepseek)
         self.assertNotIn("GITHUB_TOKEN", deepseek)
 

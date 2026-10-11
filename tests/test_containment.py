@@ -1031,15 +1031,28 @@ class TestAdapters(unittest.TestCase):
             self.assertIn("is unusable (must begin with http:// or https://)", res.stderr)
 
     def test_deepseek_accepts_factory_default_deepseek_base_url(self):
-        """agents-sjgq: FACTORY_DEFAULT_DEEPSEEK_BASE_URL provides explicit dev/test endpoint override."""
+        """agents-sjgq: FACTORY_DEFAULT_DEEPSEEK_BASE_URL provides explicit dev/test endpoint override,
+        and child_environment forwards it into the adapter's environment."""
+        from lib.child_env import child_environment
+        parent = dict(os.environ)
+        parent["FACTORY_DEFAULT_DEEPSEEK_BASE_URL"] = "http://127.0.0.1:9"
+        parent["DEEPSEEK_API_KEY"] = "sk-test-key"
+        parent.pop("DEEPSEEK_BASE_URL", None)
+
+        # 1. Verify child_environment forwards the override
+        env = child_environment(engine="deepseek", parent=parent)
+        self.assertEqual(env.get("FACTORY_DEFAULT_DEEPSEEK_BASE_URL"), "http://127.0.0.1:9")
+        self.assertNotIn("DEEPSEEK_BASE_URL", env)
+
+        # 2. Verify adapter receives and uses the forwarded override
+        env["PATH"] = f"{self.bin}{os.pathsep}/usr/bin:/bin"
+        env["HOME"] = str(self.home)
+        env["FACTORY_ALLOW_UNPINNED_TOOLS"] = "1"
         res = subprocess.run(
             ["bash", str(ROOT / "lib" / "adapters" / "deepseek.sh"), "probe",
              str(self.target), str(self.skill), str(self.tmp / "run")],
             input="valid prompt with scanner data\n", capture_output=True, text=True, timeout=60,
-            env={"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "HOME": str(self.home),
-                 "FACTORY_ALLOW_UNPINNED_TOOLS": "1",
-                 "FACTORY_DEFAULT_DEEPSEEK_BASE_URL": "http://127.0.0.1:9",
-                 "DEEPSEEK_API_KEY": "sk-test-key"},
+            env=env,
         )
         self.assertEqual(res.returncode, 1, res.stderr + res.stdout)
         self.assertIn("DeepSeek API Request Error", res.stderr + res.stdout)
