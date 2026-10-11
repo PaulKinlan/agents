@@ -1672,19 +1672,30 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # same-uid process via /proc/<pid>/environ — the reviewer's pre-pass-spawned
         # attacker read exactly that value and authenticated with it. A secret confines
         # by KNOWLEDGE; between processes of one uid there is no knowledge asymmetry.
-        # So the broker now gates the TCP listener on the kernel's attribution of the
-        # connecting PEER (lib/credential_broker.py — /proc/net/tcp's inode to its
-        # owning pid, then the ppid chain; the TCP analogue of SO_PEERCRED), accepting
-        # only this dispatcher's process tree, narrowed to the ENGINE SESSION's tree the
-        # moment the engine is spawned (run_station_command's on_spawn below). WHO CAN
-        # REACH the broker is a property of the OPERATION, not of the OS environment's
-        # uid rules. Chosen over a UNIX socket with SO_PEERCRED — the engine's SDK dials
-        # a TCP base URL and cannot dial a UNIX socket, so a relay would sit on the same
-        # shared loopback needing this same check; the check is the mechanism — and over
-        # failing closed, which remains the posture when /proc is unreadable: the gate
-        # refuses, never opens. The placeholder stays as the SECOND factor; its presence
-        # in the engine's environ and in models.json (which pi still needs) no longer
-        # confers authority by itself.
+        # So the broker gates on the kernel's attribution of the connecting PEER — the
+        # TCP listener through /proc/net/tcp's inode -> owning pid and then the ppid
+        # chain, the UNIX listener through getsockopt(SO_PEERCRED) (agents-28nn round 9)
+        # — accepting only this dispatcher's process tree, narrowed to the ENGINE
+        # SESSION's tree the moment the engine is spawned (run_station_command's
+        # on_spawn below). Round 9's verdict found the UNIX listener UNGATED: its socket
+        # FILE is created on the host filesystem before its directory is bind-mounted
+        # into the sandbox, so the netns protects nothing there and a same-uid host
+        # process could read the placeholder out of the session's environ, read the
+        # socket path and dial the host socket directly (constructed: a 502, i.e. past
+        # the gate and onto the wire). Both listeners now reach ONE peer decision in
+        # lib/credential_broker.py, because two code paths is how one of them came to be
+        # exempt from the check the other performed. WHO CAN REACH the broker is a
+        # property of the OPERATION, not of the OS environment's uid rules. Chosen over
+        # moving the unsandboxed transport to a UNIX socket with SO_PEERCRED: the
+        # engine's SDK dials a TCP base URL and cannot dial a UNIX socket, so a relay
+        # would sit on the same shared loopback needing this same check — the check is
+        # the mechanism. Chosen over failing closed, which remains the posture whenever
+        # the peer cannot be attributed at all: the gate refuses, never opens. The
+        # default root is this dispatcher's pid and is safe because the pre-pass has
+        # been reaped before the broker starts (the line below runs after it) and an
+        # orphan re-parents to init, outside the tree. The placeholder stays as the
+        # SECOND factor on both listeners; its presence in the engine's environ and in
+        # models.json (which pi still needs) no longer confers authority by itself.
         # Both are started here — after the pre-pass — and torn down in the finally, so
         # neither leaks on any failure.
         broker: Optional[CredentialBroker] = None
