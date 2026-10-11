@@ -60,9 +60,40 @@ cd "$ROOT"
 FAST_GATE_STAGE="resolving changed files"
 BASE="${GIT_BASE:-origin/main}"
 
-# The branch delta. Empty when the base is absent/unknown -> smoke fallback.
+# The branch delta. AN ERROR RESOLVING THE BASE IS NOT AN EMPTY DELTA (agents-c1z0, P1).
+#
+# This used to be `changed="${GIT_CHANGED:-$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)}"`,
+# and the `|| true` was the hole: `git diff <bad-base>...HEAD` exits non-zero and prints
+# nothing on stdout, so "I could not determine the delta" arrived here as "there is no
+# delta". An empty delta then reaches the bounded smoke fallback below and the verdict
+# reads PASS for a suite unrelated to the change - the same masking shape the *) arm was
+# written to remove, one level up and one level quieter. It was reachable with a
+# GIT_BASE naming a ref that does not exist, a shallow clone with no origin/main, or an
+# unrelated history with no merge base, and it flipped a named refusal into a green pass
+# on the SAME tree.
+#
+# So: A FALLBACK THAT SWALLOWS AN ERROR MUST PRODUCE A DISTINCT VALUE RATHER THAN AN
+# EMPTY ONE. A base that is not a commit, and a diff that fails to compute, are both
+# errors: they fail loudly and never reach the smoke fallback. Only a diff that genuinely
+# succeeds and reports no paths is an empty delta, and only that takes the fallback.
+#
 # Override changed files directly with GIT_CHANGED (used by tests).
-changed="${GIT_CHANGED:-$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)}"
+if [ -n "${GIT_CHANGED:-}" ]; then
+  changed="$GIT_CHANGED"
+else
+  FAST_GATE_STAGE="resolving the branch delta vs $BASE"
+  if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null 2>&1; then
+    echo "fast-gate: FAIL: base '$BASE' is not a commit in this repository." >&2
+    echo "fast-gate: an unresolvable base is an ERROR, not an empty delta - the change set is UNKNOWN," >&2
+    echo "fast-gate: so there is no honest verdict to report (set GIT_BASE to a real ref)." >&2
+    exit 1
+  fi
+  if ! changed="$(git diff --name-only "${BASE}...HEAD")"; then
+    echo "fast-gate: FAIL: 'git diff --name-only ${BASE}...HEAD' failed to compute the delta." >&2
+    echo "fast-gate: the change set is UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
+    exit 1
+  fi
+fi
 
 run=""
 mapped=""
@@ -432,7 +463,20 @@ if [ -n "$unmatched" ]; then
 fi
 
 # Union, dedupe, deterministic order.
-files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort || true)"
+#
+# NO `|| true` HERE EITHER (agents-c1z0 review): this is the same error-masking shape as
+# the base resolution above, one line later, and the reviewer constructed it. With the
+# trailing `|| true` a failing element of this pipeline (a broken or OOM-killed `sort` or
+# `awk`, a SIGPIPE) suppressed its exit status, `files` evaluated to the empty string, and
+# the smoke fallback below reported PASS - discarding suites that HAD been mapped
+# correctly. Reproduced with GIT_CHANGED="lib/sandbox.py" and a `sort` on PATH that exits 1:
+# the correctly mapped tests/test_sandbox.py was thrown away and the verdict was green.
+# A pipeline that cannot compute the suite list is an ERROR, not an empty suite list.
+if ! files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort)"; then
+  echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
+  echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
+  exit 1
+fi
 
 # Dry-run support for testing mapping resolution without invoking unittest.
 if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
