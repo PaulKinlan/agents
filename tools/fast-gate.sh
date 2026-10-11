@@ -223,7 +223,9 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_hillclimb.py"
       ;;
     agents/docs-write/scripts/prepare_docs_fixes.py)
-      mapped="$mapped tests/test_prepass_exclusions.py"
+      # agents-tdwv: ALSO the suite for THIS script's own error handling, same
+      # one-token shape as the arm above.
+      mapped="$mapped tests/test_prepass_exclusions.py tests/test_docs_write.py"
       ;;
     agents/docs-drift/scripts/check_docs.py)
       # agents-q0mt: also emits candidate ids now; the exclusion suite drives this script, and the
@@ -287,7 +289,12 @@ while IFS= read -r f; do
     agents/accessibility/scripts/audit_a11y.py)
       # agents-q0mt: emits candidate ids. The emission pin is this station's only executable
       # coverage of its artefact, so it is named here rather than left to the smoke subset.
-      mapped="$mapped tests/test_candidate_id_emission.py"
+      # agents-tdwv: ALSO its OWN suite - tests/test_audit_a11y.py tests THIS script's
+      # CLI (no --output must drop candidate ids and matched line hashes from stdout),
+      # so a change here could regress the suite written to test it. Same one-token
+      # shape as agents-nhf0, agents-yx7z, agents-8jx1 and agents-4ic0; found by the
+      # wildcard-set scoping pass rather than by the gate, which cannot see it.
+      mapped="$mapped tests/test_candidate_id_emission.py tests/test_audit_a11y.py"
       ;;
     agents/memory-profile/scripts/scan_memory_leaks.py)
       # agents-q0mt: emits candidate ids; the binding suite drives this script.
