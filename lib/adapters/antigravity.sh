@@ -12,6 +12,10 @@ RUN_DIR="${4}"
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
+# agents-p2ik: the engine's stderr is kept SEPARATE from its stdout, as at the other
+# three adapter sites. Both used to land in $OUTPUT_FILE, so an engine that wrote ONLY
+# to stderr left a non-empty file that the read-back below accepted as the answer.
+STDERR_FILE="$RUN_DIR/model_stderr.txt"
 
 # agentapi is the only supported headless dispatch path. Fail loudly when it is
 # missing: writing a placeholder and exiting 0 made the dispatcher parse no JSON and
@@ -61,6 +65,32 @@ if [ -t 0 ]; then
   echo "[antigravity adapter] Error: prompt expected on stdin." >&2
   exit 2
 fi
+# agents-2iwf PLACEMENT NOTE - RECORDED, NOT EDITED, AND DELIBERATELY NO STRONGER THAN
+# WHAT WAS MEASURED. The guard below tests $PROMPT AS READ FROM STDIN. The run further
+# down uses the FINAL prompt, which this adapter reassembles from the system directive
+# file. The two differ whenever a directive is set.
+#
+# WHETHER THAT DIFFERENCE MATTERS DEPENDS ON WHETHER A DIRECTIVE IS SET, and both cases
+# were established separately:
+#
+#   WITH A DIRECTIVE SET, this guard is UNREACHABLE AS A CONTENT TEST. The directive
+#   guard earlier in this file refuses a missing, unreadable or EMPTY directive before
+#   anything else runs, so :80 always has content to prepend and the final prompt cannot
+#   be empty. Measured: whitespace stdin alone is refused by that earlier guard, and
+#   whitespace stdin with a non-empty directive produces "<directive>\n\n<stdin>".
+#
+#   WITH NO DIRECTIVE SET, this guard is REACHABLE AND WRONG. :80 has nothing to
+#   reassemble, so the engine receives $PROMPT unchanged - and this guard tests
+#   EMPTINESS, not content, so a prompt of spaces passes it and the engine runs with
+#   nothing to act on. Measured on a copy of this file with the tool-policy refusal
+#   removed (the order of the guards), and the ROUTE by search: NOTHING IN THIS ADAPTER
+#   OR IN THE DISPATCHER SETS FACTORY_SYSTEM_DIRECTIVE_FILE - it is a variable this file
+#   consumes and nothing sets - so the no-directive case is not excluded.
+#
+# WHAT MUST CHANGE: the guard belongs BELOW the reassembly and must test CONTENT rather
+# than emptiness. Whitespace-only stdin WITH a reassembled directive is a legitimate
+# prompt; whitespace-only stdin with no directive is not. That is a predicate change, not
+# a move, and it is filed separately (see the tracker) rather than made here.
 PROMPT="$(cat)"
 if [ -z "$PROMPT" ]; then
   echo "[antigravity adapter] Error: empty prompt on stdin." >&2
@@ -84,10 +114,28 @@ cd "$TARGET_DIR"
 
 # agentapi has no stdin mode, so the prompt is positional here and appears in that engine
 # process's argv for the duration of the run. The dispatcher no longer carries it (agents-pgr).
-"$AGENTAPI_BIN" new-conversation "$PROMPT" > "$OUTPUT_FILE" 2>&1 || {
+"$AGENTAPI_BIN" new-conversation "$PROMPT" > "$OUTPUT_FILE" 2> "$STDERR_FILE" || {
   echo "[antigravity adapter] Error executing agentapi" >&2
   cat "$OUTPUT_FILE" >&2
+  cat "$STDERR_FILE" >&2
   exit 1
 }
 
+# agents-fnij/agents-p2ik: A ZERO EXIT IS NOT EVIDENCE THAT THE AGENT ANSWERED. This
+# adapter had NO read-back at all - it printed the PATH and the dispatcher read that as
+# the model's output - so a run that wrote nothing, or wrote only to stderr, was a
+# delivered run. Measured on pi.sh, which had the same shape: rc=0 with a 0-byte file,
+# and rc=0 with a 44-byte file holding nothing but "provider error: 429 rate limited".
+#
+# THESE LINES ARE NOT REACHABLE TODAY: the tool-policy refusal above exits 3 before
+# this point, for every policy. They are fixed anyway because that refusal is a
+# CONDITION, not a property - if it is ever satisfied this defect becomes live AT ONCE,
+# in a file whose diff says it was reviewed (agents-2iwf; the reachability test in
+# tests/test_adapter_stderr_readback.py asserts the refusal precedes this block).
+if [ ! -s "$OUTPUT_FILE" ]; then
+  echo "[antigravity adapter] Error: agentapi exited 0 but wrote no output to $OUTPUT_FILE; the run produced no result (agents-fnij)." >&2
+  if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
+  exit 1
+fi
+if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
 echo "$OUTPUT_FILE"

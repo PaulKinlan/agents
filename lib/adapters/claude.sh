@@ -12,6 +12,11 @@ RUN_DIR="${4}"
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
+# agents-p2ik: the engine's stderr is kept SEPARATE from its stdout. Both used to land in
+# $OUTPUT_FILE, so an engine that wrote ONLY to stderr (a rate-limit notice, a traceback)
+# left a non-empty file that the read-back below accepted as the answer. Splitting them
+# makes -s mean exactly one thing: STDOUT has content.
+STDERR_FILE="$RUN_DIR/model_stderr.txt"
 
 # Deterministic auth check — presence of a credential, not a model round trip.
 # A `claude -p "ping"` probe cost a full inference per run and only recognised one
@@ -248,10 +253,27 @@ if [ ${#BUDGET_FLAGS[@]} -gt 0 ]; then
   echo "[claude adapter] Budget cap: \$$FACTORY_MAX_BUDGET_USD (--max-budget-usd)"
 fi
 # ${SKILL_FLAGS[@]+...} / ${BUDGET_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
-printf '%s' "$PROMPT" | "$ENGINE_BIN" "${POLICY_FLAGS[@]}" ${SKILL_FLAGS[@]+"${SKILL_FLAGS[@]}"} ${BUDGET_FLAGS[@]+"${BUDGET_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
+printf '%s' "$PROMPT" | "$ENGINE_BIN" "${POLICY_FLAGS[@]}" ${SKILL_FLAGS[@]+"${SKILL_FLAGS[@]}"} ${BUDGET_FLAGS[@]+"${BUDGET_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2> "$STDERR_FILE" || {
   echo "[claude adapter] Error executing claude" >&2
   cat "$OUTPUT_FILE" >&2
+  cat "$STDERR_FILE" >&2
   exit 1
 }
 
+# agents-fnij/agents-p2ik: A ZERO EXIT IS NOT EVIDENCE THAT THE ENGINE ANSWERED. This
+# adapter had NO read-back at all - it printed the PATH and the dispatcher read that as
+# the model's output - so an engine exiting 0 having written nothing, or having written
+# only to stderr, produced a delivered run with an empty or misleading answer. Measured
+# on pi.sh, which had the same shape: rc=0 with a 0-byte file, and rc=0 with a 44-byte
+# file holding nothing but "provider error: 429 rate limited". The output file is the
+# one artefact this adapter exists to produce, so its emptiness is read back rather than
+# inferred from the exit status. -s is the test that can express that failure.
+if [ ! -s "$OUTPUT_FILE" ]; then
+  echo "[claude adapter] Error: $ENGINE_BIN exited 0 but wrote no output to $OUTPUT_FILE; the run produced no result (agents-fnij)." >&2
+  if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
+  exit 1
+fi
+# Whatever the engine said on stderr is diagnostic, not an answer - surfaced to the
+# operator (traced: nothing consumes the adapter's stderr as model output).
+if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
 echo "$OUTPUT_FILE"

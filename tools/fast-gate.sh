@@ -194,16 +194,16 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_yaml_mini.py tests/test_ci_action.py"
       ;;
     lib/adapters/claude.sh)
-      # Claude adapter session auth scrub and precedence (agents-vt7w), prompt guards (agents-9bp7).
-      mapped="$mapped tests/test_claude_adapter.py tests/test_prompt_exposure.py"
+      # Claude adapter session auth scrub and precedence (agents-vt7w), prompt guards (agents-9bp7), stderr read-back (agents-2iwf).
+      mapped="$mapped tests/test_claude_adapter.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py"
       ;;
     lib/adapters/pi.sh)
       # Pi adapter keyless broker wireup, auth failure handling, containment policies, prompt guards, and factory core (agents-zak0).
-      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_prompt_exposure.py"
+      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py"
       ;;
     lib/adapters/*.sh)
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0).
-      mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_prompt_exposure.py"
+      mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py"
       ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.
