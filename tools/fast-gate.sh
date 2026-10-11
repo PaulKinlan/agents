@@ -27,14 +27,31 @@ set -euo pipefail
 # Establish hermetic test environment: scrub ambient operator host config (agents-v1a2).
 unset FACTORY_TOOL_PINS 2>/dev/null || true
 export FACTORY_ALLOW_UNPINNED_TOOLS=1  # READ THE SCOPE BEFORE WORRYING (agents-xdmh): this
-# waives only the REQUIREMENT that a trusted tool HAVE a pin (lib/tool_pins.py:426
-# _require_pin, which fires when sha256 is None). It does NOT touch content verification:
-# verify_pin (:442) contains no _unpinned_allowed() call, so a sha256 that is present and
-# MISMATCHED still raises - measured, with that mismatch case refused as the control. The
-# unset above is not a scrub either: lib/tool_pins.py reads the COMMITTED tools.yaml when
-# the variable is unset (:397), so it swaps the host override for the committed pins -
-# STRICTER for the pins that exist. :29 had no note where :28 has one, which is why the
-# pair read like a scrub.
+# waives only the REQUIREMENT that a trusted tool HAVE a pin (lib/tool_pins.py:432
+# _require_pin, which fires at :441 when sha256 is None and not _unpinned_allowed()). It
+# does NOT touch content verification: verify_pin (:457) contains no _unpinned_allowed()
+# call, so a sha256 that is present and MISMATCHED still raises - measured, with that
+# mismatch case refused as the control.
+#
+# THE UNSET ABOVE IS A SCRUB, AND SAYING OTHERWISE WAS WRONG (agents-x2uw). An earlier
+# version of this note claimed the unset "is not a scrub either" because tool_pins.py
+# "swaps the host override for the committed pins - STRICTER for the pins that exist".
+# THAT IS MEASURABLY FALSE: the committed tools.yaml ships its pins COMMENTED OUT (0
+# active, 13 commented), while a host pins its own tools (~/.fleet/../tools.pins.yaml, 8
+# here). The committed set is EMPTY, so unsetting FACTORY_TOOL_PINS REMOVES pins it does
+# not replace, and for every host-pinned tool this gate runs with NO pin where the ambient
+# environment had one - LOOSER, not stricter, for exactly the tools the host pinned. With a
+# fake git first on PATH, the ambient environment resolves /usr/bin/git (the host pin wins)
+# and THIS GATE RESOLVES THE PLANTED FAKE. The opt-in above is what then lets such a tool
+# resolve at all, by PATH order.
+#
+# SO THE TWO HALVES ARE ASYMMETRIC, and the note says so rather than smoothing it over:
+# the WAIVER is narrow and measured (content verification still runs on any pin that
+# exists); the DIRECTION is "not a scrub" ONLY for a tool that HAS a committed pin, WHICH
+# THIS REPO CURRENTLY HAS NONE OF. The pin-semantics half stands; the direction claim is
+# withdrawn and the citations were re-measured against origin/main rather than carried
+# forward (agents-hs2g; the earlier :426/:442/:397 were stale or unsupported).
+# :29 had no note where :28 has one, which is why the pair first read like a scrub.
 
 # Fail-visible abort diagnostics (agents-adhc).
 # UNCOVERABLE BY CONSTRUCTION: SIGKILL (kill -9), kernel OOM-killer invocations,
