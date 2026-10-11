@@ -871,7 +871,7 @@ class TestEngineAdapterAuth(unittest.TestCase):
             tmp = Path(tmpdir)
             creds = tmp / "home" / ".claude" / ".credentials.json"
             creds.parent.mkdir(parents=True)
-            creds.write_text("{\"stub\":true}")
+            creds.write_text('{"claudeAiOauth": {"accessToken": "valid-test-token", "expiresAt": 4102444800000}}')
             bindir = self._stub_engine(tmp)
 
             res, run_dir = self._run_claude_adapter(tmp, {
