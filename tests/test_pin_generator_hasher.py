@@ -24,8 +24,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lib.tool_pins import load_tool_pins
-
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "generate-tool-pins.sh"
 FAKE_HASH = "0" * 64
@@ -113,10 +111,9 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
       bytes. Exact hex byte escapes ($'\\xc2\\x85', $'\\xe2\\x80\\xa8', $'\\xe2\\x80\\xa9')
       match the loader's line break bytes across all host and runner locales.
 
-    THE TEST IS BEHAVIOURAL AND ASSERTED AGAINST THE PARSER, not against the shell: for every
+    THE TEST IS BEHAVIOURAL AND ASSERTED AGAINST THE GENERATOR'S REFUSAL: for every
     character str.splitlines() breaks on it builds the injection, runs the generator, and
-    asserts (a) the generator refuses and writes nothing, and (b) if a file WERE produced,
-    this repo's own parser would not find the injected path in it.
+    asserts the generator refuses with exit 2 and writes nothing.
     """
 
     LINE_BREAKS = {
@@ -158,12 +155,6 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
                                   f"{label} ({flag_style}): expected rejection on stderr")
                     self.assertFalse(pins_file.exists(),
                                      f"{label} ({flag_style}): pins file should not be created on rejection")
-                    if pins_file.exists():
-                        parsed = load_tool_pins(pins_file)
-                        entry = parsed.get("semgrep") or {}
-                        self.assertNotEqual(
-                            entry.get("path"), str(fake),
-                            f"{label} ({flag_style}): injected semgrep pin accepted by loader")
 
     def test_a_legitimate_lookup_path_is_still_accepted(self):
         """The other direction: the fix must not reject ordinary operator directories, which
