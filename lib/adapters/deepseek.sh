@@ -47,6 +47,24 @@ fi
 # tools and no filesystem read scope) and risk credential exfiltration or fabricated
 # verdicts. Even if FACTORY_ENGINE_BIN is passed or a namesake exists on PATH, this
 # adapter NEVER executes a host binary.
+#
+# Finding P1 (agents-mhv7 review): The Python interpreter running this station client
+# MUST be the dispatcher-verified python binary (FACTORY_PYTHON_BIN) or an absolute system
+# path (/usr/bin/python3, /usr/local/bin/python3). NEVER resolve python3 across the
+# inherited PATH — a PATH-planted python3 would otherwise receive the run's DEEPSEEK_API_KEY.
+PYTHON_BIN="${FACTORY_PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  for p in /usr/bin/python3 /usr/local/bin/python3 /bin/python3; do
+    if [ -x "$p" ]; then
+      PYTHON_BIN="$p"
+      break
+    fi
+  done
+fi
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "[deepseek adapter] Error: no trusted python3 binary found in system dirs (/usr/bin/python3)." >&2
+  exit 2
+fi
 
 # Execute via Python stdlib HTTP call to DeepSeek API
 echo "[deepseek adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR' via DeepSeek API..."
@@ -55,7 +73,7 @@ export PYTHONUNBUFFERED=1
 STATUS=0
 # agents-w8z: the heredoc below owns this process's stdin (it IS the program), so the
 # prompt cannot ride stdin. Pass it explicitly as PROMPT in the environment instead.
-PROMPT="$PROMPT" python3 - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
+PROMPT="$PROMPT" "$PYTHON_BIN" - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
 import json
 import os
 import sys

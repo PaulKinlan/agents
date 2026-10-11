@@ -931,21 +931,31 @@ class TestAdapters(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn("empty prompt", res.stderr + res.stdout)
 
-    def test_deepseek_adapter_is_strictly_payload_only_and_never_executes_cli(self):
-        """agents-mhv7 (P1): deepseek is payload-only and has NO CLI arm.
+    def test_deepseek_adapter_is_strictly_payload_only_and_never_executes_cli_or_planted_python(self):
+        """agents-mhv7 (P1/P2): deepseek is payload-only and has NO CLI arm, and never
+        executes an unverified python3 planted on PATH.
 
-        Even if an executable named 'deepseek' is planted first on PATH or passed via
-        FACTORY_ENGINE_BIN, the adapter must NEVER execute it — it runs exclusively via
-        the Python HTTP API path, preserving the payload-only doctrine (lib/containment.py:
-        no filesystem read scope, no arbitrary binary execution as operator).
+        Even if executables named 'deepseek' and 'python3' are planted first on PATH or
+        passed via FACTORY_ENGINE_BIN, the adapter must NEVER execute them — it runs
+        exclusively via the dispatcher-verified/system-confined Python interpreter,
+        preserving the payload-only doctrine (no filesystem read scope, no arbitrary binary
+        execution as operator, no credential exfiltration).
         """
         fake_binary = self.bin / "deepseek"
-        marker = self.tmp / "fake-deepseek-executed.marker"
+        marker_ds = self.tmp / "fake-deepseek-executed.marker"
         fake_binary.write_text(
-            f"#!/bin/sh\ntouch '{marker}'\necho 'MALICIOUS VERDICT'\nexit 0\n",
+            f"#!/bin/sh\ntouch '{marker_ds}'\necho 'MALICIOUS VERDICT'\nexit 0\n",
             encoding="utf-8"
         )
         fake_binary.chmod(fake_binary.stat().st_mode | stat.S_IEXEC)
+
+        fake_python = self.bin / "python3"
+        marker_py = self.tmp / "fake-python-executed.marker"
+        fake_python.write_text(
+            f"#!/bin/sh\ntouch '{marker_py}'\necho 'MALICIOUS PYTHON'\nexit 0\n",
+            encoding="utf-8"
+        )
+        fake_python.chmod(fake_python.stat().st_mode | stat.S_IEXEC)
 
         res, argv = self.run_adapter(
             "deepseek",
@@ -955,12 +965,15 @@ class TestAdapters(unittest.TestCase):
                 "DEEPSEEK_BASE_URL": "http://127.0.0.1:9",  # unreachable loopback so python exits fast
             }
         )
-        self.assertFalse(marker.exists(), "the deepseek CLI binary must NEVER be executed!")
+        self.assertFalse(marker_ds.exists(), "the deepseek CLI binary must NEVER be executed!")
+        self.assertFalse(marker_py.exists(), "a PATH-planted python3 must NEVER be executed!")
         self.assertIsNone(argv, "the deepseek CLI binary must never receive arguments")
         self.assertIn("DeepSeek API", res.stderr + res.stdout)
         output_file = self.tmp / "run" / "model_output.txt"
         if output_file.exists():
-            self.assertNotIn("MALICIOUS VERDICT", output_file.read_text(encoding="utf-8", errors="ignore"))
+            content = output_file.read_text(encoding="utf-8", errors="ignore")
+            self.assertNotIn("MALICIOUS VERDICT", content)
+            self.assertNotIn("MALICIOUS PYTHON", content)
 
     def test_claude_enforces_a_declared_usd_cap(self):
         """agents-js7: budget.max_usd reaches the engine as --max-budget-usd."""
@@ -2924,14 +2937,28 @@ class TestEngineCredentialPinning(TestDispatcher):
         self._assert_no_dump_received_the_secret()
 
     def test_deepseek_engine_has_no_binary_and_never_executes_planted_cli(self):
-        """agents-mhv7: deepseek is purely payload-only Python HTTP station code and
-        has no CLI arm — planting a fake deepseek on PATH never executes it and never
-        leaks credentials."""
+        """agents-mhv7 (review P1/P2): deepseek is purely payload-only Python HTTP station code
+        and has no CLI arm — planting a fake deepseek or fake python3 on PATH never executes
+        either binary and never leaks DEEPSEEK_API_KEY."""
         self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
                    "budget: {max_minutes: 1}\n")
         self.trusted_target("trusted")
-        evil, _fake = self._plant_fake_engine("deepseek")
-        res = self.factory("deepseek", self._attack_env(evil), target_arg="trusted")
+        evil, _fake_ds = self._plant_fake_engine("deepseek")
+        _evil, _fake_py = self._plant_fake_engine("python3")
+        res = self.factory(
+            "deepseek",
+            self._attack_env(
+                evil,
+                {
+                    "DEEPSEEK_API_KEY": self.SECRET,
+                    "DEEPSEEK_BASE_URL": "http://127.0.0.1:9",
+                }
+            ),
+            target_arg="trusted"
+        )
+        # Verify the adapter actually ran and attempted the DeepSeek API call
+        self.assertIn("DeepSeek API", res.stdout + res.stderr,
+                      "the deepseek adapter was not exercised!")
         self._assert_no_dump_received_the_secret()
 
 
