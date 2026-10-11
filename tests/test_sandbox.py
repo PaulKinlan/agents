@@ -36,6 +36,25 @@ from lib.sandbox import (  # noqa: E402
 )
 from lib import sandbox as sandbox_module  # noqa: E402
 
+# --- hermetic test environment (agents-21ap) -------------------------------------------------
+# The pin machinery under test resolves tools through FACTORY_TOOL_PINS when the OPERATOR'S
+# shell exports it (~/.fleet/local.conf does on this VM), so without this scrub these tests
+# observed the host rather than the tree: on 2026-10-11 a re-provision generated the host pins
+# file and the full suite went red on EVERY tree, including landed main - these three accounting for 14 of the 43 failures, the rest in seven sibling modules fixed under the same bead - each
+# with `trusted tool 'pi' resolved to /tmp/.../bin/pi, not the configured path
+# /usr/local/bin/pi`. The tests were right - they plant a fake `pi` and assert the pin refuses
+# it - and the environment was not hermetic. See tests/hermetic_env.py.
+from tests import hermetic_env  # noqa: E402
+
+
+def setUpModule():
+    hermetic_env.isolate_operator_config()
+
+
+def tearDownModule():
+    hermetic_env.restore_operator_config()
+
+
 LIVE = sandbox_available()
 
 

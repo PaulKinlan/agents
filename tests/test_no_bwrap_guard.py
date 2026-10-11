@@ -10,7 +10,36 @@ import textwrap
 import unittest
 from pathlib import Path
 
+# --- hermetic test environment (agents-21ap) -------------------------------------------------
+# The pin machinery resolves tools through FACTORY_TOOL_PINS when the OPERATOR'S shell exports
+# it (~/.fleet/local.conf does on this VM). Without this scrub the suite observed the host
+# rather than the tree: a re-provision generated the host pins file at 02:19:46Z and the full
+# suite went red on EVERY tree, including landed main, with `trusted tool 'pi' resolved to
+# /tmp/.../bin/pi, not the configured path /usr/local/bin/pi`. The tests were right; the
+# environment was not hermetic. See tests/hermetic_env.py.
+#
+# THE ROOT INSERT MUST COME FIRST (agents-21ap review P2): `from tests import ...` needs the
+# repo root on sys.path, so this module now puts it there before the import. THIS MODULE'S
+# BREAK WAS NEWLY INTRODUCED BY THIS BEAD - `python3 tests/test_no_bwrap_guard.py` worked
+# before it and raised ModuleNotFoundError after, while `-m unittest` stayed fine, which is
+# how it went unnoticed until review. The reviewer also measured the justifying claim I first
+# wrote here ("in the other nine modules that was already true") and found it wrong: two of
+# the ten do not insert the repo root at all and are independently unrunnable as scripts, so
+# the honest statement is the narrow one - this module regressed, and it is fixed.
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tests import hermetic_env  # noqa: E402
+
+
+def setUpModule():
+    hermetic_env.isolate_operator_config()
+
+
+def tearDownModule():
+    hermetic_env.restore_operator_config()
+
 
 
 class TestNoBubblewrapGuard(unittest.TestCase):
