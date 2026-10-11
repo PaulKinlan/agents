@@ -1017,6 +1017,16 @@ elif mode == "unix-handoff":
                              array.array("i", [conn.fileno()]).tobytes())])
     print("SENT", flush=True)
     time.sleep(60)
+elif mode == "unix-handoff-exit":
+    # agents-28nn round 10: the SAME hand-off, but the root does not linger — it exits
+    # immediately after sending. The duplicated fd outlives it, so the holder still has
+    # a usable connection that the kernel attributes to a pid that no longer exists.
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.connect(os.environ["FACTORY_BROKER_SOCKET"])
+    sender = socket.socket(fileno=int(sys.argv[2]))
+    sender.sendmsg([b"H"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                             array.array("i", [conn.fileno()]).tobytes())])
+    print("SENT", flush=True)
 '''
 
 
@@ -1332,7 +1342,9 @@ class TestUnixPeerIdentityGate(BrokerTestBase):
         # the gate checks is the one the kernel recorded at connect, but the tree walk
         # itself reads LIVE /proc state at request time, so what this pins is a grant
         # that survives a hand-off — not a connection that outlives the process which
-        # opened it.
+        # opened it. Round 10 closes that sentence by construction:
+        # test_the_gate_follows_the_root_out_of_existence runs this same hand-off with the
+        # connector waited out, and it is refused.
         with tempfile.TemporaryDirectory() as tmpdir:
             script = self._probe_script(tmpdir)
             broker, sock = self._broker_on_unix(tmpdir)
@@ -1374,6 +1386,105 @@ class TestUnixPeerIdentityGate(BrokerTestBase):
                 connector.kill()
                 connector.wait()
                 connector.stdout.close()
+
+    def _hand_off_and_request(self, script, broker, sock, mode, root_exits):
+        """agents-28nn round 10: the stale-capability construction, driven by behaviour.
+
+        `mode` connects to the broker's UNIX socket and hands the CONNECTED fd to THIS
+        process over a socketpair; the gate's root is then narrowed to that connector, so
+        the kernel's attribution of the inherited connection names the connector's pid.
+        When `root_exits`, the connector is waited out BEFORE the request is sent, so the
+        request travels on a connection whose attributed pid no longer exists — and the
+        precondition that the pid is really gone from /proc is asserted first, so a
+        refusal can never pass as liveness when it came from somewhere else. Returns the
+        response's status line.
+        """
+        handoff_parent, handoff_child = socket.socketpair()
+        self.addCleanup(handoff_parent.close)
+        self.addCleanup(handoff_child.close)
+        connector = subprocess.Popen(
+            [sys.executable, script, mode, str(handoff_child.fileno())],
+            env=self._session_env(broker, sock),
+            pass_fds=[handoff_child.fileno()],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            broker.restrict_peer_root(connector.pid)
+            self.assertTrue(connector.stdout.readline().startswith("SENT"))
+            handoff_parent.settimeout(15)
+            _msg, ancdata, _flags, _addr = handoff_parent.recvmsg(
+                1, socket.CMSG_LEN(array.array("i").itemsize))
+            received = array.array("i")
+            received.frombytes(ancdata[0][2])
+            conn = socket.socket(fileno=received[0])
+            try:
+                conn.settimeout(15)
+                if root_exits:
+                    connector.kill()
+                    connector.wait(timeout=10)
+                    with self.assertRaises(FileNotFoundError):
+                        Path(f"/proc/{connector.pid}/stat").read_bytes()
+                conn.sendall(
+                    b"POST /proxy/anthropic/v1/messages HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"x-api-key: " + broker.placeholder.encode() + b"\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 2\r\n\r\n{}")
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                return data.split(b"\r\n")[0]
+            finally:
+                conn.close()
+        finally:
+            connector.kill()
+            connector.wait()
+            connector.stdout.close()
+
+    def test_the_gate_follows_the_root_out_of_existence(self):
+        # agents-28nn round 10 — the round-9 verdict's P1, constructed the way the verdict
+        # described it. Round 9 pinned that a connection handed off by a LIVE connector
+        # keeps its grant; what it left unpinned is the connector's own survival, because
+        # _pid_in_tree short-circuited on `current == root` before reading /proc and so
+        # never asked whether the ROOT still existed. The root here is the process the
+        # gate is narrowed to — in production the engine session, which is what opens the
+        # socket and can pass it on. SO_PEERCRED keeps attributing the inherited
+        # connection to that pid after the process is gone, so the walk must check that
+        # the root exists rather than assume it.
+        #
+        # THE TWO ARMS ARE DELIBERATELY IN ONE TEST. A refusal arm on its own is green
+        # whether the root is gone OR the whole gate path is broken, so the ALIVE arm runs
+        # first and proves the path serves; only then does the after-exit arm isolate
+        # liveness as the reason for the refusal. (The alive arm restates the round-9
+        # behaviour pinned independently by
+        # test_a_connection_handed_to_an_out_of_tree_process_keeps_its_grant.)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = self._probe_script(tmpdir)
+            broker, sock = self._broker_on_unix(tmpdir)
+
+            # ARM 1 — the root is ALIVE: the identical hand-off is SERVED. If this arm
+            # fails, the arm below says nothing about liveness.
+            served = self._hand_off_and_request(script, broker, sock, "unix-handoff",
+                                                root_exits=False)
+            self.assertIn(
+                b"200", served,
+                "a hand-off from a LIVE root must still be served: the gate path itself "
+                "is broken here, so the refusal below would not be evidence about "
+                "liveness")
+
+            # ARM 2 — the root has EXITED: the same hand-off is REFUSED. The refusal means
+            # "the root is gone", not "the path is broken", because arm 1 was served over
+            # exactly this path and the helper asserted the root's pid had left /proc.
+            stale = self._hand_off_and_request(script, broker, sock,
+                                               "unix-handoff-exit", root_exits=True)
+            self.assertIn(
+                b"403", stale,
+                "the connection was still served AFTER the root exited: the gate does "
+                "not verify that the root exists. (The expected refusal is about the "
+                "root being GONE, not about the path — arm 1 above served on the same "
+                "path.")
 
 
 class TestPeerIdentityHelpers(unittest.TestCase):
