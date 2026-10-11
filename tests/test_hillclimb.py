@@ -517,25 +517,56 @@ class HillClimbApplyIsolationTest(unittest.TestCase):
         target = self._git_target({"index.html": BLOCKING_HTML})
         wt_dir = self.tmp / "disposable_worktree_lock"
 
-        calls = 0
+        # agents-2ayl: THIS USED TO ASSERT mock_sleep.assert_called_once() ON A PROCESS-GLOBAL
+        # mock.patch("time.sleep"). That patches the attribute on the SHARED time module object, so
+        # ANY other component that sleeps inside the window is recorded, and the count assertion then
+        # fails on a retry that worked. It surfaced as a false FULL-GATE failure on a landing and
+        # cost ~390s of the single heavy slot plus a re-run.
+        #
+        # A VALUE-BASED OR COUNT-BASED FIX IS NOT AVAILABLE, AND THAT IS MEASURED RATHER THAN
+        # ASSUMED: the retry's first backoff is 0.05 * (2 ** (attempt - 1)) = 0.05, and
+        # lib/findings.py's STORE_LOCK_POLL_SECONDS is ALSO 0.05 - so "the calls contain 0.05" is
+        # satisfied by the store-lock poller ALONE and would pass even with the retry never sleeping.
+        # Patching factory_cli.time.sleep does not isolate anything either: the helper calls
+        # time.sleep on the shared time module it imported, so there is no module-local object to
+        # patch without changing what the helper binds.
+        #
+        # SO THE ASSERTION IS ON THE INTERLEAVING, WHICH IS INDIFFERENT TO OTHER SLEEPERS BY
+        # CONSTRUCTION RATHER THAN BY TOLERANCE. Every git attempt and every sleep is appended to ONE
+        # ordered list as it happens, and the test asserts there is a sleep BETWEEN the two git
+        # attempts. Sleep markers OUTSIDE that window - any number of them - are not counted,
+        # compared or tolerated: they are simply not looked at, because the assertion reads the slice
+        # between the first git marker and the second. A co-resident poller can sleep as often as it
+        # likes before or after and cannot move that slice, whereas only the retry path runs between
+        # the two attempts, so it cannot manufacture the marker the assertion requires.
+        events = []
         real_run_git = factory_cli._run_git
 
         def fake_run_git(cmd, cwd=None):
-            nonlocal calls
             if "worktree" in cmd and "add" in cmd:
-                calls += 1
-                if calls == 1:
+                events.append("git")
+                if events.count("git") == 1:
                     # First attempt simulates transient lock collision
                     return subprocess.CompletedProcess(cmd, 128, "", "fatal: Unable to create '.git/index.lock': File exists.")
             return real_run_git(cmd, cwd)
 
+        def record_sleep(*_args, **_kwargs):
+            events.append("sleep")
+
         with mock.patch.object(factory_cli, "_run_git", side_effect=fake_run_git):
-            with mock.patch("time.sleep") as mock_sleep:
+            with mock.patch("time.sleep", side_effect=record_sleep):
                 admin_gitdir = factory_cli._create_session_worktree(target, wt_dir)
                 self.assertTrue(wt_dir.exists())
                 self.assertTrue(admin_gitdir.exists())
-                self.assertEqual(calls, 2)
-                mock_sleep.assert_called_once()
+                git_positions = [i for i, e in enumerate(events) if e == "git"]
+                self.assertEqual(len(git_positions), 2,
+                                 f"expected two git attempts, saw {len(git_positions)}: {events}")
+                window = events[git_positions[0] + 1:git_positions[1]]
+                self.assertIn(
+                    "sleep", window,
+                    "the retry loop must SLEEP between its attempts: no sleep marker appears between "
+                    "the first and second git attempt, so the backoff is gone. Sleeps outside this "
+                    "window are ignored, not counted (agents-2ayl): " + repr(events))
         factory_cli._remove_session_worktree(target, wt_dir)
 
     def test_create_session_worktree_raises_loud_error_on_persistent_failure(self):
