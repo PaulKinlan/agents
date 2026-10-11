@@ -167,6 +167,18 @@ if [ -z "$SHA256SUM" ]; then
   echo "error: no sha256sum/shasum in the confined lookup dirs — cannot pin safely" >&2
   exit 2
 fi
+# agents-0poh: AN INDEPENDENT DIGEST. The pin's value comes from the external hasher's output,
+# so a substituted hasher could report whatever hash makes itself look correct - pinning the
+# hasher's own hash WITH the hasher is circular. python3's hashlib is a SECOND implementation,
+# resolved by the same confined rule, so the two must AGREE before any pin is emitted. A planted
+# sha256sum can no longer choose its own reference value: it must also plant the interpreter.
+# THIS REDUCES THE EXPOSURE RATHER THAN ELIMINATING IT (agents-dso1, agents-76p7): the trust root
+# is the interpreter, which is a provisioning property this generator cannot establish.
+PYTHON3="$(resolve_in_lookup python3 "$SYSTEM_LOOKUP_PATH" || true)"
+if [ -z "$PYTHON3" ]; then
+  echo "error: no python3 in the confined lookup dirs - the independent digest cannot be computed" >&2
+  exit 2
+fi
 MKDIR="$(resolve_in_lookup mkdir "$SYSTEM_LOOKUP_PATH" || true)"
 DIRNAME_BIN="$(resolve_in_lookup dirname "$SYSTEM_LOOKUP_PATH" || true)"
 DATE="$(resolve_in_lookup date "$SYSTEM_LOOKUP_PATH" || true)"
@@ -204,6 +216,17 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
     # SHA256_ARGS legal under set -u on bash 3.2 (macOS).
     hash_line="$("$SHA256SUM" ${SHA256_ARGS[@]+"${SHA256_ARGS[@]}"} "$path")"
     hash="${hash_line%% *}"
+    # agents-0poh: the INDEPENDENT digest must agree. If it does not, one of the two hashers is
+    # lying and NEITHER value can be trusted, so refuse rather than emit a pin whose own
+    # reference value came from the party the pin defends against.
+    py_hash="$("$PYTHON3" -c 'import hashlib,sys
+print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$path")"
+    if [ "$hash" != "$py_hash" ]; then
+      echo "error: digest disagreement for $tool - sha256sum reported $hash, the independent" >&2
+      echo "  hashlib digest is $py_hash. One of the two hashers is not trustworthy, so no pin" >&2
+      echo "  for it can be emitted. Refusing (agents-0poh)." >&2
+      exit 2
+    fi
     echo "$tool:"
     echo "  path: $path"
     echo "  sha256: $hash"
