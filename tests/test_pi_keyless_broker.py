@@ -44,7 +44,7 @@ from lib.sandbox import sandbox_available  # noqa: E402
 # The pin machinery under test resolves tools through FACTORY_TOOL_PINS when the OPERATOR'S
 # shell exports it (~/.fleet/local.conf does on this VM), so without this scrub these tests
 # observed the host rather than the tree: on 2026-10-11 a re-provision generated the host pins
-# file and 42 tests across three modules went red on EVERY tree, including landed main, each
+# file and the full suite went red on EVERY tree, including landed main - these three accounting for 14 of the 43 failures, the rest in eight sibling modules fixed under the same bead - each
 # with `trusted tool 'pi' resolved to /tmp/.../bin/pi, not the configured path
 # /usr/local/bin/pi`. The tests were right - they plant a fake `pi` and assert the pin refuses
 # it - and the environment was not hermetic. See tests/hermetic_env.py.

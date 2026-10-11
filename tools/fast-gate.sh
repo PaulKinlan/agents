@@ -108,12 +108,12 @@ while IFS= read -r f; do
       ;;
     tests/hermetic_env.py)
       # The shared hermetic-test helper (agents-21ap). Search recorded: `grep -rln
-      # 'hermetic_env' tests/ --include='*.py'` -> exactly the three modules that call
-      # setUpModule/tearDownModule, and no others. A change here changes the environment
-      # those suites observe, so it runs all three: a helper that quietly stopped isolating
-      # the operator's config would turn the suites red or green for reasons the tree does
-      # not contain, which is the whole defect it exists to remove.
-      mapped="$mapped tests/test_sandbox.py tests/test_pi_keyless_broker.py tests/test_factory_core.py"
+      # 'hermetic_env' tests/ --include='*.py'` -> the helper plus the TEN modules that call
+      # setUpModule/tearDownModule. ALL TEN ARE LISTED: this arm was written at three-module
+      # scope and the fix grew to ten, so a three-module list would have read PASS for a
+      # breakage in the other seven - which is exactly the under-inclusion the loud-unmatched
+      # arm exists to prevent, moved into the arm's own contents (agents-21ap review P2).
+      mapped="$mapped tests/test_sandbox.py tests/test_pi_keyless_broker.py tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_line_andon.py tests/test_report_schema.py tests/test_prompt_exposure.py tests/test_adapter_auth_failure.py tests/test_no_bwrap_guard.py"
       ;;
     tests/fixtures/*)
       # Checked-in test payloads (agents-28nn round 5): fake_engine.sh is the contained
