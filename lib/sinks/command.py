@@ -187,12 +187,39 @@ class CommandSink(Sink):
             if isinstance(item, dict) and item.get("status") in STATUSES and item.get("fingerprint"):
                 statuses[str(item["fingerprint"])] = item
 
+        # agents-nzdi: a silent sink is recorded UNVERIFIED, never published.
+        #
+        # THIS REPLACES AN ABSENCE-IS-DELIVERY BRANCH. When stdout yielded no parseable status
+        # line at all, this loop used to answer "published" for EVERY pending finding, and
+        # "published" is what appends to dispatched_sinks - a receipt that findings.py:1167
+        # consumes as the PENDING FILTER. So a sink that exited 0 and told us nothing had its
+        # findings marked delivered PERMANENTLY and was never offered them again: not the next
+        # run, not ever, with nothing recording that nothing had arrived. `curl` without -f
+        # exits 0 on an HTTP 500, so this was reachable by an ordinary sink command.
+        #
+        # The rule that condemns the old branch is stated one screen above, at line 36: "a
+        # partial answer is never read as success". The code refused a PARTIAL answer as
+        # success and then read NO ANSWER AT ALL as complete success - the principle applied to
+        # every case except its own exclusion.
+        #
+        # WHY UNVERIFIED RATHER THAN FAILED, AND WHY NOT A RECEIPT: exit 0 with silence is not
+        # evidence of failure either. A sink may legitimately have delivered and said nothing.
+        # What we must not do is CLAIM DELIVERY WE DID NOT READ, and what we must not do is
+        # consume the retry. So the value is honest (we could not verify), it counts as
+        # not-delivered, it writes NO receipt, and the finding stays retryable. This is the
+        # non-breaking step: the tolerance remains, its consequence is removed. Tightening the
+        # PROTOCOL so that a silent sink is required to declare itself is a separate change
+        # (filed by coord with the version bump), because that one alters a published contract
+        # other people's sinks are written against.
+        silent = not statuses
         for f in pending:
-            if statuses:
+            if not silent:
                 answer = statuses.get(f.get("fingerprint"), {"status": "failed",
                                                              "message": "no status from sink_command"})
             else:
-                answer = {"status": "published"}
+                answer = {"status": "unverified",
+                          "message": "sink_command exited 0 but reported no status for any "
+                                     "finding: delivery NOT verified (agents-nzdi)"}
             status = answer["status"]
             if status == "published":
                 f.setdefault("dispatched_sinks", []).append(self.name)
@@ -208,4 +235,11 @@ class CommandSink(Sink):
         missing = sum(1 for f in pending if statuses and f.get("fingerprint") not in statuses)
         if missing:
             result["note"] = f"sink_command reported no status for {missing} finding(s): counted as failed"
+        elif silent and pending:
+            # Name the reason rather than leaving a bare failure count: the operator needs to
+            # know the sink was SILENT, not that it complained. No receipt was written, so the
+            # next run will offer these findings again.
+            result["note"] = (f"sink_command exited 0 but reported no status for any of "
+                              f"{len(pending)} finding(s): delivery NOT verified, nothing "
+                              f"receipted and all {len(pending)} will be retried")
         return result
