@@ -539,14 +539,32 @@ def _package_root(path: Path) -> Optional[Path]:
 
 
 def _is_broad_root(pkg: Path, home: Optional[str]) -> bool:
-    """A package root that is really a top-level user prefix (~/.local, ~/fleet): binding it
-    whole would expose far more than the one tool. Detected by the root's parent being the
-    user's home or a hidden root, so we fall back to binding just the executable file."""
-    parent = pkg.parent
-    if str(parent) in _HIDDEN_ROOTS:
+    """A package root that is really a top-level user prefix (~/.local, ~/fleet, ~/fleet/sdk-host):
+    binding it whole would expose far more than the one tool. Detected when the root itself,
+    its parent, or its grandparent is the user's home or a hidden root (/home, /root),
+    or when the root is an ancestor of the user's home or a hidden root, so we fall back
+    to binding just the executable file (agents-cdzn)."""
+    p = Path(pkg).resolve()
+    if p == Path("/"):
         return True
-    if home and str(parent) == str(Path(home)):
-        return True
+    for root_str in _HIDDEN_ROOTS:
+        r = Path(root_str).resolve()
+        if p == r or p.parent == r or p.parent.parent == r:
+            return True
+        try:
+            if r.is_relative_to(p):
+                return True
+        except ValueError:
+            pass
+    if home:
+        h = Path(home).resolve()
+        if p == h or p.parent == h or p.parent.parent == h:
+            return True
+        try:
+            if h.is_relative_to(p):
+                return True
+        except ValueError:
+            pass
     return False
 
 

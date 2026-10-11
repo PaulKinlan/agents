@@ -1121,14 +1121,14 @@ class WrapperRuntimeBindTests(unittest.TestCase):
         from lib.sandbox import _BindPlan, _executable_binds
         tmp = Path(tempfile.mkdtemp(prefix="wza-bind-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        # A "real" package tree at a resolved location ...
-        real_pkg = tmp / "real" / "pi-coding-agent"
+        # A "real" package tree at a resolved location (depth >= 3 under tmp/home) ...
+        real_pkg = tmp / "opt" / "real" / "pi-coding-agent"
         (real_pkg / "dist" / "bundle").mkdir(parents=True)
         (real_pkg / "package.json").write_text("{}\n", encoding="utf-8")
         (real_pkg / "dist" / "bundle" / "cli.js").write_text("// stub\n", encoding="utf-8")
         # ... symlinked at the path a launcher hardcodes.
-        link = tmp / "linked" / "pi-coding-agent"
-        link.parent.mkdir()
+        link = tmp / "opt" / "linked" / "pi-coding-agent"
+        link.parent.mkdir(parents=True)
         link.symlink_to(real_pkg)
         # A flat launcher (name != dir, not under a structural dir) binds only its own file,
         # so the runtime bind below is what must bring the package in.
@@ -1262,6 +1262,72 @@ class TestUntrustedExecutableSandboxBind(unittest.TestCase):
         # Because system binaries under /usr are already visible from _system_binds,
         # _executable_binds does not append any new ro-bind mounts for them.
         self.assertEqual(plan.argv, initial_argv)
+
+
+class TestIsBroadRoot(unittest.TestCase):
+    """agents-cdzn: _is_broad_root prevents binding whole user directories or whole $HOME
+    into the sandbox when resolving wrapper runtime paths."""
+
+    def test_hidden_roots_and_filesystem_root_are_broad(self):
+        from lib.sandbox import _is_broad_root
+        self.assertTrue(_is_broad_root(Path("/root"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/root"), "/root"))
+        self.assertTrue(_is_broad_root(Path("/home"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/"), "/home/u"))
+
+    def test_home_itself_is_broad_regardless_of_parent(self):
+        from lib.sandbox import _is_broad_root
+        self.assertTrue(_is_broad_root(Path("/home/u"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/var/home/u"), "/var/home/u"))
+        self.assertTrue(_is_broad_root(Path("/tmp/area/home"), "/tmp/area/home"))
+
+    def test_depth_1_under_home_is_broad(self):
+        from lib.sandbox import _is_broad_root
+        self.assertTrue(_is_broad_root(Path("/home/u/work"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/home/u/.local"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/home/u/fleet"), "/home/u"))
+
+    def test_depth_2_under_home_is_broad(self):
+        from lib.sandbox import _is_broad_root
+        self.assertTrue(_is_broad_root(Path("/home/u/work/proj"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/home/u/fleet/sdk-host"), "/home/u"))
+        self.assertTrue(_is_broad_root(Path("/tmp/area/home/work/proj"), "/tmp/area/home"))
+
+    def test_depth_3_or_deeper_is_not_broad(self):
+        from lib.sandbox import _is_broad_root
+        self.assertFalse(_is_broad_root(Path("/home/u/work/proj/deep/pkg"), "/home/u"))
+        self.assertFalse(_is_broad_root(
+            Path("/home/u/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent"),
+            "/home/u"))
+        self.assertFalse(_is_broad_root(Path("/usr/lib/node_modules/npm"), "/home/u"))
+
+    def test_runtime_in_depth_2_project_under_home_is_refused_broad_bind(self):
+        """Reproduction of agents-cdzn: a launcher executing a script under $HOME/work/proj
+        must NOT bind $HOME/work/proj whole, preventing leakage of $HOME/work/proj/.env."""
+        from lib.sandbox import _BindPlan, _executable_binds
+        tmp = Path(tempfile.mkdtemp(prefix="cdzn-repro-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        home = tmp / "home"
+        proj = home / "work" / "proj"
+        (proj / "dist").mkdir(parents=True)
+        (proj / "package.json").write_text('{"name": "proj"}\n', encoding="utf-8")
+        canary = proj / ".env"
+        canary.write_text("SECRET=leaked\n", encoding="utf-8")
+        cli = proj / "dist" / "cli.js"
+        cli.write_text("// stub\n", encoding="utf-8")
+
+        launcher = tmp / "bin" / "pi"
+        launcher.parent.mkdir()
+        launcher.write_text(f"#!/bin/sh\nexec node {cli} \"$@\"\n", encoding="utf-8")
+        launcher.chmod(launcher.stat().st_mode | 0o111)
+
+        plan = _BindPlan()
+        _executable_binds(plan, ("pi",), str(launcher.parent), str(home))
+        self.assertFalse(plan.visible(str(proj)),
+                         "depth-2 package root $HOME/work/proj must not be bound whole")
+        self.assertFalse(plan.visible(str(canary)),
+                         "canary file in $HOME/work/proj must not be visible in sandbox")
+
 
 
 if __name__ == "__main__":
