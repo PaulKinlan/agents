@@ -343,6 +343,35 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         self.assertIn(tracked_cmd, installed)
         self.assertIn("-t .", installed)
 
+    def test_install_warns_when_overwriting_foreign_project_config(self):
+        """agents-f6no: when ~/.fleet/check.conf already exists without agents-factory stamp
+        (e.g. written by another project on a shared-HOME host), --install must warn to stderr
+        and stamp the project name and machine-global scope in the header."""
+        home = tempfile.mkdtemp(prefix="f6no-foreign-")
+        conf = Path(home) / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text('CHECK_CMD="echo OTHER_PROJECT_GATE"\n', encoding="utf-8")
+
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+
+        r = subprocess.run(["bash", str(RESOLVER), "--install"],
+                           capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("WARNING", r.stderr)
+        self.assertIn("not stamped by agents-factory", r.stderr)
+
+        installed = conf.read_text(encoding="utf-8")
+        self.assertIn("# Project: agents-factory", installed)
+        self.assertIn("# WARNING: This file is MACHINE-GLOBAL", installed)
+
+        # Idempotent second install should NOT warn
+        r2 = subprocess.run(["bash", str(RESOLVER), "--install"],
+                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r2.returncode, 0)
+        self.assertNotIn("WARNING", r2.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
