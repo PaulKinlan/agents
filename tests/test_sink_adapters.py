@@ -240,6 +240,25 @@ class TestCommandSinkReview(CommandSinkCase):
         self.assertNotIn("tok-SECRET-1234", text)
         self.assertNotIn("sk-proj-abcdefghijklmnopqrstuvwx", text)
 
+    def test_repeated_sink_env_options_merge_and_redact_all_tokens(self):
+        """agents-rck1: repeated --sink-option sink_env=... arguments merge rather than overwrite."""
+        command = self.write_script("leaky_multi.py",
+            "import os, sys\nsys.stdin.read()\n"
+            "sys.stderr.write('auth failed for ' + os.environ.get('TOKEN_A', '') +"
+            " ' and ' + os.environ.get('TOKEN_B', '') + '\\n')\nsys.exit(3)\n")
+        run_dir = self.root / "run_multi"
+        result = self.scan([SAMPLE], command=command,
+                           extra=["--run-dir", str(run_dir),
+                                  "--sink-option", "sink_env=TOKEN_A",
+                                  "--sink-option", "sink_env=TOKEN_B"],
+                           env_extra={"TOKEN_A": "tok-SECRET-AAAA", "TOKEN_B": "tok-SECRET-BBBB"})
+        log = run_dir / "sink-command-stderr.log"
+        self.assertTrue(log.exists())
+        text = log.read_text(encoding="utf-8")
+        self.assertNotIn("tok-SECRET-AAAA", text)
+        self.assertNotIn("tok-SECRET-BBBB", text)
+        self.assertIn("[redacted:value]", text)
+
     def test_a_timeout_kills_the_whole_group(self):
         pidfile = self.target / "child.pid"
         command = (f"sh -c 'sleep 60 >/dev/null 2>&1 & echo $! > {pidfile}; sleep 60'")
