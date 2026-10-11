@@ -236,6 +236,7 @@ capabilities:
         with self.assertRaises(ValueError) as ctx:
             validate_safety("API token sk-1234567890abcdef1234567890abcdef in docs", "test.html")
         self.assertIn("API secret token", str(ctx.exception))
+        self.assertNotIn("sk-1234567890abcdef1234567890abcdef", str(ctx.exception))
 
         # agents-h0z8: extended leak spellings
         with self.assertRaises(ValueError) as ctx:
@@ -261,11 +262,19 @@ capabilities:
         with self.assertRaises(ValueError) as ctx:
             validate_safety("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...", "test.html")
         self.assertIn("found credential (private-key)", str(ctx.exception))
+        self.assertNotIn("MIIEowIBAAKCAQEA0", str(ctx.exception))
 
         with self.assertRaises(ValueError) as ctx:
             jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcde1234567890"
             validate_safety(f"leaked {jwt} token", "test.html")
         self.assertIn("found credential (jwt-token)", str(ctx.exception))
+        self.assertNotIn(jwt, str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            aws_key = "AKIAIOSFODNN7EXAMPLE"
+            validate_safety(f"leaked AWS {aws_key} token", "test.html")
+        self.assertIn("found credential (aws-access-key)", str(ctx.exception))
+        self.assertNotIn(aws_key, str(ctx.exception))
 
         # Legitimate documented public tool references must pass
         validate_safety("Symlink all 22 factory skills into ~/.gemini and ~/.claude", "test.html")
