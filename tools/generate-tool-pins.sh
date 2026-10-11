@@ -105,10 +105,20 @@ PATH="$PIN_LOOKUP_PATH"
 # resolve_tool would later expand from the factory's CWD (agents-28nn round 3, review P1,
 # proven by construction). A relative lookup dir can never yield an absolute pin path,
 # so it is skipped — the emit-side absolute-path reject below is the hard backstop.
+# agents-oc3q: the PATH LIST IS AN ARGUMENT. The script's own plumbing and the HASHER must
+# resolve from $SYSTEM_LOOKUP_PATH ONLY, never from operator-supplied dirs. Before this
+# change the plumbing and the hasher were resolved through $PIN_LOOKUP_PATH, which PREPENDS
+# the operator dirs - so `--lookup-path /attacker` put a planted sha256sum FIRST and the
+# pin's own reference value came from the party the pin defends against. MEASURED, not
+# inferred: with a fake sha256sum in an operator dir, every line of the generated file
+# carried `sha256: 0000...`. The file's own header says "the hash this script writes IS the
+# vouch for the binary", so a hasher chosen by the operator makes every pin worthless AND
+# authoritative. Same rule as the tool lookup: the reference value must not be supplied by
+# the thing being defended against.
 resolve_in_lookup() {
-  local name="$1" dir
+  local name="$1" search_path="$2" dir
   local IFS=:
-  for dir in $PIN_LOOKUP_PATH; do
+  for dir in $search_path; do
     case "$dir" in
       /*) ;;
       *) continue ;;
@@ -124,19 +134,19 @@ resolve_in_lookup() {
 # The hasher feeds the pin, so it is resolved by the same explicit rule — a function or
 # PATH-planted namesake for it would vouch for anything. No hasher in the confined dirs
 # means no safe pin: fail loudly.
-SHA256SUM="$(resolve_in_lookup sha256sum || true)"
+SHA256SUM="$(resolve_in_lookup sha256sum "$SYSTEM_LOOKUP_PATH" || true)"
 SHA256_ARGS=()
 if [ -z "$SHA256SUM" ]; then
-  SHA256SUM="$(resolve_in_lookup shasum || true)"
+  SHA256SUM="$(resolve_in_lookup shasum "$SYSTEM_LOOKUP_PATH" || true)"
   SHA256_ARGS=(-a 256)
 fi
 if [ -z "$SHA256SUM" ]; then
   echo "error: no sha256sum/shasum in the confined lookup dirs — cannot pin safely" >&2
   exit 2
 fi
-MKDIR="$(resolve_in_lookup mkdir || true)"
-DIRNAME_BIN="$(resolve_in_lookup dirname || true)"
-DATE="$(resolve_in_lookup date || true)"
+MKDIR="$(resolve_in_lookup mkdir "$SYSTEM_LOOKUP_PATH" || true)"
+DIRNAME_BIN="$(resolve_in_lookup dirname "$SYSTEM_LOOKUP_PATH" || true)"
+DATE="$(resolve_in_lookup date "$SYSTEM_LOOKUP_PATH" || true)"
 if [ -z "$MKDIR" ] || [ -z "$DIRNAME_BIN" ] || [ -z "$DATE" ]; then
   echo "error: mkdir/dirname/date must resolve in the confined lookup dirs" >&2
   exit 2
@@ -153,7 +163,7 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
   echo "# Resolution is explicit per-directory filesystem tests, never command -v: exported"
   echo "# shell functions and the CWD cannot influence what is hashed or emitted (agents-28nn round 3)"
   for tool in $TOOLS; do
-    path="$(resolve_in_lookup "$tool" || true)"
+    path="$(resolve_in_lookup "$tool" "$PIN_LOOKUP_PATH" || true)"
     if [ -z "$path" ]; then
       echo "# $tool: not found in the pinned lookup dirs — no pin"
       continue
