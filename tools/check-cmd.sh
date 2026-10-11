@@ -2,9 +2,9 @@
 # Resolve the gate's command configuration: TRACKED default first, per-VM override second.
 #
 # agents-ia3p: the tracked file is what a fresh VM gets and what a reviewer can read in a
-# PR; ~/.fleet/check.conf may override for local tuning. THE OVERRIDE IS FOR EXPERIMENTS,
-# NOT FOR THE DEFAULT - which is the whole point, because the fix that this bead is about
-# lived ONLY in the override and was therefore lost on every rebuild.
+# PR; tools/check-cmd.sh --install writes its values into ~/.fleet/check.conf where the
+# deployed gate reads them. To update or tune configuration, edit tools/check.conf and
+# re-run --install.
 #
 # Usage:  tools/check-cmd.sh [CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT]
 # With no argument it prints the whole resolved set. Values from the override win.
@@ -48,7 +48,7 @@ if [ "${1:-}" = "--install" ]; then
     printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p)."
     printf '%s\n' "# DO NOT HAND-EDIT FOR TUNING: a hand-edit and a stale install are indistinguishable"
     printf '%s\n' "# from the files alone, and tests/test_gate_entrypoint_config.py fails on any divergence"
-    printf '%s\n' "# from the tracked command. Tune per-machine with FLEET_CHECK_CONF."
+    printf '%s\n' "# from the tracked command. To tune, edit tools/check.conf and re-run --install."
     printf 'CHECK_CMD="%s"\n' "$CHECK_CMD"
     printf 'CHECK_FAST_CMD="%s"\n' "${CHECK_FAST_CMD:-}"
     printf 'CHECK_TIMEOUT=%s\n' "${CHECK_TIMEOUT:-}"
