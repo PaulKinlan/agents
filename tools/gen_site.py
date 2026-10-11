@@ -751,30 +751,38 @@ FORBIDDEN_TOKEN_PATTERNS = [
 
 
 def validate_safety(text: str, filename: str) -> None:
-    """Safety checks: public site must not leak host paths, runs, findings, or secrets (agents-h0z8)."""
+    """Safety checks: public site must not leak host paths, runs, findings, or secrets (agents-h0z8, agents-64tl)."""
     # Critical security rule: NEVER echo matched credential values into error messages
-    # or exception strings. Check credentials FIRST so an overlapping path containing a
-    # token (e.g. /home/alice/AKIAIOSFODNN7EXAMPLE) raises a credential violation without
+    # or exception strings (agents-h0z8). Report line number only (agents-64tl) so the
+    # operator has positional guidance without disclosing the secret value.
+    # Check credentials FIRST so an overlapping path containing a token
+    # (e.g. /home/alice/AKIAIOSFODNN7EXAMPLE) raises a credential violation without
     # disclosing the secret in a path error.
     for pattern, label in FORBIDDEN_TOKEN_PATTERNS:
-        if re.search(pattern, text):
-            raise ValueError(f"Security constraint violation in {filename}: found {label}")
+        m = re.search(pattern, text)
+        if m:
+            line_no = text[:m.start()].count("\n") + 1
+            raise ValueError(f"Security constraint violation in {filename}:{line_no}: found {label}")
 
     for name, pattern in ALL_PATTERNS:
-        if pattern.search(text):
-            raise ValueError(f"Security constraint violation in {filename}: found credential ({name})")
+        m = pattern.search(text)
+        if m:
+            line_no = text[:m.start()].count("\n") + 1
+            raise ValueError(f"Security constraint violation in {filename}:{line_no}: found credential ({name})")
 
     for pattern, label in FORBIDDEN_PATH_PATTERNS:
         m = re.search(pattern, text)
         if m:
+            line_no = text[:m.start()].count("\n") + 1
             clean_path = mask_text(m.group(0))
-            raise ValueError(f"Security constraint violation in {filename}: found {label} ({clean_path})")
+            raise ValueError(f"Security constraint violation in {filename}:{line_no}: found {label} ({clean_path})")
 
     for m in re.finditer(r"(?:^|[\s<>\"'`(=])(~/[^\s<>\"'`)]+)", text):
         path = m.group(1).rstrip(".,;:'\"`")
         if path not in ALLOWED_TILDE_PATHS:
+            line_no = text[:m.start(1)].count("\n") + 1
             clean_tilde = mask_text(path)
-            raise ValueError(f"Security constraint violation in {filename}: found Host user tilde path ({clean_tilde})")
+            raise ValueError(f"Security constraint violation in {filename}:{line_no}: found Host user tilde path ({clean_tilde})")
 
 
 def generate_all(repo_root: Path = ROOT, docs_dir: Path = DOCS) -> Dict[str, str]:
