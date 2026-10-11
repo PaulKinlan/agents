@@ -83,10 +83,6 @@ fi
 #   because the directive IS the instruction; whitespace-only stdin with NO directive is not,
 #   because nothing is reassembled and the engine would get nothing to act on.
 #
-#   The guard carries a marker comment that the order test in
-#   tests/test_adapter_stderr_readback.py indexes by string. That marker exists so the anchor
-#   is stable BY DESIGN rather than by luck: it cannot reflow with the case arm without being
-#   deliberately deleted.
 #
 # THE ROUTE THAT MADE THE OLD GUARD REACHABLE IS STILL TRUE AND WORTH KNOWING: NOTHING IN
 # THIS ADAPTER OR IN THE DISPATCHER SETS FACTORY_SYSTEM_DIRECTIVE_FILE - it is a variable
@@ -125,10 +121,6 @@ fi
 #   arm B ran with rc=0. It must be refused.
 # A content test covers both with one rule; moving the emptiness test down would not,
 # because it never asks whether what REMAINS has content.
-# This line is a MARKER, not decoration: the test above indexes this exact string. It
-# exists so the anchor is stable BY DESIGN rather than by luck - it cannot reflow with
-# the case arm without being deliberately deleted, and deleting it tells you a test
-# depends on the guard moving with it.
 case "$PROMPT" in
   *[![:space:]]*) ;;
   *)
