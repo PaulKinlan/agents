@@ -673,3 +673,102 @@ class TrustedArgvLauncherPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LookupPathContractTests(unittest.TestCase):
+    """agents-lzln: the contract the hub's provision.sh one-liner depends on.
+
+    THE FLAG IS IN THIS REPO EVEN THOUGH THE CALLER IS NOT. provision.sh regenerates the host
+    pins file and must pass --lookup-path for dirs holding trusted tools that live outside the
+    generator's confined system dirs (the bd case: /home/exedev/fleet/bin). If --lookup-path's
+    semantics ever change or the flag is removed, that one-liner silently stops working and
+    NOTHING IN THIS REPO WOULD NOTICE. That is the failure these two arms guard.
+
+    ARM A PROVES THE FLAG IS WIRED. ARM B PROVES VERIFICATION STILL RUNS - without it, a test
+    that only shows a pin appearing would pass just as well if the verifier had been made
+    permissive. Neither arm is evidence alone.
+
+    Everything happens in a temp dir and a temp pins file. NEVER the live
+    ~/.config/factory/tools.pins.yaml: a test that regenerates the real host pins file can
+    break every other lane on the VM.
+    """
+
+    def _generate(self, lookup: Path, out: Path) -> None:
+        root = Path(__file__).resolve().parent.parent
+        res = subprocess.run(
+            ["bash", str(root / "tools" / "generate-tool-pins.sh"),
+             str(out), "--lookup-path", str(lookup)],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "HOME": str(out.parent)},
+        )
+        self.assertEqual(res.returncode, 0, f"generator failed: {res.stderr[:300]}")
+
+    def test_arm_a_lookup_path_pins_a_tool_outside_the_system_dirs(self):
+        """bd is a trusted tool that the system dirs do NOT contain, so it is the real case:
+        without the flag there is no bd entry anywhere, and with the flag the temp dir's bd is
+        pinned and RESOLVES."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            outside = tmpdir / "not-a-system-dir"
+            outside.mkdir()
+            bd = _make_tool(outside, "bd", "#!/bin/sh\necho synthetic-bd\n")
+            out = tmpdir / "pins.yaml"
+            self._generate(outside, out)
+
+            pins = load_tool_pins(out)
+            self.assertIn("bd", pins, "arm A: --lookup-path must add the dir to the lookup")
+            self.assertEqual(Path(pins["bd"]["path"]).resolve(), bd.resolve())
+            self.assertEqual(pins["bd"]["sha256"], sha256_file(bd))
+            self.assertEqual(Path(resolve_tool("bd", pins=pins)).resolve(), bd.resolve(),
+                             "arm A: the pinned tool must RESOLVE, not merely appear")
+
+            # THE OTHER CONTROL, AND THE ONE THAT MAKES ARM A MEANINGFUL: generate WITHOUT the
+            # flag from the same dir and bd must be ABSENT, because the dir is not in the
+            # generator's confined lookup. Without this, arm A could pass for a reason that has
+            # nothing to do with the flag.
+            root = Path(__file__).resolve().parent.parent
+            bare = tmpdir / "pins-bare.yaml"
+            res = subprocess.run(
+                ["bash", str(root / "tools" / "generate-tool-pins.sh"), str(bare)],
+                capture_output=True, text=True, timeout=120,
+                env={**os.environ, "HOME": str(tmpdir)},
+            )
+            self.assertEqual(res.returncode, 0, res.stderr[:200])
+            self.assertNotIn("bd", load_tool_pins(bare),
+                             "control: without --lookup-path bd must NOT be pinned")
+
+    def test_arm_b_a_mismatched_sha_still_refuses(self):
+        """THE CONTROL. If this ever stops refusing, the pin machinery has been made
+        permissive and arm A's success means nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            outside = tmpdir / "not-a-system-dir"
+            outside.mkdir()
+            _make_tool(outside, "bd", "#!/bin/sh\necho synthetic-bd\n")
+            out = tmpdir / "pins.yaml"
+            self._generate(outside, out)
+
+            text = out.read_text(encoding="utf-8")
+            # CORRUPT bd's OWN sha, not whichever sha256 the first regex finds - the pins
+            # file holds several tools and a splice into the wrong block would test nothing.
+            i = text.index("bd:")
+            j = text.index("sha256:", i)
+            k = text.index("\n", j)
+            original = text[j:k]
+            digest = original.split(": ", 1)[1]
+            corrupted_digest = ("0" if digest[0] != "0" else "1") + digest[1:]
+            bad_text = text[:j] + f"sha256: {corrupted_digest}" + text[k:]
+            # VISIBILITY (coord, agents-lzln): assert the corruption LANDED before trusting a
+            # result, so a silent no-op cannot be read as "the control behaved".
+            self.assertNotEqual(bad_text, text, "arm B: the corruption did not change the file")
+            self.assertIn(corrupted_digest, bad_text)
+            self.assertNotIn(digest, bad_text.replace(corrupted_digest, ""))
+
+            bad = tmpdir / "pins-bad.yaml"
+            bad.write_text(bad_text, encoding="utf-8")
+            bad_pins = load_tool_pins(bad)
+            self.assertNotEqual(bad_pins["bd"]["sha256"], digest, "arm B: bd's pin was not corrupted")
+
+            with self.assertRaises(ToolPinError,
+                                   msg="arm B: a mismatched sha256 must STILL REFUSE"):
+                resolve_tool("bd", pins=bad_pins)
