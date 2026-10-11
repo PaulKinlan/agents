@@ -59,10 +59,7 @@ if [ "${1:-}" = "--install" ]; then
     printf '%s\n' "# DO NOT HAND-EDIT FOR TUNING: a hand-edit and a stale install are indistinguishable"
     printf '%s\n' "# from the files alone, and tests/test_gate_entrypoint_config.py fails on any divergence"
     printf '%s\n' "# from the tracked command. To tune, edit tools/check.conf and re-run --install."
-    printf 'CHECK_CMD="%s"\n' "$CHECK_CMD"
-    printf 'CHECK_FAST_CMD="%s"\n' "${CHECK_FAST_CMD:-}"
-    printf 'CHECK_TIMEOUT=%s\n' "${CHECK_TIMEOUT:-}"
-    printf 'CHECK_FAST_TIMEOUT=%s\n' "${CHECK_FAST_TIMEOUT:-}"
+    grep -E '^[A-Z_]+=' "$TRACKED"
   } > "$dest"
   echo "check-cmd: installed the project's gate command into $dest"
   exit 0

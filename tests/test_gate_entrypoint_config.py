@@ -186,7 +186,11 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
 
         env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
 
-        tracked = _tracked_fields()["CHECK_CMD"]
+        # The tracked command as evaluated when sourced by fleet-check:
+        res_cmd = subprocess.run(["bash", str(RESOLVER), "CHECK_CMD"],
+                                 env={"FLEET_CHECK_CONF": "/dev/null", "PATH": os.environ.get("PATH", "")},
+                                 capture_output=True, text=True, cwd=str(ROOT))
+        tracked = res_cmd.stdout.strip()
         tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], capture_output=True,
                               text=True, timeout=30, cwd=str(ROOT)).stdout.strip()
         self.assertTrue(tree, "need the committed tree the gate caches against")
