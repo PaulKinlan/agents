@@ -1482,11 +1482,18 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # the per-run config dir (bound writable below: pi needs auth.json there too) holding a
         # broker-routed override.
         adapter_env["PI_CODING_AGENT_DIR"] = str(pi_config_dir)
+        # agents-2xf7: rebuild the sandboxed engine child's PATH from the resolved tools'
+        # install trees plus SYSTEM_BIN_DIRS, so arbitrary operator PATH directories
+        # (which could hold unpinned planted shells or binaries) are never inherited.
+        engine_bin_name = ENGINE_BINARIES.get(engine)
+        tools_for_path = tuple(t for t in (engine_bin_name, "node") if t)
+        adapter_env["PATH"] = allowlisted_path(tools_for_path, adapter_env.get("PATH", ""))
+        engine_executables = ((engine_bin_name,) if engine_bin_name else ()) + ENGINE_EXECUTABLES
         try:
             adapter_cmd = sandbox_command(
                 adapter_cmd, target_dir=read_dir, factory_root=FACTORY_ROOT,
                 run_dir=run_dir, env=adapter_env,
-                executables=(engine,) + ENGINE_EXECUTABLES,
+                executables=engine_executables,
                 egress_forwards=([(EGRESS_BROKER_PORT, str(broker_sock))]
                                  if egress_active else None),
                 rw_binds=[str(pi_config_dir)],

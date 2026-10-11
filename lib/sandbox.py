@@ -601,10 +601,18 @@ def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
             # before binding it into the child. A pinned tool whose binary does not hash-match,
             # or whose real path is not the configured path, fails the wrap closed rather than
             # binding an unverified binary. A trusted tool with NO pin also fails closed here
-            # (unless FACTORY_ALLOW_UNPINNED_TOOLS=1) — see lib.tool_pins._require_pin. Untrusted
-            # names (bash/sh/env/python3) are never passed to verify_pin and need no pin.
+            # (unless FACTORY_ALLOW_UNPINNED_TOOLS=1) — see lib.tool_pins._require_pin.
             if name in PINNED_TOOLS:
                 verify_pin(name, str(real))
+            elif name in ("bash", "sh", "env", "python3"):
+                # agents-2xf7: untrusted shell and execution utilities must resolve under
+                # standard system directories already mounted read-only by _system_binds (/usr, /bin).
+                # An untrusted binary outside system directories (e.g. a planted bash/env on PATH)
+                # must never be bound into the sandbox.
+                if not plan.visible(str(real)):
+                    raise SandboxError(
+                        f"untrusted executable '{name}' resolved to {real} outside system "
+                        f"directories; refusing to bind an unverified binary into the sandbox")
             # Bind the tool's own install tree when it is tool-specific (node's versioned
             # tree, pi's ~/.local/pi), so the real binary and its siblings resolve at their
             # true paths. A tree that is really a top-level user prefix (~/.local) is too
