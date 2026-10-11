@@ -25,12 +25,12 @@ The census measures exactly 10 test modules in `tests/` currently carrying boile
 9. `tests/test_report_schema.py`
 10. `tests/test_sandbox.py`
 
-## Architecture: Centralized Two-Tier Declaration
+## Architecture: Centralized Multi-Tier Declaration
 
-Instead of relying on N test files to self-scrub, the environment is declared at the two canonical entry points:
+Instead of relying on N test files to self-scrub, the environment is declared at the canonical entry points:
 
 ### 1. Package-Level Hermeticity (`tests/__init__.py`)
-When any test is executed via `python3 -m unittest discover -s tests` or `python3 -m unittest tests.test_<name>`, Python imports the `tests` package before loading any submodule.
+When tests are executed via `python3 -m unittest discover -s tests -t .` or `python3 -m unittest tests.test_<name>`, Python imports the `tests` package before loading any submodule.
 
 In `tests/__init__.py`:
 ```python
@@ -47,21 +47,23 @@ hermetic_env.isolate_operator_config()
 ```
 This guarantees that any test running within `tests` executes in an isolated environment by default, without needing per-module boilerplate.
 
-### 2. Gate-Level Hermeticity (`tools/fast-gate.sh`)
+### 2. Fast-Gate Runner Hermeticity (`tools/fast-gate.sh`)
 At the runner level in `tools/fast-gate.sh`:
 ```bash
 # Establish hermetic test environment: scrub ambient operator host config (agents-v1a2).
-unset FACTORY_TOOL_PINS
+unset FACTORY_TOOL_PINS 2>/dev/null || true
 export FACTORY_ALLOW_UNPINNED_TOOLS=1
 ```
 All child processes and test commands dispatched by `fast-gate.sh` inherit a clean, sanitized environment.
 
 ### 3. Full-Gate Coordination (`~/.fleet/check.conf`)
-Per coordinator instruction, `check.conf` is shared with `agents-j1te` and is not edited here. When `agents-j1te` coordinates `check.conf` updates, `CHECK_CMD` can be declared as:
+As noted in review (Finding P1), when `python3 -m unittest discover -s tests -v` runs without `-t .`, Python treats `tests/` as the top-level directory and loads test modules as top-level modules rather than package submodules, which bypasses `tests/__init__.py`.
+
+Per coordinator instruction, `check.conf` is shared with `agents-j1te` and must not be edited independently. When `agents-j1te` updates `check.conf`, `CHECK_CMD` should be declared as:
 ```bash
-CHECK_CMD="env -u FACTORY_TOOL_PINS FACTORY_ALLOW_UNPINNED_TOOLS=1 python3 -m unittest discover -s tests -v"
+CHECK_CMD="env -u FACTORY_TOOL_PINS FACTORY_ALLOW_UNPINNED_TOOLS=1 python3 -m unittest discover -s tests -t . -v"
 ```
-Because `tests/__init__.py` already isolates on import, test discovery is hermetic even prior to the `check.conf` update.
+This pairs explicit gate-level environment scrubbing (`env -u FACTORY_TOOL_PINS FACTORY_ALLOW_UNPINNED_TOOLS=1`) with package-aware discovery (`-t .`), ensuring that the merger's full gate is completely hermetic against host pins files.
 
 ## Removal of Redundant Boilerplate
 
@@ -84,4 +86,6 @@ become strictly redundant. They are removed to eliminate dead claims and ensure 
 The acceptance test in `tests/test_hermetic_env.py` proves:
 1. `tests/__init__.py` initializes the environment so that `FACTORY_TOOL_PINS` is absent and `FACTORY_ALLOW_UNPINNED_TOOLS == "1"`.
 2. A new, unscrubbed test case with synthetic binaries on PATH passes under an active host pins file without needing `setUpModule`.
-3. `tools/fast-gate.sh` scrubs `FACTORY_TOOL_PINS` before invoking test suites.
+3. Package-aware discovery (`-s tests -t .`) runs hermetically under an ambient host pins file.
+4. Full-gate command declaration (`env -u FACTORY_TOOL_PINS FACTORY_ALLOW_UNPINNED_TOOLS=1 ...`) runs hermetically under an ambient host pins file.
+5. `tools/fast-gate.sh` actually executes child test suites with `FACTORY_TOOL_PINS` scrubbed and `FACTORY_ALLOW_UNPINNED_TOOLS=1`.
