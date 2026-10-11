@@ -67,20 +67,21 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertEqual(env["LANG"], "en_GB.UTF-8")
         for name in list(SECRETS) + ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"]:
             with self.subTest(name=name):
-                self.assertNotIn(name, env)
+                # agents-3cm4/agents-vsqa: assert key presence only, never dump env dict
+                self.assertFalse(name in env)
 
     def test_engine_gets_only_its_own_model_auth(self):
         pi = child_environment(engine="pi", parent=parent_env())
         self.assertEqual(pi["ANTHROPIC_API_KEY"], "sk-ant")
         self.assertEqual(pi["GEMINI_API_KEY"], "gem")
-        self.assertNotIn("GITHUB_TOKEN", pi)
-        self.assertNotIn("AWS_SECRET_ACCESS_KEY", pi)
-        self.assertNotIn("SSH_AUTH_SOCK", pi)
+        self.assertFalse("GITHUB_TOKEN" in pi)
+        self.assertFalse("AWS_SECRET_ACCESS_KEY" in pi)
+        self.assertFalse("SSH_AUTH_SOCK" in pi)
 
         claude = child_environment(engine="claude", parent=parent_env())
         self.assertEqual(claude["ANTHROPIC_API_KEY"], "sk-ant")
-        self.assertNotIn("GEMINI_API_KEY", claude)
-        self.assertNotIn("GITHUB_TOKEN", claude)
+        self.assertFalse("GEMINI_API_KEY" in claude)
+        self.assertFalse("GITHUB_TOKEN" in claude)
 
         deepseek = child_environment(engine="deepseek", parent=parent_env(
             DEEPSEEK_API_KEY="ds-key",
@@ -88,13 +89,13 @@ class TestChildEnvironment(unittest.TestCase):
         ))
         self.assertEqual(deepseek["DEEPSEEK_API_KEY"], "ds-key")
         self.assertEqual(deepseek["FACTORY_DEFAULT_DEEPSEEK_BASE_URL"], "http://127.0.0.1:9")
-        self.assertNotIn("ANTHROPIC_API_KEY", deepseek)
-        self.assertNotIn("GITHUB_TOKEN", deepseek)
+        self.assertFalse("ANTHROPIC_API_KEY" in deepseek)
+        self.assertFalse("GITHUB_TOKEN" in deepseek)
 
     def test_unknown_engine_fails_closed(self):
         env = child_environment(engine="brand-new-engine", parent=parent_env())
-        self.assertNotIn("ANTHROPIC_API_KEY", env)
-        self.assertNotIn("GEMINI_API_KEY", env)
+        self.assertFalse("ANTHROPIC_API_KEY" in env)
+        self.assertFalse("GEMINI_API_KEY" in env)
         self.assertEqual(env["PATH"], "/usr/bin")
 
     def test_github_sink_gets_a_token_and_nothing_else(self):
@@ -103,8 +104,8 @@ class TestChildEnvironment(unittest.TestCase):
                 env = child_environment(sink=sink, parent=parent_env())
                 self.assertEqual(env["GH_TOKEN"], "ghs_ci_token")
                 self.assertEqual(env["GITHUB_TOKEN"], "ghs_ci_token")
-                self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
-                self.assertNotIn("ANTHROPIC_API_KEY", env)
+                self.assertFalse("AWS_SECRET_ACCESS_KEY" in env)
+                self.assertFalse("ANTHROPIC_API_KEY" in env)
 
     def test_beads_alias_sinks_get_no_github_token(self):
         """agents-eyo: `both`/`all` are now aliases for beads and grant no GitHub token."""
@@ -112,19 +113,19 @@ class TestChildEnvironment(unittest.TestCase):
             with self.subTest(sink=sink):
                 env = child_environment(sink=sink, parent=parent_env())
                 for name in GITHUB_TOKEN_VARS:
-                    self.assertNotIn(name, env)
+                    self.assertFalse(name in env)
 
     def test_other_sinks_get_no_github_token(self):
         for sink in ("file", "beads", None):
             with self.subTest(sink=sink):
                 env = child_environment(sink=sink, parent=parent_env())
                 for name in GITHUB_TOKEN_VARS:
-                    self.assertNotIn(name, env)
+                    self.assertFalse(name in env)
 
     def test_github_flag_adds_tokens(self):
         env = child_environment(github=True, parent=parent_env())
         self.assertEqual(env["GH_TOKEN"], "ghs_ci_token")
-        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertFalse("ANTHROPIC_API_KEY" in env)
 
     def test_declares_requirement_reads_the_agent_yaml_shape(self):
         self.assertTrue(declares_requirement({"capabilities": {"requires": ["gh"]}}, "gh"))
@@ -138,11 +139,22 @@ class TestChildEnvironment(unittest.TestCase):
         declaring = prepass_environment({"capabilities": {"requires": ["gh"]}},
                                         parent=parent_env())
         self.assertEqual(declaring["GH_TOKEN"], "ghs_ci_token")
-        self.assertNotIn("ANTHROPIC_API_KEY", declaring)
+        self.assertFalse("ANTHROPIC_API_KEY" in declaring)
 
         plain = prepass_environment({"capabilities": {"requires": ["git"]}},
                                     parent=parent_env())
-        self.assertNotIn("GH_TOKEN", plain)
+        self.assertFalse("GH_TOKEN" in plain)
+
+    def test_assertion_failure_does_not_leak_child_environment_dict_or_tokens(self):
+        """agents-vsqa: assertion failures in child_env tests must assert on key presence only
+        and never format the child environment dictionary or credentials into the error message."""
+        poisoned_env = dict(child_environment(sink="github-issues", parent=parent_env()),
+                            AWS_SECRET_ACCESS_KEY="synthetic-secret-leak-marker")
+        with self.assertRaises(AssertionError) as ctx:
+            self.assertFalse("AWS_SECRET_ACCESS_KEY" in poisoned_env)
+        err_msg = str(ctx.exception)
+        self.assertNotIn("synthetic-secret-leak-marker", err_msg, "leaked poisoned secret value in traceback")
+        self.assertNotIn("ghs_ci_token", err_msg, "leaked child token value in traceback")
 
     def test_absent_variables_are_not_invented(self):
         self.assertEqual(child_environment(parent={"PATH": "/bin"}), {"PATH": "/bin"})
@@ -179,8 +191,9 @@ class TestChildEnvironment(unittest.TestCase):
             self.assertEqual(resolve(True), f"RESOLVED {fake_bd}")
             self.assertTrue(resolve(False).startswith("FAILED"),
                             "without the flag the child must fail closed, not guess")
-            self.assertNotIn("FACTORY_TOOL_PINS", child_environment(parent=parent))
-            self.assertNotIn("FACTORY_TOOL_PINS", child_environment(engine="pi", parent=parent))
+            # agents-3cm4: check key presence only, never dump child environment dict
+            self.assertFalse("FACTORY_TOOL_PINS" in child_environment(parent=parent))
+            self.assertFalse("FACTORY_TOOL_PINS" in child_environment(engine="pi", parent=parent))
 
     def test_findings_child_resolves_an_unpinned_tool_with_the_parent_opt_in(self):
         """agents-7ua: the sink child must inherit the parent's unpinned-tools opt-in.
@@ -216,13 +229,11 @@ class TestChildEnvironment(unittest.TestCase):
 
             # The opt-in is only for the children that resolve a trusted tool themselves.
             without, out = resolve(False)
-            self.assertNotIn("FACTORY_ALLOW_UNPINNED_TOOLS", without)
+            self.assertFalse("FACTORY_ALLOW_UNPINNED_TOOLS" in without)
             self.assertTrue(out.startswith("FAILED"))
 
-            self.assertNotIn("FACTORY_ALLOW_UNPINNED_TOOLS",
-                             child_environment(parent=parent))
-            self.assertNotIn("FACTORY_ALLOW_UNPINNED_TOOLS",
-                             child_environment(engine="pi", parent=parent))
+            self.assertFalse("FACTORY_ALLOW_UNPINNED_TOOLS" in child_environment(parent=parent))
+            self.assertFalse("FACTORY_ALLOW_UNPINNED_TOOLS" in child_environment(engine="pi", parent=parent))
 
     def test_findings_child_opt_in_never_leaks_secrets(self):
         """agents-7ua: forwarding the unpinned opt-in must not widen the secret boundary."""
@@ -231,7 +242,7 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertEqual(env["FACTORY_ALLOW_UNPINNED_TOOLS"], "1")
         for name in list(SECRETS) + ["ANTHROPIC_API_KEY", "GEMINI_API_KEY"]:
             with self.subTest(name=name):
-                self.assertNotIn(name, env)
+                self.assertFalse(name in env)
 
     def test_proxy_and_ca_vars_not_forwarded_by_default(self):
         # agents-5d9: a poisoned operator proxy/CA must not reach a child by default.
@@ -247,14 +258,14 @@ class TestChildEnvironment(unittest.TestCase):
                      "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
                      "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
             with self.subTest(name=name):
-                self.assertNotIn(name, env)
+                self.assertFalse(name in env)
 
     def test_proxy_vars_forwarded_only_when_proxied(self):
         # agents-5d9: an UNSANDBOXED child (proxied=True) inherits the operator's proxy.
         parent = parent_env(HTTP_PROXY="http://corp-proxy:3128",
                             HTTPS_PROXY="http://corp-proxy:3128",
                             NO_PROXY="localhost,127.0.0.1")
-        self.assertNotIn("HTTP_PROXY", child_environment(parent=parent))
+        self.assertFalse("HTTP_PROXY" in child_environment(parent=parent))
         proxied = child_environment(parent=parent, proxied=True)
         self.assertEqual(proxied["HTTP_PROXY"], "http://corp-proxy:3128")
         self.assertEqual(proxied["HTTPS_PROXY"], "http://corp-proxy:3128")
@@ -268,8 +279,8 @@ class TestChildEnvironment(unittest.TestCase):
         for env in (child_environment(parent=parent),
                     child_environment(parent=parent, proxied=True)):
             with self.subTest(env=env):
-                self.assertNotIn("SSL_CERT_FILE", env)
-                self.assertNotIn("NODE_EXTRA_CA_CERTS", env)
+                self.assertFalse("SSL_CERT_FILE" in env)
+                self.assertFalse("NODE_EXTRA_CA_CERTS" in env)
 
     def test_parent_mapping_is_read_only(self):
         source = parent_env()
@@ -307,15 +318,15 @@ class TestCredentialBrokering(unittest.TestCase):
                                 broker_placeholder=TEST_PLACEHOLDER)
         self.assertEqual(env["ANTHROPIC_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["ANTHROPIC_BASE_URL"], url)
-        self.assertNotIn("sk-ant", env.values())  # the real key is gone
+        self.assertFalse("sk-ant" in env.values())  # the real key is gone
 
     def test_every_secret_var_of_a_brokered_provider_is_stripped(self):
         parent = parent_env(ANTHROPIC_AUTH_TOKEN="auth-tok", CLAUDE_CODE_OAUTH_TOKEN="oauth-tok")
         env = child_environment(engine="claude", parent=parent,
                                 broker_urls={"anthropic": "http://127.0.0.1:1/proxy/anthropic"},
                                 broker_placeholder=TEST_PLACEHOLDER)
-        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
-        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+        self.assertFalse("ANTHROPIC_AUTH_TOKEN" in env)
+        self.assertFalse("CLAUDE_CODE_OAUTH_TOKEN" in env)
         self.assertEqual(env["ANTHROPIC_API_KEY"], TEST_PLACEHOLDER)
 
     def test_unbrokered_providers_keep_their_real_keys(self):
@@ -334,13 +345,13 @@ class TestCredentialBrokering(unittest.TestCase):
         self.assertEqual(env["OPENAI_BASE_URL"], "http://127.0.0.1:1/proxy/openai")
         self.assertEqual(env["GEMINI_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["GOOGLE_GEMINI_BASE_URL"], "http://127.0.0.1:1/proxy/google")
-        self.assertNotIn("op", env.values())
-        self.assertNotIn("gem", env.values())
+        self.assertFalse("op" in env.values())
+        self.assertFalse("gem" in env.values())
 
     def test_no_broker_urls_leaves_the_env_unchanged(self):
         with_broker = child_environment(engine="pi", parent=parent_env())
         self.assertEqual(with_broker["ANTHROPIC_API_KEY"], "sk-ant")  # real key, as today
-        self.assertNotIn("ANTHROPIC_BASE_URL", with_broker)
+        self.assertFalse("ANTHROPIC_BASE_URL" in with_broker)
 
     def test_an_unmapped_provider_fails_closed(self):
         # A provider the broker advertised but child_env doesn't map must FAIL CLOSED,
@@ -364,8 +375,8 @@ class TestCredentialBrokering(unittest.TestCase):
         self.assertEqual(env["DEEPSEEK_BASE_URL"], "http://127.0.0.1:1/proxy/deepseek")
         self.assertEqual(env["OPENROUTER_API_KEY"], TEST_PLACEHOLDER)
         self.assertEqual(env["OPENROUTER_BASE_URL"], "http://127.0.0.1:1/proxy/openrouter")
-        self.assertNotIn("ds-key", env.values())
-        self.assertNotIn("or-key", env.values())
+        self.assertFalse("ds-key" in env.values())
+        self.assertFalse("or-key" in env.values())
 
     def test_brokering_fails_closed_without_the_running_brokers_placeholder(self):
         # agents-28nn round 7: the broker refuses any request that does not present the
