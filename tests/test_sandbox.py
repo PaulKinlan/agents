@@ -295,6 +295,93 @@ class TestWrapVerification(unittest.TestCase):
                                factory_root=self.factory, run_dir=self.run_dir,
                                env={"PATH": path, "HOME": str(self.root / "home")})
 
+    def test_a_sentinel_that_cannot_read_the_token_is_refused_with_its_own_code(self):
+        """The verify child closing its stdin must refuse with the token arm, not another (agents-0p3l review).
+
+        Exit code 40 is a failure mode THIS CHANGE CREATES - before it the token travelled in
+        argv and the child never read stdin, so nothing could make this arm fire. The reviewer
+        observed that a stub which closes fd 0 before exec'ing the sentinel (a fake bwrap doing
+        `exec "$@" </dev/null`) passed on the pre-fix code and is refused now, which makes it
+        the natural construction: a bare `exit 0` fake bwrap is caught by the no-proof arm, but
+        this one gets INTO the sentinel and then cannot read the token, so it pins 40 exactly
+        and not 0, 41 or 42. An failure arm nothing tests is an arm nobody will notice breaking.
+        """
+        # The stub must reach the SENTINEL, not bwrap's flags: a real wrap's argv begins with
+        # plan flags (--die-with-parent --new-session -- ...), so `exec "$@"` alone would try
+        # to exec `--die-with-parent` and exit 127 (observed). Skip to after the last `--` and
+        # run the command there, with fd 0 closed - which is what makes the sentinel's read
+        # fail and isolates exit 40 from the other arms.
+        path = self.use_fake_bwrap(
+            '#!/bin/sh\n'
+            'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+            '[ "$1" = "--" ] && shift\n'
+            'exec "$@" </dev/null\n', name="fakebin-nostdin")
+        # agents-28nn landed the pin: a fake bwrap is now refused BEFORE _verify_wrap runs, so
+        # the token arm is only reachable with the documented dev/test opt-out. That is the
+        # right interaction (the pin is what refuses a PATH-shadowed bwrap), and it is scope'd
+        # here rather than worked around, so this test still exercises the arm it names.
+        # SAVE AND RESTORE, do not unset: other tests in this file rely on this variable being
+        # present, and popping it on cleanup destroyed their fixture value and turned three
+        # passing tests into errors (observed, caught before commit).
+        previous_opt_out = os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS")
+        os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = "1"
+
+        def _restore_opt_out():
+            if previous_opt_out is None:
+                os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+            else:
+                os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = previous_opt_out
+
+        self.addCleanup(_restore_opt_out)
+        with self.assertRaises(sandbox_module.SandboxError) as caught:
+            self.build(path)
+        message = str(caught.exception)
+        self.assertIn("could not read the one-time token", message)
+        self.assertIn("never shown to start its child", message, "the refusal must not claim the run was sandboxed")
+
+    def test_the_proof_token_is_never_passed_in_the_wrapped_process_argv(self):
+        """The one-time proof token must not appear in the sentinel's argv (agents-0p3l).
+
+        The sentinel used to be built as [..., "factory-wrap-verify", str(inner[0]), token,
+        str(token_path)], so the token WAS argv of a process whose /proc/<pid>/cmdline is
+        world-readable (0444): any process on the host, any uid, could read it while the wrap
+        was being verified. The pin half of this bead narrows WHO must be proven; this half is
+        about HOW the proof is delivered, which is why it is a separate change. The fix puts
+        the token on stdin and keeps the destination path in argv (the path is not a secret).
+
+        RESIDUAL, deliberately asserted rather than glossed: a SAME-UID process can still read
+        the token from /proc/<pid>/fd/0 while the child holds the pipe. The token moved from
+        world-readable to same-uid-readable - a narrowing, not a containment boundary, and
+        unavoidable while the factory and its children share one uid by design.
+        """
+        if not shutil.which("bwrap"):
+            self.skipTest("needs a real bwrap to exercise a wrap")
+        captured = []
+        real_run = subprocess.run
+
+        def spy(argv, **kwargs):
+            argv = [str(a) for a in argv]
+            if "factory-wrap-verify" in argv:
+                captured.append((argv, kwargs.get("input"), kwargs.get("stdin")))
+            return real_run(argv, **kwargs)
+
+        subprocess.run = spy
+        try:
+            self.build(self.real_path)
+        finally:
+            subprocess.run = real_run
+
+        self.assertTrue(captured, "the sentinel was never exercised; this test proves nothing")
+        for argv, sent_input, stdin_kw in captured:
+            hexish = [a for a in argv if len(a) == 32 and all(c in "0123456789abcdef" for c in a)]
+            self.assertEqual(hexish, [], f"a 32-hex token is in the sentinel argv: {hexish}")
+            self.assertNotIn("factory-wrap-verify\n", argv, "guard: the sentinel marker is expected")
+            self.assertEqual(stdin_kw, None, "stdin must not be forced to DEVNULL now that the token travels on it")
+            self.assertIsInstance(sent_input, bytes, "the token must be delivered to the child")
+            token = sent_input.decode().strip()
+            self.assertNotIn(token, " ".join(argv), "the token must not appear anywhere in argv")
+            self.assertRegex(token, r"^[0-9a-f]{32}$", "the delivered value must be the token shape")
+
     def test_a_bwrap_that_fails_at_exec_after_a_green_probe_is_refused(self):
         """The agents-kwi reproduction: a bwrap that answers the availability probe (it is
         handed a bare plan ending in /bin/true) but exits non-zero for every real wrap. The
