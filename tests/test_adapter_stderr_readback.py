@@ -149,6 +149,49 @@ class TestStderrIsNotAnAnswer(unittest.TestCase):
                           "the engine's stderr must reach the operator, not vanish")
 
 
+
+class TestDeepSeekStderrIsNotTheAnswer(TestStderrIsNotAnAnswer):
+    # agents-2plj: DEEPSEEK WAS NAMED IN PROSE AND NEVER INVOKED. The single grep hit for it
+    # was the module docstring, while the fast-gate wildcard arm selects this file for a
+    # deepseek.sh change - so the map named a suite that cannot discriminate on the file
+    # that triggered it. The absent edge is what a grep cannot show.
+    #
+    # Two facts the harness has to satisfy, BOTH LEARNED FROM THE ADAPTER'S OWN REFUSALS
+    # rather than from reading it: it refuses BY NAME without DEEPSEEK_BASE_URL, and it
+    # shells out to python for the API call. The second is why the harness points
+    # FACTORY_PYTHON_BIN at a stub interpreter - without it the arm makes a REAL network
+    # call and fails on connection refused. The redirect under test is in the SHELL below
+    # that call, so stubbing the call still exercises it.
+
+    DEEPSEEK_ENV = {"DEEPSEEK_BASE_URL": "http://127.0.0.1:1", "DEEPSEEK_API_KEY": "test-key"}
+
+    def _cases(self, name, env=None):
+        for label, body, want_rc in (
+            ("CONTROL silent engine -> refused", SILENT, 1),
+            ("stderr-only engine -> refused", STDERR_ONLY, 1),
+            ("engine that answers -> delivered", ANSWERS, 0),
+        ):
+            with self.subTest(adapter=name, case=label), \
+                    tempfile.TemporaryDirectory() as tmpdir:
+                box = _Sandbox(Path(tmpdir))
+                stub = box.root / "python-stub"
+                stub.write_text('#!/bin/sh\nexec "$FACTORY_ENGINE_BIN"\n', encoding="utf-8")
+                stub.chmod(0o755)
+                engine = box.engine(body)
+                env2 = dict(env or {})
+                env2["FACTORY_PYTHON_BIN"] = str(stub)
+                res = box.invoke(self._adapter(name), "a real prompt", engine, env2)
+                yield label, res, want_rc, box
+
+    def test_deepseek_stderr_is_not_the_answer(self):
+        seen = 0
+        for label, res, want_rc, box in self._cases("deepseek", self.DEEPSEEK_ENV):
+            seen += 1
+            with self.subTest(case=label):
+                self.assertEqual(res.returncode, want_rc,
+                                 f"deepseek {label}: rc={res.returncode} stderr={res.stderr[:300]}")
+        self.assertEqual(seen, 3, "the deepseek arm must run all three cases")
+
 class TestAntigravityIsRefusedToday(unittest.TestCase):
     """The fact that makes the copy legitimate, and the fact that would change first."""
 
