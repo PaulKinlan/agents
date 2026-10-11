@@ -70,17 +70,27 @@ fi
 # down uses the FINAL prompt, which this adapter reassembles from the system directive
 # file. The two differ whenever a directive is set.
 #
-# THAT DIFFERENCE IS HARMLESS TODAY, AND THE CONDITION IS SPECIFIC: the directive guard
-# earlier in this file refuses a missing, unreadable or EMPTY directive before anything
-# else runs, so the reassembled prompt always carries the directive's content and an
-# empty or whitespace-only final prompt is unreachable. Measured, not inferred:
-# whitespace stdin alone is refused by that earlier guard; whitespace stdin with a
-# non-empty directive produces "<directive>\n\n<stdin>", which has content - so a
-# content-based guard placed after the reassembly would ADMIT it, correctly.
+# WHETHER THAT DIFFERENCE MATTERS DEPENDS ON WHETHER A DIRECTIVE IS SET, and both cases
+# were established separately:
 #
-# IF THAT EARLIER REFUSAL IS EVER WEAKENED - an empty directive permitted, or the
-# directive made optional - THIS GUARD MUST MOVE BELOW THE REASSEMBLY, because an empty
-# final prompt becomes reachable and this guard would not see it.
+#   WITH A DIRECTIVE SET, this guard is UNREACHABLE AS A CONTENT TEST. The directive
+#   guard earlier in this file refuses a missing, unreadable or EMPTY directive before
+#   anything else runs, so :80 always has content to prepend and the final prompt cannot
+#   be empty. Measured: whitespace stdin alone is refused by that earlier guard, and
+#   whitespace stdin with a non-empty directive produces "<directive>\n\n<stdin>".
+#
+#   WITH NO DIRECTIVE SET, this guard is REACHABLE AND WRONG. :80 has nothing to
+#   reassemble, so the engine receives $PROMPT unchanged - and this guard tests
+#   EMPTINESS, not content, so a prompt of spaces passes it and the engine runs with
+#   nothing to act on. Measured on a copy of this file with the tool-policy refusal
+#   removed (the order of the guards), and the ROUTE by search: NOTHING IN THIS ADAPTER
+#   OR IN THE DISPATCHER SETS FACTORY_SYSTEM_DIRECTIVE_FILE - it is a variable this file
+#   consumes and nothing sets - so the no-directive case is not excluded.
+#
+# WHAT MUST CHANGE: the guard belongs BELOW the reassembly and must test CONTENT rather
+# than emptiness. Whitespace-only stdin WITH a reassembled directive is a legitimate
+# prompt; whitespace-only stdin with no directive is not. That is a predicate change, not
+# a move, and it is filed separately (see the tracker) rather than made here.
 PROMPT="$(cat)"
 if [ -z "$PROMPT" ]; then
   echo "[antigravity adapter] Error: empty prompt on stdin." >&2
