@@ -311,8 +311,6 @@ def _pid_in_tree(pid: int, root: int, proc_root: str = "/proc", _limit: int = 12
     bounds the walk against a corrupt chain."""
     current = pid
     for _ in range(_limit):
-        if current == root:
-            return True
         if current <= 1:
             return False
         try:
@@ -320,6 +318,10 @@ def _pid_in_tree(pid: int, root: int, proc_root: str = "/proc", _limit: int = 12
                 stat = fh.read()
         except OSError:
             return False  # the process exited mid-check: nothing left to trust
+        # Below the /proc read on purpose: a short-circuit before a verification is an
+        # unverified path — the root must not skip whether it still EXISTS.
+        if current == root:
+            return True
         close = stat.rfind(")")  # comm is parenthesised and may contain spaces or ')'
         if close < 0:
             return False
