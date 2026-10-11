@@ -41,26 +41,12 @@ if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
   fi
 fi
 
-# The CLI path is taken ONLY with a dispatcher-verified binary (agents-28nn round 5,
-# review P0 — credential exfiltration): this process's environment carries the run's
-# DEEPSEEK_API_KEY, so the binary it execs decides who receives the key — a by-name
-# `command -v` lookup would hand it to whatever an attacker planted first on PATH. The
-# dispatcher resolves and pin-verifies the binary (lib/tool_pins.resolve_tool; deepseek
-# is in TRUSTED_TOOLS) and passes the verified absolute path as FACTORY_ENGINE_BIN. With
-# no verified binary the adapter falls through to the Python HTTP path below, which is
-# the factory's own code — no PATH-resolved binary is ever handed the credential.
-if [ -n "${FACTORY_ENGINE_BIN:-}" ]; then
-  # agents-m2n (review P1-2): the CLI path has NO system-prompt interface — it pipes the
-  # prompt and nothing else — so it cannot carry the system directive. Fail closed for a
-  # directive-bearing run rather than silently dropping the rule.
-  if [ -n "${FACTORY_SYSTEM_DIRECTIVE_FILE:-}" ]; then
-    echo "[deepseek adapter] Error: the 'deepseek' CLI path has no system-prompt interface and cannot carry the system directive; refusing to run without it." >&2
-    exit 2
-  fi
-  echo "$PROMPT" | "$FACTORY_ENGINE_BIN" "$@" > "$OUTPUT_FILE" 2>&1 || exit $?
-  echo "$OUTPUT_FILE"
-  exit 0
-fi
+# agents-mhv7: DeepSeek has NO CLI arm — it is strictly payload-only via the Python
+# stdlib HTTP call below. Executing a PATH-planted binary or an arbitrary CLI would violate
+# the containment doctrine (lib/containment.py: deepseek is payload-only, with no file
+# tools and no filesystem read scope) and risk credential exfiltration or fabricated
+# verdicts. Even if FACTORY_ENGINE_BIN is passed or a namesake exists on PATH, this
+# adapter NEVER executes a host binary.
 
 # Execute via Python stdlib HTTP call to DeepSeek API
 echo "[deepseek adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR' via DeepSeek API..."

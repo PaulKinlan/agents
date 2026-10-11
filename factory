@@ -781,27 +781,23 @@ def choose_engine(requested_engine: str) -> str:
 # path to the adapter as FACTORY_ENGINE_BIN; the adapter refuses to run without it, so a
 # by-name PATH lookup can never be handed the credential. The sandbox binder re-verifies the
 # same pin at wrap time (lib/sandbox.py _executable_binds) before binding the engine in.
-ENGINE_BINARIES = {"pi": "pi", "claude": "claude", "antigravity": "agentapi",
-                   "deepseek": "deepseek"}
+# deepseek has NO CLI binary (agents-mhv7): its adapter is purely payload-only Python HTTP
+# station code, so it executes no host binary and has no binary to pin.
+ENGINE_BINARIES = {"pi": "pi", "claude": "claude", "antigravity": "agentapi"}
 
 
 def _resolve_engine_bin(engine: str) -> Optional[str]:
     """Resolve the engine's executed binary to a pin-verified absolute path, or None.
 
     Raises ToolPinError when the binary is unpinned, mismatched, or unresolvable — the run
-    fails closed rather than handing credentials to an unverified binary. deepseek is the
-    one engine whose binary is OPTIONAL: with no `deepseek` CLI installed its adapter falls
-    back to the factory's own Python HTTP client, which is station code with no binary to
-    pin, so an absent binary resolves to None (no FACTORY_ENGINE_BIN) rather than failing.
-    A deepseek binary that IS present but unpinned still fails closed — a resolvable but
-    unverifiable binary must never be silently skipped while the adapter could reach it.
+    fails closed rather than handing credentials to an unverified binary. deepseek has NO
+    binary (agents-mhv7) — its adapter is purely payload-only Python HTTP station code, so
+    it has no binary to pin and resolves to None (no FACTORY_ENGINE_BIN).
     """
     binary = ENGINE_BINARIES.get(engine)
     if binary is None:
-        # An engine with no adapter on this station gets no credentials (lib/child_env.py
-        # fails closed the same way) and its adapter script will not exist; nothing to pin.
-        return None
-    if engine == "deepseek" and shutil.which(binary) is None:
+        # An engine with no CLI binary (e.g. deepseek, purely payload-only Python API)
+        # or no adapter on this station gets no binary path; nothing to pin.
         return None
     return resolve_tool(binary)
 

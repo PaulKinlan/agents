@@ -66,6 +66,3 @@ claude:
 agentapi:
   # path: /usr/local/bin/agentapi
   # sha256: <64 hex>
-deepseek:
-  # path: /usr/local/bin/deepseek
-  # sha256: <64 hex>
