@@ -208,8 +208,8 @@ class TestAntigravityIsRefusedToday(unittest.TestCase):
         # content case below the reassembly, so indexing the old text raised ValueError
         # BEFORE this test asserted anything. Anchored on the NEW guard, and on the case arm
         # rather than the exact spacing, so a future reflow does not break the anchor the way
-        # this one did. agents-ut3v review, found by the merger on the union - each branch was
-        # red ALONE - and this is the measured version, replacing a claim that was FALSE.
+        # this one did. agents-ut3v review, found by the merger on the union - the
+        # ut3v tip was red ALONE - and this is the measured version, replacing a claim that was FALSE.
         # I first wrote "each branch was green alone, which is why a per-branch fast gate did
         # not see it". The merger measured the opposite: git archive of the earlier tip into a
         # temp dir shows that tree's OWN adapter has zero hits for the old anchor text, the
