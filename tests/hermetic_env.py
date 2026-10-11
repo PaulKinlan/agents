@@ -28,17 +28,26 @@ something that does (the factory dispatcher, an adapter, a sandbox wrap):
         hermetic_env.restore_operator_config()
 
 WHAT IT DOES, AND WHY IT IS TWO THINGS RATHER THAN ONE. It removes the operator's
-FACTORY_TOOL_PINS, so no test observes the host's pins file; and it SETS
-FACTORY_ALLOW_UNPINNED_TOOLS=1, because these modules plant synthetic binaries and
-`pi` and `bwrap` are deliberately absent from tools.yaml. Removing the ambient
-input alone was tried first and made things WORSE, which is the most useful thing
-learned here: test_pi_keyless_broker stayed at 2 errors with a different, more
-honest message ("trusted tool 'pi' is not pinned") and test_sandbox went from
-2 failures and 1 error to 4 failures and 28 errors, because those tests had been
-resolving `pi` only BY ACCIDENT through the operator's host file. A module that
-needs a tool resolved must either pin it itself or opt out explicitly; opting out
-is what the code documents for a dev/test run, so this module installs that
-opt-out and thereby makes the assumption VISIBLE instead of inherited.
+FACTORY_TOOL_PINS, so no test observes the host's pins file; and it RE-ASSERTS
+FACTORY_ALLOW_UNPINNED_TOOLS=1 after that removal, because these modules plant
+synthetic binaries and `pi` and `bwrap` are deliberately absent from tools.yaml.
+
+CORRECTED ATTRIBUTION (agents-21ap review, measured rather than assumed): an
+earlier version of this docstring said the suites had been resolving `pi` "only BY
+ACCIDENT through the operator's host file", and cited a 4F+28E blow-up as proof
+that removing the ambient input alone was not enough. THE MEASUREMENT CONTRADICTS
+THAT ATTRIBUTION. The pre-fix tree with FACTORY_TOOL_PINS UNSET is `Ran 77 ... OK
+(skipped=1)` - the host file is not involved at all - and the 4F+28E figure is
+reproduced only by deleting THIS module's opt-out line. So the truth is simpler and
+narrower: these modules ALREADY installed the opt-out themselves with
+os.environ.setdefault(...) before this helper existed (test_sandbox.py:20,
+test_factory_core.py:8, test_pi_keyless_broker.py:30, all citing agents-7bj), and
+what this module does is REMOVE the operator's pins file and then PUT THAT OPT-OUT
+BACK, because the removal would otherwise take it with it. The design conclusion is
+unchanged - a test must state its environment rather than inherit one - but the
+reason is "restore the assumption the tests already declared", not "rescue tests
+that were passing by accident". A docstring that names the wrong cause is the kind
+of thing a later reader trusts and then acts on; this one is now measured.
 
 WHY NOT INSTALL A PINS FILE OF OUR OWN: a pins file would have to name paths this
 module cannot know (each test plants its own temp tree), and it would silently

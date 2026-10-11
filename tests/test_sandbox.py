@@ -43,8 +43,7 @@ from lib import sandbox as sandbox_module  # noqa: E402
 # file and 42 tests across three modules went red on EVERY tree, including landed main, each
 # with `trusted tool 'pi' resolved to /tmp/.../bin/pi, not the configured path
 # /usr/local/bin/pi`. The tests were right - they plant a fake `pi` and assert the pin refuses
-# it - and the environment was not hermetic. See tests/hermetic_env.py for why this removes the
-# ambient input rather than installing pins of its own.
+# it - and the environment was not hermetic. See tests/hermetic_env.py.
 from tests import hermetic_env  # noqa: E402
 
 

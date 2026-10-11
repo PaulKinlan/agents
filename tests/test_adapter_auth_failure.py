@@ -47,6 +47,24 @@ run_agent = factory_module.run_agent
 run_line = factory_module.run_line
 from lib.sandbox import sandbox_available
 
+# --- hermetic test environment (agents-21ap) -------------------------------------------------
+# The pin machinery resolves tools through FACTORY_TOOL_PINS when the OPERATOR'S shell exports
+# it (~/.fleet/local.conf does on this VM). Without this scrub the suite observed the host
+# rather than the tree: a re-provision generated the host pins file at 02:19:46Z and these
+# suites went red on EVERY tree, including landed main, with `trusted tool 'pi' resolved to
+# /tmp/.../bin/pi, not the configured path /usr/local/bin/pi`. The tests were right; the
+# environment was not hermetic. See tests/hermetic_env.py.
+from tests import hermetic_env  # noqa: E402
+
+
+def setUpModule():
+    hermetic_env.isolate_operator_config()
+
+
+def tearDownModule():
+    hermetic_env.restore_operator_config()
+
+
 
 class TestAdapterAuthFailureDetection(unittest.TestCase):
     def test_pi_auth_failure_detected(self):

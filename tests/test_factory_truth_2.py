@@ -28,6 +28,24 @@ from lib.report_schema import normalize_report, validate  # noqa: E402
 from lib.sandbox import sandbox_available  # noqa: E402
 from test_factory_truth import Sandbox, factory_cli  # noqa: E402
 
+# --- hermetic test environment (agents-21ap) -------------------------------------------------
+# The pin machinery resolves tools through FACTORY_TOOL_PINS when the OPERATOR'S shell exports
+# it (~/.fleet/local.conf does on this VM). Without this scrub the suite observed the host
+# rather than the tree: a re-provision generated the host pins file at 02:19:46Z and these
+# suites went red on EVERY tree, including landed main, with `trusted tool 'pi' resolved to
+# /tmp/.../bin/pi, not the configured path /usr/local/bin/pi`. The tests were right; the
+# environment was not hermetic. See tests/hermetic_env.py.
+from tests import hermetic_env  # noqa: E402
+
+
+def setUpModule():
+    hermetic_env.isolate_operator_config()
+
+
+def tearDownModule():
+    hermetic_env.restore_operator_config()
+
+
 _RUNNABLE_BWRAP = sandbox_available()
 _NEEDS_BWRAP = "needs a host where bubblewrap actually runs"
 
