@@ -30,6 +30,11 @@ fi
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
+# agents-p2ik: the engine's stderr is kept SEPARATE from its stdout. Both used to land in
+# $OUTPUT_FILE, so an engine that wrote ONLY to stderr (a rate-limit notice, a traceback)
+# left a non-empty file that the read-back below accepted as the answer. Splitting them
+# makes -s mean exactly one thing: STDOUT has content.
+STDERR_FILE="$RUN_DIR/model_stderr.txt"
 
 # agents-sjgq: The base URL must be an explicit, operator-supplied configuration.
 # Falling back to a hardcoded default (e.g. deepseek.int.exe.xyz) when DEEPSEEK_API_KEY
@@ -90,7 +95,7 @@ export PYTHONUNBUFFERED=1
 STATUS=0
 # agents-w8z: the heredoc below owns this process's stdin (it IS the program), so the
 # prompt cannot ride stdin. Pass it explicitly as PROMPT in the environment instead.
-PROMPT="$PROMPT" "$PYTHON_BIN" - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2>&1 || STATUS=$?
+PROMPT="$PROMPT" "$PYTHON_BIN" - "$SKILL_DIR" << 'EOF' > "$OUTPUT_FILE" 2> "$STDERR_FILE" || STATUS=$?
 import json
 import os
 import sys
@@ -206,7 +211,25 @@ EOF
 if [ $STATUS -ne 0 ]; then
   echo "[deepseek adapter] Error executing DeepSeek API call" >&2
   cat "$OUTPUT_FILE" >&2
+  cat "$STDERR_FILE" >&2
   exit "$STATUS"
 fi
 
+# agents-fnij/agents-p2ik: A ZERO EXIT IS NOT EVIDENCE THAT THE CALL ANSWERED. This
+# adapter had NO read-back at all - it printed the PATH and the dispatcher read that as
+# the model's output - so a call that returned nothing, or wrote only to stderr, was a
+# delivered run. Measured on pi.sh, which had the same shape: rc=0 with a 0-byte file,
+# and rc=0 with a 44-byte file holding nothing but "provider error: 429 rate limited".
+# The read-back sits HERE rather than immediately after the pipeline above because the
+# status is CAPTURED into STATUS rather than exited at the redirect, so every non-zero
+# outcome has already left through the block above and only a zero exit reaches this
+# point. Same logical position as pi.sh and claude.sh; a different line in the file.
+if [ ! -s "$OUTPUT_FILE" ]; then
+  echo "[deepseek adapter] Error: the DeepSeek API call exited 0 but wrote no output to $OUTPUT_FILE; the run produced no result (agents-fnij)." >&2
+  if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
+  exit 1
+fi
+# Whatever the call said on stderr is diagnostic, not an answer - surfaced to the
+# operator (traced: nothing consumes the adapter's stderr as model output).
+if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
 echo "$OUTPUT_FILE"
