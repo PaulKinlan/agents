@@ -98,6 +98,11 @@ def _unpinned_allowed() -> bool:
         "1", "true", "yes", "on",
     )
 
+
+def unpinned_allowed() -> bool:
+    """Public helper for _unpinned_allowed (agents-onf6)."""
+    return _unpinned_allowed()
+
 # Standard system bin dirs a shimmed/wrapped tool's shebang needs (env, bash, sh). The
 # findings-dispatch child PATH is rebuilt from the resolved tools' install trees PLUS these,
 # so a `#!/usr/bin/env bash` wrapper still finds its interpreter without re-exposing arbitrary
