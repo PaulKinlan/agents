@@ -76,6 +76,7 @@ ENGINE_CREDENTIALS = {
     # the adapter deliberately preserves; tests/test_child_env.py asserts the relationship.
     "deepseek": (
         "DEEPSEEK_API_KEY", "deepseek_api_key", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
+        "FACTORY_DEFAULT_DEEPSEEK_BASE_URL",
     ),
     "claude": (
         "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
