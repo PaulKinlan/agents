@@ -65,32 +65,39 @@ if [ -t 0 ]; then
   echo "[antigravity adapter] Error: prompt expected on stdin." >&2
   exit 2
 fi
-# agents-2iwf PLACEMENT NOTE - RECORDED, NOT EDITED, AND DELIBERATELY NO STRONGER THAN
-# WHAT WAS MEASURED. The guard below tests $PROMPT AS READ FROM STDIN. The run further
-# down uses the FINAL prompt, which this adapter reassembles from the system directive
-# file. The two differ whenever a directive is set.
+# agents-2iwf PLACEMENT NOTE - HISTORY, KEPT BECAUSE IT EXPLAINS THE SHAPE BELOW. It is
+# written in the past tense on purpose: it describes a defect that has since been fixed, so
+# it cannot go stale the way a prescriptive note does when someone obeys it.
 #
-# WHETHER THAT DIFFERENCE MATTERS DEPENDS ON WHETHER A DIRECTIVE IS SET, and both cases
-# were established separately:
+# WHAT WAS WRONG: the guard HERE tested $PROMPT AS READ FROM STDIN, while the run further
+# down uses the FINAL prompt, which this adapter reassembles from the system directive file.
+# The two differ whenever a directive is set. And the old guard tested EMPTINESS rather than
+# CONTENT, so with no directive set a prompt of spaces passed it and the engine ran with
+# nothing to act on. So the guard was testing the wrong string AND the wrong property.
 #
-#   WITH A DIRECTIVE SET, this guard is UNREACHABLE AS A CONTENT TEST. The directive
-#   guard earlier in this file refuses a missing, unreadable or EMPTY directive before
-#   anything else runs, so :80 always has content to prepend and the final prompt cannot
-#   be empty. Measured: whitespace stdin alone is refused by that earlier guard, and
-#   whitespace stdin with a non-empty directive produces "<directive>\n\n<stdin>".
+# WHAT THE FILE NOW DOES, AND THIS IS A DESCRIPTION RATHER THAN AN INSTRUCTION:
 #
-#   WITH NO DIRECTIVE SET, this guard is REACHABLE AND WRONG. :80 has nothing to
-#   reassemble, so the engine receives $PROMPT unchanged - and this guard tests
-#   EMPTINESS, not content, so a prompt of spaces passes it and the engine runs with
-#   nothing to act on. Measured on a copy of this file with the tool-policy refusal
-#   removed (the order of the guards), and the ROUTE by search: NOTHING IN THIS ADAPTER
-#   OR IN THE DISPATCHER SETS FACTORY_SYSTEM_DIRECTIVE_FILE - it is a variable this file
-#   consumes and nothing sets - so the no-directive case is not excluded.
+#   The guard sits BELOW the reassembly and tests the CONTENT of the final prompt - the same
+#   string the engine is about to receive. A final prompt that is not entirely whitespace is
+#   a legitimate run; whitespace-only stdin WITH a reassembled directive is legitimate,
+#   because the directive IS the instruction; whitespace-only stdin with NO directive is not,
+#   because nothing is reassembled and the engine would get nothing to act on.
 #
-# WHAT MUST CHANGE: the guard belongs BELOW the reassembly and must test CONTENT rather
-# than emptiness. Whitespace-only stdin WITH a reassembled directive is a legitimate
-# prompt; whitespace-only stdin with no directive is not. That is a predicate change, not
-# a move, and it is filed separately (see the tracker) rather than made here.
+#   The guard carries a marker comment that the order test in
+#   tests/test_adapter_stderr_readback.py indexes by string. That marker exists so the anchor
+#   is stable BY DESIGN rather than by luck: it cannot reflow with the case arm without being
+#   deliberately deleted.
+#
+# THE ROUTE THAT MADE THE OLD GUARD REACHABLE IS STILL TRUE AND WORTH KNOWING: NOTHING IN
+# THIS ADAPTER OR IN THE DISPATCHER SETS FACTORY_SYSTEM_DIRECTIVE_FILE - it is a variable
+# this file consumes and nothing sets - so the no-directive case is not excluded by
+# configuration, and the content test is what makes that case correct now.
+#
+# AND ONE THING THE FIX DID NOT CLAIM TO SOLVE: whether the guard is even reachable depends
+# on the tool-policy refusal earlier in this file, which refuses every policy and exits
+# before reaching it. The lines below are UNREACHABLE TODAY for that reason. That is why the
+# tests covering them use a test-local copy with the refusal removed, which discharges the
+# ORDER of the guards and not the reachability of the lines.
 PROMPT="$(cat)"
 
 echo "[antigravity adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
