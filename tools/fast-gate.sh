@@ -193,8 +193,8 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_yaml_mini.py tests/test_ci_action.py"
       ;;
     lib/adapters/claude.sh)
-      # Claude adapter session auth scrub and precedence (agents-vt7w).
-      mapped="$mapped tests/test_claude_adapter.py"
+      # Claude adapter session auth scrub and precedence (agents-vt7w), prompt guards (agents-9bp7).
+      mapped="$mapped tests/test_claude_adapter.py tests/test_prompt_exposure.py"
       ;;
     lib/adapters/pi.sh)
       # Pi adapter keyless broker wireup, auth failure handling, containment policies, prompt guards, and factory core (agents-zak0).

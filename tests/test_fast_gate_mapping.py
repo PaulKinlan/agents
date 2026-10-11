@@ -133,9 +133,10 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_ci_action.py", mapped)
 
     def test_claude_adapter_maps_to_claude_adapter_test(self):
-        """lib/adapters/claude.sh must run claude adapter session auth scrub tests."""
+        """lib/adapters/claude.sh must run claude adapter session auth scrub and prompt exposure tests."""
         mapped = resolve_fast_gate(["lib/adapters/claude.sh"])
         self.assertIn("tests/test_claude_adapter.py", mapped)
+        self.assertIn("tests/test_prompt_exposure.py", mapped, "claude.sh prompt exposure suite omitted (agents-9bp7)")
 
     def test_pi_adapter_maps_to_keyless_and_auth_failure_tests(self):
         """lib/adapters/pi.sh must run keyless broker and adapter auth failure tests."""
