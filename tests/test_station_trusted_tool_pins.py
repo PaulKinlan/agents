@@ -227,11 +227,9 @@ class TestStationTrustedToolPins(unittest.TestCase):
         """sandboxed pre-pass wrap must bind host pins file so child can authenticate tools (agents-ebm7)."""
         import hashlib
         import shutil
-        from lib.sandbox import sandbox_command, sandbox_available
+        from lib import sandbox as sb
+        from lib.sandbox import sandbox_command, sandbox_available, sandbox_unavailable_reason
         from lib.child_env import prepass_environment
-
-        if not sandbox_available():
-            self.skipTest("bubblewrap sandbox not available on this host")
 
         real_git = shutil.which("git")
         if not real_git:
@@ -241,8 +239,9 @@ class TestStationTrustedToolPins(unittest.TestCase):
             self.skipTest("bwrap is not installed on this host")
 
         # Test controls its own fixture under $HOME (which bubblewrap tmpfs hides by default).
-        # We write a valid pins file for git and bwrap into $HOME, proving sandbox_command explicitly
-        # mounts the host pins file read-only over the sandbox's /home tmpfs while authenticating bwrap.
+        # We write a valid pins file for git and bwrap into $HOME FIRST, proving sandbox_command
+        # explicitly mounts the host pins file read-only over the sandbox's /home tmpfs while
+        # authenticating bwrap (agents-vs9z).
         git_sha = hashlib.sha256(Path(real_git).read_bytes()).hexdigest()
         bwrap_sha = hashlib.sha256(Path(real_bwrap).read_bytes()).hexdigest()
         home_pins = Path.home() / f".test-pins-{os.getpid()}.yaml"
@@ -264,6 +263,14 @@ class TestStationTrustedToolPins(unittest.TestCase):
         try:
             os.environ["FACTORY_TOOL_PINS"] = str(home_pins)
             os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+            sb._probe_result = None
+            sb._probe_reason = None
+
+            # With the bwrap pin fixture established, sandbox MUST be available on this host;
+            # failing here is an assertion failure, never a silent skip (agents-vs9z).
+            if not sandbox_available():
+                self.fail(f"bubblewrap sandbox must be available with pinned bwrap fixture: {sandbox_unavailable_reason()}")
+
             child_env = prepass_environment({"capabilities": {"requires": ["git"]}})
             script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
             inner = [sys.executable, str(script), "--target", str(self.target)]
@@ -283,6 +290,8 @@ class TestStationTrustedToolPins(unittest.TestCase):
                 os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = orig_unpinned
             else:
                 os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+            sb._probe_result = None
+            sb._probe_reason = None
             home_pins.unlink(missing_ok=True)
 
 
