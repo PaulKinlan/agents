@@ -294,6 +294,56 @@ capabilities:
         # Legitimate documented public tool references must pass
         validate_safety("Symlink all 22 factory skills into ~/.gemini and ~/.claude", "test.html")
 
+    def test_validate_safety_reports_line_numbers_without_leaking_secrets(self):
+        """agents-64tl: credential and path arms report line numbers but never leak matched secret text."""
+        multiline_doc = (
+            "<!-- Line 1: Header -->\n"
+            "<div class='content'>\n"
+            "  <p>Line 3: Safe text</p>\n"
+            "  <p>Line 4: Leaked AWS key AKIAIOSFODNN7EXAMPLE</p>\n"
+            "</div>\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety(multiline_doc, "page.html")
+        msg = str(ctx.exception)
+        self.assertIn("page.html:4:", msg)
+        self.assertIn("found credential (aws-access-key)", msg)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", msg)
+
+        multiline_token_doc = (
+            "# Line 1\n\n"
+            "# Line 3\n\n"
+            "API token sk-1234567890abcdef1234567890abcdef in docs\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety(multiline_token_doc, "guide.html")
+        msg = str(ctx.exception)
+        self.assertIn("guide.html:5:", msg)
+        self.assertIn("API secret token", msg)
+        self.assertNotIn("sk-1234567890abcdef1234567890abcdef", msg)
+
+        multiline_jwt_doc = (
+            "Line 1\nLine 2\n"
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcde1234567890\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety(multiline_jwt_doc, "token.html")
+        msg = str(ctx.exception)
+        self.assertIn("token.html:3:", msg)
+        self.assertIn("found credential (jwt-token)", msg)
+        self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", msg)
+
+        multiline_path_doc = (
+            "Line 1: Safe header\n"
+            "Line 2: Safe preamble\n"
+            "findings/target.json\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety(multiline_path_doc, "report.html")
+        msg = str(ctx.exception)
+        self.assertIn("report.html:3:", msg)
+        self.assertIn("Internal findings store file path (findings/target.json)", msg)
+
     def test_yaml_parser_fails_closed_on_invalid_constructs(self):
         """Stdlib YAML parser must fail closed on tabs, unclosed quotes, and unsupported YAML shapes."""
         from tools.gen_site import load_yaml
