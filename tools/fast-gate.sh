@@ -121,6 +121,15 @@ while IFS= read -r f; do
       # reader would have no way to identify as the stale one.)
       mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py"
       ;;
+    tools/stage_site.py)
+      # agents-1n9i: THIS FILE MATCHED NO ARM AT ALL, so a change to it hit the unmatched
+      # bucket and ABORTED THE GATE with exit 1 rather than skipping a suite - the one member
+      # of this family the instrument can actually catch, because the changed file was
+      # unmatched. tests/test_pages_publish_scope.py imports tools.stage_site directly (:18)
+      # and exercises guard() and stage_site() plus the publication scopes, so it is the suite
+      # this file's own changes must select. Same mapping a docs/* or .github/* change uses.
+      mapped="$mapped tests/test_pages_publish_scope.py"
+      ;;
     tests/__init__.py|tests/hermetic_env.py)
       # Centralized hermetic test package initialization (agents-v1a2) and shared helper.
       # A change to the package initialization or helper runs the acceptance suite
