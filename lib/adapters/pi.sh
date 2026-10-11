@@ -69,6 +69,18 @@ if [ -z "$PROMPT" ]; then
   echo "[pi adapter] Error: empty prompt on stdin." >&2
   exit 2
 fi
+# agents-zak0: EMPTY IS NOT THE ONLY NON-PROMPT. A prompt of spaces/newlines passes the
+# check above and the engine is invoked with nothing to act on. Measured before this
+# change: a whitespace-only prompt returned rc=0 and ran the engine. The guard is a
+# property of the prompt's CONTENT, so it is tested as content: the case below matches
+# only a prompt containing at least one non-whitespace character, and anything else is
+# refused with the same exit code as the empty case.
+case "$PROMPT" in
+  *[![:space:]]*) ;;
+  *)
+    echo "[pi adapter] Error: prompt on stdin is empty or whitespace only." >&2
+    exit 2 ;;
+esac
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
@@ -150,4 +162,16 @@ printf '%s' "$PROMPT" | "$ENGINE_BIN" --no-session "${MODEL_FLAGS[@]}" "${POLICY
   exit 1
 }
 
+# agents-zak0: A ZERO EXIT IS NOT EVIDENCE THAT THE ENGINE PRODUCED ANYTHING. The line
+# above sends the engine's stdout AND stderr into $OUTPUT_FILE, so a successful-looking
+# run that wrote nothing leaves an empty file - and this script used to print the PATH,
+# which the dispatcher reads as the model's answer. Measured before this change: an
+# engine exiting 0 without writing a byte produced rc=0 and an empty model_output.txt.
+# The output file is the one artefact this adapter exists to produce, so its emptiness is
+# read back here rather than inferred from the exit status: exit 0 says the ENGINE ran,
+# not that it ANSWERED. -s is the test that can express that failure.
+if [ ! -s "$OUTPUT_FILE" ]; then
+  echo "[pi adapter] Error: $ENGINE_BIN exited 0 but wrote no output to $OUTPUT_FILE; the run produced no result (agents-zak0)." >&2
+  exit 1
+fi
 echo "$OUTPUT_FILE"

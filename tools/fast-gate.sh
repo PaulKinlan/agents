@@ -197,12 +197,12 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_claude_adapter.py"
       ;;
     lib/adapters/pi.sh)
-      # Pi adapter keyless broker wireup, auth failure handling, containment policies, and factory core.
-      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py"
+      # Pi adapter keyless broker wireup, auth failure handling, containment policies, prompt guards, and factory core (agents-zak0).
+      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_prompt_exposure.py"
       ;;
     lib/adapters/*.sh)
-      # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure and core runner (agents-vt7w).
-      mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py"
+      # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0).
+      mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_prompt_exposure.py"
       ;;
     lib/bench/*.py)
       # Bench measurement & runners (agents-uxt): covered by bench runner and hillclimb tests.

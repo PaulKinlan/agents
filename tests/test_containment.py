@@ -664,6 +664,18 @@ class TestAdapters(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertNotIn("--model", argv)
 
+    def test_pi_fails_closed_when_engine_exits_zero_silently(self):
+        """agents-zak0: an engine that exits 0 without writing any output must fail
+        closed with exit 1 and a diagnostic message ('wrote no output'), rather than
+        the pre-fix behaviour where exit 0 with an empty file was blessed as rc=0."""
+        pi_stub = self.bin / "pi"
+        pi_stub.write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n", encoding="utf-8")
+        pi_stub.chmod(pi_stub.stat().st_mode | stat.S_IEXEC)
+
+        res, _ = self.run_adapter("pi")
+        self.assertEqual(res.returncode, 1, res.stderr + res.stdout)
+        self.assertIn("wrote no output", res.stderr)
+
     def test_claude_gets_the_read_only_flags_and_the_skill_as_a_file(self):
         for policy in ("read-only", None):
             with self.subTest(policy=policy):

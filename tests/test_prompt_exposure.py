@@ -181,6 +181,29 @@ class TestPromptExposure(unittest.TestCase):
             self.assertEqual(res.returncode, 2)
             self.assertIn("empty prompt", res.stderr)
 
+    def test_a_whitespace_only_stdin_is_rejected_loudly_without_running_engine(self):
+        """agents-zak0: a prompt containing only whitespace must be refused with exit 2
+        and an explanatory message, and the engine must not run."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = PromptSandbox(Path(tmpdir))
+            run_dir = sandbox.root / "run"
+            marker = sandbox.root / "engine-executed.marker"
+            (sandbox.bin / "pi").write_text(
+                f"#!/usr/bin/env bash\ntouch '{marker}'\nexit 0\n",
+                encoding="utf-8",
+            )
+            res = subprocess.run(
+                ["bash", str(sandbox.root / "lib" / "adapters" / "pi.sh"),
+                 "probe", str(sandbox.target), str(sandbox.root), str(run_dir)],
+                input="   \n\t  \n  ", capture_output=True, text=True, timeout=30,
+                env={"PATH": f"{sandbox.bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                     "FACTORY_ENGINE_BIN": str(sandbox.bin / "pi"),
+                     "FACTORY_ALLOW_UNPINNED_TOOLS": "1"},
+            )
+            self.assertEqual(res.returncode, 2, res.stderr + res.stdout)
+            self.assertIn("empty or whitespace only", res.stderr)
+            self.assertFalse(marker.exists(), "engine must NOT run on a whitespace-only prompt")
+
 
 if __name__ == "__main__":
     unittest.main()
