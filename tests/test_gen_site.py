@@ -333,6 +333,17 @@ capabilities:
         self.assertIn("found credential (jwt-token)", msg)
         self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", msg)
 
+        multiline_path_doc = (
+            "Line 1: Safe header\n"
+            "Line 2: Safe preamble\n"
+            "findings/target.json\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            validate_safety(multiline_path_doc, "report.html")
+        msg = str(ctx.exception)
+        self.assertIn("report.html:3:", msg)
+        self.assertIn("Internal findings store file path (findings/target.json)", msg)
+
     def test_yaml_parser_fails_closed_on_invalid_constructs(self):
         """Stdlib YAML parser must fail closed on tabs, unclosed quotes, and unsupported YAML shapes."""
         from tools.gen_site import load_yaml

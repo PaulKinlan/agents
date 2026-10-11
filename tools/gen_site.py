@@ -738,9 +738,9 @@ FORBIDDEN_PATH_PATTERNS = [
     (r"/(?:home|Users|root)/[^\s<>\"'`]+", "Host user filesystem path (/home, /Users, /root)"),
     (r"/(?:tmp|var/tmp)/[^\s<>\"'`]+", "Host /tmp temporary path"),
     (r"\$(?:\{HOME\}|HOME)/[^\s<>\"'`]+", "Host environment path ($HOME)"),
-    (r"(?:^|[\s<>\"'`(=/])targets/[\w.-]+\.ya?ml", "Internal target manifest path"),
-    (r"(?:^|[\s<>\"'`(=/])findings/[\w.-]+", "Internal findings store file path"),
-    (r"(?:^|[\s<>\"'`(=/])runs/[\w.-]+", "Internal run directory path"),
+    (r"(?:^|[\s<>\"'`(=/])(targets/[\w.-]+\.ya?ml)", "Internal target manifest path"),
+    (r"(?:^|[\s<>\"'`(=/])(findings/[\w.-]+)", "Internal findings store file path"),
+    (r"(?:^|[\s<>\"'`(=/])(runs/[\w.-]+)", "Internal run directory path"),
 ]
 
 # Dedicated tokens checked for legacy error-string compatibility
@@ -773,8 +773,11 @@ def validate_safety(text: str, filename: str) -> None:
     for pattern, label in FORBIDDEN_PATH_PATTERNS:
         m = re.search(pattern, text)
         if m:
-            line_no = text[:m.start()].count("\n") + 1
-            clean_path = mask_text(m.group(0))
+            idx = m.lastindex if m.lastindex is not None else 0
+            start_pos = m.start(idx)
+            matched_str = m.group(idx)
+            line_no = text[:start_pos].count("\n") + 1
+            clean_path = mask_text(matched_str)
             raise ValueError(f"Security constraint violation in {filename}:{line_no}: found {label} ({clean_path})")
 
     for m in re.finditer(r"(?:^|[\s<>\"'`(=])(~/[^\s<>\"'`)]+)", text):
