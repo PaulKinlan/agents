@@ -84,6 +84,11 @@ esac
 
 mkdir -p "$RUN_DIR"
 OUTPUT_FILE="$RUN_DIR/model_output.txt"
+# agents-p2ik: the engine's stderr is kept SEPARATE from its stdout. Both used to land in
+# $OUTPUT_FILE, so an engine that wrote ONLY to stderr (a rate-limit notice, a traceback)
+# left a non-empty file that the -s read-back below accepted as the answer. Splitting them
+# makes -s mean exactly one thing: STDOUT has content.
+STDERR_FILE="$RUN_DIR/model_stderr.txt"
 
 echo "[pi adapter] Running agent '$AGENT_NAME' on target '$TARGET_DIR'..."
 
@@ -156,9 +161,10 @@ if [ -n "${FACTORY_MAX_BUDGET_USD:-}" ]; then
   echo "[pi adapter] Note: budget.max_usd=\$$FACTORY_MAX_BUDGET_USD declared but NOT enforced by this adapter (no per-run budget flag; the claude engine enforces it via --max-budget-usd)."
 fi
 # ${SYSTEM_DIRECTIVE_FLAGS[@]+...}: an empty array under set -u is an error on bash 3.2 (macOS).
-printf '%s' "$PROMPT" | "$ENGINE_BIN" --no-session "${MODEL_FLAGS[@]}" "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" ${SYSTEM_DIRECTIVE_FLAGS[@]+"${SYSTEM_DIRECTIVE_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2>&1 || {
+printf '%s' "$PROMPT" | "$ENGINE_BIN" --no-session "${MODEL_FLAGS[@]}" "${POLICY_FLAGS[@]}" --skill "$SKILL_DIR" ${SYSTEM_DIRECTIVE_FLAGS[@]+"${SYSTEM_DIRECTIVE_FLAGS[@]}"} -p > "$OUTPUT_FILE" 2> "$STDERR_FILE" || {
   echo "[pi adapter] Error executing pi" >&2
   cat "$OUTPUT_FILE" >&2
+  cat "$STDERR_FILE" >&2
   exit 1
 }
 
@@ -172,6 +178,16 @@ printf '%s' "$PROMPT" | "$ENGINE_BIN" --no-session "${MODEL_FLAGS[@]}" "${POLICY
 # not that it ANSWERED. -s is the test that can express that failure.
 if [ ! -s "$OUTPUT_FILE" ]; then
   echo "[pi adapter] Error: $ENGINE_BIN exited 0 but wrote no output to $OUTPUT_FILE; the run produced no result (agents-zak0)." >&2
+  # agents-p2ik: whatever the engine said on stderr is diagnostic, not an answer. It is
+  # surfaced here rather than left in the output file so the operator can read the reason
+  # (measured before this change: an engine writing "provider error: 429 rate limited" to
+  # stderr only produced rc=0 and a 44-byte model_output.txt that this read-back accepted).
+  if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
   exit 1
 fi
+# agents-p2ik: stderr is ALWAYS shown to the operator, on success too - it is where the
+# engine's warnings and budget notes go, and it must not be silently dropped now that it
+# no longer rides inside $OUTPUT_FILE. Nothing consumes this file as model output
+# (traced: factory:1882/1903/1909 are the only readers), so it cannot reach the model.
+if [ -s "$STDERR_FILE" ]; then cat "$STDERR_FILE" >&2; fi
 echo "$OUTPUT_FILE"
