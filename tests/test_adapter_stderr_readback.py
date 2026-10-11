@@ -219,7 +219,19 @@ class TestAntigravityIsRefusedToday(unittest.TestCase):
         # not being run at the tip. The author ran only the new test file. Recording the miss
         # rather than an exoneration of the tool, because a comment that teaches the wrong
         # lesson is worse than no comment: it closes the question.
-        guard = text.index('factory: prompt-content guard')
+        # TWO ANCHORS, TWO JOBS (agents-ho6a). THE ORDER OF THE GUARDS IS A PROPERTY OF THE
+        # CODE, SO IT MUST BE ANCHORED ON CODE. The guard line was previously indexed as
+        # text.index('factory: prompt-content guard') - WHICH IS A COMMENT, NOT THE GUARD - so
+        # this assertion compared the refusal's position against a COMMENT's position. MEASURED,
+        # not inferred: a mutant that moved the executable guard ('case "$PROMPT" in' ... its
+        # esac) above the refusal WHILE LEAVING THE MARKER COMMENT IN PLACE left this assertion
+        # SILENT - the test only failed on the exit-code assertion below, which the mutant also
+        # changed. THE MARKER IS STABLE BY DESIGN AND CODE POSITIONS ARE NOT, so each anchor is
+        # kept for the job it can actually do: CODE for ORDER (this assertion), MARKER for
+        # durability of checks that only need to find the region (it cannot reflow with the case
+        # arm without being deliberately deleted). The marker comment stays in the adapter for
+        # that second job; it is simply no longer the thing this assertion measures.
+        guard = text.index('case "$PROMPT" in')
         redirect = text.index('new-conversation "$PROMPT"')
         self.assertLess(refusal, guard,
                         "the tool-policy refusal must precede the prompt guard")
