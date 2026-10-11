@@ -210,7 +210,12 @@ while IFS= read -r f; do
       ;;
     lib/adapters/pi.sh)
       # Pi adapter keyless broker wireup, auth failure handling, containment policies, prompt guards, and factory core (agents-zak0).
-      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py"
+      # agents-4ic0: ALSO the line-runner regression suite. The pi adapter is the engine that
+      # drives the REAL line runner, which DISPATCHES adapters - so a pi.sh edit can change what
+      # the line runner does, and tests/test_line_andon.py was reachable only through the
+      # lib/adapters/*.sh wildcard (agents-yx7z), never through this dedicated arm. Measured with
+      # the bead's own repro: GIT_CHANGED=lib/adapters/pi.sh selected six suites, none of them it.
+      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_line_andon.py"
       ;;
     lib/adapters/*.sh)
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0). test_antigravity_prompt_content.py is listed EXPLICITLY (agents-nhf0): the wildcard arm already selected this file when the TEST changed, but NOT when the ADAPTER changed - so the suite protecting antigravity.sh's prompt guard did not run for the edits that could regress it. A suite gated only on its own edits is the half-fixed shape.
