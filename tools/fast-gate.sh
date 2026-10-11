@@ -163,12 +163,15 @@ while IFS= read -r f; do
     agents/vuln-triage/scripts/triage.py)
       mapped="$mapped tests/test_vuln_triage_prepass.py"
       ;;
-    agents/issue-triage/scripts/fetch_issues.py|agents/release-notes/scripts/gather_commits.py)
+    agents/issue-triage/scripts/fetch_issues.py)
+      mapped="$mapped tests/test_issue_triage_prepass.py tests/test_redaction.py tests/test_docs_drift.py"
+      ;;
+    agents/release-notes/scripts/gather_commits.py)
       # Prose surface only (--help text and module docstrings). SEARCH PERFORMED: `grep -ln
-      # "fetch_issues\|gather_commits" tests/*.py` returns nothing, so no suite names these two
-      # scripts - but tests/test_redaction.py PARSES every agents/*/scripts/*.py as an AST, so it
-      # does consume them, and tests/test_docs_drift.py owns the prose. Mapped rather than ignored
-      # so a future BEHAVIOUR change to either script is not silently absorbed (agents-fq92).
+      # "gather_commits" tests/*.py` returns nothing, so no suite names this script - but
+      # tests/test_redaction.py PARSES every agents/*/scripts/*.py as an AST, so it does consume
+      # it, and tests/test_docs_drift.py owns the prose. Mapped rather than ignored so a future
+      # BEHAVIOUR change is not silently absorbed (agents-fq92).
       mapped="$mapped tests/test_redaction.py tests/test_docs_drift.py"
       ;;
     tests/sandbox_fixtures.py)

@@ -144,6 +144,12 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertIn("tests/test_station_trusted_tool_pins.py", mapped,
                               f"{path} missing pin resolution suite (agents-01qd)")
 
+    def test_fetch_issues_mapped_to_issue_triage_prepass(self):
+        """fetch_issues.py must map tests/test_issue_triage_prepass.py (agents-ujtv)."""
+        mapped = resolve_fast_gate(["agents/issue-triage/scripts/fetch_issues.py"])
+        self.assertIn("tests/test_issue_triage_prepass.py", mapped,
+                      "fetch_issues.py missing pre-pass test suite (agents-ujtv)")
+
     # --- agents-9nir: the ignore list is deliberate, and "no arm" fails loudly ----------
 
     def test_root_markdown_maps_to_docs_drift(self):

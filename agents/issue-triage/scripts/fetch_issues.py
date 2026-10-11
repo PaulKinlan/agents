@@ -19,7 +19,18 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
-from lib.redaction import emit_station_result  # noqa: E402
+from lib.redaction import emit_station_result, mask_literals, mask_text  # noqa: E402
+
+
+def _redact_stderr(raw_stderr: str) -> str:
+    """Mask credential patterns and active environment token literals from gh stderr."""
+    literals = {
+        v.strip()
+        for k, v in os.environ.items()
+        if (k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN") or k.endswith(("_TOKEN", "_KEY", "_SECRET")))
+        and isinstance(v, str) and len(v.strip()) >= 8
+    }
+    return mask_literals(mask_text(raw_stderr), literals)
 
 def fetch_beads_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
     """Extract open issues from .beads/issues.jsonl if the target uses beads."""
@@ -97,7 +108,8 @@ def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
     try:
         res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False)
         if res.returncode != 0:
-            sys.stderr.write(f"Note: gh issue list failed (code {res.returncode}): {res.stderr.strip()}\n")
+            redacted_err = _redact_stderr(res.stderr.strip())
+            sys.stderr.write(f"Note: gh issue list failed (code {res.returncode}): {redacted_err}\n")
             return None
 
         raw_issues = json.loads(res.stdout or "[]")
@@ -137,7 +149,8 @@ def fetch_github_issues(target_dir: Path) -> Optional[List[Dict[str, Any]]]:
             })
         return candidates
     except Exception as e:
-        sys.stderr.write(f"Warning: unexpected error executing gh CLI: {e}\n")
+        redacted_err = _redact_stderr(str(e))
+        sys.stderr.write(f"Warning: unexpected error executing gh CLI: {redacted_err}\n")
         return None
 
 def main():
