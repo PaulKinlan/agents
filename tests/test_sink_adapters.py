@@ -380,7 +380,8 @@ class TestCommandSinkFromManifest(unittest.TestCase):
             box.agent("lint", report(dict(SAMPLE, severity="high")))
             with box.patched(), \
                  mock.patch.dict(os.environ, {"TRACKER_TOKEN": "tok",
-                                              "ANTHROPIC_API_KEY": "never-for-a-sink"}), \
+                                              "ANTHROPIC_API_KEY": "never-for-a-sink",
+                                              "FACTORY_TOOL_PINS": str(box.root / "no-pins.yaml")}), \
                  contextlib.redirect_stdout(io.StringIO()):
                 factory_cli.run_agent("lint", "proj", engine_arg="pi")
             call, = [json.loads(l) for l in (box.target / "receiver.log").read_text().splitlines()]
