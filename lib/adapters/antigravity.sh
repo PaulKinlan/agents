@@ -118,6 +118,11 @@ fi
 #   arm B ran with rc=0. It must be refused.
 # A content test covers both with one rule; moving the emptiness test down would not,
 # because it never asks whether what REMAINS has content.
+# factory: prompt-content guard (anchored by tests/test_adapter_stderr_readback.py).
+# This line is a MARKER, not decoration: the test above indexes this exact string. It
+# exists so the anchor is stable BY DESIGN rather than by luck - it cannot reflow with
+# the case arm without being deliberately deleted, and deleting it tells you a test
+# depends on the guard moving with it.
 case "$PROMPT" in
   *[![:space:]]*) ;;
   *)
