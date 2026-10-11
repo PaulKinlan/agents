@@ -114,7 +114,7 @@ explicitly configured `beads_path`.
 | `agents`, `chrome-agent-platform`, `voicebox`, `aifocus` | `beads` | Findings file to beads automatically; public input is triaged via issue-triage. |
 | `fauxmium` | `file` | No beads DB configured yet; local evidence only until its destination is declared. |
 | *default* | `file` | Local JSON for targets without a configured beads DB. |
-| *other trackers* | `command` | A manifest `sink_command` receives redacted, embargo-filtered JSON Lines (factory-sink/1). |
+| *other trackers* | `command` | A manifest `sink_command` receives redacted, embargo-filtered JSON Lines (factory-sink/2). |
 
 ### Severity & Public Disclosure Rules
 
