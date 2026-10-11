@@ -278,8 +278,8 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     HONEST LIMIT, AND IT MAKES THE STRICTER CHOICE CORRECT: from the files alone, a
     HAND-TUNED override and a STALE INSTALL are the same bytes. There is no marker that
     distinguishes "I meant this locally" from "the tracked file moved on". So this test
-    FAILS ON ANY DIVERGENCE from the tracked command, and the documented way to tune
-    locally is the FLEET_CHECK_CONF / override path rather than editing the installed file.
+    FAILS ON ANY DIVERGENCE from the tracked command; the documented way to update or tune
+    is editing tools/check.conf and re-running `bash tools/check-cmd.sh --install`.
     """
 
     def test_install_is_idempotent_and_matches_the_tracked_command(self):

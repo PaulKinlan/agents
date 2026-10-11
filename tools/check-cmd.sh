@@ -2,9 +2,9 @@
 # Resolve the gate's command configuration: TRACKED default first, per-VM override second.
 #
 # agents-ia3p: the tracked file is what a fresh VM gets and what a reviewer can read in a
-# PR; ~/.fleet/check.conf may override for local tuning. THE OVERRIDE IS FOR EXPERIMENTS,
-# NOT FOR THE DEFAULT - which is the whole point, because the fix that this bead is about
-# lived ONLY in the override and was therefore lost on every rebuild.
+# PR; tools/check-cmd.sh --install writes its values into ~/.fleet/check.conf where the
+# deployed gate reads them. To update or tune configuration, edit tools/check.conf and
+# re-run --install.
 #
 # Usage:  tools/check-cmd.sh [CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT]
 # With no argument it prints the whole resolved set. Values from the override win.
