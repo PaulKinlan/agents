@@ -205,12 +205,21 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
     # run-directory-write check still needs only the DESTINATION path, which is not a secret
     # (a random-named file that is unlinked immediately) whereas the token is.
     #
-    # RESIDUAL, STATED RATHER THAN LEFT TO BE DISCOVERED: a SAME-UID process can still read
-    # the token from /proc/<pid>/fd/0 while this child holds the pipe, and can read the
-    # destination from the cmdline. The token moved from WORLD-readable to SAME-UID-readable.
-    # That is a real narrowing and it is NOT a containment boundary, and it is unavoidable at
-    # this layer because the factory and every process it launches share one uid by design.
-    # A different-uid boundary for the token is a different change.
+    # RESIDUAL, STATED RATHER THAN LEFT TO BE DISCOVERED, AND SCOPED TO WHAT THIS ACTUALLY
+    # CHANGES (corrected after review 868b5311): WHAT THIS REMOVES IS THE WORLD-READABLE
+    # ARGV. The token is no longer in any command line; /proc/<pid>/cmdline is 0444, so
+    # before this change ANY process on the host at any uid could read it, and it cannot now.
+    # WHAT REMAINS, AND AT WHAT PRIVILEGE: (a) a SAME-UID process can still read the token
+    # from /proc/<pid>/fd/0 while this child holds the pipe - confirmed by construction, and
+    # unavoidable because the factory and every process it launches share one uid by design;
+    # (b) the destination path is still in the cmdline, which is not a secret; (c) the proof
+    # FILE this child writes into run_dir is created 0600 below (it inherited the ambient
+    # umask and was measured 0644, which made the world-readable window smaller rather than
+    # closed - the redirection is now umask 077 so the file itself is not readable by other
+    # uids while it exists). Stealing the token by draining the pipe is a read-or-DoS, never a
+    # forgery: it pushes the sentinel to _VERIFY_TOKEN_NOT_READABLE and the run is REFUSED.
+    # So: the token moved from world-readable-in-argv to same-uid-readable, and that is a real
+    # narrowing of one channel rather than a containment boundary.
     #
     # `read` needs the newline, hence input=token + '\n' below: without it dash's read
     # returns non-zero at EOF even though it filled the variable, which would be
@@ -218,6 +227,11 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
     script = (f'IFS= read -r tok || exit {_VERIFY_TOKEN_NOT_READABLE}\n'
               'if { [ -f "$1" ] && [ -x "$1" ]; } || command -v "$1" >/dev/null 2>&1; '
               f'then :; else exit {_VERIFY_INNER_NOT_EXECUTABLE}; fi\n'
+              # umask 077 first: this file holds the token, and with the ambient umask it was
+              # created 0644 - world-readable for the window between this write and the
+              # parent's read-and-unlink (review 868b5311). Narrowing one channel (argv) while
+              # leaving another (this file) at the old width would make the docstring false.
+              'umask 077\n'
               'printf "%s" "$tok" > "$2" 2>/dev/null || '
               f'exit {_VERIFY_RUN_DIR_NOT_WRITABLE}\n')
     sentinel = ["/bin/sh", "-c", script, "factory-wrap-verify", str(inner[0]),

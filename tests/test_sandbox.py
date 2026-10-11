@@ -295,6 +295,50 @@ class TestWrapVerification(unittest.TestCase):
                                factory_root=self.factory, run_dir=self.run_dir,
                                env={"PATH": path, "HOME": str(self.root / "home")})
 
+    def test_a_sentinel_that_cannot_read_the_token_is_refused_with_its_own_code(self):
+        """The verify child closing its stdin must refuse with the token arm, not another (agents-0p3l review).
+
+        Exit code 40 is a failure mode THIS CHANGE CREATES - before it the token travelled in
+        argv and the child never read stdin, so nothing could make this arm fire. The reviewer
+        observed that a stub which closes fd 0 before exec'ing the sentinel (a fake bwrap doing
+        `exec "$@" </dev/null`) passed on the pre-fix code and is refused now, which makes it
+        the natural construction: a bare `exit 0` fake bwrap is caught by the no-proof arm, but
+        this one gets INTO the sentinel and then cannot read the token, so it pins 40 exactly
+        and not 0, 41 or 42. An failure arm nothing tests is an arm nobody will notice breaking.
+        """
+        # The stub must reach the SENTINEL, not bwrap's flags: a real wrap's argv begins with
+        # plan flags (--die-with-parent --new-session -- ...), so `exec "$@"` alone would try
+        # to exec `--die-with-parent` and exit 127 (observed). Skip to after the last `--` and
+        # run the command there, with fd 0 closed - which is what makes the sentinel's read
+        # fail and isolates exit 40 from the other arms.
+        path = self.use_fake_bwrap(
+            '#!/bin/sh\n'
+            'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+            '[ "$1" = "--" ] && shift\n'
+            'exec "$@" </dev/null\n', name="fakebin-nostdin")
+        # agents-28nn landed the pin: a fake bwrap is now refused BEFORE _verify_wrap runs, so
+        # the token arm is only reachable with the documented dev/test opt-out. That is the
+        # right interaction (the pin is what refuses a PATH-shadowed bwrap), and it is scope'd
+        # here rather than worked around, so this test still exercises the arm it names.
+        # SAVE AND RESTORE, do not unset: other tests in this file rely on this variable being
+        # present, and popping it on cleanup destroyed their fixture value and turned three
+        # passing tests into errors (observed, caught before commit).
+        previous_opt_out = os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS")
+        os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = "1"
+
+        def _restore_opt_out():
+            if previous_opt_out is None:
+                os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+            else:
+                os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = previous_opt_out
+
+        self.addCleanup(_restore_opt_out)
+        with self.assertRaises(sandbox_module.SandboxError) as caught:
+            self.build(path)
+        message = str(caught.exception)
+        self.assertIn("could not read the one-time token", message)
+        self.assertIn("never shown to start its child", message, "the refusal must not claim the run was sandboxed")
+
     def test_the_proof_token_is_never_passed_in_the_wrapped_process_argv(self):
         """The one-time proof token must not appear in the sentinel's argv (agents-0p3l).
 
