@@ -291,6 +291,69 @@ class TestCommandSinkReview(CommandSinkCase):
         self.assertNotIn("tok-SECRET-BBBB", text)
         self.assertIn("[redacted:value]", text)
 
+    def test_pre_existing_diagnostics_file_mode_clamped_to_0600(self):
+        """agents-oi35: a pre-existing 0644 diagnostics file must be clamped to 0600 via fchmod."""
+        run_dir = self.root / "run_preexisting"
+        run_dir.mkdir(parents=True)
+        log = run_dir / "sink-command-stderr.log"
+        log.write_text("pre-existing unprivileged log\n")
+        log.chmod(0o644)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o644)
+
+        command = self.write_script("leaky_pre.py",
+            "import sys\nsys.stdin.read()\nsys.stderr.write('failure\\n')\nsys.exit(3)\n")
+        result = self.scan([SAMPLE], command=command, extra=["--run-dir", str(run_dir)])
+        self.assertIn("sink_command exited 3: nothing delivered", result.stdout)
+        self.assertIn("(mode 0600)", result.stdout)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+
+    def test_failed_fchmod_does_not_append_stderr_and_reports_error(self):
+        """agents-oi35 (review P1): if fchmod fails on a pre-existing 0644 log, stderr
+        must NOT be appended to the unprivileged file, and the note must report the error."""
+        from lib.sinks.command import _write_diagnostics
+        from lib.sinks.base import SinkContext
+
+        run_dir = self.root / "run_fchmod_fail"
+        run_dir.mkdir(parents=True)
+        log = run_dir / "sink-command-stderr.log"
+        log.write_text("initial-content\n")
+        log.chmod(0o644)
+
+        ctx = SinkContext(target_name="fx", target_dir=self.target, visibility="public",
+                          agent="lint", stats={}, options={}, diagnostics_dir=run_dir)
+
+        with mock.patch("os.fchmod", side_effect=PermissionError("simulated EPERM")):
+            note = _write_diagnostics(ctx, "secret-stderr-data\n", [])
+
+        self.assertEqual(note, "stderr could not be saved (PermissionError)")
+        # Secret stderr must NOT have been appended to the 0644 file
+        self.assertEqual(log.read_text(), "initial-content\n")
+
+    def test_unwritable_diagnostics_file_does_not_abort_dispatch_and_reports_note(self):
+        """agents-oi35: an unopenable 0400 diagnostics file must not crash or abort dispatch."""
+        run_dir = self.root / "run_unwritable_file"
+        run_dir.mkdir(parents=True)
+        log = run_dir / "sink-command-stderr.log"
+        log.write_text("read-only\n")
+        log.chmod(0o400)
+
+        command = self.write_script("leaky_unwritable_file.py",
+            "import sys\nsys.stdin.read()\nsys.stderr.write('failure\\n')\nsys.exit(3)\n")
+        result = self.scan([SAMPLE], command=command, extra=["--run-dir", str(run_dir)])
+        self.assertIn("sink_command exited 3: nothing delivered", result.stdout)
+        self.assertIn("stderr could not be saved (PermissionError)", result.stdout)
+
+    def test_unwritable_diagnostics_dir_does_not_abort_dispatch_and_reports_note(self):
+        """agents-oi35: an OSError writing diagnostics must not abort the dispatch or crash."""
+        bad_run_dir = self.root / "file_as_dir"
+        bad_run_dir.write_text("not a directory")
+
+        command = self.write_script("leaky_unwritable.py",
+            "import sys\nsys.stdin.read()\nsys.stderr.write('failure\\n')\nsys.exit(3)\n")
+        result = self.scan([SAMPLE], command=command, extra=["--run-dir", str(bad_run_dir)])
+        self.assertIn("sink_command exited 3: nothing delivered", result.stdout)
+        self.assertIn("stderr could not be saved", result.stdout)
+
     def test_a_timeout_kills_the_whole_group(self):
         pidfile = self.target / "child.pid"
         command = (f"sh -c 'sleep 60 >/dev/null 2>&1 & echo $! > {pidfile}; sleep 60'")

@@ -53,6 +53,7 @@ intact and are not resent unless dispatched_sinks is cleared.
 import json
 import os
 import shlex
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -81,29 +82,45 @@ STATUSES = ("published", "duplicate", "failed", "skipped")
 DIAGNOSTICS_FILENAME = "sink-command-stderr.log"
 
 
-def _write_diagnostics(ctx: SinkContext, stderr: str, secret_names: Sequence[str]) -> Optional[Path]:
-    """Keep the command's stderr in a private (0600) file; it never goes into a note.
+def _write_diagnostics(ctx: SinkContext, stderr: str, secret_names: Sequence[str]) -> Optional[str]:
+    """Keep the command's stderr in a mode-0600 file; it never goes into a note.
 
     Notes are rendered into the delta report and the public-adjacent step summary, and an
     auth failure can echo a token. The file is redacted too: known credential shapes and
     the literal values of the variables the command was given (`sink_env`).
+    Returns an honest, verified note describing diagnostics storage, or None if no stderr.
     """
     if not stderr or not stderr.strip() or ctx.diagnostics_dir is None:
         return None
     literals = {os.environ[n] for n in secret_names if len(os.environ.get(n, "")) >= 4}
     text = mask_literals(mask_text(stderr), literals)
     directory = Path(ctx.diagnostics_dir)
-    directory.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(directory, 0o700)
-    except OSError:
-        pass
-    path = directory / DIAGNOSTICS_FILENAME
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as handle:
-        handle.write(f"--- {datetime.now(timezone.utc).isoformat()} {ctx.target_name}/{ctx.agent}\n")
-        handle.write(text if text.endswith("\n") else text + "\n")
-    return path
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
+        path = directory / DIAGNOSTICS_FILENAME
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            if mode != 0o600:
+                raise OSError(f"diagnostics mode {oct(mode)} != 0o600")
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write(f"--- {datetime.now(timezone.utc).isoformat()} {ctx.target_name}/{ctx.agent}\n")
+                handle.write(text if text.endswith("\n") else text + "\n")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    except OSError as e:
+        return f"stderr could not be saved ({type(e).__name__})"
+
+    return f"stderr logged in {path} (mode 0600)"
 
 
 def _names(value: Any) -> List[str]:
@@ -179,7 +196,7 @@ class CommandSink(Sink):
         # stderr is never published (it can echo a credential): a private file holds it and the
         # note names only the exit status and that path.
         diagnostics = _write_diagnostics(ctx, stderr or "", self.credential_env(ctx.options))
-        where = f"; stderr kept privately in {diagnostics}" if diagnostics else ""
+        where = f"; {diagnostics}" if diagnostics else ""
         if returncode is None:
             result["failed"] = len(pending)
             result["note"] = f"sink_command timed out after {timeout:g}s: nothing delivered{where}"
