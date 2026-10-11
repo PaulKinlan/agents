@@ -135,6 +135,7 @@ _MAX_BINDS = 96
 # proof, no wrap — SandboxError, so the station fails before any banner or policy.json exists,
 # exactly like the bwrap-missing path. Cost: one short-lived bwrap per wrap.
 _VERIFY_TIMEOUT = 60
+_VERIFY_TOKEN_NOT_READABLE = 40       # the sentinel got in; the token never arrived on stdin
 _VERIFY_INNER_NOT_EXECUTABLE = 41     # the sentinel got in; the real inner is not runnable there
 _VERIFY_RUN_DIR_NOT_WRITABLE = 42     # the sentinel got in; the run-directory bind is not writable
 
@@ -179,9 +180,11 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
     `head` and `tail` are the wrap's own argv split around its command, so the exercise runs
     the SAME plan, the same namespaces and the same net_forward relay argv (agents-2x6) — only
     the final command is replaced by the sentinel. The sentinel is /bin/sh (every Linux host
-    has it, and the plan binds the system directories), given the inner program to resolve, a
-    one-time token, and its path under the run directory. It exits 0 only after resolving
-    `inner[0]` inside the sandbox AND writing the token through the run-directory bind, so the
+    has it, and the plan binds the system directories), given the inner program to resolve and
+    the destination path for the proof. IT IS NOT GIVEN THE TOKEN IN ITS ARGV (agents-0p3l):
+    the token arrives on stdin, because the sentinel's cmdline is world-readable. It exits 0
+    only after resolving `inner[0]` inside the sandbox AND writing the token through the
+    run-directory bind, so the
     proof is the child's own write and not bwrap's exit status: a bwrap that returns 0 without
     running the child fails too.
 
@@ -192,14 +195,35 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
     """
     token = os.urandom(16).hex()
     token_path = run_dir / f".sandbox-wrap-verify-{token[:8]}"
-    script = ('if { [ -f "$1" ] && [ -x "$1" ]; } || command -v "$1" >/dev/null 2>&1; '
+    # THE TOKEN ARRIVES ON STDIN AND NEVER IN ARGV (agents-0p3l).
+    #
+    # argv was the leak. The sentinel runs as a child of bwrap, and /proc/<pid>/cmdline is
+    # world-readable (0444), so a token passed as an argument was readable by ANY process on
+    # the host, any uid, for as long as the wrap was being verified - and the run-directory
+    # bind then wrote it to a path. The proof itself is unchanged and deliberately so: it is
+    # still the child's own write into the run directory and not bwrap's exit status, and the
+    # run-directory-write check still needs only the DESTINATION path, which is not a secret
+    # (a random-named file that is unlinked immediately) whereas the token is.
+    #
+    # RESIDUAL, STATED RATHER THAN LEFT TO BE DISCOVERED: a SAME-UID process can still read
+    # the token from /proc/<pid>/fd/0 while this child holds the pipe, and can read the
+    # destination from the cmdline. The token moved from WORLD-readable to SAME-UID-readable.
+    # That is a real narrowing and it is NOT a containment boundary, and it is unavoidable at
+    # this layer because the factory and every process it launches share one uid by design.
+    # A different-uid boundary for the token is a different change.
+    #
+    # `read` needs the newline, hence input=token + '\n' below: without it dash's read
+    # returns non-zero at EOF even though it filled the variable, which would be
+    # indistinguishable from a token that never arrived.
+    script = (f'IFS= read -r tok || exit {_VERIFY_TOKEN_NOT_READABLE}\n'
+              'if { [ -f "$1" ] && [ -x "$1" ]; } || command -v "$1" >/dev/null 2>&1; '
               f'then :; else exit {_VERIFY_INNER_NOT_EXECUTABLE}; fi\n'
-              'printf "%s" "$2" > "$3" 2>/dev/null || '
+              'printf "%s" "$tok" > "$2" 2>/dev/null || '
               f'exit {_VERIFY_RUN_DIR_NOT_WRITABLE}\n')
-    sentinel = ["/bin/sh", "-c", script, "factory-wrap-verify", str(inner[0]), token,
+    sentinel = ["/bin/sh", "-c", script, "factory-wrap-verify", str(inner[0]),
                 str(token_path)]
     try:
-        res = subprocess.run([*head, *tail(sentinel)], stdin=subprocess.DEVNULL,
+        res = subprocess.run([*head, *tail(sentinel)], input=(token + "\n").encode(),
                              capture_output=True, timeout=_VERIFY_TIMEOUT, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise SandboxError(
@@ -215,6 +239,11 @@ def _verify_wrap(head: List[str], tail: "Callable[[Sequence[str]], List[str]]", 
             token_path.unlink()
         except OSError:
             pass
+    if res.returncode == _VERIFY_TOKEN_NOT_READABLE:
+        raise SandboxError(
+            f"the sandbox wrap's verify child could not read the one-time token from its "
+            f"stdin, so the wrap was never shown to start its child; refusing to run (and to "
+            f"record the run as sandboxed)")
     if res.returncode == _VERIFY_INNER_NOT_EXECUTABLE:
         raise SandboxError(
             f"the sandbox wrap cannot execute {str(inner[0])!r} inside it, so the child it was "

@@ -295,6 +295,49 @@ class TestWrapVerification(unittest.TestCase):
                                factory_root=self.factory, run_dir=self.run_dir,
                                env={"PATH": path, "HOME": str(self.root / "home")})
 
+    def test_the_proof_token_is_never_passed_in_the_wrapped_process_argv(self):
+        """The one-time proof token must not appear in the sentinel's argv (agents-0p3l).
+
+        The sentinel used to be built as [..., "factory-wrap-verify", str(inner[0]), token,
+        str(token_path)], so the token WAS argv of a process whose /proc/<pid>/cmdline is
+        world-readable (0444): any process on the host, any uid, could read it while the wrap
+        was being verified. The pin half of this bead narrows WHO must be proven; this half is
+        about HOW the proof is delivered, which is why it is a separate change. The fix puts
+        the token on stdin and keeps the destination path in argv (the path is not a secret).
+
+        RESIDUAL, deliberately asserted rather than glossed: a SAME-UID process can still read
+        the token from /proc/<pid>/fd/0 while the child holds the pipe. The token moved from
+        world-readable to same-uid-readable - a narrowing, not a containment boundary, and
+        unavoidable while the factory and its children share one uid by design.
+        """
+        if not shutil.which("bwrap"):
+            self.skipTest("needs a real bwrap to exercise a wrap")
+        captured = []
+        real_run = subprocess.run
+
+        def spy(argv, **kwargs):
+            argv = [str(a) for a in argv]
+            if "factory-wrap-verify" in argv:
+                captured.append((argv, kwargs.get("input"), kwargs.get("stdin")))
+            return real_run(argv, **kwargs)
+
+        subprocess.run = spy
+        try:
+            self.build(self.real_path)
+        finally:
+            subprocess.run = real_run
+
+        self.assertTrue(captured, "the sentinel was never exercised; this test proves nothing")
+        for argv, sent_input, stdin_kw in captured:
+            hexish = [a for a in argv if len(a) == 32 and all(c in "0123456789abcdef" for c in a)]
+            self.assertEqual(hexish, [], f"a 32-hex token is in the sentinel argv: {hexish}")
+            self.assertNotIn("factory-wrap-verify\n", argv, "guard: the sentinel marker is expected")
+            self.assertEqual(stdin_kw, None, "stdin must not be forced to DEVNULL now that the token travels on it")
+            self.assertIsInstance(sent_input, bytes, "the token must be delivered to the child")
+            token = sent_input.decode().strip()
+            self.assertNotIn(token, " ".join(argv), "the token must not appear anywhere in argv")
+            self.assertRegex(token, r"^[0-9a-f]{32}$", "the delivered value must be the token shape")
+
     def test_a_bwrap_that_fails_at_exec_after_a_green_probe_is_refused(self):
         """The agents-kwi reproduction: a bwrap that answers the availability probe (it is
         handed a bare plan ending in /bin/true) but exits non-zero for every real wrap. The
