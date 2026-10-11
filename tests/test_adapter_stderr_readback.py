@@ -28,6 +28,13 @@ use TWO arms:
     the pre-fix tree because the pre-fix tree cannot reach the line.
 """
 
+THE FOUR SITES, AND WHICH ARE EXECUTED HERE: pi and claude are invoked directly and
+antigravity is covered by the two order tests below it. DEEPSEEK WAS NAMED IN PROSE AND
+NEVER INVOKED until agents-2plj - the one grep hit for it was in this docstring - while the
+fast-gate wildcard arm selects this file for a deepseek.sh change. A suite that names a file
+without executing it cannot discriminate on it, and the map selecting it is what made the
+absence invisible. TestDeepSeekStderrIsNotTheAnswer now runs it against a stub interpreter.
+
 from __future__ import annotations
 
 import shutil
@@ -148,6 +155,59 @@ class TestStderrIsNotAnAnswer(unittest.TestCase):
             self.assertIn("a cost note", res.stderr,
                           "the engine's stderr must reach the operator, not vanish")
 
+
+
+class TestDeepSeekStderrIsNotTheAnswer(TestStderrIsNotAnAnswer):
+    """DEEPSEEK, WHICH THIS SUITE NAMED IN PROSE BUT NEVER INVOKED (agents-2plj).
+
+    The module docstring claimed the four-site split was tested and this file was mapped to
+    the adapter arm, but `grep -c deepseek` returned ONE hit and it was in that docstring.
+    A suite that names a file without executing it cannot discriminate on that file, and the
+    map selecting it made the absence invisible - the absent edge is what a grep cannot show.
+
+    Two facts about this adapter the harness has to satisfy, both learned from its own
+    refusal rather than from reading it: it refuses BY NAME without DEEPSEEK_BASE_URL (the
+    refusal is how the interface was discovered), and it captures the engine's status
+    (`|| STATUS=$?`) and reads the output file back AFTER that status block, so its rc is
+    the engine's own code rather than a flat 1.
+    """
+
+    DEEPSEEK_ENV = {"DEEPSEEK_BASE_URL": "http://127.0.0.1:1", "DEEPSEEK_API_KEY": "test-key"}
+
+    def _cases(self, name, env=None):
+        """deepseek.sh shells out to python for the API call, so the harness points
+        FACTORY_PYTHON_BIN at a STUB INTERPRETER that runs the case's engine body instead.
+        Without it the arm makes a real network call and fails on connection refused - which
+        is how I found that this adapter executes python rather than curl, and the same way I
+        found DEEPSEEK_BASE_URL: from its own refusal. The redirect under test is in the
+        SHELL, below the call, so stubbing the call still exercises it."""
+        root = None
+        for label, body, want_rc in (
+            ("CONTROL silent engine -> refused", SILENT, 1),
+            ("stderr-only engine -> refused", STDERR_ONLY, 1),
+            ("engine that answers -> delivered", ANSWERS, 0),
+        ):
+            with self.subTest(adapter=name, case=label), \
+                    tempfile.TemporaryDirectory() as tmpdir:
+                box = _Sandbox(Path(tmpdir))
+                stub = box.root / "python-stub"
+                stub.write_text('#!/bin/sh\nexec "$FACTORY_ENGINE_BIN"\n', encoding="utf-8")
+                stub.chmod(0o755)
+                engine = box.engine(body)
+                env2 = dict(env or {})
+                env2["FACTORY_PYTHON_BIN"] = str(stub)
+                res = box.invoke(self._adapter(name), "a real prompt", engine, env2)
+                yield label, res, want_rc, box
+
+    def test_deepseek_stderr_is_not_the_answer(self):
+        seen = 0
+        for label, res, want_rc, box in self._cases("deepseek", self.DEEPSEEK_ENV):
+            seen += 1
+            with self.subTest(case=label):
+                self.assertEqual(res.returncode, want_rc,
+                                 f"deepseek {label}: rc={res.returncode} "
+                                 f"stderr={res.stderr[:300]}")
+        self.assertEqual(seen, 3, "the deepseek arm must run all three cases")
 
 class TestAntigravityIsRefusedToday(unittest.TestCase):
     """The fact that makes the copy legitimate, and the fact that would change first."""
