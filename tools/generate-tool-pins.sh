@@ -172,6 +172,13 @@ fi
 # hasher's own hash WITH the hasher is circular. python3's hashlib is a SECOND implementation,
 # resolved by the same confined rule, so the two must AGREE before any pin is emitted. A planted
 # sha256sum can no longer choose its own reference value: it must also plant the interpreter.
+# THE SAME RULE ONE LEVEL DEEPER (agents-lm6r): the supplier of the reference values must not be
+# the defended party - and 'an independent implementation' is not enough if the DEFENDED PARTY CAN
+# SHADOW IT. hashlib is reachable AS A FILE: a hashlib.py on PYTHONPATH or in the generator's CWD
+# shadows stdlib, so the 'independent' digest could itself be supplied by the party the pin defends
+# against, and a wrong-DIGEST hash her plant would then still emit forged pins at exit 0. MEASURED
+# by review: python3 -I closes BOTH channels (isolated mode drops PYTHONPATH and keeps CWD off
+# sys.path), which is why the call is isolated rather than plain.
 # THIS REDUCES THE EXPOSURE RATHER THAN ELIMINATING IT (agents-dso1, agents-76p7): the trust root
 # is the interpreter, which is a provisioning property this generator cannot establish.
 PYTHON3="$(resolve_in_lookup python3 "$SYSTEM_LOOKUP_PATH" || true)"
@@ -219,7 +226,7 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
     # agents-0poh: the INDEPENDENT digest must agree. If it does not, one of the two hashers is
     # lying and NEITHER value can be trusted, so refuse rather than emit a pin whose own
     # reference value came from the party the pin defends against.
-    py_hash="$("$PYTHON3" -c 'import hashlib,sys
+    py_hash="$("$PYTHON3" -I -c 'import hashlib,sys
 print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$path")"
     if [ "$hash" != "$py_hash" ]; then
       echo "error: digest disagreement for $tool - sha256sum reported $hash, the independent" >&2
