@@ -758,7 +758,7 @@ def choose_engine(requested_engine: str) -> str:
 
     When `requested_engine` is not 'auto', the requested engine is used as-is.
     When 'auto', candidate engines on PATH are checked in order: 'pi', 'claude',
-    then 'antigravity'. If none of these engine binaries is present on PATH,
+    then 'agentapi' (selecting 'antigravity'). If none of these engine binaries is present on PATH,
     an explicit dev/test fallback is checked via FACTORY_DEFAULT_ENGINE; if unset,
     the dispatcher refuses the run (StationError) rather than silently defaulting
     to 'pi' (agents-cxno: success-by-absence is refused).
