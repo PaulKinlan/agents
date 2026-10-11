@@ -93,7 +93,7 @@ while [ $# -gt 0 ]; do
       # trusts the flag. Reject control characters outright rather than escaping them: no
       # legitimate directory name contains a newline, and escaping invites the next mistake.
       case "$2" in
-        *$'\n'*|*$'\r'*|*$'\t'*)
+        *$'\n'*|*$'\r'*|*$'\t'*|*$'\v'*|*$'\f'*|*$'\x1c'*|*$'\x1d'*|*$'\x1e'*|*$'\u0085'*|*$'\u2028'*|*$'\u2029'*)
           echo "error: --lookup-path must not contain newlines, carriage returns or tabs" >&2
           exit 2 ;;
       esac
@@ -103,7 +103,7 @@ while [ $# -gt 0 ]; do
       PIN_LOOKUP_PATH="$2:$SYSTEM_LOOKUP_PATH"; shift 2 ;;
     --lookup-path=*)
       case "${1#--lookup-path=}" in
-        *$'\n'*|*$'\r'*|*$'\t'*)
+        *$'\n'*|*$'\r'*|*$'\t'*|*$'\v'*|*$'\f'*|*$'\x1c'*|*$'\x1d'*|*$'\x1e'*|*$'\u0085'*|*$'\u2028'*|*$'\u2029'*)
           echo "error: --lookup-path must not contain newlines, carriage returns or tabs" >&2
           exit 2 ;;
       esac
