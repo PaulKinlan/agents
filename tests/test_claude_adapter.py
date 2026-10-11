@@ -211,6 +211,81 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.env_dump.exists(), "the engine must be invoked")
 
+    def test_empty_credentials_file_fails_when_no_env_key(self):
+        """agents-0zt9: an empty (0-byte) credentials file must not admit the run."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text("", encoding="utf-8")
+        result = self.run_adapter({})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no Claude credentials", result.stderr)
+        self.assertFalse(self.env_dump.exists(), "engine must not be invoked")
+
+    def test_garbage_credentials_file_fails_when_no_env_key(self):
+        """agents-0zt9: unparseable non-JSON credentials file must not admit the run."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text("{not valid json at all", encoding="utf-8")
+        result = self.run_adapter({})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no Claude credentials", result.stderr)
+        self.assertFalse(self.env_dump.exists(), "engine must not be invoked")
+
+    def test_empty_credentials_file_does_not_scrub_working_api_key(self):
+        """agents-0zt9: an empty credentials file must not scrub a valid ANTHROPIC_API_KEY."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text("", encoding="utf-8")
+        result = self.run_adapter({"ANTHROPIC_API_KEY": "sk-ant-live-key"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Auth: environment, no session credential", result.stdout)
+        child = self.child_env()
+        self.assertIn("ANTHROPIC_API_KEY=sk-ant-live-key", child)
+
+    def test_garbage_credentials_file_does_not_scrub_working_api_key(self):
+        """agents-0zt9: a malformed credentials file must not scrub a valid ANTHROPIC_API_KEY."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text("{garbage", encoding="utf-8")
+        result = self.run_adapter({"ANTHROPIC_API_KEY": "sk-ant-live-key"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Auth: environment, no session credential", result.stdout)
+        child = self.child_env()
+        self.assertIn("ANTHROPIC_API_KEY=sk-ant-live-key", child)
+
+    def test_empty_credentials_file_does_not_scrub_bedrock_backend(self):
+        """agents-0zt9: an empty credentials file must not scrub CLAUDE_CODE_USE_BEDROCK."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text("", encoding="utf-8")
+        result = self.run_adapter({"CLAUDE_CODE_USE_BEDROCK": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Auth: environment, no session credential", result.stdout)
+        child = self.child_env()
+        self.assertIn("CLAUDE_CODE_USE_BEDROCK=1", child)
+
+    def test_expired_session_without_refresh_token_fails_without_env_key(self):
+        """agents-0zt9: an expired session without a refresh token must not admit the run."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text('{"claudeAiOauth": {"accessToken": "tok", "expiresAt": 1000}}',
+                               encoding="utf-8")
+        result = self.run_adapter({})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no Claude credentials", result.stderr)
+        self.assertFalse(self.env_dump.exists())
+
+    def test_expired_session_without_refresh_token_does_not_scrub_api_key(self):
+        """agents-0zt9: an expired session must not scrub working environment API key."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text('{"claudeAiOauth": {"accessToken": "tok", "expiresAt": 1000}}',
+                               encoding="utf-8")
+        result = self.run_adapter({"ANTHROPIC_API_KEY": "sk-ant-live-key"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        child = self.child_env()
+        self.assertIn("ANTHROPIC_API_KEY=sk-ant-live-key", child)
+
 
 if __name__ == "__main__":
     unittest.main()

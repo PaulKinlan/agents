@@ -26,9 +26,51 @@ has_key=0
 if [ -n "${ANTHROPIC_API_KEY:-}${ANTHROPIC_AUTH_TOKEN:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   has_key=1
 fi
+# Finding (agents-0zt9): A 0-byte, garbage, or unparseable credentials file must NOT be
+# treated as a valid session. When has_session=1, the adapter scrubs ambient auth
+# overrides (ANTHROPIC_API_KEY, Bedrock). If an empty file were treated as presence,
+# it would both admit the run on an unusable file and DESTROY the only working credential.
+# Validate that CREDENTIALS_FILE exists, is non-empty, and holds parseable, usable session data.
 has_session=0
-if [ -n "$CREDENTIALS_FILE" ] && [ -f "$CREDENTIALS_FILE" ]; then
-  has_session=1
+if [ -n "$CREDENTIALS_FILE" ] && [ -f "$CREDENTIALS_FILE" ] && [ -s "$CREDENTIALS_FILE" ]; then
+  PYTHON_BIN="${FACTORY_PYTHON_BIN:-}"
+  if [ -z "$PYTHON_BIN" ]; then
+    for p in /usr/bin/python3 /usr/local/bin/python3 /bin/python3; do
+      if [ -x "$p" ]; then
+        PYTHON_BIN="$p"
+        break
+      fi
+    done
+  fi
+  if [ -n "$PYTHON_BIN" ] && [ -x "$PYTHON_BIN" ]; then
+    if "$PYTHON_BIN" -c '
+import json, sys, time
+try:
+    with open(sys.argv[1], "rb") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or not data:
+        sys.exit(1)
+    oauth = data.get("claudeAiOauth")
+    if oauth is not None:
+        if not isinstance(oauth, dict):
+            sys.exit(1)
+        access_token = oauth.get("accessToken")
+        refresh_token = oauth.get("refreshToken")
+        if not access_token and not refresh_token:
+            sys.exit(1)
+        expires_at = oauth.get("expiresAt")
+        refresh_expires_at = oauth.get("refreshTokenExpiresAt")
+        now_ms = time.time() * 1000
+        if expires_at and expires_at < now_ms:
+            if not refresh_token or (refresh_expires_at and refresh_expires_at < now_ms):
+                sys.exit(1)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+' "$CREDENTIALS_FILE" >/dev/null 2>&1; then
+      has_session=1
+    fi
+  fi
 fi
 # Bedrock/Vertex are opt-in backend auth (agents-d06): the runner selected the backend,
 # and its SDK chain (AWS bearer/profile, Google application credentials) resolves the
