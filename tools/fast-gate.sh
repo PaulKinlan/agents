@@ -106,6 +106,15 @@ while IFS= read -r f; do
     tests/test_*.py)
       run="$run $f"
       ;;
+    tests/hermetic_env.py)
+      # The shared hermetic-test helper (agents-21ap). Search recorded: `grep -rln
+      # 'hermetic_env' tests/ --include='*.py'` -> exactly the three modules that call
+      # setUpModule/tearDownModule, and no others. A change here changes the environment
+      # those suites observe, so it runs all three: a helper that quietly stopped isolating
+      # the operator's config would turn the suites red or green for reasons the tree does
+      # not contain, which is the whole defect it exists to remove.
+      mapped="$mapped tests/test_sandbox.py tests/test_pi_keyless_broker.py tests/test_factory_core.py"
+      ;;
     tests/fixtures/*)
       # Checked-in test payloads (agents-28nn round 5): fake_engine.sh is the contained
       # engine-exfiltration attack asserted on by tests/test_containment.py
