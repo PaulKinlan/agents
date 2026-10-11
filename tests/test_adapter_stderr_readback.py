@@ -204,7 +204,13 @@ class TestAntigravityIsRefusedToday(unittest.TestCase):
         adapter = ADAPTERS / "antigravity.sh"
         text = adapter.read_text(encoding="utf-8")
         refusal = text.index("agentapi has no tool controls")
-        guard = text.index('if [ -z "$PROMPT" ]; then')
+        # THE GUARD ANCHOR MOVED WITH agents-ut3v: the emptiness test was replaced by a
+        # content case below the reassembly, so indexing the old text raised ValueError
+        # BEFORE this test asserted anything. Anchored on the NEW guard, and on the case arm
+        # rather than the exact spacing, so a future reflow does not break the anchor the way
+        # this one did. agents-ut3v review, found by the merger on the union - each branch was
+        # green alone, which is why a per-branch fast gate did not see it.
+        guard = text.index('*[![:space:]]*)')
         redirect = text.index('new-conversation "$PROMPT"')
         self.assertLess(refusal, guard,
                         "the tool-policy refusal must precede the prompt guard")
