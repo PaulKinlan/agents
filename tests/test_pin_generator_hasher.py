@@ -15,12 +15,16 @@ via --lookup-path, and asserts the generated file carries NO hash the fake produ
 that only checked for the string "command -v" would pass while the hole was open.
 """
 
+import hashlib
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from lib.tool_pins import load_tool_pins
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "generate-tool-pins.sh"
@@ -86,6 +90,98 @@ class TestPinGeneratorHasherIsNotCallerSupplied(unittest.TestCase):
             self.assertNotEqual(written, FAKE_HASH,
                                 "the planted tool was hashed by the planted hasher: the fix "
                                 "narrowed the tool lookup too, or not at all")
+
+
+@unittest.skipUnless(GENERATOR.exists(), "generator not present")
+class TestLookupPathCannotInjectAPin(unittest.TestCase):
+    """agents-oc3q: no CALLER-SUPPLIED DIRECTORY may supply the pin's reference value.
+
+    THE ROUTE THIS PINS, AND WHY THE FIRST ATTEMPT AT IT WAS NOT ENOUGH. --lookup-path's
+    value is interpolated into the emitted file's header comment, so a directory name
+    carrying a LINE BREAK breaks out of that comment and injects a complete pin - path AND
+    sha256 - which lib/tool_pins.py then accepts.
+
+      Round 1 fix rejected \\n \\r \\t. THAT IS THE YAML LINE-BREAK SET AND THIS FILE IS NOT
+      PARSED AS YAML: lib/tool_pins.py:318 uses text.splitlines() on a decoded string, which
+      ALSO breaks on \\v \\f \\x1c \\x1d \\x1e \\x85 U+2028 U+2029. The reviewer constructed
+      the surviving \\v route end to end and resolve_tool() returned the attacker's binary.
+      So the first fix closed THE DELIMITER I WAS SHOWN rather than THE CLASS, and this test
+      is written over the LOADER'S boundary set rather than a remembered list.
+
+      Multi-byte characters U+0085, U+2028, U+2029: bash ANSI-C quoting $'\\u0085' expands to
+      literal "\\u0085" in non-Unicode locales (C / POSIX), failing to match incoming UTF-8
+      bytes. Exact hex byte escapes ($'\\xc2\\x85', $'\\xe2\\x80\\xa8', $'\\xe2\\x80\\xa9')
+      match the loader's line break bytes across all host and runner locales.
+
+    THE TEST IS BEHAVIOURAL AND ASSERTED AGAINST THE PARSER, not against the shell: for every
+    character str.splitlines() breaks on it builds the injection, runs the generator, and
+    asserts (a) the generator refuses and writes nothing, and (b) if a file WERE produced,
+    this repo's own parser would not find the injected path in it.
+    """
+
+    LINE_BREAKS = {
+        "LF": "\n", "CR": "\r", "VT": "\v", "FF": "\f",
+        "FS": "\x1c", "GS": "\x1d", "RS": "\x1e",
+        "NEL": "\u0085", "LS": "\u2028", "PS": "\u2029",
+    }
+
+    def _run_injection(self, tmp, evil, flag_style="separate"):
+        out = Path(tmp) / "out"
+        out.mkdir(exist_ok=True)
+        pins_file = out / "pins.yaml"
+        cmd = ["bash", str(GENERATOR), str(pins_file)]
+        if flag_style == "separate":
+            cmd.extend(["--lookup-path", evil])
+        else:
+            cmd.append(f"--lookup-path={evil}")
+        proc = subprocess.run(
+            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+            env={"PATH": "/usr/bin:/bin", "HOME": tmp},
+        )
+        return proc, pins_file
+
+    def test_no_line_break_character_in_lookup_path_can_inject_a_pin(self):
+        for label, char in self.LINE_BREAKS.items():
+            for flag_style in ("separate", "equals"):
+                with self.subTest(char=label, flag_style=flag_style), tempfile.TemporaryDirectory(prefix="oc3q-inj-") as tmp:
+                    tmpd = Path(tmp)
+                    fake = tmpd / "fakesemgrep"
+                    fake.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
+                    fake.chmod(0o755)
+                    fake_hash = hashlib.sha256(fake.read_bytes()).hexdigest()
+                    evil = (f"{tmpd}/P{char}semgrep:{char}  path: {fake}{char}"
+                            f"  sha256: {fake_hash} #")
+                    proc, pins_file = self._run_injection(tmp, evil, flag_style=flag_style)
+                    self.assertEqual(proc.returncode, 2,
+                                     f"{label} ({flag_style}): expected generator exit 2, got {proc.returncode}")
+                    self.assertIn("error: --lookup-path must not contain", proc.stderr,
+                                  f"{label} ({flag_style}): expected rejection on stderr")
+                    self.assertFalse(pins_file.exists(),
+                                     f"{label} ({flag_style}): pins file should not be created on rejection")
+                    if pins_file.exists():
+                        parsed = load_tool_pins(pins_file)
+                        entry = parsed.get("semgrep") or {}
+                        self.assertNotEqual(
+                            entry.get("path"), str(fake),
+                            f"{label} ({flag_style}): injected semgrep pin accepted by loader")
+
+    def test_a_legitimate_lookup_path_is_still_accepted(self):
+        """The other direction: the fix must not reject ordinary operator directories, which
+        are the flag's documented purpose (engines install outside the system dirs)."""
+        with tempfile.TemporaryDirectory(prefix="oc3q-ok-") as tmp:
+            tmpd = Path(tmp)
+            out = tmpd / "out"
+            out.mkdir()
+            os.makedirs(tmpd / "operator bin", exist_ok=True)
+            proc = subprocess.run(
+                ["bash", str(GENERATOR), str(out / "pins.yaml"),
+                 "--lookup-path", f"{tmpd}/operator bin:{tmpd}"],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                env={"PATH": "/usr/bin:/bin", "HOME": tmp},
+            )
+            self.assertEqual(proc.returncode, 0,
+                             f"a legitimate --lookup-path was rejected: {proc.stderr}")
+            self.assertTrue((out / "pins.yaml").exists())
 
 
 if __name__ == "__main__":
