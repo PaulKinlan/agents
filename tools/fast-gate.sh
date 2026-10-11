@@ -110,6 +110,14 @@ while IFS= read -r f; do
     tests/test_*.py)
       run="$run $f"
       ;;
+    tools/fast-gate.sh)
+      # agents-8jx1: THE GATE'S OWN SCRIPT HAD NO ARM AT ALL, so editing it fell to the
+      # unmatched bucket. The run still executed tests/test_fast_gate_mapping.py - that is the
+      # unmatched fallback, not a mapping - while tests/test_hermetic_env.py, the acceptance
+      # suite for the gate's hermetic environment (it names fast-gate/CHECK_CMD seven times),
+      # was NOT selected. Found by the gate's own coverage warning on a green run.
+      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py"
+      ;;
     tests/__init__.py|tests/hermetic_env.py)
       # Centralized hermetic test package initialization (agents-v1a2) and shared helper.
       # A change to the package initialization or helper runs the acceptance suite
