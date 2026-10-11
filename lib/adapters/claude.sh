@@ -51,19 +51,19 @@ try:
     if not isinstance(data, dict) or not data:
         sys.exit(1)
     oauth = data.get("claudeAiOauth")
-    if oauth is not None:
-        if not isinstance(oauth, dict):
-            sys.exit(1)
-        access_token = oauth.get("accessToken")
-        refresh_token = oauth.get("refreshToken")
-        if not access_token and not refresh_token:
-            sys.exit(1)
-        expires_at = oauth.get("expiresAt")
-        refresh_expires_at = oauth.get("refreshTokenExpiresAt")
-        now_ms = time.time() * 1000
-        if expires_at and expires_at < now_ms:
-            if not refresh_token or (refresh_expires_at and refresh_expires_at < now_ms):
-                sys.exit(1)
+    if oauth is None or not isinstance(oauth, dict):
+        sys.exit(1)
+    access_token = oauth.get("accessToken")
+    refresh_token = oauth.get("refreshToken")
+    if not access_token and not refresh_token:
+        sys.exit(1)
+    expires_at = oauth.get("expiresAt")
+    refresh_expires_at = oauth.get("refreshTokenExpiresAt")
+    now_ms = time.time() * 1000
+    has_valid_access = bool(access_token and (not expires_at or expires_at >= now_ms))
+    has_valid_refresh = bool(refresh_token and (not refresh_expires_at or refresh_expires_at >= now_ms))
+    if not has_valid_access and not has_valid_refresh:
+        sys.exit(1)
     sys.exit(0)
 except Exception:
     sys.exit(1)

@@ -81,7 +81,10 @@ class ClaudeAdapterTestCase(unittest.TestCase):
     def sign_in(self):
         credentials = self.home / ".claude" / ".credentials.json"
         credentials.parent.mkdir(parents=True, exist_ok=True)
-        credentials.write_text('{"stub": true}', encoding="utf-8")
+        credentials.write_text(
+            '{"claudeAiOauth": {"accessToken": "valid-test-token", "expiresAt": 4102444800000}}',
+            encoding="utf-8",
+        )
 
     def run_adapter(self, extra_env, unset_home=False, prompt="prompt"):
         env = dict(os.environ)
@@ -285,6 +288,69 @@ class ClaudeAdapterTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         child = self.child_env()
         self.assertIn("ANTHROPIC_API_KEY=sk-ant-live-key", child)
+
+    def test_non_oauth_json_object_fails_when_no_env_key(self):
+        """agents-0zt9 review P1: JSON without claudeAiOauth must not admit session."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text('{"stub": true, "other": "value"}', encoding="utf-8")
+        result = self.run_adapter({})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no Claude credentials", result.stderr)
+        self.assertFalse(self.env_dump.exists(), "engine must not be invoked")
+
+    def test_non_oauth_json_object_does_not_scrub_working_api_key(self):
+        """agents-0zt9 review P1: JSON without claudeAiOauth must not scrub working API key."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text('{"stub": true, "other": "value"}', encoding="utf-8")
+        result = self.run_adapter({"ANTHROPIC_API_KEY": "sk-ant-live-key"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Auth: environment, no session credential", result.stdout)
+        child = self.child_env()
+        self.assertIn("ANTHROPIC_API_KEY=sk-ant-live-key", child)
+
+    def test_expired_refresh_token_alone_fails_when_no_env_key(self):
+        """agents-0zt9 review P1: expired refresh token alone must not admit session."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text(
+            '{"claudeAiOauth": {"refreshToken": "ref", "refreshTokenExpiresAt": 1000}}',
+            encoding="utf-8",
+        )
+        result = self.run_adapter({})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no Claude credentials", result.stderr)
+        self.assertFalse(self.env_dump.exists())
+
+    def test_expired_refresh_token_alone_does_not_scrub_working_api_key(self):
+        """agents-0zt9 review P1: expired refresh token alone must not scrub working API key."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text(
+            '{"claudeAiOauth": {"refreshToken": "ref", "refreshTokenExpiresAt": 1000}}',
+            encoding="utf-8",
+        )
+        result = self.run_adapter({"ANTHROPIC_API_KEY": "sk-ant-live-key"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Auth: environment, no session credential", result.stdout)
+        child = self.child_env()
+        self.assertIn("ANTHROPIC_API_KEY=sk-ant-live-key", child)
+
+    def test_valid_refresh_token_alone_admits_session_and_scrubs_overrides(self):
+        """agents-0zt9 review P1: valid unexpired refresh token alone admits session and scrubs."""
+        credentials = self.home / ".claude" / ".credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text(
+            '{"claudeAiOauth": {"refreshToken": "ref", "refreshTokenExpiresAt": 4102444800000}}',
+            encoding="utf-8",
+        )
+        result = self.run_adapter({"ANTHROPIC_API_KEY": "sk-ant-live-key"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Auth: developer session", result.stdout)
+        child = self.child_env()
+        self.assertNotIn("ANTHROPIC_API_KEY=", child)
+
 
 
 if __name__ == "__main__":
