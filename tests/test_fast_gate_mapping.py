@@ -114,6 +114,15 @@ class TestFastGateMapping(unittest.TestCase):
                       "containing suite omitted for the checked-in attack payload "
                       "(agents-28nn round 5)")
 
+    def test_hermetic_env_and_package_init_map_to_hermetic_suite(self):
+        """tests/__init__.py and tests/hermetic_env.py must map to test_hermetic_env.py and pin suites."""
+        for path in ("tests/__init__.py", "tests/hermetic_env.py"):
+            with self.subTest(path=path):
+                mapped = resolve_fast_gate([path])
+                self.assertIn("tests/test_hermetic_env.py", mapped, f"{path} must map to test_hermetic_env.py")
+                self.assertIn("tests/test_sandbox.py", mapped, f"{path} must map to test_sandbox.py")
+                self.assertIn("tests/test_tool_pins.py", mapped, f"{path} must map to test_tool_pins.py")
+
     def test_candidate_identity_maps_to_prepass_emission(self):
         """lib/candidate_identity.py must run property tests and prepass emission assertions."""
         mapped = resolve_fast_gate(["lib/candidate_identity.py"])
