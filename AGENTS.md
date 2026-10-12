@@ -183,6 +183,24 @@ uploads the staged directory, and no markdown or file with an `audits` component
 
 ## Quoting a gate verdict
 
+### A lock is not a verdict
+
+`fleet-check --status` is the only verdict source. A lock file or a cache file in
+`~/.fleet/checks/` is not evidence that a tree was gated - it is evidence that a run
+*started*. A crashed or killed run leaves a zero-byte lock behind, and by its presence
+alone that lock is indistinguishable from the lock of a run still in progress:
+
+- **locked and held** - a gate is running now. Wait for it; quote nothing.
+- **locked and free** - the run that made it is dead, so there is **no verdict**. Run one.
+- **a verdict json exists** - that is the verdict, and the lock no longer matters.
+
+So a lock with no `--status` verdict means **NO GATE**, and the answer is to run one -
+never to read the lock as a pass. Treating a zero-byte lock as green would be the same
+defect with a friendlier face; treating it as red would invent a verdict that does not
+exist. Measured on 2026-10-12 (`agents-82qr`): 126 stale locks in `~/.fleet/checks/`, and
+in a sample of 12, half carried a lock with no verdict at all - status `NONE` while the
+tree looked gated.
+
 A lane quotes a verdict from the **record**, never from an exit code. Measured (agents-1thk), not
 assumed: `fleet-check --fast` returns **rc 0 in five situations that are not a PASS** — a job it has
 just started, a job already running, `--stop --fast` (which prints "no verdict recorded"), and
