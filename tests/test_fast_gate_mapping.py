@@ -9,9 +9,10 @@ Validates:
 5. agents-9nir: the ignore list is deliberate - ignored docs/config-only paths still fall
    back quietly, and any changed file matching NEITHER a mapping arm NOR the ignore list
    FAILS LOUDLY, naming the file, even when other changed files do map. Markdown is NOT a
-   prose-only class: the docs-drift scanner os.walk()s every committed .md outside
-   IGNORE_DIRS (agents/docs-drift/scripts/check_docs.py:466-478), so walked-but-unpinned
-   markdown fails loudly rather than being silently absorbed by a canvas ignore arm.
+   prose-only class: the docs-drift scanner os.walk()s every committed .md outside IGNORE_DIRS
+   (its walks are in agents/docs-drift/scripts/check_docs.py at :256 and :491; the :466-478 range
+   cited here before is that file's markdown tree-block PREFIX parsing - agents-xgha), so
+   walked-but-unpinned markdown fails loudly rather than being silently absorbed by a canvas ignore arm.
 """
 
 import os
