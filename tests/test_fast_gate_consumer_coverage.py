@@ -90,7 +90,7 @@ CONSUMER_COVERAGE_ALLOWLIST = {
         "tests/test_line_andon.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
     },
     "egress_proxy": {
-        "tests/containment_harness.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
+        "tests/containment_harness.py": "not a suite: is_test_filename excludes it and it has its own arm, so no arm can ever select it AS A SUITE. The arm for lib/egress_proxy.py now selects the module's namesake suite AND the six containment suites, so this entry is not stale - none of those can cover a non-suite harness - and it is kept, with this reason corrected, because the omission is real (agents-bwbe; agents-m4pf)",
         "tests/test_containment.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
         "tests/test_containment_adapters.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
         "tests/test_containment_declarations.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
