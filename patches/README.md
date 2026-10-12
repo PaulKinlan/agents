@@ -79,6 +79,21 @@ This directory holds patches for fleet-level infrastructure and tooling that can
   and its warning condition fires on `num_partial > 0` as well. The unmapped clause is OMITTED when its count is
   zero, because otherwise the sentence reads `0 unmapped changed file(s)` while the real finding is an incomplete
   arm, trading one mislabel for another.
+- **THE TWO RULES, WHICH IS WHY THIS IS ONE FINDING RATHER THAN TWO:** `find_candidate_tests_for_file` carries
+  its OWN import matcher (the walk adds files under a comment reading "Candidate by import/require reference"),
+  and it is NOT `has_import_reference`. So the tool has TWO rules for "does this suite consume this module": the
+  loose one decides the candidate set and OVER-REPORTS (agents-hbz3's five phantom consumers of `lib/sandbox.py`),
+  and the naming fallback then UNDER-REPORTS when the loose rule finds nothing (the silent true filed as
+  `agents-0xm2`). THE PHANTOM AND THE SILENT TRUE ARE THE SAME BUG FACING OPPOSITE WAYS, which is why the
+  reporting split (`partial`) and the candidate-rule consolidation are one instrument's problem.
+- **Consequences for every project using the oracle, named rather than left to be discovered:** consolidating on
+  `has_import_reference` makes the candidate set STRICTER about name-adjacent files and BROADER about real
+  importers — fewer phantom omissions, and in the narrow case an omission that was previously invisible. Neither
+  direction can silently drop an existing warning: a real importer is a real importer under either rule. The
+  rejected alternative was to publish "omissions unknown" instead, and the exchange rate is what rules it out: it
+  would report unknown for files that ARE genuinely covered by a namesake suite which imports them, so THE ORACLE
+  WOULD LOSE CONFIDENCE WHERE IT IS CURRENTLY RIGHT — trading a rare silent true for common noise, and A CHECK
+  THAT CRIES UNKNOWN OFTEN ENOUGH TO BE IGNORED PROTECTS NOTHING.
 - **Why these two files travel together, and must not be split to make a smaller diff:** shipping the oracle alone
   renders `COVERAGE WARNING: 0 unmapped changed file(s): (omitted: ...)` — a sentence that is FALSE IN A NEW WAY
   rather than merely incomplete, so the half-patch trades one mislabel for another and the net is negative. The
@@ -93,6 +108,15 @@ This directory holds patches for fleet-level infrastructure and tooling that can
   `unmapped`, and a fully executed candidate set produces NEITHER. Direction (d), the decider that this is not a
   widening: no name-adjacent non-importer (e.g. a `tests/sandbox_fixtures` consumer) appears in the reported set.
   `git apply --check` round-trips byte-identically, which is how these two files were verified before commit.
+- **Status of the evidence, with (b) still owed:** (a), (c) and (d) are measured on real gate logs and are
+  quoted from the runs that produced them. (b) — a log in which the omitting suite actually executed, so that the
+  signal is shown FIRING rather than merely absent-in-the-right-place — is NOT yet measured. It is guaranteed by
+  construction (the `partial` entry is created only inside `if omitted_c:`), and three of the four directions
+  prove the patch does not misreport while (b) is the one that proves it reports. It is owed before this lands,
+  and the blocker is mechanical: the oracle resolves the changed-file set from the worktree's git state, and with
+  a gate measuring the current tree the lid log's own sha cannot be checked out without moving the tree under the
+  gate. The plan is to re-run the pair in a scratch worktree at the log's sha, or by supplying the changed-file
+  set through the environment if the oracle honours it; whichever route is used gets recorded here with its output.
 - **Ownership and routing:** these files are outside this VM's write access; the hub owns the fleet tree and is the
   only route. The related correctness bead is `agents-0xm2` (the silent true: the candidate discovery misses a real
   importer, the naming fallback matches a namesake suite, and `covered=True` is published). Its fix is the SAME
