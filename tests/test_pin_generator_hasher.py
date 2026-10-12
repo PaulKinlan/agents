@@ -175,9 +175,6 @@ class TestLookupPathCannotInjectAPin(unittest.TestCase):
             self.assertTrue((out / "pins.yaml").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 @unittest.skipUnless(GENERATOR.exists(), "generator not present")
 class TestTheIndependentDigestMustAgree(unittest.TestCase):
     """agents-0poh: the digest is computed twice, by two different implementations, and they
@@ -331,4 +328,8 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
                                 (out / "pins.yaml").read_text(encoding="utf-8"), re.M)
             self.assertNotIn("0" * 64, hashes,
                              "a hashlib.py in the CWD supplied the digest (agents-lm6r)")
+
+
+if __name__ == "__main__":
+    unittest.main()
 
