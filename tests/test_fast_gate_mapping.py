@@ -312,6 +312,18 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_gate_entrypoint_config.py", mapped,
                       "install.sh must map to the suite that drives it in a temp HOME (agents-3xqa)")
 
+    def test_check_conf_and_cmd_map_to_consistency_and_entrypoint_suites(self):
+        """agents-ows4: tools/check.conf and tools/check-cmd.sh configure and install the gate
+        command; edits to either must map to tests/test_check_conf_consistency.py and
+        tests/test_gate_entrypoint_config.py rather than failing loudly as unmapped."""
+        for path in ("tools/check.conf", "tools/check-cmd.sh"):
+            with self.subTest(path=path):
+                mapped = resolve_fast_gate([path])
+                self.assertIn("tests/test_check_conf_consistency.py", mapped,
+                              f"{path} must map to the consistency test (agents-ows4)")
+                self.assertIn("tests/test_gate_entrypoint_config.py", mapped,
+                              f"{path} must map to the gate entrypoint suite (agents-ows4)")
+
     def test_unmatched_file_fails_loudly_naming_the_file(self):
         """A changed file matching neither a mapping arm nor the ignore list must fail and name itself."""
         for path in ("package.json", ".agents/skills/beads/SKILL.md"):
@@ -320,6 +332,19 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertNotEqual(res.returncode, 0, f"{path}: unmatched file must fail loudly (agents-9nir)")
                 self.assertIn(path, res.stderr, f"{path}: the failure must name the unmatched file (agents-9nir)")
                 self.assertIn("no mapping arm", res.stderr)
+
+    def test_unmatched_gate_config_path_refuses_loudly_with_actionable_guidance(self):
+        """agents-ows4: a new/unmatched gate or provisioning config path must fail loudly,
+        identifying the path, explaining that it is gate/provisioning config, pointing directly
+        to tools/fast-gate.sh, and recommending relevant test suites so the fix is an immediate edit."""
+        for path in ("tools/new_gate.conf", "tools/custom-gate.sh"):
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertNotEqual(res.returncode, 0, f"{path} must fail loudly")
+                self.assertIn(path, res.stderr, f"{path} must be named in the error")
+                self.assertIn("gate/provisioning config", res.stderr)
+                self.assertIn("tools/fast-gate.sh", res.stderr)
+                self.assertIn("tests/test_check_conf_consistency.py", res.stderr)
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""

@@ -587,8 +587,13 @@ if [ -n "$unmatched" ]; then
   echo "fast-gate: FAIL: changed file(s) match no mapping arm and no ignore-list arm:" >&2
   for u in $unmatched; do
     echo "fast-gate:   $u" >&2
+    case "$u" in
+      tools/*.conf|tools/*.sh|*.conf|install.sh|.fleet/*)
+        echo "fast-gate:     (gate/provisioning config: consider mapping to tests/test_check_conf_consistency.py, tests/test_gate_entrypoint_config.py, or tests/test_fast_gate_mapping.py)" >&2
+        ;;
+    esac
   done
-  echo "fast-gate: add a case arm mapping each file to its suite, or a deliberate ignore arm with a reason (agents-9nir)" >&2
+  echo "fast-gate: To fix, add an arm to tools/fast-gate.sh (under 'mapping changed files', around line 135) mapping the path to its test suite, or an ignore arm under 'deliberate ignore list' with documented search evidence (agents-9nir, agents-ows4)." >&2
   exit 1
 fi
 
