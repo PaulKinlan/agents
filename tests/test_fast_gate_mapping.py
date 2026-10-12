@@ -461,13 +461,35 @@ class TestFastGateMapping(unittest.TestCase):
                       "reports/*.md is walked (lib/exclusions.py:23-43 excludes findings/,runs/ - not reports/) (agents-9nir)")
 
     def test_ignored_docs_and_vcs_metadata_fall_back_quietly(self):
-        """Ignore-list paths resolve to nothing and exit 0, so the real run takes the smoke fallback quietly."""
-        for path in (".gitignore", ".beads/metadata.json", "findings/scan-notes.md",
+        """Ignore-list paths resolve to nothing and exit 0, so the real run takes the smoke fallback quietly.
+
+        .gitignore USED TO BE IN THIS LIST AND WAS REMOVED BY agents-ah03: the ignore arm claimed it was
+        "consumed only by git itself", citing two suites that write their own .gitignore into a tmp target
+        - true, but it missed tests/test_docs_drift.py::TestPlanFindingsStoreAgreement, which drives
+        `git check-ignore` against the committed file. An ignored path is not merely unmapped: it
+        suppresses the smoke fallback, so the file ran one unrelated suite while a suite that can fail on
+        it was never selected. The replacement assertion is test_gitignore_maps_to_the_suite_that_pins_it.
+        """
+        for path in (".beads/metadata.json", "findings/scan-notes.md",
                      "findings/.gitkeep", "schedules/.gitkeep"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertEqual(res.returncode, 0, f"{path}: ignored path must not fail (agents-9nir): {res.stderr}")
                 self.assertEqual(res.stdout.strip(), "", f"{path}: ignored path must map to no suite (agents-9nir)")
+
+    def test_gitignore_maps_to_the_suite_that_pins_it(self):
+        """agents-ah03: .gitignore has a consumer, so it must MAP, not be ignored.
+
+        The consumer is tests/test_docs_drift.py::TestPlanFindingsStoreAgreement: it runs
+        `git check-ignore -q --no-index findings/<name>` against the repository for two names and asserts
+        opposite outcomes (findings/*.md ignored, findings/suppressions.yaml not ignored and tracked). The
+        committed .gitignore is what decides both, so a .gitignore edit can break that suite - and while
+        this file was ignored, the fast gate would not have run it.
+        """
+        mapped = resolve_fast_gate([".gitignore"])
+        self.assertIn("tests/test_docs_drift.py", mapped,
+                      "a .gitignore change must select the suite that drives git check-ignore against it "
+                      "(agents-ah03); ignoring it also suppressed the smoke fallback")
 
     def test_walked_but_unpinned_markdown_fails_loudly(self):
         """Markdown the scanner walks but no assertion pins must NOT be silently ignored (agents-9nir P0).
