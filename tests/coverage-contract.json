@@ -1,0 +1,5 @@
+{
+  "lib/child_env.py": [
+    "tests/test_promotion.py"
+  ]
+}

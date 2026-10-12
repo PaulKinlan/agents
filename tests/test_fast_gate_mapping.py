@@ -310,6 +310,18 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_tool_pins.py", mapped)
         self.assertIn("tests/test_child_env.py", mapped, "fail-closed probe reads the committed tools.yaml (agents-9nir)")
 
+    def test_test_file_change_selects_coverage_contract_audit(self):
+        """agents-vim1: newly added or modified test files must audit the cross-module mock contract."""
+        mapped = resolve_fast_gate(["tests/test_new_feature.py"])
+        self.assertIn("tests/test_coverage_contract.py", mapped)
+        self.assertIn("tests/test_new_feature.py", mapped)
+
+    def test_coverage_contract_mapping(self):
+        """tests/coverage-contract.json maps to test_coverage_contract and test_fast_gate_mapping (agents-1kzf)."""
+        mapped = resolve_fast_gate(["tests/coverage-contract.json"])
+        self.assertIn("tests/test_coverage_contract.py", mapped)
+        self.assertIn("tests/test_fast_gate_mapping.py", mapped)
+
     def test_docs_change_maps_to_docs_drift(self):
         """docs/* must include the suite that pins docs/INTEGRATION.md by content (agents-9nir review)."""
         mapped = resolve_fast_gate(["docs/INTEGRATION.md"])
@@ -491,7 +503,7 @@ class TestFastGateMapping(unittest.TestCase):
             # agents-h17y: the tests/test_*.py arm also maps tests/test_direct_run_completeness.py,
             # so any test-file run names it alongside the changed file - the class-wide __main__-block
             # invariant (agents-9lh8) is re-checked whenever a test file changes.
-            self.assertIn("fast-gate: passed: tests/test_direct_run_completeness.py tests/test_pass_probe_tmp.py", res.stdout)
+            self.assertIn("fast-gate: passed: tests/test_coverage_contract.py tests/test_direct_run_completeness.py tests/test_pass_probe_tmp.py", res.stdout)
         finally:
             probe.unlink(missing_ok=True)
 
@@ -511,7 +523,7 @@ class TestFastGateMapping(unittest.TestCase):
             passed_lines = [l for l in res.stdout.splitlines() if l.startswith("fast-gate: passed:")]
             self.assertEqual(len(passed_lines), 1, f"expected exactly one 'fast-gate: passed:' line, got: {passed_lines}")
             suites_on_marker = passed_lines[0].replace("fast-gate: passed:", "").split()
-            expected = sorted(["tests/test_direct_run_completeness.py",
+            expected = sorted(["tests/test_coverage_contract.py", "tests/test_direct_run_completeness.py",
                                str(probe_a.relative_to(ROOT)), str(probe_b.relative_to(ROOT))])
             self.assertEqual(sorted(suites_on_marker), expected,
                              f"completion marker must name all suites on the single marker line: {passed_lines[0]}")
@@ -529,7 +541,7 @@ class TestFastGateMapping(unittest.TestCase):
             env["GIT_CHANGED"] = "tests/test_abort_probe_tmp.py"
             res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 1, f"expected rc 1, got {res.returncode}")
-            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp tests.test_direct_run_completeness)", res.stderr)
+            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp tests.test_coverage_contract tests.test_direct_run_completeness)", res.stderr)
         finally:
             probe.unlink(missing_ok=True)
 
@@ -559,7 +571,7 @@ class TestFastGateMapping(unittest.TestCase):
             time.sleep(0.3)
             os.killpg(p.pid, signal.SIGTERM)
             _, stderr = p.communicate()
-            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_direct_run_completeness tests.test_sleep_probe_tmp))", stderr)
+            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_coverage_contract tests.test_direct_run_completeness tests.test_sleep_probe_tmp))", stderr)
         finally:
             probe.unlink(missing_ok=True)
 

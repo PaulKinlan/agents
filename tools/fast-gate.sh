@@ -146,6 +146,73 @@ run=""
 mapped=""
 unmatched=""
 
+# Contract-declared cross-file coverage dependencies (agents-1kzf)
+if [ -e "tests/coverage-contract.json" ]; then
+  if [ ! -f "tests/coverage-contract.json" ]; then
+    echo "fast-gate: FAIL: tests/coverage-contract.json exists but is not a regular file" >&2
+    exit 1
+  fi
+  if ! contract_suites=$(python3 -c "
+import json, sys, os, fnmatch, glob
+try:
+    with open('tests/coverage-contract.json', encoding='utf-8') as f:
+        data = json.load(f)
+except Exception as e:
+    print(f'fast-gate: FAIL: tests/coverage-contract.json is malformed: {e}', file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict):
+    print('fast-gate: FAIL: tests/coverage-contract.json must be a JSON object mapping paths to suite lists', file=sys.stderr)
+    sys.exit(1)
+if len(data) == 0:
+    print('fast-gate: FAIL: tests/coverage-contract.json must not be empty', file=sys.stderr)
+    sys.exit(1)
+
+for pat, suites in data.items():
+    if not isinstance(pat, str) or not pat:
+        print(f'fast-gate: FAIL: coverage-contract pattern must be non-empty string, got {pat!r}', file=sys.stderr)
+        sys.exit(1)
+    if not os.path.exists(pat) and not glob.glob(pat):
+        print(f'fast-gate: FAIL: coverage-contract target {pat!r} does not exist', file=sys.stderr)
+        sys.exit(1)
+    if isinstance(suites, str):
+        suite_list = [suites]
+    elif isinstance(suites, list):
+        suite_list = suites
+    else:
+        print(f'fast-gate: FAIL: coverage-contract value for {pat!r} must be list of suite paths or string, got {type(suites).__name__}', file=sys.stderr)
+        sys.exit(1)
+    if len(suite_list) == 0:
+        print(f'fast-gate: FAIL: coverage-contract suite list for {pat!r} must not be empty', file=sys.stderr)
+        sys.exit(1)
+    for s in suite_list:
+        if not isinstance(s, str) or not s:
+            print(f'fast-gate: FAIL: coverage-contract suite for {pat!r} must be non-empty string, got {s!r}', file=sys.stderr)
+            sys.exit(1)
+        if not os.path.isfile(s):
+            print(f'fast-gate: FAIL: coverage-contract suite {s!r} for {pat!r} does not exist', file=sys.stderr)
+            sys.exit(1)
+
+changed = sys.argv[1:]
+out = set()
+for fp in changed:
+    norm_fp = os.path.normpath(fp)
+    for pat, suites in data.items():
+        norm_pat = os.path.normpath(pat)
+        if norm_fp == norm_pat or fnmatch.fnmatch(norm_fp, pat) or norm_fp.endswith(os.sep + norm_pat):
+            if isinstance(suites, list):
+                out.update(suites)
+            elif isinstance(suites, str):
+                out.add(suites)
+print(' '.join(sorted(out)))
+" $changed); then
+    echo "fast-gate: aborting due to contract error" >&2
+    exit 1
+  fi
+  if [ -n "$contract_suites" ]; then
+    mapped="$mapped $contract_suites"
+  fi
+fi
+
 FAST_GATE_STAGE="mapping changed files"
 while IFS= read -r f; do
   [ -z "$f" ] && continue
@@ -159,6 +226,8 @@ while IFS= read -r f; do
       # Measured cost: 0.67s for the suite (3 tests; the AST walk over 71 modules is 0.62s of it).
       run="$run $f"
       mapped="$mapped tests/test_direct_run_completeness.py"
+      # agents-vim1: newly added or modified test files must audit the cross-module mock coverage contract
+      mapped="$mapped tests/test_coverage_contract.py"
       ;;
     tests/containment_harness.py)
       # agents-3iog: the shared harness (setUp plus 11 helpers) the containment suites
@@ -204,6 +273,10 @@ while IFS= read -r f; do
       # tmp-tree dirs). Measured, not inferred (agents-3iog): removing `env` from the
       # payload turns THIS arm red and leaves the five sibling containment modules green.
       mapped="$mapped tests/test_containment_engine_credentials.py"
+      ;;
+    tests/coverage-contract.json)
+      # Contract-declared cross-file coverage dependencies (agents-1kzf).
+      mapped="$mapped tests/test_coverage_contract.py tests/test_fast_gate_mapping.py"
       ;;
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
