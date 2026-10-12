@@ -1,5 +1,9 @@
 {
   "lib/child_env.py": [
     "tests/test_promotion.py"
+  ],
+  "tools/check-cmd.sh": [
+    "tests/test_check_conf_consistency.py",
+    "tests/test_gate_entrypoint_config.py"
   ]
 }

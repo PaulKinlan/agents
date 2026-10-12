@@ -105,6 +105,16 @@ class TestCoverageContract(unittest.TestCase):
             "track them as required consumers (agents-1kzf)."
         )
 
+    def test_check_cmd_is_declared_in_coverage_contract(self):
+        """tools/check-cmd.sh has .py consumers (tests/test_check_conf_consistency.py and
+        tests/test_gate_entrypoint_config.py); because check-coverage.py's stem/import heuristic
+        does not match .sh sources to .py tests, it must be declared in coverage-contract.json (agents-b0eg)."""
+        contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+        self.assertIn("tools/check-cmd.sh", contract)
+        suites = contract["tools/check-cmd.sh"]
+        self.assertIn("tests/test_check_conf_consistency.py", suites)
+        self.assertIn("tests/test_gate_entrypoint_config.py", suites)
+
     def test_oracle_extract_coverage_flags_omitted_contract_suites(self):
         """When check-coverage.py runs on a diff modifying a contracted file (e.g. lib/child_env.py)
         without executing the contracted suite (tests/test_promotion.py), it must report
