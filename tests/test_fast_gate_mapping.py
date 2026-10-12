@@ -568,6 +568,29 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertEqual(classes, ["TestNoUnboundedSubprocess"],
                          "tests/test_tree_guards.py must contain exactly the pinned tree-guard classes")
 
+    def test_a_tier_file_delta_selects_the_suite_that_guards_its_contents(self):
+        """agents-azi1, found by the merger landing a union rather than by anyone anticipating it: the
+        always-on tier file's CONTENTS are guarded by the pin in THIS module
+        (test_tree_guard_tier_module_holds_only_tree_property_tests asserts it holds exactly
+        ['TestNoUnboundedSubprocess']), so a change to tests/test_tree_guards.py must select this module.
+        Without it, adding a class to the tier file PASSED the fast gate and FAILED the full gate: a real
+        verdict about the file under review that was blind to the rule governing it - worse than an
+        omission, because it says PASS. The generic tests/test_*.py arm cannot cover this: it adds
+        direct_run_completeness and coverage_contract, neither of which reads the tier file (measured:
+        exactly one suite names it). Both halves are asserted, because an explicit arm REPLACES the
+        generic one (agents-bwbe) and a narrow fix would otherwise silently drop what it already gave."""
+        mapped = resolve_fast_gate(["tests/test_tree_guards.py"])
+        self.assertIn("tests/test_fast_gate_mapping.py", mapped,
+                      "a change to the always-on tier file must run the suite that pins its contents "
+                      "(agents-azi1: without it the fast gate passes a class-creep change that the full "
+                      "gate rejects)")
+        self.assertIn("tests/test_direct_run_completeness.py", mapped,
+                      "the explicit tier-file arm must keep what the generic tests/test_*.py arm gave: "
+                      "the __main__-last invariant (agents-9lh8, agents-h17y)")
+        self.assertIn("tests/test_coverage_contract.py", mapped,
+                      "the explicit tier-file arm must keep what the generic tests/test_*.py arm gave: "
+                      "the cross-module mock coverage contract (agents-vim1)")
+
     def test_an_unresolvable_base_is_an_error_not_an_empty_delta(self):
         """A base that is not a commit must FAIL LOUDLY, never fall back to the smoke subset (agents-c1z0 P1).
 
