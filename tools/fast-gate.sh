@@ -27,48 +27,61 @@ set -euo pipefail
 # Establish hermetic test environment: scrub ambient operator host config (agents-v1a2).
 unset FACTORY_TOOL_PINS 2>/dev/null || true
 export FACTORY_ALLOW_UNPINNED_TOOLS=1  # READ THE SCOPE BEFORE WORRYING (agents-xdmh): this
-# waives only the REQUIREMENT that a trusted tool HAVE a pin (lib/tool_pins.py:432
-# _require_pin, which fires at :441 when sha256 is None and not _unpinned_allowed()). It
-# does NOT touch content verification: verify_pin (:457) contains no _unpinned_allowed()
-# call, so a sha256 that is present and MISMATCHED still raises - measured, with that
-# mismatch case refused as the control.
+# waives only the REQUIREMENT that a trusted tool HAVE a pin: lib/tool_pins.py's
+# _require_pin refuses a tool whose entry carries no sha256, and the _unpinned_allowed()
+# branch inside it is what this opt-in flips. It does NOT touch content verification:
+# _unpinned_allowed() is consulted ONLY by _require_pin and never by verify_pin, so a sha256
+# that is present and MISMATCHED still raises - measured, with that mismatch case refused as
+# the control. NAMED BY FUNCTION, NOT BY LINE: the numbers that used to be here (:432/:441/
+# :457) were true at ONE tree and went stale when lib/tool_pins.py grew ~140 lines in the
+# oq3j landing, which moved all three by more than a hundred lines (agents-lh2f). A function
+# name survives a rebase; a line number does not, which is why this note now carries none
+# that a reader is meant to follow.
 #
 # THE UNSET ABOVE IS A SCRUB, AND SAYING OTHERWISE WAS WRONG (agents-x2uw). An earlier
 # version of this note claimed the unset "is not a scrub either" because tool_pins.py
 # "swaps the host override for the committed pins - STRICTER for the pins that exist".
 # THAT IS MEASURABLY FALSE: the committed tools.yaml ships its pins COMMENTED OUT (0
-# active, 13 commented), while a host pins its own tools - host_pins_path() ->
-# $HOME/.config/factory/tools.pins.yaml, 9 pinned tools on this VM on 2026-10-12. (This
-# line used to say "8" and named ~/.fleet/../tools.pins.yaml, which DOES NOT EXIST: a note
-# that sends a reader to a missing path and a stale count is the same class of error as
-# the direction claim above, so both are re-measured rather than carried forward.) The
+# active, 13 commented), while a host pins its own tools - 9 pinned tools in
+# $HOME/.config/factory/tools.pins.yaml on this VM on 2026-10-12. HOW THAT FILE IS REACHED
+# MATTERS, AND CALLING host_pins_path() BARE IS NOT HOW (agents-lh2f): measured on the
+# landed tree, a bare call returns None, and so does one with an ambient FACTORY_TOOL_PINS.
+# It is selected only by configure_host_pins(<path>) for a run that chose it explicitly, by
+# configure_host_pins(None) through the loud deprecated fallback whose warning names
+# agents-uekw, or - for a CHILD - by FACTORY_VERIFIED_TOOL_PINS. (This line used to say "8",
+# and before that it named ~/.fleet/../tools.pins.yaml, which DOES NOT EXIST: a note that
+# sends a reader to a missing path, a stale count, or a call they can make themselves and
+# see return None is the same class of error as the direction claim above, so all of it is
+# re-measured rather than carried forward.) The
 # committed set is EMPTY, so unsetting FACTORY_TOOL_PINS REMOVES pins it does not replace,
-# and for every host-pinned tool this gate runs with NO pin where the ambient environment
-# had one - LOOSER, not stricter, for exactly the tools the host pinned. With a fake git
-# first on PATH, the ambient environment resolves /usr/bin/git (the host pin wins) and THIS
-# GATE RESOLVES THE PLANTED FAKE. The opt-in above is what then lets such a tool resolve at
-# all, by PATH order.
+# and for every host-pinned tool this gate runs with NO pin where a host run had one -
+# LOOSER, not stricter, for exactly the tools the host pinned. MEASURED on the landed tree
+# with a fake git first on PATH: a run that SELECTED the host file resolves /usr/bin/git (the
+# host pin wins, the fake is NOT selected), while THIS GATE RESOLVES THE PLANTED FAKE - and
+# an unconfigured process with no waiver REFUSES instead ("not pinned"), so the opt-in above
+# is what turns that refusal into a PATH-order resolution.
 #
 # RE-MEASURED INDEPENDENTLY, both directions, by the owner of agents-x2uw - a withdrawn
 # claim re-stated the other way still has to be measured, or the correction carries a
-# measurement's authority while being the same mistake: ambient -> /usr/bin/git; gate env
-# -> the planted fake; and the WAIVER HALF HOLDS - a pin that is PRESENT and MISMATCHED is
-# refused BOTH with and without FACTORY_ALLOW_UNPINNED_TOOLS=1 (verify_pin never consults
-# _unpinned_allowed()), so the waiver buys an UNPINNED tool a PATH-order resolution and
-# buys a PINNED one nothing.
+# measurement's authority while being the same mistake: the host-selected run -> /usr/bin/git,
+# this gate's env -> the planted fake; and the WAIVER HALF HOLDS - a pin that is PRESENT and
+# MISMATCHED is refused BOTH with and without FACTORY_ALLOW_UNPINNED_TOOLS=1 (that option is
+# read only by _require_pin, never by verify_pin), so the waiver buys an UNPINNED tool a
+# PATH-order resolution and buys a PINNED one nothing.
 #
 # SO THE TWO HALVES ARE ASYMMETRIC, and the note says so rather than smoothing it over:
 # the WAIVER is narrow and measured (content verification still runs on any pin that
 # exists); the DIRECTION is "not a scrub" ONLY for a tool that HAS a committed pin, WHICH
 # THIS REPO CURRENTLY HAS NONE OF. The pin-semantics half stands; the direction claim is
 # withdrawn and the citations were re-measured against origin/main rather than carried
-# forward (agents-hs2g; the earlier :426/:442/:397 were stale or unsupported).
-# The note hung off the OPT-IN (:29) while the UNSET (:28) carried none, which is why the
-# pair first read like a scrub. (This sentence used to say ":29 had no note where :28 has
-# one", which is INVERTED - and inverted in its own introducing commit, 70d6ac6, where :28
-# is the bare `unset FACTORY_TOOL_PINS` and :29 is the `export` line carrying this whole
-# note. Checked against that commit rather than re-worded, because a sentence about which
-# line is annotated is as checkable as the pin counts above.)
+# forward (agents-hs2g; the earlier citations were stale or unsupported).
+# The note hung off the `export FACTORY_ALLOW_UNPINNED_TOOLS=1` line while the
+# `unset FACTORY_TOOL_PINS` line above it carried none, which is why the pair first read
+# like a scrub. (This sentence used to say ":29 had no note where :28 has one", which is
+# INVERTED - and inverted in its own introducing commit 70d6ac6, where the bare `unset` line
+# is the one WITHOUT a note and the `export` line is the one carrying it. Checked against
+# that commit rather than re-worded, and stated as COMMANDS rather than line numbers,
+# because those two lines shift the moment anything is inserted above them.)
 
 # Fail-visible abort diagnostics (agents-adhc).
 # UNCOVERABLE BY CONSTRUCTION: SIGKILL (kill -9), kernel OOM-killer invocations,
