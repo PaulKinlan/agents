@@ -140,7 +140,7 @@ def run_station_command(
     if on_spawn is not None:
         try:
             on_spawn(proc)
-        except BaseException:
+        except BaseException as hook_error:
             # agents-8z4z: THE HOOK MUST NOT BE ABLE TO ORPHAN THE CHILD IT WAS HANDED. The
             # call used to sit outside every cleanup path, so an exception from it (the
             # broker's registration path failing, a dead pid, a socket error) propagated
@@ -151,16 +151,58 @@ def run_station_command(
             # hook's failure mode worse than the hook's absence. BaseException, not
             # Exception: an interrupt during the hook would orphan the child just as
             # certainly, and the kill is bounded and idempotent either way.
-            _kill_and_reap(proc)
+            #
+            # agents-dhk8: AND A REAP THAT ITSELF FAILS MUST NOT BE THE END OF THE STORY.
+            # Measured before this change (tests/test_budget.py
+            # TestRunStationCommand.test_a_failing_group_kill_still_contains_the_child):
+            # with the group kill raising, the caller saw the reap's OSError INSTEAD of the
+            # hook's RuntimeError - the hook's own failure silently misattributed - and the
+            # child SURVIVED. So the direct child is killed when the group path is what
+            # failed, and the hook's exception is then propagated, which keeps the reap's
+            # error in its __context__ chain rather than letting it replace the cause.
+            try:
+                _kill_and_reap(proc)
+            except BaseException as reap_error:
+                # The reap's own failure must not vanish either: it happened WHILE HANDLING
+                # the hook's error, which is the chain Python builds for a nested raise, so
+                # the hook's exception stays the one reported and the reap's stays readable
+                # in it. Swallowing it would be the same class of defect as the
+                # misattribution above, one order smaller.
+                _best_effort_kill(proc)
+                hook_error.__context__ = reap_error
             raise
     try:
         stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_and_reap(proc)
-        raise StationTimeout(
+        timeout_error = StationTimeout(
             f"{budget.label}: {step} exceeded the {budget.minutes:g} min station budget; "
             f"process group killed"
-        ) from None
+        )
+        # agents-0hbq: THE EXPIRY PATH NEEDS THE SAME CONTAINMENT AS THE HOOK PATH. It used to
+        # call _kill_and_reap bare, so a reap that failed here did exactly what the hook path
+        # was fixed for: the caller was told about the cleanup's OSError INSTEAD of the station
+        # budget expiring (StationTimeout replaced by its own teardown's error), and a child
+        # holding live model credentials stayed alive after the caller had been told the budget
+        # was enforced. Measured before this change: OSError propagated, is StationTimeout
+        # False, child alive 1 s after the caller returned. Same three pieces as the hook path -
+        # keep the FIRST fault, best-effort kill the child, and leave the reap's error in the
+        # chain rather than in place of the cause.
+        reap_error = None
+        try:
+            _kill_and_reap(proc)
+        except BaseException as exc:
+            _best_effort_kill(proc)
+            reap_error = exc
+        if reap_error is not None:
+            # EXPLICIT CHAINING IS REQUIRED HERE, unlike the hook path above: that path
+            # RE-RAISES the same exception object, so a __context__ set by hand survives, while
+            # this path raises a NEW StationTimeout from inside the handler and CPython then
+            # sets its __context__ to the TimeoutExpired being handled - which silently DROPPED
+            # the reap's error in my first version of this fix (the expiry-path test caught it:
+            # it found the TimeoutExpired's message in the chain instead of "killpg failed").
+            # `from` keeps the reap failure readable in every traceback and crash log.
+            raise timeout_error from reap_error
+        raise timeout_error from None
     if kill_group_on_exit:
         try:
             os.killpg(proc.pid, signal.SIGKILL)  # pgid == pid: the session started above
@@ -191,14 +233,59 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
     cleanup improvement lands on both rather than on whichever branch was edited last. The
     child IS our own process, so communicate() reaps it; descendants are not, which is what
     _wait_for_group_exit is for.
+
+    BOUNDED EVEN WHEN THE DRAIN CANNOT FINISH (agents-dhk8): a descendant that escaped the
+    group (its own session) still holds our stdout/stderr write end, so no communicate() can
+    ever see EOF. Both waits below are therefore bounded, and the pipes are closed when the
+    second one runs out: the remaining holder is neither our child nor in our group, and
+    waiting for it is what made this unbounded (measured: 25.1 s against a descendant that
+    slept 25 s, on the hook path and on the expiry path alike).
     """
     _kill_process_group(proc)
     try:
-        proc.communicate(timeout=5)
+        # The same bound as the second wait (single-sourced, agents-dhk8): the first drain is
+        # bounded by the module's group-exit wait rather than by a second literal.
+        proc.communicate(timeout=GROUP_EXIT_WAIT_SECONDS)
     except subprocess.TimeoutExpired:  # a child escaped the group and holds the pipes
         proc.kill()
-        proc.communicate()
+        try:
+            proc.communicate(timeout=GROUP_EXIT_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _close_output_pipes(proc)
     _wait_for_group_exit(proc.pid)
+
+
+def _best_effort_kill(proc: subprocess.Popen) -> None:
+    """Kill `proc` after the reap failed, without masking the exception being propagated.
+
+    _kill_process_group falls back to the direct child only for ProcessLookupError and
+    PermissionError, so a group kill that failed any other way left the child running. This
+    retries the group path and then the direct child, swallowing everything: it runs inside
+    the handler for an exception that must survive, and a second failure here belongs in
+    that exception's __context__ chain rather than in place of it.
+    """
+    try:
+        _kill_process_group(proc)
+    except BaseException:
+        try:
+            proc.kill()
+        except BaseException:
+            pass
+
+
+def _close_output_pipes(proc: subprocess.Popen) -> None:
+    """Close the pipes no communicate() could drain, so their descriptors do not leak.
+
+    Only reached when a process outside our group holds a write end. The station's output is
+    already discarded on every path that gets here (the hook raised, or the budget expired),
+    so there is nothing to read and no reader left to serve.
+    """
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 GROUP_EXIT_WAIT_SECONDS = 5.0
