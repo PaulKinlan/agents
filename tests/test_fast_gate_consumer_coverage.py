@@ -72,75 +72,89 @@ _FLEET_ORACLE = Path("/home/exedev/fleet/remote/check-coverage.py")
 # Each entry names WHY it is exempt. Format: module -> {suite: reason}.
 # MODULES: {"<lib module stem>": {"<tests/ suite>": "<why this omission is known and accepted>"}}
 # GENERATED FROM MEASUREMENT (agents-pdth), not typed: re-derive with the oracle in this file.
+# ---------------------------------------------------------------------------------------------------
+# THE ALLOWLIST, AND WHY IT CARRIES NO REASONS (agents-02s9). Each entry is just the suite now; the reason
+# is DERIVED when a test fails, from the gate's own answer to "what do you select for this module" - a
+# measurement rather than a sentence.
+#
+# The reasons used to be prose, one string per module, and all of them said the arm "selects only the
+# module's namesake suite(s)". That was true for the modules that fall to the generic lib/*.py) arm and
+# FALSE for those with a dedicated arm - and it never mentioned the two always-on tiers every arm adds. A
+# false reason attached to a true fact is worse than no reason, because the next reader trusts the wrong
+# mechanism; the fix is not better prose but a reason that cannot be written down wrong.
+#
+# The arm's PATTERN is named rather than its LINE - the line moves, the pattern is greppable, and the
+# selection beside it is measured rather than read.
+# ---------------------------------------------------------------------------------------------------
 CONSUMER_COVERAGE_ALLOWLIST = {
     "candidate_identity": {
-        "tests/test_findings.py": "basename arm: this suite imports lib/candidate_identity.py, but the arm selects only the module's namesake suite(s), so a change to lib/candidate_identity.py does not run it",
-        "tests/test_scan_surface.py": "basename arm: this suite imports lib/candidate_identity.py, but the arm selects only the module's namesake suite(s), so a change to lib/candidate_identity.py does not run it",
+        "tests/test_findings.py",
+        "tests/test_scan_surface.py",
     },
     "child_env": {
-        "tests/containment_harness.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
-        "tests/test_containment.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
-        "tests/test_containment_adapters.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
-        "tests/test_containment_declarations.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
-        "tests/test_containment_egress.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
-        "tests/test_containment_engine_credentials.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
-        "tests/test_containment_prepass_pins.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
-        "tests/test_factory_core.py": "basename arm: this suite imports lib/child_env.py, but the arm selects only the module's namesake suite(s), so a change to lib/child_env.py does not run it",
+        "tests/containment_harness.py",
+        "tests/test_containment.py",
+        "tests/test_containment_adapters.py",
+        "tests/test_containment_declarations.py",
+        "tests/test_containment_egress.py",
+        "tests/test_containment_engine_credentials.py",
+        "tests/test_containment_prepass_pins.py",
+        "tests/test_factory_core.py",
     },
     "containment": {
-        "tests/containment_harness.py": "basename arm: this suite imports lib/containment.py, but the arm selects only the module's namesake suite(s), so a change to lib/containment.py does not run it",
+        "tests/containment_harness.py",
     },
     "credential_broker": {
-        "tests/containment_harness.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_child_env.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_containment.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_containment_adapters.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_containment_declarations.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_containment_egress.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_containment_engine_credentials.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_containment_prepass_pins.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_factory_core.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
-        "tests/test_line_andon.py": "basename arm: this suite imports lib/credential_broker.py, but the arm selects only the module's namesake suite(s), so a change to lib/credential_broker.py does not run it",
+        "tests/containment_harness.py",
+        "tests/test_child_env.py",
+        "tests/test_containment.py",
+        "tests/test_containment_adapters.py",
+        "tests/test_containment_declarations.py",
+        "tests/test_containment_egress.py",
+        "tests/test_containment_engine_credentials.py",
+        "tests/test_containment_prepass_pins.py",
+        "tests/test_factory_core.py",
+        "tests/test_line_andon.py",
     },
     "egress_proxy": {
-        "tests/containment_harness.py": "not a suite: is_test_filename excludes it and it has its own arm, so no arm can ever select it AS A SUITE. The arm for lib/egress_proxy.py now selects the module's namesake suite AND the six containment suites, so this entry is not stale - none of those can cover a non-suite harness - and it is kept, with this reason corrected, because the omission is real (agents-bwbe; agents-m4pf)",
-        "tests/test_containment.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_adapters.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_declarations.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_egress.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_engine_credentials.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_prepass_pins.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
+        "tests/containment_harness.py",
+        "tests/test_containment.py",
+        "tests/test_containment_adapters.py",
+        "tests/test_containment_declarations.py",
+        "tests/test_containment_egress.py",
+        "tests/test_containment_engine_credentials.py",
+        "tests/test_containment_prepass_pins.py",
     },
     "findings": {
-        "tests/test_candidate_identity.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
-        "tests/test_factory_core.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
-        "tests/test_factory_truth.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
-        "tests/test_perf_review.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
+        "tests/test_candidate_identity.py",
+        "tests/test_factory_core.py",
+        "tests/test_factory_truth.py",
+        "tests/test_perf_review.py",
     },
     "sandbox": {
-        "tests/containment_harness.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_adapter_auth_failure.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_containment.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_containment_adapters.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_containment_declarations.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_containment_egress.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_containment_engine_credentials.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_containment_prepass_pins.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_factory_core.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_factory_truth.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_factory_truth_2.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_line_andon.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_pi_keyless_broker.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_prompt_exposure.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
-        "tests/test_report_schema.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
+        "tests/containment_harness.py",
+        "tests/test_adapter_auth_failure.py",
+        "tests/test_containment.py",
+        "tests/test_containment_adapters.py",
+        "tests/test_containment_declarations.py",
+        "tests/test_containment_egress.py",
+        "tests/test_containment_engine_credentials.py",
+        "tests/test_containment_prepass_pins.py",
+        "tests/test_factory_core.py",
+        "tests/test_factory_truth.py",
+        "tests/test_factory_truth_2.py",
+        "tests/test_line_andon.py",
+        "tests/test_pi_keyless_broker.py",
+        "tests/test_prompt_exposure.py",
+        "tests/test_report_schema.py",
     },
     "tool_pins": {
-        "tests/test_bench_runner.py": "basename arm: this suite imports lib/tool_pins.py, but the arm selects only the module's namesake suite(s), so a change to lib/tool_pins.py does not run it",
-        "tests/test_containment_prepass_pins.py": "basename arm: this suite imports lib/tool_pins.py, but the arm selects only the module's namesake suite(s), so a change to lib/tool_pins.py does not run it",
-        "tests/test_factory_core.py": "basename arm: this suite imports lib/tool_pins.py, but the arm selects only the module's namesake suite(s), so a change to lib/tool_pins.py does not run it",
-        "tests/test_hermetic_env.py": "basename arm: this suite imports lib/tool_pins.py, but the arm selects only the module's namesake suite(s), so a change to lib/tool_pins.py does not run it",
-        "tests/test_sink_adapters.py": "basename arm: this suite imports lib/tool_pins.py, but the arm selects only the module's namesake suite(s), so a change to lib/tool_pins.py does not run it",
-        "tests/test_store_lock_timeout.py": "basename arm: this suite imports lib/tool_pins.py, but the arm selects only the module's namesake suite(s), so a change to lib/tool_pins.py does not run it",
+        "tests/test_bench_runner.py",
+        "tests/test_containment_prepass_pins.py",
+        "tests/test_factory_core.py",
+        "tests/test_hermetic_env.py",
+        "tests/test_sink_adapters.py",
+        "tests/test_store_lock_timeout.py",
     },
 }
 
@@ -167,6 +181,35 @@ def _strip_code(source):
     for pattern, repl in _STRIP:
         source = pattern.sub(repl, source)
     return source
+
+
+def _arm_pattern(module):
+    """The case pattern in tools/fast-gate.sh that owns lib/<module>.py, or the generic catch-all.
+
+    THE PATTERN RATHER THAN ITS LINE: the line moves on every unrelated edit, while the pattern is greppable
+    and the selection printed beside it is measured. A reason naming a stale line is the same defect as a
+    reason naming the wrong arm, one commit later. Read once per FAILING run, never on a green one.
+    """
+    text = (ROOT / "tools" / "fast-gate.sh").read_text(encoding="utf-8")
+    if re.search(rf"^\s+lib/{re.escape(module)}\.py\)", text, re.MULTILINE):
+        return f"lib/{module}.py)"
+    return "lib/*.py)"
+
+def _why_omitted(module, suite):
+    """Why `suite` imports lib/<module>.py and the gate still does not run it for a change to that file.
+
+    DERIVED, NOT WRITTEN DOWN (agents-02s9). The sentence is built from the gate's own answer, so it cannot
+    describe the wrong mechanism - which is what all 62 hand-written reasons did for the seven modules that
+    have a dedicated arm, every one of them claiming the arm selects "only the namesake suite(s)".
+
+    Cost on a green run: nothing. It is called only for an unlisted omission or a stale entry, and the
+    selection it quotes is the _selected_suites the test already asked for.
+    """
+    selected = sorted(_selected_suites(f"lib/{module}.py"))
+    return (
+        f"{suite} imports lib/{module}.py, but the {_arm_pattern(module)} arm in tools/fast-gate.sh does not "
+        f"select it - it selects {', '.join(s.split('/')[-1] for s in selected)}"
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -263,10 +306,12 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
             allowed = set(CONSUMER_COVERAGE_ALLOWLIST.get(module, {}))
             unlisted = sorted(omitted - allowed)
             if unlisted:
+                detail = "\n  ".join(_why_omitted(module, s) for s in unlisted)
                 failures.append(
-                    f"{path} omits {len(unlisted)} consumer(s) and they are not in the allowlist: "
-                    f"{', '.join(unlisted)}. Fix the arm in tools/fast-gate.sh, or add each entry to "
-                    f"CONSUMER_COVERAGE_ALLOWLIST with the reason it is exempt (agents-pdth)."
+                    f"{path} omits {len(unlisted)} consumer(s) and they are not in the allowlist:\n  "
+                    f"{detail}\nFix the arm in tools/fast-gate.sh, or add each suite to "
+                    f"CONSUMER_COVERAGE_ALLOWLIST - its exemption is then explained by the same "
+                    f"measurement (agents-pdth)."
                 )
         self.assertEqual(failures, [], "\n".join(failures))
 
@@ -277,10 +322,11 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
             omitted = _importing_suites(module) - _selected_suites(f"lib/{module}.py")
             for suite in entries:
                 if suite not in omitted:
+                    still_runs = [s.split("/")[-1] for s in sorted(_selected_suites(f"lib/{module}.py"))]
                     stale.append(
                         f"CONSUMER_COVERAGE_ALLOWLIST['{module}']['{suite}'] is STALE: the gate now "
-                        f"selects it, or the suite no longer imports the module. Delete the entry so "
-                        f"the list shrinks (agents-pdth)."
+                        f"selects it, or the suite no longer imports the module. For that file the gate "
+                        f"selects {still_runs}. Delete the entry so the list shrinks (agents-pdth)."
                     )
         self.assertEqual(stale, [], "\n".join(stale))
 
