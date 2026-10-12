@@ -681,7 +681,13 @@ class TestGithubIssuesPinBoundary(unittest.TestCase):
         # The module-level dev/test opt-in this file sets for its stub tools is exactly
         # what these properties pin, so it comes OFF for this class.
         os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
-        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        # agents-oq3j: the sink resolves gh in THIS process (lib.sinks), which is the HOST path,
+        # so the pins file is the run's own decision rather than an environment name.
+        from lib import tool_pins as tool_pins_module
+        self.addCleanup(setattr, tool_pins_module, "_configured_host_pins",
+                        tool_pins_module._UNSET_HOST_PINS)
+        os.environ.pop("FACTORY_TOOL_PINS", None)
+        tool_pins_module.configure_host_pins(self.pins)
         os.environ["FAKE_GH_LOG"] = str(self.fake_log)
         self.finding = dict(SAMPLE, state="new", agent="probe",
                             fingerprint=compute_fingerprint("lint", SAMPLE["rule_id"],

@@ -223,14 +223,31 @@ while IFS= read -r f; do
       ;;
     lib/sandbox.py)
       # Bubblewrap sandbox (bwrap isolation, binds, proc/env masking) plus no-bwrap refusal contract (agents-vt7w).
-      mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py"
+      #
+      # agents-oq3j: tests/test_station_trusted_tool_pins.py joins (measured 0.8 s). Its sandboxed
+      # case drives sandbox_command with a dispatcher-built child env and the read-only pins bind,
+      # which is exactly this module's child-side contract; the gate's coverage oracle named it as
+      # an omitted consumer when the child channel moved, and it caught the regression.
+      mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py tests/test_station_trusted_tool_pins.py"
+      ;;
+    lib/child_env.py)
+      # The child environment builder. Its own suite plus the two consumers that resolve trusted
+      # tools from the environment it constructs (agents-oq3j).
+      mapped="$mapped tests/test_child_env.py tests/test_station_trusted_tool_pins.py tests/test_sinks.py"
       ;;
     lib/tool_pins.py)
       # Trusted-tool pinning (agents-7bj). Since agents-28nn this module also authenticates
       # bwrap itself, and the property that an unauthenticated bwrap is refused BEFORE it
       # executes lives in tests/test_sandbox.py (TestBwrapPinBoundary) — the pins contract
       # alone cannot see a sandbox-side regression.
-      mapped="$mapped tests/test_tool_pins.py tests/test_sandbox.py"
+      #
+      # agents-oq3j: tests/test_station_trusted_tool_pins.py (measured 0.8 s) and
+      # tests/test_sinks.py (measured 8.2 s) join, both named by the gate's own coverage oracle
+      # as omitted consumers when the pins channels were separated. The first is THE handoff
+      # contract (pre-pass child env, sandboxed and unsandboxed); the second is a sink child
+      # resolving `gh` inside this module's fail-closed rule. Each caught a real regression in
+      # that change, which is exactly what the oracle exists to find.
+      mapped="$mapped tests/test_tool_pins.py tests/test_sandbox.py tests/test_station_trusted_tool_pins.py tests/test_sinks.py"
       ;;
     tools/generate-tool-pins.sh)
       # Operator-run pin generator (never invoked by the factory — its own header). SEARCH
