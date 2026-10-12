@@ -113,6 +113,23 @@ mkdir -p "$LOCAL_BIN"
 ln -sfn "$FACTORY_DIR/factory" "$LOCAL_BIN/factory"
 echo "  ✓ CLI binary: linked -> $LOCAL_BIN/factory"
 
+# Gate configuration (agents-l2xb): THIS IS THE CALLER THE TRACKED CONFIG WAS MISSING.
+# The DEPLOYED gate on a fleet VM is ~/fleet/bin/fleet-check, and it reads the per-VM
+# ~/.fleet/check.conf ONLY: it has no project-local lookup, and this repo has neither a
+# deno.json nor a package.json, so with no per-VM file it refuses outright (rc 2) rather
+# than falling back to a wrong command. The TRACKED tools/check.conf therefore reaches the
+# deployed gate through this one step - the tracked file is the SOURCE, the per-VM file is
+# the copy the gate reads. Without it a fresh VM, and a VM whose per-VM copy has gone
+# stale, have no gate command for this project at all while every tracked file says the
+# gate is configured. --install resolves the tracked file, repairs a stale or malformed
+# per-VM file (agents-r1o7), and warns rather than silently clobbering another project's
+# config on a shared HOME (agents-f6no).
+if [[ -f "$FACTORY_DIR/tools/check-cmd.sh" ]]; then
+  bash "$FACTORY_DIR/tools/check-cmd.sh" --install
+else
+  echo "  ! no gate configuration: $FACTORY_DIR/tools/check-cmd.sh is absent, so the deployed gate's config is left untouched"
+fi
+
 if [[ "$INSTALL_HOOKS" == "true" ]]; then
   "$FACTORY_DIR/factory" hook install --all
 fi

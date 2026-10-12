@@ -377,5 +377,71 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         self.assertNotIn("WARNING", r2.stderr)
 
 
+class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
+    """agents-l2xb / agents-3xqa: install.sh - the provisioning entrypoint - IS THE CALLER.
+
+    WHY THIS CLASS EXISTS: tools/check-cmd.sh --install resolves the tracked config and writes
+    the per-VM copy the deployed entrypoint reads, and the suites above prove the entrypoint
+    reads that copy. What was MISSING was the call site: nothing in the provisioning/setup
+    lifecycle ran --install, so a fresh VM - and a VM whose per-VM copy had gone stale - kept
+    the entrypoint's rc-2 refusal while every tracked file said the gate was configured. That
+    is the original P1 shape (a fix in a place the DEPLOYED INVOCATION does not read) one
+    level up, which is why it is pinned by EXECUTION rather than by grepping install.sh for a
+    string: a grep cannot fail when the call site is present but unreachable, and the arm that
+    maps install.sh to this file (agents-3xqa) needs a consumer that actually fails.
+
+    NO git-dirty precondition and no dependency on the fleet bundle, unlike the classes above:
+    install.sh is executed with a TEMP HOME and no network (the checkout branch is taken
+    because `factory` and `agents/` are present in ROOT), so this runs wherever the repo does.
+    """
+
+    def _run_installer(self, home: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["HOME"] = home
+        # Keep the installer off any ambient per-VM redirect or alternate checkout: this test
+        # is about what PROVISIONING writes for a plain, default host.
+        for var in ("FLEET_CHECK_CONF", "SF_INSTALL_DIR", "SF_REPO_URL", "SKILL_FILTER"):
+            env.pop(var, None)
+        return subprocess.run(
+            ["bash", str(ROOT / "install.sh")],
+            capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT),
+        )
+
+    def test_install_sh_installs_the_tracked_gate_command(self):
+        """A fresh host: provisioning writes the file the deployed gate reads, carrying the
+        TRACKED command (including the load-bearing `-t .` hermeticity flag)."""
+        home = tempfile.mkdtemp(prefix="l2xb-provision-")
+        res = self._run_installer(home)
+        self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
+
+        conf = Path(home) / ".fleet" / "check.conf"
+        self.assertTrue(conf.is_file(),
+                        "install.sh must write ~/.fleet/check.conf: it is the only config the "
+                        "deployed gate reads, and nothing else in the provisioning lifecycle does")
+        installed = conf.read_text(encoding="utf-8")
+        m = re.search(r'^CHECK_CMD="(.*)"\s*$', installed, re.M)
+        self.assertIsNotNone(m, f"the installed file must define CHECK_CMD: {installed!r}")
+        self.assertEqual(m.group(1), _tracked_fields()["CHECK_CMD"],
+                         "provisioning must install the TRACKED command; a divergence means a "
+                         "hand-edit or a stale install, and this test cannot tell them apart")
+        self.assertIn("-t .", installed)
+
+    def test_install_sh_repairs_a_stale_per_vm_config(self):
+        """The 'repaired host' half of the acceptance, which is the half a fresh-host check
+        cannot see: a per-VM copy predating the `-t .` hermeticity fix must be REPLACED by
+        the tracked command when provisioning runs, not left in place."""
+        home = tempfile.mkdtemp(prefix="l2xb-repair-")
+        conf = Path(home) / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text('CHECK_CMD="python3 -m unittest discover -s tests -v"\n', encoding="utf-8")
+
+        res = self._run_installer(home)
+        self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
+
+        installed = conf.read_text(encoding="utf-8")
+        self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
+        self.assertIn("-t .", installed)
+
+
 if __name__ == "__main__":
     unittest.main()

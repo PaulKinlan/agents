@@ -183,6 +183,18 @@ while IFS= read -r f; do
       # now asserts the tombstone lands). Neither was reachable from this arm before.
       mapped="$mapped tests/test_retention.py tests/test_hillclimb.py"
       ;;
+    install.sh)
+      # agents-3xqa: THE PROVISIONING ENTRYPOINT MATCHED NO ARM, so an implementer editing it
+      # - the file where the gate-install step is wired (agents-l2xb) - could not pass its own
+      # fast gate: the change fell to the *) arm and exited 1 ("match no mapping arm"). It is a
+      # deliberate mapping arm, not an ignore arm, and THE SUITE IS THE CONSUMER RATHER THAN A
+      # STAND-IN: tests/test_gate_entrypoint_config.py EXECUTES install.sh in a temp HOME and
+      # reads back the per-VM config the deployed gate reads - delete the --install call site
+      # from install.sh and it goes red - so it catches exactly the regression this arm exists
+      # for. It is also already the suite pinning the tracked command's path to the deployed
+      # entrypoint, which is the contract install.sh provisions.
+      mapped="$mapped tests/test_gate_entrypoint_config.py"
+      ;;
     lib/sinks/*.py)
       # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, layering, and adapter registry/commands.
       mapped="$mapped tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_sink_adapters.py"

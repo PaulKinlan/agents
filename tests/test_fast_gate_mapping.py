@@ -293,9 +293,17 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
                 self.assertIn(path, res.stderr, f"{path}: the failure must name the file (agents-9nir)")
 
+    def test_install_sh_maps_to_the_gate_entrypoint_suite(self):
+        """agents-3xqa: install.sh is the provisioning entrypoint and the CALLER of the gate's
+        install step (agents-l2xb). It must select a suite that EXECUTES it - not fail loudly as
+        an unmapped file, which is what made an install.sh edit unable to pass its own fast gate."""
+        mapped = resolve_fast_gate(["install.sh"])
+        self.assertIn("tests/test_gate_entrypoint_config.py", mapped,
+                      "install.sh must map to the suite that drives it in a temp HOME (agents-3xqa)")
+
     def test_unmatched_file_fails_loudly_naming_the_file(self):
         """A changed file matching neither a mapping arm nor the ignore list must fail and name itself."""
-        for path in ("package.json", "install.sh", ".agents/skills/beads/SKILL.md"):
+        for path in ("package.json", ".agents/skills/beads/SKILL.md"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0, f"{path}: unmatched file must fail loudly (agents-9nir)")
@@ -304,9 +312,9 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
-        res = run_fast_gate(["lib/sandbox.py", "install.sh"])
+        res = run_fast_gate(["lib/sandbox.py", ".agents/skills/beads/SKILL.md"])
         self.assertNotEqual(res.returncode, 0, "unmatched file masked by a mapped sibling (agents-9nir)")
-        self.assertIn("install.sh", res.stderr, "the failure must name the unmatched file")
+        self.assertIn(".agents/skills/beads/SKILL.md", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
     def test_an_unresolvable_base_is_an_error_not_an_empty_delta(self):
