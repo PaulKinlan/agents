@@ -92,6 +92,17 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_sandbox.py", mapped,
                       "bwrap-pin boundary suite omitted (agents-28nn)")
 
+    def test_budget_py_maps_to_the_line_runner_suite(self):
+        """agents-8z4z: the line runner is a run_station_command caller (factory:1831), and
+        tests/test_line_andon.py imports StationTimeout from lib.budget to drive the andon
+        timeout path - so a budget.py edit must run it. Evidence is the gate's own coverage
+        oracle, which reported `unmatched: ['lib/budget.py']` / `omitted:
+        ['tests/test_line_andon.py']` on the change that wrapped the on_spawn call."""
+        mapped = resolve_fast_gate(["lib/budget.py"])
+        self.assertIn("tests/test_budget.py", mapped)
+        self.assertIn("tests/test_line_andon.py", mapped,
+                      "line-runner suite omitted for the station-command runner (agents-8z4z)")
+
     def test_generate_tool_pins_maps_to_pins_contract(self):
         """tools/generate-tool-pins.sh must run the suite asserting its TOOLS list covers
         every trusted tool (agents-28nn)."""

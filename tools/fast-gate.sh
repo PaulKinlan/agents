@@ -410,7 +410,20 @@ while IFS= read -r f; do
       # engine-pid handoff to the credential broker's peer gate): its own unit suite, the
       # dispatcher suites that consume run_station_command, and the broker suite whose
       # peer-gate contract the handoff serves.
-      mapped="$mapped tests/test_budget.py tests/test_factory_core.py tests/test_credential_broker.py"
+      #
+      # agents-8z4z: tests/test_line_andon.py JOINS THIS UNION, AND THE EVIDENCE IS THE
+      # GATE'S OWN COVERAGE ORACLE, NOT MY JUDGEMENT. On the change that wrapped the on_spawn
+      # call, the fast gate PASSED while reporting `unmapped: ['lib/budget.py']` with
+      # `omitted: ['tests/test_line_andon.py']` - the independent oracle had found this suite
+      # as a consumer and caught that the union did not run it. It IS one: the line runner is
+      # a run_station_command caller (factory:1831 for the engine, :1573 pre-pass, :2144
+      # findings dispatch), and that suite imports StationTimeout from lib.budget (:496, :523)
+      # to drive the andon timeout path and COPIES lib/budget.py into its fixture tree (:112).
+      # So a budget.py edit could change what the line runner does while the fast gate ran
+      # only the three suites above - the same half-mapped shape agents-4ic0 fixed for
+      # lib/adapters/pi.sh. Measured cost of the addition: 8.3 s (14 tests), against a 61 s
+      # run for this arm's current union.
+      mapped="$mapped tests/test_budget.py tests/test_factory_core.py tests/test_credential_broker.py tests/test_line_andon.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"
