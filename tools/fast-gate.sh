@@ -251,6 +251,21 @@ FAST_GATE_STAGE="mapping changed files"
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   case "$f" in
+    tests/test_tree_guards.py)
+      # agents-azi1 (found by the merger landing a union, not by anyone anticipating it): THE ALWAYS-ON
+      # TIER FILE IS GUARDED BY ITS CONTENTS, AND ITS GUARD LIVES IN THE MAPPING SUITE. This file must
+      # hold EXACTLY ['TestNoUnboundedSubprocess'] (agents-dv23), asserted by
+      # tests/test_fast_gate_mapping.py::test_tree_guard_tier_module_holds_only_tree_property_tests
+      # (cited by SYMBOL: a line number here drifts as that suite grows). Without the mapping suite
+      # selected, ADDING A CLASS to this file runs GREEN on the fast gate and RED on the full gate - a
+      # real verdict about the file under review that is BLIND to the rule governing it, which is worse
+      # than an omission. It cannot ride the always-on tier (tree_guards= below, ~9s on EVERY run), and
+      # the generic tests/test_*.py arm cannot cover it either: that arm adds direct_run_completeness and
+      # coverage_contract, neither of which reads this file - measured, exactly ONE suite names it.
+      # Cost, measured: 9.2s for the suite, 10.4s for the pinned delta, paid only on tier-file changes.
+      run="$run $f"
+      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_direct_run_completeness.py tests/test_coverage_contract.py"
+      ;;
     tests/test_*.py)
       # agents-h17y: a changed test file also re-checks the CLASS-WIDE invariant that every
       # tests/test_*.py carries its `if __name__ == "__main__"` block LAST (agents-9lh8). The
