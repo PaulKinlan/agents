@@ -62,7 +62,23 @@ else
   FACTORY_DIR="$DEFAULT_INSTALL_DIR"
   if [[ -d "$FACTORY_DIR/.git" ]]; then
     echo "↻ Updating existing Software Factory checkout in $FACTORY_DIR..."
-    git -C "$FACTORY_DIR" pull --ff-only --quiet || true
+    # agents-yow5: A FAILED UPDATE MUST NOT LOOK LIKE A SUCCESSFUL INSTALL. This was
+    # `|| true`, so a VM whose pull failed installed skills from a checkout of unknown age,
+    # printed its success lines and EXITED 0 - and the caller (remote/provision.sh:970) runs
+    # this installer with ALL OUTPUT SUPPRESSED, so the exit code is the only signal that
+    # survives it. The factory tracks main deliberately (no pin), which is precisely why the
+    # update failing has to be visible: otherwise the nightly runs against a station set of
+    # unknown age while every health check still passes.
+    if ! git -C "$FACTORY_DIR" pull --ff-only --quiet; then
+      stale="$(git -C "$FACTORY_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+      {
+        echo "✗ install.sh: could not update the Software Factory checkout in $FACTORY_DIR"
+        echo "  'git pull --ff-only' failed, so this run would install station skills from a"
+        echo "  stale checkout (currently at $stale). Resolve the checkout or the network and"
+        echo "  re-run; nothing was installed from it (agents-yow5)."
+      } >&2
+      exit 1
+    fi
   else
     echo "⬇ Cloning Software Factory from $REPO_URL into $FACTORY_DIR..."
     git clone --depth 1 "$REPO_URL" "$FACTORY_DIR"
