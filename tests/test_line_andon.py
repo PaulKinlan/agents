@@ -693,6 +693,62 @@ class TestLineAndon(unittest.TestCase):
             self.assertTrue((first / "failure_reason.txt").exists())
             self.assertIn("silent station", (first / "failure_reason.txt").read_text(encoding="utf-8"))
 
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
+    def test_empty_output_with_stderr_rc_0_is_retried_and_line_continues(self):
+        """agents-2wgg: when an engine exits 0, model_output.txt exists but is empty, and
+        model_stderr.txt has diagnostic output, it must be treated as a plumbing failure
+        (SilentStationError / NoVerdictError): repair-retried once, degrades to ERROR and
+        continues as INCOMPLETE without halting the line, and downstream stations run.
+        This exercises the REAL adapter (lib/adapters/pi.sh) with a stub engine."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["emptydiag", "okprobe"])
+            sandbox._agent("emptydiag")
+            report = sandbox.root / "report-src.json"
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "prompt=$(cat)\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ \"$agent\" = okprobe ]; then\n"
+                "  echo OKPROBE-RAN\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = emptydiag ]; then\n"
+                "  echo 'engine diagnostic: warning notice' >&2\n"
+                "  exit 0\n"
+                "else\n"
+                "  echo 'unexpected agent' >&2; exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertFalse(result, "a line with an empty-output station is INCOMPLETE")
+            self.assertIn("INCOMPLETE", output)
+            self.assertNotIn("HALTED", output)
+            self.assertNotIn("SKIPPED", output)
+            self.assertIn("emptydiag", output)
+            self.assertIn("okprobe", output)
+            self.assertIn("PASS", output)
+            self.assertTrue(sandbox.marker.exists(), "okprobe downstream must run")
+
+            runs = sorted((sandbox.root / "runs").glob("emptydiag-*"))
+            self.assertEqual(len(runs), 2, f"attempt 1 and attempt 2 run dirs: {[r.name for r in runs]}")
+            for r in runs:
+                self.assertTrue((r / "failure_reason.txt").exists(),
+                                f"{r.name} must leave failure_reason.txt")
+                self.assertTrue((r / "report.json").exists(),
+                                f"{r.name} must leave report.json")
+                reason = (r / "failure_reason.txt").read_text(encoding="utf-8")
+                self.assertIn("exited 0 but produced no verdict or output", reason)
+                rep = json.loads((r / "report.json").read_text(encoding="utf-8"))
+                self.assertEqual(rep["status"], "ERROR")
+                self.assertEqual(rep["verdict"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()

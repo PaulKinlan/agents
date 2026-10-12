@@ -1953,26 +1953,32 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         has_output = bool(raw_output.strip()) if output_file.exists() else False
         has_engine_stderr = bool(stderr_raw.strip())
         has_adapter_stderr = bool((adapter_res.stderr or "").strip())
+        engine_exited_zero = (
+            adapter_res.returncode == 0 or
+            "exited 0 but wrote no output" in (adapter_res.stderr or "")
+        )
 
-        # agents-h8i4: Silent station check — empty or missing model_output.txt and no stderr diagnostics.
-        # This is retried once boundedly (Priority 1).
-        if not has_output and not has_engine_stderr and not has_adapter_stderr:
-            reason = (f"{agent_name}: engine '{engine}' produced no verdict and no output "
-                      f"(exit {adapter_res.returncode}; silent station)")
-            report = {
-                "summary": f"NO VERDICT: {reason}",
-                "verdict": "error",
-                "status": "ERROR",
-                "error": reason,
-                "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
-                "findings": []
-            }
-            report_path = run_dir / "report.json"
-            _write_run_artifact(report_path, json.dumps(report, indent=2))
-            _write_run_artifact(run_dir / "failure_reason.txt", reason + "\n")
-            raise SilentStationError(reason)
-
+        # agents-h8i4, agents-2wgg: Failure classification ladder when output is missing or empty.
         if not output_file.exists():
+            # If model_output.txt was not created AND adapter stderr has no diagnostics,
+            # this is a silent crash without output file: route to silent station retry.
+            if not has_adapter_stderr:
+                reason = (f"{agent_name}: engine '{engine}' produced no verdict and no output file "
+                          f"(exit {adapter_res.returncode}; silent station)")
+                report = {
+                    "summary": f"NO VERDICT: {reason}",
+                    "verdict": "error",
+                    "status": "ERROR",
+                    "error": reason,
+                    "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
+                    "findings": []
+                }
+                report_path = run_dir / "report.json"
+                _write_run_artifact(report_path, json.dumps(report, indent=2))
+                _write_run_artifact(run_dir / "failure_reason.txt", reason + "\n")
+                raise SilentStationError(reason)
+
+            # Genuine adapter fail-closed with diagnostics: leave artifacts and fail closed (sys.exit).
             err_msg = (adapter_res.stderr or "").strip()
             reason = f"{agent_name}: model output not produced: {err_msg}"
             report = {
@@ -1989,27 +1995,55 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             sys.stderr.write(f"Model output not produced: {adapter_res.stderr}\n")
             sys.exit(1)
 
-        # agents-h8i4: Silent station check — output_file exists (0 bytes) and engine stderr is empty.
-        if not has_output and not has_engine_stderr:
-            err_detail = (adapter_res.stderr or "").strip()
-            reason = (f"{agent_name}: engine '{engine}' produced no verdict and no output "
-                      f"(exit {adapter_res.returncode}; silent station)")
-            if err_detail:
-                reason += f" [{err_detail[-200:]}]"
-            report = {
-                "summary": f"NO VERDICT: {reason}",
-                "verdict": "error",
-                "status": "ERROR",
-                "error": reason,
-                "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
-                "findings": []
-            }
-            report_path = run_dir / "report.json"
-            _write_run_artifact(report_path, json.dumps(report, indent=2))
-            _write_run_artifact(run_dir / "failure_reason.txt", reason + "\n")
-            raise SilentStationError(reason)
-
         if not has_output:
+            # Case A: Engine exited 0 (or adapter verified engine exited 0 without output), but output is empty.
+            # Regardless of stderr (e.g. harmless engine warnings, deprecation notices, or diagnostic logs),
+            # the engine ran and exited zero — only its output was unusable. This is a PLUMBING
+            # failure (NoVerdictError / SilentStationError): run_station_with_repair_retry retries it
+            # once boundedly, then degrades to ERROR and continues as INCOMPLETE instead of halting
+            # the line and skipping downstream stations (agents-2wgg).
+            if engine_exited_zero:
+                err_detail = (stderr_raw or adapter_res.stderr or "").strip()
+                reason = f"{agent_name}: engine '{engine}' exited 0 but produced no verdict or output"
+                if err_detail:
+                    reason += f": {err_detail[-200:]}"
+                report = {
+                    "summary": f"NO VERDICT: {reason}",
+                    "verdict": "error",
+                    "status": "ERROR",
+                    "error": reason,
+                    "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
+                    "findings": []
+                }
+                report_path = run_dir / "report.json"
+                _write_run_artifact(report_path, json.dumps(report, indent=2))
+                _write_run_artifact(run_dir / "failure_reason.txt", reason + "\n")
+                raise SilentStationError(reason)
+
+            # Case B: Engine exited non-zero, but produced NO output AND NO engine stderr diagnostics in model_stderr.txt.
+            # This is the silent station crash (e.g. perf-review silently dying with rc=1 and 0B output/stderr).
+            # Retried once boundedly; degrades to ERROR and continues if persistent (agents-h8i4).
+            if not has_engine_stderr:
+                err_detail = (adapter_res.stderr or "").strip()
+                reason = (f"{agent_name}: engine '{engine}' produced no verdict and no output "
+                          f"(exit {adapter_res.returncode}; silent station)")
+                if err_detail:
+                    reason += f" [{err_detail[-200:]}]"
+                report = {
+                    "summary": f"NO VERDICT: {reason}",
+                    "verdict": "error",
+                    "status": "ERROR",
+                    "error": reason,
+                    "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
+                    "findings": []
+                }
+                report_path = run_dir / "report.json"
+                _write_run_artifact(report_path, json.dumps(report, indent=2))
+                _write_run_artifact(run_dir / "failure_reason.txt", reason + "\n")
+                raise SilentStationError(reason)
+
+            # Case C: Engine exited non-zero with diagnostic engine stderr (model_stderr.txt).
+            # Genuine engine failure with diagnostic output: write artifacts and fail closed (StationError).
             err_msg = (stderr_raw or adapter_res.stderr or "").strip()[-2000:]
             reason = f"{agent_name}: model output not produced (engine '{engine}' exit {adapter_res.returncode}): {err_msg}"
             report = {
