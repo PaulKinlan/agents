@@ -319,7 +319,9 @@ while IFS= read -r f; do
       # when factory changes, against a full gate that found this defect at 1547 tests.
       mapped="$mapped tests/test_promotion.py"
       # agents-dm8n round 2: the deleter that escaped round 1 lived in FACTORY (the failed
-      # --apply proposal_run_dir rmtree at :2102), not in lib/retention.py - so a factory
+      # --apply proposal_run_dir rmtree - the remove_recorded(proposal_run_dir, ...) call; agents-gioi:
+      # cited by SYMBOL, not by line, because the number that used to be here, :2102, is a lone '}'),
+      # not in lib/retention.py - so a factory
       # change must run the two suites that pin deletion under the runs root.
       # SEARCH PERFORMED: `grep -n "shutil\.rmtree(\|\.unlink(\|os\.remove(\|os\.unlink("
       # factory` enumerates every deletion site in the dispatcher; tests/test_retention.py's
@@ -462,7 +464,8 @@ while IFS= read -r f; do
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0). test_antigravity_prompt_content.py is listed EXPLICITLY (agents-nhf0): the wildcard arm already selected this file when the TEST changed, but NOT when the ADAPTER changed - so the suite protecting antigravity.sh's prompt guard did not run for the edits that could regress it. A suite gated only on its own edits is the half-fixed shape.
       # test_line_andon.py is listed here (agents-yx7z) because it drives the REAL LINE
       # RUNNER, which is what DISPATCHES adapters, so an adapter-only change can regress it. It
-      # was mapped in the factory arm (:129) but not this one.
+      # was mapped in the `factory)` arm above but not this one (agents-gioi: cited by PATTERN, not
+      # by line - the number that used to be here, :129, is the GIT_CHANGED assignment).
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0).
       mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_antigravity_prompt_content.py tests/test_line_andon.py"
       ;;
@@ -618,8 +621,9 @@ while IFS= read -r f; do
       # call, the fast gate PASSED while reporting `unmapped: ['lib/budget.py']` with
       # `omitted: ['tests/test_line_andon.py']` - the independent oracle had found this suite
       # as a consumer and caught that the union did not run it. It IS one: the line runner is
-      # a run_station_command caller (factory:1831 for the engine, :1573 pre-pass, :2144
-      # findings dispatch), and that suite imports StationTimeout from lib.budget (:496, :523)
+      # a run_station_command caller (the engine, pre-pass and findings dispatch call sites in
+      # factory; agents-gioi: cited by ROLE, not by line - all three numbers that used to be here
+      # have moved), and that suite imports StationTimeout from lib.budget (:496, :523)
       # to drive the andon timeout path and COPIES lib/budget.py into its fixture tree (:112).
       # So a budget.py edit could change what the line runner does while the fast gate ran
       # only the three suites above - the same half-mapped shape agents-4ic0 fixed for
