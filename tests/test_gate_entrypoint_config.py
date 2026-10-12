@@ -37,6 +37,54 @@ TRACKED = ROOT / "tools" / "check.conf"
 FLEET_CHECK = Path.home() / "fleet" / "bin" / "fleet-check"
 
 
+def _entrypoint_env(home: str) -> dict:
+    """The env the deployed entrypoint is driven with, PINNED - so the verdict is about the
+    entrypoint and not about WHO RAN THE SUITE.
+
+    MEASURED 2026-10-12 on a PRISTINE origin/main worktree (60ab891, no lane delta):
+    fleet-check:173 refuses a FULL-gate attempt from any lane that is not `merger` ("the FULL
+    gate is the merger's job"), and that refusal fires AFTER the config is sourced (:149) but
+    BEFORE the cached-verdict path (:170/:191) these tests assert on. So inheriting the
+    caller's FLEET_LANE made both arms of TestTheEntrypointResolvesTheInstalledCommand FAIL
+    for every implementer lane while a merger lane passed them - and, worse, it made the
+    fresh-HOME refusal arm pass on the LANE-REFUSAL message rather than on the missing-config
+    message it exists to pin. A result that depends on the calling lane is a machine-state
+    assertion; it turns an unrelated change red for everyone, and install.sh maps to this
+    suite (agents-3xqa), so both halves had to become lane-independent. `merger` is the only
+    lane value the entrypoint lets through to the config path, and EVERY test here also calls
+    _prevent_real_gate, so passing that gate cannot start a real full gate.
+    """
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["FLEET_LANE"] = "merger"
+    env.pop("FLEET_CHECK_CONF", None)
+    return env
+
+
+def _prevent_real_gate(env: dict, home: str) -> Path:
+    """Put stubs for `setsid` and `fleet-heavy` FIRST on PATH so that no test in this file can
+    start a detached real full gate in the background (agents-gxnb, extended from the positive
+    arm to every entrypoint arm - four tests, all of which now reach the spawn path by virtue
+    of the pinned lane above). The stubs exit 99 and record the attempt, so a regression is
+    ASSERTED ON rather than paid for by the VM's one heavy slot. Returns the marker path the
+    caller asserts is absent.
+    """
+    bin_dir = Path(home) / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    marker = Path(home) / "spawn_attempted.txt"
+    stub_script = (
+        "#!/bin/sh\n"
+        f'echo "interceptor called: $*" >> "{marker}"\n'
+        "exit 99\n"
+    )
+    for tool in ("setsid", "fleet-heavy"):
+        stub_path = bin_dir / tool
+        stub_path.write_text(stub_script, encoding="utf-8")
+        stub_path.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    return marker
+
+
 def _tracked_fields() -> dict:
     fields = {}
     for line in TRACKED.read_text(encoding="utf-8").splitlines():
@@ -97,9 +145,8 @@ class TestTheEntrypointReadsTheTrackedCommand(unittest.TestCase):
         shape, which I have not read yet.
         """
         home = self._fresh_home()
-        env = dict(os.environ)
-        env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env = _entrypoint_env(home)
+        marker = _prevent_real_gate(env, home)
         res = subprocess.run(
             ["bash", str(FLEET_CHECK)],
             capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT),
@@ -114,15 +161,16 @@ class TestTheEntrypointReadsTheTrackedCommand(unittest.TestCase):
                          f"gate has no path for this project at all: {blob[:300]}")
         self.assertNotIn("started the", blob,
                          "the refusal path must not have started a gate")
+        self.assertFalse(marker.exists(),
+                         "a refusal must not have reached the spawn path at all")
 
     def test_no_args_is_the_mode_that_reaches_the_config(self):
         """The interface fact, pinned so the next reader does not repeat my wrong harness:
         a bare sha or an unknown flag prints usage and exits 2 without sourcing anything,
         while no-args and --fast are the only modes that reach :149."""
         home = self._fresh_home()
-        env = dict(os.environ)
-        env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env = _entrypoint_env(home)
+        marker = _prevent_real_gate(env, home)
         res = subprocess.run(
             ["bash", str(FLEET_CHECK), "--definitely-not-a-flag"],
             capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT),
@@ -130,6 +178,7 @@ class TestTheEntrypointReadsTheTrackedCommand(unittest.TestCase):
         blob = res.stdout + res.stderr
         self.assertEqual(res.returncode, 2, blob[:300])
         self.assertNotIn("started the", blob, "an unknown flag must not start a gate")
+        self.assertFalse(marker.exists(), "an unknown flag must not reach the spawn path")
 
 
 class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
@@ -159,32 +208,26 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
     def test_the_entrypoint_resolves_the_installed_tracked_command(self):
         import json
         home = tempfile.mkdtemp(prefix="ia3p-positive-")
-        env = dict(os.environ)
-        env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env = _entrypoint_env(home)
 
-        # 1. the install step, which install.sh now invokes on provisioning
-        install = subprocess.run(["bash", str(RESOLVER), "--install"],
-                                 capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        # 1. THE INSTALL STEP, DRIVEN THROUGH THE PROVISIONING ENTRYPOINT INSTEAD OF ASSERTED
+        # IN PROSE. This used to read "the install step, which install.sh now invokes on
+        # provisioning" while install.sh had NO check-cmd.sh reference at all - a sentence
+        # about intent standing in for behaviour, which is exactly how the original P1
+        # survived a suite written to end it (agents-l2xb; coord asked for behaviour here).
+        # The claim is now EXECUTED and then ASSERTED: install.sh is run, and the file the
+        # entrypoint below reads must exist BECAUSE of it.
+        install = subprocess.run(["bash", str(ROOT / "install.sh")],
+                                 capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT))
         self.assertEqual(install.returncode, 0, install.stderr[:300])
+        self.assertTrue((Path(home) / ".fleet" / "check.conf").is_file(),
+                        "install.sh must be the CALLER that provisions the per-VM config; the "
+                        "assertion, not a comment, is what pins its call site")
 
         # agents-gxnb: stub setsid and fleet-heavy on PATH so that even if the test
         # condition regresses (mismatched command, missing record, etc.), fleet-check
         # cannot launch a detached real full gate in the background.
-        bin_dir = Path(home) / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        marker = Path(home) / "spawn_attempted.txt"
-        stub_script = (
-            "#!/bin/sh\n"
-            f'echo "interceptor called: $*" >> "{marker}"\n'
-            "exit 99\n"
-        )
-        for tool in ("setsid", "fleet-heavy"):
-            stub_path = bin_dir / tool
-            stub_path.write_text(stub_script, encoding="utf-8")
-            stub_path.chmod(0o755)
-
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        marker = _prevent_real_gate(env, home)
 
         # The tracked command as evaluated when sourced by fleet-check:
         res_cmd = subprocess.run(["bash", str(RESOLVER), "CHECK_CMD"],
@@ -232,28 +275,13 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
         attempt to re-run the gate is intercepted, proving no real full gate can run."""
         import json
         home = tempfile.mkdtemp(prefix="ia3p-regress-")
-        env = dict(os.environ)
-        env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env = _entrypoint_env(home)
 
         install = subprocess.run(["bash", str(RESOLVER), "--install"],
                                  capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
         self.assertEqual(install.returncode, 0)
 
-        bin_dir = Path(home) / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        marker = Path(home) / "spawn_attempted.txt"
-        stub_script = (
-            "#!/bin/sh\n"
-            f'echo "interceptor called: $*" >> "{marker}"\n'
-            "exit 99\n"
-        )
-        for tool in ("setsid", "fleet-heavy"):
-            stub_path = bin_dir / tool
-            stub_path.write_text(stub_script, encoding="utf-8")
-            stub_path.chmod(0o755)
-
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        marker = _prevent_real_gate(env, home)
 
         tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], capture_output=True,
                               text=True, timeout=30, cwd=str(ROOT)).stdout.strip()
@@ -375,6 +403,72 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
                             capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
         self.assertEqual(r2.returncode, 0)
         self.assertNotIn("WARNING", r2.stderr)
+
+
+class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
+    """agents-l2xb / agents-3xqa: install.sh - the provisioning entrypoint - IS THE CALLER.
+
+    WHY THIS CLASS EXISTS: tools/check-cmd.sh --install resolves the tracked config and writes
+    the per-VM copy the deployed entrypoint reads, and the suites above prove the entrypoint
+    reads that copy. What was MISSING was the call site: nothing in the provisioning/setup
+    lifecycle ran --install, so a fresh VM - and a VM whose per-VM copy had gone stale - kept
+    the entrypoint's rc-2 refusal while every tracked file said the gate was configured. That
+    is the original P1 shape (a fix in a place the DEPLOYED INVOCATION does not read) one
+    level up, which is why it is pinned by EXECUTION rather than by grepping install.sh for a
+    string: a grep cannot fail when the call site is present but unreachable, and the arm that
+    maps install.sh to this file (agents-3xqa) needs a consumer that actually fails.
+
+    NO git-dirty precondition and no dependency on the fleet bundle, unlike the classes above:
+    install.sh is executed with a TEMP HOME and no network (the checkout branch is taken
+    because `factory` and `agents/` are present in ROOT), so this runs wherever the repo does.
+    """
+
+    def _run_installer(self, home: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["HOME"] = home
+        # Keep the installer off any ambient per-VM redirect or alternate checkout: this test
+        # is about what PROVISIONING writes for a plain, default host.
+        for var in ("FLEET_CHECK_CONF", "SF_INSTALL_DIR", "SF_REPO_URL", "SKILL_FILTER"):
+            env.pop(var, None)
+        return subprocess.run(
+            ["bash", str(ROOT / "install.sh")],
+            capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT),
+        )
+
+    def test_install_sh_installs_the_tracked_gate_command(self):
+        """A fresh host: provisioning writes the file the deployed gate reads, carrying the
+        TRACKED command (including the load-bearing `-t .` hermeticity flag)."""
+        home = tempfile.mkdtemp(prefix="l2xb-provision-")
+        res = self._run_installer(home)
+        self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
+
+        conf = Path(home) / ".fleet" / "check.conf"
+        self.assertTrue(conf.is_file(),
+                        "install.sh must write ~/.fleet/check.conf: it is the only config the "
+                        "deployed gate reads, and nothing else in the provisioning lifecycle does")
+        installed = conf.read_text(encoding="utf-8")
+        m = re.search(r'^CHECK_CMD="(.*)"\s*$', installed, re.M)
+        self.assertIsNotNone(m, f"the installed file must define CHECK_CMD: {installed!r}")
+        self.assertEqual(m.group(1), _tracked_fields()["CHECK_CMD"],
+                         "provisioning must install the TRACKED command; a divergence means a "
+                         "hand-edit or a stale install, and this test cannot tell them apart")
+        self.assertIn("-t .", installed)
+
+    def test_install_sh_repairs_a_stale_per_vm_config(self):
+        """The 'repaired host' half of the acceptance, which is the half a fresh-host check
+        cannot see: a per-VM copy predating the `-t .` hermeticity fix must be REPLACED by
+        the tracked command when provisioning runs, not left in place."""
+        home = tempfile.mkdtemp(prefix="l2xb-repair-")
+        conf = Path(home) / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text('CHECK_CMD="python3 -m unittest discover -s tests -v"\n', encoding="utf-8")
+
+        res = self._run_installer(home)
+        self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
+
+        installed = conf.read_text(encoding="utf-8")
+        self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
+        self.assertIn("-t .", installed)
 
 
 if __name__ == "__main__":
