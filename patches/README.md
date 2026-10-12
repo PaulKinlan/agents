@@ -55,6 +55,43 @@ This directory holds patches for fleet-level infrastructure and tooling that can
   it. This patch deliberately does not re-resolve, fetch or repair anything — it only makes the failure say
   which condition it observed, which is what a lane needs while 5br9's guard does not exist yet.
 
+## `fleet-lanes-pull-bead-before-spawn.patch` (agents-oryd)
+
+- **Target repository:** `PaulKinlan/fleet`
+- **Target files:**
+  - `remote/lanes.sh` (the `spawn)` argument line, immediately after the bead id is parsed)
+- **Problem Statement (agents-oryd, the CAUSE half of the same finding as the patch above):**
+  A new lane's first act is to claim the bead it was handed, so a bead that has not reached this VM's ledger
+  yet fails with `no issue found matching <id>` — text indistinguishable from the bead not existing, after
+  which the lane creates a duplicate or reports the bead missing. That is a property of the SPAWN SHAPE
+  rather than of bd, and the bead id is already known at spawn time, so the spawn path is the layer where the
+  condition can be removed instead of reported.
+- **Measured basis (2026-10-12, project VM):** a fresh LINKED worktree resolves through the shared git common
+  dir to the canonical ledger (`bd info`: 494 issues, nothing created locally), so visibility is bead arrival,
+  not the worktree; the failing text comes from the claim path, not from `show`.
+- **Changes:**
+  1. At spawn, if the bead is not visible **in the project checkout** (`repo_dir`, so it reads the ledger the
+     lane will read rather than the journal's), pull once and retry.
+  2. If it is **still** not visible after the pull, print a warning saying so — that is a different problem
+     (a wrong id, or a different ledger) and the lane must not be told the bead is missing.
+  3. The pull is non-fatal: a failed or offline pull still leaves the warning in place and does not abort the
+     spawn.
+- **Verification:**
+  - `git apply --check` clean against the deployed `lanes.sh`; applying it reproduces the committed result
+    byte for byte; `bash -n` clean.
+  - The inserted block was exercised against the **real bd** with a logging shim, three cases:
+    bead visible → one `bd show`, no pull, no warning (the normal case costs one probe);
+    bead missing → `show`, `dolt pull`, `show`, then the warning;
+    pull failing → non-fatal, warning still printed, exit status unaffected.
+  - **Limitation stated rather than hidden:** the spawn path itself was NOT executed, because running
+    `lanes.sh spawn` creates a lane on the VM — a side effect this artefact does not need. The reviewer of
+    the delivery should treat the three cases above as the evidence and the integration as unproven until it
+    runs on a VM where spawning is expected.
+- **Relationship to the other two changes:** `fleet-bd-annotate-missing-bead.patch` (above) makes the failure
+  say WHICH world it is in, for every caller and path; this patch removes the cause for the spawned-lane case;
+  `agents-5br9` owns the guard against a per-worktree database becoming authoritative. Deliberately three
+  separate changes rather than one: they touch different files and are reviewable in isolation.
+
 ## `fleet-land-message-tree-identity.patch` (agents-19jh)
 
 - **Target repository:** `PaulKinlan/fleet`
