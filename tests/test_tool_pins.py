@@ -786,10 +786,6 @@ class TrustedArgvLauncherPolicyTests(unittest.TestCase):
                 pin_trusted_argv(["git", "--version"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LookupPathContractTests(unittest.TestCase):
     """agents-lzln: the contract the hub's provision.sh one-liner depends on.
 
@@ -887,3 +883,8 @@ class LookupPathContractTests(unittest.TestCase):
             with self.assertRaises(ToolPinError,
                                    msg="arm B: a mismatched sha256 must STILL REFUSE"):
                 resolve_tool("bd", pins=bad_pins)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

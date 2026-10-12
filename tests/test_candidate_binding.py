@@ -148,10 +148,6 @@ class TestProcessRunBinding(unittest.TestCase):
             self.assertEqual(processed[0]["path"], "model/path.js")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestBindingNeverDestroysARealLocation(unittest.TestCase):
     """agents-0tl: binding must keep the guard's purpose without destroying real locations.
 
@@ -304,3 +300,8 @@ class TestRuleIdStaysBlankOnAContextShapedIndex(unittest.TestCase):
         rule_id, path = bind_candidates(finding(rule_id="unhandled-url-construction",
                                                path="lib/real.py"), index, self.target)
         self.assertEqual((rule_id, path), ("unhandled-url-construction", "lib/real.py"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+

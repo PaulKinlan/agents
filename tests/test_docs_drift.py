@@ -213,10 +213,6 @@ class TestTreeDiagramParser(unittest.TestCase):
             self.assertNotIn("lib/present.py", references)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestStationSkillScope(unittest.TestCase):
     """A station SKILL.md documents auditing an ARBITRARY target, so its prose names the
     target's layout as often as this repo's own files (agents-6zq).
@@ -576,3 +572,8 @@ class TestLineSuffixIsALocationNotAFilename(unittest.TestCase):
                 exists,
                 "a non-path token with a colon was stripped and resolved away",
             )
+
+
+if __name__ == "__main__":
+    unittest.main()
+

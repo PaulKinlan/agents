@@ -195,10 +195,6 @@ class ModelRuleIdTestCase(unittest.TestCase):
         self.assertNotIn("not scanner provenance", report)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ModelRuleIdSecurityTestCase(unittest.TestCase):
     """The review's P0/P1: a model-authored label is prose, and prose is not published for
     credential or security-sensitive findings - so the label must not be either.
@@ -301,3 +297,8 @@ class ModelRuleIdSecurityTestCase(unittest.TestCase):
                                                       "false_positive": 0}, [])
         self.assertIn("doc-broken-link", report)
         self.assertIn("not scanner provenance", report)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

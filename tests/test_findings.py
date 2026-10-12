@@ -431,10 +431,6 @@ class TestStoreRedactsRawMaterialAtRest(unittest.TestCase):
             self.assertNotIn("A" * 36, str(saved), "raw fields must stay redacted")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestIdentityAttribution(unittest.TestCase):
     """Every row records WHICH KEY produced its fingerprint (agents-x9my).
 
@@ -1286,3 +1282,8 @@ class TestIdentityAttribution(unittest.TestCase):
             for item, index in cases:
                 observed.add(self._run(td, [item], index)[0][0]["identity_source"])
         self.assertEqual(observed, set(findings.IDENTITY_SOURCES), observed)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

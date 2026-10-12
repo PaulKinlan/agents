@@ -337,7 +337,6 @@ class TestDispatcherSchemaGate(unittest.TestCase):
             self.assertEqual(record["severity"], "low")
 
 
-
 class TestPathlessVerificationRecord(unittest.TestCase):
     """agents-nhpb: a pathless candidate is valid input, and the contract must say so."""
 
@@ -432,10 +431,6 @@ class TestNormalizeReport(unittest.TestCase):
         notes = normalize_report(report)
         # Should not raise ValueError; leaves original string for schema validator to handle
         self.assertEqual(report["scanned_files"], "²")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestUnlocatableVerdicts(unittest.TestCase):
@@ -603,4 +598,8 @@ class TestThreatModelSchemaBound(unittest.TestCase):
         self.assertIsNotNone(errors)
         self.assertTrue(any("$.threat_model_markdown: length 16385 exceeds maxLength 16384" in e for e in errors),
                         errors)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
