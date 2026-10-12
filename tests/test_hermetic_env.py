@@ -67,8 +67,22 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
                       f"the gate must say which environment its verdict is about: {res.stderr!r}")
         self.assertIn("isolate_operator_config", res.stderr,
                       "the gate must name the declaration that supplies hermeticity")
-        self.assertEqual(res.stdout.strip(), "tests/test_hermetic_env.py",
-                         "stdout stays the machine-readable suite list")
+        # agents-h17y / agents-i2sx: this test is about the gate NOT scrubbing its caller's
+        # environment, and the dry-run stdout is only the PROBE that makes the run observable - so
+        # the expectation states the CONTRACT rather than freezing one filename. Arms legitimately
+        # widen the resolution (this one gained the completeness guard), and such a widening must
+        # not break an assertion about the environment. The resolution must therefore be a non-empty,
+        # sorted, unique list of test module paths that names the file which changed.
+        # The EXACT list is pinned where exactness IS the contract, in tests/test_fast_gate_mapping.py.
+        resolved = res.stdout.strip().splitlines()
+        self.assertTrue(resolved, "the dry run must print the resolution, not nothing at all")
+        for line in resolved:
+            self.assertRegex(line, r"^tests/[A-Za-z0-9_/]+\.py$",
+                             "stdout is the machine-readable suite list: one module path per line, no prose")
+        self.assertEqual(sorted(set(resolved)), resolved,
+                         "the resolution is sorted and free of duplicates")
+        self.assertIn("tests/test_hermetic_env.py", resolved,
+                      "the file that changed must appear in its own arm's resolution")
         self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_assertion_failure_does_not_leak_ambient_environment_values(self):

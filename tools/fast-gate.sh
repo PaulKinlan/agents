@@ -151,7 +151,14 @@ while IFS= read -r f; do
   [ -z "$f" ] && continue
   case "$f" in
     tests/test_*.py)
+      # agents-h17y: a changed test file also re-checks the CLASS-WIDE invariant that every
+      # tests/test_*.py carries its `if __name__ == "__main__"` block LAST (agents-9lh8). The
+      # defect that invariant catches is produced by appending a test BELOW the block, which is
+      # precisely what a change to a test file is - and the file still passes under discovery, so
+      # without this the fast gate is blind to it and only the merger's full gate would see it.
+      # Measured cost: 0.67s for the suite (3 tests; the AST walk over 71 modules is 0.62s of it).
       run="$run $f"
+      mapped="$mapped tests/test_direct_run_completeness.py"
       ;;
     tests/containment_harness.py)
       # agents-3iog: the shared harness (setUp plus 11 helpers) the containment suites
