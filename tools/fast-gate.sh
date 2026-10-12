@@ -282,7 +282,7 @@ while IFS= read -r f; do
       ;;
     lib/report_schema.py)
       # Report schema validation, post-filters (concurrency guard, unlocatable verdicts), and pipeline gate (agents-vt7w).
-      mapped="$mapped tests/test_report_schema.py tests/test_perf_review.py tests/test_factory_truth_2.py"
+      mapped="$mapped tests/test_report_schema.py tests/test_perf_review.py tests/test_factory_truth_2.py tests/test_threat_model_prepass.py"
       ;;
     agents/bundle-size/scripts/measure_bundle.py)
       mapped="$mapped tests/test_bundle_size.py"

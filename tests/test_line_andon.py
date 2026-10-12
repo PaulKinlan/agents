@@ -550,6 +550,205 @@ class TestLineAndon(unittest.TestCase):
         self.assertIsNotNone(max_minutes)
         self.assertGreaterEqual(float(max_minutes), 20.0)
 
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
+    def test_silent_station_is_retried_once_and_recovers_via_real_adapter(self):
+        """agents-h8i4: a station that produces no verdict and no output (silent station)
+        is retried ONCE. If the retry produces a valid report, the line completes as COMPLETE.
+        The first attempt preserves its explicit reason and report in its own run dir."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["silentprobe", "okprobe"])
+            sandbox._agent("silentprobe")
+            report = sandbox.root / "report-src.json"
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "prompt=$(cat)\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ \"$agent\" = okprobe ]; then\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = silentprobe ] && grep -q 'NO OUTPUT' <<<\"$prompt\"; then\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = silentprobe ]; then\n"
+                "  # First attempt: exit 1, write 0 bytes to stdout and 0 bytes to stderr (silent station)\n"
+                "  exit 1\n"
+                "else\n"
+                "  echo 'unexpected agent' >&2; exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertTrue(result, "silent-then-valid must recover via the retry")
+            self.assertIn("COMPLETE", output)
+            self.assertIn("repair-retry", output)
+            runs = sorted((sandbox.root / "runs").glob("silentprobe-*"))
+            self.assertEqual(len(runs), 2, f"exactly one retry: {[r.name for r in runs]}")
+            first = next(r for r in runs if "-attempt2" not in r.name)
+            second = next(r for r in runs if "-attempt2" in r.name)
+            self.assertTrue((first / "failure_reason.txt").exists(),
+                            "the failed first attempt must leave an explicit reason in its run dir")
+            first_reason = (first / "failure_reason.txt").read_text(encoding="utf-8")
+            self.assertIn("silent station", first_reason)
+            self.assertTrue((first / "report.json").exists())
+            first_report = json.loads((first / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(first_report["status"], "ERROR")
+            self.assertEqual(first_report["verdict"], "error")
+            self.assertIn("silent station", first_report["summary"])
+
+            second_report = json.loads((second / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(second_report["summary"], "stub")
+
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
+    def test_silent_station_failing_after_retry_leaves_reason_in_run_dir_and_line_continues(self):
+        """agents-h8i4: a station that remains silent after retry leaves an explicit reason
+        in both run dirs, degrades to ERROR, and allows the line to continue as INCOMPLETE
+        so downstream stations (okprobe) are not skipped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["persistentsilent", "okprobe"])
+            sandbox._agent("persistentsilent")
+            report = sandbox.root / "report-src.json"
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "prompt=$(cat)\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ \"$agent\" = okprobe ]; then\n"
+                "  echo OKPROBE-RAN\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = persistentsilent ]; then\n"
+                "  # Both attempts silent: exit 1, 0 bytes stdout, 0 bytes stderr\n"
+                "  exit 1\n"
+                "else\n"
+                "  echo 'unexpected agent' >&2; exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertFalse(result, "a line with a silent station that fails retry is INCOMPLETE")
+            self.assertIn("INCOMPLETE", output)
+            self.assertNotIn("HALTED", output)
+            self.assertIn("persistentsilent", output)
+            self.assertIn("okprobe", output)
+            self.assertIn("PASS", output)
+            self.assertTrue(sandbox.marker.exists(), "okprobe downstream ran")
+
+            runs = sorted((sandbox.root / "runs").glob("persistentsilent-*"))
+            self.assertEqual(len(runs), 2, f"attempt 1 and attempt 2 run dirs: {[r.name for r in runs]}")
+            for r in runs:
+                self.assertTrue((r / "failure_reason.txt").exists(),
+                                f"{r.name} must leave failure_reason.txt")
+                self.assertTrue((r / "report.json").exists(),
+                                f"{r.name} must leave report.json")
+                reason = (r / "failure_reason.txt").read_text(encoding="utf-8")
+                self.assertIn("silent station", reason)
+                rep = json.loads((r / "report.json").read_text(encoding="utf-8"))
+                self.assertEqual(rep["status"], "ERROR")
+                self.assertEqual(rep["verdict"], "error")
+
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
+    def test_missing_output_file_without_stderr_is_retried_as_silent_station(self):
+        """agents-h8i4 (review finding P1): when model_output.txt is completely missing
+        and stderr has no diagnostics, it must route through silent retry rather than sys.exit(1)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["missingfileprobe", "okprobe"])
+            sandbox._agent("missingfileprobe")
+            adapter = sandbox.root / "lib" / "adapters" / "pi.sh"
+            adapter.write_text(
+                "#!/usr/bin/env bash\n"
+                "prompt=$(cat)\n"
+                "run_dir=\"$4\"\n"
+                "if grep -q 'NO OUTPUT' <<<\"$prompt\"; then\n"
+                "  echo '{\"summary\": \"recovered\", \"findings\": [], \"scanned_files\": 1}' > \"$run_dir/model_output.txt\"\n"
+                "  exit 0\n"
+                "elif [ \"$1\" = okprobe ]; then\n"
+                "  echo '{\"summary\": \"ok\", \"findings\": [], \"scanned_files\": 1}' > \"$run_dir/model_output.txt\"\n"
+                "  exit 0\n"
+                "else\n"
+                "  # Attempt 1: no model_output.txt, no stderr output at all\n"
+                "  rm -f \"$run_dir/model_output.txt\"\n"
+                "  exit 1\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run(engine="pi")
+
+            self.assertTrue(result, "missing output file without stderr must recover via silent retry")
+            self.assertIn("COMPLETE", output)
+            self.assertIn("repair-retry", output)
+            runs = sorted((sandbox.root / "runs").glob("missingfileprobe-*"))
+            self.assertEqual(len(runs), 2, f"exactly one retry: {[r.name for r in runs]}")
+            first = next(r for r in runs if "-attempt2" not in r.name)
+            self.assertTrue((first / "failure_reason.txt").exists())
+            self.assertIn("silent station", (first / "failure_reason.txt").read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
+    def test_empty_output_with_stderr_rc_0_is_retried_and_line_continues(self):
+        """agents-2wgg: when an engine exits 0, model_output.txt exists but is empty, and
+        model_stderr.txt has diagnostic output, it must be treated as a plumbing failure
+        (SilentStationError / NoVerdictError): repair-retried once, degrades to ERROR and
+        continues as INCOMPLETE without halting the line, and downstream stations run.
+        This exercises the REAL adapter (lib/adapters/pi.sh) with a stub engine."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = self._sandbox(tmpdir, halt=True, stations=["emptydiag", "okprobe"])
+            sandbox._agent("emptydiag")
+            report = sandbox.root / "report-src.json"
+            stub = sandbox.bin / "pi"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "prompt=$(cat)\n"
+                "agent=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = --skill ]; then agent=${2##*/}; break; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ \"$agent\" = okprobe ]; then\n"
+                "  echo OKPROBE-RAN\n"
+                f"  cat '{report}'\n"
+                "elif [ \"$agent\" = emptydiag ]; then\n"
+                "  echo 'engine diagnostic: warning notice' >&2\n"
+                "  exit 0\n"
+                "else\n"
+                "  echo 'unexpected agent' >&2; exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+            result, output = sandbox.run()
+
+            self.assertFalse(result, "a line with an empty-output station is INCOMPLETE")
+            self.assertIn("INCOMPLETE", output)
+            self.assertNotIn("HALTED", output)
+            self.assertNotIn("SKIPPED", output)
+            self.assertIn("emptydiag", output)
+            self.assertIn("okprobe", output)
+            self.assertIn("PASS", output)
+            self.assertTrue(sandbox.marker.exists(), "okprobe downstream must run")
+
+            runs = sorted((sandbox.root / "runs").glob("emptydiag-*"))
+            self.assertEqual(len(runs), 2, f"attempt 1 and attempt 2 run dirs: {[r.name for r in runs]}")
+            for r in runs:
+                self.assertTrue((r / "failure_reason.txt").exists(),
+                                f"{r.name} must leave failure_reason.txt")
+                self.assertTrue((r / "report.json").exists(),
+                                f"{r.name} must leave report.json")
+                reason = (r / "failure_reason.txt").read_text(encoding="utf-8")
+                self.assertIn("exited 0 but produced no verdict or output", reason)
+                rep = json.loads((r / "report.json").read_text(encoding="utf-8"))
+                self.assertEqual(rep["status"], "ERROR")
+                self.assertEqual(rep["verdict"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()
