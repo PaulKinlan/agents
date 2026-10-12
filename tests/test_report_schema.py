@@ -147,6 +147,52 @@ class TestDeclaredSchema(unittest.TestCase):
                         # enum/required hold literals, title/description strings: no schema nodes
                 walk(json.loads(schema_path.read_text(encoding="utf-8")))
 
+    def test_all_shipped_schemas_satisfy_report_anatomy_contract(self):
+        """agents-tz2y: Every committed report.schema.json must satisfy the report anatomy contract:
+        top-level object requiring 'findings' array, whose items are objects with required
+        'rule_id' (string) and 'severity' whose enum is exactly ['critical', 'high', 'medium', 'low', 'info']."""
+        expected_severities = ["critical", "high", "medium", "low", "info"]
+        schemas = sorted(FACTORY_ROOT.glob("agents/*/report.schema.json"))
+        self.assertEqual(len(schemas), 22, "must discover all 22 agent report schemas")
+        for schema_path in schemas:
+            with self.subTest(schema=schema_path.parent.name):
+                schema = json.loads(schema_path.read_text(encoding="utf-8"))
+                self.assertEqual(schema.get("type"), "object",
+                                 f"{schema_path}: top-level schema type must be 'object'")
+                top_required = schema.get("required")
+                self.assertIsInstance(top_required, list,
+                                      f"{schema_path}: top-level 'required' must be an array")
+                self.assertIn("findings", top_required,
+                              f"{schema_path}: schema must require 'findings'")
+
+                findings_prop = schema.get("properties", {}).get("findings", {})
+                self.assertEqual(findings_prop.get("type"), "array",
+                                 f"{schema_path}: 'findings' property must be an array")
+
+                items = findings_prop.get("items", {})
+                self.assertEqual(items.get("type"), "object",
+                                 f"{schema_path}: 'findings' items must be objects")
+
+                item_props = items.get("properties", {})
+                self.assertIn("rule_id", item_props,
+                              f"{schema_path}: findings items must define 'rule_id'")
+                self.assertEqual(item_props["rule_id"].get("type"), "string",
+                                 f"{schema_path}: 'rule_id' must be a string")
+
+                self.assertIn("severity", item_props,
+                              f"{schema_path}: findings items must define 'severity'")
+                sev_enum = item_props["severity"].get("enum")
+                self.assertEqual(sev_enum, expected_severities,
+                                 f"{schema_path}: 'severity' enum must match factory severity levels")
+
+                item_required = items.get("required")
+                self.assertIsInstance(item_required, list,
+                                      f"{schema_path}: findings items 'required' must be an array")
+                self.assertIn("rule_id", item_required,
+                              f"{schema_path}: findings items must require 'rule_id'")
+                self.assertIn("severity", item_required,
+                              f"{schema_path}: findings items must require 'severity'")
+
 
 @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
 class TestDispatcherSchemaGate(unittest.TestCase):

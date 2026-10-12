@@ -551,12 +551,9 @@ while IFS= read -r f; do
       # test_adapter_auth_failure.py:128/:239, test_report_schema.py:107-123,
       # test_perf_review.py:945 - EVERY one writes a report.schema.json into a TMP fixture and
       # reads that back.
-      # HONEST CONSEQUENCE, filed rather than buried: because those fixtures are self-written,
-      # the committed schemas are not any test's input - 20 of this repo's 22 committed
-      # report.schema.json files (the exception, agents/threat-model's, is read at
-      # tests/test_factory_truth_2.py:34 and already had its own arm at :426) are data no test
-      # reads, so a broken one surfaces only where it is consumed at runtime. That is a
-      # coverage finding (agents-9iyf note), not a reason to invent a consumer.
+      # CONTRACT CHECK: tests/test_report_schema.py asserts every committed report.schema.json
+      # stays inside the supported keyword subset and satisfies the report anatomy contract
+      # (object type, required findings array with string rule_id and exact severity levels; agents-tz2y).
       mapped="$mapped tests/test_report_schema.py"
       ;;
     lines/*.yaml)
