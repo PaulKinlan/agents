@@ -304,7 +304,17 @@ while IFS= read -r f; do
       #   AssertionError: 'does not exist' not found in ...
       # Unmutated control: green. Measured cost of the addition: 1.4s (5 tests), paid only when
       # this script changes.
-      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py tests/test_coverage_contract.py"
+      # agents-d081: tests/test_gate_entrypoint_config.py IS THE SAME SHAPE AGAIN, and this one was
+      # created by the same change that had to name it: the drift-detection work added a class there
+      # (TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse) that DRIVES THIS SCRIPT in a temp HOME to
+      # assert the point-of-use warning, which makes that suite a consumer of this file. The gate's own
+      # coverage oracle named it as omitted on the first gate run of that change
+      # (omitted=['tests/test_gate_entrypoint_config.py'] with unmapped=['tools/fast-gate.sh']), and the
+      # base tree reports neither, so the omission arrived with the consumer rather than having been
+      # there all along. Cost of naming it, measured: the suite is 17 tests / ~1.2 s and already runs
+      # green in the gate environment (it was selected for that same change by the tools/check-cmd.sh
+      # arm), so it adds a suite this arm can afford and no new environment sensitivity.
+      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py tests/test_coverage_contract.py tests/test_gate_entrypoint_config.py"
       ;;
     tools/stage_site.py)
       # agents-1n9i: THIS FILE MATCHED NO ARM AT ALL, so a change to it hit the unmatched
