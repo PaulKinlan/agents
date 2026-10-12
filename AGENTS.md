@@ -183,6 +183,37 @@ uploads the staged directory, and no markdown or file with an `audits` component
 
 ## Quoting a gate verdict
 
+### The instrument is part of the claim
+
+Three conventions, each earned by a measured instance on 2026-10-12. They sit beside the
+verdict rules because each is a way a correct gate becomes a wrong statement about it.
+
+- **Never type a value that looks measured - capture it.** A sha, a tree identity, a
+  duration, a count, a test total: either a command in the same breath produced it or it is
+  not stated. A tree identity was retyped by hand as `...819bddaa9a00855...` when the real
+  value was `a7f13312562c51981bdda9a00855d726c708109b`, and only re-reading it against git
+  showed the difference. Capture identities by command substitution, or resolve them from
+  `origin/fleet/<branch>` after a fetch - never transcribe them from a screen.
+- **State the shape of the whole output, not a substring that would pass on meaningless
+  output.** A proof must be scoped to the same object as the claim it supports.
+  `tests/test_hermetic_env.py` is the worked example: non-empty; every line matching
+  `^tests/[A-Za-z0-9_/]+\.py$`; sorted; duplicate-free; and naming the file that changed. It
+  rejects empty stdout, whitespace, a prose banner, an unsorted list and a missing file,
+  while accepting both the old single-file value and the new two-module one. Exactness stays
+  where exactness IS the contract (`tests/test_fast_gate_mapping.py`); everywhere else, pin
+  the shape of the contract.
+- **Make the command state which question it answered - and know what your instrument
+  cannot see, and what it cannot ignore.** Four instances in one night: an arm table read as
+  the gate's run (`agents-i4cz`), a dry run read as the selection when the fallback tier runs
+  anyway (`agents-5sfb`), a `[check]` duration read as the current tip's, and a three-field
+  reader projected onto a record and then reported as the record's schema - the sharpest of
+  the four, because the instrument was the reader rather than the project. The mirror case
+  matters as much: a raw `diff` of two ranges says DIFFERENT while `git patch-id` says
+  IDENTICAL, because patch-id ignores index lines and hunk offsets by design. A crude
+  instrument can therefore hide a real difference or invent a fake one, and the remedy in both
+  directions is to name the question the command answers rather than the feeling that it
+  answered one.
+
 ### A lock is not a verdict
 
 `fleet-check --status` is the only verdict source. A lock file or a cache file in
