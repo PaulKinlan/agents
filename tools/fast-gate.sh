@@ -481,6 +481,28 @@ while IFS= read -r f; do
       # them for the credential-grant drift guard (agents-9nir review).
       mapped="$mapped tests/test_docs_design.py tests/test_containment.py"
       ;;
+    agents/*/report.schema.json)
+      # agents-9iyf. A MAPPING, not an ignore arm, and the chain is measured rather than
+      # assumed: every agent.yaml names this file under output.schema (lib/report_schema.py:4),
+      # lib/report_schema.py:38 validate() checks a model's report against that declared schema
+      # subset at runtime, and tests/test_report_schema.py is that module's contract suite. So
+      # the committed schema is not a test INPUT (see the search below) but the contract of the
+      # code that consumes it is the honest thing to run.
+      # SEARCH PERFORMED: `grep -rn report.schema.json tests/ lib/ tools/ factory` gives, apart
+      # from agents/threat-model - which ALREADY had its own arm at :426 and is why that file was
+      # never in the abort set (a first-match-wins case statement means my duplicate arm for it
+      # was dead code, caught and removed before review):
+      # test_adapter_auth_failure.py:128/:239, test_report_schema.py:107-123,
+      # test_perf_review.py:945 - EVERY one writes a report.schema.json into a TMP fixture and
+      # reads that back.
+      # HONEST CONSEQUENCE, filed rather than buried: because those fixtures are self-written,
+      # the committed schemas are not any test's input - 20 of this repo's 22 committed
+      # report.schema.json files (the exception, agents/threat-model's, is read at
+      # tests/test_factory_truth_2.py:34 and already had its own arm at :426) are data no test
+      # reads, so a broken one surfaces only where it is consumed at runtime. That is a
+      # coverage finding (agents-9iyf note), not a reason to invent a consumer.
+      mapped="$mapped tests/test_report_schema.py"
+      ;;
     lines/*.yaml)
       # Line manifests are read off the real tree: tests/test_docs_design.py:78 globs
       # lines/*.yaml to check lines.html (agents-9nir review).
@@ -509,6 +531,28 @@ while IFS= read -r f; do
       # docs-drift scanner DOES walk these files, and the real-tree fleet-resolution assertions
       # (tests/test_docs_drift.py:101-113) bind any walked .md that names a bare agent directory.
       mapped="$mapped tests/test_docs_drift.py"
+      ;;
+    agents/*/scripts/*.py)
+      # agents-9iyf: THE CLASS ARM FOR STATION SCRIPTS. The table had only PER-FILE arms, so a
+      # script nobody had enumerated (agents/log-check/scripts/parse_logs.py) failed the fast
+      # gate and forced the lane to edit THIS shared file mid-branch - a merge hazard in a
+      # parallel fleet, for 1 of the 30 aborting tracked files.
+      # SEARCH PERFORMED AND ITS RESULT (the rule in the ignore block is that a reason must
+      # record the search, never a judgement): `grep -rn parse_logs tests/` ->
+      # tests/test_prepass_exclusions.py:126 imports it; and tests/test_redaction.py:757 is a
+      # WALKER - `for path in sorted(ROOT.glob("agents/*/scripts/*.py"))` - so the redaction
+      # contract is a property of the whole CLASS, which is exactly why this arm is class-wide.
+      # tests/test_prepass_pin_boundary.py and tests/test_station_trusted_tool_pins.py are the
+      # other class consumers (every station script's trusted-tool resolution is pinned there;
+      # tests/test_fast_gate_mapping.py::test_station_trusted_tool_pins_mapped_for_prepass_scripts
+      # holds that requirement and FAILED my first version of this arm, which omitted it -
+      # evidence that the requirement is enforced rather than decorative).
+      # DELIBERATELY THE LAST MAPPED ARM: first match wins in this case statement, so every
+      # per-script arm above keeps its extra consumers, and this arm only catches scripts that
+      # would otherwise abort. Measured cost: 59 tests, 7.4 s (verified: a script WITH its own
+      # arm, agents/release-notes/scripts/gather_commits.py, still selects only that arm's three
+      # suites, so this one neither shadows nor inflates them).
+      mapped="$mapped tests/test_redaction.py tests/test_prepass_pin_boundary.py tests/test_station_trusted_tool_pins.py"
       ;;
     # --- Ignore list (agents-9nir) -----------------------------------------------------
     # RULE: an ignore must be a DELIBERATE CASE ARM WITH A REASON, never a default.
