@@ -95,6 +95,16 @@ CONFIG_PATH = FACTORY_ROOT / "tools.yaml"
 # against that writer either.
 HOST_PINS_ENV = "FACTORY_TOOL_PINS"
 
+# The DISPATCHER-SET pins handoff to a CHILD (agents-oq3j). A run that has verified its tools writes
+# the merged view it verified and names it with THIS variable in the environment the child is
+# constructed with (lib.child_env), so the name is set-not-inherited at every hop. A second
+# inherited name would authenticate nothing - the initial process can inherit that name too - so
+# lib.child_env NEVER copies this from its parent, and the dispatcher's entry point clears any
+# ambient value of it before it can be inherited further. A child that finds no value here
+# resolves the committed tools.yaml only, which fails closed on an unpinned trusted tool: the safe
+# direction, and the one a child with no handoff deserves.
+VERIFIED_PINS_ENV = "FACTORY_VERIFIED_TOOL_PINS"
+
 # The explicit dev/test opt-in that restores by-name resolution for an unpinned trusted tool.
 # `_unpinned_allowed` reads it, and lib.child_env forwards it to the children that resolve a
 # trusted tool themselves (findings dispatch, promotion) so a run that opted in parent-side does
@@ -402,11 +412,25 @@ def configure_host_pins(path: Any) -> None:
 
     ``None`` records an explicit "no host pins file", which is NOT the same as never having called
     this: an unconfigured process is a child, and a child still resolves the dispatcher's handoff
-    through ``HOST_PINS_ENV``.
+    through ``VERIFIED_PINS_ENV``.
+
+    The entry point also DROPS any inherited child-only name: that name means "the dispatcher
+    constructed this environment for a child", and a dispatcher that inherited it would be reading
+    a value it did not set. Children get theirs from lib.child_env, built from an explicit
+    argument, never from this process's environment.
     """
     global _configured_host_pins
     raw = str(path).strip() if path is not None else ""
     _configured_host_pins = Path(os.path.expanduser(raw)) if raw else None
+    os.environ.pop(VERIFIED_PINS_ENV, None)
+
+
+def _verified_pins_path() -> Optional[Path]:
+    """The dispatcher's verified snapshot named for a CHILD (``VERIFIED_PINS_ENV``), or None."""
+    raw = os.environ.get(VERIFIED_PINS_ENV, "").strip()
+    if not raw:
+        return None
+    return Path(os.path.expanduser(raw))
 
 
 def _ambient_host_pins() -> Optional[Path]:
@@ -426,12 +450,16 @@ def host_pins_path() -> Optional[Path]:
     still export it (~/fleet/remote/factory-nightly.sh, remote/provision.sh) - selecting nothing
     there would fail a legitimate run closed. THE FALLBACK IS THE HOLE: while it exists, an
     ambient name still selects a host pins file for a run that did not choose one. It goes away
-    with the enforcement follow-up, and until then this function is the only place that needs to
-    change. A child (never configured) resolves the dispatcher's handoff as before.
+    with the enforcement follow-up (agents-e6pi), and until then this function is the only place
+    that needs to change.
+
+    A CHILD (never configured) resolves the dispatcher's snapshot through ``VERIFIED_PINS_ENV``
+    and nothing else: the legacy name is not honoured for a child, because child_env builds the
+    child's environment from an explicit argument rather than copying its parent's.
     """
     global _ambient_fallback_announced
     if _configured_host_pins is _UNSET_HOST_PINS:
-        return _ambient_host_pins()
+        return _verified_pins_path()
     if _configured_host_pins is not None:
         return _configured_host_pins  # type: ignore[return-value]
     fallback = _ambient_host_pins()
@@ -510,7 +538,8 @@ def _require_pin(name: str, entry: Dict[str, str]) -> None:
     if entry.get("sha256") is None and not _unpinned_allowed():
         raise ToolPinError(
             f"trusted tool {name!r} is not pinned (no {name}.sha256 in tools.yaml nor the "
-            f"{HOST_PINS_ENV} host file); pin it, or set {UNPINNED_ALLOW_ENV}=1 to "
+            f"run's pins file - the --tool-pins argument, or for a child the dispatcher's "
+            f"{VERIFIED_PINS_ENV} handoff); pin it, or set {UNPINNED_ALLOW_ENV}=1 to "
             "opt out explicitly for a dev/test run")
 
 

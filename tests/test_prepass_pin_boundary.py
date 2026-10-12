@@ -76,7 +76,7 @@ class PrepassPinBoundaryBase(unittest.TestCase):
         env = {
             "PATH": f"{fakebin}:/usr/bin:/bin:/usr/local/bin",
             "HOME": os.environ.get("HOME", "/root"),
-            "FACTORY_TOOL_PINS": str(pins),
+            "FACTORY_VERIFIED_TOOL_PINS": str(pins),
             "FACTORY_ALLOW_UNPINNED_TOOLS": "0",
             "GH_TOKEN": "fake-token-for-the-constructed-case",
         }

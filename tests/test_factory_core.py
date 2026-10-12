@@ -195,7 +195,14 @@ class TestGitPinBoundary(unittest.TestCase):
                        for k in ("PATH", "FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS",
                                  "FAKE_GIT_LOG")}
         self.addCleanup(self._restore_env)
-        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        # agents-oq3j: these tests resolve git in THIS process (factory_cli._run_git), which is the
+        # HOST path, so the pins file is the run's own decision - not an environment name, which a
+        # host no longer reads. The decision is process state, so it is reset for the next suite.
+        from lib import tool_pins as tool_pins_module
+        self.addCleanup(setattr, tool_pins_module, "_configured_host_pins",
+                        tool_pins_module._UNSET_HOST_PINS)
+        os.environ.pop("FACTORY_TOOL_PINS", None)
+        tool_pins_module.configure_host_pins(self.pins)
         os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
         os.environ["FAKE_GIT_LOG"] = str(self.fake_log)
 

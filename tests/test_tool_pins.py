@@ -259,24 +259,32 @@ class RunChosenHostPinsTests(unittest.TestCase):
         self.assertIn("FACTORY_TOOL_PINS", announced)
         self.assertIn("--tool-pins", announced)
 
-    def test_a_child_process_still_resolves_the_dispatchers_handoff(self):
-        """agents-ndjv owns this channel and agents-oq3j must not move it: a process that made no
-        run decision of its own (a pre-pass child, handed the dispatcher's snapshot) resolves the
-        handoff name exactly as before. Pinned here so a later change to the host channel cannot
-        quietly take the child channel with it.
+    def test_a_child_resolves_the_dispatchers_snapshot_and_not_an_inherited_name(self):
+        """The child hop (agents-oq3j): a process that made no run decision of its own resolves the
+        snapshot the DISPATCHER constructed its environment with - the child-only name - and an
+        inherited legacy name selects NOTHING. Without the second half an ambient variable could
+        still choose the file a child verifies its tools against, which is the whole defect.
         """
-        handoff = self._pins_file("handoff.yaml", "gh:\n  sha256: " + "b" * 64 + "\n")
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(handoff)}):
-            self.assertEqual(host_pins_path(), handoff)
+        snapshot = self._pins_file("snapshot.yaml", "gh:\n  sha256: " + "b" * 64 + "\n")
+        with mock.patch.dict(os.environ, {"FACTORY_VERIFIED_TOOL_PINS": str(snapshot),
+                                          "FACTORY_TOOL_PINS": str(self.tmp / "ambient.yaml")}):
+            self.assertEqual(host_pins_path(), snapshot)
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(snapshot)}):
+            self.assertIsNone(host_pins_path(),
+                              "an inherited legacy name must never select a child's pins file")
 
 
 class HostPinsTests(unittest.TestCase):
-    """agents-3g6: FACTORY_TOOL_PINS host file is merged OVER tools.yaml (the out-of-band
-    pin source that makes fail-closed deployable without editing the repo)."""
+    """agents-3g6 + agents-oq3j: the HOST's pins file is merged OVER tools.yaml - the out-of-band
+    pin source that makes fail-closed deployable without editing the repo - and it is chosen by the
+    run's explicit decision (``configure_host_pins``: the ``factory`` / ``gen_site`` ``--tool-pins``
+    argument), never by an environment name."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="hostpins-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(setattr, tool_pins_module, "_configured_host_pins",
+                        tool_pins_module._UNSET_HOST_PINS)
         self.gh = _make_tool(self.tmp, "gh")
 
     def test_host_pins_merge_over_repo_per_tool(self):
@@ -287,8 +295,8 @@ class HostPinsTests(unittest.TestCase):
         host = self.tmp / "host.pins.yaml"
         host_sha = "b" * 64
         host.write_text(f"gh:\n  path: {self.gh}\n  sha256: {host_sha}\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(host)}):
-            pins = load_tool_pins(path=repo)
+        configure_host_pins(host)
+        pins = load_tool_pins(path=repo)
         # gh is overridden by the host file; bd (not in the host file) keeps the repo entry.
         self.assertEqual(pins["gh"], {"path": str(self.gh), "sha256": host_sha})
         self.assertEqual(pins["bd"], {"sha256": "a" * 64})
@@ -296,27 +304,27 @@ class HostPinsTests(unittest.TestCase):
     def test_host_pins_missing_file_is_no_change(self):
         repo = self.tmp / "tools.yaml"
         repo.write_text(f"gh:\n  sha256: {sha256_file(self.gh)}\n", encoding="utf-8")
-        missing = self.tmp / "does-not-exist.pins.yaml"
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(missing)}):
-            pins = load_tool_pins(path=repo)
+        configure_host_pins(self.tmp / "does-not-exist.pins.yaml")
+        pins = load_tool_pins(path=repo)
         self.assertEqual(pins["gh"], {"sha256": sha256_file(self.gh)})
 
     def test_host_pins_malformed_file_raises(self):
         host = self.tmp / "host.pins.yaml"
         host.write_text("gh:\n  sha256: not-hex\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(host)}):
-            with self.assertRaises(ToolPinError):
-                load_tool_pins()
+        configure_host_pins(host)
+        with self.assertRaises(ToolPinError):
+            load_tool_pins()
 
     def test_host_pins_path_is_none_when_unset(self):
         with mock.patch.dict(os.environ, {}, clear=True):
+            configure_host_pins(None)
             self.assertIsNone(host_pins_path())
 
     def test_host_pins_still_fails_closed_when_host_is_absent(self):
         # A missing host file must NOT relax the fail-closed default: an unpinned trusted
         # tool still refuses to resolve.
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(self.tmp / "nope.yaml"),
-                                          "FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
+        configure_host_pins(self.tmp / "nope.yaml")
+        with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
             with self.assertRaises(ToolPinError):
                 resolve_tool("gh", path_env=str(self.tmp), pins=load_tool_pins())
 
