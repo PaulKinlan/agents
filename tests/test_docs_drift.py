@@ -642,9 +642,16 @@ class TestThreatModelSandboxAlignment(unittest.TestCase):
 
     def test_threat_model_does_not_overstate_invisible_paths(self):
         text = (FACTORY_ROOT / "THREAT_MODEL.md").read_text(encoding="utf-8")
-        self.assertNotIn("everything else — including all of `$HOME`", text)
-        self.assertNotIn("everything else invisible", text)
-        self.assertNotIn("everything else — including", text)
+        # agents-k8hh: these absence checks were case-sensitive literal substrings, so a reintroduction that a
+        # doc naturally produces - the phrase at the START OF A LINE, where a sentence is capitalised - passed
+        # the pin. Matching on whitespace-normalised, lowercased text catches the phrase in ANY CASE, at ANY
+        # column, and ACROSS A LINE BREAK (markdown reflow splits sentences mid-phrase).
+        # BOUNDARY, stated so the pin is a rule rather than a blanket: a PARAPHRASE of the claim (e.g. "all other
+        # paths are hidden") is still NOT caught. This closes the phrase, not the class of rewordings.
+        normalised = re.sub(r"\s+", " ", text).lower()
+        self.assertNotIn("everything else — including all of `$home`", normalised)
+        self.assertNotIn("everything else invisible", normalised)
+        self.assertNotIn("everything else — including", normalised)
         # Truthfully documents read-only system mounts and tmpfs scratch
         self.assertIn("/usr", text)
         self.assertIn("/etc", text)
