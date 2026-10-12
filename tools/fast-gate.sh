@@ -300,6 +300,14 @@ while IFS= read -r f; do
       # $PIN_LOOKUP_PATH back at the hasher call site would pass the fast gate.
       mapped="$mapped tests/test_tool_pins.py tests/test_pin_generator_hasher.py"
       ;;
+    tools/audit-tool-pins.sh)
+      # agents-5vun: the pins AUDIT - a detector that must be run to have any value, so the
+      # suite that drives it (real forged files, real generator, exit codes) belongs here.
+      # tests/test_pins_audit.py also PINS THE MEASURED LIMIT (a self-consistent forgery
+      # whose path the lookup chooses passes), so the honest NOT-CHECKED text cannot be
+      # quietly turned into a claim of security by a later edit.
+      mapped="$mapped tests/test_pins_audit.py"
+      ;;
     THREAT_MODEL.md)
       # Root markdown the docs-drift scanner WALKS (check_docs.py os.walk()s every committed
       # .md outside IGNORE_DIRS). SEARCH PERFORMED (agents-28nn): `grep -rn 'ROOT /
