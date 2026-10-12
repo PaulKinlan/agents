@@ -258,7 +258,22 @@ class TestPromotion(SinkFixture, unittest.TestCase):
             factory_cli.promote_public_issue("fixture", self.issue_url)
         # agents-dpt: the promotion child resolves gh/bd itself, so it is also built with the
         # trusted-tool pin source (no new trust: the parent verified against the same pins).
-        child_env.assert_called_once_with(sink="github-issues", trusted_tools=True)
+        # agents-oq3j: AND with the SNAPSHOT THIS RUN verified - the dispatcher now hands the
+        # child the merged file it just authenticated (verified_pins). The path is per-run
+        # temp, so the CONTRACT is asserted rather than the path: pinning
+        # /tmp/factory-pins-XXXX/tool-pins.effective.yaml would fail for a reason that has
+        # nothing to do with the routing under test, while mock.ANY would accept None - that
+        # is, a promotion child that silently resolves no pins at all, which is the regression
+        # this expectation exists to catch (expecting `verified_pins` at all makes a call that
+        # drops it a KeyError, so the arm stays red when the handoff goes away).
+        self.assertEqual(child_env.call_count, 1)
+        routed = child_env.call_args.kwargs
+        self.assertEqual(routed["sink"], "github-issues")
+        self.assertIs(routed["trusted_tools"], True)
+        snapshot = routed["verified_pins"]
+        self.assertTrue(snapshot, "the promotion child must be handed the verified snapshot")
+        self.assertTrue(os.path.isfile(snapshot),
+                        f"the snapshot handed to the promotion child must exist: {snapshot!r}")
         self.assertEqual(json.loads(stdout.getvalue())["status"], "created")
         self.assertEqual(len(self.state()["beads"]), 1)
 
