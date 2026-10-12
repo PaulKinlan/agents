@@ -46,6 +46,51 @@ RESOLVER = ROOT / "tools" / "check-cmd.sh"
 TRACKED = ROOT / "tools" / "check.conf"
 FLEET_CHECK = Path.home() / "fleet" / "bin" / "fleet-check"
 
+# THE FLEET-BUNDLE INTERFACE THIS SUITE DRIVES, ASSERTED RATHER THAN ASSUMED (agents-o8jd).
+#
+# This file's subject is ~/fleet/bin/fleet-check - a file in ANOTHER repo, with no version pin
+# here and no signal when it changes. On 2026-10-11 the bundle grew a lane guard
+# (`if [ -z "$FAST" ] && [ -z "$FORCE_FULL" ] && [ "${FLEET_LANE:-}" != merger ]`, so a full-gate
+# attempt from a non-merger lane exits 2) and this suite went RED for every implementer lane
+# while passing for a merger lane - and the failure read as `'PASS (cached)' not found`, which
+# names a string rather than the fleet-side change that caused it. agents-3xqa pinned the suite's
+# own environment; this map closes the remaining half: the anchors below are what this suite
+# actually depends on, so losing one fails HERE, in one message that names the bundle, the
+# anchor, and the assertion that needs it.
+#
+# WHAT THIS DOES AND DOES NOT DO. It detects an anchor being REMOVED or reworded. It does NOT
+# detect a rename that keeps the anchor as a prefix (`fleet-heavy` -> `fleet-heavy-v2`), because
+# these are substring checks and a lookahead regex to close that would be a check nobody can
+# read; for the two spawn stubs that case is covered anyway, because every test that can reach
+# the spawn path asserts its stub DID intercept the attempt, so a bypass fails loudly rather
+# than starting a real gate quietly. It also cannot detect a behavioural change that keeps the
+# text - that is what the tests below are for. And it is a CONTRACT check, not a version pin:
+# a bundle edit that keeps these anchors is fine, which is the property we want (sensitivity to
+# the interface, not to the file's text).
+FLEET_BUNDLE_ANCHORS = {
+    "FLEET_LANE": "the lane variable the bundle requires (lane=${FLEET_LANE:?...}) and the one "
+                  "_entrypoint_env pins to merger; without it the bundle exits before the "
+                  "config/verdict paths these tests assert on (agents-3xqa)",
+    "FORCE_FULL": "the guard's sibling bypass, beside FAST; the shape _entrypoint_env's pin is "
+                  "written against, so a rewrite of that guard must be met by a suite update",
+    "setsid": "one of the two commands _prevent_real_gate stubs FIRST on PATH; if the bundle "
+              "starts a gate some other way, an entrypoint test can spawn a REAL full gate in "
+              "the background and pay for the VM's one heavy slot (agents-gxnb)",
+    "fleet-heavy": "the other stubbed command, for the same reason as setsid",
+    ".fleet/check.conf": "the per-VM config this suite installs into a temp HOME and asserts "
+                          "on; the path is part of the interface, not an implementation detail",
+    "PASS (cached)": "the cached-verdict line "
+                     "test_the_entrypoint_resolves_the_installed_tracked_command asserts on",
+    "cached PASS was for a different command": "the mismatch line "
+                                               "test_command_mismatch_fails_cleanly_without_spawning_real_gate "
+                                               "asserts on",
+}
+
+
+def missing_bundle_anchors(source: str) -> dict:
+    """The anchors absent from `source`, each mapped to what depends on it."""
+    return {anchor: why for anchor, why in FLEET_BUNDLE_ANCHORS.items() if anchor not in source}
+
 
 def _entrypoint_env(home: str) -> dict:
     """The env the deployed entrypoint is driven with, PINNED - so the verdict is about the
@@ -280,8 +325,9 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
         # the cached verdict - which is exactly what a wrong or missing config would make
         # impossible (the .cmd comparison at :170 would fail and it would start a gate).
         self.assertIn("PASS (cached)", blob,
-                      f"the entrypoint must resolve the installed command and report the "
-                      f"cached verdict: {blob[:300]}")
+                      f"the entrypoint ({FLEET_CHECK}) must resolve the installed command and "
+                      f"report the cached verdict (agents-o8jd: this line is part of the "
+                      f"fleet-bundle interface this suite drives): {blob[:300]}")
 
     def test_command_mismatch_fails_cleanly_without_spawning_real_gate(self):
         """agents-gxnb: when the cached command does not match $CHECK_CMD, fleet-check's
@@ -312,7 +358,10 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
         res = subprocess.run(["bash", str(FLEET_CHECK)],
                              capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
         # The entrypoint reports the mismatch
-        self.assertIn("cached PASS was for a different command", res.stdout)
+        self.assertIn("cached PASS was for a different command", res.stdout,
+                      f"the entrypoint ({FLEET_CHECK}) must report the command mismatch "
+                      f"(agents-o8jd: this line is part of the fleet-bundle interface this "
+                      f"suite drives): {(res.stdout + res.stderr)[:300]}")
         # The spawn attempt was intercepted and neutralized before any real tests ran
         self.assertTrue(marker.exists(), "stub interceptor must capture the spawn attempt")
 
@@ -556,6 +605,58 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
         installed = conf.read_text(encoding="utf-8")
         self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
         self.assertIn("-t .", installed)
+
+
+class TestTheFleetBundleInterfaceThisSuiteDrives(unittest.TestCase):
+    """agents-o8jd: fail LOUDLY and IN ONE MESSAGE when the fleet bundle drops an anchor.
+
+    The rest of this file asserts the entrypoint's behaviour, which is the right way to test it -
+    but a fleet-side change that removes or renames something the suite drives used to surface as
+    a confusing assertion about a string (measured 2026-10-12: `'PASS (cached)' not found`, red
+    for every implementer lane and green for a merger lane, i.e. a verdict that was a function of
+    WHO RAN THE SUITE - see _entrypoint_env). This test turns that into one named failure.
+
+    Non-vacuity is proven in the second test below, against synthetic sources: the real bundle is
+    never mutated, because it is the shared entrypoint for every lane on this VM.
+    """
+
+    def setUp(self):
+        if not FLEET_CHECK.is_file():
+            self.skipTest(f"no deployed entrypoint at {FLEET_CHECK} on this VM")
+        self.source = FLEET_CHECK.read_text(encoding="utf-8", errors="replace")
+
+    def test_every_anchor_this_suite_depends_on_is_still_present(self):
+        missing = missing_bundle_anchors(self.source)
+        if not missing:
+            return
+        lines = [
+            f"THE FLEET BUNDLE NO LONGER PRESENTS {len(missing)} ANCHOR(S) THIS SUITE DRIVES: "
+            f"{FLEET_CHECK}",
+            "",
+            "This project suite's subject is a file in the fleet bundle, so a fleet-side change "
+            "like this is expected to need a matching update HERE rather than to fail as a "
+            "string assertion somewhere below (agents-o8jd).",
+            "",
+        ]
+        for anchor, why in sorted(missing.items()):
+            lines.append(f"  MISSING {anchor!r} - needed by: {why}")
+        lines += [
+            "",
+            "What to do: if the bundle still offers this capability under a new name or wording, "
+            "update FLEET_BUNDLE_ANCHORS and the dependent assertion in the same change; if the "
+            "capability is GONE, this suite must stop depending on it (or be deleted with the "
+            "interface it tests).",
+        ]
+        self.fail("\n".join(lines))
+
+    def test_the_anchor_check_fires_when_an_anchor_is_missing(self):
+        """A green run above must mean the check looked, not that it is dead code."""
+        complete = "\n".join(FLEET_BUNDLE_ANCHORS)
+        self.assertEqual({}, missing_bundle_anchors(complete))
+        for anchor, why in FLEET_BUNDLE_ANCHORS.items():
+            broken = complete.replace(anchor, "")
+            self.assertEqual({anchor: why}, missing_bundle_anchors(broken),
+                             f"dropping {anchor!r} must be reported, and only it")
 
 
 if __name__ == "__main__":
