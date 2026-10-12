@@ -57,3 +57,45 @@ This directory holds patches for fleet-level infrastructure and tooling that can
   git apply /path/to/fleet-check-lock-classification.patch
   bash tests/fleet-check-lock.test.sh
   ```
+
+## fleet-oracle-partial-consumers.patch + fleet-check-partial-clause.patch (agents-ul9v)
+
+- **Target repo:** the fleet tree (hub-owned) — NOT this repository.
+- **Target files:** `remote/check-coverage.py` (the coverage oracle) and `bin/fleet-check` (its consumer).
+- **Problem:** an omitted consumer is only ever reported INSIDE the `unmapped` bucket. The oracle appends a
+  changed file to its `unmapped` list whenever candidate suites were omitted, so a file whose arm IS mapped and
+  executed but which omits a consumer is published to a lane as an unmapped file —
+  `COVERAGE WARNING: 1 unmapped changed file(s): lib/sandbox.py (omitted: ...)`. The label is wrong in the common
+  case, and the genuine finding is demoted to a parenthesis under a false heading.
+- **Measured basis:** one variable apart on REAL gate logs (same log, same repo dir, same sha; only the oracle
+  file differing). On `tests/test_sandbox.py`-style logs the mapped file leaves `unmapped` and lands in the new
+  `partial` field WITH AN IDENTICAL OMITTED LIST (19 = 19 on one log, 20 = 20 on another), and the entry that is
+  GENUINELY unmapped on the same log (a changed test file that did not execute) is untouched. The patch relabels;
+  it does not widen and it does not silence.
+- **Changes:** (1) `check-coverage.py` initialises `partial = {}`, records `partial[f] = sorted(omitted_c)` in
+  mode (b) INSTEAD OF `unmapped.append(f)`, publishes `partial` in the result dict, and clears it in the UNKNOWN
+  branch (an absence of evidence must not become a partial claim either). (2) `bin/fleet-check` reads `.partial`
+  and renders it as its OWN clause in BOTH note-building paths — the fresh path and the previous-attempt path —
+  and its warning condition fires on `num_partial > 0` as well. The unmapped clause is OMITTED when its count is
+  zero, because otherwise the sentence reads `0 unmapped changed file(s)` while the real finding is an incomplete
+  arm, trading one mislabel for another.
+- **Why these two files travel together, and must not be split to make a smaller diff:** shipping the oracle alone
+  renders `COVERAGE WARNING: 0 unmapped changed file(s): (omitted: ...)` — a sentence that is FALSE IN A NEW WAY
+  rather than merely incomplete, so the half-patch trades one mislabel for another and the net is negative. The
+  artefact is the oracle plus the consumer clause, one shared vocabulary, or nothing.
+- **Rendering evidence, four variable states through the real clause:** partial only →
+  `1 mapped changed file(s) with omitted consumers: lib/sandbox.py (19 omitted)` with NO unmapped clause;
+  unmapped only → unchanged wording; both → both clauses; neither → no warning. `omitted > 0` implies a non-zero
+  clause, because the omission is recorded in the same branch that now populates `partial`.
+- **Verification recipe:** apply both patches to pristine copies of the two files, then run the oracle twice on one
+  real gate log — once as-is and once with the omitted suites appended to the `passed:` line — and diff the two
+  result dicts. Both directions must hold: a mapped file with omitted consumers appears in `partial` and NOT in
+  `unmapped`, and a fully executed candidate set produces NEITHER. Direction (d), the decider that this is not a
+  widening: no name-adjacent non-importer (e.g. a `tests/sandbox_fixtures` consumer) appears in the reported set.
+  `git apply --check` round-trips byte-identically, which is how these two files were verified before commit.
+- **Ownership and routing:** these files are outside this VM's write access; the hub owns the fleet tree and is the
+  only route. The related correctness bead is `agents-0xm2` (the silent true: the candidate discovery misses a real
+  importer, the naming fallback matches a namesake suite, and `covered=True` is published). Its fix is the SAME
+  rule consolidation — the candidate path delegating to `has_import_reference`, the rule the pin mirrors — and it
+  is deliberately NOT included here: it changes the candidate set for every project using the oracle, and it
+  should land as its own measured change. Neither patch closes `agents-0xm2`.
