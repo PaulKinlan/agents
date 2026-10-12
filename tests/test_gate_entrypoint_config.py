@@ -453,11 +453,30 @@ class TestAFailedUpdateIsNotSwallowed(unittest.TestCase):
 class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     """The named weakness of (C): the tracked file is the source, the per-VM file is a copy.
 
-    HONEST LIMIT, AND IT MAKES THE STRICTER CHOICE CORRECT: from the files alone, a
-    HAND-TUNED override and a STALE INSTALL are the same bytes. There is no marker that
-    distinguishes "I meant this locally" from "the tracked file moved on". So this test
-    FAILS ON ANY DIVERGENCE from the tracked command; the documented way to update or tune
-    is editing tools/check.conf and re-running `bash tools/check-cmd.sh --install`.
+    WHAT THIS CLASS ENFORCES (agents-024z). The tests below install into a temp HOME and assert two
+    properties: `--install` is idempotent and writes CHECK_CMD EQUAL to the tracked value, and a
+    PRE-EXISTING stale, malformed or other-project file is REPAIRED by it (overwritten with the
+    tracked values, with a warning for the foreign case).
+
+    WHAT IT DELIBERATELY DOES NOT. It never reads the live ~/.fleet/check.conf, so it does NOT fail
+    on a hand-tuned divergence in an operator's HOME - a claim the earlier wording here made ("this
+    test FAILS ON ANY DIVERGENCE from the tracked command") and that this class cannot provide: a
+    reader who trusted it would not write the test that is actually missing. The omission is chosen,
+    not overlooked - that file is machine-global state, so asserting its contents would make this
+    suite non-hermetic and turn it red on every host that has not run --install, which is the
+    machine-state pathology the fleet's speed guidance names. What a divergent live file does in
+    practice: the deployed entrypoint SOURCES it, so the live command is what runs until someone
+    repairs it, and the repair is the documented `bash tools/check-cmd.sh --install` (or editing
+    tools/check.conf and re-running it). A stale PASS record cannot quietly hide that: the cache-hit
+    path requires a record whose `.cmd` equals the command actually resolved, which
+    TestTheEntrypointResolvesTheInstalledCommand pins. Drift between the TRACKED file and CI is
+    guarded by tests/test_check_conf_consistency.py, not here.
+
+    HONEST LIMIT, AND IT MAKES THE STRICTER CHOICE CORRECT: from the files alone, a HAND-TUNED
+    override and a STALE INSTALL are the same bytes. There is no marker that distinguishes "I
+    meant this locally" from "the tracked file moved on". So --install refuses to guess and
+    overwrites both, which is what the repair tests below measure; the documented way to update or
+    tune is editing tools/check.conf and re-running `bash tools/check-cmd.sh --install`.
     """
 
     def test_install_is_idempotent_and_matches_the_tracked_command(self):
@@ -478,6 +497,18 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
                          "the installed command MUST equal the tracked one; a divergence "
                          "means either a hand-edit or a stale install, and this test "
                          "cannot tell them apart, so it refuses both")
+
+        # agents-024z: the header --install writes into EVERY VM's live config is the only prose
+        # most operators ever read about this guard, and it used to promise one this suite cannot
+        # keep (it said the suite "fails on any divergence", which it cannot detect because it
+        # never reads the live file). The two facts the header may state are pinned here: the file
+        # is machine-global, and it names the repair. The negative assertion is what makes the
+        # false promise unable to come back - it is the falsifiable half of this bead.
+        self.assertIn("MACHINE-GLOBAL", installed)
+        self.assertIn("--install", installed)
+        self.assertNotIn("fails on any divergence", installed,
+                         "the emitted header must not promise a guard no test performs "
+                         "(agents-024z): nothing in this suite reads the live per-VM file")
 
     def test_install_overwrites_stale_per_vm_config_with_tracked_values(self):
         """When an existing per-VM check.conf carries a stale command (e.g. without -t .),
