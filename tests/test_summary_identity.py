@@ -32,10 +32,6 @@ WRITERS = ("tools/fast-gate.sh", "tools/check.conf")
 def _src(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
 
-def _naming_lines(src):
-    """Lines that ASSIGN a summary file path - where the identity has to live."""
-    return [ln for ln in src.splitlines() if ".summary.txt" in ln and "=" in ln]
-
 def _header_format_line(src):
     """The statement that WRITES the run identity - the artefact this property is about.
 
