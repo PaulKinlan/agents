@@ -730,7 +730,21 @@ fi
 # correctly. Reproduced with GIT_CHANGED="lib/sandbox.py" and a `sort` on PATH that exits 1:
 # the correctly mapped tests/test_sandbox.py was thrown away and the verdict was green.
 # A pipeline that cannot compute the suite list is an ERROR, not an empty suite list.
-if ! files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort)"; then
+# Tree-guard tier (agents-dv23): repo-wide invariants run on every mapped and smoke run.
+# Extracted from tests/test_budget.py (TestNoUnboundedSubprocess) per ADR agents-c07o.
+tree_guards="tests/test_tree_guards.py"
+
+# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
+# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
+if [ -z "$run" ] && [ -z "$mapped" ]; then
+  if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
+    FAST_GATE_TERMINATED=1
+    exit 0
+  fi
+  mapped="tests/test_factory_core.py"
+fi
+
+if ! files="$(printf '%s\n' $run $mapped $tree_guards | awk 'NF && !seen[$0]++' | sort)"; then
   echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
   echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
   exit 1
@@ -741,12 +755,6 @@ if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
   FAST_GATE_TERMINATED=1
   printf '%s\n' $files
   exit 0
-fi
-
-# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
-# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
-if [ -z "$files" ]; then
-  files="tests/test_factory_core.py"
 fi
 
 FAST_GATE_STAGE="preparing runner"
