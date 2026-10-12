@@ -188,3 +188,33 @@ This directory holds patches for fleet-level infrastructure and tooling that can
   rule consolidation — the candidate path delegating to `has_import_reference`, the rule the pin mirrors — and it
   is deliberately NOT included here: it changes the candidate set for every project using the oracle, and it
   should land as its own measured change. Neither patch closes `agents-0xm2`.
+
+### Revision 2 — corrections after the first review (agents-keaf, agents-oeza)
+
+- **agents-keaf (P2, fixed): the cached-PASS serve path.** Revision 1 claimed the clause was rendered in "both
+  note-building paths" and that claim did NOT reproduce on the path most lanes actually read: the record assembly
+  (`.state=... .suites=$cov[0].suites | .unmapped=$cov[0].unmapped | .omitted=$cov[0].omitted`) copied three fields
+  and NOT `partial`, so on a cache hit the new signal was absent — and the old `${unm_str:-files unmapped}` fallback
+  then printed a FALSE "files unmapped" clause for a partial-only record, which is the very bug this patch exists to
+  remove. FIXED: the assembly now carries `.partial=$cov[0].partial`, and every path builds the sentence one way,
+  with each clause printed only when its own count is non-zero. THAT CLAIM IS DELIBERATELY LEFT ABOVE UNCHANGED: it
+  is the sentence whose failure a reader could see, and a revision note that hides it would remove the evidence that
+  the hole was findable. The correction is the additional site, not a repaired wording.
+- **The field has four consumers, and every one of them must render it or the mislabel is merely relocated:** the
+  fresh note path, the previous-attempt note path, the cached-PASS serve path (all in `bin/fleet-check`; all three
+  fixed), and `fleet-budget`, whose R5 rollup reads `unmapped` and therefore drops a partially-mapped file out of
+  its count after the relabel (**agents-oeza**, deliberately still OPEN: a different tool's own semantics decide
+  whether a partial file is counted as an unmapped one was or gets its own line, and that is decided by reading it
+  rather than by taste). A rollup is read as a summary rather than a detail, so a consumer that silently drops the
+  file is worse than one that prints the old word.
+- **(b) IS NO LONGER OWED, AND IT IS NO LONGER THE AUTHOR'S CLAIM:** the reviewer independently reproduced it from
+  the recipe in this file, on a scratch clone, in the revision under review — which is the standard that makes a
+  stated recipe worth more than a stated limit. Everything in the evidence section above therefore has a second
+  reader.
+- **Gate note:** these are PATCH ARTEFACTS, so no cached gate run applies to them; the evidence standard is a
+  reviewer reproducing the directions from the recipe. The in-tree fast gate for this branch passes because the
+  branch adds files under `patches/` only, and NOTHING in the patched files can be exercised by this repository's
+  suite, because neither file is in it.
+- **What revision 2 changes in the diff:** the fleet-check patch only — the record assembly line and the serve-path
+  sentence. The oracle patch is untouched, so its four measured directions and the reviewer's reproduction stand as
+  they were.
