@@ -43,6 +43,130 @@ def _discovery_commands() -> list[str]:
     return commands
 
 
+def _parse_discovery_args(cmd: str) -> dict:
+    """Parse unittest discover arguments (-s, -t, -p, -k, etc., short/long/attached forms) from a command string."""
+    tokens = cmd.split()
+    args = {"start": None, "top": None, "pattern": None, "filter": None, "verbose": False}
+    if "discover" in tokens:
+        idx = tokens.index("discover") + 1
+        i = idx
+        while i < len(tokens):
+            t = tokens[i]
+            if t == "-s" or t == "--start-directory":
+                if i + 1 < len(tokens):
+                    args["start"] = tokens[i + 1].strip("'\"")
+                    i += 2
+                else:
+                    i += 1
+            elif t.startswith("--start-directory="):
+                args["start"] = t.split("=", 1)[1].strip("'\"")
+                i += 1
+            elif t.startswith("-s") and len(t) > 2:
+                val = t[2:]
+                if val.startswith("="):
+                    val = val[1:]
+                args["start"] = val.strip("'\"")
+                i += 1
+            elif t == "-t" or t == "--top-level-directory":
+                if i + 1 < len(tokens):
+                    args["top"] = tokens[i + 1].strip("'\"")
+                    i += 2
+                else:
+                    i += 1
+            elif t.startswith("--top-level-directory="):
+                args["top"] = t.split("=", 1)[1].strip("'\"")
+                i += 1
+            elif t.startswith("-t") and len(t) > 2:
+                val = t[2:]
+                if val.startswith("="):
+                    val = val[1:]
+                args["top"] = val.strip("'\"")
+                i += 1
+            elif t == "-p" or t == "--pattern":
+                if i + 1 < len(tokens):
+                    args["pattern"] = tokens[i + 1].strip("'\"")
+                    i += 2
+                else:
+                    i += 1
+            elif t.startswith("--pattern="):
+                args["pattern"] = t.split("=", 1)[1].strip("'\"")
+                i += 1
+            elif t.startswith("-p") and len(t) > 2:
+                val = t[2:]
+                if val.startswith("="):
+                    val = val[1:]
+                args["pattern"] = val.strip("'\"")
+                i += 1
+            elif t == "-k":
+                if i + 1 < len(tokens):
+                    args["filter"] = tokens[i + 1].strip("'\"")
+                    i += 2
+                else:
+                    i += 1
+            elif t.startswith("-k") and len(t) > 2:
+                val = t[2:]
+                if val.startswith("="):
+                    val = val[1:]
+                args["filter"] = val.strip("'\"")
+                i += 1
+            elif t in ("-v", "--verbose"):
+                args["verbose"] = True
+                i += 1
+            else:
+                i += 1
+    return args
+
+
+def check_ci_and_tracked_config_consistency(ci_commands: list[str], tracked_cmd: str) -> None:
+    """Assert that CI discovery commands and tracked CHECK_CMD agree on hermeticity and test selection."""
+    if not ci_commands:
+        raise AssertionError("expected at least one discovery invocation in ci.yml")
+
+    tracked_args = _parse_discovery_args(tracked_cmd)
+
+    # 1. EVERY discovery command in CI must carry -t . (package-aware) and -s tests
+    for cmd in ci_commands:
+        cmd_args = _parse_discovery_args(cmd)
+        if cmd_args["top"] != ".":
+            raise AssertionError(f"the CI invocation lost top-level directory -t .: {cmd!r}")
+        if cmd_args["start"] != "tests":
+            raise AssertionError(f"the CI invocation lost start directory -s tests: {cmd!r}")
+
+    # 2. Tracked CHECK_CMD must carry -t . and -s tests
+    if tracked_args["top"] != ".":
+        raise AssertionError(f"the tracked CHECK_CMD lost top-level directory -t .: {tracked_cmd!r}")
+    if tracked_args["start"] != "tests":
+        raise AssertionError(f"the tracked CHECK_CMD lost start directory -s tests: {tracked_cmd!r}")
+
+    # 3. Core CI suite must agree with tracked CHECK_CMD on discovery arguments and test selection.
+    # Neither side may acquire a pattern (-p/--pattern), filter (-k), or directory (-s, -t) flag the other lacks (agents-z9aa).
+    core_ci_cmd = ci_commands[0]
+    core_ci_args = _parse_discovery_args(core_ci_cmd)
+
+    if core_ci_args["start"] != tracked_args["start"]:
+        raise AssertionError(
+            f"CI core discovery start dir ({core_ci_args['start']!r}) "
+            f"diverges from tracked CHECK_CMD ({tracked_args['start']!r})"
+        )
+    if core_ci_args["top"] != tracked_args["top"]:
+        raise AssertionError(
+            f"CI core discovery top dir ({core_ci_args['top']!r}) "
+            f"diverges from tracked CHECK_CMD ({tracked_args['top']!r})"
+        )
+    if core_ci_args["pattern"] != tracked_args["pattern"]:
+        raise AssertionError(
+            f"CI core discovery pattern ({core_ci_args['pattern']!r}) "
+            f"diverges from tracked CHECK_CMD ({tracked_args['pattern']!r}); "
+            f"core CI must not narrow or alter test selection"
+        )
+    if core_ci_args["filter"] != tracked_args["filter"]:
+        raise AssertionError(
+            f"CI core discovery filter ({core_ci_args['filter']!r}) "
+            f"diverges from tracked CHECK_CMD ({tracked_args['filter']!r}); "
+            f"core CI must not filter test names"
+        )
+
+
 class TestTrackedCheckConfig(unittest.TestCase):
     """The acceptance: tools/check.conf is tracked and specifies package-aware discovery."""
 
@@ -99,13 +223,37 @@ class TestTrackedCheckConfig(unittest.TestCase):
         edit: it compares the two, so it fails whichever side changes alone.
         """
         tracked = _tracked_fields()["CHECK_CMD"]
-        for cmd in _discovery_commands():
-            for flag in ("-t .",):
-                with self.subTest(command=cmd, flag=flag):
-                    self.assertIn(flag, tracked,
-                                  f"the tracked CHECK_CMD lost {flag!r}: {tracked!r}")
-                    self.assertIn(flag, cmd,
-                                  f"the CI invocation lost {flag!r}: {cmd!r}")
+        commands = _discovery_commands()
+        check_ci_and_tracked_config_consistency(commands, tracked)
+
+    def test_divergent_ci_test_selection_fails_consistency_check(self):
+        """agents-z9aa: assert that when CI's core test command narrows or alters test selection
+        (e.g. adding -p, -pVAL, --pattern, --pattern=, -k, or -kVAL), the consistency check FAILS."""
+        tracked = _tracked_fields()["CHECK_CMD"]
+        divergent_variants = [
+            "python3 -m unittest discover -s tests -t . -p test_no_bwrap_guard.py -v",
+            "python3 -m unittest discover -s tests -t . -p 'test_no_bwrap_guard.py' -v",
+            "python3 -m unittest discover -s tests -t . -ptest_no_bwrap_guard.py -v",
+            "python3 -m unittest discover -s tests -t . --pattern test_no_bwrap_guard.py -v",
+            "python3 -m unittest discover -s tests -t . --pattern='test_no_bwrap_guard.py' -v",
+            "python3 -m unittest discover -s tests -t . -k test_no_bwrap -v",
+            "python3 -m unittest discover -s tests -t . -ktest_no_bwrap -v",
+        ]
+        for divergent_cmd in divergent_variants:
+            with self.subTest(variant=divergent_cmd):
+                with self.assertRaises(AssertionError) as cm:
+                    check_ci_and_tracked_config_consistency([divergent_cmd], tracked)
+                self.assertIn("diverges from tracked CHECK_CMD", str(cm.exception))
+
+    def test_divergent_start_dir_fails_consistency_check(self):
+        """agents-z9aa: assert that a divergent start directory fails consistency check."""
+        tracked = _tracked_fields()["CHECK_CMD"]
+        divergent_commands = [
+            "python3 -m unittest discover -s other_tests -t . -v",
+        ]
+        with self.assertRaises(AssertionError) as cm:
+            check_ci_and_tracked_config_consistency(divergent_commands, tracked)
+        self.assertIn("tests", str(cm.exception))
 
 
 class TestConfigIsResolvedLoudly(unittest.TestCase):
