@@ -629,6 +629,19 @@ while IFS= read -r f; do
       # run for this arm's current union.
       mapped="$mapped tests/test_budget.py tests/test_factory_core.py tests/test_credential_broker.py tests/test_line_andon.py"
       ;;
+    lib/containment.py)
+      # agents-mo75. The generic lib/*.py arm below derives the suite from the changed file's
+      # BASENAME, so this module mapped to tests/test_containment.py - and agents-3iog split the
+      # containment suite into six modules, of which test_containment.py is the one that kept the
+      # module's name. The THIN module was therefore what ran: measured, the name-based rule emitted
+      # 2 suites and ran 55 tests, while the eight test files that import lib.containment run 151,
+      # so five sibling modules and the child-env consumer were omitted and the gate still printed
+      # PASS (the coverage oracle named them, which is how the omission was found). A name-based rule
+      # cannot know a suite was split, so this one is a LIST - the same treatment
+      # tests/containment_harness.py) gets above for the same reason. Measured cost of the addition:
+      # about 8 s (61.5 s for the eight files against 53.3 s for the two the fallback chose).
+      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_child_env.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in
