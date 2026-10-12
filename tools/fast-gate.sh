@@ -254,9 +254,17 @@ while IFS= read -r f; do
       # bucket and ABORTED THE GATE with exit 1 rather than skipping a suite - the one member
       # of this family the instrument can actually catch, because the changed file was
       # unmatched. tests/test_pages_publish_scope.py imports tools.stage_site directly (:18)
-      # and exercises guard() and stage_site() plus the publication scopes, so it is the suite
-      # this file's own changes must select. Same mapping a docs/* or .github/* change uses.
-      mapped="$mapped tests/test_pages_publish_scope.py"
+      # and exercises guard() and stage_site() plus the publication scopes. It is NOT the only
+      # suite that can fail for this file, which the previous wording claimed ("the suite this
+      # file's own changes must select"): agents-23jg measured that tests/test_retention.py pins
+      # this file too, through its deletion inventory - :1207 carries
+      # ("tools/stage_site.py", "shutil.rmtree(out)", 1, "NAMED", ...). MEASURED on 2026-10-12
+      # with the non-equivalent mutant `shutil.rmtree(out) -> shutil.rmtree(out,
+      # ignore_errors=True)`: the arm selected tests/test_pages_publish_scope.py ALONE and it
+      # reported OK, while tests/test_retention.py reported FAILED (failures=2) without ever
+      # being selected - a change to this file the fast gate could not catch. Both consumers are
+      # therefore listed. Same mapping a docs/* or .github/* change uses.
+      mapped="$mapped tests/test_pages_publish_scope.py tests/test_retention.py"
       ;;
     tests/__init__.py|tests/hermetic_env.py)
       # Centralized hermetic test package initialization (agents-v1a2) and shared helper.
