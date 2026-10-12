@@ -67,7 +67,10 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
                       f"the gate must say which environment its verdict is about: {res.stderr!r}")
         self.assertIn("isolate_operator_config", res.stderr,
                       "the gate must name the declaration that supplies hermeticity")
-        self.assertEqual(res.stdout.strip(), "tests/test_hermetic_env.py",
+        # agents-h17y: the tests/test_*.py arm also maps tests/test_direct_run_completeness.py, so a
+        # changed test file resolves to the guard plus itself - still an exact, machine-readable list.
+        self.assertEqual(res.stdout.strip(),
+                         "tests/test_direct_run_completeness.py\ntests/test_hermetic_env.py",
                          "stdout stays the machine-readable suite list")
         self.assertEqual(res.returncode, 0, res.stderr)
 
