@@ -203,6 +203,7 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
   echo "# Generated $("$DATE" -u +%Y-%m-%dT%H:%M:%SZ); the consuming run selects it with an explicit --tool-pins (merged over tools.yaml) - an inherited FACTORY_TOOL_PINS is the LEGACY host fallback (agents-uekw removes it), NOT the dispatcher-to-child handoff: the dispatcher hands a child its verified snapshot as FACTORY_VERIFIED_TOOL_PINS (lib/tool_pins.py host_pins_path)."
   echo "# Regenerate after any tool upgrade: tools/generate-tool-pins.sh"
   echo "# Lookup confined to: $PIN_LOOKUP_PATH (an inherited PATH is never trusted; agents-28nn round 2)"
+  echo "# The fleet's own bd shim (~/fleet/bin) is deliberately excluded: the nightly runner strips that directory from PATH and every PATH resolution is verified, so pinning the shim would make the nightly fail closed (agents-1pnh)."
   echo "# Resolution is explicit per-directory filesystem tests, never command -v: exported"
   echo "# shell functions and the CWD cannot influence what is hashed or emitted (agents-28nn round 3)"
   for tool in $TOOLS; do
