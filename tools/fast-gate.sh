@@ -266,23 +266,24 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py tests/test_station_trusted_tool_pins.py"
       ;;
     lib/child_env.py)
-      # This arm deliberately does NOT include two suites that the fleet-check wrapper's coverage
-      # oracle names for this file: tests/test_credential_broker.py and tests/test_sink_adapters.py.
-      # They import the builder and even call it (the broker suite at :649 and :677), but nothing
-      # they assert on the result notices a wrong one. MEASURED on 2026-10-12 for agents-6ujc:
-      # patching child_environment to leak an ambient AWS_SECRET_ACCESS_KEY leaves
-      # test_credential_broker at "80 tests, 0 failures, 0 errors" and test_sink_adapters at
-      # "29 tests, 0 failures, 0 errors" - identical to their unmutated baselines - while the SAME
-      # mutation fails six tests in tests/test_child_env.py, the suite that actually covers this
-      # boundary. Adding them would add 109 tests that do not exercise the file while LOOKING like
-      # coverage, so the warning is noise from an import-graph proxy rather than a missing arm; the
-      # real gap is a credential-boundary assertion in those two suites, which is separate work.
+      # This arm INCLUDES tests/test_credential_broker.py and tests/test_sink_adapters.py (agents-hay8).
+      # It previously did not, and the reason is worth keeping, because it is the same principle in
+      # both directions. They had always RECEIVED the builder's output - the broker suite calls
+      # child_environment() directly at :649 and :677 - but until agents-a9lc they asserted nothing
+      # about the credential boundary in it. MEASURED on 2026-10-12 for agents-6ujc: patching the
+      # builder to leak an ambient AWS_SECRET_ACCESS_KEY left test_credential_broker at "80 tests,
+      # 0 failures, 0 errors" and test_sink_adapters at "29 tests, 0 failures, 0 errors" - identical
+      # to their unmutated baselines - while the SAME mutation failed six tests in the file's own
+      # suite. Naming suites that cannot go red for the file they are named for is coverage that
+      # lies, so they were excluded then; agents-a9lc then added assertNotIn("AWS_SECRET_ACCESS_KEY",
+      # env) at every call site that consumes the builder, which makes them able to fail for this
+      # file's property, so they are included now for exactly the reason they were excluded before.
       # The child environment builder. Its own suite plus the two consumers that resolve trusted
       # tools from the environment it constructs (agents-oq3j), and the promotion suite, whose
       # mock patches the BUILDER'S SIGNATURE: agents-oq3j added a `verified_pins` argument and
       # tests/test_promotion.py's expectation was the consumer nobody had migrated, so a mock of
       # this call is a consumer of this file whether or not the mock's file was touched.
-      mapped="$mapped tests/test_child_env.py tests/test_station_trusted_tool_pins.py tests/test_sinks.py tests/test_promotion.py"
+      mapped="$mapped tests/test_child_env.py tests/test_station_trusted_tool_pins.py tests/test_sinks.py tests/test_promotion.py tests/test_credential_broker.py tests/test_sink_adapters.py"
       ;;
     lib/tool_pins.py)
       # Trusted-tool pinning (agents-7bj). Since agents-28nn this module also authenticates
