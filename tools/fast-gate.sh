@@ -63,7 +63,12 @@ export FACTORY_ALLOW_UNPINNED_TOOLS=1  # READ THE SCOPE BEFORE WORRYING (agents-
 # THIS REPO CURRENTLY HAS NONE OF. The pin-semantics half stands; the direction claim is
 # withdrawn and the citations were re-measured against origin/main rather than carried
 # forward (agents-hs2g; the earlier :426/:442/:397 were stale or unsupported).
-# :29 had no note where :28 has one, which is why the pair first read like a scrub.
+# The note hung off the OPT-IN (:29) while the UNSET (:28) carried none, which is why the
+# pair first read like a scrub. (This sentence used to say ":29 had no note where :28 has
+# one", which is INVERTED - and inverted in its own introducing commit, 70d6ac6, where :28
+# is the bare `unset FACTORY_TOOL_PINS` and :29 is the `export` line carrying this whole
+# note. Checked against that commit rather than re-worded, because a sentence about which
+# line is annotated is as checkable as the pin counts above.)
 
 # Fail-visible abort diagnostics (agents-adhc).
 # UNCOVERABLE BY CONSTRUCTION: SIGKILL (kill -9), kernel OOM-killer invocations,
