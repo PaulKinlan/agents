@@ -181,6 +181,24 @@ extension, and no `audits` path component (checked case-insensitively). Adding i
 page is refused rather than published. `tests/test_pages_publish_scope.py` pins this — the workflow
 uploads the staged directory, and no markdown or file with an `audits` component can appear in the artifact.
 
+## Quoting a gate verdict
+
+A lane quotes a verdict from the **record**, never from an exit code. Measured (agents-1thk), not
+assumed: `fleet-check --fast` returns **rc 0 in five situations that are not a PASS** — a job it has
+just started, a job already running, `--stop --fast` (which prints "no verdict recorded"), and
+`fleet-check --status` for a cached **FAIL** as well as for a RUNNING job. rc 0 therefore means
+*accepted*, not *passed*: there is no invocation for which the exit status is a verdict.
+
+- **Read the record.** `~/.fleet/checks/<tree>.fast.json` carries the verdict in its `state` field
+alongside the `sha` it belongs to, and `fleet-check --status --fast <tree>` prints that same record.
+Read the field, not the status code — `--status` exits 0 for a FAIL too.
+- **Quote it with the sha.** A verdict is cached per **commit tree**, so a quoted PASS names the sha it
+refers to and the log path. A PASS for another tree, or for a tip a later push superseded, is not a
+PASS for yours.
+- **The record is safe to read at any time:** while a job runs it says `state: RUNNING` with the pid,
+and `--stop` deletes it. The trap is specifically the exit status, which is why no wrapper script
+around `fleet-check` should try to infer a verdict from it.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
 
