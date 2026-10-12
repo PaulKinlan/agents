@@ -1368,6 +1368,75 @@ class TestIsBroadRoot(unittest.TestCase):
             w_exe.chmod(0o755)
             self.assertTrue(_is_broad_root(workspace_tool, str(home)))
 
+    def test_shared_xdg_roots_stay_broad_even_with_a_namesake_executable(self):
+        """agents-or3m: ~/.cache/<x> and ~/.config/<x> are XDG_CACHE_HOME / XDG_CONFIG_HOME members,
+        not tool install trees, so a namesake executable must not exempt them from the broad-root
+        refusal. The guard arm this pins was DEAD before agents-or3m - it tested `prefix in
+        _SHARED_USER_DIRS`, whose members are all bare leaf names while the prefix is required to
+        start with '.' - so both roots were exempted like any hidden prefix. The canonical
+        ~/.local/<tool> exemption and a hidden non-shared prefix are asserted in the same tree, so a
+        "fix" that simply refuses every hidden prefix cannot pass this test."""
+        from lib.sandbox import _is_broad_root
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for prefix in (".cache", ".config"):
+                tool_dir = home / prefix / "evil"
+                tool_dir.mkdir(parents=True)
+                exe = tool_dir / "evil"
+                exe.write_text("#!/bin/sh\n")
+                exe.chmod(0o755)
+                self.assertTrue(
+                    _is_broad_root(tool_dir, str(home)),
+                    f"~/{prefix}/evil houses a namesake executable but is a shared XDG root: it "
+                    "must stay broad rather than be exempted as a tool install tree (agents-or3m)",
+                )
+
+            # The XDG sibling that IS a tool install tree keeps its exemption (agents-n5qp).
+            pi_tree = home / ".local" / "pi"
+            pi_tree.mkdir(parents=True)
+            (pi_tree / "pi").write_text("#!/bin/sh\n")
+            (pi_tree / "pi").chmod(0o755)
+            self.assertFalse(_is_broad_root(pi_tree, str(home)),
+                             "~/.local/<tool> must keep its exemption: the new refusal is by NAME")
+
+            # A hidden prefix that is NOT shared stays exempt - the refusal is by name, not by dot.
+            custom = home / ".custom" / "mytool"
+            custom.mkdir(parents=True)
+            (custom / "mytool").write_text("#!/bin/sh\n")
+            (custom / "mytool").chmod(0o755)
+            self.assertFalse(_is_broad_root(custom, str(home)),
+                             "a hidden non-shared prefix must keep its exemption (agents-or3m)")
+
+    def test_xdg_cache_tool_dir_is_not_bound_whole_over_a_sibling_secret(self):
+        """agents-or3m, end to end: the consequence of the guard is in the bind plan, not in the
+        classifier. A tool whose executable RESOLVES under <home>/.cache/<name> must be bound as the
+        file only, so a sibling secret in that directory stays invisible - before the fix the whole
+        .cache/<name> tree was bound, because the directory was exempted as a tool install root."""
+        from lib.sandbox import _BindPlan, _executable_binds
+        tmp = Path(tempfile.mkdtemp(prefix="or3m-repro-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        home = tmp / "home"
+        tool_tree = home / ".cache" / "evil"
+        tool_tree.mkdir(parents=True)
+        exe = tool_tree / "evil"
+        exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        exe.chmod(0o755)
+        secret = tool_tree / "credentials.json"
+        secret.write_text('{"token": "leaked"}\n', encoding="utf-8")
+
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "evil").symlink_to(exe)
+
+        plan = _BindPlan()
+        _executable_binds(plan, ("evil",), str(bin_dir), str(home))
+        self.assertFalse(plan.visible(str(tool_tree)),
+                         "$HOME/.cache/<name> is a shared XDG root and must not be bound whole")
+        self.assertFalse(plan.visible(str(secret)),
+                         "canary in $HOME/.cache/<name> must not be visible in the sandbox")
+        self.assertTrue(plan.visible(str(exe)),
+                        "the executable FILE must still be bound, or the tool cannot run")
+
     def test_depth_3_or_deeper_is_not_broad(self):
         from lib.sandbox import _is_broad_root
         self.assertFalse(_is_broad_root(Path("/home/u/work/proj/deep/pkg"), "/home/u"))
