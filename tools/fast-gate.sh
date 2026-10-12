@@ -864,6 +864,12 @@ fi
 # Extracted from tests/test_budget.py (TestNoUnboundedSubprocess) per ADR agents-c07o.
 tree_guards="tests/test_tree_guards.py"
 
+# agents-undf: the consumer-coverage pin is the same tier shape, and agents-pdth moved it OUT of
+# tests/test_tree_guards.py because agents-dv23 pins that file to hold exactly its tree-guard classes.
+# It is added to every mapped and smoke run for the same reason the tier is: a pin that exists and is
+# not selected is the same as no pin (the merger's check, and the gap that let agents-pdth be born red).
+consumer_coverage="tests/test_fast_gate_consumer_coverage.py"
+
 # Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
 # change, or no delta at all). Unmatched files never reach here - they fail loudly above.
 if [ -z "$run" ] && [ -z "$mapped" ]; then
@@ -874,7 +880,7 @@ if [ -z "$run" ] && [ -z "$mapped" ]; then
   mapped="tests/test_factory_core.py"
 fi
 
-if ! files="$(printf '%s\n' $run $mapped $tree_guards | awk 'NF && !seen[$0]++' | sort)"; then
+if ! files="$(printf '%s\n' $run $mapped $tree_guards $consumer_coverage | awk 'NF && !seen[$0]++' | sort)"; then
   echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
   echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
   exit 1
