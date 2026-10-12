@@ -217,6 +217,30 @@ PASS for yours.
 and `--stop` deletes it. The trap is specifically the exit status, which is why no wrapper script
 around `fleet-check` should try to infer a verdict from it.
 
+### A transcribed verdict names its transcriber
+
+The shape rule - the verdict goes in its own comment - is enforced. Provenance is not, and a
+shape-only check cannot see the difference: a comment that is correctly standalone, carrying
+`VERDICT:`, the delta range, the tree and both parties named, is accepted whether the REVIEWER
+posted it or the AUTHOR LANE restated it, and those are not the same claim. The author has an
+interest in the answer, so the restatement can be wrong (measured on `agents-h0z8`, where the
+author's summary was the only copy of the outcome) and the transcription can be empty
+(measured on `agents-hay8`, where the reviewer's verdict arrived as a one-character bullet and
+the text had to be recovered from the reviewer's own event log).
+
+- **A verdict that is not the reviewer's own comment must name its transcriber and the source
+  it was recovered from:** `VERDICT: PASS (TRANSCRIBED - SEE PROVENANCE BELOW)`, followed by
+  the exact file the text came from. A named party asserting they are relaying is checkable;
+  "the reviewer said this" is not. Naming the transcriber rather than "only the reviewer posts"
+  is deliberate, because the reviewer is frequently a subagent that cannot comment or a retired
+  lane, and insisting on an unavailable party would block the fix.
+- **Preferred order, weakest last:** the reviewer posts it itself; a party other than the
+  author transcribes and names itself; the author transcribes and names itself, which is
+  acceptable but is the weakest form and should be visible as such.
+- **The test is what the comment alone supports:** from the verdict comment by itself, without
+  inferring from comment authorship or from ordering, a reader can tell which party FORMED the
+  verdict and which party CARRIED it into the bead.
+
 ## Landing mechanics: the identity is the tree, and a push is never a pipeline's passenger
 
 Both rules come from `agents-yk6m`, where a landing reached the default branch carrying a
