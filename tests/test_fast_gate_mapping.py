@@ -472,7 +472,10 @@ class TestFastGateMapping(unittest.TestCase):
             env["GIT_CHANGED"] = "tests/test_pass_probe_tmp.py"
             res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, f"expected rc 0, got {res.returncode}: {res.stderr}")
-            self.assertIn("fast-gate: passed: tests/test_pass_probe_tmp.py", res.stdout)
+            # agents-h17y: the tests/test_*.py arm also maps tests/test_direct_run_completeness.py,
+            # so any test-file run names it alongside the changed file - the class-wide __main__-block
+            # invariant (agents-9lh8) is re-checked whenever a test file changes.
+            self.assertIn("fast-gate: passed: tests/test_direct_run_completeness.py tests/test_pass_probe_tmp.py", res.stdout)
         finally:
             probe.unlink(missing_ok=True)
 
@@ -492,7 +495,8 @@ class TestFastGateMapping(unittest.TestCase):
             passed_lines = [l for l in res.stdout.splitlines() if l.startswith("fast-gate: passed:")]
             self.assertEqual(len(passed_lines), 1, f"expected exactly one 'fast-gate: passed:' line, got: {passed_lines}")
             suites_on_marker = passed_lines[0].replace("fast-gate: passed:", "").split()
-            expected = sorted([str(probe_a.relative_to(ROOT)), str(probe_b.relative_to(ROOT))])
+            expected = sorted(["tests/test_direct_run_completeness.py",
+                               str(probe_a.relative_to(ROOT)), str(probe_b.relative_to(ROOT))])
             self.assertEqual(sorted(suites_on_marker), expected,
                              f"completion marker must name all suites on the single marker line: {passed_lines[0]}")
         finally:
@@ -509,7 +513,7 @@ class TestFastGateMapping(unittest.TestCase):
             env["GIT_CHANGED"] = "tests/test_abort_probe_tmp.py"
             res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 1, f"expected rc 1, got {res.returncode}")
-            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp)", res.stderr)
+            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp tests.test_direct_run_completeness)", res.stderr)
         finally:
             probe.unlink(missing_ok=True)
 
@@ -539,7 +543,7 @@ class TestFastGateMapping(unittest.TestCase):
             time.sleep(0.3)
             os.killpg(p.pid, signal.SIGTERM)
             _, stderr = p.communicate()
-            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_sleep_probe_tmp))", stderr)
+            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_direct_run_completeness tests.test_sleep_probe_tmp))", stderr)
         finally:
             probe.unlink(missing_ok=True)
 
