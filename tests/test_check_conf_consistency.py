@@ -448,6 +448,42 @@ class TestConfigIsResolvedLoudly(unittest.TestCase):
             self.assertIn("-t .", res.stdout,
                           "the resolved command must come from the tracked config")
 
+    def test_install_honors_fleet_check_conf_destination_and_docs_agree(self):
+        """tools/check-cmd.sh --install respects FLEET_CHECK_CONF and docs describe it (agents-80go)."""
+        import subprocess, tempfile, os
+        resolver = ROOT / "tools" / "check-cmd.sh"
+        conf_doc = ROOT / "tools" / "check.conf"
+        self.assertTrue(resolver.is_file(), "tools/check-cmd.sh must exist")
+        self.assertTrue(conf_doc.is_file(), "tools/check.conf must exist")
+
+        # 1. Behavior: FLEET_CHECK_CONF redirects the install destination
+        with tempfile.TemporaryDirectory() as tmp_home, tempfile.TemporaryDirectory() as tmp_dest:
+            redirected = Path(tmp_dest) / "redirected.conf"
+            env = dict(os.environ)
+            env["HOME"] = tmp_home
+            env["FLEET_CHECK_CONF"] = str(redirected)
+            res = subprocess.run(["bash", str(resolver), "--install"],
+                                 capture_output=True, text=True, timeout=30, env=env)
+            self.assertEqual(res.returncode, 0, f"--install failed: {res.stderr}")
+            self.assertTrue(redirected.is_file(), f"redirected config must be written to {redirected}")
+            self.assertFalse((Path(tmp_home) / ".fleet" / "check.conf").exists(),
+                             "HOME/.fleet/check.conf must NOT be created when FLEET_CHECK_CONF is set")
+            self.assertIn(str(redirected), res.stdout,
+                          "install output must report the actual destination written")
+
+        # 2. Docs agreement: both tools/check.conf and tools/check-cmd.sh must document
+        # the FLEET_CHECK_CONF override destination rather than claiming ~/.fleet/check.conf unconditionally
+        conf_text = conf_doc.read_text(encoding="utf-8")
+        cmd_text = resolver.read_text(encoding="utf-8")
+        self.assertIn("FLEET_CHECK_CONF", conf_text,
+                      "tools/check.conf must document FLEET_CHECK_CONF override destination")
+        self.assertIn("FLEET_CHECK_CONF", cmd_text,
+                      "tools/check-cmd.sh header must document FLEET_CHECK_CONF override destination")
+        self.assertNotIn("sources ONLY $HOME/.fleet/check.conf", conf_text,
+                         "tools/check.conf must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
+        self.assertNotIn("sources ONLY $HOME/.fleet/check.conf", cmd_text,
+                         "tools/check-cmd.sh must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
+
 
 if __name__ == "__main__":
     unittest.main()
