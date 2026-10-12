@@ -200,6 +200,36 @@ and `--stop` deletes it. The trap is specifically the exit status, which is why 
 around `fleet-check` should try to infer a verdict from it.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+## Landing mechanics: the identity is the tree, and a push is never a pipeline's passenger
+
+Both rules come from `agents-yk6m`, where a landing reached the default branch carrying a
+**stale `GATE` paragraph**. Neither cause was the gate itself.
+
+**1. A landing asserts a property of the TREE, not of a ref.** A no-op rebase moves the
+branch ref while changing not one byte of content, so any check that asks "does the
+merged commit contain this branch ref?" can refuse a landing whose tree is exactly the
+tree that was reviewed. Check the identity that actually carries the property - compare
+the landed tree with the tree of the reviewed delta, or test the relationship the
+reviewer pinned - and **say in the landing message which identity was accepted**. (The shared landing
+helper is fleet-repo tooling: its internals are tracked separately and are not repaired
+from a project branch.)
+
+**2. Never let a push be gated by a pipeline's exit status.** A message step failed, the
+`--amend` aborted with "empty commit message", and the push ran anyway because it was
+chained after a pipe whose status came from `tail -1`. Capture the helper's status
+**directly**, and reach the push only on explicit success:
+
+    if ! msg=$(fleet-land-message --gate "$sha" "$bead" "fleet/$branch"); then
+      echo "landing aborted: message step failed" >&2
+      exit 1
+    fi
+    git commit --amend -F - <<<"$msg" || exit 1
+    git push origin HEAD:<default>      # reached only when the step above succeeded
+
+The rule is that a failed message step makes the push **impossible**, not merely
+unfashionable. Its control is a deliberate failure of the message step, which must leave
+the default branch untouched.
+
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
