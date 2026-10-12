@@ -825,6 +825,12 @@ while IFS= read -r f; do
       # VCS metadata, consumed only by git itself. Tests mention .gitignore only as
       # fixtures they write into tmp targets (test_containment.py, test_hillclimb.py).
       ;;
+    patches/*)
+      # Fleet tooling patches delivered to the hub (agents-19jh).
+      # Consumed hub-side by PaulKinlan/fleet; not read by any factory suite or script.
+      # Search performed: grep -rn "patches" across the codebase confirms no script, target,
+      # runner, or test consumes this directory.
+      ;;
     *)
       unmatched="$unmatched $f"
       ;;
