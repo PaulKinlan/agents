@@ -57,6 +57,27 @@ class ResolveToolTests(unittest.TestCase):
             resolve_tool("gh", path_env=str(self.bindir),
                          pins={"gh": {"sha256": self.gh_sha}})
 
+    def test_a_mismatched_pin_still_refuses_under_the_fast_gate_waiver(self):
+        """agents-x2uw: the waiver the fast gate exports is NARROW, and this is the matrix cell
+        no other test covers - test_resolve_fails_closed_on_sha_mismatch leaves the waiver OFF,
+        and test_resolve_unpinned_allowed_by_explicit_opt_in turns it ON with NO pin at all.
+        The cell that matters is waiver ON *and* a pin that is present but WRONG: if that ever
+        stopped refusing, the waiver would be a content-verification bypass rather than an
+        allowance for unpinned tools - which is exactly what tools/fast-gate.sh's scope note
+        tells the reader it is not (verify_pin never consults _unpinned_allowed).
+
+        The MESSAGE assertion is the point: refusing with "not pinned" would mean the mismatch
+        was never verified, so this test would pass while the property it names was gone.
+        """
+        self.gh.write_text("#!/bin/sh\necho TROJAN\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "1"}):
+            with self.assertRaises(ToolPinError) as ctx:
+                resolve_tool("gh", path_env=str(self.bindir),
+                             pins={"gh": {"sha256": self.gh_sha}})
+        self.assertIn("hashes to", str(ctx.exception),
+                      "a mismatched pin must be refused AS A MISMATCH (content verification "
+                      "ran), not as a missing pin")
+
     def test_resolve_fails_closed_when_unpinned(self):
         # A trusted tool with no sha256 pin must be refused, not silently resolved by PATH.
         # Other test modules opt out globally; force the opt-out OFF for this one test.

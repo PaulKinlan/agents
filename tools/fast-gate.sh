@@ -37,13 +37,25 @@ export FACTORY_ALLOW_UNPINNED_TOOLS=1  # READ THE SCOPE BEFORE WORRYING (agents-
 # version of this note claimed the unset "is not a scrub either" because tool_pins.py
 # "swaps the host override for the committed pins - STRICTER for the pins that exist".
 # THAT IS MEASURABLY FALSE: the committed tools.yaml ships its pins COMMENTED OUT (0
-# active, 13 commented), while a host pins its own tools (~/.fleet/../tools.pins.yaml, 8
-# here). The committed set is EMPTY, so unsetting FACTORY_TOOL_PINS REMOVES pins it does
-# not replace, and for every host-pinned tool this gate runs with NO pin where the ambient
-# environment had one - LOOSER, not stricter, for exactly the tools the host pinned. With a
-# fake git first on PATH, the ambient environment resolves /usr/bin/git (the host pin wins)
-# and THIS GATE RESOLVES THE PLANTED FAKE. The opt-in above is what then lets such a tool
-# resolve at all, by PATH order.
+# active, 13 commented), while a host pins its own tools - host_pins_path() ->
+# $HOME/.config/factory/tools.pins.yaml, 9 pinned tools on this VM on 2026-10-12. (This
+# line used to say "8" and named ~/.fleet/../tools.pins.yaml, which DOES NOT EXIST: a note
+# that sends a reader to a missing path and a stale count is the same class of error as
+# the direction claim above, so both are re-measured rather than carried forward.) The
+# committed set is EMPTY, so unsetting FACTORY_TOOL_PINS REMOVES pins it does not replace,
+# and for every host-pinned tool this gate runs with NO pin where the ambient environment
+# had one - LOOSER, not stricter, for exactly the tools the host pinned. With a fake git
+# first on PATH, the ambient environment resolves /usr/bin/git (the host pin wins) and THIS
+# GATE RESOLVES THE PLANTED FAKE. The opt-in above is what then lets such a tool resolve at
+# all, by PATH order.
+#
+# RE-MEASURED INDEPENDENTLY, both directions, by the owner of agents-x2uw - a withdrawn
+# claim re-stated the other way still has to be measured, or the correction carries a
+# measurement's authority while being the same mistake: ambient -> /usr/bin/git; gate env
+# -> the planted fake; and the WAIVER HALF HOLDS - a pin that is PRESENT and MISMATCHED is
+# refused BOTH with and without FACTORY_ALLOW_UNPINNED_TOOLS=1 (verify_pin never consults
+# _unpinned_allowed()), so the waiver buys an UNPINNED tool a PATH-order resolution and
+# buys a PINNED one nothing.
 #
 # SO THE TWO HALVES ARE ASYMMETRIC, and the note says so rather than smoothing it over:
 # the WAIVER is narrow and measured (content verification still runs on any pin that
