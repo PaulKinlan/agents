@@ -58,6 +58,15 @@
 # resolves under the runner's PATH before line 1: a runner whose PATH selects the shell
 # itself is image/runner provenance, a different bead.
 #
+# ROOT-TRUST BOUNDARY (agents-dso1, agents-76p7):
+# Pinning the hasher's own hash inside the generator is circular: a compromised sha256sum
+# reports whatever value verifies itself. To eliminate a single point of compromise, the
+# generator cross-checks digests against an independent tool (python3 -I -c 'import hashlib';
+# agents-0poh). However, the generator cannot vouch for the integrity of sha256sum or python3
+# without an external trust anchor: the recursion terminates at the provisioned host image
+# (agents-76p7), which guarantees that root-owned system directories (/usr/bin) cannot be
+# written by the untrusted process whose tools are being pinned.
+#
 # A tool that is not installed (e.g. the optional semgrep/gitleaks pre-pass scanners, or
 # bwrap on a host that never sandboxes) is skipped with a comment: the factory only fails
 # closed for a tool it actually resolves, so an absent tool stays absent rather than
