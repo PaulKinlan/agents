@@ -10,7 +10,11 @@ lib file is introduced without an explicit budget.py mapping (closing agents-c04
 """
 
 import ast
+import os
 from pathlib import Path
+import re
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,6 +75,9 @@ class TestNoUnboundedSubprocess(unittest.TestCase):
         # exact path).
         self.assertEqual(offenders, [])
 
+# The fast-gate consumer-coverage pin lived here until agents-undf moved it to
+# tests/test_fast_gate_consumer_coverage.py: agents-dv23 pins this file to hold exactly the
+# tree-guard classes, so a consumer-coverage pin placed here made the union red.
 
 if __name__ == "__main__":
     unittest.main()
