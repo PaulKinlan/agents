@@ -214,8 +214,16 @@ class TestRunStationCommand(unittest.TestCase):
         The liveness assertion is on the Popen rather than os.kill(pid, 0), because a ZOMBIE
         still answers signal 0: the reap raised before its wait(), so the killed child is
         unreaped and an os.kill probe reports a dead process as alive (this test caught its
-        own author with exactly that). poll() both reports SIGKILL and reaps, after which
-        the pid is genuinely gone.
+        own author with exactly that).
+
+        AND IT WAITS (agents-2q4n): an earlier version asserted popen.poll() and its docstring
+        claimed poll() "reports SIGKILL and reaps". It does not wait - it is waitpid(WNOHANG) -
+        so poll() immediately after _best_effort_kill's asynchronous proc.kill() returns None
+        until the kernel has reaped the child, and the assertion passed only when the
+        intervening Python work outran it. Review measured that: None in 40/40 immediate probes,
+        and 1-in-3 failures of the full suite on a loaded 2-vCPU VM while 6/6 single-test runs
+        passed - intermittent by mechanism, not by luck. wait(timeout=5) is both bounded and
+        blocking, so the child's death is synchronised with the assertion rather than hoped for.
         """
         import os
 
@@ -242,10 +250,48 @@ class TestRunStationCommand(unittest.TestCase):
         self.assertIn("killpg failed", str(ctx.exception.__context__),
                       "the reap's failure must stay in the chain, not replace the cause")
         self.assertEqual(len(pids), 1, "the hook must have been handed the live child")
-        self.assertEqual(popen[0].poll(), -signal.SIGKILL,
+        self.assertEqual(popen[0].wait(timeout=5), -signal.SIGKILL,
                          "the child outlived a failing hook AND a failed reap")
         with self.assertRaises(ProcessLookupError, msg="the killed child was left unreaped"):
             os.kill(pids[0], 0)
+
+    def test_a_failing_reap_on_the_expiry_path_keeps_the_station_timeout(self):
+        """agents-0hbq: THE DOUBLE FAULT ON THE EXPIRY PATH, not only the hook path.
+
+        _kill_and_reap is shared, but the containment this bead added (_best_effort_kill, keep
+        the first fault, context chain) lived only in the on_spawn handler - so a group kill
+        failing during EXPIRY did exactly what the hook path had just been fixed for: the caller
+        was told about the cleanup's error instead of the station budget expiring, and a child
+        holding live model credentials was still alive after the caller had been told the budget
+        was enforced. Measured before the fix: OSError propagated, is StationTimeout False, child
+        alive 1 s after the caller returned.
+        """
+        import os
+
+        spawned = []
+
+        def broken_group_kill(proc):
+            raise OSError("killpg failed")
+
+        with mock.patch("lib.budget._kill_process_group", broken_group_kill):
+            with self.assertRaises(StationTimeout) as ctx:
+                run_station_command(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    StationBudget(0.01, label="hung"),  # 0.6 s
+                    "engine", capture_output=True, text=True, check=False,
+                    on_spawn=spawned.append,
+                )
+
+        self.assertIn("hung", str(ctx.exception))
+        self.assertIn("process group killed", str(ctx.exception))
+        self.assertIn("killpg failed", str(ctx.exception.__cause__),
+                      "the reap's failure must stay in the chain, not replace the budget error")
+        self.assertIsInstance(ctx.exception, StationTimeout,
+                              "the expiry must still be reported as the budget expiring")
+        self.assertEqual(spawned[0].wait(timeout=5), -signal.SIGKILL,
+                         "the child outlived an expiry whose reap failed")
+        with self.assertRaises(ProcessLookupError, msg="the killed child was left unreaped"):
+            os.kill(spawned[0].pid, 0)
 
     def test_the_reap_is_bounded_when_an_escaped_descendant_holds_the_pipes(self):
         """agents-dhk8: A DESCENDANT THAT ESCAPED THE GROUP MAKES THE DRAIN UNFINISHABLE.
@@ -389,7 +435,7 @@ class TestNoUnboundedSubprocess(unittest.TestCase):
                 if not isinstance(node, ast.Call):
                     continue
                 func = node.func
-                if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+                if not isinstance(func, ast.Attribute):
                     continue
                 if func.attr == "communicate":
                     # agents-dhk8: THE HOLE THIS GUARD RAIL HAD. It checked the calls that
@@ -399,17 +445,22 @@ class TestNoUnboundedSubprocess(unittest.TestCase):
                     # hatch existed, while being able to block for the LIFETIME of a process
                     # outside our group (measured: 25.1 s against a descendant that slept
                     # 25 s). communicate() is Popen-specific, so a rule for it cannot
-                    # misfire. `wait` is deliberately NOT covered: Event.wait and thread
-                    # waits share the name, and a rule flagging them would turn other lanes'
-                    # branches red for a false positive - lib/net_forward.py's child.wait is
-                    # the documented exception, bounded transitively by the station's group
-                    # kill. That residual is named here rather than left to be rediscovered.
+                    # misfire - and it is checked for EVERY receiver shape (agents-v4jt): the
+                    # Name requirement used to sit above this branch, so self.proc.
+                    # communicate() or holders[k].communicate() were skipped entirely, which
+                    # is the same hole one shape over. `wait` is deliberately NOT covered:
+                    # Event.wait and thread waits share the name, and flagging them would turn
+                    # other lanes' branches red for a false positive; the sole .wait( in the
+                    # tree is lib/net_forward.py:162 child.wait(), bounded transitively by the
+                    # station's group kill because that engine child gets no
+                    # start_new_session. If wait coverage is ever wanted, key it on the
+                    # receiver being a known Popen rather than on the method name.
                     if not any(kw.arg == "timeout" for kw in node.keywords):
                         offenders.append(
                             f"{path.relative_to(ROOT)}:{node.lineno}: .communicate() without timeout="
                         )
                     continue
-                if func.value.id != "subprocess":
+                if not isinstance(func.value, ast.Name) or func.value.id != "subprocess":
                     continue
                 where = f"{path.relative_to(ROOT)}:{node.lineno}"
                 if func.attr in ("run", "call", "check_call", "check_output"):

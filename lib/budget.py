@@ -154,7 +154,7 @@ def run_station_command(
             #
             # agents-dhk8: AND A REAP THAT ITSELF FAILS MUST NOT BE THE END OF THE STORY.
             # Measured before this change (tests/test_budget.py
-            # TestOnSpawnHookFailure.test_a_failing_group_kill_still_contains_the_child):
+            # TestRunStationCommand.test_a_failing_group_kill_still_contains_the_child):
             # with the group kill raising, the caller saw the reap's OSError INSTEAD of the
             # hook's RuntimeError - the hook's own failure silently misattributed - and the
             # child SURVIVED. So the direct child is killed when the group path is what
@@ -174,11 +174,35 @@ def run_station_command(
     try:
         stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_and_reap(proc)
-        raise StationTimeout(
+        timeout_error = StationTimeout(
             f"{budget.label}: {step} exceeded the {budget.minutes:g} min station budget; "
             f"process group killed"
-        ) from None
+        )
+        # agents-0hbq: THE EXPIRY PATH NEEDS THE SAME CONTAINMENT AS THE HOOK PATH. It used to
+        # call _kill_and_reap bare, so a reap that failed here did exactly what the hook path
+        # was fixed for: the caller was told about the cleanup's OSError INSTEAD of the station
+        # budget expiring (StationTimeout replaced by its own teardown's error), and a child
+        # holding live model credentials stayed alive after the caller had been told the budget
+        # was enforced. Measured before this change: OSError propagated, is StationTimeout
+        # False, child alive 1 s after the caller returned. Same three pieces as the hook path -
+        # keep the FIRST fault, best-effort kill the child, and leave the reap's error in the
+        # chain rather than in place of the cause.
+        reap_error = None
+        try:
+            _kill_and_reap(proc)
+        except BaseException as exc:
+            _best_effort_kill(proc)
+            reap_error = exc
+        if reap_error is not None:
+            # EXPLICIT CHAINING IS REQUIRED HERE, unlike the hook path above: that path
+            # RE-RAISES the same exception object, so a __context__ set by hand survives, while
+            # this path raises a NEW StationTimeout from inside the handler and CPython then
+            # sets its __context__ to the TimeoutExpired being handled - which silently DROPPED
+            # the reap's error in my first version of this fix (the expiry-path test caught it:
+            # it found the TimeoutExpired's message in the chain instead of "killpg failed").
+            # `from` keeps the reap failure readable in every traceback and crash log.
+            raise timeout_error from reap_error
+        raise timeout_error from None
     if kill_group_on_exit:
         try:
             os.killpg(proc.pid, signal.SIGKILL)  # pgid == pid: the session started above
