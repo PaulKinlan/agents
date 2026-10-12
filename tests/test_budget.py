@@ -116,6 +116,88 @@ class TestRunStationCommand(unittest.TestCase):
         self.assertTrue(seen[0][1], "on_spawn fired before the child was running")
         self.assertGreater(seen[0][0], 0)
 
+    def test_a_raising_on_spawn_cannot_orphan_the_child(self):
+        """agents-8z4z: THE SPAWN-RAISES PATH, DRIVEN RATHER THAN READ.
+
+        The hook is what binds the credential broker's peer gate to the engine session's pid
+        (factory:1835); if it raises, its job is NOT done, so the child is still running with
+        live model credentials in its environment and nobody to reap it. RED-FIRST against the
+        pre-fix module: on_spawn was called outside every cleanup path (audit finding
+        lib/budget.py:136), so this child survived the raise and the assertion below failed.
+        """
+        import os
+
+        budget = StationBudget(1)
+        pids = []
+
+        def hook(proc):
+            pids.append(proc.pid)
+            raise RuntimeError("broker registration failed")
+
+        with self.assertRaises(RuntimeError):
+            run_station_command(
+                [sys.executable, "-c", "import time; time.sleep(60)"], budget, "spawn",
+                on_spawn=hook, capture_output=True, text=True, check=False,
+            )
+
+        self.assertEqual(len(pids), 1, "the hook must have been handed the live child")
+        with self.assertRaises(ProcessLookupError,
+                               msg=f"pid {pids[0]} outlived a failing on_spawn - orphaned"):
+            os.kill(pids[0], 0)
+
+    def test_a_raising_on_spawn_kills_the_whole_process_group(self):
+        """The containment property, not just the direct child: the session started for the
+        station dies with the hook's failure, so a descendant the adapter spawned cannot keep
+        working (and holding credentials) after the hook refused to narrow the peer gate.
+        Same shape as test_expiry_kills_the_whole_process_group, with on_spawn raising in
+        place of the budget expiring."""
+        child_code = (
+            "import sys, time\n"
+            "while True:\n"
+            "    with open(sys.argv[1], 'a') as fh:\n"
+            "        fh.write('.')\n"
+            "    time.sleep(0.05)\n"
+        )
+        parent_code = (
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+            "time.sleep(60)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child = root / "child.py"
+            child.write_text(child_code, encoding="utf-8")
+            parent = root / "parent.py"
+            parent.write_text(parent_code, encoding="utf-8")
+            heartbeat = root / "heartbeat"
+
+            budget = StationBudget(1, label="hook")
+
+            def hook(proc):
+                # DETERMINISM, NOT DECORATION: on_spawn runs BEFORE communicate() blocks, so
+                # the hook waits for the descendant it is about to fail over to actually
+                # start. Without that wait the raise (and, with the fix, the kill) completes
+                # before the grandchild exists, and the assertion below would fail on the
+                # grandchild never having STARTED rather than on it surviving - a race that
+                # read as a test bug in both directions.
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and not heartbeat.exists():
+                    time.sleep(0.02)
+                raise RuntimeError("broker registration failed")
+
+            with self.assertRaises(RuntimeError):
+                run_station_command(
+                    [sys.executable, str(parent), str(child), str(heartbeat)],
+                    budget, "spawn", capture_output=True, text=True, check=False,
+                    on_spawn=hook,
+                )
+
+            self.assertTrue(heartbeat.exists(), "the grandchild never started")
+            size_after_kill = heartbeat.stat().st_size
+            time.sleep(0.5)
+            self.assertEqual(heartbeat.stat().st_size, size_after_kill,
+                             "a descendant of the spawned session outlived the failing hook")
+
     def test_expiry_raises_station_timeout(self):
         budget = StationBudget(0.01, label="hung")  # 0.6 s
         started = time.monotonic()
