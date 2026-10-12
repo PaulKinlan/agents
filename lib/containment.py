@@ -33,7 +33,6 @@ from urllib.parse import urlsplit
 
 from lib.child_env import (BROKER_PROVIDERS, ENGINE_CREDENTIALS,
                            NETWORK_CREDENTIAL_REQUIREMENTS)
-from lib.tool_pins import TRUSTED_TOOLS, UNPINNED_ALLOW_ENV, unpinned_allowed
 
 # docs/PLAN.md section 5. The ceiling is what an agent at that tier may *declare*.
 #   t0-readonly  no network, read-only checkout
