@@ -122,6 +122,11 @@ def run_station_command(
     (agents-28nn round 8: the credential broker narrows its loopback peer gate to the
     engine session's own process tree, so no other descendant of the dispatcher is
     served).
+
+    A hook that RAISES cannot orphan the child it was handed (agents-8z4z): the exception is
+    propagated only after the session started above has been killed and reaped, because the
+    alternative is a station child still running with live model credentials in its
+    environment and nobody to reap it.
     """
     timeout = budget.timeout_for(step)
     # `capture_output` and `input` are subprocess.run conveniences, not Popen arguments.
@@ -133,17 +138,25 @@ def run_station_command(
         kwargs.setdefault("stdin", subprocess.PIPE)
     proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
     if on_spawn is not None:
-        on_spawn(proc)
+        try:
+            on_spawn(proc)
+        except BaseException:
+            # agents-8z4z: THE HOOK MUST NOT BE ABLE TO ORPHAN THE CHILD IT WAS HANDED. The
+            # call used to sit outside every cleanup path, so an exception from it (the
+            # broker's registration path failing, a dead pid, a socket error) propagated
+            # while the session started on the line above kept running - with live model
+            # credentials in its environment, its process group unreaped, and the broker's
+            # peer gate left UN-narrowed (the hook's whole purpose, factory:1835). That is
+            # the one outcome this module's containment exists to prevent, and it made the
+            # hook's failure mode worse than the hook's absence. BaseException, not
+            # Exception: an interrupt during the hook would orphan the child just as
+            # certainly, and the kill is bounded and idempotent either way.
+            _kill_and_reap(proc)
+            raise
     try:
         stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_process_group(proc)
-        try:
-            proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:  # a child escaped the group and holds the pipes
-            proc.kill()
-            proc.communicate()
-        _wait_for_group_exit(proc.pid)
+        _kill_and_reap(proc)
         raise StationTimeout(
             f"{budget.label}: {step} exceeded the {budget.minutes:g} min station budget; "
             f"process group killed"
@@ -168,6 +181,24 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
             proc.kill()
         except ProcessLookupError:
             pass
+
+
+def _kill_and_reap(proc: subprocess.Popen) -> None:
+    """End the session started for `proc`: kill its whole group, drain the pipes, wait it out.
+
+    The single cleanup path for a child that must not outlive the call - the station budget
+    expiring, and an `on_spawn` hook that raised (agents-8z4z, agents-28nn) share it, so a
+    cleanup improvement lands on both rather than on whichever branch was edited last. The
+    child IS our own process, so communicate() reaps it; descendants are not, which is what
+    _wait_for_group_exit is for.
+    """
+    _kill_process_group(proc)
+    try:
+        proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:  # a child escaped the group and holds the pipes
+        proc.kill()
+        proc.communicate()
+    _wait_for_group_exit(proc.pid)
 
 
 GROUP_EXIT_WAIT_SECONDS = 5.0
