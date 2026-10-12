@@ -81,9 +81,11 @@ class TestRegistry(unittest.TestCase):
                 env = child_environment(sink=spec, parent=parent)
                 self.assertEqual("GH_TOKEN" in env, has_github)
                 self.assertNotIn("TRACKER_TOKEN", env)
+                self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
         env = child_environment(sink="command", parent=parent, sink_options={"sink_env": ["TRACKER_TOKEN"]})
         self.assertEqual(env.get("TRACKER_TOKEN"), "t")
         self.assertNotIn("GH_TOKEN", env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
 
     def test_detection_reads_target_guidance(self):
         with tempfile.TemporaryDirectory() as tmp:

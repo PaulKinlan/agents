@@ -649,6 +649,7 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         env = child_environment(engine="pi", parent=parent,
                                 broker_urls={"anthropic": broker.base_url("anthropic")},
                                 broker_placeholder=broker.placeholder)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
         self.assertEqual(env["ANTHROPIC_API_KEY"], broker.placeholder)
         self.assertNotIn(REAL["anthropic"], env.values())
         # Simulate the engine's SDK: POST {base_url}/v1/messages with the placeholder key.
@@ -677,6 +678,7 @@ class TestChildEnvBrokerComposition(BrokerTestBase):
         env = child_environment(engine="pi", parent=parent,
                                 broker_urls={"deepseek": broker.base_url("deepseek")},
                                 broker_placeholder=broker.placeholder)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
         self.assertEqual(env["DEEPSEEK_API_KEY"], broker.placeholder)
         split = urlsplit(env["DEEPSEEK_BASE_URL"])
         status, _, body = _client_request(
