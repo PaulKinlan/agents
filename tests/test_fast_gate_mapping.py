@@ -183,6 +183,17 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_docs_drift.py", mapped,
                       "walker suite omitted for walked root markdown (agents-28nn)")
 
+    def test_patches_markdown_maps_to_the_walker_suite(self):
+        """patches/*.md is walked by the docs-drift scanner (agents-g1je)."""
+        mapped = resolve_fast_gate(["patches/README.md"])
+        self.assertIn("tests/test_docs_drift.py", mapped,
+                      "walker suite omitted for walked patches markdown (agents-g1je)")
+
+    def test_patches_patch_artifacts_are_ignored(self):
+        """patches/*.patch diff artifacts are consumed hub-side and ignored in fast gate (agents-g1je)."""
+        mapped = resolve_fast_gate(["patches/fleet-land-message-tree-identity.patch"])
+        self.assertEqual(mapped, [], "patch diff artifact should be claimed by ignore arm")
+
     def test_tests_fixtures_map_to_the_containment_suite(self):
         """tests/fixtures/ holds the checked-in attack payloads (agents-28nn round 5):
         fake_engine.sh is asserted on by TestEngineCredentialPinning, which agents-3iog

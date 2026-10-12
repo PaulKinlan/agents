@@ -797,6 +797,13 @@ while IFS= read -r f; do
       # (tests/test_docs_drift.py:101-113) bind any walked .md that names a bare agent directory.
       mapped="$mapped tests/test_docs_drift.py"
       ;;
+    patches/*.md)
+      # Fleet tooling documentation (agents-g1je). patches/ is NOT in DEFAULT_IGNORE_DIRS
+      # (lib/exclusions.py:23-43), so the docs-drift scanner (agents/docs-drift/scripts/check_docs.py)
+      # walks these markdown files, and tests/test_docs_drift.py asserts reference and anchor
+      # validity across the real repository tree.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
     agents/*/scripts/*.py)
       # agents-9iyf: THE CLASS ARM FOR STATION SCRIPTS. The table had only PER-FILE arms, so a
       # script nobody had enumerated (agents/log-check/scripts/parse_logs.py) failed the fast
@@ -880,11 +887,15 @@ while IFS= read -r f; do
       # VCS metadata, consumed only by git itself. Tests mention .gitignore only as
       # fixtures they write into tmp targets (test_containment.py, test_hillclimb.py).
       ;;
-    patches/*)
-      # Fleet tooling patches delivered to the hub (agents-19jh).
-      # Consumed hub-side by PaulKinlan/fleet; not read by any factory suite or script.
-      # Search performed: grep -rn "patches" across the codebase confirms no script, target,
-      # runner, or test consumes this directory.
+    patches/*.patch)
+      # Fleet tooling patch diff artifacts delivered to the hub (agents-19jh, agents-g1je).
+      # Consumed hub-side by git apply in PaulKinlan/fleet; not read by any factory suite or script.
+      # Search performed:
+      # - Walkers: check_docs.py only walks .md for documentation and specific code extensions
+      #   (.py, .sh, etc.) for symbols; .patch files are skipped by extension.
+      # - Globs: grep -rn "patches/" across lib/, agents/, tests/, and factory confirms no
+      #   glob or script references these artifacts.
+      # - Subprocesses: no runner or station subprocess defaults to patches/*.patch.
       ;;
     *)
       unmatched="$unmatched $f"
