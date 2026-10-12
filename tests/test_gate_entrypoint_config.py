@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -303,6 +304,80 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
         self.assertIn("cached PASS was for a different command", res.stdout)
         # The spawn attempt was intercepted and neutralized before any real tests ran
         self.assertTrue(marker.exists(), "stub interceptor must capture the spawn attempt")
+
+
+class TestAFailedUpdateIsNotSwallowed(unittest.TestCase):
+    """agents-yow5: install.sh's `git pull --ff-only --quiet || true` swallowed a failed
+    update, so a VM continued with STALE stations, printed its success lines and EXITED 0.
+
+    That is worse than a visible failure: the caller (remote/provision.sh:970) runs this
+    installer with ALL OUTPUT SUPPRESSED, so the exit code is the only signal that survives,
+    and the thing that certifies the VM looks correctly provisioned could not tell a fresh
+    install from a silent one.
+    """
+
+    def _checkout_whose_remote_is_gone(self, root: Path) -> Path:
+        """A real git checkout whose pull fails for the reason a VM's pull fails: the remote
+        it tracks is not there. Built from a real clone of a real repository so the failure is
+        git's own, not a fixture's imitation of one.
+        """
+        origin = root / "origin.git"
+        seed = root / "seed"
+        seed.mkdir()
+        commit = ["-c", "user.email=installer@test.invalid", "-c", "user.name=installer"]
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+        (seed / "factory").write_text("#!/bin/sh\n", encoding="utf-8")
+        (seed / "agents").mkdir()
+        subprocess.run(["git", "-C", str(seed), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(seed), *commit, "commit", "-q", "-m", "seed"],
+                       check=True)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", str(origin),
+                        "HEAD:refs/heads/main"], check=True)
+        subprocess.run(["git", "-C", str(origin), "symbolic-ref", "HEAD",
+                        "refs/heads/main"], check=True)
+
+        dst = root / "agents"
+        subprocess.run(["git", "clone", "-q", str(origin), str(dst)], check=True)
+        # The remote disappears: an unreachable remote, deterministic and instant (a bogus
+        # https URL would depend on DNS timing on a starved VM).
+        shutil.rmtree(origin)
+        return dst
+
+    def test_a_failed_pull_is_not_silent_and_does_not_exit_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            dst = self._checkout_whose_remote_is_gone(root)
+
+            # The installer must run from OUTSIDE a checkout: run from this repo it finds
+            # factory+agents beside itself and takes the "use this checkout" branch, never
+            # reaching the update path that is under test here.
+            installer_dir = root / "installer"
+            installer_dir.mkdir()
+            installer = installer_dir / "install.sh"
+            shutil.copy(ROOT / "install.sh", installer)
+
+            env = _entrypoint_env(str(home))
+            _prevent_real_gate(env, str(home))
+            res = subprocess.run(["bash", str(installer), "-d", str(dst)],
+                                 capture_output=True, text=True, env=env, cwd=str(root))
+
+            self.assertNotEqual(
+                res.returncode, 0,
+                "a failed update must not exit 0: provision.sh calls this installer with its "
+                "output suppressed, so a zero here is how a stale VM is reported as "
+                "correctly provisioned",
+            )
+            output = res.stdout + res.stderr
+            self.assertIn("could not update the Software Factory checkout", output,
+                          "the failure must name what failed in the installer's own words")
+            self.assertIn("pull", output.lower())
+            self.assertNotIn("Installing Software Factory skills", res.stdout,
+                             "the installer must not continue to install (stale) skills")
+            self.assertFalse((home / ".pi" / "agent" / "skills").exists(),
+                             "a failed update still linked skills into the agent hub")
 
 
 class TestInstalledConfigDoesNotDrift(unittest.TestCase):
