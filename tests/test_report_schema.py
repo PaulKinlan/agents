@@ -30,6 +30,7 @@ sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.report_schema import (  # noqa: E402
     declared_schema,
+    normalize_report,
     unlocatable_verdicts,
     validate,
     validate_agent_report,
@@ -343,6 +344,43 @@ class TestPathlessVerificationRecord(unittest.TestCase):
         errors = validate(report, self._schema())
         self.assertTrue(any("path" in e for e in errors),
                         f"a verified finding with no path must still be refused, got {errors}")
+
+class TestNormalizeReport(unittest.TestCase):
+    """agents-h8i4: normalize_report normalizes scanned_files from a list of paths or string
+    into an integer count so schema validation succeeds on attempt 1."""
+
+    def test_normalize_report_scanned_files_list_to_count(self):
+        report = {
+            "summary": "s",
+            "findings": [],
+            "scanned_files": ["lib/a.py", "lib/b.py", "lib/c.py"],
+        }
+        notes = normalize_report(report)
+        self.assertEqual(report["scanned_files"], 3)
+        self.assertTrue(any("scanned_files" in n for n in notes))
+
+    def test_normalize_report_scanned_files_digit_string_to_int(self):
+        report = {
+            "summary": "s",
+            "findings": [],
+            "scanned_files": "42",
+        }
+        notes = normalize_report(report)
+        self.assertEqual(report["scanned_files"], 42)
+        self.assertTrue(any("scanned_files" in n for n in notes))
+
+    def test_normalize_report_unicode_digit_does_not_raise(self):
+        """Review finding P2: unicode numeric chars like '²' must not raise ValueError."""
+        report = {
+            "summary": "s",
+            "findings": [{"rule_id": "r", "path": "p.py", "line_number": "²", "snippet": "s",
+                          "severity": "high", "title": "t", "description": "d", "remediation": "r"}],
+            "scanned_files": "²",
+        }
+        notes = normalize_report(report)
+        # Should not raise ValueError; leaves original string for schema validator to handle
+        self.assertEqual(report["scanned_files"], "²")
+
 
 if __name__ == "__main__":
     unittest.main()

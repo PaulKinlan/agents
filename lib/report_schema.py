@@ -708,6 +708,25 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
     notes: List[str] = []
     if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
         return notes
+
+    # agents-h8i4: Normalize top-level scanned_files if the model emitted a list of
+    # scanned file paths instead of an integer count (or a digit string).
+    scanned = report.get("scanned_files")
+    if isinstance(scanned, list):
+        report["scanned_files"] = len(scanned)
+        notes.append(f"scanned_files: list of {len(scanned)} item(s) -> count {len(scanned)}")
+    elif isinstance(scanned, str):
+        try:
+            report["scanned_files"] = int(scanned.strip())
+            notes.append(f"scanned_files: digit string {scanned!r} -> integer {report['scanned_files']}")
+        except ValueError:
+            pass
+    elif isinstance(scanned, dict) and ("count" in scanned or "total" in scanned):
+        val = scanned.get("count", scanned.get("total"))
+        if isinstance(val, int):
+            report["scanned_files"] = val
+            notes.append(f"scanned_files: dict -> integer {val}")
+
     item_schema = _finding_item_schema(schema)
     declared = set(item_schema.get("properties", {}) or {})
     enum = (item_schema.get("properties", {}).get("severity", {}) or {}).get("enum")
@@ -730,8 +749,11 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
                     notes.append(f"findings[{index}]: {alias} -> {canonical}")
                     break
         line = item.get("line_number")
-        if isinstance(line, str) and line.strip().isdigit():
-            item["line_number"] = int(line.strip())
+        if isinstance(line, str):
+            try:
+                item["line_number"] = int(line.strip())
+            except ValueError:
+                pass
         severity = item.get("severity")
         if isinstance(severity, str):
             lowered = severity.strip().lower()
