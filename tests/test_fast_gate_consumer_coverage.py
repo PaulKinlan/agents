@@ -19,6 +19,7 @@ is the same as no pin.
 
 import functools
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -86,71 +87,58 @@ _FLEET_ORACLE = Path("/home/exedev/fleet/remote/check-coverage.py")
 # The arm's PATTERN is named rather than its LINE - the line moves, the pattern is greppable, and the
 # selection beside it is measured rather than read.
 # ---------------------------------------------------------------------------------------------------
-CONSUMER_COVERAGE_ALLOWLIST = {
-    "candidate_identity": {
-        "tests/test_findings.py",
-        "tests/test_scan_surface.py",
-    },
-    "child_env": {
-        "tests/containment_harness.py",
-        "tests/test_containment.py",
-        "tests/test_containment_adapters.py",
-        "tests/test_containment_declarations.py",
-        "tests/test_containment_egress.py",
-        "tests/test_containment_engine_credentials.py",
-        "tests/test_containment_prepass_pins.py",
-        "tests/test_factory_core.py",
-    },
-    "containment": {
-        "tests/containment_harness.py",
-    },
-    "credential_broker": {
-        "tests/containment_harness.py",
-        "tests/test_child_env.py",
-        "tests/test_containment.py",
-        "tests/test_containment_adapters.py",
-        "tests/test_containment_declarations.py",
-        "tests/test_containment_egress.py",
-        "tests/test_containment_engine_credentials.py",
-        "tests/test_containment_prepass_pins.py",
-        "tests/test_factory_core.py",
-        "tests/test_line_andon.py",
-    },
-    "egress_proxy": {
-        "tests/containment_harness.py",
-    },
-    "findings": {
-        "tests/test_candidate_identity.py",
-        "tests/test_factory_core.py",
-        "tests/test_factory_truth.py",
-        "tests/test_perf_review.py",
-    },
-    "sandbox": {
-        "tests/containment_harness.py",
-        "tests/test_adapter_auth_failure.py",
-        "tests/test_containment.py",
-        "tests/test_containment_adapters.py",
-        "tests/test_containment_declarations.py",
-        "tests/test_containment_egress.py",
-        "tests/test_containment_engine_credentials.py",
-        "tests/test_containment_prepass_pins.py",
-        "tests/test_factory_core.py",
-        "tests/test_factory_truth.py",
-        "tests/test_factory_truth_2.py",
-        "tests/test_line_andon.py",
-        "tests/test_pi_keyless_broker.py",
-        "tests/test_prompt_exposure.py",
-        "tests/test_report_schema.py",
-    },
-    "tool_pins": {
-        "tests/test_bench_runner.py",
-        "tests/test_containment_prepass_pins.py",
-        "tests/test_factory_core.py",
-        "tests/test_hermetic_env.py",
-        "tests/test_sink_adapters.py",
-        "tests/test_store_lock_timeout.py",
-    },
-}
+# ---------------------------------------------------------------------------------------------------
+# agents-nerv: THIS IS A DIRECTORY OF FRAGMENTS, NOT A LITERAL. Appending to one dict in one file made
+# every lane that omitted a consumer resolve a conflict against every other lane (N deliveries, N-1
+# rebases and re-gates). A delivery now drops its OWN fragment - tests/fast_gate_allowlists.d/<id>.json -
+# and this test merges whatever is there, so no two deliveries touch one file.
+#
+# The base fragments are the migration of what used to be the literals here, generated from those
+# literals with ast.literal_eval and asserted EQUAL to them - not transcribed, because a hand copy would
+# make the test agree with itself (agents-nerv).
+#
+# A MALFORMED FRAGMENT IS AN ERROR RATHER THAN SOMETHING TO SKIP: silently ignoring one is how an
+# omission stops being guarded, which is the failure this whole file exists to prevent.
+_ALLOWLIST_DIR = ROOT / "tests" / "fast_gate_allowlists.d"
+
+
+def _load_allowlist_fragments():
+    """Merge every fragment; return (consumer_coverage, non_suite, provenance).
+
+    provenance maps (kind, module, suite) -> the fragment file that declared it, so a stale entry names
+    the file a reader must edit rather than a directory they must search (agents-nerv).
+    """
+    coverage, non_suite, provenance = {}, {}, {}
+    fragments = sorted(_ALLOWLIST_DIR.glob("*.json"))
+    if not fragments:
+        raise AssertionError(f"no allowlist fragments in {_ALLOWLIST_DIR}: the merged allowlist would be empty")
+    for path in fragments:
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise AssertionError(f"{path.name}: not valid JSON ({exc}) - a fragment that does not parse must fail")
+        kind = blob.get("kind")
+        if kind not in ("consumer_coverage", "non_suite_consumers"):
+            raise AssertionError(f"{path.name}: kind must be consumer_coverage or non_suite_consumers, got {kind!r}")
+        target = coverage if kind == "consumer_coverage" else non_suite
+        modules = blob.get("modules")
+        if not isinstance(modules, dict):
+            raise AssertionError(f"{path.name}: modules must be an object mapping module -> list of suites")
+        for module, suites in modules.items():
+            if not isinstance(suites, list) or not all(isinstance(s, str) for s in suites):
+                raise AssertionError(f"{path.name}: {module} must map to a list of suite paths")
+            for suite in suites:
+                target.setdefault(module, set()).add(suite)
+                provenance[(kind, module, suite)] = path.name
+    return coverage, non_suite, provenance
+
+
+CONSUMER_COVERAGE_ALLOWLIST, NON_SUITE_CONSUMERS, _ALLOWLIST_PROVENANCE = _load_allowlist_fragments()
+
+
+def _fragment_declaring(kind, module, suite):
+    """The fragment that declared this entry - named so a stale entry tells a reader what to edit."""
+    return _ALLOWLIST_PROVENANCE.get((kind, module, suite), "<no fragment names this entry>")
 
 # Import reference to a module stem, the same shape the fleet oracle matches (agents-pdth).
 _IMPORT_RE = r"^\s*(?:import\s+[^;\n]*?\b{stem}\b|from\s+[^;\n]*?\b{stem}\b)"
@@ -304,7 +292,7 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
                 failures.append(
                     f"{path} omits {len(unlisted)} consumer(s) and they are not in the allowlist:\n  "
                     f"{detail}\nFix the arm in tools/fast-gate.sh, or add each suite to "
-                    f"CONSUMER_COVERAGE_ALLOWLIST - its exemption is then explained by the same "
+                    f"a fragment in tests/fast_gate_allowlists.d/ - its exemption is then explained by the same "
                     f"measurement (agents-pdth)."
                 )
         self.assertEqual(failures, [], "\n".join(failures))
@@ -318,7 +306,8 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
                 if suite not in omitted:
                     still_runs = [s.split("/")[-1] for s in sorted(_selected_suites(f"lib/{module}.py"))]
                     stale.append(
-                        f"CONSUMER_COVERAGE_ALLOWLIST['{module}']['{suite}'] is STALE: the gate now "
+                        f"{_fragment_declaring('consumer_coverage', module, suite)} declares "
+                        f"{module} -> {suite}, and that entry is STALE: the gate now "
                         f"selects it, or the suite no longer imports the module. For that file the gate "
                         f"selects {still_runs}. Delete the entry so the list shrinks (agents-pdth)."
                     )
@@ -329,13 +318,8 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
 # broader than the oracle: a helper that imports a lib module is still a consumer, because the gate cannot
 # run it but a change to that module still breaks it. This is that difference, pinned - a sixth module
 # gaining a helper consumer, or a new helper appearing, fails here rather than quietly widening the claim.
-NON_SUITE_CONSUMERS = {
-    "child_env": ["tests/containment_harness.py"],
-    "containment": ["tests/containment_harness.py"],
-    "credential_broker": ["tests/containment_harness.py"],
-    "egress_proxy": ["tests/containment_harness.py"],
-    "sandbox": ["tests/containment_harness.py"],
-}
+# NON_SUITE_CONSUMERS is loaded from tests/fast_gate_allowlists.d/ together with the allowlist
+# above, so a lane widening the mirror drops its own fragment instead of editing this file.
 
 
 def _load_oracle():
