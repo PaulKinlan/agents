@@ -24,6 +24,9 @@ sys.path.insert(0, str(ROOT))
 from lib.pins_audit import DEFAULT_LOOKUP, audit, render  # noqa: E402
 
 CLI = ROOT / "tools" / "audit-tool-pins.sh"
+# The coverage oracle reads the LITERAL in run_cli()'s subprocess call, so it must name the tool
+# this suite actually spawns - pinned in a test below rather than left to drift.
+CLI_LITERAL = "tools/audit-tool-pins.sh"
 GENERATOR = ROOT / "tools" / "generate-tool-pins.sh"
 PIN_NAMES = ("FACTORY_TOOL_PINS", "FACTORY_VERIFIED_TOOL_PINS")
 
@@ -53,8 +56,16 @@ def run_cli(args, env_extra=None, clear_pins_env=True):
         for name in PIN_NAMES:
             env.pop(name, None)
     env.update(env_extra or {})
-    return subprocess.run(["bash", str(CLI), *args], cwd=str(ROOT), env=env,
-                          capture_output=True, text=True)
+    # THE LITERAL PATH IS DELIBERATE, NOT A STYLE CHOICE (agents-5vun). The fleet's coverage
+    # oracle (remote/check-coverage.py) relates a changed file to a suite by looking for the
+    # file's path, basename or stem INSIDE a subprocess/exec call in the test source; a
+    # `str(CLI)` indirection hides it, and a .sh source can never be matched by test-name
+    # stem either, because its are_extensions_compatible() is `ext1 == ext2` - so before this
+    # literal, a change to tools/audit-tool-pins.sh was reported UNMAPPED by the fleet
+    # extractor even though it ran this suite. Same reason tests/test_fast_gate_mapping.py
+    # names tools/fast-gate.sh at its call site.
+    return subprocess.run(["bash", str(ROOT / "tools" / "audit-tool-pins.sh"), *args],
+                          cwd=str(ROOT), env=env, capture_output=True, text=True)
 
 
 def generate(dest: Path, lookup: str) -> Path:
@@ -121,6 +132,18 @@ class AuditTests(unittest.TestCase):
         result = run_cli(["--pins", str(pins), "--lookup-path", str(lookup)])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("AGREES", result.stdout)
+
+    def test_the_coverage_oracles_literal_names_the_tool_this_suite_spawns(self):
+        """The fleet's oracle reads a LITERAL path inside the subprocess call, so it is a contract.
+
+        If the tool is renamed and this literal is not, the fleet extractor reports every change
+        to the tool as unmapped even though this suite ran - silently, and in the note a reader
+        sees. So the literal and the tool are asserted to agree (agents-5vun).
+        """
+        self.assertTrue(CLI.is_file(), f"the tool moved: {CLI}")
+        self.assertTrue(CLI_LITERAL.endswith(CLI.name), f"literal {CLI_LITERAL} != tool {CLI.name}")
+        self.assertIn(CLI_LITERAL, Path(__file__).read_text(),
+                      "run_cli() must name the tool by its literal path for the fleet oracle")
 
     def test_no_pins_file_in_use_is_reported_and_exits_zero(self):
         result = run_cli([])
