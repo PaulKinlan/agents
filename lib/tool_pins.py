@@ -82,9 +82,11 @@ CONFIG_PATH = FACTORY_ROOT / "tools.yaml"
 # agents-oq3j: this name is NO LONGER how a host run SELECTS its pins file - the run passes
 # --tool-pins explicitly (``configure_host_pins``) because an inherited variable cannot establish
 # that this run chose the file; an earlier step, a calling script or a provisioned host file sets
-# it just as convincingly. It remains the DISPATCHER -> CHILD handoff channel (factory ->
-# lib.child_env -> the read-only bind in lib.sandbox), which agents-oq3j replaced with a
-# dispatcher-set, child-only name (``VERIFIED_PINS_ENV``). Absent/unset = repo pins only (still fail-closed); a malformed
+# it just as convincingly. It is NOT the DISPATCHER -> CHILD handoff channel either: that was the
+# pre-oq3j arrangement (factory -> lib.child_env -> the read-only bind in lib.sandbox), and
+# agents-oq3j moved it to a dispatcher-set, child-only name (``VERIFIED_PINS_ENV``) that
+# lib.child_env never copies from its parent. What remains under THIS name is the staged host
+# fallback (agents-uekw deletes it). Absent/unset = repo pins only (still fail-closed); a malformed
 # file raises instead of being ignored.
 #
 # NOT DEFENDED, STATED RATHER THAN IMPLIED: a process that persists after generation and rewrites
@@ -497,9 +499,11 @@ def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
     """Load the effective pins: ``tools.yaml`` (or `path`) merged OVER by the host file.
 
     The repo ``tools.yaml`` (or `path`, for tests) is parsed first. If this run selected a host
-    file (``configure_host_pins``: the dispatcher's explicit --tool-pins) or, for a child, the
-    dispatcher handed one over (``FACTORY_TOOL_PINS``), it is parsed and its per-tool entries
-    REPLACE the repo's — the host file wins for every tool it defines, because only the host
+    file (``configure_host_pins``: the dispatcher's explicit --tool-pins) or, for a CHILD, the
+    dispatcher handed its verified snapshot over as ``FACTORY_VERIFIED_TOOL_PINS``
+    (``VERIFIED_PINS_ENV``, the only name ``host_pins_path`` reads for a child), it is parsed and
+    its per-tool entries REPLACE the repo's — the host file wins for every tool it defines,
+    because only the host
     knows its own binaries' hashes. No host file, or a missing one, leaves the repo pins
     unchanged (still fail-closed when unpinned); a malformed host file raises ``ToolPinError``.
     """
@@ -513,13 +517,14 @@ def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
 def write_effective_pins(path: Path,
                          pins: Optional[Dict[str, Dict[str, str]]] = None) -> Path:
     """Write the EFFECTIVE merged pins (repo ``tools.yaml`` under the host file) as one
-    pins file a child process can point ``FACTORY_TOOL_PINS`` at.
+    pins file the dispatcher hands to a CHILD as ``FACTORY_VERIFIED_TOOL_PINS``
+    (``VERIFIED_PINS_ENV`` - NOT the legacy ``FACTORY_TOOL_PINS``, which a child never reads).
 
     The sandboxed pre-pass re-authenticates its own trusted tools through
     ``resolve_tool`` (agents-28nn round 4: a station script's own trusted-tool launch is
     a census kind of its own), but the host pins file typically lives under ``$HOME`` —
     tmpfs-hidden inside the wrap. The dispatcher therefore writes the merged view it just
-    verified and points the child's ``FACTORY_TOOL_PINS`` at it, so the child re-verifies
+    verified and points the child's ``FACTORY_VERIFIED_TOOL_PINS`` at it, so the child re-verifies
     against EXACTLY what the host verified. Pins are paths and hashes — not secret — and
     only the pre-pass reads this file, before any engine session starts.
 
