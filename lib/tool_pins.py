@@ -69,6 +69,7 @@ import hashlib
 import os
 import shutil
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -76,10 +77,33 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = FACTORY_ROOT / "tools.yaml"
 
 # Env var naming a host-local pins file, merged OVER tools.yaml (agents-3g6). Host-specific
-# hashes cannot live in the repo, so the fleet nightly runner, CI and downstream consumers
-# generate one on the host and point this at it. Absent/unset = repo pins only (still
-# fail-closed); a malformed file raises instead of being ignored.
+# hashes cannot live in the repo, so a host generates one and hands it to the run it belongs to.
+#
+# agents-oq3j: this name is NO LONGER how a host run SELECTS its pins file - the run passes
+# --tool-pins explicitly (``configure_host_pins``) because an inherited variable cannot establish
+# that this run chose the file; an earlier step, a calling script or a provisioned host file sets
+# it just as convincingly. It remains the DISPATCHER -> CHILD handoff channel (factory ->
+# lib.child_env -> the read-only bind in lib.sandbox), which agents-oq3j replaced with a
+# dispatcher-set, child-only name (``VERIFIED_PINS_ENV``). Absent/unset = repo pins only (still fail-closed); a malformed
+# file raises instead of being ignored.
+#
+# NOT DEFENDED, STATED RATHER THAN IMPLIED: a process that persists after generation and rewrites
+# the generated file in place shares the uid that owns it, so the consumer reads pins that verify
+# the writer's binary, and no argument or variable change can tell that file from the generated
+# one. That requires generating and consuming the pins across an isolated runner/job boundary
+# (agents-g527). Neither the staged fallback below nor the child channel above is a defence
+# against that writer either.
 HOST_PINS_ENV = "FACTORY_TOOL_PINS"
+
+# The DISPATCHER-SET pins handoff to a CHILD (agents-oq3j). A run that has verified its tools writes
+# the merged view it verified and names it with THIS variable in the environment the child is
+# constructed with (lib.child_env), so the name is set-not-inherited at every hop. A second
+# inherited name would authenticate nothing - the initial process can inherit that name too - so
+# lib.child_env NEVER copies this from its parent, and the dispatcher's entry point clears any
+# ambient value of it before it can be inherited further. A child that finds no value here
+# resolves the committed tools.yaml only, which fails closed on an unpinned trusted tool: the safe
+# direction, and the one a child with no handoff deserves.
+VERIFIED_PINS_ENV = "FACTORY_VERIFIED_TOOL_PINS"
 
 # The explicit dev/test opt-in that restores by-name resolution for an unpinned trusted tool.
 # `_unpinned_allowed` reads it, and lib.child_env forwards it to the children that resolve a
@@ -369,27 +393,120 @@ def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
     return pins
 
 
-def host_pins_path() -> Optional[Path]:
-    """The host-local pins file named by ``FACTORY_TOOL_PINS`` (agents-3g6), or None."""
+# The pins file THIS RUN selected explicitly (agents-oq3j). Only an entry point that owns a run
+# sets it, from its explicit --tool-pins argument, before any tool resolution. A pre-pass CHILD
+# never sets it: it still receives the dispatcher's snapshot by environment handoff (factory ->
+# lib.child_env), and agents-oq3j moved that channel to a dispatcher-set, child-only name
+# (``VERIFIED_PINS_ENV``) that lib.child_env never copies from its parent.
+#
+# WHY AN ARGUMENT AND NOT THE ENVIRONMENT: an environment variable is inherited by every step of a
+# job, so "the environment names this file" cannot establish that THIS RUN chose it - an earlier
+# step, a calling script or a provisioned host file sets it just as convincingly. The argument is
+# the run's own decision, which is the property a pins consumer is entitled to rely on.
+_UNSET_HOST_PINS = object()
+_configured_host_pins: object = _UNSET_HOST_PINS
+_ambient_fallback_announced = False
+
+
+def configure_host_pins(path: Any) -> None:
+    """Record the host pins file this run selected explicitly (agents-oq3j).
+
+    ``None`` records an explicit "no host pins file", which is NOT the same as never having called
+    this: an unconfigured process is a child, and a child still resolves the dispatcher's handoff
+    through ``VERIFIED_PINS_ENV``.
+
+    The entry point also DROPS any inherited child-only name: that name means "the dispatcher
+    constructed this environment for a child", and a dispatcher that inherited it would be reading
+    a value it did not set. Children get theirs from lib.child_env, built from an explicit
+    argument, never from this process's environment.
+    """
+    global _configured_host_pins
+    raw = str(path).strip() if path is not None else ""
+    _configured_host_pins = Path(os.path.expanduser(raw)) if raw else None
+    os.environ.pop(VERIFIED_PINS_ENV, None)
+
+
+def _verified_pins_path() -> Optional[Path]:
+    """The dispatcher's verified snapshot named for a CHILD (``VERIFIED_PINS_ENV``), or None."""
+    raw = os.environ.get(VERIFIED_PINS_ENV, "").strip()
+    if not raw:
+        return None
+    return Path(os.path.expanduser(raw))
+
+
+def _ambient_host_pins() -> Optional[Path]:
+    """The pins file named by ``FACTORY_TOOL_PINS``, or None - the pre-migration channel."""
     raw = os.environ.get(HOST_PINS_ENV, "").strip()
     if not raw:
         return None
     return Path(os.path.expanduser(raw))
 
 
+def _env_named_fallback() -> Optional[Path]:
+    """THE ONE PLACE an environment name may still select a host pins file (agents-uekw deletes it).
+
+    Kept deliberately single and named so the enforcement flip is a small honest diff rather than a
+    hunt: when the fleet bundle passes --tool-pins (~/fleet/remote/factory-nightly.sh:112,
+    remote/provision.sh:1092-1093 and the test that asserts that export), this function and its one
+    call site below are deleted, and nothing else in the repo changes.
+
+    The warning names the ROUTE, not just the variable: someone reading a nightly log has to be able
+    to tell that this is the route that is going away, and which run it was.
+    """
+    global _ambient_fallback_announced
+    fallback = _ambient_host_pins()
+    if fallback is None:
+        return None
+    if not _ambient_fallback_announced:
+        _ambient_fallback_announced = True
+        invoked = " ".join(sys.argv[:4]) or "this process"
+        sys.stderr.write(
+            f"factory: no --tool-pins argument, so the ENVIRONMENT NAME {HOST_PINS_ENV} selected "
+            f"the host pins file {fallback} for this run (invoked as: {invoked}). The routes that "
+            "still export that name are the fleet's nightly runner "
+            "(~/fleet/remote/factory-nightly.sh:112) and every lane's environment "
+            "(~/.fleet/local.conf, written by remote/provision.sh:1092); both are being migrated "
+            "to pass --tool-pins, after which this fallback is REMOVED and an environment name "
+            "selects nothing (agents-uekw). Pass --tool-pins explicitly to migrate now.\n")
+    return fallback
+
+
+def host_pins_path() -> Optional[Path]:
+    """The host-local pins file to merge over ``tools.yaml``, or None.
+
+    A run that configured its own pins file uses it, and the environment is not consulted at all.
+    A run that explicitly configured NONE still falls back to ``FACTORY_TOOL_PINS`` for one release
+    and says so on stderr, naming the route, because the fleet's nightly runner and every lane's
+    environment still export it - selecting nothing there would fail a legitimate run closed while
+    the committed tools.yaml ships no active pins. THE FALLBACK IS THE HOLE: while it exists, an
+    ambient name still selects a host pins file for a run that did not choose one, and
+    ``_env_named_fallback`` is the single path that closes by deleting it (agents-uekw).
+
+    A CHILD (never configured) resolves the dispatcher's snapshot through ``VERIFIED_PINS_ENV``
+    and nothing else: the legacy name is not honoured for a child, because child_env builds the
+    child's environment from an explicit argument rather than copying its parent's.
+    """
+    if _configured_host_pins is _UNSET_HOST_PINS:
+        return _verified_pins_path()
+    if _configured_host_pins is not None:
+        return _configured_host_pins  # type: ignore[return-value]
+    return _env_named_fallback()
+
+
 def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
     """Load the effective pins: ``tools.yaml`` (or `path`) merged OVER by the host file.
 
-    The repo ``tools.yaml`` (or `path`, for tests) is parsed first. If ``FACTORY_TOOL_PINS``
-    names an existing host file, it is parsed and its per-tool entries REPLACE the repo's —
-    the host file wins for every tool it defines, because only the host knows its own
-    binaries' hashes. An unset env var or a missing host file leaves the repo pins unchanged
-    (still fail-closed when unpinned); a malformed host file raises ``ToolPinError``.
+    The repo ``tools.yaml`` (or `path`, for tests) is parsed first. If this run selected a host
+    file (``configure_host_pins``: the dispatcher's explicit --tool-pins) or, for a child, the
+    dispatcher handed one over (``FACTORY_TOOL_PINS``), it is parsed and its per-tool entries
+    REPLACE the repo's — the host file wins for every tool it defines, because only the host
+    knows its own binaries' hashes. No host file, or a missing one, leaves the repo pins
+    unchanged (still fail-closed when unpinned); a malformed host file raises ``ToolPinError``.
     """
     repo = _parse_pins_file(Path(path) if path is not None else CONFIG_PATH, "tools.yaml")
     host = host_pins_path()
     if host is not None and host.exists():
-        repo.update(_parse_pins_file(host, f"FACTORY_TOOL_PINS ({host})"))
+        repo.update(_parse_pins_file(host, f"host pins file ({host})"))
     return repo
 
 
@@ -441,7 +558,8 @@ def _require_pin(name: str, entry: Dict[str, str]) -> None:
     if entry.get("sha256") is None and not _unpinned_allowed():
         raise ToolPinError(
             f"trusted tool {name!r} is not pinned (no {name}.sha256 in tools.yaml nor the "
-            f"{HOST_PINS_ENV} host file); pin it, or set {UNPINNED_ALLOW_ENV}=1 to "
+            f"run's pins file - the --tool-pins argument, or for a child the dispatcher's "
+            f"{VERIFIED_PINS_ENV} handoff); pin it, or set {UNPINNED_ALLOW_ENV}=1 to "
             "opt out explicitly for a dev/test run")
 
 

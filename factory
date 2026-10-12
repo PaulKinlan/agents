@@ -44,9 +44,9 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
-    from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
-                               UNPINNED_ALLOW_ENV, allowlisted_path, prepass_tool_env, resolve_tool,
-                               unpinned_allowed, write_effective_pins)
+    from lib.tool_pins import (PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError, UNPINNED_ALLOW_ENV,
+                               VERIFIED_PINS_ENV, allowlisted_path, configure_host_pins,
+                               prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -70,9 +70,9 @@ except ImportError:
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
-    from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
-                               UNPINNED_ALLOW_ENV, allowlisted_path, prepass_tool_env, resolve_tool,
-                               unpinned_allowed, write_effective_pins)
+    from lib.tool_pins import (PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError, UNPINNED_ALLOW_ENV,
+                               VERIFIED_PINS_ENV, allowlisted_path, configure_host_pins,
+                               prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -1365,7 +1365,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # set — the grant no longer routes through it.
         effective_pins = write_effective_pins(
             _make_pins_dir() / "tool-pins.effective.yaml")
-        prepass_env[HOST_PINS_ENV] = str(effective_pins)
+        # agents-oq3j: the snapshot crosses to the child under the CHILD-ONLY name, set here on the
+        # environment the dispatcher CONSTRUCTS for it - never inherited, and never copied from
+        # this process's environment by lib.child_env. FACTORY_TOOL_PINS remains this run's
+        # host-side fallback name (agents-uekw) and is deliberately not what a child resolves.
+        prepass_env[VERIFIED_PINS_ENV] = str(effective_pins)
         # Host-side verification of the pre-pass's whole trusted-tool set, on EVERY path
         # (the control is a property of the operation, not of the path taken to it).
         # A PRESENT-BUT-UNAUTHENTICATABLE tool refuses the run here — exactly what the
@@ -2284,8 +2288,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             elif isinstance(value, (str, int, float)):
                 findings_cmd += ["--sink-option", f"{key}={value}"]
         # The findings child resolves `bd` (and `gh`) itself through lib.sinks, so it needs the
-        # same trusted-tool pin source the parent just verified against (agents-dpt).
-        dispatch_env = child_environment(sink=sink, sink_options=sink_options, trusted_tools=True)
+        # same trusted-tool pin source the parent just verified against (agents-dpt) - handed over
+        # as the dispatcher's own snapshot (agents-oq3j), not as an inherited environment name.
+        dispatch_env = child_environment(
+            sink=sink, sink_options=sink_options, trusted_tools=True,
+            verified_pins=str(write_effective_pins(
+                _make_pins_dir() / "tool-pins.effective.yaml")))
         # agents-7bj: when the sink is the synced beads tracker the findings child resolves
         # `bd` by name; give it a PATH rebuilt from only that tool's install tree (plus the
         # system bin dirs a wrapped/shimmed bd's shebang needs), so it can never pick up a
@@ -2971,7 +2979,10 @@ def promote_public_issue(target_name: str, issue_url: str) -> None:
     # agents-7bj (P1-4): the promotion child resolves both gh and bd by name; apply the same
     # pinned, allowlisted PATH as the findings dispatch so it cannot pick up a trojaned binary
     # from PATH order. On a pin failure we leave the PATH intact and let the child fail closed.
-    env = child_environment(sink="github-issues", trusted_tools=True)
+    env = child_environment(
+        sink="github-issues", trusted_tools=True,
+        verified_pins=str(write_effective_pins(
+            _make_pins_dir() / "tool-pins.effective.yaml")))
     try:
         env["PATH"] = allowlisted_path(("gh", "bd"), env.get("PATH", ""))
     except ToolPinError as e:
@@ -2990,6 +3001,11 @@ def promote_public_issue(target_name: str, issue_url: str) -> None:
 def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=prog or "factory", description="The Software Factory (factory)")
     parser.add_argument("--agent", action="store_true", dest="agent_guide", help="Print machine-actionable instructions and recipes for AI agents to integrate the factory")
+    parser.add_argument("--tool-pins", dest="tool_pins", default=None, metavar="PATH",
+                        help="Host-local tool pins file (this machine's binary hashes), merged over "
+                             "the committed tools.yaml. Explicit by design: an environment variable "
+                             "is inherited by every step of a job, so it cannot establish that THIS "
+                             "run chose the file (agents-oq3j). Given before the subcommand.")
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to run")
 
     # integrate
@@ -3120,6 +3136,9 @@ def main():
     parser = build_parser()
 
     args = parser.parse_args()
+    # The run's own pins decision, resolved BEFORE any tool resolution below (agents-oq3j):
+    # every resolve_tool past this line reads it, and the environment is not consulted for it.
+    configure_host_pins(getattr(args, "tool_pins", None))
     if getattr(args, "agent_guide", False):
         print_agent_instructions("all")
         sys.exit(0)

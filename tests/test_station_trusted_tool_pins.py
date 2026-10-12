@@ -47,7 +47,7 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         env = os.environ.copy()
         env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
-        env["FACTORY_TOOL_PINS"] = str(pins)
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
         env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
         script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
@@ -65,7 +65,7 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         env = os.environ.copy()
         env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
-        env["FACTORY_TOOL_PINS"] = str(pins)
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
         env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
         script = ROOT / "agents/pr-fixer/scripts/collect_failures.py"
@@ -83,7 +83,7 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         env = os.environ.copy()
         env["PATH"] = f"{self.fakebin}:{env.get('PATH', '')}"
-        env["FACTORY_TOOL_PINS"] = str(pins)
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
         env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
         pkg = self.target / "package.json"
@@ -108,7 +108,7 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         env = os.environ.copy()
         env["PATH"] = str(empty_bin)
-        env["FACTORY_TOOL_PINS"] = str(pins)
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
         env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
         pkg = self.target / "package.json"
@@ -123,17 +123,29 @@ class TestStationTrustedToolPins(unittest.TestCase):
         # Verify that npm audit was not attempted: no 'npm-audit-unavailable' coverage gap candidate
         self.assertNotIn("npm-audit-unavailable", res.stdout)
 
-    def test_prepass_child_environment_forwards_tool_pins(self):
-        """prepass_environment must forward FACTORY_TOOL_PINS and FACTORY_ALLOW_UNPINNED_TOOLS (agents-qbl8)."""
+    def test_prepass_child_environment_forwards_the_dispatchers_snapshot_not_the_parents_name(self):
+        """agents-qbl8 + agents-oq3j: the pre-pass child gets the pins the RUN selected, under the
+        child-only name, and NEVER an inherited pin name - the parent's FACTORY_TOOL_PINS is
+        deliberately present here and must not appear in the child's environment. The unpinned-tools
+        opt-in is still forwarded (agents-7ua): it is the same run-scoped decision.
+        """
         from lib.child_env import prepass_environment
         parent = {
             "PATH": "/bin:/usr/bin",
             "FACTORY_TOOL_PINS": "/some/path/tools.pins.yaml",
             "FACTORY_ALLOW_UNPINNED_TOOLS": "1"
         }
-        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent)
-        self.assertEqual(child_env.get("FACTORY_TOOL_PINS"), "/some/path/tools.pins.yaml")
+        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent,
+                                        verified_pins="/some/path/tool-pins.effective.yaml")
+        self.assertEqual(child_env.get("FACTORY_VERIFIED_TOOL_PINS"),
+                         "/some/path/tool-pins.effective.yaml")
+        self.assertNotIn("FACTORY_TOOL_PINS", child_env)
         self.assertEqual(child_env.get("FACTORY_ALLOW_UNPINNED_TOOLS"), "1")
+
+        # No handoff: the child gets no pin name at all and fails closed on an unpinned tool.
+        bare = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent)
+        self.assertNotIn("FACTORY_VERIFIED_TOOL_PINS", bare)
+        self.assertNotIn("FACTORY_TOOL_PINS", bare)
 
     def test_perf_review_runs_dispatched_under_prepass_env_with_valid_pins(self):
         """perf-review runs to exit 0 when dispatched under prepass_environment with valid pins (agents-qbl8)."""
@@ -146,10 +158,11 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         parent = os.environ.copy()
         parent["PATH"] = f"{self.fakebin}:{parent.get('PATH', '')}"
-        parent["FACTORY_TOOL_PINS"] = str(pins)
+        # agents-oq3j: handed over as the run's own value, never copied from the parent.
+        parent.pop("FACTORY_TOOL_PINS", None)
         parent.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
-        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent)
+        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent, verified_pins=str(pins))
         script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
         res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
                              env=child_env, capture_output=True, text=True)
@@ -168,10 +181,11 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         parent = os.environ.copy()
         parent["PATH"] = f"{self.fakebin}:{parent.get('PATH', '')}"
-        parent["FACTORY_TOOL_PINS"] = str(pins)
+        # agents-oq3j: handed over as the run's own value, never copied from the parent.
+        parent.pop("FACTORY_TOOL_PINS", None)
         parent.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
-        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent)
+        child_env = prepass_environment({"capabilities": {"requires": ["git"]}}, parent=parent, verified_pins=str(pins))
         script = ROOT / "agents/pr-fixer/scripts/collect_failures.py"
         res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
                              env=child_env, capture_output=True, text=True)
@@ -190,13 +204,14 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         parent = os.environ.copy()
         parent["PATH"] = f"{self.fakebin}:{parent.get('PATH', '')}"
-        parent["FACTORY_TOOL_PINS"] = str(pins)
+        # agents-oq3j: handed over as the run's own value, never copied from the parent.
+        parent.pop("FACTORY_TOOL_PINS", None)
         parent.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
         pkg = self.target / "package.json"
         pkg.write_text('{"name": "test", "dependencies": {"foo": "1.0.0"}}\n')
 
-        child_env = prepass_environment({"capabilities": {"requires": ["npm"]}}, parent=parent)
+        child_env = prepass_environment({"capabilities": {"requires": ["npm"]}}, parent=parent, verified_pins=str(pins))
         script = ROOT / "agents/deps-supply-chain/scripts/audit_deps.py"
         res = subprocess.run([sys.executable, str(script), "--target", str(self.target)],
                              env=child_env, capture_output=True, text=True)
@@ -210,7 +225,7 @@ class TestStationTrustedToolPins(unittest.TestCase):
 
         env = os.environ.copy()
         env["PATH"] = str(self.fakebin)
-        env["FACTORY_TOOL_PINS"] = str(pins)
+        env["FACTORY_VERIFIED_TOOL_PINS"] = str(pins)
         env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
 
         pkg = self.target / "package.json"
@@ -261,7 +276,8 @@ class TestStationTrustedToolPins(unittest.TestCase):
         orig_pins = os.environ.get("FACTORY_TOOL_PINS")
         orig_unpinned = os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS")
         try:
-            os.environ["FACTORY_TOOL_PINS"] = str(home_pins)
+            import lib.tool_pins as _tool_pins
+            _tool_pins.configure_host_pins(home_pins)  # agents-oq3j: the HOST probe's decision
             os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
             sb._probe_result = None
             sb._probe_reason = None
@@ -271,7 +287,8 @@ class TestStationTrustedToolPins(unittest.TestCase):
             if not sandbox_available():
                 self.fail(f"bubblewrap sandbox must be available with pinned bwrap fixture: {sandbox_unavailable_reason()}")
 
-            child_env = prepass_environment({"capabilities": {"requires": ["git"]}})
+            child_env = prepass_environment({"capabilities": {"requires": ["git"]}},
+                                            verified_pins=str(home_pins))
             script = ROOT / "agents/perf-review/scripts/scan_perf_changes.py"
             inner = [sys.executable, str(script), "--target", str(self.target)]
             cmd = sandbox_command(
@@ -286,6 +303,9 @@ class TestStationTrustedToolPins(unittest.TestCase):
                 os.environ["FACTORY_TOOL_PINS"] = orig_pins
             else:
                 os.environ.pop("FACTORY_TOOL_PINS", None)
+            # agents-oq3j: the host decision is process state, so it is reset too - a leak would
+            # change how a later suite resolves pins.
+            _tool_pins._configured_host_pins = _tool_pins._UNSET_HOST_PINS
             if orig_unpinned is not None:
                 os.environ["FACTORY_ALLOW_UNPINNED_TOOLS"] = orig_unpinned
             else:

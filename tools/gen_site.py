@@ -23,11 +23,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 
 try:
-    from lib.tool_pins import resolve_tool
+    from lib.tool_pins import configure_host_pins, resolve_tool
     from lib.redaction import ALL_PATTERNS, mask_text
 except ImportError:
     sys.path.insert(0, str(ROOT))
-    from lib.tool_pins import resolve_tool
+    from lib.tool_pins import configure_host_pins, resolve_tool
     from lib.redaction import ALL_PATTERNS, mask_text
 
 # Valid enums per AGENTS.md / THREAT_MODEL.md
@@ -835,7 +835,18 @@ def main() -> int:
         action="store_true",
         help="Check whether generated site is fresh without writing changes (exit 1 if dirty)",
     )
+    parser.add_argument(
+        "--tool-pins",
+        default=None,
+        metavar="PATH",
+        help="Host-local tool pins file this run selected explicitly (agents-oq3j), merged over "
+             "the committed tools.yaml. Found without consulting the environment: an inherited "
+             "variable cannot establish that this run chose the file.",
+    )
     args = parser.parse_args()
+    # Before any resolve_tool below: the generator resolves git through the factory's fail-closed
+    # pin rule, so the run's pins decision has to be made first (agents-oq3j).
+    configure_host_pins(args.tool_pins)
 
     try:
         new_pages = generate_all(ROOT, DOCS)

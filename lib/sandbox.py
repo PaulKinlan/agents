@@ -78,7 +78,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 # agents-28nn: bwrap itself is resolved through the same pin rule (resolve_tool) — the
 # binary that delivers the sandbox must be authenticated before it executes.
 from lib.tool_pins import TRUSTED_TOOLS as PINNED_TOOLS
-from lib.tool_pins import SYSTEM_BIN_DIRS, ToolPinError, resolve_tool, verify_pin
+from lib.tool_pins import SYSTEM_BIN_DIRS, ToolPinError, VERIFIED_PINS_ENV, resolve_tool, verify_pin
 
 BWRAP = "bwrap"
 TOOL = "bubblewrap"
@@ -861,7 +861,7 @@ def sandbox_command(
     # skipped), and a correct over-mount would still leave the file exposed to every
     # OTHER wrap that rw-binds the run dir, the engine session included. The file must
     # live OUTSIDE every rw-bound tree and be bound here, read-only, at the same absolute
-    # path the child's FACTORY_TOOL_PINS names.
+    # path the dispatcher names for the child (`VERIFIED_PINS_ENV`).
     for path in ro_binds:
         plan.ro_bind(path)
 
@@ -902,11 +902,15 @@ def sandbox_command(
         raise SandboxError(
             f"a trusted tool bound into the sandbox cannot be authenticated: {e}") from e
 
-    # Host tool pins file (agents-ebm7): when child_env forwards FACTORY_TOOL_PINS,
-    # the target file is often under $HOME (e.g. ~/.config/factory/tools.pins.yaml).
+    # Host tool pins file (agents-ebm7; named by the CHILD channel since agents-oq3j): when
+    # child_env hands the dispatcher's verified snapshot to a trusted-tool child
+    # (VERIFIED_PINS_ENV), the target file is often under $HOME (e.g.
+    # ~/.config/factory/tools.pins.yaml).
     # Since $HOME and /home are tmpfs'd above, bind the pins file into the wrap
     # read-only at the exact host path so the sandboxed child can authenticate its tools.
-    pins_env = child_env.get("FACTORY_TOOL_PINS")
+    # A child handed no snapshot (the variable absent, or set only by an inherited environment
+    # name child_env never copies) simply gets no bind, and fails closed on an unpinned tool.
+    pins_env = child_env.get(VERIFIED_PINS_ENV)
     if pins_env:
         pins_path = Path(os.path.expanduser(pins_env)).resolve()
         if pins_path.is_file():

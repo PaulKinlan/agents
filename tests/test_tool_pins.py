@@ -7,19 +7,22 @@ temp directory of fake executables and a temp pins config, so they exercise the
 resolution/verification logic without touching the real tools.
 """
 
+import io
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from lib import tool_pins as tool_pins_module
 from lib.tool_pins import (MAX_PINS_FILE_BYTES, TRUSTED_TOOLS, ToolPinError,
-                           allowlisted_path, host_pins_path, load_tool_pins,
+                           allowlisted_path, configure_host_pins, host_pins_path, load_tool_pins,
                            pin_trusted_argv, resolve_tool, sha256_file, tool_dir,
                            verify_pin)
 
@@ -187,13 +190,104 @@ class AllowlistedPathTests(unittest.TestCase):
         self.assertNotIn(str(self.bin_c.resolve()), entries)
 
 
+class RunChosenHostPinsTests(unittest.TestCase):
+    """agents-oq3j: the host pins file is chosen by the RUN, never by an inherited name.
+
+    ``FACTORY_TOOL_PINS`` is inherited by every step of a job, so a file named that way cannot be
+    shown to have been chosen by THIS run - an earlier step, a calling script or a provisioned
+    host file sets it just as convincingly. ``configure_host_pins`` is the run's own decision
+    (the ``factory`` / ``tools/gen_site.py`` ``--tool-pins`` argument), and these tests assert the
+    strong form: once a run has made that decision the environment is NOT CONSULTED AT ALL, which
+    is a different property from winning a precedence contest.
+
+    Every test restores the module-level decision on cleanup, so the suite stays order-independent:
+    a leaked configuration would silently change how the host tests above resolve their pins.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="runpins-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(setattr, tool_pins_module, "_configured_host_pins",
+                        tool_pins_module._UNSET_HOST_PINS)
+        self.gh = _make_tool(self.tmp, "gh")
+        self.repo = self.tmp / "tools.yaml"
+        self.repo.write_text("gh:\n  sha256: " + "c" * 64 + "\n", encoding="utf-8")
+
+    def _pins_file(self, name: str, body: str) -> Path:
+        path = self.tmp / name
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_the_run_chosen_file_is_used_and_the_ambient_one_is_never_read(self):
+        chosen = self._pins_file(
+            "chosen.yaml", f"gh:\n  path: {self.gh}\n  sha256: {sha256_file(self.gh)}\n")
+        # Malformed ON PURPOSE: a consumer that consults the ambient file raises here, so passing
+        # is evidence the ambient file was not read rather than that it lost a precedence contest.
+        hostile = self._pins_file("ambient.yaml", "gh:\n  sha256: not-hex\n")
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(hostile)}):
+            configure_host_pins(chosen)
+            pins = load_tool_pins(path=self.repo)
+        self.assertEqual(pins["gh"], {"path": str(self.gh), "sha256": sha256_file(self.gh)})
+
+    def test_the_chosen_path_is_what_resolves_even_when_an_ambient_name_differs(self):
+        chosen = self._pins_file("chosen.yaml", "gh:\n  sha256: " + "e" * 64 + "\n")
+        ambient = self._pins_file("ambient.yaml", "gh:\n  sha256: " + "f" * 64 + "\n")
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(ambient)}):
+            configure_host_pins(chosen)
+            self.assertEqual(host_pins_path(), chosen)
+
+    def test_a_run_that_names_no_file_and_has_no_ambient_one_selects_nothing(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            configure_host_pins(None)
+            self.assertIsNone(host_pins_path())
+
+    def test_the_staged_fallback_is_used_but_never_silently(self):
+        """agents-oq3j's migration is staged: a run that names no file still adopts the ambient
+        one FOR ONE RELEASE because the fleet's nightly runner and every lane's environment still
+        export it - and it says so, NAMING THE ROUTE that has to migrate, rather than falling back
+        quietly. agents-uekw deletes the fallback, and this is the test that changes with it.
+        """
+        ambient = self._pins_file("ambient.yaml", "gh:\n  sha256: " + "a" * 64 + "\n")
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(ambient)}):
+            configure_host_pins(None)
+            with mock.patch.object(tool_pins_module, "_ambient_fallback_announced", False):
+                stderr = io.StringIO()
+                with mock.patch.object(sys, "stderr", stderr):
+                    selected = host_pins_path()
+        self.assertEqual(selected, ambient)
+        announced = stderr.getvalue()
+        self.assertIn("FACTORY_TOOL_PINS", announced)
+        self.assertIn("--tool-pins", announced)
+        # A generic "deprecated" would not tell a nightly-log reader which route is going away.
+        self.assertIn("factory-nightly.sh", announced)
+        self.assertIn("agents-uekw", announced)
+
+    def test_a_child_resolves_the_dispatchers_snapshot_and_not_an_inherited_name(self):
+        """The child hop (agents-oq3j): a process that made no run decision of its own resolves the
+        snapshot the DISPATCHER constructed its environment with - the child-only name - and an
+        inherited legacy name selects NOTHING. Without the second half an ambient variable could
+        still choose the file a child verifies its tools against, which is the whole defect.
+        """
+        snapshot = self._pins_file("snapshot.yaml", "gh:\n  sha256: " + "b" * 64 + "\n")
+        with mock.patch.dict(os.environ, {"FACTORY_VERIFIED_TOOL_PINS": str(snapshot),
+                                          "FACTORY_TOOL_PINS": str(self.tmp / "ambient.yaml")}):
+            self.assertEqual(host_pins_path(), snapshot)
+        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(snapshot)}):
+            self.assertIsNone(host_pins_path(),
+                              "an inherited legacy name must never select a child's pins file")
+
+
 class HostPinsTests(unittest.TestCase):
-    """agents-3g6: FACTORY_TOOL_PINS host file is merged OVER tools.yaml (the out-of-band
-    pin source that makes fail-closed deployable without editing the repo)."""
+    """agents-3g6 + agents-oq3j: the HOST's pins file is merged OVER tools.yaml - the out-of-band
+    pin source that makes fail-closed deployable without editing the repo - and it is chosen by the
+    run's explicit decision (``configure_host_pins``: the ``factory`` / ``gen_site`` ``--tool-pins``
+    argument), never by an environment name."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="hostpins-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(setattr, tool_pins_module, "_configured_host_pins",
+                        tool_pins_module._UNSET_HOST_PINS)
         self.gh = _make_tool(self.tmp, "gh")
 
     def test_host_pins_merge_over_repo_per_tool(self):
@@ -204,8 +298,8 @@ class HostPinsTests(unittest.TestCase):
         host = self.tmp / "host.pins.yaml"
         host_sha = "b" * 64
         host.write_text(f"gh:\n  path: {self.gh}\n  sha256: {host_sha}\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(host)}):
-            pins = load_tool_pins(path=repo)
+        configure_host_pins(host)
+        pins = load_tool_pins(path=repo)
         # gh is overridden by the host file; bd (not in the host file) keeps the repo entry.
         self.assertEqual(pins["gh"], {"path": str(self.gh), "sha256": host_sha})
         self.assertEqual(pins["bd"], {"sha256": "a" * 64})
@@ -213,27 +307,27 @@ class HostPinsTests(unittest.TestCase):
     def test_host_pins_missing_file_is_no_change(self):
         repo = self.tmp / "tools.yaml"
         repo.write_text(f"gh:\n  sha256: {sha256_file(self.gh)}\n", encoding="utf-8")
-        missing = self.tmp / "does-not-exist.pins.yaml"
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(missing)}):
-            pins = load_tool_pins(path=repo)
+        configure_host_pins(self.tmp / "does-not-exist.pins.yaml")
+        pins = load_tool_pins(path=repo)
         self.assertEqual(pins["gh"], {"sha256": sha256_file(self.gh)})
 
     def test_host_pins_malformed_file_raises(self):
         host = self.tmp / "host.pins.yaml"
         host.write_text("gh:\n  sha256: not-hex\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(host)}):
-            with self.assertRaises(ToolPinError):
-                load_tool_pins()
+        configure_host_pins(host)
+        with self.assertRaises(ToolPinError):
+            load_tool_pins()
 
     def test_host_pins_path_is_none_when_unset(self):
         with mock.patch.dict(os.environ, {}, clear=True):
+            configure_host_pins(None)
             self.assertIsNone(host_pins_path())
 
     def test_host_pins_still_fails_closed_when_host_is_absent(self):
         # A missing host file must NOT relax the fail-closed default: an unpinned trusted
         # tool still refuses to resolve.
-        with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(self.tmp / "nope.yaml"),
-                                          "FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
+        configure_host_pins(self.tmp / "nope.yaml")
+        with mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNPINNED_TOOLS": "0"}):
             with self.assertRaises(ToolPinError):
                 resolve_tool("gh", path_env=str(self.tmp), pins=load_tool_pins())
 

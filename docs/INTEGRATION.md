@@ -259,7 +259,9 @@ Generate it with the bundled helper (explicit operator/runner step — the facto
 
 ```bash
 tools/generate-tool-pins.sh                       # writes $HOME/.config/factory/tools.pins.yaml
-export FACTORY_TOOL_PINS="$HOME/.config/factory/tools.pins.yaml"
+
+# hand this run the file it selected - an EXPLICIT argument, and it must precede the subcommand:
+factory --tool-pins "$HOME/.config/factory/tools.pins.yaml" run secret-scan --target ...
 
 # one-liner for a single tool
 printf 'gh:\n  path: %s\n  sha256: %s\n' "$(command -v gh)" "$(sha256sum "$(command -v gh)" | cut -d' ' -f1)"
@@ -270,9 +272,11 @@ Semantics: an **unset** `FACTORY_TOOL_PINS`, or a path that does not exist, leav
 A trusted tool named in a target manifest's `sink_command` or a `--bench-cmd` is routed through the pin the same way (`pin_trusted_argv`): the pinned binary runs, or nothing does and the note says why (agents-28nn round 3).
 
 Consumers already satisfy this:
-- **Composite action** (`.github/actions/factory`): a *Generate Tool Pins* step runs `tools/generate-tool-pins.sh` on the runner and exports `FACTORY_TOOL_PINS`, so downstream `factory run <agent>` calls work without any repo edit.
-- **Fleet nightly runner** (`factory line project-audit`): the host's timer/environment must export `FACTORY_TOOL_PINS` (generate once, regenerate after any tool upgrade) the same way.
-- **Local scheduler / target enrolment** (Layer 3): run the helper on the host and export `FACTORY_TOOL_PINS` in the launchd/systemd unit's environment before `factory run`/`factory line`.
+- **Composite action** (`.github/actions/factory`): a *Generate Tool Pins* step runs `tools/generate-tool-pins.sh` on the runner and the consuming step passes that path as `--tool-pins`, so downstream `factory run <agent>` calls work without any repo edit.
+- **Fleet nightly runner** (`factory line project-audit`): the host's timer/command must pass `--tool-pins <generated file>` (generate once, regenerate after any tool upgrade).
+- **Local scheduler / target enrolment** (Layer 3): run the helper on the host and pass `--tool-pins` in the launchd/systemd unit's command line before `factory run`/`factory line`.
+
+WHY AN ARGUMENT RATHER THAN AN EXPORTED VARIABLE (agents-oq3j): an environment variable is inherited by every step of a job, so a file named that way cannot be shown to have been chosen by THIS run - an earlier step, a calling script or a provisioned host file sets it just as convincingly. The argument is the run's own decision. Two boundaries are stated rather than implied: **the host migration is staged** - a run that passes no `--tool-pins` still falls back to `FACTORY_TOOL_PINS` for one release, loudly and naming the route, and that fallback is the remaining hole on the host channel until agents-uekw removes it once the fleet bundle passes the argument; and **the child channel is closed** - pre-pass, findings and promotion children are handed the dispatcher's snapshot under a child-only name (`FACTORY_VERIFIED_TOOL_PINS`) that lib.child_env never copies from its parent, so no inherited name selects a child's pins file. Neither boundary is protected against a **persistent same-UID writer** that rewrites the generated file after generation (agents-g527); that requires job/runner isolation.
 
 ---
 

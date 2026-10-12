@@ -416,7 +416,9 @@ class TestCommandSinkPinBoundary(CommandSinkCase):
         env_extra = {
             # The fake is FIRST on PATH: PATH order alone would run it.
             "PATH": f"{self.fakebin}:/usr/bin:/bin",
-            "FACTORY_TOOL_PINS": str(self.pins),
+            # agents-oq3j: this is the CHILD's environment (lib/findings.py is launched directly
+            # below), so the pins file crosses under the dispatcher's child-only name.
+            "FACTORY_VERIFIED_TOOL_PINS": str(self.pins),
         }
         env_extra.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
         return self.scan(items, command=command, env_extra=env_extra)

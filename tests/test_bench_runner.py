@@ -127,8 +127,15 @@ class TestBenchCmdPinBoundary(unittest.TestCase):
 
     def measure(self, pins_text):
         self.pins.write_text(pins_text, encoding="utf-8")
+        # agents-oq3j: the measurement is HOST-side in this process, so the pins file is the run's
+        # own decision (configure_host_pins); the child the runner spawns is handed the same file
+        # under the dispatcher's child-only name below.
+        from lib import tool_pins as tool_pins_module
+        self.addCleanup(setattr, tool_pins_module, "_configured_host_pins",
+                        tool_pins_module._UNSET_HOST_PINS)
+        tool_pins_module.configure_host_pins(self.pins)
         env = {"PATH": f"{self.fakebin}{os.pathsep}{os.environ.get('PATH', '')}",
-               "FACTORY_TOOL_PINS": str(self.pins),
+               "FACTORY_VERIFIED_TOOL_PINS": str(self.pins),
                # The dev/test opt-in this repo's suites sometimes set must NOT leak in:
                # these properties pin exactly what it waives.
                "FACTORY_ALLOW_UNPINNED_TOOLS": ""}

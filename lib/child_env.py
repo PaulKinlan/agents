@@ -24,7 +24,7 @@ from collections.abc import Mapping as MappingABC
 from typing import Dict, Mapping, Optional, Tuple
 
 from lib.credential_broker import BROKER_ENV_CONFIGS
-from lib.tool_pins import HOST_PINS_ENV, UNPINNED_ALLOW_ENV
+from lib.tool_pins import UNPINNED_ALLOW_ENV, VERIFIED_PINS_ENV
 
 # Paths, locale, temp and user identity. Proxy and CA-bundle vars are deliberately NOT here
 # (agents-5d9): a poisoned operator env could redirect a child's traffic or point its TLS at
@@ -110,7 +110,8 @@ def declares_requirement(agent_cfg: Mapping, tool: str) -> bool:
 
 
 def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] = None,
-                        proxied: bool = False) -> Dict[str, str]:
+                        proxied: bool = False, verified_pins: Optional[str] = None,
+                        ) -> Dict[str, str]:
     """The deterministic pre-pass env: trusted factory code, but still an added allowlist.
 
     It gets a GitHub token only when the agent declares it needs `gh` (issue-triage), never
@@ -126,7 +127,7 @@ def prepass_environment(agent_cfg: Mapping, parent: Optional[Mapping[str, str]] 
     when unsandboxed, where no bind boundary authenticates anything.
     """
     return child_environment(github=declares_requirement(agent_cfg, "gh"), parent=parent,
-                             proxied=proxied, trusted_tools=True)
+                             proxied=proxied, trusted_tools=True, verified_pins=verified_pins)
 
 
 def apply_broker_urls(env: Dict[str, str], broker_urls: Mapping[str, str],
@@ -174,6 +175,7 @@ def child_environment(
     trusted_tools: bool = False,
     sink_options: Optional[Mapping[str, object]] = None,
     proxied: bool = False,
+    verified_pins: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the environment for one child process by addition.
 
@@ -186,7 +188,9 @@ def child_environment(
     `gh`/`bd`, and (agents-28nn round 4) the pre-pass scripts, which now resolve their own
     git/gh/gitleaks/npm through `resolve_tool` rather than trusting PATH order (a station
     script's own trusted-tool launch is a census kind of its own). On a pinned host the pins
-    live behind `FACTORY_TOOL_PINS`, and without that variable such a child cannot verify
+    live behind `FACTORY_VERIFIED_TOOL_PINS`, set by the dispatcher on the environment it constructs
+    for this child and never copied from it (agents-oq3j), and without that handoff such a child
+    cannot verify
     the tool it is about to execute and fails closed, with strictly less information than
     the parent that already verified the same file (agents-dpt). The same child also needs
     the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in (agents-7ua): it is a
@@ -211,6 +215,12 @@ def child_environment(
     host side). Providers absent from broker_urls are untouched. `broker_placeholder` must be
     the running broker's per-run secret (agents-28nn round 7); apply_broker_urls fails
     closed without it.
+
+    `verified_pins` (agents-oq3j) is the dispatcher's OWN verified pins snapshot, handed to a
+    trusted-tool child under ``VERIFIED_PINS_ENV``. It is set from this argument and never copied
+    from `parent`: a name merely inherited by the child would authenticate nothing. A child given
+    no snapshot resolves the committed tools.yaml only and fails closed on an unpinned trusted
+    tool.
     """
     source = os.environ if parent is None else parent
     env = {name: source[name] for name in BASE_ALLOW if name in source}
@@ -218,8 +228,14 @@ def child_environment(
         env.update({name: source[name] for name in PROXY_VARS if name in source})
 
     if trusted_tools:
-        if source.get(HOST_PINS_ENV):
-            env[HOST_PINS_ENV] = str(source[HOST_PINS_ENV])
+        # agents-oq3j: the pins file crosses as the DISPATCHER'S OWN value under a child-only name,
+        # and is NEVER copied from `parent`. A copied name would authenticate nothing - the parent
+        # may have inherited it from anywhere (an earlier step of the job, a calling script, a
+        # provisioned host file), which is exactly the conflation this replaced. A child handed no
+        # snapshot resolves the committed tools.yaml only and fails closed on an unpinned trusted
+        # tool, the safe direction.
+        if verified_pins:
+            env[VERIFIED_PINS_ENV] = str(verified_pins)
         # agents-7ua: the unpinned-tools opt-in is the same run-scoped decision as the pins
         # file above — forward it so the sink/promotion child resolves the tool under the same
         # rule the parent just used, never a stricter one that makes it fail closed spuriously.

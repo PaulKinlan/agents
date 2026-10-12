@@ -183,7 +183,10 @@ class TestChildEnvironment(unittest.TestCase):
                      "except ToolPinError as e: print('FAILED', e)\n") % str(ROOT)
 
             def resolve(pins_in_child):
-                env = child_environment(parent=parent, trusted_tools=pins_in_child)
+                # The snapshot is the DISPATCHER's argument (agents-oq3j); the parent's own
+                # FACTORY_TOOL_PINS is deliberately present and must not be what the child uses.
+                env = child_environment(parent=parent, trusted_tools=pins_in_child,
+                                        verified_pins=str(pins) if pins_in_child else None)
                 out = subprocess.run([sys.executable, "-c", probe], env=env, text=True,
                                      capture_output=True, cwd=str(ROOT), timeout=60)
                 return out.stdout.strip()
@@ -191,9 +194,44 @@ class TestChildEnvironment(unittest.TestCase):
             self.assertEqual(resolve(True), f"RESOLVED {fake_bd}")
             self.assertTrue(resolve(False).startswith("FAILED"),
                             "without the flag the child must fail closed, not guess")
-            # agents-3cm4: check key presence only, never dump child environment dict
-            self.assertFalse("FACTORY_TOOL_PINS" in child_environment(parent=parent))
-            self.assertFalse("FACTORY_TOOL_PINS" in child_environment(engine="pi", parent=parent))
+            # agents-3cm4 + agents-oq3j: check key presence only, never dump the child environment
+            # dict. NEITHER pins name may appear without an explicit handoff, even though the parent
+            # here carries the legacy one: the value is SET by the dispatcher, never inherited.
+            for env in (child_environment(parent=parent),
+                        child_environment(engine="pi", parent=parent),
+                        child_environment(parent=parent, trusted_tools=True)):
+                self.assertFalse("FACTORY_TOOL_PINS" in env)
+                self.assertFalse("FACTORY_VERIFIED_TOOL_PINS" in env)
+
+    def test_the_pins_handoff_is_set_by_the_dispatcher_and_never_inherited(self):
+        """agents-oq3j, the property in the strongest available form: a pins file crosses to a child
+        because the DISPATCHER put it in the environment it constructed, not because the child
+        inherited a name. Both directions are asserted, because only the pair rules out each other's
+        failure mode - a value that is not inherited cannot be conjured by the parent, and a value
+        that was not handed over cannot be smuggled in by it.
+        """
+        handed = child_environment(parent={"HOME": "/tmp"}, trusted_tools=True,
+                                   verified_pins="/somewhere/tool-pins.effective.yaml")
+        self.assertEqual(handed["FACTORY_VERIFIED_TOOL_PINS"],
+                         "/somewhere/tool-pins.effective.yaml")
+        self.assertNotIn("FACTORY_TOOL_PINS", handed)
+
+        hostile_parent = {"HOME": "/tmp",
+                          "FACTORY_VERIFIED_TOOL_PINS": "/attacker/pins.yaml",
+                          "FACTORY_TOOL_PINS": "/attacker/pins.yaml"}
+        for env in (child_environment(parent=hostile_parent, trusted_tools=True),
+                    child_environment(parent=hostile_parent, trusted_tools=True,
+                                      verified_pins="/real/pins.yaml")):
+            self.assertNotEqual(env.get("FACTORY_VERIFIED_TOOL_PINS"), "/attacker/pins.yaml",
+                                "an inherited pins name must never substitute for the dispatcher's")
+            self.assertNotIn("FACTORY_TOOL_PINS", env)
+
+    def test_a_prepass_child_gets_the_same_handoff_as_a_sink_child(self):
+        handed = prepass_environment({"name": "secret-scan"}, parent={"HOME": "/tmp"},
+                                     verified_pins="/somewhere/tool-pins.effective.yaml")
+        self.assertEqual(handed["FACTORY_VERIFIED_TOOL_PINS"],
+                         "/somewhere/tool-pins.effective.yaml")
+        self.assertNotIn("FACTORY_TOOL_PINS", handed)
 
     def test_findings_child_resolves_an_unpinned_tool_with_the_parent_opt_in(self):
         """agents-7ua: the sink child must inherit the parent's unpinned-tools opt-in.

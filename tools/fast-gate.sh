@@ -172,6 +172,12 @@ while IFS= read -r f; do
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
       mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_adapter_auth_failure.py tests/test_line_andon.py tests/test_prompt_exposure.py tests/test_transient_dirs.py"
+      # agents-oq3j: the promotion child is built by a call in THIS file (the dispatcher's
+      # promote path), and tests/test_promotion.py MOCKS that call and asserts its exact shape -
+      # so the dispatcher was changed and the assertion went stale while the arm that owns the
+      # call site never ran the suite. Measured cost of the addition: 8.5 s (14 tests), paid only
+      # when factory changes, against a full gate that found this defect at 1547 tests.
+      mapped="$mapped tests/test_promotion.py"
       # agents-dm8n round 2: the deleter that escaped round 1 lived in FACTORY (the failed
       # --apply proposal_run_dir rmtree at :2102), not in lib/retention.py - so a factory
       # change must run the two suites that pin deletion under the runs root.
@@ -223,14 +229,34 @@ while IFS= read -r f; do
       ;;
     lib/sandbox.py)
       # Bubblewrap sandbox (bwrap isolation, binds, proc/env masking) plus no-bwrap refusal contract (agents-vt7w).
-      mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py"
+      #
+      # agents-oq3j: tests/test_station_trusted_tool_pins.py joins (measured 0.8 s). Its sandboxed
+      # case drives sandbox_command with a dispatcher-built child env and the read-only pins bind,
+      # which is exactly this module's child-side contract; the gate's coverage oracle named it as
+      # an omitted consumer when the child channel moved, and it caught the regression.
+      mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py tests/test_station_trusted_tool_pins.py"
+      ;;
+    lib/child_env.py)
+      # The child environment builder. Its own suite plus the two consumers that resolve trusted
+      # tools from the environment it constructs (agents-oq3j), and the promotion suite, whose
+      # mock patches the BUILDER'S SIGNATURE: agents-oq3j added a `verified_pins` argument and
+      # tests/test_promotion.py's expectation was the consumer nobody had migrated, so a mock of
+      # this call is a consumer of this file whether or not the mock's file was touched.
+      mapped="$mapped tests/test_child_env.py tests/test_station_trusted_tool_pins.py tests/test_sinks.py tests/test_promotion.py"
       ;;
     lib/tool_pins.py)
       # Trusted-tool pinning (agents-7bj). Since agents-28nn this module also authenticates
       # bwrap itself, and the property that an unauthenticated bwrap is refused BEFORE it
       # executes lives in tests/test_sandbox.py (TestBwrapPinBoundary) — the pins contract
       # alone cannot see a sandbox-side regression.
-      mapped="$mapped tests/test_tool_pins.py tests/test_sandbox.py"
+      #
+      # agents-oq3j: tests/test_station_trusted_tool_pins.py (measured 0.8 s) and
+      # tests/test_sinks.py (measured 8.2 s) join, both named by the gate's own coverage oracle
+      # as omitted consumers when the pins channels were separated. The first is THE handoff
+      # contract (pre-pass child env, sandboxed and unsandboxed); the second is a sink child
+      # resolving `gh` inside this module's fail-closed rule. Each caught a real regression in
+      # that change, which is exactly what the oracle exists to find.
+      mapped="$mapped tests/test_tool_pins.py tests/test_sandbox.py tests/test_station_trusted_tool_pins.py tests/test_sinks.py"
       ;;
     tools/generate-tool-pins.sh)
       # Operator-run pin generator (never invoked by the factory — its own header). SEARCH

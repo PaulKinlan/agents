@@ -552,7 +552,7 @@ class TestBannerAndRecord(unittest.TestCase):
         # When tool pins are enforced (unpinned_note=None), the waiver is absent
         # and the banner states that tool pins are enforced.
         normal_banner = "\n".join(banner_lines(policy, "pi", sandbox=None))
-        self.assertIn("Tool pins:   enforced (tools.yaml / FACTORY_TOOL_PINS)", normal_banner)
+        self.assertIn("Tool pins:   enforced (tools.yaml / --tool-pins)", normal_banner)
         normal_record = policy_record(policy, "pi", sandbox=None)
         self.assertNotIn("unpinned_tools_opt_in", normal_record)
         self.assertNotIn("trusted-tool-pins", normal_record["not_enforced"])
@@ -3145,7 +3145,8 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
     The constructed case forces the unsandboxed path on a sandboxed host — a host pins
     file with NO bwrap entry fails the probe closed, and FACTORY_ALLOW_UNSANDBOXED=1 plus
     a trusted private target permits the run — and the pre-pass records the
-    FACTORY_TOOL_PINS it was handed. The control must hold on this path too: the env
+    FACTORY_VERIFIED_TOOL_PINS it was handed (the dispatcher's snapshot; agents-oq3j). The control
+    must hold on this path too: the env
     names the dispatcher's effective pins file (a factory-pins-*/ dir, NOT the run dir,
     NOT the forwarded host file) and its content is the merged view.
 
@@ -3158,7 +3159,7 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
         "import json, os, sys\n"
         "from pathlib import Path\n"
         "out = sys.argv[sys.argv.index('--output') + 1]\n"
-        "pins = os.environ.get('FACTORY_TOOL_PINS', '')\n"
+        "pins = os.environ.get('FACTORY_VERIFIED_TOOL_PINS', '')\n"
         "Path(out).write_text(json.dumps({\n"
         "    'candidates': [],\n"
         "    'pins_env': pins,\n"
@@ -3194,7 +3195,7 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
         A CONTROL THAT DEPENDS ON A MOUNT NAMESPACE IS ABSENT ON THE PATH THAT HAS NONE.
 
         The constructed case, kept as a regression test: an unsandboxed pre-pass child
-        REWRITES the FACTORY_TOOL_PINS file it was handed, injecting a pin that names a
+        REWRITES the child-only pins file it was handed, injecting a pin that names a
         planted fake git by path+hash — the round-6 reviewer's exact construction — and
         then asks lib.tool_pins which git it may execute. On the round-5 tree the
         resolver validated the injected pin and the fake would have run with the
@@ -3231,7 +3232,7 @@ class TestPrepassEffectivePinsEveryPath(TestDispatcher):
             "sys.path.insert(0, str(Path(__file__).resolve().parents[3]))\n"
             "from lib.tool_pins import prepass_tool\n"
             "out = sys.argv[sys.argv.index('--output') + 1]\n"
-            "pins = Path(os.environ['FACTORY_TOOL_PINS'])\n"
+            "pins = Path(os.environ['FACTORY_VERIFIED_TOOL_PINS'])\n"
             f"fake = {str(fake)!r}\n"
             "digest = hashlib.sha256(Path(fake).read_bytes()).hexdigest()\n"
             # THE ATTACK: rewrite the pins file in place, granting the fake the git role.

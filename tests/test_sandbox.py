@@ -515,7 +515,13 @@ class TestBwrapPinBoundary(unittest.TestCase):
         self._saved = {k: os.environ.get(k)
                        for k in ("PATH", "FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS")}
         self.addCleanup(self._restore_env)
-        os.environ["FACTORY_TOOL_PINS"] = str(self.pins)
+        # agents-oq3j: this probe is HOST-side, so its pins file is the run's own decision
+        # (lib.tool_pins.configure_host_pins), never an environment name. The decision is process
+        # state, so it is reset afterwards: leaking it would change how later suites resolve pins.
+        import lib.tool_pins as tool_pins
+        os.environ.pop("FACTORY_TOOL_PINS", None)
+        tool_pins.configure_host_pins(self.pins)
+        self.addCleanup(setattr, tool_pins, "_configured_host_pins", tool_pins._UNSET_HOST_PINS)
         os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
         os.environ["FAKE_BWRAP_LOG"] = str(self.fake_log)
         self.addCleanup(os.environ.pop, "FAKE_BWRAP_LOG", None)
@@ -613,7 +619,7 @@ class TestEffectivePinsBoundary(unittest.TestCase):
     WHAT IS READ. The dispatcher used to write the merged tool-pins.effective.yaml into
     the run directory, which the wrap binds READ-WRITE at the same host path; the round-4
     reviewer CONSTRUCTED the hole by having a station script write a fake git hash to the
-    path named by FACTORY_TOOL_PINS before calling resolve_tool("git"), which validated
+    path named by the child-only pins variable before calling resolve_tool("git"), which validated
     the injected hash. The fix keeps the pins OUTSIDE every rw-bound tree and binds the
     file into the wrap READ-ONLY (sandbox_command's ro_binds — the existing bind
     machinery, reused).
@@ -629,13 +635,13 @@ class TestEffectivePinsBoundary(unittest.TestCase):
     """
 
     # The child: plant a fake git in the (rw-bound) run dir, FORGE a pins file vouching
-    # for it at the FACTORY_TOOL_PINS path it was handed, then resolve — exactly the
+    # for it at the FACTORY_VERIFIED_TOOL_PINS path it was handed, then resolve — exactly the
     # reviewer's construction.
     ATTACK_CHILD = r"""
 import hashlib, os, sys
 from pathlib import Path
 sys.path.insert(0, {factory!r})
-pins = Path(os.environ["FACTORY_TOOL_PINS"])
+pins = Path(os.environ["FACTORY_VERIFIED_TOOL_PINS"])
 fake = Path({run_dir!r}) / "git"
 fake.write_text("#!/bin/sh\necho PWNED\n")
 fake.chmod(0o755)
@@ -681,7 +687,7 @@ except ToolPinError as e:
             encoding="utf-8")
         env = {"PATH": "/usr/bin:/bin",
                # The properties pinned here are exactly what the dev/test opt-in waives.
-               "FACTORY_TOOL_PINS": str(pins_path)}
+               "FACTORY_VERIFIED_TOOL_PINS": str(pins_path)}
         argv = sandbox_command(
             [sys.executable, str(self.child)],
             target_dir=self.target, factory_root=self.factory, run_dir=self.run_dir,
@@ -691,8 +697,10 @@ except ToolPinError as e:
             # gets from factory_root.
             ro_binds=[str(p) for p in ro_binds] + [str(ROOT)])
         # The env must ride the EXEC, not only the wrap build: bwrap inherits the
-        # process environment, so omitting env= here would hand the child the OPERATOR's
-        # FACTORY_TOOL_PINS instead of the file under test.
+        # process environment, so omitting env= here would let an INHERITED environment decide
+        # which pins file the child authenticates against — it cannot, because the child honours
+        # only the dispatcher-set child-only name (agents-oq3j), and the read-only bind above is
+        # what makes an attacker's own file useless anyway.
         return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
 
     def test_a_child_cannot_rewrite_the_read_only_pins_it_is_handed(self):
@@ -762,6 +770,8 @@ class TestPinFailureDegradation(unittest.TestCase):
         self._saved = {k: os.environ.get(k)
                        for k in ("FACTORY_TOOL_PINS", "FACTORY_ALLOW_UNPINNED_TOOLS")}
         self.addCleanup(self._restore_env)
+        import lib.tool_pins as tool_pins
+        self.addCleanup(setattr, tool_pins, "_configured_host_pins", tool_pins._UNSET_HOST_PINS)
         os.environ.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
         sandbox_module._probe_result = None
         self.addCleanup(setattr, sandbox_module, "_probe_result", None)
@@ -772,6 +782,12 @@ class TestPinFailureDegradation(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+    def _select_host_pins(self, path) -> None:
+        """agents-oq3j: the probe under test is HOST-side, so its pins file is the run's own
+        decision (configure_host_pins) rather than an environment name."""
+        import lib.tool_pins as tool_pins
+        tool_pins.configure_host_pins(path)
 
     def _assert_degrades_honestly(self):
         """The probe returns False (no exception), names WHY, and the wrap build fails
@@ -793,12 +809,12 @@ class TestPinFailureDegradation(unittest.TestCase):
         pins.write_text("bwrap:\n  sha256: " + "0" * 64 + "\n", encoding="utf-8")
         pins.chmod(0o000)
         self.addCleanup(pins.chmod, 0o644)
-        os.environ["FACTORY_TOOL_PINS"] = str(pins)
+        self._select_host_pins(pins)
         self._assert_degrades_honestly()
 
     def test_a_directory_where_the_pins_file_is_expected_degrades(self):
-        """The other unreadable shape: FACTORY_TOOL_PINS names a directory."""
-        os.environ["FACTORY_TOOL_PINS"] = str(self.root / "pins.d")
+        """The other unreadable shape: the pins file is a directory."""
+        self._select_host_pins(self.root / "pins.d")
         (self.root / "pins.d").mkdir()
         self._assert_degrades_honestly()
 
@@ -807,14 +823,14 @@ class TestPinFailureDegradation(unittest.TestCase):
         degrades with the 'not pinned' cause named."""
         pins = self.root / "tools.pins.yaml"
         pins.write_text("", encoding="utf-8")
-        os.environ["FACTORY_TOOL_PINS"] = str(pins)
+        self._select_host_pins(pins)
         self.assertFalse(sandbox_available())
         reason = sandbox_unavailable_reason()
         self.assertIsNotNone(reason)
         self.assertIn("not pinned", reason)
 
     def test_a_fifo_where_the_pins_file_is_expected_degrades(self):
-        """agents-28nn round 3: a FIFO as FACTORY_TOOL_PINS. Without the bounded read the
+        """agents-28nn round 3: a FIFO where the pins file is expected. Without the bounded read the
         probe BLOCKS on the FIFO (or reads attacker-supplied bytes through it); with it
         the refusal precedes any read and the degradation names the FIFO. The writer
         keeps the mutation direction bounded: with the refusal removed the read gets
@@ -846,7 +862,7 @@ class TestPinFailureDegradation(unittest.TestCase):
         feeder = threading.Thread(target=writer, daemon=True)
         feeder.start()
         try:
-            os.environ["FACTORY_TOOL_PINS"] = str(fifo)
+            self._select_host_pins(fifo)
             self._assert_degrades_honestly()
             self.assertIn("FIFO", sandbox_unavailable_reason())
         finally:
@@ -857,7 +873,7 @@ class TestPinFailureDegradation(unittest.TestCase):
     def test_a_device_file_where_the_pins_file_is_expected_degrades(self):
         """The unbounded-read sibling (/dev/null stands in for /dev/urandom, which must
         never be read to exhaustion — that read IS the crash being fixed)."""
-        os.environ["FACTORY_TOOL_PINS"] = "/dev/null"
+        self._select_host_pins("/dev/null")
         self._assert_degrades_honestly()
         self.assertIn("character device", sandbox_unavailable_reason())
 
@@ -1139,13 +1155,17 @@ class ToolPinBindTests(unittest.TestCase):
         from lib.sandbox import _BindPlan, _executable_binds
         tmp = Path(tempfile.mkdtemp(prefix="binds-pin-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        # agents-3g6: a host-local FACTORY_TOOL_PINS file overlays the repo tools.yaml in
+        # agents-oq3j + agents-3g6: a host-local pins file overlays the repo tools.yaml in
         # load_tool_pins(), so its `path` pin would not match this fake binary and the test
-        # would fail for reasons unrelated to what it asserts. Isolate these fixtures from
-        # the host env so they test the repo-pin path deterministically.
+        # would fail for reasons unrelated to what it asserts. Isolate these fixtures from any
+        # host pins file by CLEARING THE RUN'S DECISION (a pins file is chosen by the run, not by
+        # the environment) with the legacy name removed too, since an un-flagged run still falls
+        # back to it for one release (agents-uekw).
         host_pins = os.environ.pop("FACTORY_TOOL_PINS", None)
         if host_pins is not None:
             self.addCleanup(os.environ.__setitem__, "FACTORY_TOOL_PINS", host_pins)
+        tool_pins.configure_host_pins(None)
+        self.addCleanup(setattr, tool_pins, "_configured_host_pins", tool_pins._UNSET_HOST_PINS)
         fake = tmp / name
         fake.write_text(content, encoding="utf-8")
         fake.chmod(fake.stat().st_mode | 0o111)
