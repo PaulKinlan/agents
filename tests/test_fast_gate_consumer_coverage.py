@@ -91,12 +91,6 @@ CONSUMER_COVERAGE_ALLOWLIST = {
     },
     "egress_proxy": {
         "tests/containment_harness.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_adapters.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_declarations.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_egress.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_engine_credentials.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
-        "tests/test_containment_prepass_pins.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
     },
     "embargo": {
         "tests/test_factory_truth.py": "basename arm: this suite imports lib/embargo.py, but the arm selects only the module's namesake suite(s), so a change to lib/embargo.py does not run it",
