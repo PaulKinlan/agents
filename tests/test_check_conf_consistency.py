@@ -46,7 +46,7 @@ def _discovery_commands() -> list[str]:
 def _parse_discovery_args(cmd: str) -> dict:
     """Parse unittest discover arguments (-s, -t, -p, -k, etc., short/long/attached forms) from a command string."""
     tokens = cmd.split()
-    args = {"start": None, "top": None, "pattern": None, "filter": None, "verbose": False}
+    args = {"start": None, "top": None, "pattern": None, "filters": [], "verbose": False}
     if "discover" in tokens:
         idx = tokens.index("discover") + 1
         i = idx
@@ -99,7 +99,7 @@ def _parse_discovery_args(cmd: str) -> dict:
                 i += 1
             elif t == "-k":
                 if i + 1 < len(tokens):
-                    args["filter"] = tokens[i + 1].strip("'\"")
+                    args["filters"].append(tokens[i + 1].strip("'\""))
                     i += 2
                 else:
                     i += 1
@@ -107,7 +107,7 @@ def _parse_discovery_args(cmd: str) -> dict:
                 val = t[2:]
                 if val.startswith("="):
                     val = val[1:]
-                args["filter"] = val.strip("'\"")
+                args["filters"].append(val.strip("'\""))
                 i += 1
             elif t in ("-v", "--verbose"):
                 args["verbose"] = True
@@ -138,8 +138,20 @@ def check_ci_and_tracked_config_consistency(ci_commands: list[str], tracked_cmd:
     if tracked_args["start"] != "tests":
         raise AssertionError(f"the tracked CHECK_CMD lost start directory -s tests: {tracked_cmd!r}")
 
-    # 3. Core CI suite must agree with tracked CHECK_CMD on discovery arguments and test selection.
-    # Neither side may acquire a pattern (-p/--pattern), filter (-k), or directory (-s, -t) flag the other lacks (agents-z9aa).
+    # 3. Tracked CHECK_CMD must be UN-NARROWED (agents-h4tg). The full gate selects the complete suite.
+    if tracked_args["pattern"] is not None:
+        raise AssertionError(
+            f"the tracked CHECK_CMD must not carry a pattern filter (-p/--pattern); "
+            f"the full gate selects the complete suite: {tracked_cmd!r}"
+        )
+    if tracked_args["filters"]:
+        raise AssertionError(
+            f"the tracked CHECK_CMD must not carry a test name filter (-k); "
+            f"the full gate selects the complete suite: {tracked_cmd!r}"
+        )
+
+    # 4. Core CI suite must agree with tracked CHECK_CMD on discovery arguments and test selection.
+    # Neither side may acquire a pattern (-p/--pattern), filter (-k), or directory (-s, -t) flag the other lacks (agents-z9aa, agents-h4tg).
     core_ci_cmd = ci_commands[0]
     core_ci_args = _parse_discovery_args(core_ci_cmd)
 
@@ -159,10 +171,10 @@ def check_ci_and_tracked_config_consistency(ci_commands: list[str], tracked_cmd:
             f"diverges from tracked CHECK_CMD ({tracked_args['pattern']!r}); "
             f"core CI must not narrow or alter test selection"
         )
-    if core_ci_args["filter"] != tracked_args["filter"]:
+    if core_ci_args["filters"] != tracked_args["filters"]:
         raise AssertionError(
-            f"CI core discovery filter ({core_ci_args['filter']!r}) "
-            f"diverges from tracked CHECK_CMD ({tracked_args['filter']!r}); "
+            f"CI core discovery filter ({core_ci_args['filters']!r}) "
+            f"diverges from tracked CHECK_CMD ({tracked_args['filters']!r}); "
             f"core CI must not filter test names"
         )
 
@@ -254,6 +266,59 @@ class TestTrackedCheckConfig(unittest.TestCase):
         with self.assertRaises(AssertionError) as cm:
             check_ci_and_tracked_config_consistency(divergent_commands, tracked)
         self.assertIn("tests", str(cm.exception))
+
+    def test_narrowed_tracked_check_cmd_fails_consistency_check(self):
+        """agents-h4tg: assert that tracked CHECK_CMD carrying -p or -k fails consistency check.
+        The full gate command in tools/check.conf must select the complete test suite."""
+        commands = _discovery_commands()
+        narrowed_tracked_cmds = [
+            "python3 -m unittest discover -s tests -t . -v -p test_no_bwrap_guard.py",
+            "python3 -m unittest discover -s tests -t . -v --pattern=test_no_bwrap_guard.py",
+            "python3 -m unittest discover -s tests -t . -v -k test_no_bwrap",
+            "python3 -m unittest discover -s tests -t . -v -ktest_no_bwrap",
+        ]
+        for narrowed_cmd in narrowed_tracked_cmds:
+            with self.subTest(narrowed_cmd=narrowed_cmd):
+                with self.assertRaises(AssertionError) as cm:
+                    check_ci_and_tracked_config_consistency(commands, narrowed_cmd)
+                self.assertIn("the tracked CHECK_CMD must not carry", str(cm.exception))
+
+    def test_mutual_narrowing_fails_consistency_check(self):
+        """agents-h4tg: assert that mutual narrowing (identical -p or -k on both CI and tracked config)
+        fails consistency check because tracked CHECK_CMD must select the complete suite."""
+        mutual_pairs = [
+            (
+                ["python3 -m unittest discover -s tests -t . -v -p test_no_bwrap_guard.py"],
+                "python3 -m unittest discover -s tests -t . -v -p test_no_bwrap_guard.py",
+            ),
+            (
+                ["python3 -m unittest discover -s tests -t . -v -k test_no_bwrap"],
+                "python3 -m unittest discover -s tests -t . -v -k test_no_bwrap",
+            ),
+        ]
+        for ci_cmds, tracked_cmd in mutual_pairs:
+            with self.subTest(ci_cmds=ci_cmds, tracked_cmd=tracked_cmd):
+                with self.assertRaises(AssertionError) as cm:
+                    check_ci_and_tracked_config_consistency(ci_cmds, tracked_cmd)
+                self.assertIn("the tracked CHECK_CMD must not carry", str(cm.exception))
+
+    def test_repeated_k_flag_difference_fails_consistency_check(self):
+        """agents-h4tg: assert that repeated -k flags on CI are collected into a list rather than
+        overwriting with last-wins semantics, and diverge from tracked un-narrowed command."""
+        parsed = _parse_discovery_args("python3 -m unittest discover -s tests -t . -v -k foo -k bar")
+        self.assertEqual(parsed["filters"], ["foo", "bar"],
+                         "repeated -k flags must be collected in order rather than keeping last-wins")
+
+        parsed_attached = _parse_discovery_args("python3 -m unittest discover -s tests -t . -v -kfoo -k=bar")
+        self.assertEqual(parsed_attached, {"start": "tests", "top": ".", "pattern": None,
+                                           "filters": ["foo", "bar"], "verbose": True})
+
+        tracked = _tracked_fields()["CHECK_CMD"]
+        ci_cmds = ["python3 -m unittest discover -s tests -t . -v -k foo -k bar"]
+        with self.assertRaises(AssertionError) as cm:
+            check_ci_and_tracked_config_consistency(ci_cmds, tracked)
+        self.assertIn("['foo', 'bar']", str(cm.exception))
+        self.assertIn("diverges from tracked CHECK_CMD", str(cm.exception))
 
 
 class TestConfigIsResolvedLoudly(unittest.TestCase):
