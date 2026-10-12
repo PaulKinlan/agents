@@ -447,6 +447,29 @@ capabilities:
                 load_yaml(tmp_path)
             self.assertIn("unclosed single quote", str(ctx.exception))
 
+            # 6. Quoted '#' values with space before mapping colon (agents-tekj)
+            tmp_path.write_text(
+                'name : "A # B"\n'
+                "single_space : 'C # D' # trailing comment\n"
+                'flow_space : ["X # Y", \'Z # W\'] # flow sequence\n',
+                encoding="utf-8",
+            )
+            data = load_yaml(tmp_path)
+            self.assertEqual(data["name"], "A # B")
+            self.assertEqual(data["single_space"], "C # D")
+            self.assertEqual(data["flow_space"], ["X # Y", "Z # W"])
+
+            # 7. Unclosed quotes with space before mapping colon still fail closed (agents-tekj)
+            tmp_path.write_text('name : "unclosed # with hash\n', encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("unclosed double quote", str(ctx.exception))
+
+            tmp_path.write_text("name : 'unclosed # with hash\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_yaml(tmp_path)
+            self.assertIn("unclosed single quote", str(ctx.exception))
+
     def test_cli_reference_derived_from_parser_with_nested_subcommands(self):
         """CLI reference must derive all 9 subcommands, nested subcommands, and per-subcommand options."""
         commands = get_cli_commands(ROOT)

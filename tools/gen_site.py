@@ -91,11 +91,11 @@ def _is_quote_start(raw_line: str, i: int) -> bool:
     # A block list item marker: '- ' at the start of the line (modulo indentation)
     if p.strip() == "-":
         return True
-    # A mapping key-value separator: 'key: ' at the start of the line
-    if p.endswith(":") and re.match(r"^\s*[a-zA-Z0-9_-]+:$", p):
+    # A mapping key-value separator: 'key: ' or 'key : ' at the start of the line
+    if p.endswith(":") and re.match(r"^\s*[a-zA-Z0-9_-]+\s*:$", p):
         return True
-    # Flow collection items: line starts a flow sequence ('key: ['), and index i is inside '[' ... ']'
-    m = re.match(r"^\s*[a-zA-Z0-9_-]+:\s*\[", raw_line)
+    # Flow collection items: line starts a flow sequence ('key: [' or 'key : ['), and index i is inside '[' ... ']'
+    m = re.match(r"^\s*[a-zA-Z0-9_-]+\s*:\s*\[", raw_line)
     if m:
         flow_start = m.end() - 1
         flow_prefix = raw_line[flow_start:i]
