@@ -852,8 +852,12 @@ echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
 # examples are gone. The FULL gate already solved this for the same reason - CHECK_CMD tees to a
 # per-tree summary (agents-j1te, "for stream legibility on preempt/requeue") - so this is that
 # shape rather than a new one. A file the JOB writes does not depend on who owns the fd.
-# STDERR ONLY, ON PURPOSE: this script's stdout is a machine-readable contract (the dry run IS
-# the resolved suite list, agents-9nir/agents-ftf4) and must not gain a byte.
+# BOTH STREAMS, ON PURPOSE (agents-6jmx, coord's requirement): the survivors in my logs were
+# this script's stdout and the losses the runner's stderr, so a capture that took only ONE of
+# the two would recreate the same defect facing the other way - a summary that is complete only
+# when the fd that happens to be dropped is the other one. Each stream keeps its own channel
+# (tee passes through), so stdout is not disturbed: the dry run, which exits before this block,
+# stays byte-identical, and that is verified rather than assumed (agents-9nir/agents-ftf4).
 summary_file=""
 summary_dir="${FLEET_CHECKS_DIR:-$HOME/.fleet/checks}"
 if mkdir -p "$summary_dir" 2>/dev/null; then
@@ -863,7 +867,7 @@ fi
 
 rc=0
 if [ -n "$summary_file" ]; then
-  python3 -u -m unittest $modules 2> >(tee "$summary_file" >&2) || rc=$?
+  python3 -u -m unittest $modules > >(tee -a "$summary_file") 2> >(tee -a "$summary_file" >&2) || rc=$?
 else
   python3 -u -m unittest $modules || rc=$?
 fi
