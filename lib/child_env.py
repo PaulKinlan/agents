@@ -188,7 +188,9 @@ def child_environment(
     `gh`/`bd`, and (agents-28nn round 4) the pre-pass scripts, which now resolve their own
     git/gh/gitleaks/npm through `resolve_tool` rather than trusting PATH order (a station
     script's own trusted-tool launch is a census kind of its own). On a pinned host the pins
-    live behind `FACTORY_TOOL_PINS`, and without that variable such a child cannot verify
+    live behind `FACTORY_VERIFIED_TOOL_PINS`, set by the dispatcher on the environment it constructs
+    for this child and never copied from it (agents-oq3j), and without that handoff such a child
+    cannot verify
     the tool it is about to execute and fails closed, with strictly less information than
     the parent that already verified the same file (agents-dpt). The same child also needs
     the parent's `FACTORY_ALLOW_UNPINNED_TOOLS` dev/test opt-in (agents-7ua): it is a

@@ -83,8 +83,8 @@ CONFIG_PATH = FACTORY_ROOT / "tools.yaml"
 # --tool-pins explicitly (``configure_host_pins``) because an inherited variable cannot establish
 # that this run chose the file; an earlier step, a calling script or a provisioned host file sets
 # it just as convincingly. It remains the DISPATCHER -> CHILD handoff channel (factory ->
-# lib.child_env -> the read-only bind in lib.sandbox), which agents-ndjv replaces with a
-# dispatcher-set, child-only name. Absent/unset = repo pins only (still fail-closed); a malformed
+# lib.child_env -> the read-only bind in lib.sandbox), which agents-oq3j replaced with a
+# dispatcher-set, child-only name (``VERIFIED_PINS_ENV``). Absent/unset = repo pins only (still fail-closed); a malformed
 # file raises instead of being ignored.
 #
 # NOT DEFENDED, STATED RATHER THAN IMPLIED: a process that persists after generation and rewrites
@@ -396,7 +396,8 @@ def _parse_pins_file(path: Path, label: str) -> Dict[str, Dict[str, str]]:
 # The pins file THIS RUN selected explicitly (agents-oq3j). Only an entry point that owns a run
 # sets it, from its explicit --tool-pins argument, before any tool resolution. A pre-pass CHILD
 # never sets it: it still receives the dispatcher's snapshot by environment handoff (factory ->
-# lib.child_env), and agents-ndjv tracks moving that channel to a dispatcher-set, child-only name.
+# lib.child_env), and agents-oq3j moved that channel to a dispatcher-set, child-only name
+# (``VERIFIED_PINS_ENV``) that lib.child_env never copies from its parent.
 #
 # WHY AN ARGUMENT AND NOT THE ENVIRONMENT: an environment variable is inherited by every step of a
 # job, so "the environment names this file" cannot establish that THIS RUN chose it - an earlier
@@ -441,36 +442,55 @@ def _ambient_host_pins() -> Optional[Path]:
     return Path(os.path.expanduser(raw))
 
 
+def _env_named_fallback() -> Optional[Path]:
+    """THE ONE PLACE an environment name may still select a host pins file (agents-uekw deletes it).
+
+    Kept deliberately single and named so the enforcement flip is a small honest diff rather than a
+    hunt: when the fleet bundle passes --tool-pins (~/fleet/remote/factory-nightly.sh:112,
+    remote/provision.sh:1092-1093 and the test that asserts that export), this function and its one
+    call site below are deleted, and nothing else in the repo changes.
+
+    The warning names the ROUTE, not just the variable: someone reading a nightly log has to be able
+    to tell that this is the route that is going away, and which run it was.
+    """
+    global _ambient_fallback_announced
+    fallback = _ambient_host_pins()
+    if fallback is None:
+        return None
+    if not _ambient_fallback_announced:
+        _ambient_fallback_announced = True
+        invoked = " ".join(sys.argv[:4]) or "this process"
+        sys.stderr.write(
+            f"factory: no --tool-pins argument, so the ENVIRONMENT NAME {HOST_PINS_ENV} selected "
+            f"the host pins file {fallback} for this run (invoked as: {invoked}). The routes that "
+            "still export that name are the fleet's nightly runner "
+            "(~/fleet/remote/factory-nightly.sh:112) and every lane's environment "
+            "(~/.fleet/local.conf, written by remote/provision.sh:1092); both are being migrated "
+            "to pass --tool-pins, after which this fallback is REMOVED and an environment name "
+            "selects nothing (agents-uekw). Pass --tool-pins explicitly to migrate now.\n")
+    return fallback
+
+
 def host_pins_path() -> Optional[Path]:
     """The host-local pins file to merge over ``tools.yaml``, or None.
 
     A run that configured its own pins file uses it, and the environment is not consulted at all.
-    A run that explicitly configured NONE still falls back to ``FACTORY_TOOL_PINS`` for one
-    release and says so on stderr, because the fleet's nightly runner and every lane's environment
-    still export it (~/fleet/remote/factory-nightly.sh, remote/provision.sh) - selecting nothing
-    there would fail a legitimate run closed. THE FALLBACK IS THE HOLE: while it exists, an
-    ambient name still selects a host pins file for a run that did not choose one. It goes away
-    with the enforcement follow-up (agents-e6pi), and until then this function is the only place
-    that needs to change.
+    A run that explicitly configured NONE still falls back to ``FACTORY_TOOL_PINS`` for one release
+    and says so on stderr, naming the route, because the fleet's nightly runner and every lane's
+    environment still export it - selecting nothing there would fail a legitimate run closed while
+    the committed tools.yaml ships no active pins. THE FALLBACK IS THE HOLE: while it exists, an
+    ambient name still selects a host pins file for a run that did not choose one, and
+    ``_env_named_fallback`` is the single path that closes by deleting it (agents-uekw).
 
     A CHILD (never configured) resolves the dispatcher's snapshot through ``VERIFIED_PINS_ENV``
     and nothing else: the legacy name is not honoured for a child, because child_env builds the
     child's environment from an explicit argument rather than copying its parent's.
     """
-    global _ambient_fallback_announced
     if _configured_host_pins is _UNSET_HOST_PINS:
         return _verified_pins_path()
     if _configured_host_pins is not None:
         return _configured_host_pins  # type: ignore[return-value]
-    fallback = _ambient_host_pins()
-    if fallback is not None and not _ambient_fallback_announced:
-        _ambient_fallback_announced = True
-        sys.stderr.write(
-            f"factory: {HOST_PINS_ENV} named {fallback} but this run passed no --tool-pins; using "
-            "it (agents-oq3j migration). Pass --tool-pins explicitly: an environment variable is "
-            "inherited by every step of a job, so it cannot establish that this run chose the "
-            "file. This fallback is removed by the enforcement follow-up.\n")
-    return fallback
+    return _env_named_fallback()
 
 
 def load_tool_pins(path: Optional[Path] = None) -> Dict[str, Dict[str, str]]:

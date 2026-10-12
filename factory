@@ -1355,7 +1355,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # agents-oq3j: the snapshot crosses to the child under the CHILD-ONLY name, set here on the
         # environment the dispatcher CONSTRUCTS for it - never inherited, and never copied from
         # this process's environment by lib.child_env. FACTORY_TOOL_PINS remains this run's
-        # host-side fallback name (agents-e6pi) and is deliberately not what a child resolves.
+        # host-side fallback name (agents-uekw) and is deliberately not what a child resolves.
         prepass_env[VERIFIED_PINS_ENV] = str(effective_pins)
         # Host-side verification of the pre-pass's whole trusted-tool set, on EVERY path
         # (the control is a property of the operation, not of the path taken to it).

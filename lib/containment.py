@@ -442,7 +442,7 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
     if unpinned_note:
         lines.append(f"  Tool pins:   NOT enforced — {unpinned_note}")
     else:
-        lines.append("  Tool pins:   enforced (tools.yaml / FACTORY_TOOL_PINS)")
+        lines.append("  Tool pins:   enforced (tools.yaml / --tool-pins)")
     return lines
 
 

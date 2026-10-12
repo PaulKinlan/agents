@@ -861,7 +861,7 @@ def sandbox_command(
     # skipped), and a correct over-mount would still leave the file exposed to every
     # OTHER wrap that rw-binds the run dir, the engine session included. The file must
     # live OUTSIDE every rw-bound tree and be bound here, read-only, at the same absolute
-    # path the child's FACTORY_TOOL_PINS names.
+    # path the dispatcher names for the child (`VERIFIED_PINS_ENV`).
     for path in ro_binds:
         plan.ro_bind(path)
 

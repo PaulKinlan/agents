@@ -244,8 +244,8 @@ class RunChosenHostPinsTests(unittest.TestCase):
     def test_the_staged_fallback_is_used_but_never_silently(self):
         """agents-oq3j's migration is staged: a run that names no file still adopts the ambient
         one FOR ONE RELEASE because the fleet's nightly runner and every lane's environment still
-        export it - and it says so, naming the variable and the argument, rather than falling back
-        quietly. When the enforcement follow-up lands, this test is the one that changes.
+        export it - and it says so, NAMING THE ROUTE that has to migrate, rather than falling back
+        quietly. agents-uekw deletes the fallback, and this is the test that changes with it.
         """
         ambient = self._pins_file("ambient.yaml", "gh:\n  sha256: " + "a" * 64 + "\n")
         with mock.patch.dict(os.environ, {"FACTORY_TOOL_PINS": str(ambient)}):
@@ -258,6 +258,9 @@ class RunChosenHostPinsTests(unittest.TestCase):
         announced = stderr.getvalue()
         self.assertIn("FACTORY_TOOL_PINS", announced)
         self.assertIn("--tool-pins", announced)
+        # A generic "deprecated" would not tell a nightly-log reader which route is going away.
+        self.assertIn("factory-nightly.sh", announced)
+        self.assertIn("agents-uekw", announced)
 
     def test_a_child_resolves_the_dispatchers_snapshot_and_not_an_inherited_name(self):
         """The child hop (agents-oq3j): a process that made no run decision of its own resolves the

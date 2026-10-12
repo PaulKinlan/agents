@@ -1160,7 +1160,7 @@ class ToolPinBindTests(unittest.TestCase):
         # would fail for reasons unrelated to what it asserts. Isolate these fixtures from any
         # host pins file by CLEARING THE RUN'S DECISION (a pins file is chosen by the run, not by
         # the environment) with the legacy name removed too, since an un-flagged run still falls
-        # back to it for one release (agents-e6pi).
+        # back to it for one release (agents-uekw).
         host_pins = os.environ.pop("FACTORY_TOOL_PINS", None)
         if host_pins is not None:
             self.addCleanup(os.environ.__setitem__, "FACTORY_TOOL_PINS", host_pins)

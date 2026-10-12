@@ -8,8 +8,9 @@
 # host read as unable to sandbox (agents-28nn). The
 # repo `tools.yaml` ships the format with the pins commented out, because a binary's hash
 # is host-specific and cannot live in a shared repo. This helper writes the host's actual
-# pins to a host-local file that the factory reads via the FACTORY_TOOL_PINS env var (which
-# is merged OVER tools.yaml by lib/tool_pins.load_tool_pins).
+# pins to a host-local file that the consuming run passes with `--tool-pins`, merged OVER
+# tools.yaml by lib/tool_pins.load_tool_pins (agents-oq3j). An un-flagged run still falls back to
+# the legacy FACTORY_TOOL_PINS export for one release, loudly; agents-uekw removes that fallback.
 #
 # Usage:
 #   tools/generate-tool-pins.sh [OUT] [--lookup-path DIRS]
