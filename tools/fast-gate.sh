@@ -776,7 +776,9 @@ while IFS= read -r f; do
     # path grep cannot prove a path class is consumer-free, because a file can be consumed
     # WITHOUT BEING NAMED - by a WALKER (agents/*/SKILL.md via check_docs.py's os.walk),
     # by a GLOB (targets/*.yaml via lib/scheduler.py:140-144), and by a SUBPROCESS WITH A
-    # DEFAULT PATH (tools.yaml via lib/tool_pins.py:46 read in test_child_env.py's probes).
+    # DEFAULT PATH (tools.yaml via CONFIG_PATH / load_tool_pins in lib/tool_pins.py, read in
+    # test_child_env.py's probes). Cited by SYMBOL, not by line: the line number this used to
+    # name had drifted onto the FACTORY_TOOL_PINS override docstring (agents-lyqx).
     # So the reason in an ignore arm must record the SEARCH PERFORMED AND ITS RESULT,
     # never a judgement about who reads the path - a judgement is unfalsifiable, and that
     # is what made the original canvas `*.md` ignore arm's reason false.
@@ -793,8 +795,10 @@ while IFS= read -r f; do
       ;;
     *.gitkeep)
       # Empty placeholders keeping otherwise-gitignored dirs (findings/, lines/,
-      # schedules/) tracked. lib/retention.py:78 protects findings/.gitkeep by name, but
-      # no suite reads the committed files (test_retention.py uses tmp fixtures).
+      # schedules/) tracked. _FINDINGS_PROTECTED_NAMES in lib/retention.py protects
+      # findings/.gitkeep by name (cited by SYMBOL, not by line: the number this used to name
+      # had drifted onto unrelated symlink prose - agents-lyqx), but no suite reads the
+      # committed files (test_retention.py uses tmp fixtures).
       ;;
     .gitignore)
       # VCS metadata, consumed only by git itself. Tests mention .gitignore only as
