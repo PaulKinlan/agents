@@ -17,6 +17,7 @@ REPO_URL="${SF_REPO_URL:-https://github.com/PaulKinlan/agents.git}"
 DEFAULT_INSTALL_DIR="${SF_INSTALL_DIR:-$HOME/agents}"
 SKILL_FILTER=""
 INSTALL_HOOKS="false"
+FORCE_GATE_CONF="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       INSTALL_HOOKS="true"
       shift
       ;;
+    --force-gate-conf|--force)
+      FORCE_GATE_CONF="true"
+      shift
+      ;;
     --help|-h)
       cat <<EOF
 The Software Factory — Universal Installer
@@ -44,6 +49,7 @@ Options:
   -s, --skill <name>   Install only a specific station skill (e.g. modern-web, secret-scan)
   -d, --dir <path>     Directory to clone/update the factory into (default: ~/agents)
   --with-hooks         Also install deterministic pre-commit hooks across configured targets
+  --force-gate-conf    Overwrite ~/.fleet/check.conf even if stamped by another project (or SF_FORCE_GATE_CONF=1)
   -h, --help           Show this help message
 EOF
       exit 0
@@ -122,10 +128,14 @@ echo "  ✓ CLI binary: linked -> $LOCAL_BIN/factory"
 # the copy the gate reads. Without it a fresh VM, and a VM whose per-VM copy has gone
 # stale, have no gate command for this project at all while every tracked file says the
 # gate is configured. --install resolves the tracked file, repairs a stale or malformed
-# per-VM file (agents-r1o7), and warns rather than silently clobbering another project's
-# config on a shared HOME (agents-f6no).
+# per-VM file (agents-r1o7), and refuses on collision when an existing file belongs to a
+# different project unless --force-gate-conf or SF_FORCE_GATE_CONF=1 is passed (agents-2cuv).
 if [[ -f "$FACTORY_DIR/tools/check-cmd.sh" ]]; then
-  bash "$FACTORY_DIR/tools/check-cmd.sh" --install
+  if [[ "$FORCE_GATE_CONF" == "true" || "${SF_FORCE_GATE_CONF:-0}" == "1" ]]; then
+    bash "$FACTORY_DIR/tools/check-cmd.sh" --install --force
+  else
+    bash "$FACTORY_DIR/tools/check-cmd.sh" --install
+  fi
 else
   echo "  ! no gate configuration: $FACTORY_DIR/tools/check-cmd.sh is absent, so the deployed gate's config is left untouched"
 fi

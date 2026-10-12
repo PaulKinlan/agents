@@ -375,11 +375,12 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         self.assertIn(tracked_cmd, installed)
         self.assertIn("-t .", installed)
 
-    def test_install_warns_when_overwriting_foreign_project_config(self):
-        """agents-f6no: when ~/.fleet/check.conf already exists without agents-factory stamp
-        (e.g. written by another project on a shared-HOME host), --install must warn to stderr
-        and stamp the project name and machine-global scope in the header."""
-        home = tempfile.mkdtemp(prefix="f6no-foreign-")
+    def test_install_refuses_when_overwriting_foreign_project_config(self):
+        """agents-2cuv (superseding agents-f6no warning): when ~/.fleet/check.conf already exists
+        without agents-factory stamp (e.g. written by another project on a shared-HOME host),
+        --install must REFUSE (exit non-zero) rather than overwriting. Passing --force (or
+        SF_FORCE_GATE_CONF=1) acts as the escape hatch and overwrites with a warning."""
+        home = tempfile.mkdtemp(prefix="2cuv-foreign-")
         conf = Path(home) / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True)
         conf.write_text('CHECK_CMD="echo OTHER_PROJECT_GATE"\n', encoding="utf-8")
@@ -388,21 +389,32 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         env["HOME"] = home
         env.pop("FLEET_CHECK_CONF", None)
 
-        r = subprocess.run(["bash", str(RESOLVER), "--install"],
+        # Without force: must refuse
+        r = subprocess.run(["bash", str(ROOT / "tools" / "check-cmd.sh"), "--install"],
                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
-        self.assertEqual(r.returncode, 0)
-        self.assertIn("WARNING", r.stderr)
-        self.assertIn("not stamped by agents-factory", r.stderr)
+        self.assertNotEqual(r.returncode, 0, "install must refuse to overwrite foreign config without force")
+        self.assertIn("ERROR", r.stderr)
+        self.assertIn("collision", r.stderr.lower())
+        self.assertIn("--force", r.stderr)
+        self.assertEqual(conf.read_text(encoding="utf-8"), 'CHECK_CMD="echo OTHER_PROJECT_GATE"\n',
+                         "foreign config must remain untouched after refusal")
+
+        # With --force: overwrites with warning
+        r_force = subprocess.run(["bash", str(ROOT / "tools" / "check-cmd.sh"), "--install", "--force"],
+                                 capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r_force.returncode, 0)
+        self.assertIn("WARNING", r_force.stderr)
 
         installed = conf.read_text(encoding="utf-8")
         self.assertIn("# Project: agents-factory", installed)
         self.assertIn("# WARNING: This file is MACHINE-GLOBAL", installed)
 
-        # Idempotent second install should NOT warn
-        r2 = subprocess.run(["bash", str(RESOLVER), "--install"],
+        # Idempotent second install should NOT warn or refuse
+        r2 = subprocess.run(["bash", str(ROOT / "tools" / "check-cmd.sh"), "--install"],
                             capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
         self.assertEqual(r2.returncode, 0)
         self.assertNotIn("WARNING", r2.stderr)
+        self.assertNotIn("ERROR", r2.stderr)
 
 
 class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
@@ -469,6 +481,44 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
         installed = conf.read_text(encoding="utf-8")
         self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
         self.assertIn("-t .", installed)
+
+    def test_install_sh_refuses_on_foreign_project_collision_under_shared_home(self):
+        """agents-2cuv: on a shared HOME, installing when another project's check.conf exists
+        must REFUSE (fail loudly) and not overwrite, and the documented escape hatch
+        (--force-gate-conf or SF_FORCE_GATE_CONF=1) must overwrite."""
+        home = tempfile.mkdtemp(prefix="2cuv-shared-home-")
+        conf = Path(home) / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True)
+        foreign_content = '# Project: other-project\nCHECK_CMD="echo OTHER_PROJECT_GATE"\n'
+        conf.write_text(foreign_content, encoding="utf-8")
+
+        # 1. Attempt install on shared HOME: must refuse
+        res = self._run_installer(home)
+        self.assertNotEqual(res.returncode, 0, "install.sh must refuse to clobber foreign check.conf")
+        self.assertIn("ERROR", res.stderr)
+        self.assertIn("Refusing to overwrite another project's gate configuration", res.stderr)
+        self.assertIn("--force", res.stderr)
+        self.assertEqual(conf.read_text(encoding="utf-8"), foreign_content,
+                         "foreign check.conf must not be modified after refusal")
+
+        # 2. Use documented escape hatch (--force-gate-conf): must succeed and overwrite
+        env = dict(os.environ)
+        env["HOME"] = home
+        for var in ("FLEET_CHECK_CONF", "SF_INSTALL_DIR", "SF_REPO_URL", "SKILL_FILTER"):
+            env.pop(var, None)
+        res_force = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), "--force-gate-conf"],
+            capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT),
+        )
+        self.assertEqual(res_force.returncode, 0, (res_force.stdout + res_force.stderr)[-600:])
+        installed = conf.read_text(encoding="utf-8")
+        self.assertIn("# Project: agents-factory", installed)
+        self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
+
+        # 3. Second install under same project: must be cleanly idempotent (no refusal)
+        res_idempotent = self._run_installer(home)
+        self.assertEqual(res_idempotent.returncode, 0)
+        self.assertNotIn("ERROR", res_idempotent.stderr)
 
 
 if __name__ == "__main__":

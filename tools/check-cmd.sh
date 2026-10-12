@@ -29,6 +29,17 @@ fi
 
 : "${CHECK_CMD:?check-cmd: CHECK_CMD is unset or empty in $TRACKED - refusing to report a verdict about a command nobody chose}"
 
+INSTALL=0
+FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --install) INSTALL=1 ;;
+    --force|-f) FORCE=1 ;;
+    *) break ;;
+  esac
+  shift
+done
+
 # agents-ia3p (C): INSTALL this project's resolved command into the per-VM config, so the
 # DEPLOYED entrypoint (~/fleet/bin/fleet-check) reads the TRACKED command through the
 # mechanism it already uses. fleet-check sources ONLY $HOME/.fleet/check.conf (:149),
@@ -41,18 +52,37 @@ fi
 # agents-r1o7: DO NOT SOURCE THE OVERRIDE BEFORE --install. If an existing per-VM file is
 # malformed, corrupted, or has syntax errors, an installer whose job is to replace it
 # with clean tracked defaults must NOT fail by sourcing the broken file first.
-if [ "${1:-}" = "--install" ]; then
+if [ "$INSTALL" -eq 1 ]; then
   dest="${OVERRIDE}"
   mkdir -p "$(dirname "$dest")"
 
-  # agents-f6no: ~/.fleet/check.conf is machine-global. Warn if replacing a file
-  # not stamped by agents-factory (e.g. another project on a shared-HOME host).
-  if [ -f "$dest" ] && ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
-    echo "check-cmd: WARNING: overwriting $dest which was not stamped by agents-factory (shared-HOME host)" >&2
+  # agents-2cuv: ~/.fleet/check.conf is machine-global. Refuse to overwrite a file
+  # belonging to a different project unless explicit force is passed.
+  if [ -f "$dest" ]; then
+    is_foreign=0
+    if grep -q -E '^[# ]*Project:' "$dest" 2>/dev/null; then
+      if ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
+        is_foreign=1
+      fi
+    elif grep -q -E '^\s*CHECK_(FAST_)?CMD=' "$dest" 2>/dev/null; then
+      if ! grep -q -E 'python3 .*discover .*tests' "$dest" 2>/dev/null; then
+        is_foreign=1
+      fi
+    fi
+
+    if [ "$is_foreign" -eq 1 ]; then
+      if [ "$FORCE" -ne 1 ] && [ "${SF_FORCE_GATE_CONF:-0}" != "1" ] && [ "${FLEET_CHECK_CONF_FORCE:-0}" != "1" ]; then
+        echo "check-cmd: ERROR: $dest already exists and belongs to a different project (shared-HOME collision)." >&2
+        echo "  Refusing to overwrite another project's gate configuration." >&2
+        echo "  To overwrite intentionally, pass --force (or set SF_FORCE_GATE_CONF=1)." >&2
+        exit 1
+      fi
+      echo "check-cmd: WARNING: overwriting $dest which was stamped by another project (--force active)" >&2
+    fi
   fi
 
   {
-    printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p, agents-f6no)."
+    printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p, agents-f6no, agents-2cuv)."
     printf '%s\n' "# Project: agents-factory ($ROOT)"
     printf '%s\n' "# WARNING: This file is MACHINE-GLOBAL (~/.fleet/check.conf). fleet-check reads this file"
     printf '%s\n' "# for any repo invoked on this host; running --install replaces the active gate command."
