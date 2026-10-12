@@ -1,0 +1,72 @@
+diff --git a/bin/fleet-check b/bin/fleet-check
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -291,15 +291,18 @@
+             num_changed=$(jq -r '(.coverage.changed // []) | length' "$rec" 2>/dev/null || echo 0)
+             num_unmapped=$(jq -r '.unmapped | length // 0' "$rec" 2>/dev/null || echo 0)
+             num_omitted=$(jq -r '.omitted | length // 0' "$rec" 2>/dev/null || echo 0)
++            # agents-ul9v: a MAPPED file whose arm omitted consumers is its own signal, never 'unmapped'
++            num_partial=$(jq -r '.partial | length // 0' "$rec" 2>/dev/null || echo 0)
++            partial_clause=$(jq -r '.partial // {} | to_entries | if length > 0 then (length|tostring) + " mapped changed file(s) with omitted consumers: " + (map(.key + " (" + (.value|length|tostring) + " omitted)") | join(", ")) else "" end' "$rec" 2>/dev/null || echo "")
+             num_suites=$(jq -r '.suites | length // 0' "$rec" 2>/dev/null || echo 0)
+             is_indeterminate=$(jq -r '.coverage.indeterminate // false' "$rec" 2>/dev/null || echo false)
+             omitted_info=$(jq -r '.omitted | if length > 0 then " (omitted: " + join(", ") + ")" else "" end' "$rec" 2>/dev/null || echo "")
+             if [ "$cov_state" = "UNKNOWN" ]; then
+               # byte-identical to the fresh path's note (fleet-265v): one string, two paths
+               cov_info=" [coverage UNKNOWN: $(jq -r '.coverage.unknown_reason // "not determinable from the gate log"' "$rec" 2>/dev/null || echo "not determinable from the gate log") - $num_changed changed file(s) NOT demonstrated to be exercised]"
+-            elif [ "$num_unmapped" -gt 0 ] || [ "$num_omitted" -gt 0 ]; then
++            elif [ "$num_unmapped" -gt 0 ] || [ "$num_omitted" -gt 0 ] || [ "$num_partial" -gt 0 ]; then
+               unm_str=$(jq -r '.unmapped | if length > 0 then join(", ") + " unmapped" else "" end' "$rec" 2>/dev/null)
+-              cov_info=" Coverage warning: ${unm_str:-files unmapped}$omitted_info."
++              cov_info=" Coverage warning:${partial_clause:+ $partial_clause;}${unm_str:+ $unm_str;}$omitted_info."
+             elif [ "$num_suites" -gt 0 ]; then
+               cov_info=" Coverage: ran $num_suites suite(s) ($(jq -r '.suites | join(", ")' "$rec"))."
+             elif [ "$is_indeterminate" = "true" ]; then
+@@ -527,12 +530,14 @@
+   [ "$st" = UNKNOWN ] && note=" - NOT a verdict (${state_reason:-no reason recorded}): nothing cached, run fleet-check again"
+   [ "$st" = INCONCLUSIVE ] && note=" - NOT a verdict (worktree vanished or inconclusive exit): not cached, run fleet-check again"
+   local cov_note=""
+-  local num_suites=0 num_unmapped=0 num_omitted=0 is_indeterminate=false
+-  local unmapped_list="" suites_list="" omitted_list=""
++  local num_suites=0 num_unmapped=0 num_omitted=0 num_partial=0 is_indeterminate=false
++  local unmapped_list="" suites_list="" omitted_list="" partial_list=""
+   if [ "$cov_ok" = 1 ]; then
+     num_suites=$(jq -r '(.suites // []) | length' "$cov_out" 2>/dev/null || echo 0)
+     num_unmapped=$(jq -r '(.unmapped // []) | length' "$cov_out" 2>/dev/null || echo 0)
+     num_omitted=$(jq -r '(.omitted // []) | length' "$cov_out" 2>/dev/null || echo 0)
++    num_partial=$(jq -r '(.partial // {}) | length' "$cov_out" 2>/dev/null || echo 0)
++    partial_list=$(jq -r '(.partial // {}) | to_entries | map(.key + " (" + (.value|length|tostring) + " omitted)") | join(", ")' "$cov_out" 2>/dev/null || echo "")
+     is_indeterminate=$(jq -r '(.indeterminate // false)' "$cov_out" 2>/dev/null || echo false)
+     unmapped_list=$(jq -r '.unmapped | join(", ")' "$cov_out" 2>/dev/null)
+     suites_list=$(jq -r '.suites | join(", ")' "$cov_out" 2>/dev/null)
+@@ -548,8 +553,19 @@
+     # fleet-agch: an absence of evidence is reported as UNKNOWN, never as an unmapped list. The note
+     # names the reason and says the changed files were not demonstrated, rather than implying zero coverage.
+     cov_note=" [coverage UNKNOWN: ${unknown_reason:-not determinable from the gate log} - $num_changed changed file(s) NOT demonstrated to be exercised]"
+-  elif [ "$num_unmapped" -gt 0 ] || [ "$num_omitted" -gt 0 ]; then
+-    cov_note=" [COVERAGE WARNING: $num_unmapped unmapped changed file(s): $unmapped_list${omitted_list:+ (omitted: $omitted_list)}${suites_list:+ (ran $num_suites suite(s): $suites_list)}]"
++  elif [ "$num_unmapped" -gt 0 ] || [ "$num_omitted" -gt 0 ] || [ "$num_partial" -gt 0 ]; then
++    # agents-ul9v: a mapped file whose arm omitted consumers is NOT an unmapped file. It gets its own clause,
++    # and the unmapped clause is OMITTED when its count is zero - otherwise the sentence reads
++    # '0 unmapped changed file(s)' while the real finding is an incomplete arm, trading one mislabel for another.
++    partial_clause=""
++    if [ "$num_partial" -gt 0 ]; then
++      partial_clause="$num_partial mapped changed file(s) with omitted consumers: $partial_list"
++    fi
++    unmapped_clause=""
++    if [ "$num_unmapped" -gt 0 ]; then
++      unmapped_clause="$num_unmapped unmapped changed file(s): $unmapped_list"
++    fi
++    cov_note=" [COVERAGE WARNING:${partial_clause:+ $partial_clause;}${unmapped_clause:+ $unmapped_clause;}${omitted_list:+ (omitted: $omitted_list)}${suites_list:+ (ran $num_suites suite(s): $suites_list)}]"
+   elif [ "$num_suites" -gt 0 ]; then
+     cov_note=" [coverage: ran $num_suites suite(s): $suites_list]"
+   elif [ "$is_indeterminate" = "true" ]; then
+@@ -571,7 +587,7 @@
+   if [ "$cov_ok" = 1 ]; then
+     jq --arg st "$st" --arg sreason "$state_reason" --argjson rc "$rc" --argjson s "$secs" --slurpfile cov "$cov_out" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
+       --argjson covatt "$cov_attempted" --argjson covrc "$cov_rc" --argjson covbytes "$cov_bytes" --arg coverr "$cov_err" \
+-      '.state=$st | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .coverage_verified=($cov[0].indeterminate != true) | .coverage=$cov[0] | .suites=$cov[0].suites | .unmapped=$cov[0].unmapped | .omitted=$cov[0].omitted | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
++      '.state=$st | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .coverage_verified=($cov[0].indeterminate != true) | .coverage=$cov[0] | .suites=$cov[0].suites | .unmapped=$cov[0].unmapped | .omitted=$cov[0].omitted | .partial=$cov[0].partial | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
+       "$rec" > "$rec.finish.$$.tmp" 2>/dev/null && mv -f "$rec.finish.$$.tmp" "$rec"
+   else
+     jq --arg st "$st" --arg sreason "$state_reason" --argjson rc "$rc" --argjson s "$secs" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
