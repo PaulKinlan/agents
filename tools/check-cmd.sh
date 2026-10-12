@@ -2,9 +2,9 @@
 # Resolve the gate's command configuration: TRACKED default first, per-VM override second.
 #
 # agents-ia3p: the tracked file is what a fresh VM gets and what a reviewer can read in a
-# PR; tools/check-cmd.sh --install writes its values into ~/.fleet/check.conf where the
-# deployed gate reads them. To update or tune configuration, edit tools/check.conf and
-# re-run --install.
+# PR; tools/check-cmd.sh --install writes its values into ~/.fleet/check.conf (or
+# $FLEET_CHECK_CONF when set) where the deployed gate reads them. To update or tune
+# configuration, edit tools/check.conf and re-run --install.
 #
 # Usage:  tools/check-cmd.sh [CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT]
 # With no argument it prints the whole resolved set. Values from the override win.
@@ -31,7 +31,7 @@ fi
 
 # agents-ia3p (C): INSTALL this project's resolved command into the per-VM config, so the
 # DEPLOYED entrypoint (~/fleet/bin/fleet-check) reads the TRACKED command through the
-# mechanism it already uses. fleet-check sources ONLY $HOME/.fleet/check.conf (:149),
+# mechanism it already uses. fleet-check sources ${FLEET_CHECK_CONF:-$HOME/.fleet/check.conf},
 # auto-detects deno.json or package.json and NOTHING ELSE (:155-159), and exits 2 when it
 # finds neither (:161) - so a Python project has NO PATH through the deployed gate on a
 # fresh VM. The tracked file is the source of truth a PR can review; this writes the copy
