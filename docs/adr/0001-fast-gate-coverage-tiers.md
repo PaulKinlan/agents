@@ -126,7 +126,10 @@ However, because consumer coverage validates the fast-gate's own integrity acros
 Separating them into distinct modules preserves the purity of the tree-guard tier while ensuring both structural invariants run unconditionally on every gate execution.
 
 ### Re-entrancy Protection and Invocation Independence (`agents-q615`, `agents-dv23`)
-Tests that inspect the fast-gate mapping (such as `tests/test_fast_gate_mapping.py`) must never invoke `tools/fast-gate.sh` without `FAST_GATE_DRY_RUN=1` and an explicit non-empty `GIT_CHANGED`, because running the gate with an empty delta causes the script to inspect the active git diff, select the test suite itself, and spawn runaway recursive fork loops.
+Tests that inspect the fast-gate mapping (such as `tests/test_fast_gate_mapping.py`) must prevent recursive re-entrancy loops where the gate resolves the active diff, selects the mapping test itself, and spawns runaway child runs. In practice, invocations avoid this via two distinct mechanisms:
+1. **Dry-Run Resolution:** Setting `FAST_GATE_DRY_RUN=1` resolves planned suites and exits immediately without executing runner subprocesses (used both with simulated `GIT_CHANGED` and with base ref overrides via `GIT_BASE`).
+2. **Controlled Target Scoping:** Execution tests (such as terminal marker assertions in `test_fast_gate_execution_*`) set `GIT_CHANGED` to isolated probe files rather than dry-running, ensuring the gate executes the probe and always-on tiers without selecting the mapping suite.
+Uncontrolled invocations of `tools/fast-gate.sh` that lack both dry-run protection and explicit target scoping are prohibited.
 For the tree-guard tier (`tests/test_tree_guards.py`), the protection is even stronger: the tier module contains zero references to `tools/fast-gate.sh` and does not invoke the gate at all. It evaluates tree properties directly via the filesystem, making recursive re-entrancy impossible by construction.
 
 ---
