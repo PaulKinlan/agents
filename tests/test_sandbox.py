@@ -1437,6 +1437,76 @@ class TestIsBroadRoot(unittest.TestCase):
         self.assertTrue(plan.visible(str(exe)),
                         "the executable FILE must still be bound, or the tool cannot run")
 
+    def test_credential_roots_stay_broad_even_with_a_namesake_executable(self):
+        """agents-z6sv: ~/.ssh, ~/.gnupg and ~/.aws are credential stores, not tool install trees, so
+        a namesake executable under one must not exempt it from the broad-root refusal either. These
+        are the three the or3m review left out: the guard refused the XDG prefixes, and the same
+        guard arm silently exempted every other hidden prefix, including the ones whose whole
+        contents are keys. The exemptions around it are asserted in the same tree, so a "fix" that
+        refuses every hidden prefix cannot pass this test."""
+        from lib.sandbox import _is_broad_root
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for prefix in (".ssh", ".gnupg", ".aws"):
+                tool_dir = home / prefix / "evil"
+                tool_dir.mkdir(parents=True)
+                exe = tool_dir / "evil"
+                exe.write_text("#!/bin/sh\n")
+                exe.chmod(0o755)
+                self.assertTrue(
+                    _is_broad_root(tool_dir, str(home)),
+                    f"~/{prefix}/evil houses a namesake executable but is a credential store: it "
+                    "must stay broad rather than be exempted as a tool install tree (agents-z6sv)",
+                )
+
+            # The canonical install tree keeps its exemption (agents-n5qp), so this is not
+            # "refuse everything under $HOME".
+            pi_tree = home / ".local" / "pi"
+            pi_tree.mkdir(parents=True)
+            (pi_tree / "pi").write_text("#!/bin/sh\n")
+            (pi_tree / "pi").chmod(0o755)
+            self.assertFalse(_is_broad_root(pi_tree, str(home)),
+                             "~/.local/<tool> must keep its exemption: the refusal is by NAME")
+
+            # A hidden prefix that is neither XDG nor a credential store stays exempt, so the set is
+            # a list of named stores rather than "anything dot-prefixed" (agents-z6sv).
+            custom = home / ".custom" / "mytool"
+            custom.mkdir(parents=True)
+            (custom / "mytool").write_text("#!/bin/sh\n")
+            (custom / "mytool").chmod(0o755)
+            self.assertFalse(_is_broad_root(custom, str(home)),
+                             "a hidden non-credential prefix must keep its exemption (agents-z6sv)")
+
+    def test_credential_root_is_not_bound_whole_over_a_sibling_secret(self):
+        """agents-z6sv, end to end: the consequence lives in the bind plan, not in the classifier. A
+        tool whose executable RESOLVES under <home>/.ssh/<name> must be bound as the FILE only, so
+        the private key sitting next to it stays invisible - before this fix the whole
+        .ssh/<name> tree was bound, because the directory counted as a tool install root."""
+        from lib.sandbox import _BindPlan, _executable_binds
+        tmp = Path(tempfile.mkdtemp(prefix="z6sv-repro-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        home = tmp / "home"
+        tool_tree = home / ".ssh" / "evil"
+        tool_tree.mkdir(parents=True)
+        exe = tool_tree / "evil"
+        exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        exe.chmod(0o755)
+        secret = tool_tree / "id_ed25519"
+        secret.write_text("PRIVATE KEY\n", encoding="utf-8")
+
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "evil").symlink_to(exe)
+
+        plan = _BindPlan()
+        _executable_binds(plan, ("evil",), str(bin_dir), str(home))
+        self.assertFalse(plan.visible(str(tool_tree)),
+                         "$HOME/.ssh/<name> is a credential store and must not be bound whole")
+        self.assertFalse(plan.visible(str(secret)),
+                         "the private key beside the executable must not be visible in the sandbox")
+        self.assertTrue(plan.visible(str(exe)),
+                        "the executable FILE must still be bound, or the tool cannot run")
+
     def test_depth_3_or_deeper_is_not_broad(self):
         from lib.sandbox import _is_broad_root
         self.assertFalse(_is_broad_root(Path("/home/u/work/proj/deep/pkg"), "/home/u"))
