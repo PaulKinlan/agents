@@ -768,5 +768,52 @@ class TestFastGateMapping(unittest.TestCase):
             probe.unlink(missing_ok=True)
 
 
+class TestReplacedGenericArmsKeepTheirNamesake(unittest.TestCase):
+    """agents-iqyz: an arm that REPLACES the generic lib/*.py arm can pass while DROPPING the module's
+    own suite - that is the silent failure direction of this change, because the replacement still maps
+    consumers and so nothing looks wrong.
+
+    The expected sets below are the MEASURED selection for each path (dry run, GIT_CHANGED=<path>), not
+    a hand count: the namesake first, then the other families' suites that import the module. Asserted as
+    a SUPERSET so that adding a consumer is allowed and dropping one is not.
+    """
+
+    CASES = {
+        "lib/embargo.py": {
+            "namesake": "tests/test_embargo.py",
+            "expected": ['tests/test_embargo.py', 'tests/test_factory_truth.py', 'tests/test_model_rule_id.py', 'tests/test_report_schema.py', 'tests/test_threat_model_prepass.py', 'tests/test_tree_guards.py'],
+        },
+        "lib/redaction.py": {
+            "namesake": "tests/test_redaction.py",
+            "expected": ['tests/test_findings.py', 'tests/test_model_rule_id.py', 'tests/test_redaction.py', 'tests/test_secret_scanner.py', 'tests/test_tree_guards.py', 'tests/test_vuln_verify_prepass.py'],
+        },
+        "lib/retention.py": {
+            "namesake": "tests/test_retention.py",
+            "expected": ['tests/test_hillclimb.py', 'tests/test_retention.py', 'tests/test_tree_guards.py'],
+        },
+    }
+
+    def test_each_replaced_arm_still_selects_its_namesake_and_its_consumers(self):
+        for path, info in self.CASES.items():
+            with self.subTest(path=path):
+                proc = subprocess.run(
+                    ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
+                    env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=120,
+                )
+                out = proc.stdout + proc.stderr
+                selected = {ln.strip() for ln in out.splitlines()
+                            if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
+                self.assertIn(
+                    info["namesake"], selected,
+                    f"{path}: the replaced arm DROPS the module's own suite {info['namesake']} - the arm "
+                    "must name the namesake as well as its consumers (agents-iqyz)",
+                )
+                missing = sorted(set(info["expected"]) - selected)
+                self.assertEqual(
+                    missing, [],
+                    f"{path}: the arm no longer selects {missing} - a replaced arm must keep the "
+                    "namesake and every consumer it was added for (agents-iqyz)",
+                )
+
 if __name__ == "__main__":
     unittest.main()

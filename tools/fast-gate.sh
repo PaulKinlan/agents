@@ -709,6 +709,36 @@ while IFS= read -r f; do
       # about 8 s (61.5 s for the eight files against 53.3 s for the two the fallback chose).
       mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_child_env.py"
       ;;
+    lib/embargo.py)
+      # agents-iqyz: this arm REPLACES the generic `lib/*.py` arm further down for this path, and must
+      # therefore stay ABOVE it - the matcher is first-match, so a later arm for the same path is
+      # unreachable. The generic arm derived the namesake suite from the basename; that suite is kept
+      # here and listed FIRST, because an arm that replaces the generic one can otherwise pass while
+      # DROPPING the module's own suite. Shape: agents-bwbe's (other families' consumers), not
+      # agents-mo75's (a split family whose thin namesake ran).
+      # Measured with the coverage oracle - before: 4 omitted consumer(s); after: 0.
+      mapped="$mapped tests/test_embargo.py tests/test_factory_truth.py tests/test_model_rule_id.py tests/test_report_schema.py tests/test_threat_model_prepass.py"
+      ;;
+    lib/redaction.py)
+      # agents-iqyz: this arm REPLACES the generic `lib/*.py` arm further down for this path, and must
+      # therefore stay ABOVE it - the matcher is first-match, so a later arm for the same path is
+      # unreachable. The generic arm derived the namesake suite from the basename; that suite is kept
+      # here and listed FIRST, because an arm that replaces the generic one can otherwise pass while
+      # DROPPING the module's own suite. Shape: agents-bwbe's (other families' consumers), not
+      # agents-mo75's (a split family whose thin namesake ran).
+      # Measured with the coverage oracle - before: 4 omitted consumer(s); after: 0.
+      mapped="$mapped tests/test_redaction.py tests/test_findings.py tests/test_model_rule_id.py tests/test_secret_scanner.py tests/test_vuln_verify_prepass.py"
+      ;;
+    lib/retention.py)
+      # agents-iqyz: this arm REPLACES the generic `lib/*.py` arm further down for this path, and must
+      # therefore stay ABOVE it - the matcher is first-match, so a later arm for the same path is
+      # unreachable. The generic arm derived the namesake suite from the basename; that suite is kept
+      # here and listed FIRST, because an arm that replaces the generic one can otherwise pass while
+      # DROPPING the module's own suite. Shape: agents-bwbe's (other families' consumers), not
+      # agents-mo75's (a split family whose thin namesake ran).
+      # Measured with the coverage oracle - before: 1 omitted consumer(s); after: 0.
+      mapped="$mapped tests/test_retention.py tests/test_hillclimb.py"
+      ;;
     lib/*.py)
       name="$(basename "$f" .py)"
       case "$name" in
