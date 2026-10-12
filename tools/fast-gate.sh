@@ -915,12 +915,31 @@ echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
 summary_file=""
 summary_dir="${FLEET_CHECKS_DIR:-$HOME/.fleet/checks}"
 if mkdir -p "$summary_dir" 2>/dev/null; then
-  summary_file="$summary_dir/$(git rev-parse HEAD^{tree} 2>/dev/null || echo unknown)-${FLEET_LANE:-$(whoami)}-$$.fast.summary.txt"
+  # agents-qtnv: the name must say WHICH RUN the file came from. Tree and lane narrow a file to
+  # a SET of runs (one tree carried 13 of these before this change), and the pid alone is opaque,
+  # so the commit sha and a UTC start stamp are added. The sha is what PAIRS a file with a cached
+  # record (the record carries `sha`); the stamp ORDERS for a human reading `ls` and is written by
+  # this shell's clock, not the wrapper's, so it orders and does not pair. The tree-lane-pid shape
+  # is kept as a prefix so existing <tree>-* globs still match.
+  summary_tree="$(git rev-parse HEAD^{tree} 2>/dev/null || echo unknown)"
+  summary_sha="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+  summary_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  summary_file="$summary_dir/${summary_tree}-${FLEET_LANE:-$(whoami)}-${summary_sha}-${summary_stamp}-$$.fast.summary.txt"
+  # agents-qtnv: the file must ANSWER FOR ITSELF when there is no record to pair it with - 462 of 474
+  # live summary files had none. Written straight to the file and never echoed, so the dry run, which
+  # exits before this block, stays byte-identical (the constraint the comment above this block protects).
+  {
+    printf 'fast-gate run: tree=%s sha=%s lane=%s started=%s pid=%s\n' \
+      "$summary_tree" "$summary_sha" "${FLEET_LANE:-$(whoami)}" "$summary_stamp" "$$"
+    printf 'cwd=%s modules=%s\n' "$PWD" "${modules:-<none>}"
+  } > "$summary_file"
   echo "fast-gate: runner output -> $summary_file" >&2
 fi
 
 rc=0
 if [ -n "$summary_file" ]; then
+  # `tee -a` is load-bearing now: the header above is already in the file, and a plain tee would
+  # truncate it away on the first byte of runner output (agents-qtnv).
   python3 -u -m unittest $modules > >(tee -a "$summary_file") 2> >(tee -a "$summary_file" >&2) || rc=$?
 else
   python3 -u -m unittest $modules || rc=$?
