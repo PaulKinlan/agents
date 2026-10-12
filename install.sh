@@ -141,7 +141,26 @@ echo "  ✓ CLI binary: linked -> $LOCAL_BIN/factory"
 # per-VM file (agents-r1o7), and warns rather than silently clobbering another project's
 # config on a shared HOME (agents-f6no).
 if [[ -f "$FACTORY_DIR/tools/check-cmd.sh" ]]; then
+  # agents-d081: SHOW THE DRIFT BEFORE REPAIRING IT, and check that the repair landed. Until this,
+  # the replacement above was SILENT - a host that had been running a different gate command for
+  # days learned nothing when provisioning finally fixed it (measured 2026-10-12 on a fleet VM: the
+  # per-VM copy predated the tracked file, so its CHECK_CMD carried no summary/tee wrapper and
+  # CHECK_FAST_TIMEOUT was 360 against the tracked 180, while every gate on the host reported PASS).
+  # --check exits 0 in sync, 1 on drift and 3 when nothing is installed, and prints the differing
+  # keys with both values. A non-zero here is NOT an error - provisioning is the repair - so it is
+  # reported and the install continues.
+  if ! drift_report="$(bash "$FACTORY_DIR/tools/check-cmd.sh" --check 2>&1)"; then
+    echo "  ! this host's gate command config did not match the tracked one; provisioning is replacing it:"
+    printf '%s\n' "$drift_report" | sed 's/^/    /'
+  fi
   bash "$FACTORY_DIR/tools/check-cmd.sh" --install
+  # The post-install half is stronger than the pre-install half: it catches the failure mode where
+  # the installer believes it wrote the config but the host did not keep it (a read-only or
+  # wrong-HOME destination), which previously would have been reported as a successful install.
+  if ! post_report="$(bash "$FACTORY_DIR/tools/check-cmd.sh" --check 2>&1)"; then
+    echo "  ! WARNING: after installing, the per-VM gate config STILL differs from the tracked one -"
+    printf '%s\n' "$post_report" | sed 's/^/    /'
+  fi
 else
   echo "  ! no gate configuration: $FACTORY_DIR/tools/check-cmd.sh is absent, so the deployed gate's config is left untouched"
 fi

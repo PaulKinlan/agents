@@ -551,6 +551,83 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         self.assertNotIn("WARNING", r2.stderr)
 
 
+class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
+    """agents-d081: --check is the detector this suite cannot be, and the reason is the same one
+    agents-024z recorded for the docstring above - the drift lives in a MACHINE-GLOBAL file, so a test
+    asserting the LIVE copy would be red on any host that has not run --install, which is the
+    machine-state pathology that turns one lane's change red for everyone.
+
+    So the capability is tested HERMETICALLY instead: every case below drives --check against a temp
+    HOME, which proves the detector works without this suite reading the operator's file. Any caller
+    that wants to inspect the live VM - provisioning, a fleet-side check, a lane that suspects its own
+    gate - can run the mode directly. Measured motivation: on this VM the deployed copy predated the
+    tracked file (no summary/tee wrapper in CHECK_CMD, CHECK_FAST_TIMEOUT 360 against the tracked 180)
+    and nothing reported it.
+    """
+
+    def _run(self, *args, home):
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        return subprocess.run(["bash", str(RESOLVER), *args], capture_output=True, text=True,
+                              timeout=60, env=env, cwd=str(ROOT))
+
+    def test_not_installed_in_sync_drift_and_malformed_are_each_distinguished(self):
+        home = tempfile.mkdtemp(prefix="d081-check-")
+        conf = Path(home) / ".fleet" / "check.conf"
+
+        # 1. NOTHING INSTALLED is not drift, but it is not silence either: a distinct code so a caller
+        #    can tell "this VM was never installed" from "this VM has drifted".
+        r = self._run("--check", home=home)
+        self.assertEqual(r.returncode, 3, r.stderr[:300])
+        self.assertIn("no per-VM config", r.stderr)
+
+        # 2. Just installed: in sync, and it says so.
+        self.assertEqual(self._run("--install", home=home).returncode, 0)
+        r = self._run("--check", home=home)
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+        self.assertIn("in sync", r.stdout)
+
+        # 3. ONE KEY DIVERGES, which is exactly the drift measured on this VM: the key is named, both
+        #    values are shown, and the repair is stated - a failure message that teaches.
+        text = conf.read_text(encoding="utf-8")
+        self.assertIn("CHECK_FAST_TIMEOUT=180", text, "the tracked value this case mutates away")
+        conf.write_text(text.replace("CHECK_FAST_TIMEOUT=180", "CHECK_FAST_TIMEOUT=360"),
+                        encoding="utf-8")
+        r = self._run("--check", home=home)
+        self.assertEqual(r.returncode, 1, r.stderr[:300])
+        self.assertIn("CHECK_FAST_TIMEOUT", r.stderr)
+        self.assertIn("180", r.stderr)
+        self.assertIn("360", r.stderr)
+        self.assertIn("--install", r.stderr, "the drift message must name the repair")
+
+        # 4. A MALFORMED COPY IS DRIFT, NOT A CRASH: --check must not source the file it is judging.
+        conf.write_text('CHECK_CMD="unterminated\nnot shell at all (\n', encoding="utf-8")
+        r = self._run("--check", home=home)
+        self.assertEqual(r.returncode, 1,
+                         f"--check must survive a malformed copy and report drift: {r.stderr[:300]}")
+
+        # 5. A HAND-ADDED KEY IS DRIFT: --install writes exactly the tracked keys, so anything else in
+        #    the per-VM file silently changes the gate's environment.
+        self.assertEqual(self._run("--install", home=home).returncode, 0)
+        conf.write_text(conf.read_text(encoding="utf-8") + 'CHECK_SNEAKY="true"\n', encoding="utf-8")
+        r = self._run("--check", home=home)
+        self.assertEqual(r.returncode, 1, r.stderr[:300])
+        self.assertIn("CHECK_SNEAKY", r.stderr)
+
+        # 6. THE RIGHT KEYS WITH NO PROJECT STAMP ARE STILL DRIFT, and this is the shape the real
+        #    agents-factory VM was in when this detector was written (measured 2026-10-12): a copy
+        #    produced by an --install from before the stamp existed (agents-f6no). The keys agree, so a
+        #    key-only comparison would call it in sync; the provenance does not.
+        self.assertEqual(self._run("--install", home=home).returncode, 0)
+        stamped = conf.read_text(encoding="utf-8")
+        conf.write_text(stamped.replace("# Project: agents-factory",
+                                        "# Project: some-other-project", 1), encoding="utf-8")
+        r = self._run("--check", home=home)
+        self.assertEqual(r.returncode, 1, r.stderr[:300])
+        self.assertIn("stamp", r.stderr)
+
+
 class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
     """agents-l2xb / agents-3xqa: install.sh - the provisioning entrypoint - IS THE CALLER.
 
@@ -615,6 +692,38 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
         installed = conf.read_text(encoding="utf-8")
         self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
         self.assertIn("-t .", installed)
+
+    def test_install_sh_says_what_it_repaired_and_checks_the_repair_landed(self):
+        """agents-d081: THE REPAIR ABOVE USED TO BE SILENT, so a host that had been running a
+        different gate command for days learned nothing when provisioning finally replaced it - and
+        an install that could not write the config (read-only or wrong HOME) was still reported as a
+        success. Both halves are pinned here: the drift is NAMED before it is replaced, and the
+        config is verified against the tracked one afterwards."""
+        home = tempfile.mkdtemp(prefix="d081-loud-")
+        conf = Path(home) / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True)
+        # The measured shape of a drifted host: the pre-authored-via-an-older-installer command, with
+        # a value that differs from the tracked one in a way a reader can see.
+        conf.write_text('CHECK_CMD="python3 -m unittest discover -s tests -t . -v"\n'
+                        'CHECK_FAST_TIMEOUT=360\n', encoding="utf-8")
+
+        res = self._run_installer(home)
+        self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
+        output = res.stdout + res.stderr
+        self.assertIn("did not match the tracked one", output,
+                      "a drift that provisioning repairs must be REPORTED, not repaired silently")
+        self.assertIn("CHECK_FAST_TIMEOUT", output,
+                      "the report must name the key that differed, not just that something did")
+        self.assertNotIn("STILL differs", output,
+                         "a successful install must leave the per-VM config equal to the tracked one")
+        self.assertEqual(
+            [(line.split("=", 1)[0], line) for line in conf.read_text(encoding="utf-8").splitlines()
+             if line.startswith("CHECK_")],
+            [(line.split("=", 1)[0], line)
+             for line in TRACKED.read_text(encoding="utf-8").splitlines()
+             if line.startswith("CHECK_")],
+            "after provisioning the per-VM copy must be the tracked keys, line for line",
+        )
 
 
 class TestTheFleetBundleInterfaceThisSuiteDrives(unittest.TestCase):

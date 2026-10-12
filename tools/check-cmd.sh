@@ -8,6 +8,10 @@
 #
 # Usage:  tools/check-cmd.sh [CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT]
 # With no argument it prints the whole resolved set. Values from the override win.
+#         tools/check-cmd.sh --install   writes the tracked values into the per-VM file.
+#         tools/check-cmd.sh --check     compares the per-VM file with the tracked one and names every
+#                                        key that differs (agents-d081). Exits 0 in sync, 1 on drift,
+#                                        3 when nothing is installed, 2 on a usage/tracked error.
 #
 # IT FAILS LOUD. This file is sourced, so a syntax error in either config is fatal under
 # `set -e`, and a missing CHECK_CMD is an error rather than an empty string. A gate that
@@ -28,6 +32,69 @@ fi
 . "$TRACKED"
 
 : "${CHECK_CMD:?check-cmd: CHECK_CMD is unset or empty in $TRACKED - refusing to report a verdict about a command nobody chose}"
+
+# agents-d081: THE DRIFT DETECTOR. --install makes the deployed copy match the tracked file, but until
+# this mode existed NOTHING COULD TELL YOU WHEN IT STOPPED MATCHING. That is not hypothetical: measured
+# on the agents-factory VM on 2026-10-12, the deployed ~/.fleet/check.conf predated the tracked file, so
+# its CHECK_CMD had no summary/tee wrapper and CHECK_FAST_TIMEOUT was 360 against the tracked 180 -
+# i.e. the VM had been running a different gate command (and losing the full gate's output capture)
+# while every gate on it reported PASS. A fix that lives in a machine-global config file cannot reach a
+# machine whose copy predates it; this mode is how anyone can ASK, and how the answer can be made loud
+# without a test reading machine state.
+#
+# IT DELIBERATELY DOES NOT SOURCE THE OVERRIDE. The agents-r1o7 rule stated for --install applies here
+# for the same reason: a malformed or half-written per-VM file must be REPORTED as drift, not crash the
+# thing that reports drift. Comparison is therefore TEXTUAL, tracked key line against deployed key line.
+# WHAT IS NOT COMPARED, STATED SO A READER DOES NOT ASSUME MORE: the deployed file's header comments.
+# --install regenerates them, but they cannot change what the gate runs; the KEY LINES are the contract.
+#
+# EXIT CODES: 0 in sync · 1 drift (every differing key named, with both values) · 3 no per-VM config
+# installed (not drift - a fresh VM legitimately has none) · 2 tracked config missing or unusable.
+if [ "${1:-}" = "--check" ]; then
+  dest="${OVERRIDE}"
+  if [ ! -e "$dest" ]; then
+    echo "check-cmd: no per-VM config at $dest - nothing is installed on this VM (a fresh install would create it from $TRACKED)" >&2
+    exit 3
+  fi
+  drift=0
+  # A copy written by another project on a shared-HOME host is drift even if every key agrees - and
+  # so is a copy written by an --install from before the stamp existed (agents-f6no): the wording
+  # below names BOTH, because this detector is the thing that has to be trusted when it fires and an
+  # assertion of the wrong cause is how a reader learns to ignore it. Measured 2026-10-12: the live
+  # copy on the agents-factory VM was this second case.
+  if ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
+    echo "check-cmd: DRIFT: $dest carries no 'Project: agents-factory' stamp - it was written by another project on a shared-HOME host, or by an --install from before that stamp existed; re-running --install stamps it either way" >&2
+    drift=1
+  fi
+  while IFS= read -r tracked_line; do
+    key="${tracked_line%%=*}"
+    if ! grep -q "^${key}=" "$dest" 2>/dev/null; then
+      printf 'check-cmd: DRIFT: %s is missing from %s\n' "$key" "$dest" >&2
+      drift=1
+      continue
+    fi
+    deployed_line="$(grep -m1 "^${key}=" "$dest")"
+    if [ "$deployed_line" != "$tracked_line" ]; then
+      printf 'check-cmd: DRIFT: %s differs\n  tracked : %s\n  deployed: %s\n' \
+        "$key" "$tracked_line" "$deployed_line" >&2
+      drift=1
+    fi
+  done < <(grep -E '^[A-Z_]+=' "$TRACKED")
+  # A key the tracked file does not have is drift too: --install writes exactly the tracked keys.
+  while IFS= read -r deployed_key; do
+    if ! grep -q "^${deployed_key}=" "$TRACKED" 2>/dev/null; then
+      printf 'check-cmd: DRIFT: %s is in %s but not in %s\n' "$deployed_key" "$dest" "$TRACKED" >&2
+      drift=1
+    fi
+  done < <(grep -E '^[A-Z_]+=' "$dest" | sed 's/=.*//')
+  if [ "$drift" -ne 0 ]; then
+    printf 'check-cmd: repair with: bash tools/check-cmd.sh --install   (rewrites %s from %s)\n' \
+      "$dest" "$TRACKED" >&2
+    exit 1
+  fi
+  echo "check-cmd: in sync - $dest matches the tracked keys in $TRACKED"
+  exit 0
+fi
 
 # agents-ia3p (C): INSTALL this project's resolved command into the per-VM config, so the
 # DEPLOYED entrypoint (~/fleet/bin/fleet-check) reads the TRACKED command through the
