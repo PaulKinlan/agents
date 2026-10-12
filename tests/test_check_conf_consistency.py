@@ -237,9 +237,16 @@ class TestTrackedCheckConfig(unittest.TestCase):
         from tests.test_gate_entrypoint_config import _tracked_fields as parsed_there
 
         here, there = _tracked_fields(), parsed_there()
+        # agents-ju3g: compare the WHOLE dicts, not just the key sets. The keys-only form was
+        # green while the two copies returned DIFFERENT VALUES for the same file - the review
+        # measured CHECK_TIMEOUT 2400 vs 24000 with this test passing - so it pinned half of
+        # what the docstring above claims and a value-semantics drift stayed invisible. The
+        # commands have another consumer (tests/test_gate_entrypoint_config.py compares
+        # CHECK_CMD against the installed config); the BOUNDS parsed by that copy have none,
+        # so nothing else would have caught the drift either.
         self.assertEqual(
-            sorted(there), sorted(here),
-            "the two parsers of tools/check.conf disagree about which fields exist",
+            there, here,
+            "the two parsers of tools/check.conf disagree about its fields or their values",
         )
         # The value forms the shared grammar exists to accept: bounds are bare integers, and the
         # command fields stay quoted single strings (agents-j1te keeps them one string per line).
