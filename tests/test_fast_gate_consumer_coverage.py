@@ -118,12 +118,6 @@ CONSUMER_COVERAGE_ALLOWLIST = {
     },
     "egress_proxy": {
         "tests/containment_harness.py",
-        "tests/test_containment.py",
-        "tests/test_containment_adapters.py",
-        "tests/test_containment_declarations.py",
-        "tests/test_containment_egress.py",
-        "tests/test_containment_engine_credentials.py",
-        "tests/test_containment_prepass_pins.py",
     },
     "findings": {
         "tests/test_candidate_identity.py",
