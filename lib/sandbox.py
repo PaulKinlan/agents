@@ -131,12 +131,19 @@ _SHARED_USER_DIRS = _STRUCTURAL | frozenset({"state", "etc", "include", "var"})
 _SHARED_HOME_PREFIXES = frozenset({".cache", ".config"})
 
 # The same rule, for a different reason, on the depth-1 prefixes that are CREDENTIAL stores
-# (agents-z6sv): ~/.ssh, ~/.gnupg and ~/.aws hold the user's keys and tokens, never a tool's install
-# tree, so a namesake executable under one must not exempt the directory either. Refusing only by
-# name keeps it narrow: a tool's canonical ~/.local/<tool> tree and any unlisted hidden prefix keep
-# the exemption they had before. Siblings are the whole point - binding ~/.ssh/<name> whole would
-# expose id_* and known_hosts next to it.
-_CREDENTIAL_HOME_PREFIXES = frozenset({".ssh", ".gnupg", ".aws"})
+# (agents-z6sv, widened by agents-teg3): ~/.ssh, ~/.gnupg and ~/.aws hold the user's keys and
+# tokens, never a tool's install tree - and neither do ~/.kube (kubeconfig tokens), ~/.docker
+# (~/.docker/config.json auths) or ~/.gcloud (application default credentials), which the z6sv
+# review filed as the same class and this set now names. So a namesake executable under any of
+# them must not exempt the directory either. Refusing only by NAME keeps it narrow: a tool's
+# canonical ~/.local/<tool> tree and any unlisted hidden prefix keep the exemption they had
+# before. The prefix has to be in THIS set rather than in _SHARED_USER_DIRS, which holds bare
+# leaf names and is matched against the directory name, not the prefix (agents-or3m: the older
+# `prefix in _SHARED_USER_DIRS` test could never be true). Siblings are the whole point - binding
+# ~/.ssh/<name> whole would expose id_* and known_hosts next to it.
+_CREDENTIAL_HOME_PREFIXES = frozenset(
+    {".ssh", ".gnupg", ".aws", ".kube", ".docker", ".gcloud"}
+)
 
 # Roots that hold user credentials and are therefore never bound, only tmpfs'd over.
 _HIDDEN_ROOTS = ("/home", "/root")
