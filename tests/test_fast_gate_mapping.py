@@ -218,6 +218,21 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_issue_triage_prepass.py", mapped,
                       "fetch_issues.py missing pre-pass test suite (agents-ujtv)")
 
+    def test_station_script_class_arm_pins_parse_logs_consumer(self):
+        """The agents/*/scripts/*.py class arm must resolve a station script that has no
+        per-file arm, and must keep tests/test_prepass_exclusions.py (agents-1nb3).
+
+        Pinned because the arm's first version was a SILENT GREEN: it omitted the only
+        suite that exercises parse_logs.py while its own comment recorded the import
+        (rev-9iyf). Resolving at all is covered here too - resolve_fast_gate() re-raises
+        the gate's abort, so deleting the class arm outright fails this test rather than
+        passing it.
+        """
+        mapped = resolve_fast_gate(["agents/log-check/scripts/parse_logs.py"])
+        self.assertIn("tests/test_prepass_exclusions.py", mapped,
+                      "parse_logs.py's only exercising suite omitted: the class arm's "
+                      "silent green is back (agents-1nb3)")
+
     # --- agents-9nir: the ignore list is deliberate, and "no arm" fails loudly ----------
 
     def test_root_markdown_maps_to_docs_drift(self):
