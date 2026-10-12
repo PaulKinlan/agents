@@ -11,17 +11,20 @@ and the test should say so) or they broke the honest limit into a false claim of
 """
 
 import hashlib
+import io
+import contextlib
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from lib.pins_audit import DEFAULT_LOOKUP, audit, render  # noqa: E402
+from lib.pins_audit import DEFAULT_LOOKUP, audit, main, render  # noqa: E402
 
 CLI = ROOT / "tools" / "audit-tool-pins.sh"
 # The coverage oracle reads the LITERAL in run_cli()'s subprocess call, so it must name the tool
@@ -122,6 +125,29 @@ class AuditTests(unittest.TestCase):
         result = run_cli(["--pins", str(pins)])
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("CANNOT AUDIT", result.stdout)
+
+    def test_a_rederivation_that_exceeds_its_timeout_cannot_run_rather_than_traceback(self):
+        """agents-u4k7: the bound is BOTH present AND reported when it is reached.
+
+        tests/test_budget.py owns the repo-wide rule that this call carries a timeout= - it is
+        what caught this call unbounded, and that rule is not duplicated here. What it cannot
+        see is what happens AT the bound: a generator that hangs must leave the audit saying
+        "cannot run" (exit 2), never a traceback and never a silently skipped re-derivation,
+        which would read as agreement. The generator is driven to expiry through the module's
+        own constant, so this costs milliseconds rather than the generator's measured 6 s.
+        """
+        forged = self.dir / "lookup" / "git"
+        digest = write_fake_binary(forged, "ANY")
+        pins = write_pins(self.dir / "pins.yaml", {"git": {"path": str(forged), "sha256": digest}})
+        with mock.patch("lib.pins_audit.GENERATOR_TIMEOUT_SECONDS", 0.001):
+            report = audit(pins_arg=str(pins), lookup=str(self.dir / "lookup"))
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = main(["--pins", str(pins), "--lookup-path", str(self.dir / "lookup")])
+        self.assertIsNotNone(report.rederivation_error, "the timeout must be reported, not raised")
+        self.assertIn("did not finish within", report.rederivation_error)
+        self.assertIn("UNKNOWN", report.rederivation_error)
+        self.assertEqual(rc, 2, "a re-derivation that could not run is exit 2, never a green")
+        self.assertIn("FAILED", out.getvalue())
 
     # --- the audit does not fire on a coherent file ---------------------------------------
 

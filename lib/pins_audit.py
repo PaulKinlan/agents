@@ -60,6 +60,16 @@ DEFAULT_LOOKUP = os.pathsep.join([
     str(Path.home() / ".local" / "pi"),
 ])
 
+# HOW LONG THE RE-DERIVATION MAY TAKE (agents-u4k7). REQUIRED, not decorative: this module
+# shells out to the generator, and the repo's own guard
+# (tests/test_budget.py::TestNoUnboundedSubprocess) refuses an unbounded subprocess call - it
+# caught this call and was right to. CHOSEN, NOT COPIED: the real tools/generate-tool-pins.sh
+# takes ~6.0 s on this host (measured, 9 tools resolved and hashed), and this VM runs parallel
+# lanes plus one heavy-gate slot, so 120 s is 20x the measured cost - room for a host 20x
+# slower, while a generator that genuinely hangs still surfaces as "cannot run" well inside the
+# fast gate's own 360 s bound instead of hanging a gate.
+GENERATOR_TIMEOUT_SECONDS = 120
+
 
 def _tp():
     """Import lib.tool_pins with the repo root importable (the CLI is run from anywhere)."""
@@ -140,9 +150,19 @@ def select_pins(pins_arg: Optional[str]) -> "tuple[Optional[Path], str, List[str
 def _rederive(lookup: str, tmpdir: str) -> "tuple[Dict[str, Dict[str, str]], Optional[str]]":
     tp = _tp()
     out = Path(tmpdir) / "rederived.yaml"
-    proc = subprocess.run(
-        ["bash", str(GENERATOR), str(out), "--lookup-path", lookup],
-        cwd=str(ROOT), capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            ["bash", str(GENERATOR), str(out), "--lookup-path", lookup],
+            cwd=str(ROOT), capture_output=True, text=True,
+            timeout=GENERATOR_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # THE BOUND IS REPORTED, NOT RAISED (agents-u4k7). tests/test_budget.py's rule requires
+        # the timeout= to exist; this is what happens AT it. A generator that hangs must leave
+        # the audit saying "cannot run" (exit 2 via rederivation_error), because a traceback is a
+        # crash and a silently skipped re-derivation would read as "the file agrees".
+        return {}, (f"{GENERATOR.name} did not finish within {GENERATOR_TIMEOUT_SECONDS}s "
+                    "(measured: 6.0s on an idle host) - the fresh derivation is UNKNOWN, "
+                    "NOT an agreement")
     if proc.returncode != 0 or not out.exists():
         return {}, (f"{GENERATOR.name} exited {proc.returncode}: "
                     f"{(proc.stderr or proc.stdout).strip()[-200:]}")
