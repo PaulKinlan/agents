@@ -429,6 +429,26 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn(".agents/skills/beads/SKILL.md", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
+    def test_tree_guard_tier_runs_on_every_mapped_delta(self):
+        """agents-dv23 (ADR agents-c07o): tests/test_tree_guards.py is an always-on tier that must
+        be included in every mapped fast-gate run to enforce repo-wide invariants."""
+        for path in ("lib/budget.py", "lib/child_env.py", "tools.yaml", "README.md"):
+            with self.subTest(delta=path):
+                mapped = resolve_fast_gate([path])
+                self.assertIn("tests/test_tree_guards.py", mapped,
+                              f"mapped delta for {path} must contain the always-on tree-guard tier")
+
+    def test_tree_guard_tier_module_holds_only_tree_property_tests(self):
+        """agents-dv23: tests/test_tree_guards.py must hold only repo-wide tree property tests,
+        pinned by class names and count to prevent accidental unit-test creep into the always-on tier."""
+        tree_guards_path = ROOT / "tests" / "test_tree_guards.py"
+        self.assertTrue(tree_guards_path.is_file(), "tests/test_tree_guards.py must exist")
+        import ast
+        tree = ast.parse(tree_guards_path.read_text(encoding="utf-8"))
+        classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+        self.assertEqual(classes, ["TestNoUnboundedSubprocess"],
+                         "tests/test_tree_guards.py must contain exactly the pinned tree-guard classes")
+
     def test_an_unresolvable_base_is_an_error_not_an_empty_delta(self):
         """A base that is not a commit must FAIL LOUDLY, never fall back to the smoke subset (agents-c1z0 P1).
 
@@ -524,6 +544,7 @@ class TestFastGateMapping(unittest.TestCase):
             self.assertEqual(len(passed_lines), 1, f"expected exactly one 'fast-gate: passed:' line, got: {passed_lines}")
             suites_on_marker = passed_lines[0].replace("fast-gate: passed:", "").split()
             expected = sorted(["tests/test_coverage_contract.py", "tests/test_direct_run_completeness.py",
+                                 "tests/test_tree_guards.py",
                                str(probe_a.relative_to(ROOT)), str(probe_b.relative_to(ROOT))])
             self.assertEqual(sorted(suites_on_marker), expected,
                              f"completion marker must name all suites on the single marker line: {passed_lines[0]}")
@@ -541,7 +562,7 @@ class TestFastGateMapping(unittest.TestCase):
             env["GIT_CHANGED"] = "tests/test_abort_probe_tmp.py"
             res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 1, f"expected rc 1, got {res.returncode}")
-            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp tests.test_coverage_contract tests.test_direct_run_completeness)", res.stderr)
+            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp tests.test_coverage_contract tests.test_direct_run_completeness tests.test_tree_guards)", res.stderr)
         finally:
             probe.unlink(missing_ok=True)
 
@@ -571,7 +592,7 @@ class TestFastGateMapping(unittest.TestCase):
             time.sleep(0.3)
             os.killpg(p.pid, signal.SIGTERM)
             _, stderr = p.communicate()
-            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_coverage_contract tests.test_direct_run_completeness tests.test_sleep_probe_tmp))", stderr)
+            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_coverage_contract tests.test_direct_run_completeness tests.test_sleep_probe_tmp tests.test_tree_guards))", stderr)
         finally:
             probe.unlink(missing_ok=True)
 
