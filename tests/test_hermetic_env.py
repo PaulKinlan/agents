@@ -28,6 +28,42 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
         self.assertEqual(os.environ.get("FACTORY_ALLOW_UNPINNED_TOOLS"), "1",
                          "tests/__init__.py must establish dev/test opt-in")
 
+    def test_the_fast_gate_does_not_scrub_its_callers_environment(self):
+        """agents-u4k7: hermeticity must come from THIS declaration, not from the gate's shell.
+
+        The gate used to run ``unset FACTORY_TOOL_PINS`` plus ``export
+        FACTORY_ALLOW_UNPINNED_TOOLS=1`` before unittest. That made a green fast gate evidence
+        about the CALLER's shell rather than about this declaration - MEASURED: with the scrub in
+        place, making this package's declaration inert left ``tests/test_sandbox.py`` at "Ran 64
+        tests ... OK" (rc=0), so the gate could not report that the declaration was broken.
+        The deployed full gate (``python3 -m unittest discover -s tests -t . -v``) scrubs nothing
+        and relies on this declaration, so the fast gate must match it or the two gates are
+        evidence about different environments.
+
+        Both halves are asserted: the scrub statements are ABSENT from the gate, and the gate
+        STATES the environment policy in its output - checked through the real script with
+        FAST_GATE_DRY_RUN, which exits before running any suite, so this costs no test time.
+        """
+        gate_path = ROOT / "tools" / "fast-gate.sh"
+        gate = gate_path.read_text()
+        # COMMENTS MAY QUOTE THE OLD LINES; the assertion is about EXECUTABLE code, because a
+        # note explaining why the scrub was removed must be able to name the scrub it removed.
+        code = "\n".join(
+            line for line in gate.splitlines() if not line.lstrip().startswith("#"))
+        self.assertNotIn("unset FACTORY_TOOL_PINS", code,
+                         "the fast gate must not scrub the caller's FACTORY_TOOL_PINS")
+        self.assertNotIn("export FACTORY_ALLOW_UNPINNED_TOOLS", code,
+                         "the fast gate must not export the dev/test opt-in")
+        res = subprocess.run(
+            ["bash", str(gate_path)], cwd=str(ROOT),
+            env={**os.environ, "FAST_GATE_DRY_RUN": "1",
+                 "GIT_CHANGED": "tests/test_hermetic_env.py"},
+            capture_output=True, text=True, timeout=120)
+        self.assertIn("environment: the caller's, unmodified", res.stdout,
+                      f"the gate must say which environment its verdict is about: {res.stdout!r}")
+        self.assertIn("isolate_operator_config", res.stdout,
+                      "the gate must name the declaration that supplies hermeticity")
+
     def test_assertion_failure_does_not_leak_ambient_environment_values(self):
         """agents-3cm4: when hermetic assertions fail, they must assert on key presence only
         and never format the surrounding environment dictionary or ambient secrets into the message."""
