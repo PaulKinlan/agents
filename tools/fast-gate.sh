@@ -153,6 +153,15 @@ while IFS= read -r f; do
     tests/test_*.py)
       run="$run $f"
       ;;
+    tests/containment_harness.py)
+      # agents-3iog: the shared harness (setUp plus 11 helpers) the containment suites
+      # inherit. It is not named test_*.py on purpose - discovery must not collect it - so it
+      # needs its own arm, and it is the ONE entry in that family that legitimately names all
+      # of them: a harness change reaches every inherited execution, and the shape test is
+      # what catches a test method creeping into it (measured: with no arm the gate
+      # fail-closed on this file as unmapped, which is how the omission was found).
+      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_shape.py"
+      ;;
     tools/fast-gate.sh)
       # agents-8jx1: THE GATE'S OWN SCRIPT HAD AN ARM THAT MAPPED ONLY
       # tests/test_fast_gate_mapping.py. A change to tools/fast-gate.sh therefore selected the
