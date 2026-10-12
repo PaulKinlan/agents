@@ -118,12 +118,37 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_tests_fixtures_map_to_the_containment_suite(self):
         """tests/fixtures/ holds the checked-in attack payloads (agents-28nn round 5):
-        fake_engine.sh is asserted on by TestEngineCredentialPinning in the containment
-        suite, so a payload change must run the suite that contains the attack."""
+        fake_engine.sh is asserted on by TestEngineCredentialPinning, which agents-3iog
+        moved into tests/test_containment_engine_credentials.py, so a payload change must
+        run the module that contains the attack - and must NOT drag the whole containment
+        suite, which is what the split was for."""
         mapped = resolve_fast_gate(["tests/fixtures/fake_engine.sh"])
-        self.assertIn("tests/test_containment.py", mapped,
-                      "containing suite omitted for the checked-in attack payload "
-                      "(agents-28nn round 5)")
+        self.assertIn("tests/test_containment_engine_credentials.py", mapped,
+                      "containing module omitted for the checked-in attack payload "
+                      "(agents-28nn round 5; agents-3iog split)")
+        self.assertNotIn("tests/test_containment.py", mapped,
+                         "the attack-payload arm must not run the whole containment suite "
+                         "(agents-3iog: no other containment module reads tests/fixtures/)")
+
+    def test_containment_harness_maps_to_every_containment_module(self):
+        """tests/containment_harness.py holds the setUp plus the 11 helpers the containment suites
+        inherit (agents-3iog split), and it is deliberately NOT test_*.py so discovery never
+        collects it. That is exactly why it needs its own arm rather than being absorbed: with no
+        arm the gate FAILED CLOSED on it as unmapped ("changed file(s) match no mapping arm and no
+        ignore-list arm") - correct behaviour for a file whose changes run nothing, but it left the
+        split unlandable. A harness change reaches every inherited execution, so the arm names all
+        six modules, plus the shape test that catches a test method creeping into the harness."""
+        mapped = resolve_fast_gate(["tests/containment_harness.py"])
+        for module in (
+            "tests/test_containment.py",
+            "tests/test_containment_declarations.py",
+            "tests/test_containment_adapters.py",
+            "tests/test_containment_engine_credentials.py",
+            "tests/test_containment_prepass_pins.py",
+            "tests/test_containment_egress.py",
+            "tests/test_containment_shape.py",
+        ):
+            self.assertIn(module, mapped, f"harness arm must run {module} (agents-3iog)")
 
     def test_hermetic_env_and_package_init_map_to_hermetic_suite(self):
         """tests/__init__.py and tests/hermetic_env.py must map to test_hermetic_env.py and pin suites."""
@@ -165,6 +190,9 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_adapter_auth_failure.py", mapped)
         self.assertIn("tests/test_factory_core.py", mapped)
         self.assertIn("tests/test_containment.py", mapped, "pi.sh containment suite omitted (agents-71zn)")
+        self.assertIn("tests/test_containment_adapters.py", mapped,
+                      "pi.sh adapter suite omitted (agents-3iog split: the argv/env shape assertions "
+                      "live in the adapters module, which the pre-split arm ran as part of the whole file)")
         self.assertIn("tests/test_prompt_exposure.py", mapped, "pi.sh prompt exposure suite omitted (agents-zak0)")
 
     def test_other_adapters_map_to_auth_failure_and_core(self):
@@ -264,7 +292,12 @@ class TestFastGateMapping(unittest.TestCase):
         """agents/*/agent.yaml is globbed off the real tree by two suites (agents-9nir review)."""
         mapped = resolve_fast_gate(["agents/vuln-verify/agent.yaml"])
         self.assertIn("tests/test_docs_design.py", mapped, "stations.html glob omitted (test_docs_design.py:77)")
-        self.assertIn("tests/test_containment.py", mapped, "credential-grant drift guard omitted (test_containment.py:300)")
+        self.assertIn("tests/test_containment_declarations.py", mapped,
+                      "credential-grant drift guard omitted (agents-3iog moved it out of the "
+                      "mid-file suite; the declaration tests are the only consumers of agents/*/agent.yaml)")
+        self.assertNotIn("tests/test_containment.py", mapped,
+                         "the station-manifest arm must not run the whole containment suite "
+                         "(agents-3iog: no other containment module reads the real agents/ tree)")
 
     def test_lines_yaml_maps_to_docs_design(self):
         """lines/*.yaml is globbed off the real tree by the lines.html check (agents-9nir review)."""

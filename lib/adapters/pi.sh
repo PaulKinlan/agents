@@ -47,7 +47,8 @@ case "$TOOL_POLICY" in
   # a DIRECT invocation with FACTORY_TOOL_POLICY=worktree-write hands pi edit,write with
   # NO kernel boundary. That is misuse, not a supported caller — every production path
   # (CLI, line, hillclimb, the CI action, the scheduler) converges on run_agent — and
-  # tests/test_containment.py pins it as a misuse regression test, not a trust mechanism.
+  # the containment suites pin it as a misuse regression test, not a trust mechanism
+        # (tests/test_containment_adapters.py; agents-3iog split).
   worktree-write)
     POLICY_FLAGS=(--tools read,grep,find,ls,edit,write --no-extensions --no-approve)
     if [ -z "${FACTORY_SANDBOXED:-}" ]; then
