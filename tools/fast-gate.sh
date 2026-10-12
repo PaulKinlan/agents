@@ -527,7 +527,6 @@ while IFS= read -r f; do
       # RUNNER, which is what DISPATCHES adapters, so an adapter-only change can regress it. It
       # was mapped in the `factory)` arm above but not this one (agents-gioi: cited by PATTERN, not
       # by line - the number that used to be here, :129, is the GIT_CHANGED assignment).
-      # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0).
       mapped="$mapped tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_antigravity_prompt_content.py tests/test_line_andon.py"
       ;;
     lib/bench/*.py)
