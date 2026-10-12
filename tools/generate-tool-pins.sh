@@ -200,7 +200,7 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
 "$MKDIR" -p "$("$DIRNAME_BIN" "$OUT")"
 {
   echo "# Host-local Software Factory tool pins (agents-3g6)."
-  echo "# Generated $("$DATE" -u +%Y-%m-%dT%H:%M:%SZ); the consuming run selects it with an explicit --tool-pins (merged over tools.yaml) - an inherited FACTORY_TOOL_PINS is the dispatcher-to-child handoff, not how a run chooses its pins."
+  echo "# Generated $("$DATE" -u +%Y-%m-%dT%H:%M:%SZ); the consuming run selects it with an explicit --tool-pins (merged over tools.yaml) - an inherited FACTORY_TOOL_PINS is the LEGACY host fallback (agents-uekw removes it), NOT the dispatcher-to-child handoff: the dispatcher hands a child its verified snapshot as FACTORY_VERIFIED_TOOL_PINS (lib/tool_pins.py host_pins_path)."
   echo "# Regenerate after any tool upgrade: tools/generate-tool-pins.sh"
   echo "# Lookup confined to: $PIN_LOOKUP_PATH (an inherited PATH is never trusted; agents-28nn round 2)"
   echo "# Resolution is explicit per-directory filesystem tests, never command -v: exported"
