@@ -472,17 +472,28 @@ class TestConfigIsResolvedLoudly(unittest.TestCase):
                           "install output must report the actual destination written")
 
         # 2. Docs agreement: both tools/check.conf and tools/check-cmd.sh must document
-        # the FLEET_CHECK_CONF override destination rather than claiming ~/.fleet/check.conf unconditionally
-        conf_text = conf_doc.read_text(encoding="utf-8")
-        cmd_text = resolver.read_text(encoding="utf-8")
-        self.assertIn("FLEET_CHECK_CONF", conf_text,
-                      "tools/check.conf must document FLEET_CHECK_CONF override destination")
-        self.assertIn("FLEET_CHECK_CONF", cmd_text,
+        # the FLEET_CHECK_CONF override destination rather than claiming ~/.fleet/check.conf unconditionally.
+        # Scoped strictly to the leading documentation headers so code occurrences cannot satisfy the check (agents-0fne).
+        def _leading_comment_header(path: Path) -> str:
+            lines = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    lines.append(line)
+                else:
+                    break
+            return "\n".join(lines)
+
+        conf_header = _leading_comment_header(conf_doc)
+        cmd_header = _leading_comment_header(resolver)
+        self.assertIn("FLEET_CHECK_CONF", conf_header,
+                      "tools/check.conf header must document FLEET_CHECK_CONF override destination")
+        self.assertIn("FLEET_CHECK_CONF", cmd_header,
                       "tools/check-cmd.sh header must document FLEET_CHECK_CONF override destination")
-        self.assertNotIn("sources ONLY $HOME/.fleet/check.conf", conf_text,
-                         "tools/check.conf must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
-        self.assertNotIn("sources ONLY $HOME/.fleet/check.conf", cmd_text,
-                         "tools/check-cmd.sh must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
+        self.assertNotIn("sources ONLY $HOME/.fleet/check.conf", conf_header,
+                         "tools/check.conf header must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
+        self.assertNotIn("sources ONLY $HOME/.fleet/check.conf", cmd_header,
+                         "tools/check-cmd.sh header must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
 
 
 if __name__ == "__main__":
