@@ -125,8 +125,9 @@ However, because consumer coverage validates the fast-gate's own integrity acros
   2. `consumer_coverage="tests/test_fast_gate_consumer_coverage.py"` (mapping contract and consumer coverage).
 Separating them into distinct modules preserves the purity of the tree-guard tier while ensuring both structural invariants run unconditionally on every gate execution.
 
-### Re-entrancy Protection (`agents-q615`, `agents-dv23`)
-Tests that inspect the fast-gate mapping or tree properties must never invoke `tools/fast-gate.sh` without `FAST_GATE_DRY_RUN=1` and an explicit non-empty `GIT_CHANGED`. Running the gate with an empty delta causes the script to inspect the active git diff, select the test suite itself, and spawn runaway recursive fork loops.
+### Re-entrancy Protection and Invocation Independence (`agents-q615`, `agents-dv23`)
+Tests that inspect the fast-gate mapping (such as `tests/test_fast_gate_mapping.py`) must never invoke `tools/fast-gate.sh` without `FAST_GATE_DRY_RUN=1` and an explicit non-empty `GIT_CHANGED`, because running the gate with an empty delta causes the script to inspect the active git diff, select the test suite itself, and spawn runaway recursive fork loops.
+For the tree-guard tier (`tests/test_tree_guards.py`), the protection is even stronger: the tier module contains zero references to `tools/fast-gate.sh` and does not invoke the gate at all. It evaluates tree properties directly via the filesystem, making recursive re-entrancy impossible by construction.
 
 ---
 
