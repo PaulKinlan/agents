@@ -1,0 +1,121 @@
+From ab005d94a0e98315ce772749c6ac7de9d12e57e1 Mon Sep 17 00:00:00 2001
+From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
+Date: Mon, 12 Oct 2026 18:28:54 +0000
+Subject: [PATCH] fix(remote): candidate discovery delegates to
+ has_import_reference and bounds bare-stem subp matches
+
+1. In find_candidate_tests_for_file(), remove the 'len(stem) >= 4' gate on
+   has_import_reference, delegating all import-based candidate discovery
+   to has_import_reference regardless of stem length. This closes the
+   silent-true loophole where short-stem modules (e.g. api, cli, db, ui) with
+   omitted real importers fell back to name correspondence against executed
+   namesake suites.
+2. In the subprocess invocation pattern, bound bare-stem matching using
+   (?<![\w-])<stem>(?:\.[a-z]+)?(?![a-zA-Z0-9_]), eliminating phantom
+   omitted consumer matches on command-line flags (e.g. --sandbox) while
+   preserving genuine module-style (python -m lib.sandbox) and extensionless
+   (scripts/api) executors.
+3. In tests/check-coverage.test.sh, add test section 8 asserting both behaviors.
+---
+ remote/check-coverage.py     |  4 +--
+ tests/check-coverage.test.sh | 62 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 64 insertions(+), 2 deletions(-)
+
+diff --git a/remote/check-coverage.py b/remote/check-coverage.py
+index 8823d5c..cd78462 100755
+--- a/remote/check-coverage.py
++++ b/remote/check-coverage.py
+@@ -649,7 +649,7 @@ def extract_coverage(log_path, repo_dir, commit_sha, cmd_str=""):
+                                 candidates.add(rel)
+                         except Exception:
+                             pass
+-                    elif len(stem) >= 4:
++                    else:
+                         try:
+                             with open(os.path.join(root, f), "r", errors="ignore") as fp:
+                                 content = fp.read()
+@@ -670,7 +670,7 @@ def extract_coverage(log_path, repo_dir, commit_sha, cmd_str=""):
+                     cleaned = re.sub(r'#.*', '', cleaned)
+                     subp_pattern = (
+                         r'(?:subprocess|Popen|exec|spawn|run|fork|call|check_output|system)\s*\([^)]*?'
+-                        r'(?:' + re.escape(file_path) + r'|' + re.escape(base) + r'|\b' + re.escape(stem) + r'(?:\.[a-z]+)?\b)'
++                        r'(?:' + re.escape(file_path) + r'|' + re.escape(base) + r'|(?<![\w-])' + re.escape(stem) + r'(?:\.[a-z]+)?(?![a-zA-Z0-9_]))'
+                     )
+                     if re.search(subp_pattern, cleaned, re.DOTALL):
+                         candidates.add(rel)
+diff --git a/tests/check-coverage.test.sh b/tests/check-coverage.test.sh
+index c0950df..e1b5960 100644
+--- a/tests/check-coverage.test.sh
++++ b/tests/check-coverage.test.sh
+@@ -216,6 +216,68 @@ printf '== tests/other.test.sh\n-- other finished in 1s\n' > "$ROOT/log-hub-othe
+ out=$(run "$R7" "$ROOT/log-hub-other.txt" "$SHA7"); u=$(jq_get unmapped <<<"$out")
+ case " $u " in *" tests/thing.test.sh "*) ok "7c a changed test file the gate did NOT run is still flagged (the warning keeps its meaning)";; *) bad "7c unexecuted test file must stay unmapped" "[$u]";; esac
+ 
++echo "8. candidate discovery delegates to has_import_reference and eliminates phantom subprocess matches"
++# (a) short-stem module (len < 4) with omitted real importer: previously skipped by len(stem) >= 4,
++# falling back to name correspondence against the executed namesake test -> silent true.
++# Now: candidate discovery delegates to has_import_reference for all stem lengths.
++R8=$ROOT/eight; mkdir -p "$R8/lib" "$R8/tests"; new_repo "$R8"
++cat > "$R8/lib/api.py" <<'EOF'
++def get(): return 1
++EOF
++cat > "$R8/tests/test_api.py" <<'EOF'
++import unittest
++from lib.api import get
++EOF
++cat > "$R8/tests/test_client.py" <<'EOF'
++import unittest
++from lib.api import get
++EOF
++# (b) subprocess call with option flag matching stem (e.g. bwrap --sandbox):
++# previously matched bare \b<stem>\b in subp_pattern -> phantom omission.
++# Now: subp_pattern strictly matches invocation of file_path or base, not option flags.
++cat > "$R8/lib/sandbox.py" <<'EOF'
++def isolate(): pass
++EOF
++cat > "$R8/tests/test_sandbox.py" <<'EOF'
++import unittest
++from lib.sandbox import isolate
++EOF
++cat > "$R8/tests/test_bwrap.py" <<'EOF'
++import unittest, subprocess
++# Test invokes bwrap with --sandbox flag, but does NOT import lib.sandbox
++subprocess.run(["bwrap", "--sandbox", "/tmp"])
++EOF
++cat > "$R8/tests/test_runner.py" <<'EOF'
++import unittest, subprocess
++# Genuine module-style executor for lib.sandbox
++subprocess.run(["python3", "-m", "lib.sandbox"])
++EOF
++cat > "$R8/tests/test_node.py" <<'EOF'
++import unittest, subprocess
++# Genuine extensionless executor for lib/api
++subprocess.run(["node", "scripts/api"])
++EOF
++
++git -C "$R8" add -A && git -C "$R8" -c user.email=t@t -c user.name=t commit -q -m "base"
++git -C "$R8" checkout -q -b work8
++echo "# change" >> "$R8/lib/api.py"
++echo "# change" >> "$R8/lib/sandbox.py"
++git -C "$R8" -c user.email=t@t -c user.name=t commit -q -am "update api and sandbox"
++SHA8=$(git -C "$R8" rev-parse HEAD)
++
++# Run where only namesake suites ran (tests/test_api.py and tests/test_sandbox.py)
++printf 'fast-gate: passed: tests/test_api.py tests/test_sandbox.py\n' > "$ROOT/log-namesake.txt"
++out=$(run "$R8" "$ROOT/log-namesake.txt" "$SHA8")
++u=$(jq_get unmapped <<<"$out")
++om=$(jq_get omitted <<<"$out")
++
++case " $om " in *" tests/test_client.py "*) ok "8a short-stem omitted importer is detected as omitted candidate (was silent true)";; *) bad "8a short-stem omitted importer missed" "omitted: [$om]";; esac
++case " $u " in *" lib/api.py "*) ok "8b short-stem file is flagged unmapped when importer omitted";; *) bad "8b short-stem file not flagged unmapped" "unmapped: [$u]";; esac
++case " $om " in *" tests/test_bwrap.py "*) bad "8c subprocess flag --sandbox incorrectly flagged as omitted consumer" "omitted: [$om]";; *) ok "8c subprocess flag --sandbox does not create phantom omitted consumer";; esac
++case " $om " in *" tests/test_runner.py "*) ok "8e module-style subprocess invocation detected as omitted candidate";; *) bad "8e module-style subprocess invocation missed" "omitted: [$om]";; esac
++case " $om " in *" tests/test_node.py "*) ok "8f extensionless subprocess invocation detected as omitted candidate";; *) bad "8f extensionless subprocess invocation missed" "omitted: [$om]";; esac
++case " $u " in *" lib/sandbox.py "*) ok "8d lib/sandbox.py is flagged unmapped when module-style runner is omitted";; *) bad "8d lib/sandbox.py incorrectly clean when runner omitted" "unmapped: [$u]";; esac
++
+ if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
+-- 
+2.43.0
+
