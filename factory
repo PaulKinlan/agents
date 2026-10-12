@@ -45,8 +45,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
     from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
-                               UNPINNED_ALLOW_ENV, allowlisted_path, prepass_tool_env, resolve_tool,
-                               unpinned_allowed, write_effective_pins)
+                               UNPINNED_ALLOW_ENV, allowlisted_path, configure_host_pins,
+                               prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
     from lib.budget import StationTimeout, budget_for, run_station_command
@@ -71,8 +71,8 @@ except ImportError:
                              SandboxError, engine_sandboxed, sandbox_available,
                              sandbox_command, sandbox_record, sandbox_unavailable_reason)
     from lib.tool_pins import (HOST_PINS_ENV, PINS_RO_BOUND_ENV, TRUSTED_TOOLS, ToolPinError,
-                               UNPINNED_ALLOW_ENV, allowlisted_path, prepass_tool_env, resolve_tool,
-                               unpinned_allowed, write_effective_pins)
+                               UNPINNED_ALLOW_ENV, allowlisted_path, configure_host_pins,
+                               prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -2819,6 +2819,11 @@ def promote_public_issue(target_name: str, issue_url: str) -> None:
 def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=prog or "factory", description="The Software Factory (factory)")
     parser.add_argument("--agent", action="store_true", dest="agent_guide", help="Print machine-actionable instructions and recipes for AI agents to integrate the factory")
+    parser.add_argument("--tool-pins", dest="tool_pins", default=None, metavar="PATH",
+                        help="Host-local tool pins file (this machine's binary hashes), merged over "
+                             "the committed tools.yaml. Explicit by design: an environment variable "
+                             "is inherited by every step of a job, so it cannot establish that THIS "
+                             "run chose the file (agents-oq3j). Given before the subcommand.")
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to run")
 
     # integrate
@@ -2949,6 +2954,9 @@ def main():
     parser = build_parser()
 
     args = parser.parse_args()
+    # The run's own pins decision, resolved BEFORE any tool resolution below (agents-oq3j):
+    # every resolve_tool past this line reads it, and the environment is not consulted for it.
+    configure_host_pins(getattr(args, "tool_pins", None))
     if getattr(args, "agent_guide", False):
         print_agent_instructions("all")
         sys.exit(0)

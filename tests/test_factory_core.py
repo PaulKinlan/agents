@@ -1023,6 +1023,35 @@ class TestChooseEngine(unittest.TestCase):
             self.assertEqual(factory_cli.choose_engine("auto"), "pi")
 
 
+class ToolPinsRunDecisionTests(unittest.TestCase):
+    """agents-oq3j: the dispatcher records the RUN's own pins decision before it dispatches.
+
+    lib.tool_pins resolves the host pins file from that decision and does not consult the
+    environment for it, so an earlier step of a job cannot choose a pins file for a run that named
+    its own. These pin the WIRING (argument -> decision); tests/test_tool_pins.py owns the
+    resolution rule itself.
+    """
+
+    def test_the_tool_pins_argument_becomes_the_runs_own_decision(self):
+        with mock.patch.object(factory_cli, "configure_host_pins") as decided, \
+                mock.patch.object(factory_cli, "list_agents"), \
+                mock.patch.object(sys, "argv",
+                                  ["factory", "--tool-pins", "/tmp/run.pins.yaml", "list"]):
+            factory_cli.main()
+        decided.assert_called_once_with("/tmp/run.pins.yaml")
+
+    def test_an_omitted_flag_is_recorded_as_an_explicit_absence(self):
+        # Deliberately NOT the same as "never configured": the dispatcher says it named no file,
+        # so the staged fallback is a decision it made (and announces) rather than something the
+        # environment did to it. When the enforcement follow-up lands, this call keeps its shape
+        # and the fallback behind it goes away.
+        with mock.patch.object(factory_cli, "configure_host_pins") as decided, \
+                mock.patch.object(factory_cli, "list_agents"), \
+                mock.patch.object(sys, "argv", ["factory", "list"]):
+            factory_cli.main()
+        decided.assert_called_once_with(None)
+
+
 if __name__ == "__main__":
     unittest.main()
 

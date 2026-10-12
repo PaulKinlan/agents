@@ -13,7 +13,7 @@
 #
 # Usage:
 #   tools/generate-tool-pins.sh [OUT] [--lookup-path DIRS]
-#   export FACTORY_TOOL_PINS="$HOME/.config/factory/tools.pins.yaml"
+#   factory --tool-pins "$HOME/.config/factory/tools.pins.yaml" run <agent> --target <target>
 #
 # THE LOOKUP NEVER ASKS THE SHELL WHAT A NAME MEANS (agents-28nn rounds 2-3, review P1s).
 # The hash this script writes IS the vouch for the binary, so the binary's provenance is
@@ -199,7 +199,7 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
 "$MKDIR" -p "$("$DIRNAME_BIN" "$OUT")"
 {
   echo "# Host-local Software Factory tool pins (agents-3g6)."
-  echo "# Generated $("$DATE" -u +%Y-%m-%dT%H:%M:%SZ); consumed via FACTORY_TOOL_PINS (merged over tools.yaml)."
+  echo "# Generated $("$DATE" -u +%Y-%m-%dT%H:%M:%SZ); the consuming run selects it with an explicit --tool-pins (merged over tools.yaml) - an inherited FACTORY_TOOL_PINS is the dispatcher-to-child handoff, not how a run chooses its pins."
   echo "# Regenerate after any tool upgrade: tools/generate-tool-pins.sh"
   echo "# Lookup confined to: $PIN_LOOKUP_PATH (an inherited PATH is never trusted; agents-28nn round 2)"
   echo "# Resolution is explicit per-directory filesystem tests, never command -v: exported"
@@ -240,4 +240,4 @@ print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$path")"
   done
 } > "$OUT"
 echo "Wrote tool pins to $OUT (lookup confined to: $PIN_LOOKUP_PATH)"
-echo "Export it: export FACTORY_TOOL_PINS=\"$OUT\""
+echo "Hand it to the run: factory --tool-pins \"$OUT\" run <agent> --target <target>"

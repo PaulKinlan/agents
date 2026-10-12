@@ -45,11 +45,14 @@ jobs:
         run: |
           set -euo pipefail
           tools/generate-tool-pins.sh "$RUNNER_TEMP/tools.pins.yaml"
-          echo "FACTORY_TOOL_PINS=$RUNNER_TEMP/tools.pins.yaml" >> "$GITHUB_ENV"
 
       - name: Verify generated site is fresh
         run: |
-          python3 tools/gen_site.py
+          # agents-oq3j: the pins file is passed EXPLICITLY, never exported through $GITHUB_ENV.
+          # That channel is inherited by every later step of the job, so a name in it cannot
+          # establish that this step chose the file - only this argument does. The generate step
+          # above is the producer, this is its consumer, and that ordering is the file's own.
+          python3 tools/gen_site.py --tool-pins "$RUNNER_TEMP/tools.pins.yaml"
           if ! git diff --exit-code; then
             echo "Error: Generated docs are stale or uncommitted. Run 'python3 tools/gen_site.py' locally and commit the changes." >&2
             exit 1
