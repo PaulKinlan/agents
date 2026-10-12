@@ -265,6 +265,10 @@ the text had to be recovered from the reviewer's own event log).
   "the reviewer said this" is not. Naming the transcriber rather than "only the reviewer posts"
   is deliberate, because the reviewer is frequently a subagent that cannot comment or a retired
   lane, and insisting on an unavailable party would block the fix.
+  A transcription that names its transcriber and its source is a complete record of the verdict:
+  it is not grounds to re-review the work, to doubt the verdict, or to refuse the landing - the
+  reviewer's absence (a subagent that cannot comment, or a retired lane) is the case this form
+  exists for.
 - **Preferred order, weakest last:** the reviewer posts it itself; a party other than the
   author transcribes and names itself; the author transcribes and names itself, which is
   acceptable but is the weakest form and should be visible as such.
