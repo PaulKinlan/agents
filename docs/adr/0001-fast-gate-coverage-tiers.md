@@ -59,8 +59,8 @@ Test suites in `agents-factory` are categorized into three distinct coverage tie
 
 ### Tier 2: Class-Contract Suites (Path-Group Scanners)
 - Scanners whose inspection domain strictly equals the trigger set of an explicit glob arm.
-- Examples:
-  - `agents/*/scripts/*.py` triggers `tests/test_redaction.py`.
+- Examples (illustrative of the tier, not a uniform global pattern):
+  - In individual agent arms, `agents/<agent>/scripts/*.py` triggers tests appropriate for that arm (e.g. `tests/test_redaction.py`), while directories with dedicated arms (such as `agents/docs-drift/scripts/check_docs.py`) select their own suites (e.g. `tests/test_docs_drift.py`).
   - `agents/*/agent.yaml` triggers `tests/test_containment_declarations.py`.
   - `docs/*` triggers `tests/test_docs_drift.py`.
 - When a new file is added within these domains, the arm triggers automatically; no always-on execution is needed.
@@ -86,12 +86,12 @@ A test class qualifies for `tests/test_tree_guards.py` if and only if it satisfi
 1. `TestNoUnboundedSubprocess` (`agents-dv23`):
    - **Invariant:** Every `subprocess.run` across `factory` and `lib/**/*.py` must provide an explicit `timeout=` parameter.
    - **Domain:** Any Python module in `lib/` or root CLI.
-   - **Cost:** ~0.18s wall-clock time.
+   - **Cost:** Measured live on the gating union tree (`37a9671` / `beefa71c`) as ~0.30s (single wall-clock run inclusive of interpreter startup; whole `tests/test_tree_guards.py` module runs in ~0.25s). Clears the `< 0.5s` per-test bound.
 
 2. `TestWorktreeBeadsDecoyGuard` (`agents-5br9`):
    - **Invariant:** Linked git worktrees (`[ -f "$toplevel/.git" ]`) must not contain local `.beads/embeddeddolt` or `.beads/dolt` database directories, preventing silent empty-ledger divergence and remote data overwrites.
    - **Domain:** Any linked worktree across the repository.
-   - **Cost:** ~0.02s wall-clock time.
+   - **Cost:** Measured live on the gating union tree (`37a9671` / `beefa71c`) as ~0.07s (single wall-clock run inclusive of interpreter startup). Clears the `< 0.5s` per-test bound.
 
 ---
 
@@ -103,7 +103,7 @@ Understanding what must be excluded from `test_tree_guards.py` is as critical as
 |---|---|---|---|
 | **Symbol-Referenced Consumers** | `TestFastGateConsumerCoverage` (`agents-pdth`, `agents-undf`) | Asserts consumer coverage of specific symbols and fast-gate script mappings. Traces symbols, not whole-tree properties. | Dedicated always-on mapping suite (`tests/test_fast_gate_consumer_coverage.py`), appended to every run alongside the tier. |
 | **Module Unit Tests** | `TestBudgetEngine` (`tests/test_budget.py`) | Tests internal methods of `lib/budget.py`. Running unit tests always-on adds 7s+ latency and breaks unrelated lanes on isolated logic changes. | Module-specific test suite triggered only by relevant file arms. |
-| **Path-Bounded Walkers** | `TestRedactionRules` (`tests/test_redaction.py`) | Domain is bounded to `agents/*/scripts/*.py`, which already matches an explicit fast-gate glob arm. | Selective class-contract arm. |
+| **Path-Bounded Walkers** | `TestRedactionRules` (`tests/test_redaction.py`) | Domain is bounded to specific script arms (e.g. `agents/*/scripts/*.py`), which match selective fast-gate arms. | Selective class-contract arm. |
 | **Dynamic / End-to-End Audits** | Full factory audit pipeline (`factory run`) | Multi-minute, heavy subprocess execution requiring sandboxing and model execution. | Nightly factory runs or merger-side full gates (`fleet-check`). |
 | **Documentation Format Walkers** | `check_docs.py` | Markdown link and file existence checks are already comprehensively triggered by `docs/*` and root doc arms. | Selective doc arm (`tests/test_docs_drift.py`). |
 
