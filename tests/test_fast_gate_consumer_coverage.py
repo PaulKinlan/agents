@@ -17,6 +17,8 @@ smoke run, so it has exactly the reach the tree-guard tier has - a pin that exis
 is the same as no pin.
 """
 
+import functools
+import importlib.util
 import os
 import re
 import subprocess
@@ -25,6 +27,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# The independent oracle the mirror mirrors (agents-5z4e). It lives in the fleet tree, so it is NOT
+# available to this repo's CI - which is exactly why the mirror is the always-on assertion and this
+# cross-check is optional rather than the other way round.
+_FLEET_ORACLE = Path("/home/exedev/fleet/remote/check-coverage.py")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -48,8 +55,14 @@ ROOT = Path(__file__).resolve().parent.parent
 # would disagree silently - the probe below is what catches the version of that failure that happens
 # HERE (an oracle that stops seeing anything), not the version that happens there.
 #
-# COST: measured at 0.04s per module dry run, 21 modules, ~0.8s on EVERY mapped gate run. That is
-# within the ADR agents-g9e2 budget of ~1s and is why this is a pin rather than 21 fixed arms.
+# COST, RE-MEASURED AT agents-y2b2 RATHER THAN RESTATED: the shape this file COMMITS TO made 32 gate dry
+# runs - 21 modules in one test, the allowlist's 11 in another - which the recorded figure had undercounted
+# as 21. Sharing the answer takes it to 21, MEASURED BY COUNTING SUBPROCESS CALLS with the lru_cache
+# decorators in and out rather than estimated. So the honest figure is SMALLER than the wrong one was, which
+# is why the remedy was 'compute it once' rather than 'correct the number': a corrected figure for an
+# unchanged shape would rot the moment the shape moved. Whole class on this VM: 4 tests in 5.526s against 3
+# tests in 5.663s before - the cross-check added in agents-5z4e cost less than the dry runs it stopped
+# repeating.
 #
 # THE ALLOWLIST IS DEBT, AND IT IS GUARDED IN BOTH DIRECTIONS: an omission NOT in it fails (the arm
 # must be fixed or the entry justified), and an entry that is NO LONGER an omission fails as stale -
@@ -171,8 +184,13 @@ def _strip_code(source):
     return source
 
 
+@functools.lru_cache(maxsize=None)
 def _importing_suites(stem, root=None):
-    """Suites under tests/ whose CODE imports `stem` - the oracle's consumer set."""
+    """Suites under tests/ whose CODE imports `stem` - the oracle's consumer set.
+
+    MEMOISED (agents-y2b2): two tests ask the same question of the same modules, and without sharing the
+    answer the committed shape paid for every dry run twice.
+    """
     root = root or ROOT
     pattern = re.compile(_IMPORT_RE.format(stem=re.escape(stem)), re.MULTILINE)
     found = set()
@@ -186,12 +204,17 @@ def _importing_suites(stem, root=None):
     return found
 
 
+@functools.lru_cache(maxsize=None)
 def _selected_suites(module_path, root=None):
     """What the fast gate would actually run for a change to `module_path`.
 
     Asked of the gate itself with FAST_GATE_DRY_RUN, so this pins the mapping as it IS rather than a
     second copy of it. The dry run exits before the runner, so this cannot recurse into the suite that
     called it (agents-qtnv's re-entrancy concern, and agents-k6kr's wrapped-shape incident).
+
+    MEMOISED (agents-y2b2): the cost claim recorded 21 dry runs where the COMMITTED shape made 32, because
+    two tests each asked the gate for the same mapping. Sharing the answer is the remedy that cannot rot -
+    a corrected figure for an unchanged shape would.
     """
     root = root or ROOT
     proc = subprocess.run(
@@ -275,6 +298,60 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
                         f"the list shrinks (agents-pdth)."
                     )
         self.assertEqual(stale, [], "\n".join(stale))
+
+
+class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
+    """agents-5z4e: the mirror is what runs everywhere; the oracle is what the mirror mirrors.
+
+    MIRROR PLUS OPTIONAL AGREEMENT CROSS-CHECK, the shape coord endorsed: the mirror stays the always-on
+    assertion nothing can skip, and when the oracle IS present this asserts the two agree - so a drift in
+    either becomes a red test rather than two green ones that quietly disagree.
+
+    THE TWO SUITE DEFINITIONS DIFFER IN PRINCIPLE AND AGREE IN FACT HERE. The mirror globs tests/**/*.py;
+    the oracle's is_test_filename excludes __init__.py and helper modules. Measured at agents-5z4e: the
+    four files the oracle would not call suites (__init__.py, containment_harness.py, hermetic_env.py,
+    sandbox_fixtures.py) import none of the 21 lib modules, so the two sets are identical for every module.
+    IF THAT EVER STOPS BEING TRUE THIS TEST FAILS, which is what it is for: it names the file that created
+    the disagreement rather than letting two definitions drift apart silently.
+
+    COST: none on any gate in CI, where the oracle is absent and this skips; on a VM that has it, 21 modules
+    x 87 files of regex - a fraction of a second, and no gate dry runs at all (it reuses the memoised
+    _importing_suites the other tests already computed).
+    """
+
+    def test_the_mirror_and_the_fleet_oracle_agree_when_the_oracle_is_present(self):
+        if not _FLEET_ORACLE.is_file():
+            self.skipTest(
+                f"the fleet oracle is not present at {_FLEET_ORACLE}, so the mirror alone runs - this is "
+                "the normal case in this repo's CI, and the reason the mirror is not a call to the oracle"
+            )
+        spec = importlib.util.spec_from_file_location("_fleet_check_coverage", _FLEET_ORACLE)
+        oracle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(oracle)
+        mismatches = []
+        for module in _lib_modules():
+            mirror = _importing_suites(module)
+            theirs = set()
+            for path in sorted((ROOT / "tests").rglob("*.py")):
+                try:
+                    content = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                # RAW content: the oracle strips comments and docstrings itself, and IT owns that
+                # preprocessing - a mirror that pre-stripped would be comparing its own rule to the
+                # oracle's filtered view of it (agents-pdth measured 16 vs 15 that way).
+                if oracle.has_import_reference(content, module):
+                    theirs.add(path.relative_to(ROOT).as_posix())
+            if mirror != theirs:
+                mismatches.append(
+                    f"{module}: mirror-only={sorted(mirror - theirs)} oracle-only={sorted(theirs - mirror)}"
+                )
+        self.assertEqual(
+            mismatches,
+            [],
+            "the mirror and the fleet oracle disagree; one of the two rules has changed and the pin is "
+            "enforcing the old one (agents-5z4e):\n" + "\n".join(mismatches),
+        )
 
 
 if __name__ == "__main__":
