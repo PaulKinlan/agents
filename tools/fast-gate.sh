@@ -255,6 +255,17 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py tests/test_station_trusted_tool_pins.py"
       ;;
     lib/child_env.py)
+      # This arm deliberately does NOT include two suites that the fleet-check wrapper's coverage
+      # oracle names for this file: tests/test_credential_broker.py and tests/test_sink_adapters.py.
+      # They import the builder and even call it (the broker suite at :649 and :677), but nothing
+      # they assert on the result notices a wrong one. MEASURED on 2026-10-12 for agents-6ujc:
+      # patching child_environment to leak an ambient AWS_SECRET_ACCESS_KEY leaves
+      # test_credential_broker at "80 tests, 0 failures, 0 errors" and test_sink_adapters at
+      # "29 tests, 0 failures, 0 errors" - identical to their unmutated baselines - while the SAME
+      # mutation fails six tests in tests/test_child_env.py, the suite that actually covers this
+      # boundary. Adding them would add 109 tests that do not exercise the file while LOOKING like
+      # coverage, so the warning is noise from an import-graph proxy rather than a missing arm; the
+      # real gap is a credential-boundary assertion in those two suites, which is separate work.
       # The child environment builder. Its own suite plus the two consumers that resolve trusted
       # tools from the environment it constructs (agents-oq3j), and the promotion suite, whose
       # mock patches the BUILDER'S SIGNATURE: agents-oq3j added a `verified_pins` argument and
