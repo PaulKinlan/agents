@@ -608,8 +608,11 @@ while IFS= read -r f; do
       ;;
     docs/*)
       # Documentation pages snapshot and publishing scope (agents-vt7w). tests/test_docs_drift.py
-      # pins docs/INTEGRATION.md by content (its Section 5 script table at :191 and its section
-      # anchors at :485-492), so it belongs in this union (agents-9nir review).
+      # pins docs/INTEGRATION.md by content - and the numbers below are THAT SUITE'S lines, not the
+      # page's: its Section 5 script-table test at :191 and its anchor filter at :485-492 (agents-xgha:
+      # this used to read "docs/INTEGRATION.md ... its section anchors at :485-492", and
+      # docs/INTEGRATION.md's own Section 5 does not begin until :408, so the sentence bound the
+      # number to the wrong file). That is why it belongs in this union (agents-9nir review).
       mapped="$mapped tests/test_docs_design.py tests/test_pages_publish_scope.py tests/test_docs_drift.py"
       ;;
     lib/budget.py)
@@ -625,8 +628,10 @@ while IFS= read -r f; do
       # as a consumer and caught that the union did not run it. It IS one: the line runner is
       # a run_station_command caller (the engine, pre-pass and findings dispatch call sites in
       # factory; agents-gioi: cited by ROLE, not by line - all three numbers that used to be here
-      # have moved), and that suite imports StationTimeout from lib.budget (:496, :523)
-      # to drive the andon timeout path and COPIES lib/budget.py into its fixture tree (:112).
+      # have moved), and that suite imports StationTimeout from lib.budget (tests/test_line_andon.py:
+      # :496 and :523) to drive the andon timeout path and COPIES lib/budget.py into its fixture tree
+      # (tests/test_line_andon.py:112 - agents-xgha: all three numbers are THE SUITE'S, written bare
+      # after "lib.budget" they read as lib/budget.py lines, where :112 is blank).
       # So a budget.py edit could change what the line runner does while the fast gate ran
       # only the three suites above - the same half-mapped shape agents-4ic0 fixed for
       # lib/adapters/pi.sh. Measured cost of the addition: 8.3 s (14 tests), against a 61 s
@@ -678,8 +683,10 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_suppressions.py"
       ;;
     agents/*/SKILL.md)
-      # The docs-drift scanner os.walk()s every committed .md outside IGNORE_DIRS
-      # (agents/docs-drift/scripts/check_docs.py:466-478) and its real-tree suite pins the
+      # The docs-drift scanner os.walk()s every committed .md outside IGNORE_DIRS (both walks live
+      # in agents/docs-drift/scripts/check_docs.py, at :256 and :491; agents-xgha: the :466-478 range
+      # cited here before is that file's markdown tree-block PREFIX parsing, which contains no walk)
+      # and its real-tree suite pins the
       # agents/*/SKILL.md candidate set by count (tests/test_docs_drift.py:384-394). A path
       # grep cannot see this consumer - a walker consumes a CLASS of paths (agents-9nir review).
       mapped="$mapped tests/test_docs_drift.py"
@@ -765,7 +772,8 @@ while IFS= read -r f; do
       # THE FIRST VERSION OF THIS ARM WAS A SILENT GREEN AND THE REVIEWER CAUGHT IT BY MUTATION
       # (rev-9iyf, agents-9iyf FAIL). It omitted tests/test_prepass_exclusions.py - the suite
       # that actually exercises agents/log-check/scripts/parse_logs.py - WHILE THE COMMENT TWO
-      # LINES ABOVE RECORDED THAT VERY IMPORT (`:126 imports it`). NOTING A CONSUMER IS NOT
+      # LINES ABOVE RECORDED THAT VERY IMPORT (tests/test_prepass_exclusions.py:126; agents-xgha: the
+      # bare `:126` written here before read as a parse_logs.py line, where :126 is blank). NOTING A CONSUMER IS NOT
       # COVERING IT: the omission reproduced exactly as measured -
       #   break parse_logs.py (find_logs -> return []):
       #     this arm's 3 suites      -> Ran 59 tests, OK (exit 0)   <-- THE GREEN
@@ -806,8 +814,11 @@ while IFS= read -r f; do
     .beads/*)
       # The scanner never sees these: it skips dot dirs and .beads is in DEFAULT_IGNORE_DIRS
       # (lib/exclusions.py:23-43). Search performed: every .beads reference in tests mkdirs
-      # its own tmp fixture (test_bd_json_contract.py:64, test_factory_core.py:537,
-      # test_sinks.py:88, test_store_lock_timeout.py:273) - none reads the committed files.
+      # its own tmp fixture (test_bd_json_contract.py:64, test_factory_core.py:727, test_sinks.py:92,
+      # test_store_lock_timeout.py:277) - none reads the committed files. agents-xgha: the three
+      # corrected numbers were 190/4/4 lines stale; the fourth (:64) held, and THAT is why this list
+      # was reported at a different size every time it was scanned. Each number below is that suite's
+      # own `.beads` fixture line.
       ;;
     findings/*.md)
       # findings/ is in FACTORY_ARTIFACT_DIRS (lib/exclusions.py:11-15), so the docs-drift
