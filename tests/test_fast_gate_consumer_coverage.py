@@ -300,6 +300,44 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
         self.assertEqual(stale, [], "\n".join(stale))
 
 
+# The non-suite consumers, ASSERTED rather than described (agents-tuz8). The mirror is deliberately
+# broader than the oracle: a helper that imports a lib module is still a consumer, because the gate cannot
+# run it but a change to that module still breaks it. This is that difference, pinned - a sixth module
+# gaining a helper consumer, or a new helper appearing, fails here rather than quietly widening the claim.
+NON_SUITE_CONSUMERS = {
+    "child_env": ["tests/containment_harness.py"],
+    "containment": ["tests/containment_harness.py"],
+    "credential_broker": ["tests/containment_harness.py"],
+    "egress_proxy": ["tests/containment_harness.py"],
+    "sandbox": ["tests/containment_harness.py"],
+}
+
+
+def _load_oracle():
+    spec = importlib.util.spec_from_file_location("_fleet_check_coverage", _FLEET_ORACLE)
+    oracle = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(oracle)
+    return oracle
+
+
+def _oracle_importers(oracle, module, suites_only):
+    """What the ORACLE's rule says, optionally restricted to the files it calls suites."""
+    found = set()
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        if suites_only and not oracle.is_test_filename(str(path)):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        # RAW content: the oracle strips comments and docstrings itself, and IT owns that preprocessing -
+        # a mirror that pre-stripped would compare its own rule to the oracle's filtered view of it
+        # (agents-pdth measured 16 against 15 that way).
+        if oracle.has_import_reference(content, module):
+            found.add(path.relative_to(ROOT).as_posix())
+    return found
+
+
 class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
     """agents-5z4e: the mirror is what runs everywhere; the oracle is what the mirror mirrors.
 
@@ -307,41 +345,37 @@ class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
     assertion nothing can skip, and when the oracle IS present this asserts the two agree - so a drift in
     either becomes a red test rather than two green ones that quietly disagree.
 
-    THE TWO SUITE DEFINITIONS DIFFER IN PRINCIPLE AND AGREE IN FACT HERE. The mirror globs tests/**/*.py;
-    the oracle's is_test_filename excludes __init__.py and helper modules. Measured at agents-5z4e: the
-    four files the oracle would not call suites (__init__.py, containment_harness.py, hermetic_env.py,
-    sandbox_fixtures.py) import none of the 21 lib modules, so the two sets are identical for every module.
-    IF THAT EVER STOPS BEING TRUE THIS TEST FAILS, which is what it is for: it names the file that created
-    the disagreement rather than letting two definitions drift apart silently.
+    THE TWO SUITE DEFINITIONS DIFFER IN PRINCIPLE AND THE DIFFERENCE IS DELIBERATE - CORRECTED AT
+    agents-tuz8, WHICH FALSIFIED THE PARAGRAPH THAT USED TO STAND HERE. That earlier warrant said the four
+    files the oracle would not call suites import none of the 21 lib modules. It is FALSE: experiments showed
+    tests/containment_harness.py imports FIVE of them (child_env, containment, credential_broker,
+    egress_proxy, sandbox), which is why the allowlist legitimately carries it for those five modules. The
+    old paragraph was produced by a measurement that fed every file to the oracle, so both sides used the
+    mirror's definition and the equality could not fail on the cases that actually differ - the warrant was
+    computed with the definition it was meant to test.
 
-    COST: none on any gate in CI, where the oracle is absent and this skips; on a VM that has it, 21 modules
-    x 87 files of regex - a fraction of a second, and no gate dry runs at all (it reuses the memoised
-    _importing_suites the other tests already computed).
+    WHAT THE TWO RULES ARE FOR, so the difference reads as intended rather than as drift. The MIRROR globs
+    tests/**/*.py because a non-suite file that imports a module is still a consumer: the gate cannot run it,
+    but a change to that module still breaks it. The ORACLE's is_test_filename excludes __init__.py and
+    helper modules because the oracle deals in suites it can execute. So the cross-check is two halves:
+      1. ON FILES THE ORACLE CALLS SUITES the mirror and the oracle must agree exactly - that half compares
+         two implementations and can fail on rule drift;
+      2. THE NON-SUITE DELTA is asserted as the NAMED SET below, so a sixth module gaining a helper consumer,
+         or a new helper appearing, fails loudly instead of silently widening the mirror's claim.
     """
 
-    def test_the_mirror_and_the_fleet_oracle_agree_when_the_oracle_is_present(self):
+    def test_the_mirror_and_the_fleet_oracle_agree_on_suites(self):
+        """Like-for-like: for files the oracle calls SUITES, the two implementations must agree exactly."""
         if not _FLEET_ORACLE.is_file():
             self.skipTest(
                 f"the fleet oracle is not present at {_FLEET_ORACLE}, so the mirror alone runs - this is "
                 "the normal case in this repo's CI, and the reason the mirror is not a call to the oracle"
             )
-        spec = importlib.util.spec_from_file_location("_fleet_check_coverage", _FLEET_ORACLE)
-        oracle = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(oracle)
+        oracle = _load_oracle()
         mismatches = []
         for module in _lib_modules():
-            mirror = _importing_suites(module)
-            theirs = set()
-            for path in sorted((ROOT / "tests").rglob("*.py")):
-                try:
-                    content = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-                # RAW content: the oracle strips comments and docstrings itself, and IT owns that
-                # preprocessing - a mirror that pre-stripped would be comparing its own rule to the
-                # oracle's filtered view of it (agents-pdth measured 16 vs 15 that way).
-                if oracle.has_import_reference(content, module):
-                    theirs.add(path.relative_to(ROOT).as_posix())
+            mirror = {f for f in _importing_suites(module) if oracle.is_test_filename(f)}
+            theirs = _oracle_importers(oracle, module, suites_only=True)
             if mirror != theirs:
                 mismatches.append(
                     f"{module}: mirror-only={sorted(mirror - theirs)} oracle-only={sorted(theirs - mirror)}"
@@ -349,8 +383,32 @@ class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
         self.assertEqual(
             mismatches,
             [],
-            "the mirror and the fleet oracle disagree; one of the two rules has changed and the pin is "
-            "enforcing the old one (agents-5z4e):\n" + "\n".join(mismatches),
+            "the mirror and the fleet oracle disagree on which SUITES import a module - one of the two "
+            "rules has changed and the pin is enforcing the old one (agents-5z4e, narrowed at "
+            "agents-tuz8):\n" + "\n".join(mismatches),
+        )
+
+    def test_the_non_suite_consumer_delta_is_the_named_set(self):
+        """Half two: the files the oracle excludes, asserted as a NAMED SET rather than described.
+
+        The mirror is deliberately broader, so this delta is real and intended - which is exactly why it
+        must be pinned. Before agents-tuz8 the test compared membership for EVERY file, which made both
+        sides use the mirror's definition and could not fail here at all.
+        """
+        if not _FLEET_ORACLE.is_file():
+            self.skipTest(f"the fleet oracle is not present at {_FLEET_ORACLE}")
+        oracle = _load_oracle()
+        actual = {}
+        for module in _lib_modules():
+            delta = sorted(f for f in _importing_suites(module) if not oracle.is_test_filename(f))
+            if delta:
+                actual[module] = delta
+        self.assertEqual(
+            actual,
+            {m: sorted(v) for m, v in NON_SUITE_CONSUMERS.items()},
+            "the set of NON-SUITE files importing lib modules changed. If a new helper appeared, or a "
+            "module gained one, that is not automatically wrong - but it widens the mirror's claim, so "
+            "record it here deliberately (agents-tuz8).",
         )
 
 
