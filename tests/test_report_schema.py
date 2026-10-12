@@ -28,6 +28,8 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent
 import sys
 sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.embargo import VALID_SEVERITIES
+
 from lib.report_schema import (  # noqa: E402
     declared_schema,
     normalize_report,
@@ -150,10 +152,13 @@ class TestDeclaredSchema(unittest.TestCase):
     def test_all_shipped_schemas_satisfy_report_anatomy_contract(self):
         """agents-tz2y: Every committed report.schema.json must satisfy the report anatomy contract:
         top-level object requiring 'findings' array, whose items are objects with required
-        'rule_id' (string) and 'severity' whose enum is exactly ['critical', 'high', 'medium', 'low', 'info']."""
-        expected_severities = ["critical", "high", "medium", "low", "info"]
+        'rule_id' (string) and 'severity' whose enum is exactly list(VALID_SEVERITIES)
+        from lib.embargo (agents-hqgs)."""
+        expected_severities = list(VALID_SEVERITIES)
         schemas = sorted(FACTORY_ROOT.glob("agents/*/report.schema.json"))
-        self.assertEqual(len(schemas), 22, "must discover all 22 agent report schemas")
+        self.assertEqual(len(schemas), 22,
+                         "expected 22 agent report schemas matching agents/*/report.schema.json; "
+                         "if an agent station was added or removed, update this count")
         for schema_path in schemas:
             with self.subTest(schema=schema_path.parent.name):
                 schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -183,7 +188,8 @@ class TestDeclaredSchema(unittest.TestCase):
                               f"{schema_path}: findings items must define 'severity'")
                 sev_enum = item_props["severity"].get("enum")
                 self.assertEqual(sev_enum, expected_severities,
-                                 f"{schema_path}: 'severity' enum must match factory severity levels")
+                                 f"{schema_path}: 'severity' enum must match factory canonical "
+                                 f"severity levels from lib.embargo.VALID_SEVERITIES")
 
                 item_required = items.get("required")
                 self.assertIsInstance(item_required, list,

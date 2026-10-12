@@ -554,6 +554,8 @@ while IFS= read -r f; do
       # CONTRACT CHECK: tests/test_report_schema.py asserts every committed report.schema.json
       # stays inside the supported keyword subset and satisfies the report anatomy contract
       # (object type, required findings array with string rule_id and exact severity levels; agents-tz2y).
+      # LIMITATION: structure is test-checked, but station-specific semantic fit still surfaces
+      # only where the schema is consumed at runtime (agents-us59).
       mapped="$mapped tests/test_report_schema.py"
       ;;
     lines/*.yaml)
