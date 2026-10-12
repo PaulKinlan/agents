@@ -790,8 +790,18 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_fast_gate_sigterm_emits_aborted_marker_with_stage(self):
         """agents-adhc: an external SIGTERM signal must emit a fail-visible 'fast-gate: aborted:' line
-        naming the signal and stage."""
-        import signal, time
+naming the signal and stage.
+
+agents-ob1x: THE STAGE IS WAITED FOR, NOT RACED. This used to start the gate, wait a FIXED 0.3s and
+then signal it, while the assertIn below demands the emitter already be in the "running tests" stage.
+Measured on this VM the gate prints its "running:" stage line at 0.208-0.265s across four runs and at
+0.51s on a fifth, so the 0.3s window is not merely tight - it is sometimes already exceeded before the
+signal is sent, which is the flake that failed the full gate for union e71d73f at 2.5x contention. So
+the gate's OWN stage announcement is the handshake: read its stdout until the "running: python3 -u -m
+unittest ..." line appears, bounded, and signal only then. The assertion is unchanged; this removes the
+race rather than weakening what is checked, and if the stage line never arrives the test fails loudly.
+"""
+        import selectors, signal, time
         probe = ROOT / "tests" / "test_sleep_probe_tmp.py"
         try:
             probe.write_text("import unittest, time\nclass _S(unittest.TestCase):\n    def test_sleep(self): time.sleep(10)\n", encoding="utf-8")
@@ -801,7 +811,22 @@ class TestFastGateMapping(unittest.TestCase):
             p = subprocess.Popen(["bash", str(FAST_GATE)], cwd=ROOT, env=env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  start_new_session=True)
-            time.sleep(0.3)
+            sel = selectors.DefaultSelector()
+            sel.register(p.stdout, selectors.EVENT_READ)
+            entered = False
+            deadline = time.monotonic() + 60
+            while not entered and time.monotonic() < deadline and p.poll() is None:
+                for key, _ in sel.select(timeout=1.0):
+                    if "running:" in key.fileobj.readline():
+                        entered = True
+                        break
+            self.assertTrue(
+                entered,
+                "the gate never reached its 'running:' stage within 60s, so the SIGTERM stage assertion "
+                "cannot be made (agents-ob1x). Not a silent timeout: the gate either failed to start or "
+                "never announced the runner; on the old fixed-sleep form this condition surfaced as a "
+                "mid-flight stage name instead.",
+            )
             os.killpg(p.pid, signal.SIGTERM)
             _, stderr = p.communicate()
             self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_coverage_contract tests.test_direct_run_completeness tests.test_fast_gate_consumer_coverage tests.test_sleep_probe_tmp tests.test_tree_guards))", stderr)
