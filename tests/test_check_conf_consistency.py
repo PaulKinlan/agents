@@ -224,6 +224,47 @@ class TestTrackedCheckConfig(unittest.TestCase):
         self.assertEqual(fields["CHECK_TIMEOUT"], "2400")
         self.assertEqual(fields["CHECK_FAST_TIMEOUT"], "180")
 
+    def test_every_parser_of_the_tracked_file_agrees_on_its_fields(self):
+        """agents-1i7v: two test modules parse tools/check.conf; they must not disagree silently.
+
+        tests/test_gate_entrypoint_config.py parsed only NAME="value", so on the real file it
+        returned the two command fields and silently dropped the two unquoted bound fields. No
+        assertion noticed, because its callers read CHECK_CMD only - so any future pin built on
+        that parser would have been blind to a field the file defines, and 'which fields exist'
+        depended on which module you asked. The grammars are unified now, and this test fails if
+        they diverge again, which is what makes the drop impossible rather than merely fixed.
+        """
+        from tests.test_gate_entrypoint_config import _tracked_fields as parsed_there
+
+        here, there = _tracked_fields(), parsed_there()
+        self.assertEqual(
+            sorted(there), sorted(here),
+            "the two parsers of tools/check.conf disagree about which fields exist",
+        )
+        # The value forms the shared grammar exists to accept: bounds are bare integers, and the
+        # command fields stay quoted single strings (agents-j1te keeps them one string per line).
+        for bound in ("CHECK_TIMEOUT", "CHECK_FAST_TIMEOUT"):
+            self.assertIn(bound, here, f"the tracked config lost {bound}")
+            self.assertTrue(here[bound].isdigit(), f"{bound} must be a bare integer: {here[bound]!r}")
+        # The one relation between the two bounds that is a contract rather than a tuning
+        # choice: the fast gate must be bounded tighter than the full gate.
+        self.assertLess(int(here["CHECK_FAST_TIMEOUT"]), int(here["CHECK_TIMEOUT"]),
+                        "the fast gate must be bounded tighter than the full gate")
+        raw = TRACKED.read_text(encoding="utf-8")
+        for cmd in ("CHECK_CMD", "CHECK_FAST_CMD"):
+            self.assertRegex(
+                raw, re.compile(rf'^{cmd}="', re.M),
+                f"{cmd} must stay a quoted single string",
+            )
+        # The field SET is the contract too: tools/check-cmd.sh supports exactly these four
+        # (its usage line and its --install printf both name them), so a field that appears or
+        # disappears has to be a deliberate edit with this tuple updated, never a silent one.
+        self.assertEqual(
+            sorted(here),
+            ["CHECK_CMD", "CHECK_FAST_CMD", "CHECK_FAST_TIMEOUT", "CHECK_TIMEOUT"],
+            "the tracked config's field set changed: update this pin deliberately",
+        )
+
     def test_every_discovery_in_ci_carries_the_same_top_level_flag(self):
         """EVERY invocation, not just the first - the second line initially lacked it."""
         commands = _discovery_commands()

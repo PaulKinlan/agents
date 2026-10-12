@@ -144,9 +144,19 @@ def _prevent_real_gate(env: dict, home: str) -> Path:
 def _tracked_fields() -> dict:
     fields = {}
     for line in TRACKED.read_text(encoding="utf-8").splitlines():
-        m = re.match(r'^([A-Z_]+)="(.*)"\s*$', line.strip())
+        # agents-1i7v: this grammar used to be `NAME="value"` only, so on the real
+        # tools/check.conf it returned CHECK_CMD and CHECK_FAST_CMD and SILENTLY omitted
+        # CHECK_TIMEOUT and CHECK_FAST_TIMEOUT, which are unquoted shell integers. A field that
+        # exists in the file and not in the parse is a pin that cannot fail for what it names,
+        # and it made "which fields exist" depend on which test module you asked. The grammar
+        # below is the same one tests/test_check_conf_consistency.py uses: a quoted value (for a
+        # command string, which may contain inner quotes and spaces) or a single bare token (for
+        # a numeric bound). Anchoring, the [A-Z_]+ name and the end-of-line anchor are unchanged,
+        # so comments, fragments and trailing junk are still rejected - the narrowness this
+        # regex had was incidental to its purpose, not the protection it provided.
+        m = re.match(r'^([A-Z_]+)=(?:"(.*)"|(\S+))\s*$', line.strip())
         if m:
-            fields[m.group(1)] = m.group(2)
+            fields[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
     return fields
 
 
