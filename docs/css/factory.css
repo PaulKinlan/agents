@@ -184,6 +184,18 @@
 
   /* Code: horizontal scroll inside the block at wide widths, with edge shadows that appear only when content is
      clipped; at <= 48rem it wraps instead (see the media query below), so no sideways gesture is needed. */
+  /* TODO(baseline/container-scroll-state-queries): replace the four-gradient stack below with the declarative
+     scroll-state form - `container-type: scroll-state` on this scroller plus a sticky indicator DESCENDANT (the
+     <code> child, not pre::before) toggled by `@container scroll-state(scrollable: inline-start|inline-end)` -
+     once the feature is Baseline Widely Available. agents-eyjv tried it on 2026-10-12 and KEPT the gradients,
+     because the native form cannot be verified on this VM: Chrome 155.0.8059.39 reports
+     `CSS.supports("container-type", "scroll-state")` true and parses the @container rules, but NO scroll-state
+     condition ever matches - named or unnamed, `stuck: top` on a genuinely stuck child, or
+     `scrollable: top|left|inline-start` on genuinely scrolled containers - while a plain size container query in
+     the same page matches. The affordance would have silently disappeared. The indicator must also be a
+     descendant, never the container's own pseudo-element: "You cannot style the container element itself with
+     its own scroll-state query" (Modern Web Guidance, scrollability-affordance-hints). Re-measure in a real
+     browser before acting; the technique below is verified working (see agents-eyjv). */
   pre {
     white-space: pre; max-inline-size: 100%; overflow-x: auto; tab-size: 2;
     border-color: var(--doc-hairline); line-height: 1.55; font-size: .85rem;
