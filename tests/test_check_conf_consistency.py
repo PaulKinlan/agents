@@ -22,9 +22,17 @@ CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
 TRACKED = ROOT / "tools" / "check.conf"
 
 
-def _tracked_fields() -> dict:
+def _tracked_fields(text: str | None = None) -> dict:
+    """Parse NAME=value lines from the tracked config, or from `text` when one is supplied.
+
+    The optional argument exists so a test can drive the REAL parser with a sample
+    (agents-4eg2): the pinning test used to re-implement this loop with a verbatim copy of the
+    regex, which meant no change to this function - the parser the check actually depends on -
+    could ever make that test fail.
+    """
     fields = {}
-    for line in TRACKED.read_text(encoding="utf-8").splitlines():
+    source = TRACKED.read_text(encoding="utf-8") if text is None else text
+    for line in source.splitlines():
         m = re.match(r'^([A-Z_]+)=(?:"(.*)"|(\S+))\s*$', line.strip())
         if m:
             fields[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
@@ -206,11 +214,11 @@ class TestTrackedCheckConfig(unittest.TestCase):
             'CHECK_TIMEOUT=2400\n'
             'CHECK_FAST_TIMEOUT=180\n'
         )
-        fields = {}
-        for line in sample.splitlines():
-            m = re.match(r'^([A-Z_]+)=(?:"(.*)"|(\S+))\s*$', line.strip())
-            if m:
-                fields[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
+        # agents-4eg2: drive the REAL parser through its optional argument. This used to
+        # re-implement the loop above with a verbatim copy of the regex, so a regression in
+        # _tracked_fields - the parser tools/check.conf is actually read with - left this test
+        # green while only other tests in this module caught it by accident.
+        fields = _tracked_fields(sample)
         self.assertIn("CHECK_CMD", fields)
         self.assertIn('echo \\"inner quotes\\"', fields["CHECK_CMD"])
         self.assertEqual(fields["CHECK_TIMEOUT"], "2400")
