@@ -59,10 +59,17 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
             env={**os.environ, "FAST_GATE_DRY_RUN": "1",
                  "GIT_CHANGED": "tests/test_hermetic_env.py"},
             capture_output=True, text=True, timeout=120)
-        self.assertIn("environment: the caller's, unmodified", res.stdout,
-                      f"the gate must say which environment its verdict is about: {res.stdout!r}")
-        self.assertIn("isolate_operator_config", res.stdout,
+        # STDERR, AND THAT IS THE POINT (caught by tests/test_fast_gate_mapping.py, which is in
+        # this gate's own arm): the gate's STDOUT is a machine-readable contract - the dry run IS
+        # the suite list, asserted EMPTY for an ignored path or an empty delta (agents-9nir). My
+        # first version printed this on stdout and made that suite fail with 7 failures.
+        self.assertIn("environment: the caller's, unmodified", res.stderr,
+                      f"the gate must say which environment its verdict is about: {res.stderr!r}")
+        self.assertIn("isolate_operator_config", res.stderr,
                       "the gate must name the declaration that supplies hermeticity")
+        self.assertEqual(res.stdout.strip(), "tests/test_hermetic_env.py",
+                         "stdout stays the machine-readable suite list")
+        self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_assertion_failure_does_not_leak_ambient_environment_values(self):
         """agents-3cm4: when hermetic assertions fail, they must assert on key presence only

@@ -24,12 +24,16 @@
 #   CHECK_FAST_TIMEOUT=180
 set -euo pipefail
 
-# WHICH ENVIRONMENT THIS VERDICT IS ABOUT (agents-u4k7). Printed unconditionally, before any
+# WHICH ENVIRONMENT THIS VERDICT IS ABOUT (agents-u4k7). Printed on STDERR, not stdout: the fast
+# gate's stdout is a machine-readable contract - the dry run IS the resolved suite list, and
+# tests/test_fast_gate_mapping.py asserts it is EMPTY for an ignored path or an empty delta
+# (agents-9nir). A diagnostic line that must be visible before any exit path therefore goes to
+# stderr, where the mapping suite only expects FAILURE messages. It is emitted before every
 # exit path (including FAST_GATE_DRY_RUN), because a green fast gate is evidence about the
 # arrangement it ran in - and after agents-u4k7 that arrangement is the CALLER's environment,
 # with hermeticity supplied by the test package's declaration rather than by a shell scrub.
 echo "fast-gate: environment: the caller's, unmodified (no env scrub); hermeticity is declared" \
-     "by tests/__init__.py -> tests/hermetic_env.isolate_operator_config() (agents-v1a2)"
+     "by tests/__init__.py -> tests/hermetic_env.isolate_operator_config() (agents-v1a2)" >&2
 
 # ENVIRONMENT POLICY (agents-u4k7): THIS GATE DOES NOT SCRUB ITS CALLER'S ENVIRONMENT.
 #
