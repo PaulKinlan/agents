@@ -627,6 +627,90 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stderr[:300])
         self.assertIn("stamp", r.stderr)
 
+        # 7. --quiet IS THE POINT-OF-USE FORM (tools/fast-gate.sh warns from it on every lane's gate
+        #    run): one line naming the keys, the same exit code, and none of the verbose report - a
+        #    warning that is eight lines long on every gate is one people learn to scroll past.
+        self.assertEqual(self._run("--install", home=home).returncode, 0)
+        conf.write_text(conf.read_text(encoding="utf-8").replace("CHECK_TIMEOUT=2400",
+                                                                 "CHECK_TIMEOUT=99"),
+                        encoding="utf-8")
+        r = self._run("--check", "--quiet", home=home)
+        self.assertEqual(r.returncode, 1, r.stderr[:300])
+        self.assertIn("DRIFT keys:", r.stderr)
+        self.assertIn("CHECK_TIMEOUT", r.stderr)
+        self.assertNotIn("differs", r.stderr, "quiet means one line, not the full per-key report")
+
+        # 8. AND THE FULL REPORT NAMES EVERY DIFFERING KEY at the end, so a reader (or a log) has the
+        #    list in one place rather than having to reassemble it from the lines above.
+        r = self._run("--check", home=home)
+        self.assertEqual(r.returncode, 1, r.stderr[:300])
+        self.assertIn("DRIFT keys: CHECK_TIMEOUT", r.stderr)
+        self.assertIn("repair with: bash tools/check-cmd.sh --install", r.stderr)
+
+
+class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
+    """agents-d081: A CHECK NOBODY RUNS IS NOT LOUD.
+
+    A detector is worth what calls it, and the one surface in this repo that ALREADY runs on every lane
+    is tools/fast-gate.sh - the deployed entrypoint invokes it via CHECK_FAST_CMD, and the suites in
+    tests/test_fast_gate_mapping.py drive it directly. So the warning lives there: NAMED, on stderr, and
+    NON-BLOCKING, because the per-VM config is machine-global and failing a gate on it would turn every
+    lane red for a branch that is entirely innocent.
+
+    BOTH DIRECTIONS ARE PINNED, and the silent one is the one that protects the fleet's speed: a drifted
+    host is loud, an in-sync host is silent, a host with nothing installed is silent (a fresh VM
+    legitimately has no per-VM file), and in no case does the verdict or the stdout contract change -
+    the dry run's resolved suite list must not gain a line because of a machine's configuration.
+    """
+
+    def _run_gate(self, home, changed=".beads/metadata.json"):
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        env["GIT_CHANGED"] = changed
+        env["FAST_GATE_DRY_RUN"] = "1"
+        return subprocess.run(["bash", str(ROOT / "tools" / "fast-gate.sh")], capture_output=True,
+                              text=True, timeout=120, env=env, cwd=str(ROOT))
+
+    def _install_into(self, home):
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        return subprocess.run(["bash", str(RESOLVER), "--install"], capture_output=True, text=True,
+                              timeout=60, env=env, cwd=str(ROOT))
+
+    def test_drifted_is_loud_installed_and_absent_are_silent(self):
+        # (a) THE SHAPE THIS VM WAS ACTUALLY IN: no stamp, CHECK_CMD without the capture wrapper, and a
+        #     fast timeout of 360 against the tracked 180.
+        home = tempfile.mkdtemp(prefix="d081-point-of-use-")
+        conf = Path(home) / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True)
+        conf.write_text('CHECK_CMD="python3 -m unittest discover -s tests -t . -v"\n'
+                        "CHECK_FAST_TIMEOUT=360\n", encoding="utf-8")
+        drifted = self._run_gate(home)
+        self.assertEqual(drifted.returncode, 0,
+                         "the drift warning must NOT change the gate's verdict: the config is host-wide "
+                         "and a failing gate would turn every lane red for an innocent branch")
+        self.assertIn("WARNING (agents-d081)", drifted.stderr)
+        self.assertIn("CHECK_FAST_TIMEOUT", drifted.stderr,
+                      "the warning must NAME the keys that differ, not just that something did")
+        self.assertIn("check-cmd.sh --install", drifted.stderr, "and name the repair")
+        self.assertEqual(drifted.stdout.strip(), "",
+                         "the dry-run stdout contract must be untouched by a machine's config")
+
+        # (b) IN SYNC: the same run must be silent - a warning that fires on correct work is wallpaper.
+        self.assertEqual(self._install_into(home).returncode, 0)
+        in_sync = self._run_gate(home)
+        self.assertEqual(in_sync.returncode, 0)
+        self.assertNotIn("WARNING", in_sync.stderr)
+
+        # (c) NOTHING INSTALLED: also silent. A fresh VM has no per-VM file, and that is not drift -
+        #     exit code 3 exists precisely so the two states are not confused.
+        empty = tempfile.mkdtemp(prefix="d081-fresh-")
+        fresh = self._run_gate(empty)
+        self.assertEqual(fresh.returncode, 0)
+        self.assertNotIn("WARNING", fresh.stderr)
+
 
 class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
     """agents-l2xb / agents-3xqa: install.sh - the provisioning entrypoint - IS THE CALLER.

@@ -35,6 +35,40 @@ set -euo pipefail
 echo "fast-gate: environment: the caller's, unmodified (no env scrub); hermeticity is declared" \
      "by tests/__init__.py -> tests/hermetic_env.isolate_operator_config() (agents-v1a2)" >&2
 
+# agents-d081: THE POINT-OF-USE DRIFT WARNING, AND WHY IT IS HERE RATHER THAN IN A TEST OR A FAILURE.
+#
+# The per-VM ~/.fleet/check.conf is MACHINE-GLOBAL: a tracked change to tools/check.conf does not reach a
+# host whose copy predates it, and until agents-d081 nothing could even say so - measured on this VM, the
+# deployed file had no project stamp, no summary/tee wrapper in CHECK_CMD and a 360 s fast timeout against
+# the tracked 180, while every gate on the host printed PASS. THIS FILE is the one surface in this repo
+# that already runs on every lane, so the warning belongs here, where the lane about to be misled sees it.
+#
+# IT WARNS RATHER THAN FAILS, DELIBERATELY: the config is host-wide, so failing here would turn every lane
+# red for a branch that is entirely innocent - a machine problem reported as a tree problem, which is the
+# pathology this repo's own hermeticity work exists to remove. IT ALSO CANNOT PUT A VERDICT AT RISK: the
+# exit status is untouched and the report goes to STDERR, because this file's stdout is a machine-readable
+# contract (the dry run IS the resolved suite list).
+#
+# WHAT THIS WARNING CANNOT SEE, STATED SO IT IS NOT MISTAKEN FOR TOTAL: it is emitted by a file reached
+# THROUGH the per-VM config, so if the drift is in CHECK_FAST_CMD itself - the deployed fast command no
+# longer running this file at all - then no in-repo code runs and nothing in-repo can be loud. That case is
+# visible only to provisioning (install.sh reports the drift it repairs) or to an external caller running
+# `tools/check-cmd.sh --check`. And a branch that LEGITIMATELY changes tools/check.conf will see this
+# warning; the text says so, because a warning that fires on correct work becomes wallpaper.
+#
+# COST, MEASURED RATHER THAN ASSUMED (agents-d081): `--check --quiet` is 0.02 s on this VM in both the
+# drifted and the in-sync case - four greps and a subshell, against a gate that runs tens of seconds.
+CHECK_CMD_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-cmd.sh"
+if [ -f "$CHECK_CMD_SH" ]; then
+  drift_rc=0
+  drift_line="$(bash "$CHECK_CMD_SH" --check --quiet 2>&1)" || drift_rc=$?
+  if [ "$drift_rc" -eq 1 ]; then
+    drift_line="${drift_line#check-cmd: DRIFT keys: }"
+    echo "fast-gate: WARNING (agents-d081): this host's per-VM gate config differs from the tracked tools/check.conf - differing keys: $drift_line" >&2
+    echo "fast-gate:   detail: bash tools/check-cmd.sh --check - repair: bash tools/check-cmd.sh --install - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
+  fi
+fi
+
 # ENVIRONMENT POLICY (agents-u4k7): THIS GATE DOES NOT SCRUB ITS CALLER'S ENVIRONMENT.
 #
 # It used to, with `unset FACTORY_TOOL_PINS` + `export FACTORY_ALLOW_UNPINNED_TOOLS=1`. That

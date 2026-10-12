@@ -12,6 +12,8 @@
 #         tools/check-cmd.sh --check     compares the per-VM file with the tracked one and names every
 #                                        key that differs (agents-d081). Exits 0 in sync, 1 on drift,
 #                                        3 when nothing is installed, 2 on a usage/tracked error.
+#                                        --check --quiet prints one line naming the keys (the form
+#                                        tools/fast-gate.sh warns from at the point of use).
 #
 # IT FAILS LOUD. This file is sourced, so a syntax error in either config is fatal under
 # `set -e`, and a missing CHECK_CMD is an error rather than an empty string. A gate that
@@ -50,46 +52,67 @@ fi
 #
 # EXIT CODES: 0 in sync · 1 drift (every differing key named, with both values) · 3 no per-VM config
 # installed (not drift - a fresh VM legitimately has none) · 2 tracked config missing or unusable.
+#
+# --quiet keeps the same exit codes and prints ONE line naming the differing keys instead of the full
+# report. It exists for the POINT OF USE (tools/fast-gate.sh warns from it on every lane's gate run):
+# a warning that is eight lines long on every gate is a warning people learn to scroll past, and the
+# detail is one command away.
 if [ "${1:-}" = "--check" ]; then
+  quiet=0
+  if [ "${2:-}" = "--quiet" ]; then quiet=1; fi
   dest="${OVERRIDE}"
   if [ ! -e "$dest" ]; then
     echo "check-cmd: no per-VM config at $dest - nothing is installed on this VM (a fresh install would create it from $TRACKED)" >&2
     exit 3
   fi
   drift=0
+  drift_keys=""
+  note() { drift=1; drift_keys="${drift_keys}${drift_keys:+ }$1"; }
   # A copy written by another project on a shared-HOME host is drift even if every key agrees - and
   # so is a copy written by an --install from before the stamp existed (agents-f6no): the wording
   # below names BOTH, because this detector is the thing that has to be trusted when it fires and an
   # assertion of the wrong cause is how a reader learns to ignore it. Measured 2026-10-12: the live
   # copy on the agents-factory VM was this second case.
   if ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
-    echo "check-cmd: DRIFT: $dest carries no 'Project: agents-factory' stamp - it was written by another project on a shared-HOME host, or by an --install from before that stamp existed; re-running --install stamps it either way" >&2
-    drift=1
+    if [ "$quiet" -eq 0 ]; then
+      echo "check-cmd: DRIFT: $dest carries no 'Project: agents-factory' stamp - it was written by another project on a shared-HOME host, or by an --install from before that stamp existed; re-running --install stamps it either way" >&2
+    fi
+    note "no-project-stamp"
   fi
   while IFS= read -r tracked_line; do
     key="${tracked_line%%=*}"
     if ! grep -q "^${key}=" "$dest" 2>/dev/null; then
-      printf 'check-cmd: DRIFT: %s is missing from %s\n' "$key" "$dest" >&2
-      drift=1
+      if [ "$quiet" -eq 0 ]; then
+        printf 'check-cmd: DRIFT: %s is missing from %s\n' "$key" "$dest" >&2
+      fi
+      note "${key}(missing)"
       continue
     fi
     deployed_line="$(grep -m1 "^${key}=" "$dest")"
     if [ "$deployed_line" != "$tracked_line" ]; then
-      printf 'check-cmd: DRIFT: %s differs\n  tracked : %s\n  deployed: %s\n' \
-        "$key" "$tracked_line" "$deployed_line" >&2
-      drift=1
+      if [ "$quiet" -eq 0 ]; then
+        printf 'check-cmd: DRIFT: %s differs\n  tracked : %s\n  deployed: %s\n' \
+          "$key" "$tracked_line" "$deployed_line" >&2
+      fi
+      note "$key"
     fi
   done < <(grep -E '^[A-Z_]+=' "$TRACKED")
   # A key the tracked file does not have is drift too: --install writes exactly the tracked keys.
   while IFS= read -r deployed_key; do
     if ! grep -q "^${deployed_key}=" "$TRACKED" 2>/dev/null; then
-      printf 'check-cmd: DRIFT: %s is in %s but not in %s\n' "$deployed_key" "$dest" "$TRACKED" >&2
-      drift=1
+      if [ "$quiet" -eq 0 ]; then
+        printf 'check-cmd: DRIFT: %s is in %s but not in %s\n' "$deployed_key" "$dest" "$TRACKED" >&2
+      fi
+      note "${deployed_key}(extra)"
     fi
   done < <(grep -E '^[A-Z_]+=' "$dest" | sed 's/=.*//')
   if [ "$drift" -ne 0 ]; then
-    printf 'check-cmd: repair with: bash tools/check-cmd.sh --install   (rewrites %s from %s)\n' \
-      "$dest" "$TRACKED" >&2
+    if [ "$quiet" -eq 1 ]; then
+      printf 'check-cmd: DRIFT keys: %s\n' "$drift_keys" >&2
+    else
+      printf 'check-cmd: DRIFT keys: %s\n  repair with: bash tools/check-cmd.sh --install   (rewrites %s from %s)\n' \
+        "$drift_keys" "$dest" "$TRACKED" >&2
+    fi
     exit 1
   fi
   echo "check-cmd: in sync - $dest matches the tracked keys in $TRACKED"
