@@ -738,6 +738,20 @@ while IFS= read -r f; do
       # agents-mo75's (a split family whose thin namesake ran).
       # Measured with the coverage oracle - before: 1 omitted consumer(s); after: 0.
       mapped="$mapped tests/test_retention.py tests/test_hillclimb.py"
+    ;;
+    lib/egress_proxy.py)
+      # agents-bwbe (rev-cqrm's finding: the agents-mo75 class in a second instance). Without an arm
+      # this module fell through to the generic lib/*.py arm below, whose BASENAME rule selects only
+      # tests/test_egress_proxy.py - while six containment suites import lib.egress_proxy and assert
+      # proxy isolation and network egress rules. Measured before this arm: the coverage oracle
+      # reported unmapped ['lib/egress_proxy.py'] with those six omitted, and the gate still printed
+      # PASS. NOTE THE SHAPE DIFFERENCE from the arm above: there the omitted consumers were the
+      # changed module's OWN split family; here the module's own suite IS selected and the consumers
+      # belong to a DIFFERENT family (containment covers egress rules) - so the index that finds them
+      # is the IMPORT GRAPH, not the changed file's name.
+      # tests/test_egress_proxy.py is listed explicitly because an EXPLICIT ARM REPLACES THE GENERIC
+      # ONE: naming only the six would silently drop the module's own suite (agents-mo75's lesson).
+      mapped="$mapped tests/test_egress_proxy.py tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"
