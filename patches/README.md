@@ -507,8 +507,16 @@ This directory holds patches for fleet-level infrastructure and tooling that can
     test exists precisely to exercise `fleet-check`'s gatekeeping CLI, so stubbing the CLI would destroy the
     subject - and the opt-in polarity is the right trade-off, because inverting it would break every production
     lane's wake-up. A shared test prelude exporting the knob is a follow-up bead, not part of this patch.
-- **What this does NOT fix, stated so it is not oversold:** the knob is **opt-in**, and seven test files invoke the
-  real `fleet-check`, so every other one can still notify until it adopts the knob and a future test can forget.
+- **What this does NOT fix, stated so it is not oversold:** the knob is **opt-in**, THREE test files invoke the
+  real `fleet-check` — the other four either stub it (`fleet-land-gate-coverage`, `fleet-land-message`) or
+  only mention it (`review-cadence` has the string in JSON fixtures and never executes it;
+  `fleet-check-worker-quoting` inspects heredocs statically and runs no gate) — and of those three,
+  `fleet-gate-check` isolates the inbox on port 9999 and `fleet-check-scope` now sets the knob. That leaves
+  `tests/fleet-check-tree-stability.test.sh` as the remaining caller that talks to the live inbox, and it is
+  the one worth adopting the knob: a future test can still forget, exactly as this one did.
+  (The first version of this paragraph said "seven test files invoke the real `fleet-check`". That was a count
+  of grep hits, not of invocations — a pattern hit is not evidence of behaviour, and the number a fleet-side
+  README reports is the number future lanes will read.)
   The only defence that does not depend on test hygiene is receiver-side — resolve the sha (`git cat-file -t`) and
   check the tree is the one you asked to be gated before acting on a `[check]` — and that belongs in the prompts,
   where it costs prompt budget, so it is a coordinator decision rather than part of this patch.
