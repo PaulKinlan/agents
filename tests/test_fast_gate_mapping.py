@@ -401,6 +401,91 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn(".agents/skills/beads/SKILL.md", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
+    def test_tree_guard_tier_runs_on_every_mapped_delta(self):
+        """agents-dv23 (ADR agents-c07o): tests/test_tree_guards.py is an always-on tier that must
+        be included in every mapped fast-gate run to enforce repo-wide invariants."""
+        for path in ("lib/budget.py", "lib/child_env.py", "tools.yaml", "README.md"):
+            with self.subTest(delta=path):
+                mapped = resolve_fast_gate([path])
+                self.assertIn("tests/test_tree_guards.py", mapped,
+                              f"mapped delta for {path} must contain the always-on tree-guard tier")
+
+    def test_tree_guard_tier_module_holds_only_tree_property_tests(self):
+        """agents-dv23: tests/test_tree_guards.py must hold only repo-wide tree property tests,
+        pinned by class names and count to prevent accidental unit-test creep into the always-on tier."""
+        tree_guards_path = ROOT / "tests" / "test_tree_guards.py"
+        self.assertTrue(tree_guards_path.is_file(), "tests/test_tree_guards.py must exist")
+        import ast
+        tree = ast.parse(tree_guards_path.read_text(encoding="utf-8"))
+        classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+        self.assertEqual(classes, ["TestNoUnboundedSubprocess"],
+                         "tests/test_tree_guards.py must contain exactly the pinned tree-guard classes")
+
+    def test_fast_gate_reentrancy_guard_blocks_recursive_invocation(self):
+        """agents-q615, agents-y0ar, agents-4mvl: tools/fast-gate.sh must detect and refuse re-entrant suite execution
+        when FAST_GATE_EXEC_DEPTH >= 2 to prevent runaway fork loops if a test suite invokes fast-gate.sh."""
+        # 1. Non-dry-run invocation at max execution depth must refuse with exit 2
+        probe = ROOT / "tests" / "test_reentrant_probe_tmp.py"
+        try:
+            probe.write_text("import unittest\nclass _R(unittest.TestCase):\n    def test_r(self): pass\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = "tests/test_reentrant_probe_tmp.py"
+            env["FAST_GATE_EXEC_DEPTH"] = "2"
+            env.pop("FAST_GATE_DRY_RUN", None)
+            res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 2, f"expected re-entrancy refusal exit 2, got {res.returncode}: {res.stderr}")
+            self.assertIn("fast-gate: FAIL: recursive fast-gate execution exceeded max execution depth (depth=2)", res.stderr)
+        finally:
+            probe.unlink(missing_ok=True)
+
+        # 2. Dry-run invocation must NOT be blocked by execution depth (precedent preserved)
+        env = os.environ.copy()
+        env["FAST_GATE_EXEC_DEPTH"] = "2"
+        env["FAST_GATE_DRY_RUN"] = "1"
+        env["GIT_CHANGED"] = "lib/budget.py"
+        res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"dry-run must succeed even with execution depth set: {res.stderr}")
+        self.assertIn("tests/test_budget.py", res.stdout)
+
+    def test_fast_gate_reentrancy_guard_blocks_recursive_invocation_even_when_env_popped(self):
+        """agents-4mvl, agents-vn2e: laundering FAST_GATE_EXEC_DEPTH via os.environ.pop or resetting it to 0/1
+        must not bypass the re-entrancy guard; the kernel process tree ancestry check must still detect the
+        nested recursion and refuse with exit 2. Establishes its own ancestor context via temporary gate wrappers
+        so the assertion holds identically whether executed standalone or inside tools/fast-gate.sh."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            tpath = Path(td)
+            dummy_gate = tpath / "fast-gate.sh"
+            dummy_gate.write_text('#!/bin/bash\n"$@"\n', encoding="utf-8")
+            dummy_gate.chmod(0o755)
+
+            # Establish 2 ancestor fast-gate.sh processes in the process tree
+            cmd = ["bash", str(dummy_gate), "bash", str(dummy_gate), "bash", str(FAST_GATE)]
+            base_env = os.environ.copy()
+            base_env["GIT_CHANGED"] = "README.md"
+            base_env.pop("FAST_GATE_DRY_RUN", None)
+
+            # 1. Popping FAST_GATE_EXEC_DEPTH
+            env_pop = base_env.copy()
+            env_pop.pop("FAST_GATE_EXEC_DEPTH", None)
+            res = subprocess.run(cmd, cwd=ROOT, env=env_pop, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 2, f"expected exit 2 on popped depth, got {res.returncode}: {res.stderr}")
+            self.assertIn("exceeded max execution depth", res.stderr)
+
+            # 2. Resetting FAST_GATE_EXEC_DEPTH to 0
+            env_0 = base_env.copy()
+            env_0["FAST_GATE_EXEC_DEPTH"] = "0"
+            res = subprocess.run(cmd, cwd=ROOT, env=env_0, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 2, f"expected exit 2 on reset depth 0, got {res.returncode}: {res.stderr}")
+            self.assertIn("exceeded max execution depth", res.stderr)
+
+            # 3. Resetting FAST_GATE_EXEC_DEPTH to 1
+            env_1 = base_env.copy()
+            env_1["FAST_GATE_EXEC_DEPTH"] = "1"
+            res = subprocess.run(cmd, cwd=ROOT, env=env_1, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 2, f"expected exit 2 on reset depth 1, got {res.returncode}: {res.stderr}")
+            self.assertIn("exceeded max execution depth", res.stderr)
+
     def test_an_unresolvable_base_is_an_error_not_an_empty_delta(self):
         """A base that is not a commit must FAIL LOUDLY, never fall back to the smoke subset (agents-c1z0 P1).
 
@@ -492,7 +577,7 @@ class TestFastGateMapping(unittest.TestCase):
             passed_lines = [l for l in res.stdout.splitlines() if l.startswith("fast-gate: passed:")]
             self.assertEqual(len(passed_lines), 1, f"expected exactly one 'fast-gate: passed:' line, got: {passed_lines}")
             suites_on_marker = passed_lines[0].replace("fast-gate: passed:", "").split()
-            expected = sorted([str(probe_a.relative_to(ROOT)), str(probe_b.relative_to(ROOT))])
+            expected = sorted([str(probe_a.relative_to(ROOT)), str(probe_b.relative_to(ROOT)), "tests/test_tree_guards.py"])
             self.assertEqual(sorted(suites_on_marker), expected,
                              f"completion marker must name all suites on the single marker line: {passed_lines[0]}")
         finally:
@@ -509,7 +594,7 @@ class TestFastGateMapping(unittest.TestCase):
             env["GIT_CHANGED"] = "tests/test_abort_probe_tmp.py"
             res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 1, f"expected rc 1, got {res.returncode}")
-            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp)", res.stderr)
+            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp tests.test_tree_guards)", res.stderr)
         finally:
             probe.unlink(missing_ok=True)
 
@@ -539,7 +624,7 @@ class TestFastGateMapping(unittest.TestCase):
             time.sleep(0.3)
             os.killpg(p.pid, signal.SIGTERM)
             _, stderr = p.communicate()
-            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_sleep_probe_tmp))", stderr)
+            self.assertIn("fast-gate: aborted: caught SIGTERM (stage: running tests (tests.test_sleep_probe_tmp tests.test_tree_guards))", stderr)
         finally:
             probe.unlink(missing_ok=True)
 

@@ -70,6 +70,13 @@ echo "fast-gate: environment: the caller's, unmodified (no env scrub); hermetici
 # The gate's own shell children (git, for the delta) do not consult pins at all, so leaving the
 # caller's environment alone changes nothing for them; what matters is what the TESTS see, and
 # the declaration governs that.
+#
+# RE-ENTRANCY POLICY (agents-q615, agents-y0ar, agents-4mvl):
+# Nested real executions of tools/fast-gate.sh from inside running test suites are tracked via
+# FAST_GATE_EXEC_DEPTH. A single nested level (depth < 2) is permitted for legitimate runner-testing
+# suites (e.g. tests/test_hermetic_env.py and probe assertions in tests/test_fast_gate_mapping.py).
+# Deeper recursion (depth >= 2) is refused loudly with exit 2 at the execution boundary. Dry-run
+# mapping queries (FAST_GATE_DRY_RUN=1) exit before the execution boundary and are unconstrained.
 
 # Fail-visible abort diagnostics (agents-adhc).
 # UNCOVERABLE BY CONSTRUCTION: SIGKILL (kill -9), kernel OOM-killer invocations,
@@ -723,7 +730,21 @@ fi
 # correctly. Reproduced with GIT_CHANGED="lib/sandbox.py" and a `sort` on PATH that exits 1:
 # the correctly mapped tests/test_sandbox.py was thrown away and the verdict was green.
 # A pipeline that cannot compute the suite list is an ERROR, not an empty suite list.
-if ! files="$(printf '%s\n' $run $mapped | awk 'NF && !seen[$0]++' | sort)"; then
+# Tree-guard tier (agents-dv23): repo-wide invariants run on every mapped and smoke run.
+# Extracted from tests/test_budget.py (TestNoUnboundedSubprocess) per ADR agents-c07o.
+tree_guards="tests/test_tree_guards.py"
+
+# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
+# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
+if [ -z "$run" ] && [ -z "$mapped" ]; then
+  if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
+    FAST_GATE_TERMINATED=1
+    exit 0
+  fi
+  mapped="tests/test_factory_core.py"
+fi
+
+if ! files="$(printf '%s\n' $run $mapped $tree_guards | awk 'NF && !seen[$0]++' | sort)"; then
   echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
   echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
   exit 1
@@ -736,14 +757,40 @@ if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
   exit 0
 fi
 
-# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
-# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
-if [ -z "$files" ]; then
-  files="tests/test_factory_core.py"
-fi
-
 FAST_GATE_STAGE="preparing runner"
 modules="$(printf '%s\n' $files | sed 's#/#.#g; s#\.py$##' | tr '\n' ' ' | sed 's/ *$//')"
+
+# Re-entrancy guard (agents-q615, agents-y0ar, agents-4mvl):
+# Prevent runaway fork loops if a test suite accidentally invokes fast-gate.sh on a delta that
+# maps back to itself. Checked and exported at the execution boundary so dry-run mapping paths
+# are unconstrained, while bounding real nested test runner executions to depth < 2.
+# Belt-and-suspenders: checks both exported FAST_GATE_EXEC_DEPTH and kernel process ancestry
+# so no sequence of os.environ.pop or variable resetting in a child suite can launder the depth bound (agents-4mvl).
+_kernel_depth=0
+_p=$PPID
+while [ "$_p" -gt 1 ] 2>/dev/null; do
+  if [ -f "/proc/$_p/cmdline" ]; then
+    _a0=""; _a1=""
+    { IFS= read -r -d '' _a0; IFS= read -r -d '' _a1; } < "/proc/$_p/cmdline" 2>/dev/null || true
+    case "$_a0" in */fast-gate.sh|fast-gate.sh) _kernel_depth=$((_kernel_depth + 1)) ;;
+    *) case "$_a1" in */fast-gate.sh|fast-gate.sh) _kernel_depth=$((_kernel_depth + 1)) ;; esac ;;
+    esac
+  fi
+  _p=$(awk '{print $4}' "/proc/$_p/stat" 2>/dev/null || echo 0)
+done
+
+_env_depth="${FAST_GATE_EXEC_DEPTH:-0}"
+if [ "$_kernel_depth" -gt "$_env_depth" ] 2>/dev/null; then
+  _depth="$_kernel_depth"
+else
+  _depth="$_env_depth"
+fi
+
+if [ "$_depth" -ge 2 ]; then
+  echo "fast-gate: FAIL: recursive fast-gate execution exceeded max execution depth (depth=$_depth)" >&2
+  exit 2
+fi
+export FAST_GATE_EXEC_DEPTH=$((_depth + 1))
 
 FAST_GATE_STAGE="running tests ($modules)"
 echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
