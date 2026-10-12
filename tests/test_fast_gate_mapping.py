@@ -586,14 +586,16 @@ class TestFastGateMapping(unittest.TestCase):
                                   f"mapped delta for {path} must contain the always-on tier {tier}")
 
     def test_tree_guard_tier_module_holds_only_tree_property_tests(self):
-        """agents-dv23: tests/test_tree_guards.py must hold only repo-wide tree property tests,
-        pinned by class names and count to prevent accidental unit-test creep into the always-on tier."""
+        """agents-dv23, agents-5br9: tests/test_tree_guards.py must hold only repo-wide tree property tests,
+        pinned by class names and count to prevent accidental unit-test creep into the always-on tier.
+        TestWorktreeBeadsDecoyGuard (agents-5br9) enforces a repo-wide tree property: a linked worktree
+        must hold no local decoy .beads database."""
         tree_guards_path = ROOT / "tests" / "test_tree_guards.py"
         self.assertTrue(tree_guards_path.is_file(), "tests/test_tree_guards.py must exist")
         import ast
         tree = ast.parse(tree_guards_path.read_text(encoding="utf-8"))
         classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
-        self.assertEqual(classes, ["TestNoUnboundedSubprocess"],
+        self.assertEqual(classes, ["TestNoUnboundedSubprocess", "TestWorktreeBeadsDecoyGuard"],
                          "tests/test_tree_guards.py must contain exactly the pinned tree-guard classes")
 
     def test_a_tier_file_delta_selects_the_suite_that_guards_its_contents(self):

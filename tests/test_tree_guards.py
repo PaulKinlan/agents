@@ -10,14 +10,30 @@ lib file is introduced without an explicit budget.py mapping (closing agents-c04
 """
 
 import ast
-import os
 from pathlib import Path
-import re
-import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def check_worktree_beads_decoy(root: Path) -> list[str]:
+    """Check whether a linked git worktree contains decoy .beads database paths.
+
+    Returns a list of violating path strings, or an empty list if clean.
+    Canonical repositories (.git is a directory) legitimately hold the database and
+    are exempt.
+    """
+    if not (root / ".git").is_file():
+        return []
+    beads_dir = root / ".beads"
+    if not beads_dir.is_dir():
+        return []
+    candidates = [
+        beads_dir / "embeddeddolt",
+        beads_dir / "dolt",
+    ]
+    return [str(p) for p in candidates if p.is_dir()]
 
 
 class TestNoUnboundedSubprocess(unittest.TestCase):
@@ -78,6 +94,70 @@ class TestNoUnboundedSubprocess(unittest.TestCase):
 # The fast-gate consumer-coverage pin lived here until agents-undf moved it to
 # tests/test_fast_gate_consumer_coverage.py: agents-dv23 pins this file to hold exactly the
 # tree-guard classes, so a consumer-coverage pin placed here made the union red.
+
+class TestWorktreeBeadsDecoyGuard(unittest.TestCase):
+    """Guard rail against silent worktree decoy .beads databases (agents-5br9).
+
+    In any linked git worktree ((ROOT / ".git").is_file()), .beads/ must not contain
+    a local database directory (embeddeddolt/ or dolt/).
+    Worktrees must share the canonical repository's database via upstream bd's
+    git-common-dir fallback; a decoy database causes bd to report an empty ledger
+    and risk overwriting remote data on bd dolt push.
+    """
+
+    def test_worktree_has_no_local_beads_database(self):
+        found = check_worktree_beads_decoy(ROOT)
+        if found:
+            paths_str = ", ".join(found)
+            self.fail(
+                f"a worktree should hold no database; a decoy here means bd will report an "
+                f"empty ledger and a push from it would overwrite the shared one - "
+                f"move {paths_str} aside and re-run"
+            )
+
+    def test_decoy_guard_detects_and_refuses_decoy_database(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / ".git").write_text("gitdir: /path/to/.git/worktrees/test\n", encoding="utf-8")
+            decoy = tmp / ".beads" / "embeddeddolt"
+            decoy.mkdir(parents=True)
+
+            found = check_worktree_beads_decoy(tmp)
+            self.assertEqual(found, [str(decoy)])
+
+    def test_decoy_guard_exempts_canonical_repository(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / ".git").mkdir()
+            db = tmp / ".beads" / "embeddeddolt"
+            db.mkdir(parents=True)
+
+            found = check_worktree_beads_decoy(tmp)
+            self.assertEqual(found, [])
+
+    def test_decoy_guard_passes_clean_worktree(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / ".git").write_text("gitdir: /path/to/.git/worktrees/test\n", encoding="utf-8")
+            beads_dir = tmp / ".beads"
+            beads_dir.mkdir(parents=True)
+            (beads_dir / "config.yaml").write_text("issue_prefix: agents\n", encoding="utf-8")
+
+            found = check_worktree_beads_decoy(tmp)
+            self.assertEqual(found, [])
+
+    def test_decoy_guard_ignores_non_directory_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / ".git").write_text("gitdir: /path/to/.git/worktrees/test\n", encoding="utf-8")
+            beads_dir = tmp / ".beads"
+            beads_dir.mkdir(parents=True)
+            # A regular file (not directory) should not be flagged as a database directory
+            (beads_dir / "embeddeddolt").write_text("not a directory\n", encoding="utf-8")
+
+            found = check_worktree_beads_decoy(tmp)
+            self.assertEqual(found, [])
+
 
 if __name__ == "__main__":
     unittest.main()
