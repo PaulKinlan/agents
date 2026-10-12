@@ -10,6 +10,7 @@ path. `.github/workflows/` was reported missing while it existed.
 
 import importlib.machinery
 import importlib.util
+import re
 import subprocess
 import tempfile
 import unittest
@@ -573,20 +574,29 @@ class TestLineSuffixIsALocationNotAFilename(unittest.TestCase):
                 "a non-path token with a colon was stripped and resolved away",
             )
 
-    def test_plan_and_gitignore_agree_on_findings_and_suppressions(self):
-        """PLAN.md's claim about findings/ must match .gitignore's behaviour (agents-flgz)."""
-        import subprocess
 
+class TestPlanFindingsStoreAgreement(unittest.TestCase):
+    """PLAN.md's claim about findings/ must match .gitignore's behaviour (agents-flgz, agents-a2tm)."""
+
+    def test_plan_and_gitignore_agree_on_findings_and_suppressions(self):
         plan_path = FACTORY_ROOT / "docs" / "PLAN.md"
         self.assertTrue(plan_path.exists())
         plan_text = plan_path.read_text(encoding="utf-8")
 
-        # Find the findings/ line in the PLAN.md directory tree
+        # Anchor to the Section 7 "Repo layout" code block rather than scanning the whole file (agents-a2tm)
+        section_match = re.search(
+            r"## 7\. Repo layout\s*\n\s*```text\n(.*?)\n```",
+            plan_text,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(section_match, "docs/PLAN.md must contain ## 7. Repo layout code block")
+        tree_block = section_match.group(1)
+
         findings_lines = [
-            line for line in plan_text.splitlines()
+            line for line in tree_block.splitlines()
             if "findings/" in line and "#" in line
         ]
-        self.assertTrue(findings_lines, "docs/PLAN.md must document findings/ in directory tree")
+        self.assertEqual(len(findings_lines), 1, "exactly one findings/ entry in §7 directory tree")
         tree_comment = findings_lines[0].split("#", 1)[1].strip()
 
         # PLAN.md must declare findings are a gitignored evidence trail
