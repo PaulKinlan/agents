@@ -130,6 +130,26 @@ class TestFastGateMapping(unittest.TestCase):
                          "the attack-payload arm must not run the whole containment suite "
                          "(agents-3iog: no other containment module reads tests/fixtures/)")
 
+    def test_containment_harness_maps_to_every_containment_module(self):
+        """tests/containment_harness.py holds the setUp plus the 11 helpers the containment suites
+        inherit (agents-3iog split), and it is deliberately NOT test_*.py so discovery never
+        collects it. That is exactly why it needs its own arm rather than being absorbed: with no
+        arm the gate FAILED CLOSED on it as unmapped ("changed file(s) match no mapping arm and no
+        ignore-list arm") - correct behaviour for a file whose changes run nothing, but it left the
+        split unlandable. A harness change reaches every inherited execution, so the arm names all
+        six modules, plus the shape test that catches a test method creeping into the harness."""
+        mapped = resolve_fast_gate(["tests/containment_harness.py"])
+        for module in (
+            "tests/test_containment.py",
+            "tests/test_containment_declarations.py",
+            "tests/test_containment_adapters.py",
+            "tests/test_containment_engine_credentials.py",
+            "tests/test_containment_prepass_pins.py",
+            "tests/test_containment_egress.py",
+            "tests/test_containment_shape.py",
+        ):
+            self.assertIn(module, mapped, f"harness arm must run {module} (agents-3iog)")
+
     def test_hermetic_env_and_package_init_map_to_hermetic_suite(self):
         """tests/__init__.py and tests/hermetic_env.py must map to test_hermetic_env.py and pin suites."""
         for path in ("tests/__init__.py", "tests/hermetic_env.py"):
@@ -170,9 +190,6 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_adapter_auth_failure.py", mapped)
         self.assertIn("tests/test_factory_core.py", mapped)
         self.assertIn("tests/test_containment.py", mapped, "pi.sh containment suite omitted (agents-71zn)")
-        self.assertIn("tests/test_containment_adapters.py", mapped,
-                      "pi.sh adapter suite omitted (agents-3iog split: the argv/env shape assertions "
-                      "live in the adapters module, which the pre-split arm ran as part of the whole file)")
         self.assertIn("tests/test_containment_adapters.py", mapped,
                       "pi.sh adapter suite omitted (agents-3iog split: the argv/env shape assertions "
                       "live in the adapters module, which the pre-split arm ran as part of the whole file)")
