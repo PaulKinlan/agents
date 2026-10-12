@@ -14,6 +14,7 @@ Validates:
    markdown fails loudly rather than being silently absorbed by a canvas ignore arm.
 """
 
+import ast
 import os
 import subprocess
 import tempfile
@@ -22,6 +23,45 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FAST_GATE = ROOT / "tools" / "fast-gate.sh"
+# The FLEET COVERAGE ORACLE. It lives in the fleet bundle, not in this repo (the repo's own contract
+# suite reaches it the same way - tests/test_coverage_contract.py, agents-1kzf), so the pin below asks
+# THE ORACLE what a changed file's consumers are rather than defining a second notion that could
+# disagree with it (agents-oj5s).
+ORACLE_SCRIPT = Path("/home/exedev/fleet/remote/check-coverage.py")
+
+
+def oracle_coverage_for(changed_files: list[str], executed_suites: list[str]):
+    """The coverage the ORACLE would report for a gate run that executed `executed_suites`.
+
+    In-process reuse, mirroring tests/test_coverage_contract.py's oracle test: the log line is the
+    gate's own suite marker, and git is stubbed so the oracle sees exactly `changed_files` as the
+    delta. Returns None when the oracle is not installed on this machine - the caller must then say so
+    rather than treating silence as coverage.
+    """
+    if not ORACLE_SCRIPT.is_file():
+        return None
+    import importlib.util
+    import tempfile
+    from unittest.mock import patch
+
+    spec = importlib.util.spec_from_file_location("check_coverage_oracle", str(ORACLE_SCRIPT))
+    oracle = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(oracle)
+    with tempfile.NamedTemporaryFile("w") as log:
+        log.write("fast-gate: passed: " + " ".join(executed_suites) + "\n")
+        log.flush()
+        original = oracle.subprocess.check_output
+
+        def stubbed(cmd, *args, **kwargs):
+            if isinstance(cmd, list):
+                if "rev-parse" in cmd:
+                    return ("deadbeef" * 5) + "\n"
+                if any("diff" in str(part) for part in cmd):
+                    return "\n".join(changed_files) + "\n"
+            return original(cmd, *args, **kwargs)
+
+        with patch.object(oracle.subprocess, "check_output", side_effect=stubbed):
+            return oracle.extract_coverage(log.name, str(ROOT), "HEAD", "bash tools/fast-gate.sh")
 
 
 def run_fast_gate(changed_files: list[str]) -> subprocess.CompletedProcess:
@@ -52,6 +92,32 @@ def resolve_fast_gate(changed_files: list[str]) -> list[str]:
     res = run_fast_gate(changed_files)
     res.check_returncode()
     return res.stdout.strip().split()
+
+
+def suites_importing(dotted: str) -> set[str]:
+    """The test suites that import `dotted` - the FALLBACK consumer notion, used only when the oracle
+    cannot be reached (agents-oj5s).
+
+    This is deliberately the second-best instrument and it is named as such: the oracle's notion of a
+    consumer (import-based candidate discovery plus tests/coverage-contract.json) is the one the gate
+    of record uses, so a pin built on this scan could one day disagree with the oracle. It exists
+    because a pin that skips when the oracle is absent cannot fail, and a guard that cannot fail is not
+    a guard. Both import SHAPES are scanned - the parenthesised multi-name `from lib.containment import
+    (...)` the split modules use, and a plain `import lib.containment` - because the shape that exists
+    today is not necessarily the shape a future consumer arrives with. (Measured when this was
+    written: all seven importers use the from-import shape and none uses the plain one.) Dynamic
+    imports (importlib, __import__) are NOT seen; that limit is real, and it is one more reason the
+    oracle path is the one that matters.
+    """
+    found = set()
+    for path in sorted((ROOT / "tests").glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == dotted:
+                found.add(f"tests/{path.name}")
+            elif isinstance(node, ast.Import) and any(alias.name == dotted for alias in node.names):
+                found.add(f"tests/{path.name}")
+    return found
 
 
 class TestFastGateMapping(unittest.TestCase):
@@ -149,6 +215,58 @@ class TestFastGateMapping(unittest.TestCase):
             "tests/test_containment_shape.py",
         ):
             self.assertIn(module, mapped, f"harness arm must run {module} (agents-3iog)")
+
+    def _assert_arm_covers(self, missing: list[str], source: str) -> None:
+        """The FALLBACK path's failure message: it names the module, the suites the arm omits and the
+        one-line fix, because a bare assertEqual teaches the next person nothing (agents-oj5s)."""
+        self.assertFalse(missing, (
+            "the lib/containment.py arm in tools/fast-gate.sh does not run every suite that consumes "
+            f"lib.containment. Missing (per {source}): {missing}. "
+            "FIX: add those names to the arm's mapped= list in tools/fast-gate.sh, beside "
+            "tests/test_containment.py. This pin exists because the coverage contract REPORTS rather "
+            "than FAILS, so a dropped suite is silent by construction - both the 2-suite and the "
+            "8-suite selections exit 0 (agents-mo75 measured that; agents-oj5s pins it)."))
+
+    def test_containment_py_arm_covers_every_consumer_the_oracle_names(self):
+        """agents-oj5s, the regression pin the agents-mo75 review asked for. agents-mo75 added the
+        lib/containment.py) arm after the basename rule was measured selecting only the thin
+        tests/test_containment.py (55 tests) while the module's consumers run 151 - but nothing pinned
+        the arm's LIST, so the next editor could drop a suite, or a new consumer could appear, with the
+        gate staying green: the coverage contract REPORTS rather than FAILS.
+
+        The instrument is the ORACLE'S notion of a consumer, not a private one: the arm's emitted
+        selection is handed to the fleet coverage oracle, which reports any consumer it considers
+        required and unexecuted as `omitted` (and the changed file itself as `unmapped` when nothing
+        maps it). Only when the oracle is not installed does this fall back to the ast import scan in
+        suites_importing(), which is a second-best notion and is labelled as such in the failure text.
+        """
+        selected = resolve_fast_gate(["lib/containment.py"])
+        coverage = oracle_coverage_for(["lib/containment.py"], selected)
+        if coverage is not None:
+            unmapped = sorted(coverage.get("unmapped", []))
+            omitted = sorted(coverage.get("omitted", []))
+            self.assertEqual((unmapped, omitted), ([], []), (
+                "the lib/containment.py arm in tools/fast-gate.sh does not cover the module's consumers. "
+                f"Per the coverage oracle: unmapped changed file(s)={unmapped} (the arm is missing, so "
+                f"nothing maps the module) and omitted suite(s)={omitted} (the arm exists but does not "
+                "name them). FIX: the arm's mapped= list in tools/fast-gate.sh, beside "
+                "tests/test_containment.py, must name every omitted suite. This pin exists because the "
+                "coverage contract REPORTS rather than FAILS, so a dropped suite is silent by "
+                "construction - both the 2-suite and the 8-suite selections exit 0 (agents-mo75 "
+                "measured that; agents-oj5s pins it)."))
+            return
+        importers = suites_importing("lib.containment")
+        # Vacuity guards, pinning the SCANNER's reach rather than a count that decays when suites are
+        # split or merged: tests/test_containment.py uses the parenthesised many-name form, and
+        # tests/test_child_env.py is a single-name importer outside the containment family - it is the
+        # consumer the basename rule missed.
+        self.assertIn("tests/test_containment.py", importers,
+                      "the import scan must see the parenthesised from-import (agents-oj5s)")
+        self.assertIn("tests/test_child_env.py", importers,
+                      "the import scan must see a single-name from-import outside the suite family "
+                      "(agents-oj5s)")
+        self._assert_arm_covers(sorted(importers - set(selected)),
+                               "the ast import scan (the fleet coverage oracle is not installed here)")
 
     def test_hermetic_env_and_package_init_map_to_hermetic_suite(self):
         """tests/__init__.py and tests/hermetic_env.py must map to test_hermetic_env.py and pin suites."""
