@@ -1,0 +1,51 @@
+--- a/bin/fleet-budget
++++ b/bin/fleet-budget
+@@ -60,6 +60,10 @@
+                  "cmd": d.get("cmd") or "", "lane": d.get("lane") or "-",
+                  "sha": d.get("sha"), "log": d.get("log") or "",
+                  "unmapped": len((d.get("coverage") or {}).get("unmapped") or []) if isinstance(d.get("coverage"), dict) else 0,
++                 # agents-oeza: a file whose arm IS mapped and executed but OMITS a consumer is not an
++                 # unmapped file, so it must not be counted as one - and it must not vanish either.
++                 # agents-fwlf: measured, not inferred (case A in the harness: fast=0, full=3).
++                 "partial": len((d.get("coverage") or {}).get("partial") or {}) if isinstance(d.get("coverage"), dict) else 0,
+                  "suites": len((d.get("coverage") or {}).get("suites") or []) if isinstance(d.get("coverage"), dict) else 0})
+ 
+ def median(xs):
+@@ -79,7 +83,8 @@
+         # record can be shown to be current — refuse to certify instead of judging whatever is on disk.
+         return {"state": "NOT-CONFIGURED", "configured": False, "cmd": "",
+                 "n": len(rs), "cur_n": 0, "obsolete_n": len(rs), "obsolete": False, "defined": False,
+-                "since": None, "median": None, "max": None, "passes": 0, "fails": 0, "unmapped": 0}
++                "since": None, "median": None, "max": None, "passes": 0, "fails": 0,
++                "unmapped": 0, "partial": 0}
+     cur = [r for r in rs if r["cmd"] == configured]
+     pas = [r["secs"] for r in cur if r["state"] == "PASS" and isinstance(r["secs"], (int, float))]
+     s = {"configured": True, "cmd": configured, "n": len(rs), "cur_n": len(cur),
+@@ -87,7 +92,10 @@
+          "since": (min(r["at"] for r in cur)[:10] or None) if cur else None,
+          "median": median(pas), "max": max(pas) if pas else None, "passes": len(pas),
+          "fails": sum(1 for r in cur if r["state"] == "FAIL"),
+-         "unmapped": max((r["unmapped"] for r in cur), default=0)}
++         "unmapped": max((r["unmapped"] for r in cur), default=0),
++        # R5 is the FAST gate's selection map (docs/speed.md:56-61), so its counts come from the fast
++        # records - not from the full gate's, which is what the printed line used to read (agents-fwlf).
++        "partial": max((r["partial"] for r in cur), default=0)}
+     # The explicit state is the point (fleet-mace): "no record for the configured command" and "the
+     # configured gates are fine" are DIFFERENT answers, and neither may hide behind a median computed
+     # from a gate nobody runs.
+@@ -160,8 +168,13 @@
+     for s, lab in ((full, "full"), (fast, "fast")):
+         if s.get("cur_n") and s.get("obsolete_n"):
+             print("  ! %s gate: %d record(s) from retired gate commands are excluded from the median above" % (lab, s["obsolete_n"]))
+-    if full.get("defined") and full.get("unmapped"):
+-        print("  ! fast-gate coverage: up to %d changed file(s) with no mapped suite (R5)" % full["unmapped"])
++    # Both lines describe the FAST gate's selection map, so both read the fast record. The label said
++    # "fast-gate coverage" while the value came from the full gate's records (agents-fwlf); the two
++    # defects below are opposite faces of one question - what does this number mean, and whose is it.
++    if fast.get("defined") and fast.get("unmapped"):
++        print("  ! fast-gate coverage: up to %d changed file(s) with no mapped suite (R5)" % fast["unmapped"])
++    if fast.get("defined") and fast.get("partial"):
++        print("  ! fast-gate coverage: up to %d changed file(s) whose mapped arm omitted a consumer (R5)" % fast["partial"])
+     print("  full gate command: %s" % ((out["full_cmd"] or "(not configured)").split("\n")[0]))
+     print("  fast gate command: %s" % ((out["fast_cmd"] or "(not configured)").split("\n")[0]))
+ 
