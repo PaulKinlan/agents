@@ -684,7 +684,7 @@ if [ -n "$unmatched" ]; then
         ;;
     esac
   done
-  echo "fast-gate: To fix, add an arm to tools/fast-gate.sh (under 'mapping changed files', around line 135) mapping the path to its test suite, or an ignore arm under 'deliberate ignore list' with documented search evidence (agents-9nir, agents-ows4)." >&2
+  echo "fast-gate: To fix, add an arm to tools/fast-gate.sh (under 'mapping changed files') mapping the path to its test suite, or an ignore arm under '--- Ignore list (agents-9nir) ---' with documented search evidence (agents-9nir, agents-ows4, agents-dtj6)." >&2
   exit 1
 fi
 

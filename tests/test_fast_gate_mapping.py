@@ -349,7 +349,7 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertIn("no mapping arm", res.stderr)
 
     def test_unmatched_gate_config_path_refuses_loudly_with_actionable_guidance(self):
-        """agents-ows4: a new/unmatched gate or provisioning config path must fail loudly,
+        """agents-ows4, agents-dtj6: a new/unmatched gate or provisioning config path must fail loudly,
         identifying the path, explaining that it is gate/provisioning config, pointing directly
         to tools/fast-gate.sh, and recommending relevant test suites so the fix is an immediate edit."""
         for path in ("tools/new_gate.conf", "tools/custom-gate.sh"):
@@ -360,6 +360,9 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertIn("gate/provisioning config", res.stderr)
                 self.assertIn("tools/fast-gate.sh", res.stderr)
                 self.assertIn("tests/test_check_conf_consistency.py", res.stderr)
+                self.assertIn("--- Ignore list (agents-9nir) ---", res.stderr)
+                self.assertNotIn("deliberate ignore list", res.stderr)
+                self.assertNotIn("around line 135", res.stderr)
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
