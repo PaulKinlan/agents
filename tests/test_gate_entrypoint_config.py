@@ -160,6 +160,54 @@ def _tracked_fields() -> dict:
     return fields
 
 
+# agents-825v: every temp HOME this suite creates is REGISTERED, so a test that leaks a detached
+# worker fails HERE rather than after the suite exits. The leak is measured rather than imagined: a
+# fixture that fabricates FLEET_CHECKS_DIR and drives the real entrypoint can leave a fleet-heavy
+# worker orphaned to ppid 1 holding the VM's single heavy slot - seen as the fleet-heavy "descendants
+# still held slot1" warning in the landing-gate logs, and as a husk still alive 1h50m later, orphaned,
+# with its temp HOME already deleted.
+#
+# MODULE-LEVEL ON PURPOSE: the suite's 13 temp-HOME sites span SIX test classes (1+2+4+1+2+3), so a
+# helper defined on one class is an AttributeError in the other five - measured, not foreseen: the
+# first attempt failed with exactly that, 9 errors. They take the case explicitly for the same reason.
+#
+# AND THE CHECK IS SCOPED TO THIS TEST'S OWN HOME, deliberately: a global process diff would fire on
+# another lane's perfectly legitimate in-flight gate, and a machine-state assertion that turns an
+# unrelated change red is the defect class this suite already had to fix once (agents-3xqa).
+def _registered_tmp_home(case: unittest.TestCase, prefix: str) -> str:
+    """A temp HOME whose teardown asserts no live process still references it."""
+    home = tempfile.mkdtemp(prefix=prefix)
+    case.addCleanup(_assert_no_live_process_referencing, case, home)
+    return home
+
+
+def _assert_no_live_process_referencing(case: unittest.TestCase, path: str) -> None:
+    """Fail if any live process still references the temp HOME this test was given (agents-825v).
+
+    Reads /proc directly rather than shelling out, so the check does not depend on pgrep or ps being
+    available, and skips this process, whose own argv can legitimately name the path while the
+    assertion is being made.
+    """
+    survivors = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        printable = raw.replace(b"\x00", b" ")
+        if path.encode() in printable:
+            survivors.append((entry.name, printable.decode("utf-8", "replace")[:200]))
+    case.assertEqual(
+        survivors, [],
+        f"a live process still references this test's temp HOME {path} after the test finished: "
+        f"{survivors}. That is the agents-825v leak - a worker that outlived its parent and holds "
+        f"the VM's single heavy slot. Kill it in this test's own cleanup, or stop the fixture "
+        f"inheriting the environment.",
+    )
+
+
 class TestTheEntrypointReadsTheTrackedCommand(unittest.TestCase):
     """The acceptance: a fresh VM with no per-VM config uses the TRACKED hermetic command."""
 
@@ -173,7 +221,7 @@ class TestTheEntrypointReadsTheTrackedCommand(unittest.TestCase):
 
     def _fresh_home(self) -> str:
         """A HOME with no .fleet/check.conf - what a reprovisioned VM has."""
-        tmp = tempfile.mkdtemp(prefix="ia3p-fresh-home-")
+        tmp = _registered_tmp_home(self, "ia3p-fresh-home-")
         return tmp
 
     def test_a_fresh_home_has_no_per_vm_config(self):
@@ -275,7 +323,7 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
 
     def test_the_entrypoint_resolves_the_installed_tracked_command(self):
         import json
-        home = tempfile.mkdtemp(prefix="ia3p-positive-")
+        home = _registered_tmp_home(self, "ia3p-positive-")
         env = _entrypoint_env(home)
 
         # 1. THE INSTALL STEP, DRIVEN THROUGH THE PROVISIONING ENTRYPOINT INSTEAD OF ASSERTED
@@ -343,7 +391,7 @@ class TestTheEntrypointResolvesTheInstalledCommand(unittest.TestCase):
         """agents-gxnb: when the cached command does not match $CHECK_CMD, fleet-check's
         attempt to re-run the gate is intercepted, proving no real full gate can run."""
         import json
-        home = tempfile.mkdtemp(prefix="ia3p-regress-")
+        home = _registered_tmp_home(self, "ia3p-regress-")
         env = _entrypoint_env(home)
 
         install = subprocess.run(["bash", str(RESOLVER), "--install"],
@@ -480,7 +528,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     """
 
     def test_install_is_idempotent_and_matches_the_tracked_command(self):
-        home = tempfile.mkdtemp(prefix="ia3p-drift-")
+        home = _registered_tmp_home(self, "ia3p-drift-")
         env = dict(os.environ)
         env["HOME"] = home
         env.pop("FLEET_CHECK_CONF", None)
@@ -513,7 +561,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     def test_install_overwrites_stale_per_vm_config_with_tracked_values(self):
         """When an existing per-VM check.conf carries a stale command (e.g. without -t .),
         running --install must overwrite it with the tracked hermetic command."""
-        home = tempfile.mkdtemp(prefix="ia3p-stale-")
+        home = _registered_tmp_home(self, "ia3p-stale-")
         conf = Path(home) / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True)
         conf.write_text('CHECK_CMD="python3 -m unittest discover -s tests -v"\n', encoding="utf-8")
@@ -534,7 +582,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     def test_install_overwrites_malformed_per_vm_config_with_tracked_values(self):
         """agents-r1o7: when an existing per-VM check.conf contains invalid syntax or corruption,
         running --install must repair it from tracked defaults without failing during sourcing."""
-        home = tempfile.mkdtemp(prefix="ia3p-malformed-")
+        home = _registered_tmp_home(self, "ia3p-malformed-")
         conf = Path(home) / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True)
         conf.write_text('SYNTAX ERROR = %%% not valid bash\n', encoding="utf-8")
@@ -556,7 +604,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         """agents-f6no: when ~/.fleet/check.conf already exists without agents-factory stamp
         (e.g. written by another project on a shared-HOME host), --install must warn to stderr
         and stamp the project name and machine-global scope in the header."""
-        home = tempfile.mkdtemp(prefix="f6no-foreign-")
+        home = _registered_tmp_home(self, "f6no-foreign-")
         conf = Path(home) / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True)
         conf.write_text('CHECK_CMD="echo OTHER_PROJECT_GATE"\n', encoding="utf-8")
@@ -604,7 +652,7 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
                               timeout=60, env=env, cwd=str(ROOT))
 
     def test_not_installed_in_sync_drift_and_malformed_are_each_distinguished(self):
-        home = tempfile.mkdtemp(prefix="d081-check-")
+        home = _registered_tmp_home(self, "d081-check-")
         conf = Path(home) / ".fleet" / "check.conf"
 
         # 1. NOTHING INSTALLED is not drift, but it is not silence either: a distinct code so a caller
@@ -713,7 +761,7 @@ class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
     def test_drifted_is_loud_installed_and_absent_are_silent(self):
         # (a) THE SHAPE THIS VM WAS ACTUALLY IN: no stamp, CHECK_CMD without the capture wrapper, and a
         #     fast timeout of 360 against the tracked 180.
-        home = tempfile.mkdtemp(prefix="d081-point-of-use-")
+        home = _registered_tmp_home(self, "d081-point-of-use-")
         conf = Path(home) / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True)
         conf.write_text('CHECK_CMD="python3 -m unittest discover -s tests -t . -v"\n'
@@ -737,7 +785,7 @@ class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
 
         # (c) NOTHING INSTALLED: also silent. A fresh VM has no per-VM file, and that is not drift -
         #     exit code 3 exists precisely so the two states are not confused.
-        empty = tempfile.mkdtemp(prefix="d081-fresh-")
+        empty = _registered_tmp_home(self, "d081-fresh-")
         fresh = self._run_gate(empty)
         self.assertEqual(fresh.returncode, 0)
         self.assertNotIn("WARNING", fresh.stderr)
@@ -776,7 +824,7 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
     def test_install_sh_installs_the_tracked_gate_command(self):
         """A fresh host: provisioning writes the file the deployed gate reads, carrying the
         TRACKED command (including the load-bearing `-t .` hermeticity flag)."""
-        home = tempfile.mkdtemp(prefix="l2xb-provision-")
+        home = _registered_tmp_home(self, "l2xb-provision-")
         res = self._run_installer(home)
         self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
 
@@ -796,7 +844,7 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
         """The 'repaired host' half of the acceptance, which is the half a fresh-host check
         cannot see: a per-VM copy predating the `-t .` hermeticity fix must be REPLACED by
         the tracked command when provisioning runs, not left in place."""
-        home = tempfile.mkdtemp(prefix="l2xb-repair-")
+        home = _registered_tmp_home(self, "l2xb-repair-")
         conf = Path(home) / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True)
         conf.write_text('CHECK_CMD="python3 -m unittest discover -s tests -v"\n', encoding="utf-8")
@@ -814,7 +862,7 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
         an install that could not write the config (read-only or wrong HOME) was still reported as a
         success. Both halves are pinned here: the drift is NAMED before it is replaced, and the
         config is verified against the tracked one afterwards."""
-        home = tempfile.mkdtemp(prefix="d081-loud-")
+        home = _registered_tmp_home(self, "d081-loud-")
         conf = Path(home) / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True)
         # The measured shape of a drifted host: the pre-authored-via-an-older-installer command, with
