@@ -845,8 +845,32 @@ modules="$(printf '%s\n' $files | sed 's#/#.#g; s#\.py$##' | tr '\n' ' ' | sed '
 FAST_GATE_STAGE="running tests ($modules)"
 echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
 
+# agents-6jmx: keep a copy of the RUNNER's output in a file the job writes itself. The gate log
+# is the wrapper's file, and on a waited/preempted run the runner's output (which unittest writes
+# to stderr - dots, "Ran N tests", OK/FAILED) did not reach it, while this script's own stdout
+# lines did: five of this lane's logs split exactly that way, and the bead's two original
+# examples are gone. The FULL gate already solved this for the same reason - CHECK_CMD tees to a
+# per-tree summary (agents-j1te, "for stream legibility on preempt/requeue") - so this is that
+# shape rather than a new one. A file the JOB writes does not depend on who owns the fd.
+# BOTH STREAMS, ON PURPOSE (agents-6jmx, coord's requirement): the survivors in my logs were
+# this script's stdout and the losses the runner's stderr, so a capture that took only ONE of
+# the two would recreate the same defect facing the other way - a summary that is complete only
+# when the fd that happens to be dropped is the other one. Each stream keeps its own channel
+# (tee passes through), so stdout is not disturbed: the dry run, which exits before this block,
+# stays byte-identical, and that is verified rather than assumed (agents-9nir/agents-ftf4).
+summary_file=""
+summary_dir="${FLEET_CHECKS_DIR:-$HOME/.fleet/checks}"
+if mkdir -p "$summary_dir" 2>/dev/null; then
+  summary_file="$summary_dir/$(git rev-parse HEAD^{tree} 2>/dev/null || echo unknown)-${FLEET_LANE:-$(whoami)}-$$.fast.summary.txt"
+  echo "fast-gate: runner output -> $summary_file" >&2
+fi
+
 rc=0
-python3 -u -m unittest $modules || rc=$?
+if [ -n "$summary_file" ]; then
+  python3 -u -m unittest $modules > >(tee -a "$summary_file") 2> >(tee -a "$summary_file" >&2) || rc=$?
+else
+  python3 -u -m unittest $modules || rc=$?
+fi
 
 FAST_GATE_TERMINATED=1
 if [ "$rc" -eq 0 ]; then
