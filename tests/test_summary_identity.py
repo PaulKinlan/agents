@@ -36,6 +36,22 @@ def _naming_lines(src):
     """Lines that ASSIGN a summary file path - where the identity has to live."""
     return [ln for ln in src.splitlines() if ".summary.txt" in ln and "=" in ln]
 
+def _header_format_line(src):
+    """The statement that WRITES the run identity - the artefact this property is about.
+
+    agents-dvpk measured why a window around the redirect is the wrong subject: dropping `sha=%s`
+    from the header printf still passed, because `summary_sha="$(...)"` sits in the same window and
+    contains the substring `sha=`. The same is true of `tree=`. The marker was supplied by the
+    ASSIGNMENT rather than by the header, which is exactly the failure family this file exists to
+    avoid. So the assertion is narrowed to the line that formats the header, and it must be found:
+    a pin that silently stops matching is indistinguishable from one that passes.
+    """
+    for line in _code_only(src).splitlines():
+        if "printf" in line and "run:" in line:
+            return line
+    return ""
+
+
 def _redirects_to_file(src, var):
     """True if the writer sends something straight into the file variable `var`.
 
@@ -147,13 +163,24 @@ class TestSummaryFileNameCarriesRunIdentity(unittest.TestCase):
                     if any(p in ln for p in (f'> "${var}"', f'> \\"${var}\\"', f'> \\"\\${var}\\"', f'}} > "${var}"'))
                 ]
                 self.assertTrue(idx, f"{rel}: cannot locate the redirect to ${var}")
-                window = "\n".join(lines[max(0, idx[0] - 8) : idx[0] + 1])
+                fmt = _header_format_line(src)
+                self.assertTrue(
+                    fmt,
+                    f"{rel}: cannot locate the statement that writes the header, so this pin is no "
+                    "longer checking anything (a pin that silently stops matching reads exactly like "
+                    "one that passes) - agents-dvpk",
+                )
                 for marker in HEADER_MARKERS:
+                    field = f"{marker}%s"
                     self.assertIn(
-                        marker,
-                        window,
-                        f"{rel}: the header written to ${var} does not carry {marker!r}, so the file "
-                        "does not identify its run (agents-qtnv)",
+                        field,
+                        fmt,
+                        f"{rel}: the HEADER'S OWN FORMAT does not carry the {field!r} field, so the "
+                        "file written to ${var} cannot identify its run. Asserted on the FIELD (%s)" 
+                        "and not on the bare marker: agents-dvpk measured that dropping `sha=%s` passed "
+                        "because the assignment `summary_sha=` supplied the substring from a nearby "
+                        "line - and for check.conf's single-line writer, from the SAME line "
+                        "(agents-qtnv, agents-dvpk)",
                     )
 
     def test_the_tee_appends_so_it_cannot_truncate_the_header(self):
