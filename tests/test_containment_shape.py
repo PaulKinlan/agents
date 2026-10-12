@@ -33,9 +33,16 @@ class TestTheContainmentSuitesDoNotReRunInheritedTests(unittest.TestCase):
     def test_the_shared_harness_defines_no_tests(self):
         classes = {name: tests for name, _bases, tests in _classes(ROOT / "tests/containment_harness.py")}
         self.assertIn("ContainmentHarness", classes)
-        self.assertEqual(classes["ContainmentHarness"], frozenset(),
-                         "the harness must hold setUp and helpers only: a test method here is "
-                         "re-run by every subclass (agents-3iog)")
+        # EVERY class, not just the harness one. The file is deliberately not test_*.py, so
+        # discovery never collects it, and the arm covering harness changes runs the six modules
+        # that IMPORT it - not a class nothing imports. Measured while sizing that arm: a leaked
+        # test class added to this module left the entire mapped set GREEN, which is the
+        # silent-green shape this pin exists to prevent. A test method inside ContainmentHarness
+        # is also caught, because it is re-run by every subclass.
+        offenders = {name: sorted(tests) for name, tests in classes.items() if tests}
+        self.assertEqual(offenders, {},
+                         "the harness module must hold setUp and helpers only: a test method in ANY "
+                         "class here is never collected and never run (agents-3iog)")
 
     def test_no_containment_case_inherits_from_a_class_that_has_tests(self):
         with_tests = {}
