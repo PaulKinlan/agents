@@ -1438,16 +1438,21 @@ class TestIsBroadRoot(unittest.TestCase):
                         "the executable FILE must still be bound, or the tool cannot run")
 
     def test_credential_roots_stay_broad_even_with_a_namesake_executable(self):
-        """agents-z6sv: ~/.ssh, ~/.gnupg and ~/.aws are credential stores, not tool install trees, so
-        a namesake executable under one must not exempt it from the broad-root refusal either. These
-        are the three the or3m review left out: the guard refused the XDG prefixes, and the same
-        guard arm silently exempted every other hidden prefix, including the ones whose whole
-        contents are keys. The exemptions around it are asserted in the same tree, so a "fix" that
-        refuses every hidden prefix cannot pass this test."""
+        """agents-z6sv, widened by agents-teg3: the depth-1 prefixes that are credential stores are
+        not tool install trees, so a namesake executable under one must not exempt it from the
+        broad-root refusal either. z6sv named ~/.ssh, ~/.gnupg and ~/.aws - the three the or3m
+        review left out, because the guard refused the XDG prefixes while the same guard arm
+        silently exempted every other hidden prefix. teg3 filed the rest of the class: ~/.kube
+        (kubeconfig tokens), ~/.docker (config.json auths) and ~/.gcloud (application default
+        credentials) are stores by the same rule, so they are named in the same set and asserted by
+        the same loop. The exemptions around it are asserted in the same tree, so a "fix" that
+        refuses every hidden prefix cannot pass this test, and neither can one that puts a prefix
+        in the wrong set - _SHARED_USER_DIRS holds bare leaf names matched against the directory
+        name, so a prefix parked there is silently inert."""
         from lib.sandbox import _is_broad_root
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            for prefix in (".ssh", ".gnupg", ".aws"):
+            for prefix in (".ssh", ".gnupg", ".aws", ".kube", ".docker", ".gcloud"):
                 tool_dir = home / prefix / "evil"
                 tool_dir.mkdir(parents=True)
                 exe = tool_dir / "evil"
@@ -1456,7 +1461,8 @@ class TestIsBroadRoot(unittest.TestCase):
                 self.assertTrue(
                     _is_broad_root(tool_dir, str(home)),
                     f"~/{prefix}/evil houses a namesake executable but is a credential store: it "
-                    "must stay broad rather than be exempted as a tool install tree (agents-z6sv)",
+                    "must stay broad rather than be exempted as a tool install tree "
+                    "(agents-z6sv named the first three prefixes, agents-teg3 the rest)",
                 )
 
             # The canonical install tree keeps its exemption (agents-n5qp), so this is not
