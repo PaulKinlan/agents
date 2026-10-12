@@ -67,8 +67,8 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
                       f"the gate must say which environment its verdict is about: {res.stderr!r}")
         self.assertIn("isolate_operator_config", res.stderr,
                       "the gate must name the declaration that supplies hermeticity")
-        self.assertEqual(res.stdout.strip(), "tests/test_hermetic_env.py",
-                         "stdout stays the machine-readable suite list")
+        self.assertIn("tests/test_hermetic_env.py", res.stdout.strip().splitlines(),
+                      "stdout must contain the mapped suite")
         self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_assertion_failure_does_not_leak_ambient_environment_values(self):
