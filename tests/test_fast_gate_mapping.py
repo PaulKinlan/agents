@@ -382,9 +382,11 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertIn("no mapping arm", res.stderr)
 
     def test_unmatched_gate_config_path_refuses_loudly_with_actionable_guidance(self):
-        """agents-ows4: a new/unmatched gate or provisioning config path must fail loudly,
+        """agents-ows4, agents-dtj6, agents-iwm5: a new/unmatched gate or provisioning config path must fail loudly,
         identifying the path, explaining that it is gate/provisioning config, pointing directly
-        to tools/fast-gate.sh, and recommending relevant test suites so the fix is an immediate edit."""
+        to tools/fast-gate.sh, and recommending relevant test suites so the fix is an immediate edit.
+        The cited ignore-list section marker must actually exist as a heading in tools/fast-gate.sh (agents-iwm5)."""
+        fast_gate_content = FAST_GATE.read_text(encoding="utf-8")
         for path in ("tools/new_gate.conf", "tools/custom-gate.sh"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
@@ -393,6 +395,20 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertIn("gate/provisioning config", res.stderr)
                 self.assertIn("tools/fast-gate.sh", res.stderr)
                 self.assertIn("tests/test_check_conf_consistency.py", res.stderr)
+                self.assertIn("--- Ignore list (agents-9nir) ---", res.stderr)
+                self.assertNotIn("deliberate ignore list", res.stderr)
+                self.assertNotIn("around line 135", res.stderr)
+
+                # agents-iwm5: dynamically extract the cited header and assert it exists as an anchored heading line in tools/fast-gate.sh
+                import re
+                m = re.search(r"or an ignore arm under '([^']+)'", res.stderr)
+                self.assertIsNotNone(m, f"expected refusal guidance to cite an ignore-list section, got:\n{res.stderr}")
+                cited_header = m.group(1).strip()
+                core_header = cited_header.strip("-").strip()
+                # End-anchor required so comments like '# --- Ignore list (agents-9nir) --- is the old name' cannot match (agents-iwm5)
+                heading_pattern = re.compile(rf"^\s*#\s*-+\s*{re.escape(core_header)}\s*-+\s*$", re.MULTILINE)
+                self.assertTrue(heading_pattern.search(fast_gate_content),
+                                f"the cited section {cited_header!r} must actually exist as an anchored heading line in tools/fast-gate.sh")
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
