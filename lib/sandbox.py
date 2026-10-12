@@ -130,6 +130,14 @@ _SHARED_USER_DIRS = _STRUCTURAL | frozenset({"state", "etc", "include", "var"})
 # member of that set is a bare leaf name while the prefix is required to start with '.'.
 _SHARED_HOME_PREFIXES = frozenset({".cache", ".config"})
 
+# The same rule, for a different reason, on the depth-1 prefixes that are CREDENTIAL stores
+# (agents-z6sv): ~/.ssh, ~/.gnupg and ~/.aws hold the user's keys and tokens, never a tool's install
+# tree, so a namesake executable under one must not exempt the directory either. Refusing only by
+# name keeps it narrow: a tool's canonical ~/.local/<tool> tree and any unlisted hidden prefix keep
+# the exemption they had before. Siblings are the whole point - binding ~/.ssh/<name> whole would
+# expose id_* and known_hosts next to it.
+_CREDENTIAL_HOME_PREFIXES = frozenset({".ssh", ".gnupg", ".aws"})
+
 # Roots that hold user credentials and are therefore never bound, only tmpfs'd over.
 _HIDDEN_ROOTS = ("/home", "/root")
 
@@ -568,7 +576,8 @@ def _is_tool_install_root(p: Path, home: Path) -> bool:
         prefix, name = parts[0], parts[1]
         if not prefix.startswith("."):
             return False
-        if prefix in _SHARED_HOME_PREFIXES or name in _SHARED_USER_DIRS:
+        if (prefix in _SHARED_HOME_PREFIXES or prefix in _CREDENTIAL_HOME_PREFIXES
+                or name in _SHARED_USER_DIRS):
             return False
         try:
             exe = p / name
