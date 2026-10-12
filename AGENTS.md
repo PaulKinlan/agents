@@ -199,7 +199,6 @@ PASS for yours.
 and `--stop` deletes it. The trap is specifically the exit status, which is why no wrapper script
 around `fleet-check` should try to infer a verdict from it.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Landing mechanics: the identity is the tree, and a push is never a pipeline's passenger
 
 Both rules come from `agents-yk6m`, where a landing reached the default branch carrying a
@@ -230,6 +229,7 @@ The rule is that a failed message step makes the push **impossible**, not merely
 unfashionable. Its control is a deliberate failure of the message step, which must leave
 the default branch untouched.
 
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
