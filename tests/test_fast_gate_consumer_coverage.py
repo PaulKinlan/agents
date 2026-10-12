@@ -98,26 +98,11 @@ CONSUMER_COVERAGE_ALLOWLIST = {
         "tests/test_containment_engine_credentials.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
         "tests/test_containment_prepass_pins.py": "basename arm: this suite imports lib/egress_proxy.py, but the arm selects only the module's namesake suite(s), so a change to lib/egress_proxy.py does not run it",
     },
-    "embargo": {
-        "tests/test_factory_truth.py": "basename arm: this suite imports lib/embargo.py, but the arm selects only the module's namesake suite(s), so a change to lib/embargo.py does not run it",
-        "tests/test_model_rule_id.py": "basename arm: this suite imports lib/embargo.py, but the arm selects only the module's namesake suite(s), so a change to lib/embargo.py does not run it",
-        "tests/test_report_schema.py": "basename arm: this suite imports lib/embargo.py, but the arm selects only the module's namesake suite(s), so a change to lib/embargo.py does not run it",
-        "tests/test_threat_model_prepass.py": "basename arm: this suite imports lib/embargo.py, but the arm selects only the module's namesake suite(s), so a change to lib/embargo.py does not run it",
-    },
     "findings": {
         "tests/test_candidate_identity.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
         "tests/test_factory_core.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
         "tests/test_factory_truth.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
         "tests/test_perf_review.py": "basename arm: this suite imports lib/findings.py, but the arm selects only the module's namesake suite(s), so a change to lib/findings.py does not run it",
-    },
-    "redaction": {
-        "tests/test_findings.py": "basename arm: this suite imports lib/redaction.py, but the arm selects only the module's namesake suite(s), so a change to lib/redaction.py does not run it",
-        "tests/test_model_rule_id.py": "basename arm: this suite imports lib/redaction.py, but the arm selects only the module's namesake suite(s), so a change to lib/redaction.py does not run it",
-        "tests/test_secret_scanner.py": "basename arm: this suite imports lib/redaction.py, but the arm selects only the module's namesake suite(s), so a change to lib/redaction.py does not run it",
-        "tests/test_vuln_verify_prepass.py": "basename arm: this suite imports lib/redaction.py, but the arm selects only the module's namesake suite(s), so a change to lib/redaction.py does not run it",
-    },
-    "retention": {
-        "tests/test_hillclimb.py": "basename arm: this suite imports lib/retention.py, but the arm selects only the module's namesake suite(s), so a change to lib/retention.py does not run it",
     },
     "sandbox": {
         "tests/containment_harness.py": "basename arm: this suite imports lib/sandbox.py, but the arm selects only the module's namesake suite(s), so a change to lib/sandbox.py does not run it",
