@@ -121,6 +121,15 @@ _STRUCTURAL = frozenset({"bin", "sbin", "lib", "lib32", "lib64", "libx32", "libe
 # Shared user directories that are structural or generic storage (not dedicated tool trees):
 _SHARED_USER_DIRS = _STRUCTURAL | frozenset({"state", "etc", "include", "var"})
 
+# The same rule for the dot-prefixed depth-1 PREFIX under $HOME (agents-or3m). XDG_CACHE_HOME and
+# XDG_CONFIG_HOME hold caches and settings, never a tool's install tree, so a namesake executable
+# under one must not exempt the directory from the broad-root refusal. ~/.local is deliberately
+# NOT here - ~/.local/<tool> is the canonical install tree and keeps its exemption (agents-n5qp) -
+# and the refusal is by NAME, so it stays narrow instead of becoming "anything hidden". Before
+# agents-or3m the guard tested `prefix in _SHARED_USER_DIRS`, which could never be true: every
+# member of that set is a bare leaf name while the prefix is required to start with '.'.
+_SHARED_HOME_PREFIXES = frozenset({".cache", ".config"})
+
 # Roots that hold user credentials and are therefore never bound, only tmpfs'd over.
 _HIDDEN_ROOTS = ("/home", "/root")
 
@@ -546,7 +555,8 @@ def _is_tool_install_root(p: Path, home: Path) -> bool:
     A directory is recognized as a tool install root only when:
       (1) It sits at depth 2 under $HOME within a hidden tool/system prefix (e.g. .local/<tool>
           or .<prefix>/<tool>);
-      (2) Its directory name is NOT a shared system or XDG directory (bin, lib, share, state, etc.);
+      (2) Neither its depth-1 prefix nor its directory name is a shared system, XDG or generic
+          storage directory (bin, lib, share, state, .cache, .config, etc.);
       (3) It actually houses the tool's entrypoint: an executable file named after the
           directory exists at p/<name> (e.g. ~/.local/pi/pi) or p/bin/<name> (agents-yfqg)."""
     try:
@@ -558,7 +568,7 @@ def _is_tool_install_root(p: Path, home: Path) -> bool:
         prefix, name = parts[0], parts[1]
         if not prefix.startswith("."):
             return False
-        if prefix in _SHARED_USER_DIRS or name in _SHARED_USER_DIRS:
+        if prefix in _SHARED_HOME_PREFIXES or name in _SHARED_USER_DIRS:
             return False
         try:
             exe = p / name
