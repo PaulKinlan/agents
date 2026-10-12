@@ -632,6 +632,34 @@ class TestFastGateMapping(unittest.TestCase):
                       "the explicit tier-file arm must keep what the generic tests/test_*.py arm gave: "
                       "the cross-module mock coverage contract (agents-vim1)")
 
+    def test_an_ordinary_test_file_delta_does_not_select_the_guard_suite(self):
+        """The NEGATIVE half of agents-azi1's property, and the half that keeps its cost CONDITIONAL.
+
+        azi1 asserts three times that a TIER file delta selects tests/test_fast_gate_mapping.py. Nothing
+        asserted the converse, so nothing stopped the guard being pulled for EVERY tests/ delta - which would
+        turn its cost from conditional-on-a-tier-file into constant-on-every-gate-run.
+
+        MEASURED BEFORE THIS TEST WAS WRITTEN, with the same dry-run instrument the positive test uses: the
+        gate selects test_fast_gate_mapping.py for tests/test_tree_guards.py, and does NOT select it for
+        tests/test_summary_identity.py, tests/test_budget.py or tests/test_pip_audit.py - each of those gets
+        the two generic companions plus the two always-on tiers. So the property is expressible, which is
+        why it is asserted rather than noted as a limit.
+
+        IF THIS EVER FAILS it means an explicit arm widened to cover ordinary test files, or the generic
+        tests/test_*.py arm started adding the mapping suite: the guard's cost has stopped being conditional
+        and the fleet pays ~13s on every gate run (agents-ud2k).
+        """
+        for path in ("tests/test_summary_identity.py", "tests/test_budget.py"):
+            with self.subTest(path=path):
+                mapped = resolve_fast_gate([path])
+                self.assertNotIn(
+                    "tests/test_fast_gate_mapping.py",
+                    mapped,
+                    f"an ordinary test-file delta ({path}) must not pull the tree-guard suite: that is what "
+                    f"keeps the guard's cost conditional on a tier-file change rather than constant on every "
+                    f"gate run (agents-ud2k, the pair to agents-azi1)",
+                )
+
     def test_an_unresolvable_base_is_an_error_not_an_empty_delta(self):
         """A base that is not a commit must FAIL LOUDLY, never fall back to the smoke subset (agents-c1z0 P1).
 
