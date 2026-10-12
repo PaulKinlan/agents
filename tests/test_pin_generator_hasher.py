@@ -308,6 +308,10 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
         off sys.path. It does not reproduce a shadow REACHING the generator's digest through the
         cwd, so it is A GUARD AGAINST REGRESSION, NOT A DEMONSTRATED EXPLOIT. Two different jobs,
         and the weaker one says so rather than borrowing the stronger one's evidence.
+        agents-yuk9: the generator below now runs with the shadow in ITS OWN working
+        directory, so this arm can fail for the regression it names - reverting -I turns it
+        red (measured). It still runs no mutant itself, which is what keeps it a GUARD rather
+        than a reproduction.
         """
         with tempfile.TemporaryDirectory(prefix="lm6r-cwd-") as tmp:
             (Path(tmp) / "hashlib.py").write_text(self.SHADOW, encoding="utf-8")
@@ -321,7 +325,8 @@ class TestTheIndependentDigestCannotBeShadowed(unittest.TestCase):
             out.mkdir()
             res = subprocess.run(
                 ["bash", str(GENERATOR), str(out / "pins.yaml")],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+                # agents-yuk9: the shadow lives HERE, so this arm can actually fail.
+                cwd=tmp, capture_output=True, text=True, timeout=120,
                 env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": tmp})
             self.assertEqual(res.returncode, 0, f"generation must succeed: {res.stderr}")
             hashes = re.findall(r"^\s+sha256: ([0-9a-f]{64})$",
