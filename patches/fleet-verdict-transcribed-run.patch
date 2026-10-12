@@ -1,0 +1,296 @@
+diff -ruN a/bin/fleet-land-message b/bin/fleet-land-message
+--- a/bin/fleet-land-message	2026-10-12 21:54:27.821578308 +0000
++++ b/bin/fleet-land-message	2026-10-12 21:54:27.821578308 +0000
+@@ -588,12 +588,23 @@
+ #                   provenance is a FAILURE, not an absence of failure (coord, fleet-ry7m amendment): a
+ #                   reviewer that cannot be compared to the author is strictly weaker evidence than an
+ #                   explicitly same-family reviewer, so it must not clear under a friendlier label.
++#   transcribed-verified / transcribed-unverified  same lane, i.e. the branch author's lane posted the
++#                   verdict, directly or as the transcribing parent of a reviewer subagent. The NAMED
++#                   reviewer model is a claim on the comment, so where the verdict also names a subagent
++#                   run id, the claim is resolved against the retained run directories and the class
++#                   reports whether a COMPLETED reviewer run of the named model stands behind it
++#                   (agents-m6fr). IT DOES NOT GATE: an unresolvable run id is reported on the PASS line
++#                   and in the JSON, and the clearance is left alone, because a transcription that names
++#                   its transcriber and its source is a complete record of the verdict (foza) and many
++#                   legitimate paths have no run id at all - a reviewer on another VM, a verdict relayed
++#                   from an operator, a review run through a CLI. fleet-ry7m reasons about WHOSE words
++#                   these are; this reports whether there is an artefact behind them.
+ #   unknown         no branch author defined at all (no LAND-SUMMARY anywhere) - clears, pinned old
+ #                   behavior: there is no author to be independent from, and the merger cannot land
+ #                   without a summary anyway.
+ # A determinable SAME family refuses even when the actor differs (cross-family is the fleet's rule for
+ # every review, not only same-lane transcriptions).
+-rev_independence="unknown"; rev_reviewer_model=""; rev_author_model=""; rev_block=""
++rev_independence="unknown"; rev_reviewer_model=""; rev_author_model=""; rev_block=""; rev_run_reason=""
+ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+   _pm=$(fleet_verdict_split_models "${verdict_line:-}" "$rev_text" 2>/dev/null || true)
+   rev_reviewer_model=$(sed -n 1p <<<"$_pm"); rev_author_model=$(sed -n 2p <<<"$_pm")
+@@ -630,6 +641,32 @@
+   elif [ "$_fam" = "same" ]; then
+     rev_independence="same-family"
+   fi
++  # TRANSCRIBED-PATH PROVENANCE (agents-m6fr). When the verdict was posted by the branch author's OWN
++  # lane, the "cross-family" class above rests on a named model - a claim, not evidence. Where the
++  # verdict also names a subagent run id, that claim can be checked. ONLY this path is touched: a
++  # verdict from another lane (other-lane) is left exactly as it was.
++  #
++  # THIS REPORTS, IT DOES NOT REFUSE (agents-m6fr revision). The first version of this block refused
++  # the landing and stripped merge-queue when the run did not resolve, which broke cross-VM reviews,
++  # operator verdicts relayed with no UUID, external reviewers and the fleet's own foza standard. A
++  # transcribed verdict whose source is a file path or a human has no run id at all, and the standard
++  # says such a transcription - naming its transcriber and its source - is a complete record. So the
++  # class and the reason are carried out to the PASS line and the JSON, where a merger or coordinator
++  # can see WHICH clearance rests on a claim rather than an artefact, and nothing is blocked.
++  if [ -n "$src_who" ] && [ "$rev_who" = "$src_who" ] && [ "$rev_independence" = "cross-family" ]; then
++    _trs=$(fleet_verdict_transcribed_run_status "${rev_run_id:-}" "$rev_reviewer_model" 2>/dev/null || true)
++    case "$_trs" in
++      verified:*)   rev_independence="transcribed-verified";   rev_run_reason="${_trs#verified: }" ;;
++      unverified:*) rev_independence="transcribed-unverified"; rev_run_reason="${_trs#unverified: }" ;;
++      *)            if [ -n "$rev_run_id" ]; then
++                      rev_independence="transcribed-unverified"
++                      rev_run_reason="run id $rev_run_id did not resolve to a completed reviewer run (the check returned no verdict)"
++                    else
++                      rev_independence="transcribed-unverified"
++                      rev_run_reason="the verdict comment names no run id, so the named reviewer model is a claim with no artefact behind it"
++                    fi ;;
++    esac
++  fi
+   # The gate: independence the fleet's own rule forbids cannot clear, whatever the verdict word says.
+   if [ "$rev_cleared" = true ]; then
+     case "$rev_independence" in
+@@ -652,9 +689,9 @@
+ if [ "$rev_state" = "CURRENT" ]; then
+   if [ "$rev_cleared" = true ]; then
+     if [ "$rev_delta_identical" = true ]; then
+-      rev_line="PASS (verdict: $rev_verdict) for commit $rev_sha (rebased: delta identical to tip $tip) by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence]"
++      rev_line="PASS (verdict: $rev_verdict) for commit $rev_sha (rebased: delta identical to tip $tip) by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence${rev_run_reason:+ - $rev_run_reason}]"
+     else
+-      rev_line="PASS (verdict: $rev_verdict) for commit ${rev_sha:-$tip} by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence]"
++      rev_line="PASS (verdict: $rev_verdict) for commit ${rev_sha:-$tip} by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence${rev_run_reason:+ - $rev_run_reason}]"
+     fi
+   elif [ -n "$rev_block" ]; then
+     rev_line="NOT CLEARED: verdict was $rev_verdict by $rev_who at $rev_at, but $rev_block"
+@@ -929,6 +966,7 @@
+     --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
+     --argjson rev_delta_identical "${rev_delta_identical:-false}" \
+     --arg rev_run_id "${rev_run_id:-}" \
++    --arg rev_run_reason "${rev_run_reason:-}" \
+     --arg cleared_sha "${cleared_label_sha:-}" \
+     --arg rev_independence "${rev_independence:-unknown}" --arg rev_reviewer_model "${rev_reviewer_model:-}" \
+     --arg rev_author_model "${rev_author_model:-}" --arg branch_author "${src_who:-}" \
+@@ -940,7 +978,7 @@
+                rejected_blocks:$rejected,mentions_without_a_block:$mentions},
+       review:{state:$rev_state,verdict:$rev_verdict,reviewed_sha:$rev_sha,tip_sha:$rev_tip,
+               unreviewed_commits:$rev_unreviewed,author:$rev_who,at:$rev_at,cleared:$rev_cleared,
+-              delta_identical:$rev_delta_identical,run_id:$rev_run_id,cleared_sha:$cleared_sha,
++              delta_identical:$rev_delta_identical,run_id:$rev_run_id,run_reason:$rev_run_reason,cleared_sha:$cleared_sha,
+               branch_author:$branch_author,independence:$rev_independence,
+               reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
+               author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
+diff -ruN a/bin/fleet-verdict-words.sh b/bin/fleet-verdict-words.sh
+--- a/bin/fleet-verdict-words.sh	2026-10-12 21:54:27.821578308 +0000
++++ b/bin/fleet-verdict-words.sh	2026-10-12 21:54:27.821578308 +0000
+@@ -97,3 +97,81 @@
+ 
+ # fleet_verdict_model_family <model-id> -> the provider segment (before the first /), lowercased.
+ fleet_verdict_model_family() { printf '%s' "${1:-}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]'; }
++
++
++# fleet_verdict_model_identity <model-id> -> provider/model, lowercased, thinking suffix stripped.
++#
++# WHY NOT fleet_verdict_model_family HERE: that compares PROVIDERS, which is deliberately coarse for
++# classifying whose words a verdict is (fleet-ry7m), but far too coarse for checking a claim that a
++# specific reviewer ran - antigravity/gemini-3.8-flash would verify a claim of
++# antigravity/gemini-3.9-pro. The thinking suffix (":high") is the only part that legitimately differs
++# between the recorded model and the named one, so strip that and compare the rest exactly.
++fleet_verdict_model_identity() { printf '%s' "${1:-}" | cut -d: -f1 | tr '[:upper:]' '[:lower:]'; }
++
++# ---------- transcribed-run verification (agents-m6fr) ----------
++# fleet_verdict_transcribed_run_status <run-id> <named-reviewer-model> [run-root]
++#
++# WHY THIS EXISTS: a verdict posted by the branch author's OWN lane cannot be told from a reviewer
++# subagent's by its actor - reviewer subagents inherit the parent lane's actor (fleet-15b5) - so
++# fleet-ry7m accepts such a verdict on the strength of a NAMED reviewer model of another family.
++# That is a claim written on the comment, not evidence. The foza convention already requires a
++# transcribed verdict to name its source, and a subagent run id is one form that source can take;
++# where it is given, it is checkable, because run directories are retained on disk with a
++# recovery-descriptor.json naming agent and model.
++#
++# Prints "verified: ..." when the run resolves to a COMPLETED reviewer run whose model matches the
++# named one, "unverified: <reason>" otherwise, and nothing at all when there is no run id.
++#
++# WHAT THIS IS FOR, AND WHAT IT IS NOT: it makes a transcribed clearance's PROVENANCE VISIBLE. It does
++# not gate the landing, and it must not: the fleet's own standard (foza) says a transcription that
++# names its transcriber and its source is a complete record of the verdict - not grounds to refuse the
++# landing - and many legitimate paths have no run id at all (a reviewer on another VM, a verdict
++# relayed from a human operator, a review run through a CLI). AN INSTRUMENT THAT REFUSES MUST BE ABLE
++# TO NAME WHAT A CORRECT FLOW WOULD LOOK LIKE, OR IT WILL REFUSE ONE. The first version of this
++# function did refuse, and broke four legitimate flows; the class it produced is reported, not
++# enforced.
++#
++# LIMIT, STATED RATHER THAN HIDDEN: this proves the run exists, COMPLETED, and is a reviewer run whose
++# model matches the named one. It does NOT prove that run reviewed THIS diff - the descriptor records
++# agent and model, not the bead or the branch. A lane willing to point at an unrelated reviewer run
++# would pass. That is a smaller hole than an unbacked model string, and it is the hole that remains.
++fleet_verdict_transcribed_run_status() {
++  local rid="${1:-}" named="${2:-}" root="${3:-}" d="" r="" state=""
++  [ -n "$rid" ] || return 0
++  for r in ${root:-${TMPDIR:-/tmp}}/pi-subagents-*/async-subagent-runs; do
++    if [ -d "$r/$rid" ]; then d="$r/$rid"; break; fi
++  done
++  if [ -z "$d" ]; then
++    printf 'unverified: run id %s does not resolve to a retained run directory (these are retention-managed, so a review old enough to be pruned cannot be checked after the fact - which is why this check belongs at landing time)' "$rid"
++    return 0
++  fi
++  local desc="$d/recovery-descriptor.json" agent="" model=""
++  if [ ! -r "$desc" ]; then
++    printf 'unverified: run %s has no readable recovery-descriptor.json' "$rid"; return 0
++  fi
++  agent=$(jq -r '.agent // ""' "$desc" 2>/dev/null | head -1)
++  model=$(jq -r '.model // ""' "$desc" 2>/dev/null | head -1)
++  if [ "$agent" != "reviewer" ]; then
++    printf 'unverified: run %s records agent %s, which is not a reviewer' "$rid" "${agent:-<none>}"
++    return 0
++  fi
++  # COMPLETION, NOT LAUNCH (agents-m6fr revision): the descriptor above is written when the run
++  # STARTS and carries no status, so on its own it would let a failed or abandoned run verify a
++  # transcribed PASS. status.json carries the run's terminal state.
++  local st="$d/status.json"
++  if [ ! -r "$st" ]; then
++    printf 'unverified: run %s has no readable status.json, so there is no record that it finished' "$rid"
++    return 0
++  fi
++  state=$(jq -r '.state // ""' "$st" 2>/dev/null | head -1)
++  if [ "$state" != "complete" ]; then
++    printf 'unverified: run %s has status %s, not complete - a launched, failed or abandoned run is not a finished review' "$rid" "${state:-<none>}"
++    return 0
++  fi
++  if [ -n "$named" ] && [ "$(fleet_verdict_model_identity "$model")" != "$(fleet_verdict_model_identity "$named")" ]; then
++    printf 'unverified: run %s records model %s, which is not the named reviewer model %s' "$rid" "${model:-<none>}" "$named"
++    return 0
++  fi
++  printf 'verified: run %s is a completed reviewer run on %s' "$rid" "${model:-<unknown model>}"
++}
++
+diff -ruN a/tests/fleet-verdict-transcribed-run.test.sh b/tests/fleet-verdict-transcribed-run.test.sh
+--- a/tests/fleet-verdict-transcribed-run.test.sh	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/fleet-verdict-transcribed-run.test.sh	2026-10-12 21:54:27.841578418 +0000
+@@ -0,0 +1,117 @@
++#!/usr/bin/env bash
++# Unit tests for fleet_verdict_transcribed_run_status (agents-m6fr).
++#
++# Independent by construction: every fixture is built under its own mktemp root, nothing is written
++# outside it, no case depends on another case's order, and nothing reads the machine's own run
++# directories - the root is passed in explicitly. Run: bash tests/fleet-verdict-transcribed-run.test.sh
++set -uo pipefail
++
++HERE=$(cd "$(dirname "$0")" && pwd)
++LIB=${FLEET_VERDICT_WORDS_LIB:-$(dirname "$HERE")/bin/fleet-verdict-words.sh}
++if [ ! -r "$LIB" ]; then echo "cannot read $LIB"; exit 2; fi
++# shellcheck source=/dev/null
++. "$LIB"
++if [ "$(type -t fleet_verdict_transcribed_run_status)" != "function" ]; then
++  echo "FAIL: fleet_verdict_transcribed_run_status is not defined in $LIB"; exit 2
++fi
++
++pass=0; fail=0
++ck() {  # ck <name> <expected-prefix> <actual>
++  case "$3" in
++    "$2"*) echo "  ok   $1"; pass=$((pass + 1)) ;;
++    *)     echo "  FAIL $1"; echo "         expected prefix: $2"; echo "         got:             $3"; fail=$((fail + 1)) ;;
++  esac
++}
++ckempty() {  # a case whose correct answer is SILENCE: ckempty <name> <actual>
++  if [ -z "$2" ]; then echo "  ok   $1"; pass=$((pass + 1));
++  else echo "  FAIL $1: expected no output, got '$2'"; fail=$((fail + 1)); fi
++}
++
++root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
++mkrun() {  # mkrun <root> <id> <agent> <model> [state|none]
++  mkdir -p "$1/pi-subagents-uid-0/async-subagent-runs/$2"
++  printf '{"agent":"%s","model":"%s"}\n' "$3" "$4" \
++    > "$1/pi-subagents-uid-0/async-subagent-runs/$2/recovery-descriptor.json"
++  # status.json is written at COMPLETION and carries .state. The descriptor above is written at
++  # LAUNCH and carries no status, so on its own it cannot tell a finished review from one that was
++  # failed, timed out or abandoned - which is what the first version of this check relied on
++  # (agents-m6fr revision, edit E2). Pass "none" to omit it and test that gap.
++  if [ "${5:-complete}" != "none" ]; then
++    printf '{"state":"%s"}\n' "${5:-complete}" \
++      > "$1/pi-subagents-uid-0/async-subagent-runs/$2/status.json"
++  fi
++}
++
++RID=ffc6fb50-d7de-4f8f-a290-21a818b4df13
++RID2=57240566-a1b8-4a09-8480-2339ba04a583
++NOREAD=11111111-2222-3333-4444-555555555555
++OUTSIDE=99999999-8888-7777-6666-555555555555
++
++mkrun "$root" "$RID"  reviewer "antigravity/gemini-3.8-flash:high"
++mkrun "$root" "$RID2" worker   "openai-codex/gpt-6-sol:high"
++mkdir -p "$root/pi-subagents-uid-0/async-subagent-runs/$NOREAD"   # directory, no descriptor file
++
++echo "fleet_verdict_transcribed_run_status:"
++
++# 1. The ordinary case: a real reviewer run, named the way a hand-off would name it (no suffix).
++ck "1 a retained reviewer run of the named family" "verified" \
++  "$(fleet_verdict_transcribed_run_status "$RID" "antigravity/gemini-3.8-flash" "$root")"
++
++# 2. A DIFFERENT MODEL under the same provider must NOT verify. THIS EXPECTATION WAS THE OPPOSITE WHEN
++#    IT WAS FIRST WRITTEN, and the comment called the leniency deliberate: the comparison was on the
++#    provider alone, so a flash run verified a claim of a pro run. The independent review established
++#    that provider-granularity is too coarse for a claim whose whole content is "a particular reviewer
++#    ran this", so the comparison is now the provider/MODEL pair with only the thinking suffix
++#    stripped (edit E3). The inversion is deliberate and kept visible rather than silently flipped.
++ck "2 a different model under the same provider does NOT verify" "unverified:" \
++  "$(fleet_verdict_transcribed_run_status "$RID" "antigravity/gemini-3.9-pro" "$root")"
++
++# 2b. The thinking suffix is the one thing that legitimately differs between the recorded model and
++#     the named one, so stripping it must still verify.
++ck "2b the thinking suffix is stripped before comparing" "verified" \
++  "$(fleet_verdict_transcribed_run_status "$RID" "antigravity/gemini-3.8-flash:high" "$root")"
++
++# 3. The falsifiable direction: a fabricated run id must NOT verify. This is the case that makes the
++#    check worth having - before this, any model string at all cleared a same-lane verdict.
++ck "3 a fabricated run id does not verify" "unverified:" \
++  "$(fleet_verdict_transcribed_run_status "$OUTSIDE" "antigravity/gemini-3.8-flash" "$root")"
++
++# 4. A run that exists but is not a review.
++ck "4 a worker run is not a review" "unverified:" \
++  "$(fleet_verdict_transcribed_run_status "$RID2" "openai-codex/gpt-6-sol" "$root")"
++
++# 5. A reviewer run of the WRONG family must not back a claim of a different one.
++ck "5 reviewer run of another family" "unverified:" \
++  "$(fleet_verdict_transcribed_run_status "$RID" "openai-codex/gpt-6-sol" "$root")"
++
++# 6. A run directory without a descriptor is not evidence.
++ck "6 run directory with no descriptor" "unverified:" \
++  "$(fleet_verdict_transcribed_run_status "$NOREAD" "antigravity/gemini-3.8-flash" "$root")"
++
++# 7. No run id at all is silence from the helper - the CALLER decides that silence means unverified,
++#    so the helper must not invent a reason here.
++ckempty "7 no run id produces no verdict from the helper" \
++  "$(fleet_verdict_transcribed_run_status "" "antigravity/gemini-3.8-flash" "$root")"
++
++# 8. Roots are searched, not assumed: a run in a second root resolves. A helper that only looked at
++#    one hardcoded path would pass cases 1-7 and fail here.
++root2=$(mktemp -d); mkdir -p "$root2"
++mkrun "$root2" "$RID" reviewer "antigravity/gemini-3.8-flash"
++# the function globs <root>/pi-subagents-*/, so nesting the root one level deeper must still be found
++ck "8 a second run root is searched" "verified" \
++  "$(fleet_verdict_transcribed_run_status "$RID" "antigravity/gemini-3.8-flash" "$root2")"
++
++# 9. A run that has not COMPLETED is not a finished review. recovery-descriptor.json alone would
++#    verify here, which is the hole edit E2 closes.
++mkrun "$root" "aaaaaaaa-1111-2222-3333-444444444444" reviewer "antigravity/gemini-3.8-flash" "running"
++ck "9 a run still running does not verify" "unverified:" \
++  "$(fleet_verdict_transcribed_run_status "aaaaaaaa-1111-2222-3333-444444444444" "antigravity/gemini-3.8-flash" "$root")"
++
++# 10. A run directory with a descriptor but no completion record at all.
++mkrun "$root" "bbbbbbbb-1111-2222-3333-444444444444" reviewer "antigravity/gemini-3.8-flash" "none"
++ck "10 a run with no completion record does not verify" "unverified:" \
++  "$(fleet_verdict_transcribed_run_status "bbbbbbbb-1111-2222-3333-444444444444" "antigravity/gemini-3.8-flash" "$root")"
++
++echo
++echo "$pass passed, $fail failed"
++[ "$fail" -eq 0 ]
