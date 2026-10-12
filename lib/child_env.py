@@ -97,7 +97,7 @@ GITHUB_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 BROKER_PROVIDERS = BROKER_ENV_CONFIGS
 # Requirements that bring the pre-pass a network credential. lib/containment.py refuses any of
 # these unless the agent declares capabilities.network, so a credential never reaches a tier
-# whose ceiling forbids network (agents-05h). tests/test_containment.py holds this list and
+# whose ceiling forbids network (agents-05h). tests/test_containment_declarations.py holds this list and
 # prepass_environment() in agreement: add an entry here when a requirement starts to grant one.
 NETWORK_CREDENTIAL_REQUIREMENTS = ("gh",)
 

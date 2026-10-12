@@ -105,7 +105,9 @@ class ResolveToolTests(unittest.TestCase):
         unverified binary (proven by construction: a fake pi handed the run's
         ANTHROPIC_API_KEY and dumped its environment). deepseek has no CLI binary (agents-mhv7)
         and is purely payload-only Python HTTP station code. The end-to-end containment property
-        is pinned in tests/test_containment.py (TestEngineCredentialPinning)."""
+        is pinned in
+            tests/test_containment_engine_credentials.py (TestEngineCredentialPinning;
+            agents-3iog split)."""
         for binary in ("pi", "claude", "agentapi"):
             with self.subTest(binary=binary):
                 self.assertIn(binary, TRUSTED_TOOLS)

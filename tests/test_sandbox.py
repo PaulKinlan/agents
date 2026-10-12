@@ -12,7 +12,8 @@ Two layers:
    processes are invisible.
 
 The dispatcher-level guarantee (banner + policy.json say what was enforced) lives in
-tests/test_containment.py, which holds the stub-engine harness.
+tests/containment_harness.py, the stub-engine harness the containment suites share
+(agents-3iog moved it out of the mid-file suite so subclasses stop re-running it).
 """
 
 import errno

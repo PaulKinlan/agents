@@ -50,7 +50,8 @@ fi
 # tool allowlist, no settings isolation. A prompt is not a containment boundary
 # (non-negotiable #2), so this adapter refuses every policy, read-only included, until agentapi
 # can enforce one. lib/containment.py's ENGINE_TOOL_POLICIES lists none for it, and
-# tests/test_containment.py holds the two in agreement.
+# the containment suites hold the two in agreement
+    # (tests/test_containment_adapters.py; agents-3iog split).
 TOOL_POLICY="${FACTORY_TOOL_POLICY:-read-only}"
 case "$TOOL_POLICY" in
   *)

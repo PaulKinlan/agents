@@ -59,7 +59,8 @@ BUDGET_KEYS = frozenset({"max_minutes", "max_usd"})
 
 # Tool policies the factory can grant a model session, and which adapter enforces which.
 # lib/adapters/<engine>.sh reads FACTORY_TOOL_POLICY and refuses anything it cannot enforce;
-# tests/test_containment.py asserts the adapters and this table agree.
+# the containment suites assert the adapters and this table agree
+    # (tests/test_containment_adapters.py; agents-3iog split).
 # This table says NOTHING about OS sandboxing: a WORKTREE_WRITE row means only that the
 # adapter implements the policy's flags. The sandbox-verified set is lib/sandbox.py
 # SANDBOXED_ENGINES, and the runtime delivers a write grant solely when the run is

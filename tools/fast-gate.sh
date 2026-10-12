@@ -181,11 +181,13 @@ while IFS= read -r f; do
       ;;
     tests/fixtures/*)
       # Checked-in test payloads (agents-28nn round 5): fake_engine.sh is the contained
-      # engine-exfiltration attack asserted on by tests/test_containment.py
-      # TestEngineCredentialPinning. Search recorded: `grep -rln fixtures tests/
-      # --include='*.py'` -> tests/test_containment.py is the only consumer of
-      # tests/fixtures/ (the other hits name tests/sandbox_fixtures.py or tmp-tree dirs).
-      mapped="$mapped tests/test_containment.py"
+      # engine-exfiltration attack asserted on by TestEngineCredentialPinning, which
+      # agents-3iog moved into tests/test_containment_engine_credentials.py. Search
+      # recorded: `grep -rln fixtures tests/ --include='*.py'` -> that module is the only
+      # consumer of tests/fixtures/ (the other hits name tests/sandbox_fixtures.py or
+      # tmp-tree dirs). Measured, not inferred (agents-3iog): removing `env` from the
+      # payload turns THIS arm red and leaves the five sibling containment modules green.
+      mapped="$mapped tests/test_containment_engine_credentials.py"
       ;;
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
@@ -318,7 +320,11 @@ while IFS= read -r f; do
       # the line runner does, and tests/test_line_andon.py was reachable only through the
       # lib/adapters/*.sh wildcard (agents-yx7z), never through this dedicated arm. Measured with
       # the bead's own repro: GIT_CHANGED=lib/adapters/pi.sh selected six suites, none of them it.
-      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_line_andon.py"
+      # agents-3iog split the containment suite: this arm keeps TWO of its modules - the
+      # dispatcher suite (which drives the real adapter end to end) and the adapters suite
+      # (which asserts the adapter argv/env shape). Measured: mutating pi.sh's engine-binary
+      # variable turns tests/test_containment.py red.
+      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_containment_adapters.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_line_andon.py"
       ;;
     lib/adapters/*.sh)
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0). test_antigravity_prompt_content.py is listed EXPLICITLY (agents-nhf0): the wildcard arm already selected this file when the TEST changed, but NOT when the ADAPTER changed - so the suite protecting antigravity.sh's prompt guard did not run for the edits that could regress it. A suite gated only on its own edits is the half-fixed shape.
@@ -528,10 +534,14 @@ while IFS= read -r f; do
       mapped="$mapped tests/test_docs_drift.py"
       ;;
     agents/*/agent.yaml)
-      # Station manifests are read off the real tree: tests/test_docs_design.py:77 globs
-      # agents/*/agent.yaml to check stations.html, and tests/test_containment.py:300 globs
-      # them for the credential-grant drift guard (agents-9nir review).
-      mapped="$mapped tests/test_docs_design.py tests/test_containment.py"
+      # Station manifests are read off the real tree: tests/test_docs_design.py globs
+      # agents/*/agent.yaml to check stations.html, and the credential-grant drift guard
+      # globs them for the same reason (agents-9nir review). guards: agents-3iog moved that
+      # guard into tests/test_containment_declarations.py, which is why this arm now runs 25
+      # declaration tests instead of the whole 220-test containment suite; the dispatcher
+      # suite holds no station-manifest consumer (its manifests are tmp trees), measured by
+      # mutating agents/accessibility/agent.yaml: this arm red, the others green.
+      mapped="$mapped tests/test_docs_design.py tests/test_containment_declarations.py"
       ;;
     agents/*/report.schema.json)
       # agents-9iyf. A MAPPING, not an ignore arm, and the chain is measured rather than
