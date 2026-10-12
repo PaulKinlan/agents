@@ -380,7 +380,9 @@ while IFS= read -r f; do
       # This arm INCLUDES tests/test_credential_broker.py and tests/test_sink_adapters.py (agents-hay8).
       # It previously did not, and the reason is worth keeping, because it is the same principle in
       # both directions. They had always RECEIVED the builder's output - the broker suite calls
-      # child_environment() directly at :649 and :677 - but until agents-a9lc they asserted nothing
+      # child_environment() directly in its two base-URL tests (agents-22kv: named by FUNCTION, not
+      # by line, because the numbers that used to be here had already slipped one line) - but until
+      # agents-a9lc they asserted nothing
       # about the credential boundary in it. MEASURED on 2026-10-12 for agents-6ujc: patching the
       # builder to leak an ambient AWS_SECRET_ACCESS_KEY left test_credential_broker at "80 tests,
       # 0 failures, 0 errors" and test_sink_adapters at "29 tests, 0 failures, 0 errors" - identical
@@ -683,9 +685,11 @@ while IFS= read -r f; do
       # the committed schema is not a test INPUT (see the search below) but the contract of the
       # code that consumes it is the honest thing to run.
       # SEARCH PERFORMED: `grep -rn report.schema.json tests/ lib/ tools/ factory` gives, apart
-      # from agents/threat-model - which ALREADY had its own arm at :426 and is why that file was
-      # never in the abort set (a first-match-wins case statement means my duplicate arm for it
-      # was dead code, caught and removed before review):
+      # from agents/threat-model - which ALREADY had its own arm, the one beneath the
+      # `agents/threat-model/report.schema.json)` pattern above (agents-22kv: cited by PATTERN, not
+      # by line; the number that used to be here, :426, points at the tools/audit-tool-pins.sh arm)
+      # and is why that file was never in the abort set (a first-match-wins case statement means my
+      # duplicate arm for it was dead code, caught and removed before review):
       # test_adapter_auth_failure.py:128/:239, test_report_schema.py:107-123,
       # test_perf_review.py:945 - EVERY one writes a report.schema.json into a TMP fixture and
       # reads that back.
