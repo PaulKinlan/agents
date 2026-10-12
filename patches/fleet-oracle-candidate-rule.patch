@@ -69,7 +69,7 @@ index c0950df..e1b5960 100644
 +EOF
 +# (b) subprocess call with option flag matching stem (e.g. bwrap --sandbox):
 +# previously matched bare \b<stem>\b in subp_pattern -> phantom omission.
-+# Now: subp_pattern strictly matches invocation of file_path or base, not option flags.
++# Now: subp_pattern bounds invocation matching to (?<![\w-])<stem>(?:.[a-z]+)?(?![a-zA-Z0-9_]), preserving module-style and extensionless executors while eliminating option flags.
 +cat > "$R8/lib/sandbox.py" <<'EOF'
 +def isolate(): pass
 +EOF
