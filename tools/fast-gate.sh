@@ -547,12 +547,29 @@ while IFS= read -r f; do
       # tests/test_fast_gate_mapping.py::test_station_trusted_tool_pins_mapped_for_prepass_scripts
       # holds that requirement and FAILED my first version of this arm, which omitted it -
       # evidence that the requirement is enforced rather than decorative).
+      #
+      # THE FIRST VERSION OF THIS ARM WAS A SILENT GREEN AND THE REVIEWER CAUGHT IT BY MUTATION
+      # (rev-9iyf, agents-9iyf FAIL). It omitted tests/test_prepass_exclusions.py - the suite
+      # that actually exercises agents/log-check/scripts/parse_logs.py - WHILE THE COMMENT TWO
+      # LINES ABOVE RECORDED THAT VERY IMPORT (`:126 imports it`). NOTING A CONSUMER IS NOT
+      # COVERING IT: the omission reproduced exactly as measured -
+      #   break parse_logs.py (find_logs -> return []):
+      #     this arm's 3 suites      -> Ran 59 tests, OK (exit 0)   <-- THE GREEN
+      #     tests.test_prepass_exclusions -> AssertionError: Lists differ: [] != ['app.log']
+      # An arm that PASSES while the consumer fails is WORSE than the abort it replaced, because
+      # the abort stopped the lane and named the file, and this converts a stop into a green.
+      # THE METHOD THAT FINDS THIS CLASS, and the standard this arm is now held to: break one
+      # file the arm covers and confirm AT LEAST ONE SUITE IN THE MAPPED SET GOES RED. Listing
+      # the consumer is not the same as the arm going red, and a path grep cannot see a consumer
+      # that is neither imported nor named (see the walker note in the ignore block above).
+      #
       # DELIBERATELY THE LAST MAPPED ARM: first match wins in this case statement, so every
       # per-script arm above keeps its extra consumers, and this arm only catches scripts that
-      # would otherwise abort. Measured cost: 59 tests, 7.4 s (verified: a script WITH its own
+      # would otherwise abort. Measured cost: 69 tests, 7.1 s (verified: a script WITH its own
       # arm, agents/release-notes/scripts/gather_commits.py, still selects only that arm's three
-      # suites, so this one neither shadows nor inflates them).
-      mapped="$mapped tests/test_redaction.py tests/test_prepass_pin_boundary.py tests/test_station_trusted_tool_pins.py"
+      # suites, so this one neither shadows nor inflates them; and each suite is here for a
+      # MEASURED reason - the red run above is what put test_prepass_exclusions.py in this list).
+      mapped="$mapped tests/test_prepass_exclusions.py tests/test_redaction.py tests/test_prepass_pin_boundary.py tests/test_station_trusted_tool_pins.py"
       ;;
     # --- Ignore list (agents-9nir) -----------------------------------------------------
     # RULE: an ignore must be a DELIBERATE CASE ARM WITH A REASON, never a default.
