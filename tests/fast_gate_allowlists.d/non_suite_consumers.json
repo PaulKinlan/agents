@@ -1,0 +1,21 @@
+{
+  "kind": "non_suite_consumers",
+  "declared_by": "base - migrated from NON_SUITE_CONSUMERS by agents-nerv",
+  "modules": {
+    "child_env": [
+      "tests/containment_harness.py"
+    ],
+    "containment": [
+      "tests/containment_harness.py"
+    ],
+    "credential_broker": [
+      "tests/containment_harness.py"
+    ],
+    "egress_proxy": [
+      "tests/containment_harness.py"
+    ],
+    "sandbox": [
+      "tests/containment_harness.py"
+    ]
+  }
+}
