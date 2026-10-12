@@ -507,7 +507,7 @@ plane something concrete to attach to. I'd fold that into phase 3.
 │   ├── findings.py                # fingerprint · dedupe · state machine
 │   └── bench/                     # Class C harnesses
 ├── targets/<project>.yaml         # which agents run against what
-├── findings/                      # committed: findings + suppressions.yaml
+├── findings/                      # gitignored evidence trail; committed: suppressions.yaml
 ├── runs/                          # gitignored: transcripts, artifacts
 ├── schedules/                     # generated launchd plists
 └── .github/

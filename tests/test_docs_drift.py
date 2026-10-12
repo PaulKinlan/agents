@@ -573,6 +573,59 @@ class TestLineSuffixIsALocationNotAFilename(unittest.TestCase):
                 "a non-path token with a colon was stripped and resolved away",
             )
 
+    def test_plan_and_gitignore_agree_on_findings_and_suppressions(self):
+        """PLAN.md's claim about findings/ must match .gitignore's behaviour (agents-flgz)."""
+        import subprocess
+
+        plan_path = FACTORY_ROOT / "docs" / "PLAN.md"
+        self.assertTrue(plan_path.exists())
+        plan_text = plan_path.read_text(encoding="utf-8")
+
+        # Find the findings/ line in the PLAN.md directory tree
+        findings_lines = [
+            line for line in plan_text.splitlines()
+            if "findings/" in line and "#" in line
+        ]
+        self.assertTrue(findings_lines, "docs/PLAN.md must document findings/ in directory tree")
+        tree_comment = findings_lines[0].split("#", 1)[1].strip()
+
+        # PLAN.md must declare findings are a gitignored evidence trail
+        # and suppressions.yaml is committed (agreeing with §5 line 447)
+        self.assertIn("suppressions.yaml", tree_comment)
+        self.assertIn("gitignored", tree_comment)
+        self.assertNotIn("committed: findings +", tree_comment)
+
+        # Check .gitignore behaviour matches the documented contract:
+        # findings/*.md must be gitignored (evidence trail, sensitive)
+        res_md = subprocess.run(
+            ["git", "-C", str(FACTORY_ROOT), "check-ignore", "-q", "--no-index", "findings/candidate.md"],
+            capture_output=True,
+        )
+        self.assertEqual(
+            res_md.returncode, 0,
+            "findings/*.md must be gitignored per .gitignore and PLAN.md §5",
+        )
+
+        # findings/suppressions.yaml must NOT be gitignored (committed register)
+        # and must actually be tracked in git index
+        res_track = subprocess.run(
+            ["git", "-C", str(FACTORY_ROOT), "ls-files", "--error-unmatch", "findings/suppressions.yaml"],
+            capture_output=True,
+        )
+        self.assertEqual(
+            res_track.returncode, 0,
+            "findings/suppressions.yaml must be tracked in git index per PLAN.md §7",
+        )
+
+        res_supp = subprocess.run(
+            ["git", "-C", str(FACTORY_ROOT), "check-ignore", "-q", "--no-index", "findings/suppressions.yaml"],
+            capture_output=True,
+        )
+        self.assertNotEqual(
+            res_supp.returncode, 0,
+            "findings/suppressions.yaml must be committed per .gitignore and PLAN.md §7",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
