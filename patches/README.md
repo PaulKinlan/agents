@@ -112,3 +112,77 @@ This directory holds patches for fleet-level infrastructure and tooling that can
   git apply /path/to/fleet-reviewer-worktree-tip.patch
   bash tests/reviewer-worktree-tip.test.sh
   ```
+
+## `fleet-verdict-transcribed-run.patch` (agents-m6fr)
+
+- **Target repository:** `PaulKinlan/fleet`
+- **Target files:**
+  - `bin/fleet-verdict-words.sh` (one new function, appended after `fleet_verdict_model_family`)
+  - `bin/fleet-land-message` (the class documentation block, one new classification, one new refusal arm
+    in the existing `case` gate)
+  - `tests/fleet-verdict-transcribed-run.test.sh` (new; 8 unit cases, isolated fixtures)
+- **Baseline file hashes:**
+  `ff0f056338d5324964279b8296ae6992f261dc6c3073575a5e28845237a60396  bin/fleet-land-message`
+  `b28dde10d67426316c9809fb314f26673c19fcbc15b5cbe402340b5f2416852b  bin/fleet-verdict-words.sh`
+- **Problem statement (agents-m6fr).** `fleet-land-message` decides whether a branch may land. For a verdict
+  posted by the branch author's **own lane** it requires a NAMED reviewer model whose family differs from the
+  author's (`fleet-ry7m`, because a reviewer subagent inherits its parent lane's actor — `fleet-15b5`). That named
+  model is **a claim written on the comment, not evidence**: a lane can write any different-family model string on
+  its own verdict and be classified `cross-family` and cleared. The reader already parses a **run id** from the
+  verdict comment (`rev_run_id`) and emits it as `review.run_id` — it simply never used it. Meanwhile subagent run
+  directories are retained on disk with a `recovery-descriptor.json` naming the agent and the model, so the claim
+  is checkable.
+- **The live instance this was measured on** is this project's own lane: `agents-oeza` carried a verdict posted by
+  `agents-factory-impl-3a8a` where `branch_author` was **also** `agents-factory-impl-3a8a`, cleared as
+  `cross-family` on the strength of the model string in its own comment. The review was genuine — but the reader
+  could not tell that from the comment, and would have cleared an invented string identically.
+- **Changes:**
+  1. `fleet_verdict_transcribed_run_status <run-id> <named-model> [root]` resolves the run id against
+     `<root>/pi-subagents-*/async-subagent-runs/`, requires the descriptor to record `agent=reviewer`, and compares
+     the recorded model's **family** (via the existing `fleet_verdict_model_family`) with the named one. It prints
+     `verified: …`, `unverified: <reason>` or nothing at all when there is no run id, so the caller owns the
+     no-id decision.
+  2. `fleet-land-message` gains two classes — `transcribed-verified` and `transcribed-unverified` — reached
+     **only** when the verdict's author is the branch author (`rev_who == src_who`) and the class would otherwise
+     be `cross-family`. `transcribed-unverified` joins the existing refusal `case`, so it cannot clear and says why.
+     A verdict from another lane (`other-lane`) is untouched.
+- **Verification:**
+  - **Unit, isolated fixtures:** `bash tests/fleet-verdict-transcribed-run.test.sh` → **8 passed, 0 failed**:
+    1 real reviewer run; 2 same family/different version (a deliberate leniency, stated in the test); 3 a fabricated
+    run id does NOT verify; 4 a `worker` run is not a review; 5 a reviewer run of another family does not back a
+    claim of a different one; 6 a run directory with no descriptor is not evidence; 7 no run id → silence from the
+    helper; 8 roots are searched rather than assumed (a hardcoded path would pass 1-7 and fail here).
+  - **The whole chain, pristine vs patched, on three REAL beads** (`--print-json`, same repo, same comments):
+
+    | bead | verdict author | pristine | patched |
+    |---|---|---|---|
+    | `agents-oeza` | the branch author's own lane | `cleared=True  cross-family` | `cleared=True  transcribed-verified` |
+    | `agents-k8hh` | another lane | `cleared=True  other-lane` | **unchanged** |
+    | `agents-flgz` | another lane | `cleared=False other-lane` | **unchanged** |
+
+  - **The falsifiable direction, end to end on the same real bead with no comment mutated:** pointing the helper's
+    root at an empty directory (only the environment differs) makes the real run id unresolvable, and
+    `agents-oeza` becomes `cleared=False independence=transcribed-unverified`, with the reader printing the reason
+    — `run id ffc6fb50-… does not resolve to a retained run directory (these are retention-managed…)`. Restoring
+    the real root returns `transcribed-verified`. Same bead, same comment, one variable apart.
+  - **Round trip:** `git apply --check` passes against pristine copies, and the applied patch reproduces the
+    measured tree byte-for-byte (`diff -r` clean); patched hashes
+    `4006d5a84bf2bac8e934936c58f8dc48651bb32ed0dda1feb8184ab409fbaf89  bin/fleet-land-message`,
+    `c8b0a819080ae63485227002767c08c78c4432762386f2bfa7ed3931e001449f  bin/fleet-verdict-words.sh`.
+  - **An operator-visible side effect, found while measuring it:** in message mode the reader does not only print,
+    it ENFORCES — a refused clearance strips `merge-queue` and marks the bead `review-failed`. That is pre-existing
+    behaviour, but this patch adds a new way to reach it, so it is stated here rather than discovered later.
+- **Stated limit, not hidden:** the check proves the run exists, is a `reviewer` run, and is of the named family.
+  It does **not** prove that run reviewed *this* diff — the descriptor records agent and model, not the bead or the
+  branch — so a lane willing to point at an unrelated reviewer run would still pass. That is a smaller hole than an
+  unbacked model string, and it is the hole that remains. It also cannot check a review old enough to have been
+  pruned: run directories are retention-managed, which is exactly why this check belongs at landing time.
+- **Hub Application:**
+  ```bash
+  cd ~/fleet
+  git apply /path/to/fleet-verdict-transcribed-run.patch
+  bash tests/fleet-verdict-transcribed-run.test.sh      # 8 passed
+  # the reader needs a repo to resolve the branch against, and ~/fleet is not a git checkout:
+  fleet-land-message --print-json --repo <a project checkout> <bead> <branch> \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["review"])'
+  ```
