@@ -637,6 +637,21 @@ class TestPlanFindingsStoreAgreement(unittest.TestCase):
         )
 
 
+class TestThreatModelSandboxAlignment(unittest.TestCase):
+    """Guard rail for agents-j8s5: THREAT_MODEL.md must truthfully describe sandbox mounts and scope."""
+
+    def test_threat_model_does_not_overstate_invisible_paths(self):
+        text = (FACTORY_ROOT / "THREAT_MODEL.md").read_text(encoding="utf-8")
+        self.assertNotIn("everything else — including all of `$HOME`", text)
+        self.assertNotIn("everything else invisible", text)
+        self.assertNotIn("everything else — including", text)
+        # Truthfully documents read-only system mounts and tmpfs scratch
+        self.assertIn("/usr", text)
+        self.assertIn("/etc", text)
+        self.assertIn("/dev", text)
+        self.assertIn("/tmp", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 
