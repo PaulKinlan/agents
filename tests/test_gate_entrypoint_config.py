@@ -10,11 +10,20 @@ that has no .fleet/check.conf - which is what a fresh VM looks like.
 
 THE DEFECT, AT THE SOURCE (read, not assumed): fleet-check:149 is
     [ -f "$HOME/.fleet/check.conf" ] && source "$HOME/.fleet/check.conf"
-:155-160 auto-detect deno.json or package.json AND NOTHING ELSE, and :161 exits 2 with
-"no CHECK_CMD in ~/.fleet/check.conf and nothing to auto-detect; ask coord to set it".
-THIS IS A PYTHON PROJECT WITH NEITHER MANIFEST, so on a fresh VM the gate does not fall
-back to a wrong command - IT CANNOT RUN AT ALL, and that is true for every Python project
-in the fleet.
+:156-159 auto-detect a command it can actually run - deno.json WITH .tasks.check, or
+package.json WITH .scripts.test - and :160 exits 2 with "no CHECK_CMD in
+~/.fleet/check.conf and nothing to auto-detect; ask coord to set it".
+THIS REPO MATCHES NEITHER PREDICATE (agents-3q1e, MEASURED 2026-10-12): deno.json does not
+exist, and package.json EXISTS but declares no scripts.test, so `jq -e '.scripts.test'
+package.json` exits 1 and the auto-detect falls through. On a fresh VM the gate therefore does
+not fall back to a wrong command - for THIS repo it cannot resolve a command at all.
+(The paragraph above used to say "this is a Python project with NEITHER MANIFEST" and then to
+generalise that to every Python project in the fleet. Both were unmeasured claims about the
+environment rather than statements about the condition the entrypoint tests, and the second was
+simply false: a Python project carrying deno.json with .tasks.check, or package.json with
+.scripts.test, auto-detects perfectly well. This file was written to end exactly that defect
+class, so the condition is now the one fleet-check actually evaluates - and the citations are
+the ones I read: the predicates span :156-159 and the exit 2 is at :160, not :161.) 
 
 THE FIX SHAPE (C): tools/check-cmd.sh --install writes THIS PROJECT'S resolved command into
 $HOME/.fleet/check.conf from the tracked tools/check.conf. The deployed entrypoint then
@@ -135,9 +144,11 @@ class TestTheEntrypointReadsTheTrackedCommand(unittest.TestCase):
         :170/:191 compare the cached record's .cmd against $CHECK_CMD.
 
         NO-ARGS NORMALLY STARTS A REAL GATE, which is why this test asserts the REFUSAL
-        path only: on a fresh HOME this project has no per-VM config, and it has neither a
-        deno.json nor a package.json, so the entrypoint exits 2 BEFORE running anything.
-        The test therefore exercises the defect and starts no suite.
+        path only: on a fresh HOME this project has no per-VM config, and the auto-detect at
+        fleet-check:156-159 matches neither predicate - deno.json does not exist, and
+        package.json exists but declares no scripts.test (measured 2026-10-12:
+        `jq -e '.scripts.test' package.json` -> rc=1) - so the entrypoint exits 2 BEFORE
+        running anything. The test therefore exercises the defect and starts no suite.
 
         THE POSITIVE ARM IS A NAMED FOLLOW-UP RATHER THAN A GUESS: to observe the config
         being READ successfully without running a suite, place a PASS record whose .cmd
