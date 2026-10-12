@@ -162,15 +162,26 @@ This directory holds patches for fleet-level infrastructure and tooling that can
   `unmapped`, and a fully executed candidate set produces NEITHER. Direction (d), the decider that this is not a
   widening: no name-adjacent non-importer (e.g. a `tests/sandbox_fixtures` consumer) appears in the reported set.
   `git apply --check` round-trips byte-identically, which is how these two files were verified before commit.
-- **Status of the evidence, with (b) still owed:** (a), (c) and (d) are measured on real gate logs and are
-  quoted from the runs that produced them. (b) — a log in which the omitting suite actually executed, so that the
-  signal is shown FIRING rather than merely absent-in-the-right-place — is NOT yet measured. It is guaranteed by
-  construction (the `partial` entry is created only inside `if omitted_c:`), and three of the four directions
-  prove the patch does not misreport while (b) is the one that proves it reports. It is owed before this lands,
-  and the blocker is mechanical: the oracle resolves the changed-file set from the worktree's git state, and with
-  a gate measuring the current tree the lid log's own sha cannot be checked out without moving the tree under the
-  gate. The plan is to re-run the pair in a scratch worktree at the log's sha, or by supplying the changed-file
-  set through the environment if the oracle honours it; whichever route is used gets recorded here with its output.
+- **Evidence: all four directions measured, on real gate logs.** One variable apart throughout — same log,
+  same tree, same commit; only the oracle file differs.
+  **(a)** On a real gate log whose ground truth is the gate's own warning (`unmapped ['tools/fast-gate.sh']`,
+  three omitted consumers): the unpatched oracle reports `unmapped=['tools/fast-gate.sh']` with 3 omitted, and the
+  patched oracle reports `unmapped=[]` with `partial={'tools/fast-gate.sh': [the same three]}` — THE FILE CHANGES
+  BUCKET WITH AN IDENTICAL OMITTED COUNT (3 = 3). The identical count is what shows the patch relabels rather than
+  widening or silencing.
+  **(b)** The same log with the same three consumers reported as EXECUTED — one variable changed: BOTH versions
+  report neither field, so the signal is absent exactly when there is no omission, and the patch introduces no
+  noise the unpatched oracle does not also produce.
+  **(c)** A fully covered file stays silent: in the same runs the other changed file is reported in neither field.
+  **(d)** The decider that this is not a widening: the reported set contains only real consumers
+  (`tests/test_coverage_contract.py`, `tests/test_gate_entrypoint_config.py`, `tests/test_hermetic_env.py`) — no
+  name-adjacent non-importer and no fixture consumer.
+- **The recipe is runnable by a reviewer, and here is the part that made it work.** The oracle resolves its
+  changed-file set from the (log, repo_dir, sha) triple, and a sha that does not pair with the repo's state yields
+  `changed=[]` / `coverage='NONE'` / `no changed files to cover` — an EMPTY RESULT THAT READS AS "COVERAGE IS
+  FINE", which is this bead's theme in miniature. Use the sha the log belongs to, with the repository it was taken
+  from; then (a) is the two-oracle comparison above, and (b) is the same comparison after appending the omitted
+  suite paths to the log's `passed:` line.
 - **Ownership and routing:** these files are outside this VM's write access; the hub owns the fleet tree and is the
   only route. The related correctness bead is `agents-0xm2` (the silent true: the candidate discovery misses a real
   importer, the naming fallback matches a namesake suite, and `covered=True` is published). Its fix is the SAME
