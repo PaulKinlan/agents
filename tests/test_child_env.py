@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -145,16 +146,40 @@ class TestChildEnvironment(unittest.TestCase):
                                     parent=parent_env())
         self.assertFalse("GH_TOKEN" in plain)
 
-    def test_assertion_failure_does_not_leak_child_environment_dict_or_tokens(self):
-        """agents-vsqa: assertion failures in child_env tests must assert on key presence only
-        and never format the child environment dictionary or credentials into the error message."""
-        poisoned_env = dict(child_environment(sink="github-issues", parent=parent_env()),
-                            AWS_SECRET_ACCESS_KEY="synthetic-secret-leak-marker")
-        with self.assertRaises(AssertionError) as ctx:
-            self.assertFalse("AWS_SECRET_ACCESS_KEY" in poisoned_env)
-        err_msg = str(ctx.exception)
-        self.assertNotIn("synthetic-secret-leak-marker", err_msg, "leaked poisoned secret value in traceback")
-        self.assertNotIn("ghs_ci_token", err_msg, "leaked child token value in traceback")
+    def test_a_failing_child_env_assertion_never_dumps_the_dict_or_tokens(self):
+        """agents-97nq: this guard must FAIL if the assertions it guards are reverted.
+
+        The first version typed a copy of the fixed pattern into its own body - it built a local
+        ``poisoned_env`` and then asserted ``assertFalse("AWS_SECRET_ACCESS_KEY" in poisoned_env)``
+        - so it proved nothing about the file it lives in. MEASURED by the reviewer: reverting the
+        ~20 real assertions here to the leaking ``assertNotIn(k, env)`` form, which prints the whole
+        environment dictionary, secrets and tokens included, when it fails, left the suite GREEN
+        (Ran 36 tests ... OK). A guard that cannot fail on the defect it names is a false green.
+
+        This version CALLS THE REAL TEST METHODS, the same shape as the sibling guard in
+        tests/test_hermetic_env.py:31-54: a builder leaking one synthetic secret and one synthetic
+        token is injected, each real test method is run against it, and every failure message is
+        checked. In the fixed form the message is unittest's bare "False is not true"; in the
+        leaking form it is "'AWS_SECRET_ACCESS_KEY' unexpectedly found in {...}" carrying the
+        synthetic credential, so the revert turns this test RED.
+        """
+        leaking = dict(child_environment(sink="github-issues", parent=parent_env()),
+                       AWS_SECRET_ACCESS_KEY="synthetic-secret-leak-marker",
+                       ANTHROPIC_API_KEY="synthetic-anthropic-leak-marker")
+        for method in ("test_github_sink_gets_a_token_and_nothing_else",
+                       "test_unknown_engine_fails_closed"):
+            with self.subTest(method=method):
+                case = self.__class__(method)
+                with mock.patch("tests.test_child_env.child_environment",
+                                lambda **kwargs: dict(leaking)):
+                    with self.assertRaises(AssertionError) as ctx:
+                        getattr(case, method)()
+                err_msg = str(ctx.exception)
+                self.assertNotIn("synthetic-secret-leak-marker", err_msg,
+                                 "leaked poisoned secret value in traceback")
+                self.assertNotIn("synthetic-anthropic-leak-marker", err_msg,
+                                 "leaked poisoned anthropic value in traceback")
+                self.assertNotIn("ghs_ci_token", err_msg, "leaked child token value in traceback")
 
     def test_absent_variables_are_not_invented(self):
         self.assertEqual(child_environment(parent={"PATH": "/bin"}), {"PATH": "/bin"})
