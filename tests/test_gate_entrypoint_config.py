@@ -46,11 +46,12 @@ def _entrypoint_env(home: str) -> dict:
     gate is the merger's job"), and that refusal fires AFTER the config is sourced (:149) but
     BEFORE the cached-verdict path (:170/:191) these tests assert on. So inheriting the
     caller's FLEET_LANE made both arms of TestTheEntrypointResolvesTheInstalledCommand FAIL
-    for every implementer lane while a merger lane passed them - and, worse, it made the
-    fresh-HOME refusal arm pass on the LANE-REFUSAL message rather than on the missing-config
-    message it exists to pin. A result that depends on the calling lane is a machine-state
-    assertion; it turns an unrelated change red for everyone, and install.sh maps to this
-    suite (agents-3xqa), so both halves had to become lane-independent. `merger` is the only
+    for every implementer lane while a merger lane passed them; the fresh-HOME refusal arm
+    was never lane-dependent because with no per-VM config it exits 2 at the auto-detect
+    refusal (:161) before the lane guard for any lane, so the pin is inert there. A result
+    that depends on the calling lane is a machine-state assertion; it turns an unrelated
+    change red for everyone, and install.sh maps to this suite (agents-3xqa), so the Resolves
+    pair had to become lane-independent. `merger` is the only
     lane value the entrypoint lets through to the config path, and EVERY test here also calls
     _prevent_real_gate, so passing that gate cannot start a real full gate.
     """
