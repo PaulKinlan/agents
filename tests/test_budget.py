@@ -7,12 +7,14 @@ timeout path (including the process-group kill), and the repo-wide invariant.
 """
 
 import ast
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -198,6 +200,114 @@ class TestRunStationCommand(unittest.TestCase):
             self.assertEqual(heartbeat.stat().st_size, size_after_kill,
                              "a descendant of the spawned session outlived the failing hook")
 
+    def test_a_failing_group_kill_still_contains_the_child(self):
+        """agents-dhk8: the DOUBLE FAULT - the hook raises AND the reap fails with it.
+
+        The 8z4z guarantee above ("a hook that raises cannot orphan the child") holds only
+        while the kill itself succeeds, and that is the half nobody had driven. Measured
+        RED-FIRST against the pre-fix module: with the group kill raising, the caller saw the
+        reap's OSError INSTEAD of the hook's RuntimeError - the hook's own failure silently
+        misattributed - and the child SURVIVED, which is exactly the orphan the hook's
+        exception was supposed to prevent. A double fault is not a licence to lose the first
+        fault: the hook's error is what a reader needs, and the reap's belongs in its chain.
+
+        The liveness assertion is on the Popen rather than os.kill(pid, 0), because a ZOMBIE
+        still answers signal 0: the reap raised before its wait(), so the killed child is
+        unreaped and an os.kill probe reports a dead process as alive (this test caught its
+        own author with exactly that). poll() both reports SIGKILL and reaps, after which
+        the pid is genuinely gone.
+        """
+        import os
+
+        pids = []
+        popen = []
+
+        def hook(proc):
+            pids.append(proc.pid)
+            popen.append(proc)
+            raise RuntimeError("broker registration failed")
+
+        def broken_group_kill(proc):
+            raise OSError("killpg failed")
+
+        with mock.patch("lib.budget._kill_process_group", broken_group_kill):
+            with self.assertRaises(RuntimeError) as ctx:
+                run_station_command(
+                    [sys.executable, "-c", "import time; time.sleep(60)"], StationBudget(1),
+                    "spawn", on_spawn=hook, capture_output=True, text=True, check=False,
+                )
+
+        self.assertIn("broker registration failed", str(ctx.exception),
+                      "the hook's own failure must be the exception reported")
+        self.assertIn("killpg failed", str(ctx.exception.__context__),
+                      "the reap's failure must stay in the chain, not replace the cause")
+        self.assertEqual(len(pids), 1, "the hook must have been handed the live child")
+        self.assertEqual(popen[0].poll(), -signal.SIGKILL,
+                         "the child outlived a failing hook AND a failed reap")
+        with self.assertRaises(ProcessLookupError, msg="the killed child was left unreaped"):
+            os.kill(pids[0], 0)
+
+    def test_the_reap_is_bounded_when_an_escaped_descendant_holds_the_pipes(self):
+        """agents-dhk8: A DESCENDANT THAT ESCAPED THE GROUP MAKES THE DRAIN UNFINISHABLE.
+
+        A descendant in its own session keeps our stdout write end open, so no communicate()
+        can see EOF - the case _kill_and_reap's own comment names. The escape hatch for it
+        was a bare proc.communicate() with no bound, and the measured cost was the
+        descendant's LIFETIME: 25.1 s against a descendant that slept 25 s, so a station
+        would wait for as long as that descendant lived (the reaper allows 120 min) while
+        this module's own docstring promises no subprocess call in the dispatcher is
+        unbounded. The assertion below is about the SHAPE - we returned while the pipe holder
+        was still alive - so GROUP_EXIT_WAIT_SECONDS is patched down; the module's real bound
+        is 5 s per wait, and waiting it out twice in every run would buy nothing here.
+        """
+        import os
+
+        parent_code = (
+            "import subprocess, sys, time\n"
+            "proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(6)'],\n"
+            "                        start_new_session=True, stdout=sys.stdout)\n"
+            "open(sys.argv[1], 'w').write(str(proc.pid))\n"
+            "time.sleep(60)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "parent.py"
+            parent.write_text(parent_code, encoding="utf-8")
+            pidfile = root / "descendant.pid"
+
+            def hook(proc):
+                # The descendant must exist before the hook fails, or the pipes would be held
+                # by nobody and the drain would finish instantly (see the 8z4z test above).
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and not pidfile.exists():
+                    time.sleep(0.02)
+                raise RuntimeError("broker registration failed")
+
+            started = time.monotonic()
+            with mock.patch("lib.budget.GROUP_EXIT_WAIT_SECONDS", 0.5):
+                with self.assertRaises(RuntimeError):
+                    run_station_command(
+                        [sys.executable, str(parent), str(pidfile)],
+                        StationBudget(1), "spawn", on_spawn=hook,
+                        capture_output=True, text=True, check=False,
+                    )
+            elapsed = time.monotonic() - started
+            self.assertTrue(pidfile.exists(), "the escaped descendant never started")
+            descendant = int(pidfile.read_text())
+            try:
+                self.assertLess(elapsed, 4.5,
+                                "the reap waited out a process outside its own group")
+                try:
+                    os.kill(descendant, 0)
+                except ProcessLookupError:
+                    self.fail("the reap waited for the escaped pipe holder instead of "
+                              "bounding the drain and returning")
+            finally:
+                try:
+                    os.kill(descendant, 9)
+                except ProcessLookupError:
+                    pass
+
     def test_expiry_raises_station_timeout(self):
         budget = StationBudget(0.01, label="hung")  # 0.6 s
         started = time.monotonic()
@@ -280,6 +390,24 @@ class TestNoUnboundedSubprocess(unittest.TestCase):
                     continue
                 func = node.func
                 if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+                    continue
+                if func.attr == "communicate":
+                    # agents-dhk8: THE HOLE THIS GUARD RAIL HAD. It checked the calls that
+                    # CREATE a subprocess and none of the calls that WAIT on one, which is
+                    # where an unbounded wait actually happens: `proc.communicate()` with no
+                    # timeout in lib/budget.py passed this test for as long as the escape
+                    # hatch existed, while being able to block for the LIFETIME of a process
+                    # outside our group (measured: 25.1 s against a descendant that slept
+                    # 25 s). communicate() is Popen-specific, so a rule for it cannot
+                    # misfire. `wait` is deliberately NOT covered: Event.wait and thread
+                    # waits share the name, and a rule flagging them would turn other lanes'
+                    # branches red for a false positive - lib/net_forward.py's child.wait is
+                    # the documented exception, bounded transitively by the station's group
+                    # kill. That residual is named here rather than left to be rediscovered.
+                    if not any(kw.arg == "timeout" for kw in node.keywords):
+                        offenders.append(
+                            f"{path.relative_to(ROOT)}:{node.lineno}: .communicate() without timeout="
+                        )
                     continue
                 if func.value.id != "subprocess":
                     continue
