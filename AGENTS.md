@@ -276,6 +276,16 @@ the text had to be recovered from the reviewer's own event log).
   inferring from comment authorship or from ordering, a reader can tell which party FORMED the
   verdict and which party CARRIED it into the bead.
 
+### The parser-test-disagreement family: a test that cannot fail is not a test
+
+A family of testing defects where a component cannot fail for the thing it is named for. Where
+that component is a test asserting on a parsed structure, the test's parser drops what the
+assertion never reads, and the suite stays green through a real regression.
+- **Dynamic sweep:** `bd list --label parser-test-disagreement --all` enumerates all proven
+  members across historical closed and open beads.
+- **Deliberate exclusion:** `agents-vi8f` is excluded because it is a harness probe limitation
+  (an import-time poison cannot reach a subprocess runner), not an in-tree failure to constrain.
+
 ## Landing mechanics: the identity is the tree, and a push is never a pipeline's passenger
 
 Both rules come from `agents-yk6m`, where a landing reached the default branch carrying a
