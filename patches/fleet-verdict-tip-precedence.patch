@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index b2e56a8..41a9cf1 100755
+index b2e56a8..821fd5c 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
 @@ -276,13 +276,37 @@ flm_select() {
@@ -19,7 +19,7 @@ index b2e56a8..41a9cf1 100755
 -      c_verdict=""
 +      if [[ "$c_after_lc" =~ (supersed(es?|ing|ed)|replaces?|replacing) ]]; then
 +        re_clause="[[:space:],;(-]*\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*"
-+        claim_part=$(sed -E "s/$re_clause//I" <<<"$c_after" | tr -d "[:space:]:,;()" | xargs)
++        claim_part=$(sed -E "s/$re_clause//I" <<<"$c_after" | sed -E "s/[][,;:()]+//g" | xargs)
 +        super_part=$(grep -ioE "\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*" <<<"$c_after" || true)
 +        claim_lc=$(printf '%s' "$claim_part" | tr '[:upper:]' '[:lower:]')
 +        super_lc=$(printf '%s' "$super_part" | tr '[:upper:]' '[:lower:]')
@@ -42,7 +42,7 @@ index b2e56a8..41a9cf1 100755
      else
        # The token is decided by the ONE shared vocabulary (bin/fleet-verdict-words.sh) - never by a word list
        # here, which is how HOLDS and APPROVE came to be invisible to this tool while another tool accepted them.
-@@ -510,29 +534,115 @@ if [ -n "$REV_POOL" ]; then
+@@ -510,29 +534,116 @@ if [ -n "$REV_POOL" ]; then
      else
        flm_select "$POOL_TIP"
      fi
@@ -62,8 +62,10 @@ index b2e56a8..41a9cf1 100755
 +      flm_have_pos=0; flm_have_neg=0
 +      flm_pos=""; flm_neg=""
 +      flm_pos_super=0; flm_neg_super=0
++      flm_pos_super_row=""; flm_neg_super_row=""
 +      flm_pos_newest_idx=-1; flm_neg_newest_idx=-1
 +      flm_pos_newest_at=""; flm_neg_newest_at=""
++      flm_pos_newest_row=""; flm_neg_newest_row=""
 +
 +      flm_is_newer() {
 +        local at1="$1" idx1="$2" at2="$3" idx2="$4"
@@ -93,7 +95,7 @@ index b2e56a8..41a9cf1 100755
 +        if [ "$c_has_pos" = 1 ] && [ "$c_has_neg" = 1 ]; then
 +          if [[ "$c_after_lc" =~ (supersed(es?|ing|ed)|replaces?|replacing) ]]; then
 +            re_clause="[[:space:],;(-]*\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*"
-+            claim_part=$(sed -E "s/$re_clause//I" <<<"$c_after_chk" | tr -d "[:space:]:,;()" | xargs)
++            claim_part=$(sed -E "s/$re_clause//I" <<<"$c_after_chk" | sed -E "s/[][,;:()]+//g" | xargs)
 +            super_part=$(grep -ioE "\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*" <<<"$c_after_chk" || true)
 +            claim_lc=$(printf '%s' "$claim_part" | tr '[:upper:]' '[:lower:]')
 +            super_lc=$(printf '%s' "$super_part" | tr '[:upper:]' '[:lower:]')
@@ -114,22 +116,31 @@ index b2e56a8..41a9cf1 100755
          [ -n "$tok" ] || continue
 -        if fleet_verdict_is_positive "$tok"; then flm_have_pos=1; else flm_have_neg=1; flm_neg+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'; fi
 +
++        row="$c_idx"$'\t'"$c_who"$'\t'"$c_at"
 +        if fleet_verdict_is_positive "$tok"; then
 +          flm_have_pos=1
-+          flm_pos+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'
++          flm_pos+="$row"$'\n'
 +          if flm_is_newer "$c_at" "$c_idx" "$flm_pos_newest_at" "$flm_pos_newest_idx"; then
 +            flm_pos_newest_idx="$c_idx"
 +            flm_pos_newest_at="$c_at"
++            flm_pos_newest_row="$row"
 +          fi
-+          [ "$is_super" = 1 ] && flm_pos_super=1
++          if [ "$is_super" = 1 ]; then
++            flm_pos_super=1
++            flm_pos_super_row="$row"
++          fi
 +        else
 +          flm_have_neg=1
-+          flm_neg+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'
++          flm_neg+="$row"$'\n'
 +          if flm_is_newer "$c_at" "$c_idx" "$flm_neg_newest_at" "$flm_neg_newest_idx"; then
 +            flm_neg_newest_idx="$c_idx"
 +            flm_neg_newest_at="$c_at"
++            flm_neg_newest_row="$row"
 +          fi
-+          [ "$is_super" = 1 ] && flm_neg_super=1
++          if [ "$is_super" = 1 ]; then
++            flm_neg_super=1
++            flm_neg_super_row="$row"
++          fi
 +        fi
        done <<<"$_tip_operative"
 +
@@ -142,38 +153,28 @@ index b2e56a8..41a9cf1 100755
 -        flm_select "$flm_neg"
 +        if [ "$flm_pos_super" = 1 ] && [ "$flm_neg_super" = 0 ]; then
 +          rev_disagree="two verdicts on the SAME tip disagree; explicit supersession reports positive verdict"
-+          if ! fleet_verdict_is_positive "$rev_verdict"; then
-+            flm_select "$flm_pos"
-+          fi
++          flm_select "$flm_pos_super_row"
 +        elif [ "$flm_neg_super" = 1 ] && [ "$flm_pos_super" = 0 ]; then
 +          rev_disagree="two verdicts on the SAME tip disagree; explicit supersession reports negative verdict"
-+          if fleet_verdict_is_positive "$rev_verdict"; then
-+            flm_select "$flm_neg"
-+          fi
++          flm_select "$flm_neg_super_row"
 +        elif flm_is_newer "$flm_neg_newest_at" "$flm_neg_newest_idx" "$flm_pos_newest_at" "$flm_pos_newest_idx"; then
 +          rev_disagree="two verdicts on the SAME tip disagree; the newer verdict (#$flm_neg_newest_idx says FAIL) is reported"
-+          if fleet_verdict_is_positive "$rev_verdict"; then
-+            flm_select "$flm_neg"
-+          fi
++          flm_select "$flm_neg_newest_row"
 +        elif flm_is_newer "$flm_pos_newest_at" "$flm_pos_newest_idx" "$flm_neg_newest_at" "$flm_neg_newest_idx"; then
 +          rev_disagree="two verdicts on the SAME tip disagree; the newer verdict (#$flm_pos_newest_idx says PASS) is reported"
-+          if ! fleet_verdict_is_positive "$rev_verdict"; then
-+            flm_select "$flm_pos"
-+          fi
++          flm_select "$flm_pos_newest_row"
 +        else
-+          rev_disagree="two verdicts on the SAME tip disagree (#$rev_idx says $rev_verdict); the conservative one is reported"
-+          if fleet_verdict_is_positive "$rev_verdict"; then
-+            flm_select "$flm_neg"
-+          fi
++          rev_disagree="two verdicts on the SAME tip disagree; conservative negative verdict reported"
++          flm_select "$flm_neg_newest_row"
 +        fi
        fi
      fi
    elif [ -n "$POOL_OWN" ]; then
 diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
-index 35bdd66..26a9ead 100755
+index 35bdd66..710f50d 100755
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
-@@ -1532,6 +1532,112 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "position/offset moved (added
+@@ -1532,6 +1532,146 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "position/offset moved (added
  out=$(run tk-1 fleet/pos-tip 2>&1 || true)
  has "$out" "position/offset moved" "37j refusal line reports position/offset moved"
  
@@ -245,6 +246,16 @@ index 35bdd66..26a9ead 100755
 +j38k=$(run --print-json tk-1 fleet/delta1)
 +eq "$(jq -r '.review.state' <<<"$j38k")" "AMBIGUOUS" "38k conflicting tokens without supersession remain AMBIGUOUS"
 +
++# 38k2: space-separated verdict phrases like PASS with notes preserve inner whitespace
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS with notes (supersedes earlier FAIL)\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: small note"}]
++J
++j38k2=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.verdict' <<<"$j38k2")" "PASS-with-notes" "38k2 PASS with notes preserves inner whitespace in superseding claim"
++
 +# 38l: compound claim containing conflicting tokens despite a supersession clause remains unparseable
 +cat > "$B" <<J
 +[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
@@ -269,7 +280,7 @@ index 35bdd66..26a9ead 100755
 +j38m=$(run --print-json tk-1 fleet/delta1)
 +eq "$(jq -r '.review.verdict' <<<"$j38m")" "FAIL" "38m newer FAIL selected when older PASS only has body replaces"
 +
-+# 38n: identical timestamp and index tie falls to conservative negative
++# 38n: identical timestamp tie where FAIL has higher index selects FAIL
 +cat > "$B" <<J
 +[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
 +  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
@@ -278,10 +289,34 @@ index 35bdd66..26a9ead 100755
 + {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
 +  "text":"VERDICT: FAIL\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: issue"}]
 +J
-+# Note: here FAIL has higher index (comment 2 vs comment 1) so it wins by recency; to test identical index + time,
-+# we test that tie-break logic returns conservative negative when indices tie.
 +j38n=$(run --print-json tk-1 fleet/delta1)
-+eq "$(jq -r '.review.verdict' <<<"$j38n")" "FAIL" "38n tie on same timestamp falls to conservative negative"
++eq "$(jq -r '.review.verdict' <<<"$j38n")" "FAIL" "38n timestamp tie with higher index FAIL selects FAIL"
++
++# 38o: identical timestamp tie where PASS has higher index selects PASS
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: FAIL\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: issue"},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: none"}]
++J
++j38o=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.verdict' <<<"$j38o")" "PASS" "38o timestamp tie with higher index PASS selects PASS"
++
++# 38p: exact winning comment selected rather than whole polarity pool
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-old","created_at":"2026-10-12T10:30:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: old pass"},
++ {"author":"proj-rev-fail","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: FAIL\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: intermediate fail"},
++ {"author":"proj-rev-new","created_at":"2026-10-12T12:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: newest pass"}]
++J
++j38p=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.author' <<<"$j38p")" "proj-rev-new" "38p winning comment author is newest pass author, not older pass author"
 +
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
