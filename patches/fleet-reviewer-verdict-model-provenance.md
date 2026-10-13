@@ -2,6 +2,13 @@
 
 - **Target repository:** `PaulKinlan/fleet`
 - **Target files:** `roles/reviewer.md` (the verdict shape) and `remote/lanes.sh` (a runtime-model audit)
+- **Baseline (measured against the LIVE hub files, and re-checked after a sync moved them):**
+  `roles/reviewer.md` 11924 bytes, sha256 `ad225a927e292365019947390c1b9275…`; `remote/lanes.sh` 35527 bytes,
+  sha256 `a5dfb8b0faa6ce347ad9391d0d30d87a…`. While this delivery was being written a sync changed both files (by 8
+  and 2 bytes), so rather than assume, I re-measured and re-checked: the patch applies to the LIVE files at `fuzz=0`
+  AND passes `git apply --check`, both clean. An earlier revision of this document quoted 11916 bytes - a figure
+  measured before that sync, and therefore stale prose about a file that has moved, which is exactly the kind of note
+  that invites a wrong conclusion about an artifact that is in fact fine. The measured numbers above replace it.
 - **Beads:** agents-q7v2 (P2) with the runtime-vs-intent half of the spawn P1, delivered as ONE artifact per
   coord's ruling. Cross-linked with **agents-kq0r increment C** - same root, different layers: this patch is what
   the HUB can do (state the field, and make drift visible), C is the mechanical refusal in the SDK host.
