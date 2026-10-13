@@ -1,33 +1,84 @@
 #!/usr/bin/env sh
-# --- BEGIN BEADS INTEGRATION v1.2.2 ---
+# STOPGAP (agents-kxbv): the managed block below is patched in two ways - its default bound is
+# lowered to a measured value, and it FAILS OPEN for every non-zero result instead of aborting the
+# commit. `bd hooks install` rewrites the block from bd's own template and WILL drop both edits, so
+# re-apply them after any install until the upstream template carries them. The durable fix is
+# upstream; this copy is a stopgap.
+# --- BEGIN BEADS INTEGRATION v1.3.1 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
-  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
-  _bd_used_perl=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$_bd_timeout" bd hooks run pre-commit "$@"
-    _bd_exit=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$_bd_timeout" bd hooks run pre-commit "$@"
-    _bd_exit=$?
+  # agents-kxbv: the bound is a STALL LIMIT, not a correctness gate. This hook's payload is the
+  # passive .beads/issues.jsonl export - issues live in the local Dolt DB and sync over
+  # refs/dolt/data - so no export outcome may decide whether a commit exists. 300s was the harm
+  # measured: four lanes' bead writes stalled behind one lock incident, one finding needed another
+  # actor to record it, and a lane was wedged 64 minutes.
+  # 20s is chosen from measurement, not taste: this hook's own no-op path measured p50 0.07s / max
+  # 0.09s over 20 runs, and the lock-taking bd calls this hook competes with measured p50 1.9s / max
+  # 13.5s on this VM (agents-nbka). So 20s sits far above any healthy run and far below the 300s that
+  # caused the harm. Note the consequence deliberately: under queue pressure this bound FIRES, and
+  # firing is not a failure - it skips a passive export and lets the commit proceed.
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-20}
+  case "$_bd_timeout" in
+    *[!0-9]*|'') _bd_timeout_invalid=1 ;;
+    *[1-9]*) _bd_timeout_invalid=0 ;;
+    *) _bd_timeout_invalid=1 ;;
+  esac
+  if [ "$_bd_timeout_invalid" -eq 1 ]; then
+    echo >&2 "beads: invalid BEADS_HOOK_TIMEOUT; using 300 seconds"
+    _bd_timeout=300
+  fi
+  _bd_timeout_backend=none
+  _bd_timeout_command=
+  for _bd_timeout_candidate in timeout gtimeout; do
+    if command -v "$_bd_timeout_candidate" >/dev/null 2>&1; then
+      if _bd_timeout_version="$("$_bd_timeout_candidate" --version 2>/dev/null)"; then
+        case "$_bd_timeout_version" in
+          "timeout (GNU coreutils) "*) _bd_timeout_command=$_bd_timeout_candidate; break ;;
+        esac
+      fi
+    fi
+  done
+  if [ -n "$_bd_timeout_command" ]; then
+    _bd_timeout_backend=coreutils
+    if "$_bd_timeout_command" -- "$_bd_timeout" bd hooks run pre-commit "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   elif command -v perl >/dev/null 2>&1; then
-    _bd_used_perl=1
-    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run pre-commit "$@"
-    _bd_exit=$?
+    _bd_timeout_backend=perl
+    if perl -e 'alarm shift; exec @ARGV' -- "$_bd_timeout" bd hooks run pre-commit "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   else
     echo >&2 "beads: hook 'pre-commit' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
-    bd hooks run pre-commit "$@"
-    _bd_exit=$?
+    if bd hooks run pre-commit "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   fi
-  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+  if { [ "$_bd_timeout_backend" = coreutils ] && [ "$_bd_exit" -eq 124 ]; } || { [ "$_bd_timeout_backend" = perl ] && [ "$_bd_exit" -eq 142 ]; }; then
     echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
     _bd_exit=0
   fi
-  if [ $_bd_exit -eq 3 ]; then
+  if [ "$_bd_exit" -eq 3 ]; then
     echo >&2 "beads: database not initialized — skipping hook 'pre-commit'"
     _bd_exit=0
   fi
-  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+  # agents-kxbv: FAIL OPEN. The two branches above already continue for this hook's own timeout
+  # (124/142) and for 'database not initialized' (3); every OTHER non-zero code aborted the commit -
+  # including 75 (EX_TEMPFAIL, "try again"), which is what a bounded bd returns when the VM-wide lock
+  # is unavailable. So the policy was "a slow failure is fine, a fast one is fatal", which is exactly
+  # backwards for an export whose cost is latency: a lock incident could not block a commit for 300s
+  # any more, but a fast, CORRECT refusal killed it outright. A commit is the fleet's primary action
+  # and this export is a copy of it, so report once and continue.
+  if [ "$_bd_exit" -ne 0 ]; then
+    echo >&2 "beads: hook 'pre-commit' could not export (bd exit ${_bd_exit}) - continuing without beads"
+    _bd_exit=0
+  fi
 fi
-# --- END BEADS INTEGRATION v1.2.2 ---
+# --- END BEADS INTEGRATION v1.3.1 ---
