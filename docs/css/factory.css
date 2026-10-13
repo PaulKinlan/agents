@@ -186,8 +186,8 @@
      clipped; at <= 48rem it wraps instead (see the media query below), so no sideways gesture is needed. */
   /* TODO(baseline/scroll-state-queries): Remove the four-gradient fallback below when scroll-state queries
      work across supported browsers. On Chrome 155.0.8059.39 the <code> descendant indicators match at
-     scroll start/middle/end; the earlier failed probe styled the scroller's own pseudo-elements instead.
-     Keep the fallback for engines without scroll-state queries. */
+     scroll start/middle/end. Keep the gradients below as edge cues where scroll-state
+     queries are unavailable. */
   pre {
     white-space: pre; max-inline-size: 100%; overflow-x: auto; tab-size: 2;
     border-color: var(--doc-hairline); line-height: 1.55; font-size: .85rem;
@@ -200,7 +200,7 @@
       var(--code-bg);
   }
   pre code { color: var(--code-fg); font-size: inherit; }
-  /* The indicators belong to the <code> descendant: a scroller cannot query its own scroll state.
+  /* The indicators live on the <code> descendant and span its content height.
      Only wide layouts scroll sideways; on narrow layouts the existing wrapped code stays untouched.
      Retain the gradient fallback for engines without working scroll-state queries. */
   @supports (container-type: scroll-state) {
