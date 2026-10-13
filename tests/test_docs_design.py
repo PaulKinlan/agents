@@ -86,6 +86,9 @@ class DocsDesignTest(unittest.TestCase):
             self.assertIn(f"@container scroll-state(scrollable: {direction}) "
                           f"{{ pre > code::{indicator} {{ opacity: 1; }} }}", css)
         self.assertIn("no-repeat local", css, "keep the gradient fallback for unsupported browsers")
+        self.assertIn("Chrome 155.0.8059.39 the <code> descendant indicators match", css,
+                      "do not reinstate the falsified browser-support claim")
+        self.assertNotIn("parsed the native rules without ever matching them", css)
         self.assertNotIn("pre::before", css.split("  pre {", 1)[1],
                              "scroll-state cannot style the scroller's own pseudo-element")
 
