@@ -62,10 +62,10 @@ index fcdc928..ba33089 100755
    reason=""
    [ -f "$LD/$lane.reason" ] && reason=$(cat "$LD/$lane.reason" 2>/dev/null)
 diff --git a/tests/lanes.test.sh b/tests/lanes.test.sh
-index b20281d..17a87d7 100755
+index b20281d..6455eee 100755
 --- a/tests/lanes.test.sh
 +++ b/tests/lanes.test.sh
-@@ -1061,6 +1061,100 @@ has "$(cat "$HOME/.fleet/lanes/imp-live-rot.model" 2>/dev/null)" "antigravity/ge
+@@ -1061,6 +1061,107 @@ has "$(cat "$HOME/.fleet/lanes/imp-live-rot.model" 2>/dev/null)" "antigravity/ge
  lanes retire imp-live-rot >/dev/null 2>&1 || true
  echo '{}' > "$HOME/.fleet/model-cooldown.json"
  
@@ -81,6 +81,12 @@ index b20281d..17a87d7 100755
 +ldir="$HOME/.fleet/lanes"
 +h006_lane=impl-h006-flight
 +printf 'ROLE=implementer\nMODEL=deepseek/deepseek-flash\nWORKDIR=%s\nBEAD=bead-h006\n' "$HOME" > "$ldir/$h006_lane.conf"
++# .sid is pre-populated so the fixture is past the point the incident was past: run-lane.sh derives the session id
++# from `stat -c %Y $LD/$lane.conf` (:96) when .sid is absent, and the hook below removes that file - which would
++# make this fixture die EARLIER than the incident did (at session derivation, not at the start) and print a
++# `stat: cannot stat` that has nothing to do with the code under test. The incident's retire landed while the
++# process waited with its session already derived, which is what this fixture now reproduces.
++echo '1f873680-3b17-5f0f-48c6-0dfa209c85ba' > "$ldir/$h006_lane.sid"
 +# Control first: with nothing removed this exact fixture DOES prepare a start. An instrument that cannot see a
 +# start cannot report the absence of one, and that is the difference between this section and a green line.
 +rm -f "$ldir/$h006_lane.log"
@@ -106,6 +112,7 @@ index b20281d..17a87d7 100755
 +rc=$?
 +set -e
 +hasnt "$out" "\"lane\":\"$h006_lane\"" "30b no lane is prepared for a lane retired mid-start"
++hasnt "$out" "cannot stat" "30b2 the fixture reached the refusal and not an earlier death (no stat noise)"
 +[ "$rc" -ne 0 ] && ok "30c the refusal is a non-zero exit, not a silent success" || bad "30c refusal exit code" "got [$rc]"
 +has "$(cat "$ldir/$h006_lane.log" 2>/dev/null)" "$ldir/$h006_lane.conf is gone" \
 +  "30d the reason is in the lane's own log, where an operator looks"

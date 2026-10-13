@@ -12,7 +12,7 @@
 - **Patched file hashes (the round trip reproduced these byte-for-byte):**
   `acaa74d0c0a83a0f49b43ac6b8a896a10e857cd637c1e7a1f8ab1e8fe7cef6ea  remote/run-lane.sh`
   `cdb67591a928019d3777196cbf6e68df8eb2b1ecff6539fe29c21ea4e693900d  remote/lanes.sh`
-  `d5cfe75d196014a343416d2c3e7caa67c3728c09a08075ded9a6efdadaa5d9fe  tests/lanes.test.sh`
+  `d5cfe75d196014a343416d2c3e7caa67c3728c09a08075ded9a6efdadaa5d9fe` → `ab4a87b52b2975d97dbe8299401a59aafc718a4118e7ff27178bc5cab090abf1  tests/lanes.test.sh`
 
 - **Problem statement (agents-h006).** A lane that has been retired can come back. On 2026-10-12 `rev-weekly`
   was spawned, failed readiness, was retired **and deregistered** by coord, and then started two minutes later
@@ -77,10 +77,10 @@
   - **Baseline, before the change:** `bash tests/lanes.test.sh` → **197 passed, 0 failed** in **17.1 s**. (The
     run's own output is the evidence that it executed the pre-change test file: it ends at section 29 and the
     output was truncated to that point by the test file as read, so sections 30–32 did not exist for it.)
-  - **Patched:** **212 passed, 0 failed** — the 197 plus 15 new assertions. Whole file, one process:
+  - **Patched:** **213 passed, 0 failed** — the 197 plus 16 new assertions. Whole file, one process:
     `bash tests/lanes.test.sh`, exit 0.
   - **The new cases are not vacuous — the red run.** The same suite (new test file) against the **baseline**
-    `remote/run-lane.sh` and `remote/lanes.sh` (hashes `d792cd71…` / `a5dfb8b0…`) → **206 passed, 6 failed**,
+    `remote/run-lane.sh` and `remote/lanes.sh` (hashes `d792cd71…` / `a5dfb8b0…`) → **207 passed, 6 failed**,
     exit 1, failing exactly the new-behaviour assertions and nothing else:
     `30b no lane is prepared for a lane retired mid-start`, `30c refusal exit code`,
     `30d the reason is in the lane's own log`, `30g and that refusal is logged too`,
@@ -94,8 +94,24 @@
     `.stop` mid-start. That is the incident sequence: the state the process read is gone by the time it acts.
   - **Round trip:** `git apply --check` passes against a pristine copy, and the applied patch reproduces the
     measured tree byte-for-byte (the three patched hashes above).
-  - **Cost, measured rather than estimated:** baseline `17.1 s` (197 assertions) against patched `23.5 s`
-    (212 assertions) for the same suite — **+6.4 s, of which ~5.0 s is section 32's one real readiness wait**
-    (5 × 0.25 s polling, the only way to observe that message end-to-end) and the rest of sections 30–32 the
-    remainder. This is a test-only cost: nothing here adds work to any lane's start path — the guard is two
-    `[ -f ]` tests on files the process has already opened.
+  - **Cost, measured rather than estimated:** baseline `17.1 s` (197 assertions) against patched `21.7 s`
+    (213 assertions) for the same suite — **+4.6 s, of which ~5.0 s is section 32's one real readiness wait**
+    (5 × 0.25 s polling, the only way to observe that message end-to-end); the rest of sections 30–32 is inside
+    run-to-run noise. This is a test-only cost: nothing here adds work to any lane's start path — the guard is
+    two `[ -f ]` tests on files the process has already opened.
+
+- **Review, and what it changed.** A cross-family reviewer (`antigravity/gemini-3.8-flash`) reviewed this patch
+  read-only and returned PASS with notes, having checked the callers of `run-lane.sh` one by one (systemd unit,
+  `host.mjs` `prepare()`/`startLane`, `lanes.sh` start/spawn/restart/fresh) and confirming no legitimate path
+  runs it without a `.conf`. Two P2 notes came back, and both are recorded here rather than tidied away:
+  1. *Fixed.* The section-30 hook fired **before** `run-lane.sh` derives the session id from
+     `stat -c %Y "$LD/$lane.conf"` (`remote/run-lane.sh:96`), so the fixture died earlier than the incident did
+     and emitted an unasserted `stat: cannot stat` — the test would have passed for partly the wrong reason.
+     The fixture now pre-populates `.sid` (so it is past the point the incident was past) and `30b2` asserts the
+     absence of that noise. Measured after the fix: the refusal is still reached and the suite is green.
+  2. *Stated limit, not fixed.* Section 30 drives `run-lane.sh`'s refusal directly (in `FLEET_PREPARE_JSON=1`
+     mode, which is the same code path the sdk host uses) rather than driving `sdk-host/host.mjs` end-to-end. It
+     therefore proves the refusal and the absence of a prepared lane, and relies on a code read for the last step
+     — `host.mjs:317-321` catches a rejected `prepare()` with `lanes.delete(name)`, and no session, socket or
+     state is created after that point. An end-to-end host test would be stronger and is the natural next step if
+     this area is touched again; it is not a reason to hold this patch.
