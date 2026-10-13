@@ -1,0 +1,108 @@
+diff --git a/bin/fleet-check b/bin/fleet-check
+index 260c16e..47aa8cb 100755
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -458,7 +458,8 @@ finish() {
+   local cov_attempted=0 cov_rc=0 cov_bytes=-1 cov_err="" cov_ok=0 cov_out=""
+   # fleet-opl3: a UNKNOWN run still gets the coverage read, so the record names the changed files that were
+   # NOT demonstrated to be exercised rather than leaving the reader with only the state.
+-  if [ -n "$fast" ] && [ -f "$cov_script" ] && { [ "$st" = PASS ] || [ "$st" = FAIL ] || [ "$st" = UNKNOWN ]; }; then
++  # Full gates also extract coverage accounting when cov_script is present
++  if [ -f "$cov_script" ] && { [ "$st" = PASS ] || [ "$st" = FAIL ] || [ "$st" = UNKNOWN ]; }; then
+     cov_attempted=1
+     cov_bytes=$(wc -c < "$log" 2>/dev/null | tr -d " ")
+     case "${cov_bytes:-}" in ""|*[!0-9]*) cov_bytes=-1 ;; esac
+diff --git a/remote/check-coverage.py b/remote/check-coverage.py
+index 8823d5c..46957fa 100755
+--- a/remote/check-coverage.py
++++ b/remote/check-coverage.py
+@@ -267,7 +267,7 @@ def extract_coverage(log_path, repo_dir, commit_sha, cmd_str=""):
+                 #       file names (sixteen "files" on a run that had four, several of them English words).
+                 # The gate emits the same marker whichever way the run ended: running:/ran:/passed:/
+                 # completed:/failed: name the suites that were dispatched and executed.
+-                m_pass = re.search(r"^fast-gate:\s*(?:running|ran|passed|completed|failed):\s*(.*)$", line)
++                m_pass = re.search(r"^(?:fast-gate|full-gate):\s*(?:running|ran|passed|completed|failed):\s*(.*)$", line)
+                 if m_pass:
+                     runner_evidence = True
+                     for raw in m_pass.group(1).split():
+@@ -292,7 +292,7 @@ def extract_coverage(log_path, repo_dir, commit_sha, cmd_str=""):
+                 if m_hub_done:
+                     runner_evidence = True
+                     suites.add("tests/" + m_hub_done.group(1) + ".test.sh")
+-                m_unm = re.search(r"^fast-gate:\s*unmapped:\s*(.*)$", line)
++                m_unm = re.search(r"^(?:fast-gate|full-gate):\s*unmapped:\s*(.*)$", line)
+                 if m_unm:
+                     for raw in m_unm.group(1).split():
+                         item = raw.strip("\"',;()[]{}")
+@@ -301,7 +301,7 @@ def extract_coverage(log_path, repo_dir, commit_sha, cmd_str=""):
+                 # The gate's explicit "I could not determine coverage" marker (the project side emits it
+                 # when the gate never reached its harness, e.g. a fmt/lint failure). Reported as UNKNOWN
+                 # rather than as zero, because an absence of information is not evidence of no coverage.
+-                m_unknown = re.search(r"^fast-gate:\s*unknown:\s*(.*)$", line)
++                m_unknown = re.search(r"^(?:fast-gate|full-gate):\s*unknown:\s*(.*)$", line)
+                 if m_unknown:
+                     gate_unknown = True
+                     gate_unknown_reason = m_unknown.group(1).strip() or "the gate marked coverage unknown"
+diff --git a/tests/check-coverage.test.sh b/tests/check-coverage.test.sh
+index c0950df..eefea5c 100644
+--- a/tests/check-coverage.test.sh
++++ b/tests/check-coverage.test.sh
+@@ -216,6 +216,17 @@ printf '== tests/other.test.sh\n-- other finished in 1s\n' > "$ROOT/log-hub-othe
+ out=$(run "$R7" "$ROOT/log-hub-other.txt" "$SHA7"); u=$(jq_get unmapped <<<"$out")
+ case " $u " in *" tests/thing.test.sh "*) ok "7c a changed test file the gate did NOT run is still flagged (the warning keeps its meaning)";; *) bad "7c unexecuted test file must stay unmapped" "[$u]";; esac
+ 
++echo "8. full-gate markers are recognized identically to fast-gate"
++printf 'full-gate: passed: tests/thing.test.sh\n' > "$ROOT/log-full-marker.txt"
++out=$(run "$R7" "$ROOT/log-full-marker.txt" "$SHA7"); u=$(jq_get unmapped <<<"$out"); su=$(jq_get suites <<<"$out")
++case " $u " in *" tests/thing.test.sh "*) bad "8a full-gate suite marker failed to map" "[$u]";; *) ok "8a full-gate suite marker maps changed test file";; esac
++case " $su " in *" tests/thing.test.sh "*) ok "8b full-gate suite marker captured in executed suites";; *) bad "8b full-gate marker missing from suites" "[$su]";; esac
++
++printf 'full-gate: unknown: harness did not start\n' > "$ROOT/log-full-unknown.txt"
++out=$(run "$R7" "$ROOT/log-full-unknown.txt" "$SHA7"); st=$(jq_field coverage <<<"$out"); why=$(jq_field unknown_reason <<<"$out")
++[ "$st" = "UNKNOWN" ] && ok "8c full-gate unknown marker reports coverage UNKNOWN" || bad "8c expected UNKNOWN, got [$st]" ""
++case "$why" in *harness*) ok "8d full-gate unknown reason preserved";; *) bad "8d reason lost" "[$why]";; esac
++
+ if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
+diff --git a/tests/fleet-gate-check.test.sh b/tests/fleet-gate-check.test.sh
+index da641b1..50d2bb0 100755
+--- a/tests/fleet-gate-check.test.sh
++++ b/tests/fleet-gate-check.test.sh
+@@ -748,17 +748,34 @@ has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/vitest.test.ts" "14t vitest
+ has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/test_cls.py" "14u class-qualified pytest output captured in suites"
+ wait_curl "[check] FAST gate for"
+ 
+-# Full check does NOT run coverage extractor or warn on coverage
++# Full check runs coverage extractor and carries coverage accounting
+ rm -f "$CURL_LOG"
+ full_rec="$HOME/.fleet/checks/$app_tree.json"
+ echo 'CHECK_CMD="echo test ok"; CHECK_TIMEOUT=30' > "$CHECK_CONF"
+ ( cd "$COV_REPO" && check )
+ wait_check "$full_rec"
+-hasnt "$(jq -c . "$full_rec" 2>/dev/null)" '"coverage"' "14v full gate record omits coverage field"
++has "$(jq -c . "$full_rec" 2>/dev/null)" '"coverage"' "14v full gate record carries coverage field"
++cov_st=$(jq -r .coverage.coverage "$full_rec" 2>/dev/null)
++[ "$cov_st" = "UNKNOWN" ] && ok "14v2 full gate without runner evidence records coverage UNKNOWN" || bad "14v2 expected coverage UNKNOWN" "got $cov_st"
+ if wait_curl "[check] full gate for"; then
+   hasnt "$(cat "$CURL_LOG" 2>/dev/null)" "COVERAGE WARNING" "14w full gate notification omits coverage warning"
+ fi
+ 
++# Full gate with runner evidence records executed suites and complete mapping
++rm -f "$CURL_LOG"
++( cd "$COV_REPO" && git checkout -q main && git checkout -q -b full-covered \
++  && echo "def findings_v4(): pass" >> lib/findings.py \
++  && git -c user.email=t@t -c user.name=t commit -q -am "covered full change" )
++fc_tree=$(git -C "$COV_REPO" rev-parse 'HEAD^{tree}')
++fc_rec="$HOME/.fleet/checks/$fc_tree.json"
++echo 'CHECK_CMD="python3 -m unittest -v tests.test_findings"; CHECK_TIMEOUT=30' > "$CHECK_CONF"
++( cd "$COV_REPO" && check )
++wait_check "$fc_rec"
++has "$(jq -c .suites "$fc_rec" 2>/dev/null)" "tests.test_findings" "14v3 full gate captures executed suite from runner"
++unm_len=$(jq -r ".unmapped | length" "$fc_rec" 2>/dev/null)
++[ "$unm_len" = "0" ] && ok "14v4 full gate record has 0 unmapped files on covered change" || bad "14v4 expected 0 unmapped" "got $unm_len"
++( cd "$COV_REPO" && git checkout -q feature )
++
+ # fast-gate: running: line without test completion must not count as executed
+ rm -f "$CURL_LOG"
+ cat << 'SH' > "$CHECK_CONF"
