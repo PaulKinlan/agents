@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-park b/bin/fleet-park
-index 03c110d..745fb6e 100755
+index 03c110d..3bde903 100755
 --- a/bin/fleet-park
 +++ b/bin/fleet-park
 @@ -2,7 +2,9 @@
@@ -13,14 +13,68 @@ index 03c110d..745fb6e 100755
  set -euo pipefail
  orig_port="${FLEET_INBOX_PORT:-}"
  FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-@@ -40,4 +42,10 @@ if [ "$code" != "200" ]; then
+@@ -10,12 +12,40 @@ FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ [ -f "$HOME/.fleet/local.conf" ] && source "$HOME/.fleet/local.conf"
+ port="${orig_port:-${FLEET_INBOX_PORT:-7777}}"
+ 
++resolve_bead_dir() {
++  local target_bead="$1"
++  local dbs_file="${HOME}/.fleet/beads-dbs"
++  if [ -f "$dbs_file" ]; then
++    while read -r name dpath; do
++      [ -z "$name" ] || [[ "$name" =~ ^# ]] && continue
++      dpath="${dpath/#\~/$HOME}"
++      if [ -d "$dpath/.beads" ] && command -v bd >/dev/null 2>&1; then
++        if (cd "$dpath" && bd show "$target_bead" >/dev/null 2>&1); then
++          echo "$dpath"
++          return 0
++        fi
++      fi
++    done < "$dbs_file"
++  fi
++  if [ -d ".beads" ] && command -v bd >/dev/null 2>&1; then
++    if bd show "$target_bead" >/dev/null 2>&1; then
++      echo "$PWD"
++      return 0
++    fi
++  fi
++  return 1
++}
++
++prev_bead=""
+ if [ "${1:-}" = --unpark ]; then
+   branch="${2:-}"
+   if [ -z "$branch" ]; then
+     echo "fleet-park: error: branch required for --unpark" >&2
+     exit 1
+   fi
++  if [ -f "$HOME/.fleet/parked" ]; then
++    prev_bead=$(jq -r --arg b "$branch" '.[$b].bead // empty' "$HOME/.fleet/parked" 2>/dev/null || true)
++  fi
+   body=$(jq -nc --arg b "$branch" --arg l "${FLEET_LANE:-cli}" '{branch:$b,unpark:true,lane:$l}')
+ else
+   branch="${1:-}"
+@@ -40,4 +70,23 @@ if [ "$code" != "200" ]; then
    exit 1
  fi
  
-+# The readable parked state that dashboard and watchdog derive is the bead label.
-+# When a bead is provided, label it as parked so both tools observe it immediately.
-+if [ -n "${bead:-}" ] && [ "${1:-}" != "--unpark" ] && command -v bd >/dev/null 2>&1; then
-+  bd update "$bead" --add-label parked 2>/dev/null || true
++# Maintain readable bead state for dashboard and watchdog.
++if [ "${1:-}" = --unpark ]; then
++  if [ -n "${prev_bead:-}" ]; then
++    if bdir=$(resolve_bead_dir "$prev_bead"); then
++      (cd "$bdir" && bd update "$prev_bead" --remove-label parked >/dev/null 2>&1) || \
++        echo "fleet-park: warning: could not remove 'parked' label from bead $prev_bead" >&2
++    fi
++  fi
++else
++  if [ -n "${bead:-}" ]; then
++    if bdir=$(resolve_bead_dir "$bead"); then
++      (cd "$bdir" && bd update "$bead" --add-label parked >/dev/null 2>&1) || \
++        echo "fleet-park: warning: could not label bead $bead as 'parked'" >&2
++    else
++      echo "fleet-park: warning: bead $bead database not resolved in ~/.fleet/beads-dbs; bead label not updated" >&2
++    fi
++  fi
 +fi
 +
  echo "$body_out"
@@ -117,10 +171,18 @@ index 881cdfd..d4fd19c 100644
    if (has(i, /^(in_review|in-review|review|needs-review)$/)) return "review";
    if (i.status === "blocked" || i.status === "deferred" || (i.dependency_count && i.status === "open" && i.blocked)) return "blocked";
 diff --git a/tests/watchdog-drivers.test.sh b/tests/watchdog-drivers.test.sh
-index fd032db..e8bb2f5 100755
+index fd032db..5b03a76 100755
 --- a/tests/watchdog-drivers.test.sh
 +++ b/tests/watchdog-drivers.test.sh
-@@ -75,5 +75,10 @@ grep -q 'if \[ -t 1 \] && \[ -z "${FLEET_LANE:-}" \]' "$L" && pass "lanes.sh tai
+@@ -64,6 +64,7 @@ NODE
+ grep -q "IDLE LANE HOLDING WORK" "$W" && pass "idle-lane-holding-work driver present" || fail "no idle-holder driver"
+ grep -q "busyLane.has(id)" "$W" && pass "it skips a lane that is mid-tool-call (busy)" || fail "it does not exclude busy lanes"
+ grep -q "idlehold:" "$W" && pass "it escalates to an alert after repeated nudges" || fail "no escalation for a persistently idle lane"
++grep -q 'b\.in_flight\.filter.*EXCUSED' "$W" && pass "it excludes beads with EXCUSED labels from idle nudges" || fail "it does not exclude EXCUSED labels from idle nudges"
+ 
+ # B) the blocked-command driver: present and narrow (a long gate must NOT trip it).
+ grep -q "LANE BLOCKED IN AN UNBOUNDED COMMAND" "$W" && pass "blocked-command driver present" || fail "no blocked-command driver"
+@@ -75,5 +76,10 @@ grep -q 'if \[ -t 1 \] && \[ -z "${FLEET_LANE:-}" \]' "$L" && pass "lanes.sh tai
    || fail "lanes.sh tail can still block a lane (no TTY/FLEET_LANE guard)"
  grep -q '^  log) tail -n ' "$L" && pass "lanes.sh log is the always-safe, non-following variant" || fail "no safe non-following variant"
  
@@ -163,7 +225,7 @@ index 881cdfd..d4fd19c 100644
    if (has(i, /^(in_review|in-review|review|needs-review)$/)) return "review";
    if (i.status === "blocked" || i.status === "deferred" || (i.dependency_count && i.status === "open" && i.blocked)) return "blocked";
 diff --git a/watchdog/watchdog.mjs b/watchdog/watchdog.mjs
-index 637494f..8a5c6b6 100644
+index 637494f..6c8e065 100644
 --- a/watchdog/watchdog.mjs
 +++ b/watchdog/watchdog.mjs
 @@ -203,7 +203,7 @@ async function checkVm(vm) {
@@ -175,3 +237,12 @@ index 637494f..8a5c6b6 100644
    state.nudges = state.nudges || {};
    for (const l of lanes.filter((l) => l.running && !l.stopped)) {
      const key = `${vm}:${l.lane}`;
+@@ -345,7 +345,7 @@ async function checkVm(vm) {
+     if (!held_ && s.autopilot !== "off") {
+       for (const [id, mins] of idleOf) {
+         if (busyLane.has(id) || mins === null || mins < T.idleHoldMin) continue;
+-        const mine = b.in_flight.filter((i) => i.assignee === id);
++        const mine = b.in_flight.filter((i) => i.assignee === id && !(i.labels || []).some((x) => EXCUSED.test(x)));
+         if (!mine.length) continue;
+         if (cool(`idlehold:${vm}:${id}`, 20)) {
+           await tell(vm, id.split(`${vm}-`)[1],
