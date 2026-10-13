@@ -123,22 +123,23 @@ so under load a caller can be refused for minutes while the lock is never idle; 
 ### What it changes
 
 - **The holder names itself.** After taking the lock, the holder writes one record line into the lock
-  *file* — `pid=… lane=… role=… since=… cmd=comment` — and clears it before releasing. The file is a lock
+  *file* — `pid=… role=… since=… cmd=comment` — and clears it before releasing. The file is a lock
   **object**, never a data file: flock's lock lives on the fd/inode, so writing a record into it does not
   disturb the lock.
-- **A waiter reports the holder** — lane, role, pid, operation, how long it has been held, and the holder's
+- **A waiter reports the holder** — role, pid, operation, how long it has been held, and the holder's
   **whole descendant tree** (bounded to 4 levels), because that is where the minutes actually go: the shim
   runs bd, bd runs git, git runs the remote helper doing the round-trip.
 - **THE DIAGNOSTIC NEEDS NO CONTENT, IN EVERY FIELD AND EVERY POSITION (agents-zoch).** The first version
   stored and reported the holder's full argument vector; rev-elu6 defeated it by **driving** it rather than
   reading it. Since a whitelist is the only shape that survives an adversary — a filter has to anticipate
   the payload, a vocabulary cannot express one — **every reported value is now one of: a vocabulary word**
-  (bd operations, `dolt` operations, process names, roles), **a validated integer** (pid, timestamp), **or a
-  lane name the fleet's own registry on this VM vouches for** — and then a second review (agents-6e77) showed
-  that registry is **writable by every lane**, so it is NOT a trust boundary and the field had to go
-  entirely: see "no lane name is claimed" below. Everything else becomes the literal
-  `unrecognised` / `other` / `unknown`. Five positions had to be covered in all, and the last
-  three were found by attacking this patch rather than the original defect:
+  (bd operations, `dolt` operations, process names, roles) **or a validated integer** (pid, timestamp), and
+  anything in neither vocabulary becomes the literal `unrecognised` / `other` / `unknown`. One earlier
+  revision of this patch kept an OPEN vocabulary — a lane name that this VM's lane registry vouched for — and a
+  later review (agents-6e77) showed that registry is **writable by every lane**, so it was not a trust boundary
+  and the field was **removed** rather than validated harder (see "no lane name is claimed" below). Five
+  positions had to be covered in all, and the last three were found by attacking this patch rather than the
+  original defect:
 
   | position | attack | before | now |
   | --- | --- | --- | --- |
@@ -203,22 +204,24 @@ unchanged (it must not take the lock again, and does not).
 
 `tests/bd-lock-holder.test.sh` is hermetic — a stub `$HOME/.local/bin/bd`, a throwaway home and a
 throwaway lock file — so it never contends with the fleet's real lock, and it can be re-run in a gate
-or a review. Sixteen of its cases are the attacks above as regression tests: the shared record, the
+or a review. Twenty-five of its assertions (cases 10-15) are the attacks above as regression tests: the shared record, the
 waiting lane's stderr, a descendant's argument vector, a freeform subcommand, an environment-supplied lane
 name, and a planted record must each carry no bead text (and a freeform subcommand must report
-`unrecognised`, an unregistered lane `unregistered`).
+`unrecognised`, never the text itself).
 
 | rig | result |
 | --- | --- |
-| patched shim, new suite | **63 passed, 0 failed** (42 behaviour + 21 privacy/shape cases) |
+| patched shim, new suite | **63 passed, 0 failed** — counted per case: 38 behaviour (cases 1-9, including the P1 discriminator as case 9) + 25 privacy/shape (cases 10-15) |
 | **the revision this replaces** (lock fd closed for bd), the same suite | **54 passed, 2 failed** — and the two are exactly case 9a/9b, the killed-shim bypass |
 | **the revision before this one** (it still reported a registry-vouched lane name), the same suite | **57 passed, 6 failed** — and the failures include exactly the reviewer's agents-6e77 probe: a self-registered name reaching the shared record and another lane's stderr (15a/15b/15c) |
 | **shim as deployed, the same suite** | **32 passed, 31 failed** — the 32 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
 | patched shim, existing `tests/bd-shim.test.sh` | **15 passed, 0 failed** (serialisation and the nesting escape still hold) |
-| composed with `fleet-worktree-beads-guard.patch`, **both orders** | applies both ways; composed shim valid bash; **56/56 + 15/15 + that patch's own 13/13** |
+| composed with `fleet-worktree-beads-guard.patch`, **both orders** | applies both ways; composed shim valid bash; **63/63 + 15/15 + that patch's own 13/13** |
 | the three probes, first version vs this revision | operation **LEAK → no**, env lane/role **LEAK → no**, planted record **LEAK → no** |
 
-Live evidence on the **real** lock, with a **real** `bd dolt push` through the patched shim as the holder:
+Live evidence on the **real** lock, with a **real** `bd dolt push` through the patched shim as the holder.
+This transcript was recorded with the revision that still reported a lane name (before agents-6e77); the
+current revision prints `holder: role=… pid=…`, and the rollout section above has transcripts in that format:
 
 ```
 holder record while it held the lock:

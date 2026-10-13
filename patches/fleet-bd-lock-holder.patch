@@ -1,8 +1,11 @@
-From 3b79c6a25f273da1549784c345dcabfd12136ae4 Mon Sep 17 00:00:00 2001
+From 2adbfc3427831da47aa8f75674de6c6f6963f326 Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
  bounded waits and content-free diagnostics (agents-elu6)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 `flock -w 300 <lock> <cmd>` waits in silence and then exits 1 with NO output at all (measured against
 util-linux 2.39.3). Measured cost of that on 2026-10-13: a COMPLETE cross-family review could not record
@@ -161,6 +164,28 @@ throughout (the lock is the fd, so a pre-patch holder is safely serialised again
 empty lock file beside an active lock means "a holder whose record I cannot read", not "nobody is here".
 
 DOCS ONLY, verified: applied bin/bd and tests/ byte-identical to the reviewers' copies for 602bec9 (cmp).
+
+--- DOCS: make the write-up describe the FINAL artifact (agents-l2he) ---
+
+A second reviewer (rev-elu6e, reviewing the 8f357de..602bec9 delta) filed agents-l2he: the write-up retained
+the removed lane field and obsolete test totals, so an operator following it would expect output the artifact
+does not produce. Correct - and the sweep found five spots, not the two cited:
+
+  1. the record format shown to operators still read `pid=… lane=… role=… since=… cmd=comment` (fixed);
+  2. "A waiter reports the holder — lane, role, pid, …" (fixed);
+  3. the vocabulary paragraph still described a lane name the VM registry "vouches for" in the PRESENT tense
+     (rewritten: the final artifact reports only closed vocabularies and validated integers, with the registry
+     episode in the past tense as history);
+  4. the suite summary promised an "unregistered lane" word that no longer exists (fixed);
+  5. the composition row still said 56/56 (fixed to 63/63);
+  plus the live-evidence transcript, which was recorded with the revision that still reported a lane name - now
+  labelled as such, so an operator does not expect a lane in the output.
+
+The counts were re-measured rather than carried over, per case: 63 assertions = 38 behaviour (cases 1-9,
+including the P1 discriminator as case 9) + 25 privacy/shape (cases 10-15). The old "42 + 21" split did not sum
+to 63 and the "Sixteen of its cases are the attacks" claim was wrong; both are now the measured numbers.
+
+DOCS ONLY: applied bin/bd and tests/ remain byte-identical to the reviewers' 602bec9 copies (cmp).
 ---
  bin/bd                       | 288 ++++++++++++++++++++++++++++++++-
  tests/bd-lock-holder.test.sh | 301 +++++++++++++++++++++++++++++++++++
