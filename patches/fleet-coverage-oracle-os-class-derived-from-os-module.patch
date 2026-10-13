@@ -1,0 +1,75 @@
+--- /tmp/rev9/base.py	2026-10-13 05:13:06.129189798 +0000
++++ /tmp/rev9/r9.py	2026-10-13 05:13:56.133632159 +0000
+@@ -672,12 +672,70 @@
+                     cleaned = re.sub(r'`(?:\\.|[^`\\])*`', '', cleaned, flags=re.DOTALL)
+                     cleaned = re.sub(r'//.*', '', cleaned)
+                     cleaned = re.sub(r'#.*', '', cleaned)
++                    # agents-hbz3 / agents-6r5g: THE FOURTH SOURCE IS THE SUBPROCESS/CLI-INVOCATION CHANNEL. A suite that
++                    # runs lib/x.py as a command consumes it exactly as an importer does, and nothing else in the oracle sees
++                    # that channel, so this is NARROWED rather than deleted. THE NAME IS NOT THE EVIDENCE, THE BINDING IS:
++                    #   * the ATTRIBUTE branch matches <module>.<X> for every module name bound to subprocess (plain, aliased,
++                    #     or both in one file) and the modelled os.<X> call channels;
++                    #   * the NAME branch matches <X> only where a from-subprocess import binds it, and only when the call is
++                    #     not an attribute - a preceding dot means an object's method (self.run(...)), not a process;
++                    #   * a bare run( or call( with no subprocess binding stays OUT: that is the method-name noise.
++                    # A wildcard import cannot be resolved by a binding rule and FAILS OPEN, because a missed real consumer is
++                    # silent while a phantom is visible and reviewable.
++                    _CALL_NAMES = ("run", "Popen", "call", "check_output", "check_call", "getoutput")
++                    _bind_names, _bind_attrs, _bind_star = set(), {"subprocess"}, False
++                    for _m in re.finditer(r'^[ \t]*from[ \t]+subprocess[ \t]+import[ \t]+(\([^)]*\)|[^\n#]+)', cleaned, re.M):
++                        # agents-6r5g: Python's grammar allows a from-import to be WRAPPED IN PARENTHESES, so binding only the
++                        # first line bound '(Popen,' and silently lost every name on a continuation line.
++                        _spec = _m.group(1).strip()
++                        if _spec.startswith("("):
++                            _spec = _spec[1:-1] if _spec.endswith(")") else _spec[1:]
++                        if _spec.strip() == "*":
++                            _bind_star = True
++                            continue
++                        for _item in _spec.split(","):
++                            # `from subprocess import Popen as P` binds P to a CALL NAME. Keep the bound name when the name on
++                            # the left is a call name - which is what the old filter was for - and keep nothing for a non-call
++                            # name, so PIPE/DEVNULL never become invocations.
++                            _parts = _item.strip().split(" as ")
++                            _orig, _bound = _parts[0].strip(), _parts[-1].strip()
++                            if _bound and _orig in _CALL_NAMES:
++                                _bind_names.add(_bound)
++                    for _m in re.finditer(r'^[ \t]*import[ \t]+subprocess(?:[ \t]+as[ \t]+(\w+))?', cleaned, re.M):
++                        # agents-6r5g: this was a SINGLE last-wins string, so a file holding BOTH `import subprocess` and
++                        # `import subprocess as sp` lost the plain subprocess.<X> branch entirely. Module names bound to
++                        # subprocess are a SET, and a bare `import subprocess` must be captured as well as the aliased form.
++                        _bind_attrs.add(_m.group(1) or "subprocess")
++                    if _bind_star:
++                        _bind_names |= set(_CALL_NAMES)
++                    _call_alts = [re.escape(_a) + r"\.(?:" + "|".join(_CALL_NAMES) + r")" for _a in sorted(_bind_attrs)] + [
++                        # agents-aung: the os.<X> channels that ARE MODELLED, per the scope decision: these are attribute calls on a
++                        # module the AST names directly, and the set is ENUMERATED rather than globbed.
++                        # agents-yhhi: the previous [a-z_]*spawn[a-z_]* glob was a PREFIX WILDCARD, so it matched os.respawn and
++                        # os.child_spawn - attributes that merely CONTAIN a spawn-is substring - and exec[a-z_]* matched
++                        # os.execute. It also had no start boundary, so chaos.respawn matched on the "os." inside "chaos.".
++                        # The list below is the ACTUAL os exec/spawn family (spawnl/spawnv/execl/execv plus their suffixes),
++                        # enumerated rather than globbed so os.spawn_thing cannot slip in either; the (?<![\w.]) boundary is what stops an
++                        # attribute of a differently-named object from masquerading as an os call. NOT modelled, as a RECORDED
++                        # LIMIT: asyncio.create_subprocess_exec, multiprocessing, and anything reached through a wrapper or a
++                        # factory. The reason is the literal-only ruling - an unresolvable case is LEFT OUT AND DOCUMENTED rather
++                        # than matched by guessing, because guessing is how the eight phantoms were created.
++                        r"(?<![\w.])os\.(?:system|popen|posix_spawnp?|"
++                                            # agents-apqc: the trailing p was missing. posix_spawnp is the PATH-SEARCHING
++                                            # variant, it is in the actual family, and the round-7 glob covered it - so the
++                                            # enumeration had silently LOST a channel the glob it replaced had. p? matches
++                                            # both spellings and still cannot reach os.respawn, because the alternation is
++                                            # anchored at the attribute start.
++                                            r"spawnl[a-z]*|spawnv[a-z]*|execl[a-z]*|execv[a-z]*)"]
++                    _call_alts += [r"(?<!\.)" + re.escape(n) for n in sorted(_bind_names)]
+                     subp_pattern = (
+-                        r'(?:subprocess|Popen|exec|spawn|run|fork|call|check_output|system)\s*\([^)]*?'
+-                        r'(?:' + re.escape(file_path) + r'|' + re.escape(base) + r'|\b' + re.escape(stem) + r'(?:\.[a-z]+)?\b)'
++                        r"(?:" + "|".join(_call_alts) + r")\s*\([^)]*?"
++                        r"(?:" + re.escape(file_path) + r"|\b" + re.escape(base) + r"\b|\b" + re.escape(stem) + r"(?:\.[a-z]+)?\b)"
+                     )
+                     if re.search(subp_pattern, cleaned, re.DOTALL):
+                         candidates.add(rel)
++
++
+                 except Exception:
+                     pass
+         return sorted(list(candidates))
