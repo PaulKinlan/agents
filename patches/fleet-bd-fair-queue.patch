@@ -1,0 +1,171 @@
+From 0d76989b4c3de190587771bf093cb14ed9c94747 Mon Sep 17 00:00:00 2001
+From: agents-factory-impl-f6du <agents-factory-impl-f6du@exe.xyz>
+Date: Tue, 13 Oct 2026 16:01:51 +0000
+Subject: [PATCH] Queue contended bd lock requests in kernel with bounded wait
+
+---
+ bin/bd                      | 73 ++++++++++++++++++++++++++-----------
+ tests/bd-lock-queue.test.sh | 55 ++++++++++++++++++++++++++++
+ 2 files changed, 107 insertions(+), 21 deletions(-)
+ create mode 100755 tests/bd-lock-queue.test.sh
+
+diff --git a/bin/bd b/bin/bd
+index 311687e..19e6f16 100755
+--- a/bin/bd
++++ b/bin/bd
+@@ -289,7 +289,9 @@ guard_worktree_beads_decoy "$@"
+ #
+ # The wait keeps its 300s of patience by default (FLEET_BD_LOCK_WAIT overrides it), but is no longer silent:
+ # one report on first contention, then at most one every FLEET_BD_LOCK_REPORT seconds (default 30), so a
+-# waiting lane has visible progress instead of a dead tool call. On expiry it fails FAST with EX_TEMPFAIL
++# waiting lane has visible progress instead of a dead tool call. A contended waiter uses BLOCKING flock on
++# the same fd, joining the kernel's lock wait queue rather than polling once per second (agents-nbka).
++# On expiry it fails FAST with EX_TEMPFAIL
+ # (75) and the holder named, so the caller can retry in seconds rather than block for minutes - and the
+ # durable order is `bd comment` (the artefact) BEFORE the label and status writes (the state), so a retry
+ # never loses the thing that matters.
+@@ -478,31 +480,60 @@ fleet_bd_lock_report() {
+ 
+ fleet_bd_lock_acquire() {
+   # $1 lock file, $2 lock fd, $3... the bd argv (reduced to its operation by fleet_bd_lock_shape)
+-  # 0 = held, 75 = timed out and reported.
++  # 0 = held, 75 = timed out and reported. The uncontended fast path stays fork-light.
+   local lock="$1" fd="$2" wait="${FLEET_BD_LOCK_WAIT:-300}" every="${FLEET_BD_LOCK_REPORT:-30}"
+-  local start=$SECONDS held next=0 reported=0
++  local start=$SECONDS reporter waiter rc parent=$BASHPID
+   shift 2
+-  if flock -n "$fd"; then            # uncontended: no output, no report, one record write
++  if flock -n "$fd"; then
+     fleet_bd_lock_note "$lock" "$@"
+     return 0
+   fi
+-  while :; do
+-    held=$((SECONDS - start))
+-    if [ "$held" -ge "$next" ]; then
+-      next=$((held + every))
+-      fleet_bd_lock_report "$lock" "$held" wait
+-      reported=1
+-    fi
+-    if [ "$held" -ge "$wait" ]; then
+-      fleet_bd_lock_report "$lock" "$held" timeout "$reported"
+-      return 75
+-    fi
+-    sleep 1
+-    if flock -n "$fd"; then
+-      fleet_bd_lock_note "$lock" "$@"
+-      return 0
+-    fi
+-  done
++  # GNU timeout treats zero as NO deadline. Preserve the old zero-wait refusal
++  # and refuse malformed bounds rather than accidentally blocking forever.
++  case "$wait" in
++    ''|*[!0-9]*) echo 'bd: invalid VM-wide lock wait bound; expected integer seconds.' >&2; return 75 ;;
++  esac
++  case "$every" in
++    ''|*[!0-9]*) echo 'bd: invalid VM-wide lock report interval; expected integer seconds.' >&2; return 75 ;;
++  esac
++  if [ "$wait" -eq 0 ]; then
++    fleet_bd_lock_report "$lock" 0 timeout
++    return 75
++  fi
++  if [ "$every" -eq 0 ]; then
++    echo 'bd: invalid VM-wide lock report interval; expected a positive integer.' >&2
++    return 75
++  fi
++  # Queue before doing diagnostics: a later arrival must not overtake us while
++  # the first holder report walks /proc for process names.
++  timeout -k 2 "$wait" flock "$fd" & waiter=$!
++  fleet_bd_lock_report "$lock" 0 wait
++  # This reporter never owns the lock fd: otherwise a reporter orphaned by SIGKILL
++  # could hold the lock AFTER the payload exits. It also exits when its parent dies.
++  (
++    exec {fleet_bd_lock_fd}>&-
++    while sleep "$every"; do
++      kill -0 "$parent" 2>/dev/null || break
++      fleet_bd_lock_report "$lock" "$((SECONDS - start))" wait
++    done
++  ) & reporter=$!
++  # A blocking flock joins the kernel wait queue. `flock -w` and the old
++  # sleep/flock -n loop poll for a free instant, starving under saturation.
++  # Both this child and its parent share the lock fd's open-file description;
++  # the parent keeps the lock when the child exits, until bd and its children exit.
++  if wait "$waiter"; then rc=0; else rc=$?; fi
++  kill "$reporter" 2>/dev/null || true
++  wait "$reporter" 2>/dev/null || true
++  if [ "$rc" -eq 0 ]; then
++    fleet_bd_lock_note "$lock" "$@"
++    return 0
++  fi
++  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
++    fleet_bd_lock_report "$lock" "$((SECONDS - start))" timeout 1
++    return 75
++  fi
++  echo "bd: cannot acquire the VM-wide bd lock (flock exit $rc); refusing to run without serialisation." >&2
++  return 75
+ }
+ 
+ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+diff --git a/tests/bd-lock-queue.test.sh b/tests/bd-lock-queue.test.sh
+new file mode 100755
+index 0000000..703fcd3
+--- /dev/null
++++ b/tests/bd-lock-queue.test.sh
+@@ -0,0 +1,55 @@
++#!/usr/bin/env bash
++# The older blocked bd waiter must not lose its turn to a later lock caller.
++# Hermetic: fake bd, throwaway HOME/lock; no real Beads database.
++set -uo pipefail
++HERE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
++SHIM="${BD_SHIM_OVERRIDE:-$HERE/bin/bd}"
++ROOT=$(mktemp -d)
++cleanup() { jobs -pr | xargs -r kill 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$ROOT"; }
++trap cleanup EXIT
++HOME="$ROOT/home"; export HOME
++mkdir -p "$HOME/.fleet" "$HOME/.local/bin"
++LOCK="$HOME/.fleet/bd.lock"; LOG="$ROOT/calls.log"; export LOG
++cat > "$HOME/.local/bin/bd" <<'STUB'
++#!/usr/bin/env bash
++printf 'bd:%s\n' "$*" >> "$LOG"
++STUB
++chmod +x "$HOME/.local/bin/bd"
++
++# The raw late caller holds the *same* lock. With one-second retry polling,
++# the older shim misses the first release, and the late caller takes it before
++# its next poll. A blocking kernel waiter is already queued and runs first.
++(flock -x "$LOCK" bash -c 'sleep .40') & first=$!
++for i in $(seq 1 40); do flock -n "$LOCK" true 2>/dev/null || break; sleep .01; done
++FLEET_BD_LOCK_WAIT=1 FLEET_BD_LOCK_REPORT=30 bash "$SHIM" probe early >"$ROOT/early.out" 2>"$ROOT/early.err" & early=$!
++sleep .12
++(flock -x "$LOCK" bash -c 'sleep .85') & late=$!
++wait "$early"; rc=$?
++wait "$first" "$late" 2>/dev/null || true
++if [ "$rc" -ne 0 ]; then
++  printf 'FAIL older waiter starved (rc=%s): %s\n' "$rc" "$(tail -3 "$ROOT/early.err")"
++  exit 1
++fi
++if ! grep -qx 'bd:probe early' "$LOG"; then
++  printf 'FAIL older waiter returned without running bd\n'
++  exit 1
++fi
++if ! flock -n "$LOCK" true; then
++  printf 'FAIL lock stayed held after both callers exited\n'
++  exit 1
++fi
++printf 'PASS: older blocking waiter acquired and ran bd before its one-second bound\n'
++
++# A zero bound must NOT become an infinite wait (`timeout 0` disables its timer).
++(flock -x "$LOCK" bash -c 'sleep .65') & holder=$!
++for i in $(seq 1 40); do flock -n "$LOCK" true 2>/dev/null || break; sleep .01; done
++before=$(wc -l < "$LOG")
++FLEET_BD_LOCK_WAIT=0 bash "$SHIM" probe zero >"$ROOT/zero.out" 2>"$ROOT/zero.err"; zero_rc=$?
++FLEET_BD_LOCK_WAIT=bogus bash "$SHIM" probe invalid >"$ROOT/invalid.out" 2>"$ROOT/invalid.err"; invalid_rc=$?
++wait "$holder" || true
++after=$(wc -l < "$LOG")
++if [ "$zero_rc" -ne 75 ] || [ "$invalid_rc" -ne 75 ] || [ "$before" -ne "$after" ]; then
++  printf 'FAIL zero/invalid bounds must refuse before bd (zero=%s invalid=%s calls=%s->%s)\n' "$zero_rc" "$invalid_rc" "$before" "$after"
++  exit 1
++fi
++printf 'PASS: zero and invalid wait bounds refused without running bd\n'
+-- 
+2.43.0
+
