@@ -1,0 +1,180 @@
+diff --git a/bin/fleet-fallback-guard b/bin/fleet-fallback-guard
+new file mode 100755
+index 0000000..ca22e28
+--- /dev/null
++++ b/bin/fleet-fallback-guard
+@@ -0,0 +1,80 @@
++#!/usr/bin/env bash
++# bin/fleet-fallback-guard — runtime model fallback guard for reviewer lanes (fleet-szle, agents-kq0r)
++#
++# WHY THIS EXISTS:
++# The spawn-time cross-family guard (remote/lanes.sh:361-387, remote/pick-model.sh:192-209) checks
++# the CHOSEN model against the implementer's family at lane creation and start. Afterwards, the SDK host
++# can fall back at runtime (sdk-host/host.mjs:117-124: "ℹ runtime model fell back: <req> -> <eff>").
++# Nothing re-evaluates the family at the fallback point, so a reviewer lane can silently run on the
++# implementer's own family and self-review. Measured on this VM: 25 lanes have a fallback line, in all 25
++# the family changed, and 22 are reviewer lanes that asked for Claude and ran DeepSeek.
++#
++# WHAT THIS ENFORCES:
++# 1. Refuse (exit 1) ONLY when:
++#    - role is "reviewer", AND
++#    - FLEET_IMPL_MODEL is set and non-empty, AND
++#    - the effective model family equals the implementer's model family.
++# 2. Proceed (exit 0) when:
++#    - role is not reviewer (e.g. implementer, architect, coord), OR
++#    - the effective model family differs from the implementer's family.
++# 3. Fail open with a note (exit 0):
++#    - if FLEET_IMPL_MODEL is unset, or
++#    - if any model string is unparseable (missing the family prefix before '/').
++#    A tool that refuses on absence would block lanes with incomplete records (same defect class as a
++#    false green in the other direction).
++#
++# USAGE:
++#   fleet-fallback-guard <role> <impl_model> <requested_model> <effective_model> [source]
++set -uo pipefail
++
++role=${1:-${FLEET_ROLE:-}}
++if [ $# -ge 2 ]; then
++  impl_model=$2
++else
++  impl_model=${FLEET_IMPL_MODEL:-}
++fi
++requested_model=${3:-}
++effective_model=${4:-}
++source=${5:-${FLEET_FALLBACK_SOURCE:-runtime fallback}}
++
++is_parseable() {
++  local m=$1
++  [[ "$m" == */* ]] && [ -n "${m%%/*}" ] && [ -n "${m#*/}" ]
++}
++
++if [ "$role" != "reviewer" ]; then
++  echo "PROCEED: role '$role' is not reviewer; cross-family guard does not apply"
++  exit 0
++fi
++
++if [ -z "$impl_model" ]; then
++  echo "NOTE: implementer model (FLEET_IMPL_MODEL) is unset; cannot establish implementer family; proceeding without guard"
++  exit 0
++fi
++
++if ! is_parseable "$impl_model"; then
++  echo "NOTE: cannot establish implementer model family from '$impl_model' (unparseable model string); proceeding without guard"
++  exit 0
++fi
++
++if [ -z "$effective_model" ] || ! is_parseable "$effective_model"; then
++  echo "NOTE: cannot establish effective model family from '${effective_model:-<unset>}' (unparseable model string); proceeding without guard"
++  exit 0
++fi
++
++if [ -z "$requested_model" ] || ! is_parseable "$requested_model"; then
++  echo "NOTE: cannot establish requested model family from '${requested_model:-<unset>}' (unparseable model string); proceeding without guard"
++  exit 0
++fi
++
++impl_family=$(printf '%s' "${impl_model%%/*}" | tr '[:upper:]' '[:lower:]')
++eff_family=$(printf '%s' "${effective_model%%/*}" | tr '[:upper:]' '[:lower:]')
++req_family=$(printf '%s' "${requested_model%%/*}" | tr '[:upper:]' '[:lower:]')
++
++if [ "$eff_family" != "$impl_family" ]; then
++  echo "PROCEED: reviewer effective family '$eff_family' differs from implementer family '$impl_family' (requested family '$req_family', source: $source)"
++  exit 0
++fi
++
++echo "REFUSE: reviewer cannot run effective model family '$eff_family' (effective model '$effective_model', source: $source); matches implementer model family '$impl_family' (implementer model '$impl_model', source: FLEET_IMPL_MODEL); requested family was '$req_family' (requested model '$requested_model') (fleet-szle)"
++exit 1
+diff --git a/sdk-host/host.mjs b/sdk-host/host.mjs
+index 6f72fa7..6b8449b 100644
+--- a/sdk-host/host.mjs
++++ b/sdk-host/host.mjs
+@@ -118,6 +118,30 @@ class Lane {
+         try { writeFileSync(join(LD, `${this.name}.model`), actualModel + "\n"); } catch {}
+         if (p.env) p.env.FLEET_MODEL = actualModel;
+         if (this.ctx?.env) this.ctx.env.FLEET_MODEL = actualModel;
++        const role = p.role || p.env?.FLEET_ROLE || process.env.FLEET_ROLE || "";
++        const implModel = p.env?.FLEET_IMPL_MODEL || process.env.FLEET_IMPL_MODEL || "";
++        const guardBin = process.env.FLEET_FALLBACK_GUARD_BIN || join(HOME, "fleet/bin/fleet-fallback-guard");
++        let refusal = null;
++        try {
++          const out = cp.execFileSync(guardBin, [role, implModel, p.model, actualModel], { encoding: "utf8" });
++          if (out && out.includes("NOTE:")) {
++            this.log(`ℹ ${out.trim()}`);
++          }
++        } catch (e) {
++          const outText = (e.stdout || e.stderr || "").trim();
++          if (e.status === 1 && outText.includes("REFUSE:")) {
++            refusal = outText;
++          } else {
++            const why = e.code ? `cannot execute (${e.code})` : `exited ${e.status || "abnormally"}`;
++            this.log(`ℹ NOTE: fallback guard ${why}; proceeding without guard`);
++          }
++        }
++        if (refusal) {
++          this.log(`✖ ${refusal}`);
++          hlog(`lane ${this.name} start refused: ${refusal}`);
++          try { session.dispose(); } catch {}
++          throw new Error(refusal);
++        }
+       }
+       this.unsub = session.subscribe((ev) => { try { this.onEvent(ev); } catch (e) { hlog(`${this.name} event error ${e}`); } });
+       const u = process.cpuUsage(t0);
+diff --git a/tests/fleet-fallback-guard.test.sh b/tests/fleet-fallback-guard.test.sh
+new file mode 100755
+index 0000000..a68ed98
+--- /dev/null
++++ b/tests/fleet-fallback-guard.test.sh
+@@ -0,0 +1,53 @@
++#!/usr/bin/env bash
++# tests/fleet-fallback-guard.test.sh — regression tests for reviewer runtime fallback guard (fleet-szle / agents-kq0r)
++set -uo pipefail
++
++HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
++GUARD="${FLEET_FALLBACK_GUARD:-$HERE/bin/fleet-fallback-guard}"
++PASS=0; FAIL=0
++ok()   { PASS=$((PASS + 1)); printf '  ok   %s
++' "$1"; }
++bad()  { FAIL=$((FAIL + 1)); printf '  FAIL %s
++      %s
++' "$1" "${2:-}"; }
++has()  { grep -qF -- "$2" <<<"$1" && ok "$3" || bad "$3" "expected to find: '$2', got: '$1'"; }
++
++[ -x "$GUARD" ] || { echo "no executable $GUARD"; exit 1; }
++
++echo "1. REFUSE: reviewer falling back to implementer model family"
++out=$("$GUARD" reviewer deepseek/deepseek-flash pi-claude-code-provider/sonnet deepseek/deepseek-flash 2>&1); rc=$?
++[ "$rc" -eq 1 ] && ok "1a refuses with exit 1" || bad "1a expected exit 1, got $rc"
++has "$out" "REFUSE" "1b message states REFUSE"
++has "$out" "pi-claude-code-provider" "1c message names requested family"
++has "$out" "deepseek" "1d message names effective family"
++has "$out" "runtime fallback" "1e message names source: runtime fallback"
++has "$out" "FLEET_IMPL_MODEL" "1f message names source: FLEET_IMPL_MODEL"
++
++echo "2. PROCEED: reviewer falling back to cross-family model"
++out=$("$GUARD" reviewer deepseek/deepseek-flash pi-claude-code-provider/sonnet openai-codex/gpt-6-sol 2>&1); rc=$?
++[ "$rc" -eq 0 ] && ok "2a proceeds with exit 0" || bad "2a expected exit 0, got $rc"
++has "$out" "PROCEED" "2b message states PROCEED"
++
++echo "3. PROCEED: implementer falling back to same family as FLEET_IMPL_MODEL"
++out=$("$GUARD" implementer deepseek/deepseek-flash pi-claude-code-provider/sonnet deepseek/deepseek-flash 2>&1); rc=$?
++[ "$rc" -eq 0 ] && ok "3a proceeds with exit 0" || bad "3a expected exit 0, got $rc"
++has "$out" "PROCEED" "3b message states PROCEED"
++
++echo "4. PROCEED WITH A NOTE: FLEET_IMPL_MODEL unset"
++out=$("$GUARD" reviewer "" pi-claude-code-provider/sonnet deepseek/deepseek-flash 2>&1); rc=$?
++[ "$rc" -eq 0 ] && ok "4a proceeds with exit 0" || bad "4a expected exit 0, got $rc"
++has "$out" "NOTE" "4b message states NOTE"
++has "$out" "FLEET_IMPL_MODEL" "4c note mentions FLEET_IMPL_MODEL"
++
++echo "5. PROCEED WITH A NOTE: unparseable model string"
++out=$("$GUARD" reviewer deepseek/deepseek-flash pi-claude-code-provider/sonnet unparseable 2>&1); rc=$?
++[ "$rc" -eq 0 ] && ok "5a unparseable effective model proceeds with exit 0" || bad "5a expected exit 0, got $rc"
++has "$out" "NOTE" "5b message states NOTE"
++
++out=$("$GUARD" reviewer unparseable pi-claude-code-provider/sonnet deepseek/deepseek-flash 2>&1); rc=$?
++[ "$rc" -eq 0 ] && ok "5c unparseable impl model proceeds with exit 0" || bad "5c expected exit 0, got $rc"
++has "$out" "NOTE" "5d message states NOTE"
++
++echo
++echo "fleet-fallback-guard: $((PASS + FAIL)) checks, $FAIL failed"
++[ "$FAIL" -eq 0 ]
