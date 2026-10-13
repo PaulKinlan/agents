@@ -603,13 +603,19 @@ class TestFastGateMapping(unittest.TestCase):
         """agents-dv23, agents-5br9: tests/test_tree_guards.py must hold only repo-wide tree property tests,
         pinned by class names and count to prevent accidental unit-test creep into the always-on tier.
         TestWorktreeBeadsDecoyGuard (agents-5br9) enforces a repo-wide tree property: a linked worktree
-        must hold no local decoy .beads database."""
+        must hold no local decoy .beads database.
+        TestStagedRuntimeCarriesItsImports (agents-o7e2) enforces a repo-wide tree property too: every
+        test staging list in tests/ must copy the modules the runtime it builds imports at module scope,
+        read from the source rather than enumerated. It belongs in this tier and not in a unit suite
+        because the property is about the tree as a whole - a new import in lib/findings.py makes OTHER
+        files wrong, and the change that broke five of them touched none of them."""
         tree_guards_path = ROOT / "tests" / "test_tree_guards.py"
         self.assertTrue(tree_guards_path.is_file(), "tests/test_tree_guards.py must exist")
         import ast
         tree = ast.parse(tree_guards_path.read_text(encoding="utf-8"))
         classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
-        self.assertEqual(classes, ["TestNoUnboundedSubprocess", "TestWorktreeBeadsDecoyGuard"],
+        self.assertEqual(classes, ["TestNoUnboundedSubprocess", "TestWorktreeBeadsDecoyGuard",
+                                   "TestStagedRuntimeCarriesItsImports"],
                          "tests/test_tree_guards.py must contain exactly the pinned tree-guard classes")
 
     def test_a_tier_file_delta_selects_the_suite_that_guards_its_contents(self):
