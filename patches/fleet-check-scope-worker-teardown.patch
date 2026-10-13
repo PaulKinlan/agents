@@ -1,6 +1,6 @@
 --- a/tests/fleet-check-scope.test.sh
 +++ b/tests/fleet-check-scope.test.sh
-@@ -15,7 +15,73 @@
+@@ -15,7 +15,82 @@
  pass() { printf '  ok   %s\n' "$1"; }
  fail() { printf '  FAIL %s\n' "$1"; fails=$((fails+1)); }
  
@@ -40,6 +40,10 @@
 +    printf '%s\n' "$pid"
 +  done
 +}
++# ORDER IS THE WHOLE POINT: kill, then delete. This function runs as an EXIT trap, so the tree is deleted
++# either way; what matters is that no worker is still running at the moment it goes. An earlier draft of this
++# patch had the delete first - the fixture's original defect, reintroduced by the patch that was written to
++# remove it - and its own test could not see it, because a test of the END STATE cannot see a SEQUENCE claim.
 +suite_teardown() {
 +  local pids i
 +  # A gate that is merely parking is not a leak yet: give one a moment to exit on its own so this does not
@@ -49,7 +53,6 @@
 +    sleep 0.1
 +  done
 +  pids=$(suite_processes)
-+  rm -rf "$T"
 +  if [ -n "$pids" ]; then
 +    # Report the set that HAD TO BE KILLED, captured before killing: reporting the set afterwards reports an
 +    # empty list, because killing it is what empties it. (Caught by the red case of this patch's own test.)
@@ -65,11 +68,17 @@
 +      # shellcheck disable=SC2086
 +      kill -KILL $k 2>/dev/null || true
 +    fi
++    # 3. ONLY NOW delete the tree. The kill MUST precede this: a worker that is still running when its
++    #    directories go is reparented to pid 1 with a DELETED cwd, which IS the agents-825v mechanism. An
++    #    earlier draft of this patch deleted first and killed after, which reproduced the very defect it was
++    #    written to remove - see the SEQUENCE note at the top of suite_teardown.
++    rm -rf "$T"
 +    printf '  FAIL %s worker(s) outlived this suite and HAD TO BE KILLED - their temp tree was about to be\n' "$n"
 +    printf '       deleted, which is the agents-825v mechanism; they would have held the heavy slot:\n'
 +    printf '       pids: %s\n' "$(printf '%s' "$killed" | tr '\n' ' ')"
 +    exit 1   # an EXIT trap may set the final status
 +  fi
++  rm -rf "$T"
 +}
 +T=$(mktemp -d); trap suite_teardown EXIT
  # THIS SUITE MUST USE ITS OWN HEAVY QUEUE. It runs a REAL gate (fleet-check), and fleet-check takes a slot
