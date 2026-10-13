@@ -336,6 +336,24 @@ class TestFastGateMapping(unittest.TestCase):
                       "pi.sh adapter suite omitted (agents-3iog split: the argv/env shape assertions "
                       "live in the adapters module, which the pre-split arm ran as part of the whole file)")
         self.assertIn("tests/test_prompt_exposure.py", mapped, "pi.sh prompt exposure suite omitted (agents-zak0)")
+        # agents-fnko (P2, found by rev-ryw9's second verdict): a SPLIT that leaves this arm stale loses
+        # tests, and the full gate cannot see it - the full gate discovers the whole tree, so only a pin
+        # like this one can catch a per-arm selection regression. These tests used to ride along inside
+        # tests/test_containment.py, which this arm names. Which modules go red under a broken pi.sh
+        # engine-binary exec is MEASURED, not inferred: all six new dispatcher modules, plus 3 of the 4
+        # in tests/test_containment_egress.py (the three egress tests that moved there).
+        for module in (
+            "tests/test_containment_confinement.py",
+            "tests/test_containment_run_isolation.py",
+            "tests/test_containment_write_grants.py",
+            "tests/test_containment_session_patch.py",
+            "tests/test_containment_hardening.py",
+            "tests/test_containment_broker.py",
+            "tests/test_containment_egress.py",
+        ):
+            self.assertIn(module, mapped,
+                          f"pi.sh arm must run {module} (agents-fnko: tests that depend on pi.sh moved out "
+                          "of tests/test_containment.py into it, and the full gate cannot see the loss)")
 
     def test_other_adapters_map_to_auth_failure_and_core(self):
         """Other adapters must fall back to auth failure detection and factory core."""
