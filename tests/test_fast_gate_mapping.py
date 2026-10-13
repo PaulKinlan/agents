@@ -39,6 +39,47 @@ ARMS_DIR = ROOT / "tools" / "fast-gate-arms.d"
 DEAD_ARM_EXCEPTIONS = {"findings/*.md"}
 
 
+def arm_registry_figures(tracked_paths: list[str] | None = None) -> dict:
+    """THE PROOF'S DENOMINATORS, DERIVED FROM THE ARTEFACT (agents-exmy).
+
+    The evidence for fragmenting the arm table was reported as "a representative path of EVERY pattern
+    (81 paths)". Counted against the object, the base table has 79 pattern arms and 81 was the POST-CHANGE
+    count - a number that described one artefact while claiming to describe another. The lesson is that a
+    count describing an artefact must be derived from it, and `arm_patterns()` is the artefact's own parser;
+    so the denominators are computed here, and anyone can print them with one command:
+
+        python3 -c "from tests.test_fast_gate_mapping import arm_registry_figures as f; print(f())"
+
+    WHAT EACH FIGURE MEANS: patterns (the registry's arms), live (arms with a representative TRACKED path),
+    dead (arms with none - each must be named in DEAD_ARM_EXCEPTIONS with its reason), and representative
+    (the self-derived path set an equivalence proof can use, one tracked path per live arm, instead of a
+    list written by hand). The "N identical" figure belongs to the before/after procedure and is not
+    derivable here; what is derivable - and what was wrong before - is the denominator it divides by.
+    """
+    if tracked_paths is None:
+        tracked_paths = subprocess.run(["git", "-C", str(ROOT), "ls-files"],
+                                       capture_output=True, text=True, check=True).stdout.split()
+    patterns = arm_patterns()
+    representative, dead = {}, []
+    for pattern in patterns:
+        # A pattern line can carry alternatives (`README.md|AGENTS.md|...`), which `case` reads as
+        # alternation, so a line is live if ANY alternative matches a tracked path.
+        hit = next((path for alt in pattern.split("|") for path in tracked_paths
+                    if fnmatch.fnmatchcase(path, alt)), None)
+        if hit:
+            representative[pattern] = hit
+        else:
+            dead.append(pattern)
+    return {
+        "patterns": len(patterns),
+        "live": len(representative),
+        "dead": sorted(dead),
+        "declared_dead": sorted(DEAD_ARM_EXCEPTIONS),
+        "representative": representative,
+        "tracked_paths": len(tracked_paths),
+    }
+
+
 def arm_registry_text() -> str:
     """Every arm fragment, concatenated - the table the script used to hold."""
     fragments = sorted(ARMS_DIR.glob("*.sh"))
@@ -1167,6 +1208,24 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
         self.assertTrue(patterns, "the registry declares no patterns - the scan or the registry is broken")
         duplicates = sorted({p for p in patterns if patterns.count(p) > 1})
         self.assertEqual(duplicates, [], f"these patterns are declared in more than one fragment: {duplicates}")
+
+    def test_the_registry_derives_its_own_denominators(self):
+        """agents-exmy: the equivalence proof's denominator must be COUNTED FROM THE REGISTRY, not written by
+        hand - the published claim said "a representative path of EVERY pattern (81 paths)" while the table
+        it describes had 79 arms, and no reader could check that without redoing the work. This pin derives
+        the figures through arm_registry_figures(), so the numbers below are printed by the code that owns
+        the registry and the arithmetic cannot drift from it."""
+        figures = arm_registry_figures()
+        self.assertGreater(figures["patterns"], 50, f"the registry scan found almost no arms: {figures}")
+        self.assertEqual(figures["patterns"], figures["live"] + len(figures["dead"]),
+                         f"every arm is either live or dead: {figures['patterns']} patterns, "
+                         f"{figures['live']} live, {len(figures['dead'])} dead")
+        self.assertEqual(figures["dead"], figures["declared_dead"],
+                         "the arms matching no tracked path must be exactly the ones NAMED in "
+                         f"DEAD_ARM_EXCEPTIONS with their reason (not a superset, not a subset): {figures}")
+        # The representative path set is what an equivalence proof divides by: one TRACKED path per live arm.
+        self.assertEqual(len(figures["representative"]), figures["live"],
+                         "every live arm must have a representative tracked path for the proof to count")
 
     def test_no_arm_pattern_is_dead(self):
         """agents-v8xv's third obligation: an arm matching no tracked path is REPORTED. Measured when the
