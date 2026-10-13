@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-model-audit b/bin/fleet-model-audit
-index a54d76a..7afb06e 100755
+index a54d76a..a9d9473 100755
 --- a/bin/fleet-model-audit
 +++ b/bin/fleet-model-audit
 @@ -31,6 +31,7 @@
@@ -10,14 +10,107 @@ index a54d76a..7afb06e 100755
  #   fleet-model-audit --all                every lane that has a model pointer: pointer vs its most recent turn
  #                                          (use `lane <name> --asked M` to check a lane's whole history)
  #
-@@ -505,6 +506,99 @@ lane_verdict() {  # <lane> [asked] [asked_supplied]
+@@ -505,6 +506,213 @@ lane_verdict() {  # <lane> [asked] [asked_supplied]
    finalize "lane $lane"
  }
  
++fb_governs_turn() {  # <turns_file> <fb_line> <turn_model> <fb_model>
++  if ! command -v python3 >/dev/null 2>&1; then
++    return 2
++  fi
++  python3 -c '
++import json, re, sys
++from datetime import datetime
++
++turns_file = sys.argv[1]
++fb_line = sys.argv[2]
++turn_model = sys.argv[3]
++fb_model = sys.argv[4]
++
++m_time = re.match(r"^([0-9]{2}:[0-9]{2}:[0-9]{2})", fb_line)
++fb_time_str = m_time.group(1) if m_time else None
++if not fb_time_str:
++    sys.exit(2)
++
++turns = []
++try:
++    with open(turns_file, "r", encoding="utf-8") as f:
++        for line in f:
++            line = line.strip()
++            if not line:
++                continue
++            try:
++                turns.append(json.loads(line))
++            except Exception:
++                pass
++except Exception:
++    sys.exit(2)
++
++if not turns:
++    sys.exit(2)
++
++last_turn = turns[-1]
++last_at = str(last_turn.get("at") or "")
++try:
++    last_wall = float(last_turn.get("wall_s") or 0)
++except Exception:
++    last_wall = 0.0
++
++m_date = re.search(r"([0-9]{4}-[0-9]{2}-[0-9]{2})", last_at)
++date_str = m_date.group(1) if m_date else datetime.now().strftime("%Y-%m-%d")
++
++try:
++    fb_dt = datetime.fromisoformat(f"{date_str}T{fb_time_str}+00:00")
++    fb_epoch = fb_dt.timestamp()
++except Exception:
++    sys.exit(2)
++
++def parse_epoch(at_str):
++    m = re.search(r"([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]+)?Z?", at_str)
++    if m:
++        try:
++            return datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}+00:00").timestamp()
++        except Exception:
++            pass
++    m2 = re.search(r"([0-9]{2}:[0-9]{2}:[0-9]{2})", at_str)
++    if m2:
++        try:
++            return datetime.fromisoformat(f"{date_str}T{m2.group(1)}+00:00").timestamp()
++        except Exception:
++            pass
++    return None
++
++last_epoch = parse_epoch(last_at)
++if last_epoch is None:
++    sys.exit(2)
++
++if fb_epoch - last_epoch > 43200:
++    fb_epoch -= 86400
++elif last_epoch - fb_epoch > 43200:
++    fb_epoch += 86400
++
++if fb_epoch > last_epoch:
++    sys.exit(1)
++
++for t in turns[:-1]:
++    ep = parse_epoch(str(t.get("at") or ""))
++    m = t.get("model")
++    if ep is not None and fb_epoch <= ep < last_epoch and m == fb_model and turn_model != fb_model:
++        sys.exit(1)
++
++turn_start_epoch = last_epoch - last_wall
++slack = turn_start_epoch - fb_epoch
++if -5 <= slack <= 120:
++    sys.exit(0)
++else:
++    sys.exit(1)
++' "$1" "$2" "$3" "$4"
++}
++
 +lane_family() {  # <lane>
 +  MIS=""; UNK=""
 +  local lane=$1 tf ef pf pointer turn_observed="" fb_observed=""
-+  local line m dup_rc fb_line fb_req fb_eff fam
++  local line m dup_rc fb_line fb_req fb_eff fam fb_gov_rc
 +  tf="$LANES/$lane.turns.jsonl"; ef="$LANES/$lane.events.log"; pf="$LANES/$lane.model"
 +
 +  for _f in "$tf" "$ef" "$pf"; do
@@ -67,10 +160,30 @@ index a54d76a..7afb06e 100755
 +        fi
 +        ;;
 +      CASE)
-+        note_unk "lane '$lane' turns.jsonl ($turn_observed) and events.log fallback ($fb_observed) differ only in case"
++        fb_gov_rc=0
++        fb_governs_turn "$tf" "$fb_line" "$turn_observed" "$fb_observed" || fb_gov_rc=$?
++        if [ "$fb_gov_rc" -eq 1 ]; then
++          if [ -z "$MIS" ] && [ -z "$UNK" ]; then
++            fam=$(lower "${turn_observed%%/*}")
++            say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl)"
++          fi
++        else
++          note_unk "lane '$lane' turns.jsonl ($turn_observed) and events.log fallback ($fb_observed) differ only in case"
++        fi
 +        ;;
 +      *)
-+        note_mis "lane '$lane' last turn ran $turn_observed (source: turns.jsonl) but events.log recorded fallback to $fb_observed (source: events.log)"
++        fb_gov_rc=0
++        fb_governs_turn "$tf" "$fb_line" "$turn_observed" "$fb_observed" || fb_gov_rc=$?
++        if [ "$fb_gov_rc" -eq 1 ]; then
++          if [ -z "$MIS" ] && [ -z "$UNK" ]; then
++            fam=$(lower "${turn_observed%%/*}")
++            say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl)"
++          fi
++        elif [ "$fb_gov_rc" -eq 2 ]; then
++          note_unk "lane '$lane' turns.jsonl ($turn_observed) and events.log fallback ($fb_observed) disagree, and temporal association cannot be established from their timestamps"
++        else
++          note_mis "lane '$lane' last turn ran $turn_observed (source: turns.jsonl) but events.log recorded fallback to $fb_observed (source: events.log)"
++        fi
 +        ;;
 +    esac
 +  elif [ -n "$turn_observed" ]; then
@@ -107,10 +220,11 @@ index a54d76a..7afb06e 100755
 +  finalize "lane $lane family"
 +}
 +
++
  [ $# -ge 1 ] || { usage >&2; exit 2; }
  case $1 in
    run)
-@@ -522,15 +616,23 @@ case $1 in
+@@ -522,15 +730,23 @@ case $1 in
      done
      [ -n "$asked" ] || die "run needs a non-empty --asked <provider/model>: the run record cannot be trusted to hold the ask (the extension overwrites it with the substitute)"
      run_verdict "$rdir" "$asked"; exit $? ;;
@@ -219,10 +333,10 @@ index cc17f6e..482ccd5 100755
 +fi
  echo "${best:-${rot[$((start % n))]}}"   # everything cooling: stay in rotation anyway (fail open)
 diff --git a/tests/fleet-model-audit.test.sh b/tests/fleet-model-audit.test.sh
-index 9459cee..47b2290 100644
+index 9459cee..7284a00 100644
 --- a/tests/fleet-model-audit.test.sh
 +++ b/tests/fleet-model-audit.test.sh
-@@ -550,6 +550,57 @@ FLEET_LANES_DIR="$ROOT/emptylanes"; mkdir -p "$FLEET_LANES_DIR"; audit --all
+@@ -550,6 +550,79 @@ FLEET_LANES_DIR="$ROOT/emptylanes"; mkdir -p "$FLEET_LANES_DIR"; audit --all
  audit
  [ "$rc" = 2 ] && ok "10h no arguments is a usage error (2)" || no "10h usage" "rc=$rc out=$out"
  
@@ -230,52 +344,74 @@ index 9459cee..47b2290 100644
 +F11="$ROOT/fam"; mkdir -p "$F11"
 +printf '{"at":"2026-10-13T00:01:00Z","model":"deepseek/deepseek-flash","host":"sdk"}\n' > "$F11/l-single.turns.jsonl"
 +FLEET_LANES_DIR="$F11" audit family l-single
-+[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11a family query reports turn record family" || no "11a single turn" "rc=$rc out=$out"
-+printf '%s' "$out" | grep -q "source: turns.jsonl" && ok "11b and states source is turns.jsonl" || no "11b source turns.jsonl" "$out"
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11a family query reports turn record family" || no "11a single turn" "rc=$rc out=${out:-(empty)}"
++[ -n "$out" ] && printf '%s' "$out" | grep -q "source: turns.jsonl" && ok "11b and states source is turns.jsonl" || no "11b source turns.jsonl" "${out:-(empty)}"
 +
 +cat > "$F11/l-multi.turns.jsonl" << 'TURNS'
 +{"at":"2026-10-13T00:01:00Z","model":"kimi/k3","host":"sdk"}
 +{"at":"2026-10-13T00:02:00Z","model":"deepseek/deepseek-flash","host":"sdk"}
 +TURNS
 +FLEET_LANES_DIR="$F11" audit family l-multi
-+[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11c multi-turn lane reports last turn's family" || no "11c multi-turn" "rc=$rc out=$out"
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11c multi-turn lane reports last turn's family" || no "11c multi-turn" "rc=$rc out=${out:-(empty)}"
 +
 +cat > "$F11/l-agree.turns.jsonl" << 'TURNS'
-+{"at":"2026-10-13T00:01:00Z","model":"kimi/k3","host":"sdk"}
-+{"at":"2026-10-13T00:02:00Z","model":"deepseek/deepseek-flash","host":"sdk"}
++{"at":"2026-10-13T10:00:01Z","model":"kimi/k3","host":"sdk"}
++{"at":"2026-10-13T10:00:02Z","model":"deepseek/deepseek-flash","host":"sdk"}
 +TURNS
 +printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-agree.events.log"
 +FLEET_LANES_DIR="$F11" audit family l-agree
-+[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11d last turn and fallback agreeing exits 0" || no "11d agreeing fallback" "rc=$rc out=$out"
-+printf '%s' "$out" | grep -q "source: turns.jsonl and events.log" && ok "11e and states source is turns.jsonl and events.log" || no "11e source both" "$out"
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11d last turn and fallback agreeing exits 0" || no "11d agreeing fallback" "rc=$rc out=${out:-(empty)}"
++[ -n "$out" ] && printf '%s' "$out" | grep -q "source: turns.jsonl and events.log" && ok "11e and states source is turns.jsonl and events.log" || no "11e source both" "${out:-(empty)}"
 +
 +cat > "$F11/l-disagree.turns.jsonl" << 'TURNS'
-+{"at":"2026-10-13T00:01:00Z","model":"kimi/k3","host":"sdk"}
-+{"at":"2026-10-13T00:02:00Z","model":"deepseek/deepseek-flash","host":"sdk"}
++{"at":"2026-10-13T10:00:01Z","model":"kimi/k3","host":"sdk"}
++{"at":"2026-10-13T10:00:02Z","model":"deepseek/deepseek-flash","host":"sdk"}
 +TURNS
 +printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> openai-codex/gpt-6-sol\n' > "$F11/l-disagree.events.log"
 +FLEET_LANES_DIR="$F11" audit family l-disagree
-+[ "$rc" = 1 ] && ok "11f contradiction between turns and fallback is MISMATCH (1)" || no "11f contradiction rc" "rc=$rc out=$out"
-+printf '%s' "$out" | grep -qE "^MISMATCH " && ok "11g and outputs MISMATCH" || no "11g mismatch output" "$out"
++[ -n "$out" ] && [ "$rc" = 1 ] && ok "11f contradiction between turns and fallback is MISMATCH (1)" || no "11f contradiction rc" "rc=$rc out=${out:-(empty)}"
++[ -n "$out" ] && printf '%s' "$out" | grep -qE "^MISMATCH " && ok "11g and outputs MISMATCH" || no "11g mismatch output" "${out:-(empty)}"
 +
 +printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-evonly.events.log"
 +FLEET_LANES_DIR="$F11" audit family l-evonly
-+[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11h events-only fallback reports effective family" || no "11h events only" "rc=$rc out=$out"
-+printf '%s' "$out" | grep -q "source: events.log" && ok "11i and states source is events.log" || no "11i source events.log" "$out"
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11h events-only fallback reports effective family" || no "11h events only" "rc=$rc out=${out:-(empty)}"
++[ -n "$out" ] && printf '%s' "$out" | grep -q "source: events.log" && ok "11i and states source is events.log" || no "11i source events.log" "${out:-(empty)}"
 +
 +printf 'pi-claude-code-provider/sonnet\n' > "$F11/l-ptronly.model"
 +FLEET_LANES_DIR="$F11" audit family l-ptronly
-+[ "$rc" = 3 ] && ok "11j pointer-only evidence is UNKNOWN (3)" || no "11j pointer only" "rc=$rc out=$out"
-+printf '%s' "$out" | grep -q "source: pointer-only" && ok "11k and names source as pointer-only" || no "11k source pointer-only" "$out"
++[ -n "$out" ] && [ "$rc" = 3 ] && ok "11j pointer-only evidence is UNKNOWN (3)" || no "11j pointer only" "rc=$rc out=${out:-(empty)}"
++[ -n "$out" ] && printf '%s' "$out" | grep -q "source: pointer-only" && ok "11k and names source as pointer-only" || no "11k source pointer-only" "${out:-(empty)}"
 +
 +FLEET_LANES_DIR="$F11" audit family l-missing
-+[ "$rc" = 3 ] && ok "11l lane with no records is UNKNOWN (3)" || no "11l missing lane" "rc=$rc out=$out"
++[ -n "$out" ] && [ "$rc" = 3 ] && ok "11l lane with no records is UNKNOWN (3)" || no "11l missing lane" "rc=$rc out=${out:-(empty)}"
 +
 +FLEET_LANES_DIR="$F11" audit lane l-single --family
-+[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11m lane <name> --family alias produces same verdict" || no "11m lane --family" "rc=$rc out=$out"
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11m lane <name> --family alias produces same verdict" || no "11m lane --family" "rc=$rc out=${out:-(empty)}"
 +
 +audit family
-+[ "$rc" = 2 ] && ok "11n family without lane name is usage error (2)" || no "11n usage" "rc=$rc out=$out"
++[ "$rc" = 2 ] && ok "11n family without lane name is usage error (2)" || no "11n usage" "rc=$rc out=${out:-(empty)}"
++
++# 11o: historical fallback followed by newer turn on different model (reviewer fixture: recovered)
++cat > "$F11/l-recovered.turns.jsonl" << 'TURNS'
++{"at":"2026-10-13T10:00:02Z","model":"deepseek/deepseek-flash"}
++{"at":"2026-10-13T10:05:00Z","model":"openai-codex/gpt-6-sol"}
++TURNS
++printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-recovered.events.log"
++FLEET_LANES_DIR="$F11" audit family l-recovered
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family openai-codex" && ok "11o historical fallback with newer turn reports last turn effective family" || no "11o historical fallback" "rc=$rc out=${out:-(empty)}"
++[ -n "$out" ] && printf '%s' "$out" | grep -q "source: turns.jsonl" && ok "11p and states source is turns.jsonl" || no "11p source turns.jsonl" "${out:-(empty)}"
++
++# 11q: historical fallback with no intervening turns (stale fallback > run window)
++printf '{"at":"2026-10-13T10:05:00Z","model":"openai-codex/gpt-6-sol","host":"sdk"}\n' > "$F11/l-stale.turns.jsonl"
++printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-stale.events.log"
++FLEET_LANES_DIR="$F11" audit family l-stale
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family openai-codex" && ok "11q stale fallback outside run window does not contradict newer turn" || no "11q stale fallback" "rc=$rc out=${out:-(empty)}"
++
++# 11r: fallback logged after last turn completed (subsequent run started and fell back)
++printf '{"at":"2026-10-13T10:00:02Z","model":"openai-codex/gpt-6-sol","host":"sdk"}\n' > "$F11/l-fbafter.turns.jsonl"
++printf '10:05:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-fbafter.events.log"
++FLEET_LANES_DIR="$F11" audit family l-fbafter
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family openai-codex" && ok "11r fallback after last turn does not contradict earlier completed turn" || no "11r fallback after turn" "rc=$rc out=${out:-(empty)}"
 +
  echo
  printf 'fleet-model-audit.test.sh: %d passed, %d failed\n' "$pass" "$fail"
