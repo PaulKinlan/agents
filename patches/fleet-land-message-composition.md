@@ -216,6 +216,19 @@ means the summary's author.
 
 Post-fix on the reviewer's repro: `cleared:false`, `independence:transcribed-unverified`, `branch_author:test-vm-thing`.
 
+TWO CLAIMS ABOVE WENT STALE IN THE SAME SESSION AND ARE CORRECTED HERE, because a stale claim in a delivery document is
+the thing this delivery exists to prevent:
+  * "the second artifact is byte-identical and still applies to the corrected tree" was TRUE when written and FALSE within
+    the hour: adding the discriminator case and the harness guard edits the same test file that artifact patches, so it
+    HAD to be re-cut. 208 lines sha256 1835ddd059fc322b becomes 210 lines sha256 0d76e0aba45d0e90 - two lines different,
+    because the shared edit cancels on both sides. An artifact that needs no change must not change; an artifact whose
+    file moved must.
+  * the harness guard is new and is part of this delivery's test file: has() now FAILS when it is called with an EMPTY
+    needle (grep matches an empty pattern against anything, so such an assertion could never fail) and eq() fails when
+    both operands are empty. The suite is the artefact a later reader trusts, and a vacuous pass votes for the change it
+    cannot see. Measured in this delivery's own harness before the fix; the same class then bit a one-off verification
+    command of mine, which printed four MATCH lines from four empty comparisons after a bad cd.
+
 KNOWN CONFLICT, NOT YET RESOLVED, STATED HERE SO IT IS NOT LOST IN A COMMIT: the same correction flips fixtures 38k and
 38l (356 passed / 2 failed), which assert that a same-lane-posted verdict with a named reviewer of a DIFFERENT family
 CLEARS. Those fixtures and the reviewer's P1 fixture are the SAME case - a summary appended by another lane, one verdict

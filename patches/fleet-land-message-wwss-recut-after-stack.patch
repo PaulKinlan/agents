@@ -1,5 +1,6 @@
---- a/bin/fleet-land-message
-+++ b/bin/fleet-land-message
+diff -ruN B/bin/fleet-land-message Cold/bin/fleet-land-message
+--- B/bin/fleet-land-message	2026-10-13 19:11:29.408362293 +0000
++++ Cold/bin/fleet-land-message	2026-10-13 19:17:19.830425341 +0000
 @@ -5,6 +5,12 @@
  #
  #   fleet-land-message <bead> <branch> [bead2 ...]            message for the merge of <branch>
@@ -30,7 +31,7 @@
      --allow-stale) ALLOW_STALE=1; shift ;;
      --print-json|--json) JSON=1; shift ;;
      --author-model) AUTHOR_MODEL_ARG=${2:?--author-model needs provider/id}; shift 2 ;;
-@@ -926,13 +934,79 @@
+@@ -937,13 +945,79 @@
    # Direct ref ancestry is accepted; if the branch was rebased without changing the tree (no-op rebase),
    # verify that the merged commit contains an ancestor whose tree matches the branch tip tree.
    target_ref_tree=$(git rev-parse --verify -q "${target_ref}^{tree}" 2>/dev/null || echo "")
@@ -114,10 +115,11 @@
      exit 1
    fi
    target_tree=$(git rev-parse --verify -q "${gate_commit}^{tree}" 2>/dev/null || echo "")
---- a/tests/fleet-land-message.test.sh
-+++ b/tests/fleet-land-message.test.sh
-@@ -1623,6 +1623,84 @@
- eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38p without the supplied operand the same tree still refuses"
+diff -ruN B/tests/fleet-land-message.test.sh Cold/tests/fleet-land-message.test.sh
+--- B/tests/fleet-land-message.test.sh	2026-10-13 19:17:00.682321917 +0000
++++ Cold/tests/fleet-land-message.test.sh	2026-10-13 19:17:34.502504025 +0000
+@@ -1643,6 +1643,84 @@
+ 
  rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
  
 +echo "40. agents-wwss: a branch that ADVANCED past the gated merge, and --landed-tip"
@@ -201,7 +203,7 @@
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
    for f in "${FAILED_TESTS[@]}"; do
-@@ -1631,3 +1709,4 @@
+@@ -1651,3 +1729,4 @@
  fi
  printf '%s passed, %s failed\n' "$PASS" "$FAIL"
  [ "$FAIL" = 0 ]

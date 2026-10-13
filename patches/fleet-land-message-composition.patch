@@ -464,8 +464,18 @@ diff -ruN A/bin/fleet-verdict-words.sh B/bin/fleet-verdict-words.sh
 +}
 diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 --- A/tests/fleet-land-message.test.sh	2026-10-12 19:42:41.000000000 +0000
-+++ B/tests/fleet-land-message.test.sh	2026-10-13 19:11:29.388362162 +0000
-@@ -29,6 +29,26 @@
++++ B/tests/fleet-land-message.test.sh	2026-10-13 19:17:00.682321917 +0000
+@@ -23,12 +23,34 @@
+ FAILED_TESTS=()
+ ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
+ bad()  { FAIL=$((FAIL+1)); FAILED_TESTS+=("$1"); printf '  FAIL %s\n      %s\n' "$1" "${2:-}"; }
+-has()  { grep -qF -- "$2" <<<"$1" && ok "$3" || bad "$3" "expected to find: $2"; }
++has()  { [ -n "$2" ] || { bad "$3" "HARNESS: has() was called with an EMPTY needle, which grep matches against anything, so this assertion could never fail (fleet-harness)"; return; }
++          grep -qF -- "$2" <<<"$1" && ok "$3" || bad "$3" "expected to find: $2"; }
+ hasnt(){ grep -qF -- "$2" <<<"$1" && bad "$3" "expected NOT to find: $2" || ok "$3"; }
+-eq()   { [ "$1" = "$2" ] && ok "$3" || bad "$3" "got [$1] want [$2]"; }
++eq()   { { [ -n "$1" ] || [ -n "$2" ]; } || { bad "$3" "HARNESS: eq() compared two EMPTY values, so this assertion captures nothing and could never fail (fleet-harness)"; return; }
++          [ "$1" = "$2" ] && ok "$3" || bad "$3" "got [$1] want [$2]"; }
  
  ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
  export HOME="$ROOT/home"; mkdir -p "$HOME/.fleet" "$HOME/bin" "$ROOT/repo" "$ROOT/fix"
@@ -492,7 +502,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  echo main > "$HOME/.fleet/default-branch"
  
  # --- stubs -------------------------------------------------------------------
-@@ -775,7 +795,7 @@
+@@ -775,7 +797,7 @@
  [{"author":"proj-lane-1","created_at":"2026-10-10T10:00:00Z",
    "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
   {"author":"proj-lane-1","created_at":"2026-10-10T11:00:00Z",
@@ -501,7 +511,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  J
  out_tip_colon=$(run tk-1 fleet/delta1); rc_tip_colon=$?
  [ "$rc_tip_colon" = 0 ] && ok "12p tip: <sha> with colon extracts reviewed SHA and clears via delta identity" || bad "12p expected exit 0 on tip: <sha>" "rc=$rc_tip_colon out=$out_tip_colon"
-@@ -1089,14 +1109,14 @@
+@@ -1089,14 +1111,14 @@
  # 26. the standard transcribed-subagent shape still clears when it names a cross-family reviewer
  cat > "$B" <<J
  [$HANDOFF,
@@ -520,7 +530,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  
  # 27. a verdict from another actor clears without naming any model (independent by actor)
  cat > "$B" <<J
-@@ -1134,7 +1154,7 @@
+@@ -1134,7 +1156,7 @@
  # author model are the other-actor ones - the coord relay, 12t/12z11.
  cat > "$B" <<J
  [$HANDOFF,
@@ -529,7 +539,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  J
  rm -f "$HOME/.fleet/lanes/imp-x.model"
  j=$(run --print-json tk-2 fleet/thing2)
-@@ -1157,10 +1177,10 @@
+@@ -1157,10 +1179,10 @@
  printf 'zai/glm-5.3\n' > "$HOME/.fleet/lanes/imp-x.model"
  cat > "$B" <<J
  [$HANDOFF,
@@ -542,7 +552,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/imp-x.model"
  j=$(run --print-json tk-2 fleet/thing2)
  eq "$(jq -r '.review.independence' <<<"$j")" "same-family" "31b lane record supplies the author model (same -> blocked)"
-@@ -1181,11 +1201,11 @@
+@@ -1181,11 +1203,11 @@
  # the verdict line is scanned FIRST and is authoritative; body prose only fills what it leaves empty
  cat > "$B" <<J
  [$HANDOFF,
@@ -556,7 +566,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  eq "$(jq -r '.review.cleared' <<<"$j")" "true" "33c and the genuine cross-family review still clears"
  cat > "$B" <<J
  [$HANDOFF,
-@@ -1197,11 +1217,11 @@
+@@ -1197,11 +1219,11 @@
  # 34. sentence punctuation is not part of a model id (rev round-1 P2)
  cat > "$B" <<J
  [$HANDOFF,
@@ -570,7 +580,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  
  echo "35. fleet-260l: clearance is decided by PIN QUALITY, not by which verdict was posted last"
  # THE DEFECT THIS SECTION PINS: the tool walked the candidates newest-first and took the first that parsed
-@@ -1293,6 +1313,316 @@
+@@ -1293,6 +1315,334 @@
  has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
  has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
  
@@ -882,6 +892,24 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 +eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38o ...and the comparison still runs and clears"
 +j=$(run --print-json tk-2 fleet/thing2)
 +eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38p without the supplied operand the same tree still refuses"
++# 38q: THE DISCRIMINATOR, and 38j is why it is needed. 38j passes WITH the defect because the tip also carries a later
++# NON-AUTHOR verdict, so the wrong pool still yields the right winner - a case that cannot fail on the bug it was written
++# for. Here the tip's ONLY verdict is posted by the BRANCH's own lane while the LAND-SUMMARY was appended by a different
++# lane (the coordinator, which is the landing convention). Deriving the author from the SUMMARY APPENDER (agents-ak50)
++# puts the branch author's own verdict in the NON-author pool, where it is selected as an independent review and CLEARS
++# an author-posted PASS with no reviewer run. Deriving it from the BRANCH puts it in the author pool, demotes it, and it
++# cannot clear. Measured red-first: this case FAILS on the pre-fix helper and passes on the fixed one.
++printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
++cat > "$B" <<J
++[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++J
++j=$(run --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.branch_author' <<<"$j")" "test-vm-thing2" "38q the branch author comes from the BRANCH, not the summary appender"
++eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38q2 an author-lane verdict is not an independent review, so it does not clear"
++eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-verified" "38q3 ...and independence reports the transcription, not an independent review"
++eq "$(jq -r '.review.selected_comment_author' <<<"$j")" "test-vm-thing2" "38q4 ...while the verdict stays operative rather than being discarded"
++
 +rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
 +
  if [ "$FAIL" -gt 0 ]; then
