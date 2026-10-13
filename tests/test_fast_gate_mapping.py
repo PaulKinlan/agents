@@ -217,8 +217,11 @@ class TestFastGateMapping(unittest.TestCase):
         collects it. That is exactly why it needs its own arm rather than being absorbed: with no
         arm the gate FAILED CLOSED on it as unmapped ("changed file(s) match no mapping arm and no
         ignore-list arm") - correct behaviour for a file whose changes run nothing, but it left the
-        split unlandable. A harness change reaches every inherited execution, so the arm names all
-        six modules, plus the shape test that catches a test method creeping into the harness."""
+        split unlandable. A harness change reaches every inherited execution, so the arm names every
+        module that inherits it, plus the shape test that catches a test method creeping into the
+        harness. agents-ryw9 carried TestDispatcher's 49 non-admission tests into six more such
+        modules, so this list is longer by those six - the pin is what makes the next split name
+        them, which is the failure it was written for."""
         mapped = resolve_fast_gate(["tests/containment_harness.py"])
         for module in (
             "tests/test_containment.py",
@@ -228,6 +231,12 @@ class TestFastGateMapping(unittest.TestCase):
             "tests/test_containment_prepass_pins.py",
             "tests/test_containment_egress.py",
             "tests/test_containment_shape.py",
+            "tests/test_containment_broker.py",
+            "tests/test_containment_confinement.py",
+            "tests/test_containment_hardening.py",
+            "tests/test_containment_run_isolation.py",
+            "tests/test_containment_session_patch.py",
+            "tests/test_containment_write_grants.py",
         ):
             self.assertIn(module, mapped, f"harness arm must run {module} (agents-3iog)")
 

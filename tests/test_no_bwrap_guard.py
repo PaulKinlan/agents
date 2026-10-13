@@ -37,7 +37,8 @@ class TestNoBubblewrapGuard(unittest.TestCase):
                 from lib.sandbox import sandbox_available
 
                 ids = (
-                    'tests.test_containment.TestDispatcher.test_a_pi_run_is_refused_when_the_sandbox_cannot_run',
+                    'tests.test_containment_run_isolation.TestRunIsolation'
+                    '.test_a_pi_run_is_refused_when_the_sandbox_cannot_run',
                     'tests.test_factory_core.TestDispatcherBudget.test_hung_engine_is_killed_at_the_station_budget',
                 )
                 result = unittest.TestResult()
