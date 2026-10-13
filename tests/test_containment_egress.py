@@ -228,5 +228,100 @@ class TestEgressEndToEnd(unittest.TestCase):
             # ... and a direct CONNECT to a non-allowlisted host is refused too.
             self.assertIn("403", results["coerce_connect"], results)
 
+
+
+class TestEngineNetworkBoundary(harness.ContainmentHarness):
+    """The engine's network boundary (netns, allowlist, downgrade)."""
+
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_a_sandboxed_engine_has_no_route_off_its_netns(self):
+        """agents-2x6 acceptance: with egress control active the engine runs under
+        --unshare-net, so a dial off the sandbox must genuinely fail at the kernel, not by
+        convention. The allowlisted path — the credential broker through the net_forward
+        relay — is proven end to end by the 8h4 acceptance test above, which now runs through
+        that relay (the engine dials 127.0.0.1:8384 and the broker answers). This is the
+        complement: everything ELSE is unreachable, and no resolver is available either."""
+        stub = self.bin / "pi"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            "python3 - <<'PYEOF'\n"
+            "import socket\n"
+            "try:\n"
+            "    socket.create_connection(('93.184.216.34', 443), timeout=3).close()\n"
+            "    print('DIRECT:REACHED')\n"
+            "except OSError:\n"
+            "    print('DIRECT:UNREACHABLE')\n"
+            "try:\n"
+            "    socket.gethostbyname('api.github.com')\n"
+            "    print('DNS:RESOLVED')\n"
+            "except OSError:\n"
+            "    print('DNS:BLOCKED')\n"
+            "PYEOF\n"
+            "cat >/dev/null\n" + STUB_REPORT,
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        self.agent("name: probe\nclass: observer\ncontainment: t0-readonly\n"
+                   "capabilities: {}\nbudget: {max_minutes: 1}\n")
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.stub_line("DIRECT:"), "UNREACHABLE",
+                         "under --unshare-net a dial off the netns must fail at the kernel")
+        self.assertEqual(self.stub_line("DNS:"), "BLOCKED",
+                         "no resolver may be reachable from the isolated netns")
+
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_the_prepass_egress_is_held_to_its_own_allowlist(self):
+        """agents-2x6 acceptance: the pre-pass runs under --unshare-net with the egress
+        proxy as its only route off the netns (HTTP_PROXY points at the in-sandbox relay),
+        and the allowlist is derived from the agent's OWN requires — here [gh] →
+        api.github.com — so a fetch of any other host is refused by the proxy itself (403).
+        The refusal is decided before any upstream dial, so this needs no live network."""
+        self.agent("name: probe\nclass: observer\ncontainment: t1-fetch\n"
+                   "capabilities:\n  network: true\n  requires: [gh]\n"
+                   "budget: {max_minutes: 1}\n")
+        scripts = self.root / "agents" / "probe" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "prepass.py").write_text(
+            "import json, os, sys, urllib.error, urllib.request\n"
+            "out = sys.argv[sys.argv.index('--output') + 1]\n"
+            "try:\n"
+            "    urllib.request.urlopen('http://registry.npmjs.org/-/ping', timeout=5)\n"
+            "    verdict = 'reached'\n"
+            "except urllib.error.HTTPError as e:\n"
+            "    verdict = f'http-{e.code}'\n"
+            "except OSError as e:\n"
+            "    verdict = f'os-{type(e).__name__}'\n"
+            "with open(out, 'w', encoding='utf-8') as fh:\n"
+            "    json.dump({'egress': verdict, 'proxy': os.environ.get('HTTP_PROXY')}, fh)\n",
+            encoding="utf-8",
+        )
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        payload = json.loads((self.run_dirs()[0] / "candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["proxy"], "http://127.0.0.1:8385",
+                         "the pre-pass must be pointed at the in-sandbox egress proxy")
+        self.assertEqual(payload["egress"], "http-403",
+                         "a host outside the agent's own requires allowlist must be refused")
+
+
+    @unittest.skipUnless(_BWRAP, "needs a host where bubblewrap actually runs")
+    def test_unbrokerable_model_downgrades_network_and_reports_egress_unfiltered(self):
+        """agents-8xei: when a run requests an unbrokerable model (e.g. mistral/mistral-large),
+        the key survey recognizes the model provider cannot be brokered under --unshare-net,
+        downgrades network to withheld, and honestly reports network-egress as not enforced."""
+        self.agent("name: probe\nclass: observer\ncontainment: t1-fetch\n"
+                   "capabilities:\n  network: true\n"
+                   "budget: {max_minutes: 1}\n")
+        res = self.factory("pi", {"FACTORY_MODEL": "mistral/mistral-large"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        record = json.loads((self.run_dirs()[0] / "policy.json").read_text(encoding="utf-8"))
+        self.assertIn("network-egress", record["not_enforced"])
+        self.assertFalse(record["granted"]["os_sandbox"]["network_egress_filtered"])
+        self.assertIn("network egress NOT filtered", res.stdout)
+        self.assertIn("Withheld:    network", res.stdout)
+
 if __name__ == "__main__":
     unittest.main()
