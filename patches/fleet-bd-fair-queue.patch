@@ -1,12 +1,12 @@
-From 781f29b5a60531ec6073c725562c736d2cb6adff Mon Sep 17 00:00:00 2001
+From 40012ddc70130d657cb57e8d5a06f6e7d4765b63 Mon Sep 17 00:00:00 2001
 From: agents-factory-impl-f6du <agents-factory-impl-f6du@exe.xyz>
-Date: Tue, 13 Oct 2026 16:05:19 +0000
+Date: Tue, 13 Oct 2026 16:15:28 +0000
 Subject: [PATCH] Bounded kernel queued acquisition
 
 ---
- bin/bd                      |  73 ++++++++++++++-------
- tests/bd-lock-queue.test.sh | 122 ++++++++++++++++++++++++++++++++++++
- 2 files changed, 174 insertions(+), 21 deletions(-)
+ bin/bd                      |  73 ++++++++++++------
+ tests/bd-lock-queue.test.sh | 143 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 195 insertions(+), 21 deletions(-)
  create mode 100755 tests/bd-lock-queue.test.sh
 
 diff --git a/bin/bd b/bin/bd
@@ -107,10 +107,10 @@ index 311687e..19e6f16 100755
  if [ -n "${FLEET_BD_LOCKED:-}" ]; then
 diff --git a/tests/bd-lock-queue.test.sh b/tests/bd-lock-queue.test.sh
 new file mode 100755
-index 0000000..c1f29e5
+index 0000000..d960528
 --- /dev/null
 +++ b/tests/bd-lock-queue.test.sh
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,143 @@
 +#!/usr/bin/env bash
 +# The older blocked bd waiter must not lose its turn to a later lock caller.
 +# Hermetic: fake bd, throwaway HOME/lock; no real Beads database.
@@ -187,10 +187,31 @@ index 0000000..c1f29e5
 +fi
 +: > "$ENTRY_LOG"
 +ARRIVALS="$ROOT/arrivals.log"; : > "$ARRIVALS"
-+LOCK_INO=$(stat -c '%i' "$LOCK")
++# An inode is unique only ON ITS DEVICE. Matching just the final number can
++# count an unrelated filesystem's blocked caller and falsely pass the barrier.
++LOCK_KEY=$(python3 - "$LOCK" <<'PY'
++import os
++import sys
++st = os.stat(sys.argv[1])
++print(f'{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}')
++PY
++)
 +queue_depth() {
-+  awk -v ino="$LOCK_INO" '$2 == "->" && $3 == "FLOCK" && $7 ~ (":" ino "$") { n++ } END { print n+0 }' /proc/locks
++  awk -v key="$LOCK_KEY" '$2 == "->" && $3 == "FLOCK" && $7 == key { n++ } END { print n+0 }' "${LOCKS_PATH:-/proc/locks}"
 +}
++# Pin full identity independently of host state: a waiter with this inode on
++# a DIFFERENT device must not count, while the exact lock key must count.
++other_dev=00:00
++[ "${LOCK_KEY%:*}" = "$other_dev" ] && other_dev=00:01
++printf '1: -> FLOCK ADVISORY WRITE 123 %s:%s 0 EOF\n' "$other_dev" "${LOCK_KEY##*:}" > "$ROOT/fake-locks"
++if [ "$(LOCKS_PATH="$ROOT/fake-locks" queue_depth)" -ne 0 ]; then
++  echo 'FAIL blocked caller on another device inflated queue depth'; exit 1
++fi
++printf '2: -> FLOCK ADVISORY WRITE 124 %s 0 EOF\n' "$LOCK_KEY" >> "$ROOT/fake-locks"
++if [ "$(LOCKS_PATH="$ROOT/fake-locks" queue_depth)" -ne 1 ]; then
++  echo 'FAIL exact major:minor:inode waiter not counted'; exit 1
++fi
++printf 'PASS: queue matcher requires exact major:minor:inode\n'
 +(flock -x "$LOCK" bash -c 'sleep 5') & holder=$!
 +for attempt in $(seq 1 100); do flock -n "$LOCK" true 2>/dev/null || break; sleep .01; done
 +pids=()
