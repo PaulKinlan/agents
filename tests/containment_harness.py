@@ -6,7 +6,9 @@ and RE-RAN all 54 of its tests under an identical setUp - 108 duplicate
 executions, about 100 s of the old file's 163 s (agents-3iog). The harness now
 lives here: `TestDispatcher` subclasses it and owns the tests, while
 `TestEngineCredentialPinning` and `TestPrepassEffectivePinsEveryPath` inherit
-the HARNESS only and run just their own tests.
+the HARNESS only and run just their own tests. agents-ryw9 then carried 49 of
+TestDispatcher's tests into six subject modules beside it, so seven classes now
+inherit this harness and none of them re-runs another's tests.
 
 This module is deliberately NOT named test_*.py: it holds no tests of its own,
 and unittest discovery must not collect it per importing module.

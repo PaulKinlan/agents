@@ -1,0 +1,30 @@
+{
+  "kind": "consumer_coverage",
+  "declared_by": "agents-ryw9 - the six modules TestDispatcher's 49 non-admission tests moved into",
+  "modules": {
+    "child_env": [
+      "tests/test_containment_broker.py",
+      "tests/test_containment_confinement.py",
+      "tests/test_containment_hardening.py",
+      "tests/test_containment_run_isolation.py",
+      "tests/test_containment_session_patch.py",
+      "tests/test_containment_write_grants.py"
+    ],
+    "credential_broker": [
+      "tests/test_containment_broker.py",
+      "tests/test_containment_confinement.py",
+      "tests/test_containment_hardening.py",
+      "tests/test_containment_run_isolation.py",
+      "tests/test_containment_session_patch.py",
+      "tests/test_containment_write_grants.py"
+    ],
+    "sandbox": [
+      "tests/test_containment_broker.py",
+      "tests/test_containment_confinement.py",
+      "tests/test_containment_hardening.py",
+      "tests/test_containment_run_isolation.py",
+      "tests/test_containment_session_patch.py",
+      "tests/test_containment_write_grants.py"
+    ]
+  }
+}

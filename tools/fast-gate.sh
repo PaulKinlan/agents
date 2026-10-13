@@ -285,7 +285,10 @@ while IFS= read -r f; do
       # of them: a harness change reaches every inherited execution, and the shape test is
       # what catches a test method creeping into it (measured: with no arm the gate
       # fail-closed on this file as unmapped, which is how the omission was found).
-      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_shape.py"
+            # agents-ryw9 split TestDispatcher: the 49 tests that file held are now in the six modules
+      # appended below (it keeps its own admission/policy subset). A harness change still reaches
+      # every inherited execution, so the arm names them all.
+mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_shape.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
     tools/fast-gate.sh)
       # agents-8jx1: THE GATE'S OWN SCRIPT HAD AN ARM THAT MAPPED ONLY
@@ -552,7 +555,11 @@ while IFS= read -r f; do
       # dispatcher suite (which drives the real adapter end to end) and the adapters suite
       # (which asserts the adapter argv/env shape). Measured: mutating pi.sh's engine-binary
       # variable turns tests/test_containment.py red.
-      mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_containment_adapters.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_line_andon.py"
+            # agents-ryw9: re-measured for the split, not assumed - mutating pi.sh's engine-binary exec
+      # ("${ENGINE_BIN}" -> "${ENGINE_BIN}.mutation") turns all SEVEN dispatcher modules red, so the
+      # six new ones are appended here. Cost is flat: the arm already ran the same 54 tests
+      # through the one name it used to hold.
+mapped="$mapped tests/test_pi_keyless_broker.py tests/test_adapter_auth_failure.py tests/test_factory_core.py tests/test_containment.py tests/test_containment_adapters.py tests/test_prompt_exposure.py tests/test_adapter_stderr_readback.py tests/test_line_andon.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
     lib/adapters/*.sh)
       # Other engine adapters (e.g. antigravity.sh, deepseek.sh) covered by auth failure, prompt guards, and core runner (agents-vt7w, agents-zak0). test_antigravity_prompt_content.py is listed EXPLICITLY (agents-nhf0): the wildcard arm already selected this file when the TEST changed, but NOT when the ADAPTER changed - so the suite protecting antigravity.sh's prompt guard did not run for the edits that could regress it. A suite gated only on its own edits is the half-fixed shape.
@@ -740,7 +747,9 @@ while IFS= read -r f; do
       # cannot know a suite was split, so this one is a LIST - the same treatment
       # tests/containment_harness.py) gets above for the same reason. Measured cost of the addition:
       # about 8 s (61.5 s for the eight files against 53.3 s for the two the fallback chose).
-      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_child_env.py"
+            # agents-ryw9 split TestDispatcher; the coverage oracle names the six new modules as omitted
+      # consumers of lib.containment.py until they are appended here, so the 151-test union is kept.
+mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_child_env.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
     lib/embargo.py)
       # agents-iqyz: this arm REPLACES the generic `lib/*.py` arm further down for this path, and must
@@ -784,7 +793,11 @@ while IFS= read -r f; do
       # is the IMPORT GRAPH, not the changed file's name.
       # tests/test_egress_proxy.py is listed explicitly because an EXPLICIT ARM REPLACES THE GENERIC
       # ONE: naming only the six would silently drop the module's own suite (agents-mo75's lesson).
-      mapped="$mapped tests/test_egress_proxy.py tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py"
+            # agents-ryw9: the six new dispatcher modules carry the family header verbatim, so they import
+      # lib.egress_proxy too and the oracle names them as omitted consumers until appended here.
+      # Cost is flat (the arm already ran the same tests through tests/test_containment.py);
+      # trimming unused imports in those modules would narrow this arm and is a follow-up, not this change.
+mapped="$mapped tests/test_egress_proxy.py tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"
