@@ -100,6 +100,9 @@ _FLEET_ORACLE = Path("/home/exedev/fleet/remote/check-coverage.py")
 # A MALFORMED FRAGMENT IS AN ERROR RATHER THAN SOMETHING TO SKIP: silently ignoring one is how an
 # omission stops being guarded, which is the failure this whole file exists to prevent.
 _ALLOWLIST_DIR = ROOT / "tests" / "fast_gate_allowlists.d"
+# agents-1mz0: the WHY for an entry, and for the four assertion-consumer exclusions, is in
+# docs/adr/0001-fast-gate-coverage-tiers.md, section "The Assertion-Consumer Class". This directory
+# carries no reasons by design (agents-02s9); the pointer keeps the ADR findable from here.
 
 
 def _load_allowlist_fragments():
@@ -254,6 +257,36 @@ def _selected_suites(module_path, root=None):
 def _lib_modules(root=None):
     root = root or ROOT
     return sorted(p.stem for p in (root / "lib").glob("*.py") if p.stem != "__init__")
+
+
+class TestTheAllowlistPointsAtItsDocumentedReasons(unittest.TestCase):
+    """agents-1mz0: the ADR records WHY the assertion-consumer class and its exclusions exist, but a
+    reader who lands on the allowlists had no pointer to it. This guards DISCOVERABILITY only - the
+    allowlist itself still carries no reasons, which is deliberate (agents-02s9): a reason that cannot be
+    written down wrong is the gate's own measured answer, and the prose reasons live in the ADR."""
+
+    ADR = "docs/adr/0001-fast-gate-coverage-tiers.md"
+    SECTION = "### The Assertion-Consumer Class: When an Importer Is Not a Consumer"
+
+    def test_the_allowlist_directory_names_the_adr(self):
+        """A reader inspecting tests/fast_gate_allowlists.d/ must be able to find the reasons."""
+        pointer = _ALLOWLIST_DIR / "README.md"
+        self.assertTrue(pointer.is_file(), f"{pointer} must exist and point at the ADR")
+        self.assertIn(self.ADR, pointer.read_text(encoding="utf-8"))
+
+    def test_this_test_file_names_the_adr(self):
+        """The criterion lives here as well as in the arm, so the pointer must too."""
+        src = Path(__file__).read_text(encoding="utf-8")
+        self.assertIn(self.ADR, src)
+
+    def test_the_pointer_names_a_section_that_exists(self):
+        """A pointer to a heading that has been renamed is worse than none: it reads as authoritative."""
+        adr = ROOT / self.ADR
+        self.assertTrue(adr.is_file(), f"{self.ADR} must exist")
+        text = adr.read_text(encoding="utf-8")
+        self.assertIn(self.SECTION, text, "the ADR heading the pointer names must still exist")
+        for excluded in ("tests/test_sinks.py", "tests/test_gen_site.py"):
+            self.assertIn(excluded, text, f"the exclusion {excluded} must stay documented in the ADR")
 
 
 class TestFastGateConsumerCoverage(unittest.TestCase):
