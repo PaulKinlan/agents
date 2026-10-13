@@ -1,0 +1,86 @@
+diff --git a/remote/lanes.sh b/remote/lanes.sh
+index 1888587..525e52c 100755
+--- a/remote/lanes.sh
++++ b/remote/lanes.sh
+@@ -279,9 +279,25 @@ case $c in
+           echo "refusing to spawn lane '$name': bead '$bead' not found in $R (resolver failed); pass a valid bead id, or 'none' for an untracked lane (fleet-kjm5)" >&2
+           exit 1
+         }
+-      elif ! ( cd "$R" 2>/dev/null && timeout 10 bd show "$bead" >/dev/null 2>&1 ); then
+-        echo "refusing to spawn lane '$name': bead '$bead' not found in $R (bd show failed); pass a valid bead id, or 'none' for an untracked lane (fleet-kjm5)" >&2
+-        exit 1
++      else
++        bd_out="" bd_rc=0
++        bd_out=$(cd "$R" 2>&1 && timeout 10 bd show "$bead" 2>&1) || bd_rc=$?
++        if [ "$bd_rc" -ne 0 ]; then
++          sleep 0.5
++          bd_rc=0
++          bd_out=$(cd "$R" 2>&1 && timeout 10 bd show "$bead" 2>&1) || bd_rc=$?
++        fi
++        if [ "$bd_rc" -ne 0 ]; then
++          if [ "$bd_rc" -eq 124 ]; then
++            echo "refusing to spawn lane '$name': database timeout checking bead '$bead' in $R (bd show timed out after 10s); pass a valid bead id, or 'none' for an untracked lane (fleet-kjm5)" >&2
++          elif grep -qiE "not found|no such issue|unknown issue" <<<"$bd_out"; then
++            echo "refusing to spawn lane '$name': bead '$bead' not found in $R (bd show: bead does not exist); pass a valid bead id, or 'none' for an untracked lane (fleet-kjm5)" >&2
++          else
++            err_detail=$(head -2 <<<"$bd_out" | tr '\n' ' ' | sed 's/ *$//')
++            echo "refusing to spawn lane '$name': database error checking bead '$bead' in $R (bd show failed: ${err_detail:-exit $bd_rc}); pass a valid bead id, or 'none' for an untracked lane (fleet-kjm5)" >&2
++          fi
++          exit 1
++        fi
+       fi
+     fi
+ 
+diff --git a/tests/lanes.test.sh b/tests/lanes.test.sh
+index 8a2d1c1..f3e703b 100755
+--- a/tests/lanes.test.sh
++++ b/tests/lanes.test.sh
+@@ -77,6 +77,21 @@ for a in "$@"; do
+         bad-*|nonexistent*|agents-*|nosuch*|*foreign*)
+           echo "Issue $bead not found" >&2
+           exit 1 ;;
++        timeout-*)
++          echo "command timed out" >&2
++          exit 124 ;;
++        error-*|locked-*)
++          echo "dolt: database locked by writer" >&2
++          exit 1 ;;
++        transient-*)
++          T_FLAG="$HOME/.transient-$bead"
++          if [ ! -f "$T_FLAG" ]; then
++            touch "$T_FLAG"
++            echo "dolt: transient lock" >&2
++            exit 1
++          fi
++          echo "Issue $bead found"
++          exit 0 ;;
+         *)
+           echo "Issue $bead found"
+           exit 0 ;;
+@@ -971,6 +986,26 @@ has "$conf" "BEAD=valid-bead" "26m valid bead recorded in conf"
+ [ -d "$HOME/worktrees/fleet-manager-rev-valid" ] && ok "26n worktree created for valid bead" || bad "26n worktree created for valid bead" ""
+ lanes retire rev-valid >/dev/null 2>&1 || true
+ 
++# database timeout checking bead
++out=$(lanes spawn rev-timeout "" timeout-bead reviewer)
++has "$out" "database timeout checking bead 'timeout-bead'" "26o timeout checking bead is reported as timeout"
++hasnt "$out" "not found" "26p timeout does not falsely claim bead not found"
++has "$out" "fleet-kjm5" "26q timeout refusal cites fleet-kjm5"
++
++# database error / lock checking bead
++out=$(lanes spawn rev-locked "" locked-bead reviewer)
++has "$out" "database error checking bead 'locked-bead'" "26r database error is reported as database error"
++has "$out" "dolt: database locked" "26s database error detail included"
++hasnt "$out" "not found" "26t database error does not falsely claim bead not found"
++has "$out" "fleet-kjm5" "26u database error refusal cites fleet-kjm5"
++
++# transient database error recovers on retry
++out=$(lanes spawn rev-transient "" transient-bead reviewer)
++conf=$(cat "$HOME/.fleet/lanes/rev-transient.conf" 2>/dev/null)
++has "$conf" "BEAD=transient-bead" "26v transient database failure retries and succeeds"
++[ -d "$HOME/worktrees/fleet-manager-rev-transient" ] && ok "26w worktree created after transient retry" || bad "26w worktree created after transient retry" ""
++lanes retire rev-transient >/dev/null 2>&1 || true
++
+ echo
+ 
+ echo "27. model cooldown check and sticky model reconciliation at spawn (fleet-td3w)"
