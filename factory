@@ -116,6 +116,12 @@ PI_KEYLESS_MODELS = {
              "qwen3.8-flash", "qwen3.8-max"],
 }
 
+# Both tables describe the same keyless providers. A missing row must refuse rather
+# than write models: [] and let pi silently resolve the pattern on another provider.
+if set(PI_KEYLESS_MODELS) != set(PI_PROVIDER_API) or any(
+        not ids for ids in PI_KEYLESS_MODELS.values()):
+    raise RuntimeError("PI keyless provider tables require matching, nonempty model rows")
+
 
 class StationError(RuntimeError):
     """A station failed and produced no verdict — never a clean scan (fleet-ddd, journal-idy).
@@ -995,6 +1001,11 @@ def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
         # agents-3z8 [P2 latent]: fail-closed if the run's broker does not allow this provider
         # or if the provider is not a supported keyless endpoint.
         return
+    model_ids = PI_KEYLESS_MODELS.get(provider)
+    if not model_ids:
+        # An empty models array lets pi resolve this provider/model pattern against its
+        # bundled registry (possibly on a different provider). Refuse before writing.
+        raise StationError(f"pi keyless provider {provider!r} has no model ids configured")
     config = {
         "providers": {
             provider: {
@@ -1002,7 +1013,7 @@ def _write_pi_models_json(config_dir: Path, broker, provider: str) -> None:
                 "api": PI_PROVIDER_API[provider],
                 "apiKey": broker.placeholder,
                 "models": [{"id": model_id, "samplingParams": {"temperature": 0.1}}
-                           for model_id in PI_KEYLESS_MODELS.get(provider, [])],
+                           for model_id in model_ids],
             },
         },
     }

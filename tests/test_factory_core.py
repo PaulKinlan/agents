@@ -83,6 +83,49 @@ class TestDrainingReportStub(unittest.TestCase):
                     self.assertEqual(json.loads(res.stdout.splitlines()[-1])["summary"], "stub")
 
 
+class TestPiKeylessModels(unittest.TestCase):
+    def test_every_supported_keyless_provider_has_models(self):
+        self.assertEqual(set(factory_cli.PI_KEYLESS_MODELS), set(factory_cli.PI_PROVIDER_API))
+        for provider, ids in factory_cli.PI_KEYLESS_MODELS.items():
+            with self.subTest(provider=provider):
+                self.assertTrue(ids, f"{provider} must not emit models: []")
+                self.assertEqual(len(ids), len(set(ids)))
+
+    def test_missing_or_empty_model_row_refuses_before_writing_config(self):
+        broker = mock.Mock(providers={name: None for name in factory_cli.PI_PROVIDER_API},
+                           placeholder="factory-broker-placeholder")
+        broker.base_url.return_value = "http://127.0.0.1:9/v1"
+        for provider in factory_cli.PI_PROVIDER_API:
+            for missing in (True, False):
+                with self.subTest(provider=provider, missing=missing):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        config_dir = Path(tmpdir)
+                        rows = dict(factory_cli.PI_KEYLESS_MODELS)
+                        if missing:
+                            rows.pop(provider)
+                        else:
+                            rows[provider] = []
+                        with mock.patch.object(factory_cli, "PI_KEYLESS_MODELS", rows):
+                            with self.assertRaisesRegex(factory_cli.StationError,
+                                                        f"keyless provider '{provider}' has no model ids"):
+                                factory_cli._write_pi_models_json(config_dir, broker, provider)
+                        self.assertFalse((config_dir / "models.json").exists())
+
+    def test_each_supported_provider_writes_its_own_model_ids(self):
+        broker = mock.Mock(providers={name: None for name in factory_cli.PI_PROVIDER_API},
+                           placeholder="factory-broker-placeholder")
+        broker.base_url.return_value = "http://127.0.0.1:9/v1"
+        for provider in factory_cli.PI_PROVIDER_API:
+            with self.subTest(provider=provider):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    path = Path(tmpdir) / "models.json"
+                    factory_cli._write_pi_models_json(Path(tmpdir), broker, provider)
+                    config = json.loads(path.read_text())
+                    self.assertEqual(set(config["providers"]), {provider})
+                    self.assertEqual([entry["id"] for entry in config["providers"][provider]["models"]],
+                                     factory_cli.PI_KEYLESS_MODELS[provider])
+
+
 class TestSoftwareFactoryCore(unittest.TestCase):
     def test_fingerprint_line_number_independence(self):
         """Fingerprints must be identical across line shifts and whitespace reformatting."""
