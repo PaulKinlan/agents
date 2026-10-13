@@ -1126,5 +1126,58 @@ class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
                              "the auth class must not borrow the unreachable wording: that wording is an "
                              "instruction to retry")
 
+    def test_a_refused_connection_is_not_stolen_into_the_permanent_class(self):
+        """agents-9fjb, THE MIRROR DIRECTION. The uvzh fix IS the arm order, so the property that needs a
+        test is the one the fix creates: an eager auth arm must not capture a failure that is not
+        authentication, or a network problem starts telling operators to stop retrying.
+
+        REAL SSH, NO NETWORK, AND NO STUB: the remote is a closed port on loopback. Port 1 cannot be
+        listened on without root, so the kernel refuses immediately - MEASURED output is ssh's
+        "ssh: connect to host 127.0.0.1 port 1: Connection refused" followed by git's
+        "fatal: Could not read from remote repository.", which is the SAME last line a refused key
+        produces (test_a_denied_authentication_is_not_reported_as_a_transient_outage). That overlap is why
+        the auth arm has to be both narrow and first, and why widening it to git's generic line would look
+        harmless and swap the two classes.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            _origin, _seed, checkout = self._working_checkout(root)
+            self._git(checkout, "remote", "set-url", "origin", "ssh://git@127.0.0.1:1/repo.git")
+
+            output = self._assert_installs_nothing_and_names(
+                self._run_installer(root, checkout, home), home, checkout,
+                "remote-unreachable", "remote-auth-denied", "checkout-diverged", "checkout-local-state")
+            self.assertIn("transient", output,
+                          "a refused connection is a network failure, so the transient instruction is the "
+                          "right response and the mirror of the auth case")
+            self.assertNotIn("FAILURE CLASS: remote-auth-denied", output,
+                             "a closed port is not a credential problem: if the auth arm captures this, an "
+                             "operator is told to fix a key when the network is what failed")
+
+    def test_an_unresolvable_host_is_not_stolen_into_the_permanent_class(self):
+        """The second mirror case, chosen because it fails on DNS POLICY rather than on this VM's
+        connectivity: .invalid is reserved by RFC 6761 and never resolves, so the case needs no network and
+        cannot pass or fail because a cable is unplugged. Same property as above - the failure is the
+        network's, not the credential's.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            _origin, _seed, checkout = self._working_checkout(root)
+            self._git(checkout, "remote", "set-url", "origin",
+                      "ssh://git@no-such-host.invalid/repo.git")
+
+            output = self._assert_installs_nothing_and_names(
+                self._run_installer(root, checkout, home), home, checkout,
+                "remote-unreachable", "remote-auth-denied", "checkout-diverged", "checkout-local-state")
+            self.assertIn("  git: ", output,
+                          "the class is the installer's inference and git's text is the evidence, so the "
+                          "unreachable case must carry it here too")
+            self.assertNotIn("FAILURE CLASS: remote-auth-denied", output,
+                             "a name that does not resolve is not a credential problem")
+
 if __name__ == "__main__":
     unittest.main()
