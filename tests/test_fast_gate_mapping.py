@@ -702,6 +702,18 @@ class TestFastGateMapping(unittest.TestCase):
                                     f"{path}: deliberate loud failure must not be silenced (agents-9nir)")
                 self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
 
+        # agents-dxtx (rev-l80j, P2): the exemption above is per-FILE, so a path that appears in an
+        # exempted directory LATER must still be loud. DISCRIMINATOR for that finding: with the earlier
+        # `.codex/*` pattern these paths resolved silently (rc 0, empty suite list) rather than being
+        # refused, so this test is red against the revision the finding describes.
+        for path in (".codex/unreviewed.sh", ".codex/new_helper.py"):
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertNotEqual(res.returncode, 0,
+                                    f"{path}: a new file in an exempt directory must NOT be exempt "
+                                    "(agents-dxtx - the exemption is per file, not per directory)")
+                self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
+
     def test_tree_guard_tier_runs_on_every_mapped_delta(self):
         """agents-dv23 (ADR agents-c07o): tests/test_tree_guards.py is an always-on tier that must
         be included in every mapped fast-gate run to enforce repo-wide invariants.

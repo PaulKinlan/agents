@@ -36,7 +36,15 @@ fast_gate_arms_250_beads() {
     # at all. Each reason below records THE SEARCH PERFORMED AND ITS RESULT, including the three
     # shapes the WARNING above names - a WALKER, a GLOB, and a SUBPROCESS WITH A DEFAULT PATH -
     # because a path grep alone cannot prove a class is consumer-free.
-    .codex/*)
+    .codex/config.toml|.codex/hooks.json)
+      # agents-dxtx (rev-l80j, P2): this arm was `.codex/*`, which is exactly as broad as the DIRECTORY
+      # while the reason below is only as broad as the two FILES it measured - so any future
+      # `.codex/*.sh` or `.codex/*.py` was SILENTLY accepted instead of being loudly unmatched
+      # (reproduced: FAST_GATE_DRY_RUN=1 GIT_CHANGED=.codex/unreviewed.sh bash tools/fast-gate.sh
+      # -> rc 0 with an empty suite list). The exemption is now per-FILE, so a new file in that
+      # directory resolves to nothing and the gate refuses loudly and names it - which is the outcome
+      # the unmatched-path protection exists to produce. Adding a path here should be a deliberate act
+      # with its own recorded search, not a side effect of the integration growing.
       # Searches performed: `git grep -n -- '.codex/config.toml'`, `-- '.codex/hooks.json'`,
       # `-- 'config.toml'` and `-- 'hooks.json'` all return NO hits repo-wide. Both walkers a suite
       # runs against this tree skip leading-dot directories (agents/docs-drift/scripts/check_docs.py:492
