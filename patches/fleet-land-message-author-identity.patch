@@ -1,4 +1,4 @@
-From fa6d8257cf65248d8b634063ed628fee4762dea0 Mon Sep 17 00:00:00 2001
+From 2dfa052bd1ccc32e1bf34254d4a471d2cdd76b41 Mon Sep 17 00:00:00 2001
 From: agents-factory-impl-l2xb <agents-factory-impl-l2xb@exe.xyz>
 Date: Tue, 13 Oct 2026 16:13:55 +0000
 Subject: [PATCH] fix(fleet-land-message): derive the branch author from the
@@ -6,29 +6,31 @@ Subject: [PATCH] fix(fleet-land-message): derive the branch author from the
 
 The independence check took the "branch author" from the ACTOR of the operative LAND-SUMMARY comment.
 A summary appended by another lane - a coordinator replacing a block whose author's bd writes were
-timing out, a workflow the helper explicitly supports - therefore made the APPENDER the author, and
-the comparison used the appender's family: on agents-jb8m a deepseek reviewer was refused as
-same-family against coord's record while the branch's own lane (impl-f6du) reads
-openai-codex/gpt-6-sol, i.e. genuinely cross-family. The same object was used for the author-lane
-verdict filter, which is the defect pointed the unsafe way: with an appender of a different family,
-the AUTHOR's own verdict stops being discounted and the APPENDER's verdicts are.
+timing out, a workflow the helper explicitly supports - therefore made the APPENDER the author, and the
+comparison used the appender's family: on agents-jb8m a deepseek reviewer was refused as same-family
+against coord's record while the branch's own lane (impl-f6du) reads openai-codex/gpt-6-sol, i.e.
+genuinely cross-family. THE SAME WRONG OBJECT IS WORSE IN THE OTHER DIRECTION: the author-lane verdict
+filter discounted the APPENDER's verdicts, so with an appender of a different family the AUTHOR's own
+verdict counts as independent evidence - a false POSITIVE, which authorises a landing, rather than a
+false negative, which merely blocks one.
 
 The author is now derived from the BRANCH NAME (fleet/<lane>-<bead> -> the longest lane recorded in
 ~/.fleet/lanes/*.model that matches at a boundary), with the operative summary's actor kept only as a
 labelled fallback, and the derivation's SOURCE is recorded (author_lane, author_source,
 author_model_source in --print-json; named in the refusal text). When no object settles the authoring
-model - a lane restarted or rotated since the work was authored - --author-model supplies the operand
-rather than overriding the rule: the comparison still runs, and the value is recorded as supplied.
+model - a lane restarted or rotated since the work was authored - --author-model supplies the OPERAND
+rather than overriding the rule: the comparison still runs, the value is recorded as supplied, and the
+refusal names that flag as the remedy.
 
-Verified: tests/fleet-land-message.test.sh 296 passed / 0 failed with the patch, rc=1 and 12 failures
+Verified: tests/fleet-land-message.test.sh 297 passed / 0 failed with the patch, rc=1 and 13 failures
 against the unpatched helper on the new case (LM_OVERRIDE=<path> bash tests/fleet-land-message.test.sh).
 ---
  bin/fleet-land-message           | 84 ++++++++++++++++++++++++++------
- tests/fleet-land-message.test.sh | 69 ++++++++++++++++++++++++++
- 2 files changed, 138 insertions(+), 15 deletions(-)
+ tests/fleet-land-message.test.sh | 70 ++++++++++++++++++++++++++
+ 2 files changed, 139 insertions(+), 15 deletions(-)
 
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index e1f535a..5c429d4 100755
+index e1f535a..a6a07a5 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
 @@ -9,6 +9,13 @@
@@ -160,12 +162,12 @@ index e1f535a..5c429d4 100755
        incomplete-provenance)
          rev_cleared=false
 -        rev_block="independence: incomplete-provenance (reviewer model: $rev_reviewer_model; author model: not determinable - not named on the verdict, and no ~/.fleet/lanes lane record) — name the implementer's model on the verdict or record the lane's model, so the reviewer's family can be compared (fleet-ry7m)"
-+        rev_block="independence: incomplete-provenance (reviewer model: $rev_reviewer_model; author model: not determinable for lane ${src_lane:-?} (${src_author_source:-no author lane}); not named on the verdict and no ~/.fleet/lanes lane record) — name the implementer's model on the verdict or record the lane's model, so the reviewer's family can be compared (fleet-ry7m)"
++        rev_block="independence: incomplete-provenance (reviewer model: $rev_reviewer_model; author model: not determinable for lane ${src_lane:-?} (${src_author_source:-no author lane}); not named on the verdict and no ~/.fleet/lanes lane record - supply it with --author-model <provider/id>, which the message records as supplied) — name the implementer's model on the verdict or record the lane's model, so the reviewer's family can be compared (fleet-ry7m)"
          ;;
        same-family)
          rev_cleared=false
 -        rev_block="independence: same-family (reviewer model: $rev_reviewer_model; author model: $rev_author_model) — the fleet's rule is a different model family reviews every change, so this review cannot clear it (fleet-ry7m)"
-+        rev_block="independence: same-family (reviewer model: $rev_reviewer_model; author model: $rev_author_model, from ${rev_author_model_source:-unknown}) — the fleet's rule is a different model family reviews every change, so this review cannot clear it (fleet-ry7m)"
++        rev_block="independence: same-family (reviewer model: $rev_reviewer_model; author model: $rev_author_model, from ${rev_author_model_source:-unknown}) — the fleet's rule is a different model family reviews every change, so this review cannot clear it (fleet-ry7m). If the author model above is the wrong object (a lane restarted or rotated since the work was authored), supply the authoring model with --author-model <provider/id> and the comparison runs on it; the value is recorded as supplied (agents-2tov)"
          ;;
      esac
    fi
@@ -191,10 +193,10 @@ index e1f535a..5c429d4 100755
                author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
                newer_not_used:$newer_not_used,disagreement:$disagreement,named_branch:$rev_named_branch},
 diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
-index daaecb3..16996a4 100755
+index daaecb3..2c410bf 100755
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
-@@ -1293,6 +1293,75 @@ j_dis=$(run --print-json tk-1 fleet/delta1)
+@@ -1293,6 +1293,76 @@ j_dis=$(run --print-json tk-1 fleet/delta1)
  has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
  has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
  
@@ -229,6 +231,7 @@ index daaecb3..16996a4 100755
 +eq "$(jq -r '.review.independence' <<<"$j")" "same-family" "36g a same-family author lane still refuses"
 +eq "$(jq -r '.review.cleared' <<<"$j")" "false" "36h ...and does not clear"
 +has "$(run tk-2 fleet/thing2)" "from lane record thing2 (branch-name author)" "36i the refusal names where the author model came from"
++has "$(run tk-2 fleet/thing2)" "--author-model" "36i2 ...and names the remedy that supplies the missing operand"
 +# 36j: the AUTHOR-LANE VERDICT FILTER asks the same question, so a verdict posted by the branch's own lane is
 +# the one that is discounted - not one posted by whoever appended the summary
 +printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
