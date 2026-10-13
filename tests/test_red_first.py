@@ -169,6 +169,17 @@ class TestRedFirst(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("content verification failed: label 'non_existent_test_label_xyz' was NOT found in red tree tests", res.stderr)
 
+    def test_bogus_markers_are_refused(self):
+        """Tooth 2: bogus markers that cannot establish exclusivity preconditions are refused."""
+        res = self._run_red_first([
+            "--base", self.base_commit,
+            "--expect-absent", "NEVER_IN_GREEN_OR_RED_85927",
+            "--expect-present", "test_add_guard",
+            "tests/test_calc.py",
+        ])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("neither-direction-verified", res.stderr)
+
     def test_vacuous_form_1_zero_red_failures_rejected_loudly(self):
         """Vacuous form 1: a red run with ZERO failures is rejected loudly."""
         # Create a test that passes on BOTH revisions (pure guard, no discriminator)
@@ -176,7 +187,7 @@ class TestRedFirst(unittest.TestCase):
             "import unittest\n"
             "from lib.calc import add\n\n"
             "class TestCalc(unittest.TestCase):\n"
-            "    def test_add_guard(self):\n"
+            "    def test_new_guard(self):\n"
             "        self.assertEqual(add(2, 3), 5)\n",
             encoding="utf-8",
         )
@@ -184,7 +195,7 @@ class TestRedFirst(unittest.TestCase):
 
         res = self._run_red_first([
             "--base", self.base_commit,
-            "--expect-present", "test_add_guard",
+            "--expect-present", "test_new_guard",
             "tests/test_calc.py",
         ])
         self.assertNotEqual(res.returncode, 0)

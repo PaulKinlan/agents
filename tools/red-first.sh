@@ -414,6 +414,64 @@ if [ -z "$EXPECT_ABSENT" ]; then
   fi
 fi
 
+# Direction 2: a label that exists ONLY in the new tests must be PRESENT (expect > 0)
+if [ -z "$EXPECT_PRESENT" ]; then
+  # Auto-derive candidate from added test methods in the test files
+  diff_test_additions="$(git diff "$PRE_FIX_SHA...HEAD" -- "${TEST_FILES[@]}" | sed -n 's/^+.*def \(test_[a-zA-Z0-9_]*\).*/\1/p' || true)"
+  if [ -n "$diff_test_additions" ]; then
+    EXPECT_PRESENT="$(echo "$diff_test_additions" | head -n 1)"
+  else
+    # Fallback to the test file name or a known test method inside the test file
+    test_func="$(grep -rn "def test_" "${TEST_FILES[0]}" 2>/dev/null | head -n 1 | sed 's/.*def //; s/(.*//' || true)"
+    EXPECT_PRESENT="${test_func:-${TEST_FILES[0]}}"
+  fi
+fi
+
+# Exclusivity precondition checks:
+# 1. Direction 1: absent marker must be PRESENT in the green tree (count > 0)
+# 2. Direction 2: present marker must be ABSENT from the pre-fix test tree (count == 0)
+precondition_failed=0
+
+if [ -n "$EXPECT_ABSENT" ]; then
+  green_absent_matches=0
+  green_absent_output="$(git grep -n -F "$EXPECT_ABSENT" "$GREEN_TREE" -- . ':(exclude)tests' 2>/dev/null || true)"
+  if [ -z "$green_absent_output" ]; then
+    green_absent_output="$(grep -rnI -F "$EXPECT_ABSENT" "$ROOT" --exclude-dir=tests --exclude-dir=.git --exclude-dir=__pycache__ 2>/dev/null || true)"
+  fi
+  if [ -n "$green_absent_output" ]; then
+    green_absent_matches="$(printf '%s\n' "$green_absent_output" | wc -l)"
+  fi
+  echo "red-first: content-verification precondition (expect > 0 in green): checking '$EXPECT_ABSENT' in green tree (excl tests/) -> count: $green_absent_matches"
+  if [ "$green_absent_matches" -eq 0 ]; then
+    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' was NOT found in green tree (expected > 0 in green implementation, got 0)" >&2
+    echo "red-first:   A marker that does not exist anywhere trivially satisfies absence; exclusivity precondition is unverified" >&2
+    precondition_failed=1
+  fi
+fi
+
+if [ -n "$EXPECT_PRESENT" ]; then
+  prefix_present_matches=0
+  prefix_test_output="$(git grep -n -F "$EXPECT_PRESENT" "$PRE_FIX_SHA" -- 'tests' "${TEST_FILES[@]}" 2>/dev/null || true)"
+  if [ -n "$prefix_test_output" ]; then
+    prefix_present_matches="$(printf '%s\n' "$prefix_test_output" | wc -l)"
+  fi
+  echo "red-first: content-verification precondition (expect 0 in pre-fix): checking '$EXPECT_PRESENT' in pre-fix test tree -> count: $prefix_present_matches"
+  if [ "$prefix_present_matches" -ne 0 ]; then
+    echo "red-first: FAIL: content verification precondition failed: present marker '$EXPECT_PRESENT' exists in pre-fix test tree (expected 0 in pre-fix tests, got $prefix_present_matches)" >&2
+    echo "red-first:   A marker present in both revisions does not prove new tests were applied; exclusivity precondition is unverified" >&2
+    precondition_failed=1
+  fi
+else
+  echo "red-first: FAIL: content verification failed: no test label specified or found for expect > 0 check" >&2
+  exit 1
+fi
+
+if [ "$precondition_failed" -ne 0 ]; then
+  echo "red-first: FAIL: content verification failed: neither-direction-verified (unverifiable marker preconditions)" >&2
+  exit 1
+fi
+
+# Direction 1 check in red implementation tree (expect 0)
 if [ -n "$EXPECT_ABSENT" ]; then
   absent_matches=0
   absent_output="$(grep -rn -F "$EXPECT_ABSENT" "$RED_DIR" --exclude-dir=tests --exclude-dir=.git 2>/dev/null || true)"
@@ -430,33 +488,16 @@ else
   echo "red-first: content-verification (expect 0): no implementation changes to verify (pure test addition)"
 fi
 
-# Direction 2: a label that exists ONLY in the new tests must be PRESENT (expect > 0)
-if [ -z "$EXPECT_PRESENT" ]; then
-  # Auto-derive candidate from added test methods in the test files
-  diff_test_additions="$(git diff "$PRE_FIX_SHA...HEAD" -- "${TEST_FILES[@]}" | sed -n 's/^+.*def \(test_[a-zA-Z0-9_]*\).*/\1/p' || true)"
-  if [ -n "$diff_test_additions" ]; then
-    EXPECT_PRESENT="$(echo "$diff_test_additions" | head -n 1)"
-  else
-    # Fallback to the test file name or a known test method inside the test file
-    test_func="$(grep -rn "def test_" "${TEST_FILES[0]}" 2>/dev/null | head -n 1 | sed 's/.*def //; s/(.*//' || true)"
-    EXPECT_PRESENT="${test_func:-${TEST_FILES[0]}}"
-  fi
+# Direction 2 check in red test tree (expect > 0)
+present_matches=0
+present_output="$(grep -rn -F "$EXPECT_PRESENT" "$RED_DIR/tests" 2>/dev/null || true)"
+if [ -n "$present_output" ]; then
+  present_matches="$(printf '%s\n' "$present_output" | wc -l)"
 fi
-
-if [ -n "$EXPECT_PRESENT" ]; then
-  present_matches=0
-  present_output="$(grep -rn -F "$EXPECT_PRESENT" "$RED_DIR/tests" 2>/dev/null || true)"
-  if [ -n "$present_output" ]; then
-    present_matches="$(printf '%s\n' "$present_output" | wc -l)"
-  fi
-  echo "red-first: content-verification (expect > 0): grep -rnF '$EXPECT_PRESENT' '$RED_DIR/tests' -> count: $present_matches"
-  if [ "$present_matches" -eq 0 ]; then
-    echo "red-first: FAIL: content verification failed: label '$EXPECT_PRESENT' was NOT found in red tree tests (expected > 0, got 0)" >&2
-    echo "red-first:   A partially applied patch looks exactly like a passing pin: new tests failed to apply to red tree" >&2
-    exit 1
-  fi
-else
-  echo "red-first: FAIL: content verification failed: no test label specified or found for expect > 0 check" >&2
+echo "red-first: content-verification (expect > 0): grep -rnF '$EXPECT_PRESENT' '$RED_DIR/tests' -> count: $present_matches"
+if [ "$present_matches" -eq 0 ]; then
+  echo "red-first: FAIL: content verification failed: label '$EXPECT_PRESENT' was NOT found in red tree tests (expected > 0, got 0)" >&2
+  echo "red-first:   A partially applied patch looks exactly like a passing pin: new tests failed to apply to red tree" >&2
   exit 1
 fi
 
