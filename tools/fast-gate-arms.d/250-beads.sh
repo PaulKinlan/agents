@@ -4,6 +4,13 @@
 # before adding an arm: PRECEDENCE IS THE NUMERIC PREFIX, and the first matching arm wins.
 fast_gate_arms_250_beads() {
   case "$1" in
+    .beads/hooks/*)
+      # agents-kxbv: a git hook is CODE that runs on every commit in this repo, so unlike the rest of
+      # .beads/ it is not "the scanner never sees it" material - it has a suite that fails on its
+      # content (the fail-open policy and the bound). This arm must sit BEFORE the `.beads/*` ignore
+      # below, because PRECEDENCE IS FIRST MATCH WINS.
+      mapped="$mapped tests/test_beads_hook_fail_open.py"
+      ;;
     # --- Ignore list (agents-9nir) -----------------------------------------------------
     # RULE: an ignore must be a DELIBERATE CASE ARM WITH A REASON, never a default.
     # "No arm" used to mean two different things - a considered exclusion and an
