@@ -207,8 +207,9 @@
     @media (min-width: 48.001rem) {
       pre:has(> code) { container-type: scroll-state; }
       /* Keep <pre> a block so its fallback cover clears at the right edge.
-         Inline grid gives the code its content width; the zero-width side tracks stretch to code height. */
-      pre > code { display: inline-grid; grid-template-columns: 0 max-content 0; min-inline-size: 100%; }
+         Inline grid gives code its content width; align its top to avoid a baseline descender gap.
+         The zero-width side tracks stretch to code height. */
+      pre > code { display: inline-grid; vertical-align: top; grid-template-columns: 0 max-content 0; min-inline-size: 100%; }
       pre > code::before, pre > code::after {
         content: ""; position: sticky; grid-row: 1; inline-size: .9rem; align-self: stretch;
         opacity: 0; pointer-events: none; z-index: 1;
