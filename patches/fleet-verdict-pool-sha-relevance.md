@@ -13,6 +13,7 @@ In the composed delivery this is step 3 of 5; the composition and its ordering a
   git apply /path/to/fleet-verdict-model-families-filter.patch
   bash tests/fleet-land-message.test.sh
   ```
+  ```
 
 - **Target repository:** `PaulKinlan/fleet`
 - **Target files:**
