@@ -159,5 +159,197 @@ class TestWorktreeBeadsDecoyGuard(unittest.TestCase):
             self.assertEqual(found, [])
 
 
+def staged_runtime_missing_modules(root: Path) -> list[str]:
+    """Staging lists in tests/ that do NOT carry the modules the runtime they build imports.
+
+    WHY THIS GUARD EXISTS (agents-o7e2). Six-plus test suites build a staged factory runtime by
+    copying an EXPLICIT list of lib/ modules into a temp tree. A one-line import added to
+    lib/findings.py therefore breaks every one of those suites with ModuleNotFoundError, and
+    NOTHING NAMES WHICH ONES - measured on 2026-10-13, when findings.py gained
+    `from lib.line_numbers import usable_line_number` and five separate copy lists had to be found
+    by running suites and reading failures. That is a speed-and-fragility defect: any change to
+    findings.py costs a tree-wide edit and the fast gate's omitted suites fail for whoever runs
+    them next rather than for whoever broke them.
+
+    THE RULE IS DERIVED, NOT ENUMERATED, and it is calibrated against the real tree rather than
+    guessed. A list that stages `findings.py` builds the engine, so it must carry the HARD import
+    closure of lib/findings.py; a list that also stages factory-only modules builds the whole
+    dispatcher, so it must carry the hard closure of `factory` too. "Hard" is doing real work in
+    that sentence and it is the reason this passes today:
+      - module scope only - an import inside a function runs when it is called, so a tree that
+        never calls it needs no copy of the module;
+      - NOT under `try: ... except ImportError` - an optional dependency by construction;
+      - NOT under `if TYPE_CHECKING:` - that never runs at all (lib/scheduler.py is imported that
+        way, which is why requiring the raw closure demanded a module these suites do not need).
+    Where the closure had to be a judgement, it was made by running it: the raw module-scope
+    closure flagged six sites for lib/sandbox.py (imported at module scope by lib/egress_proxy.py)
+    while every one of those suites passes, so the rule is the closure of the ENTRY POINTS a tree
+    runs, not of every file its list happens to copy. And "which entry points does this list run?"
+    is answered by the dispatcher's own dependency markers (budget.py, child_env.py), not by "it
+    copies something only factory imports" - that weaker test failed six healthy sites too.
+
+    Returns a list of 'path:line: stages [...]; missing [...]' strings, or [] when every list is
+    complete.
+    """
+    def hard_local_imports(path: Path) -> set[str]:
+        if not path.exists():
+            return set()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            return set()
+        optional: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+                for sub in ast.walk(node):
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        optional.add(id(sub))
+            if isinstance(node, ast.Try):
+                guarded = any(h.type is None or "Error" in ast.unparse(h.type) for h in node.handlers)
+                if guarded:
+                    for sub in node.body:
+                        for inner in ast.walk(sub):
+                            if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                                optional.add(id(inner))
+        found: set[str] = set()
+
+        def walk(node: ast.AST) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                      ast.Lambda)):
+                    continue
+                if id(child) in optional:
+                    continue
+                if isinstance(child, ast.ImportFrom):
+                    module = child.module or ""
+                    if module.startswith("lib."):
+                        found.add(module.split(".")[1])
+                    elif module == "lib":
+                        found.update(alias.name for alias in child.names)
+                elif isinstance(child, ast.Import):
+                    for alias in child.names:
+                        if alias.name.startswith("lib."):
+                            found.add(alias.name.split(".")[1])
+                walk(child)
+
+        walk(tree)
+        return found
+
+    def closure(entries: list[str]) -> set[str]:
+        seen: set[str] = set()
+        stack = list(entries)
+        while stack:
+            module = stack.pop()
+            if module in seen:
+                continue
+            seen.add(module)
+            path = root / "lib" / f"{module}.py"
+            if path.exists():
+                stack.extend(hard_local_imports(path))
+        # A package directory (lib/sinks) is staged as a tree by every one of these sites, so it is
+        # satisfied by the copytree rather than by a name in the module list.
+        return {m for m in seen if not (root / "lib" / m).is_dir()}
+
+    engine = closure(["findings"])
+    runtime = engine | closure(list(hard_local_imports(root / "factory")) + ["findings"])
+    # WHICH REQUIREMENT APPLIES IS CALIBRATED, NOT MERELY DERIVED. "Stages findings.py" is the
+    # engine; a list that also stages budget.py or child_env.py is building the DISPATCHER, because
+    # those are modules only `factory` imports at module scope. The first cut of this rule keyed on
+    # "stages any factory-only module", which flagged six sites for sandbox/budget/... because they
+    # copy lib/egress_proxy.py (to exercise the proxy directly) without building a dispatcher - and
+    # every one of those suites passes. A guard that fails on a healthy tree is worse than none, so
+    # the discriminator is the dispatcher's own dependency set, verified against all ten sites.
+    dispatcher_markers = {"budget", "child_env"}
+
+    def literal_list(node: ast.AST, consts: dict[str, list[str]]) -> list[str] | None:
+        if isinstance(node, ast.Name) and node.id in consts:
+            return consts[node.id]
+        if not isinstance(node, (ast.Tuple, ast.List)):
+            return None
+        names = []
+        for element in node.elts:
+            if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                return None
+            names.append(element.value)
+        return names
+
+    problems: list[str] = []
+    for path in sorted((root / "tests").glob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        consts = {
+            node.targets[0].id: [e.value for e in node.value.elts]
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Tuple, ast.List))
+            and isinstance(node.targets[0], ast.Name)
+            and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.value.elts)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.For):
+                continue
+            names = literal_list(node.iter, consts)
+            if not names:
+                continue
+            body = ast.unparse(node)
+            if '"lib"' not in body and "'lib'" not in body:
+                continue
+            staged = {n[:-3] if n.endswith(".py") else n for n in names}
+            if "findings" not in staged and "budget" not in staged:
+                continue
+            required = runtime if staged & dispatcher_markers else engine
+            missing = sorted(required - staged)
+            if missing:
+                problems.append(
+                    f"{path.name}:{node.lineno}: this staging list builds a runtime that imports "
+                    f"{sorted(m + '.py' for m in missing)} at module scope but does not copy it"
+                )
+    return problems
+
+
+class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
+    """agents-o7e2: a staging list must carry the modules its runtime imports at module scope."""
+
+    def test_every_staging_list_carries_its_runtime_imports(self):
+        problems = staged_runtime_missing_modules(ROOT)
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_guard_names_the_site_and_the_missing_module(self):
+        """The case the guard must REJECT, so a green result means something.
+
+        A synthetic tree whose findings.py gains a hard import that its staging list does not
+        copy - the exact failure measured on 2026-10-13 - must be reported with the site and the
+        module named. Without this, a guard that silently reports nothing would look identical to
+        a tree with nothing wrong.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "lib").mkdir()
+            (tmp / "tests").mkdir()
+            (tmp / "lib" / "findings.py").write_text(
+                "from lib.embargo import x\nfrom lib.newthing import y\n", encoding="utf-8")
+            (tmp / "lib" / "embargo.py").write_text("x = 1\n", encoding="utf-8")
+            (tmp / "lib" / "newthing.py").write_text("y = 1\n", encoding="utf-8")
+            (tmp / "factory").write_text("from lib.embargo import x\n", encoding="utf-8")
+            (tmp / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                'MODULES = ("findings.py", "embargo.py")\n'
+                'def build(root):\n    for module in MODULES:\n'
+                '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n',
+                encoding="utf-8")
+            problems = staged_runtime_missing_modules(tmp)
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("test_staged.py", problems[0])
+            self.assertIn("newthing.py", problems[0])
+
+    def test_the_closure_is_derived_and_not_vacuous(self):
+        """The requirement is read from the source, so the guard proves it went and looked."""
+        tree = ast.parse((ROOT / "lib" / "findings.py").read_text(encoding="utf-8"))
+        self.assertTrue(tree.body)
+        source = (ROOT / "lib" / "findings.py").read_text(encoding="utf-8")
+        self.assertIn("from lib.", source)   # findings.py imports siblings; the closure is real
+
+
 if __name__ == "__main__":
     unittest.main()
