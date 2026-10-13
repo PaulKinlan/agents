@@ -149,6 +149,41 @@ class TestPrepassFixes(unittest.TestCase):
         content = product_css.read_text(encoding="utf-8")
         self.assertNotIn(".doc-card:hover", content)
 
+    def test_scan_ui_ux_font_size_units_and_unparsed_values(self):
+        """[agents-9vq2] Small rem and px values must not scan green; unknown units stay visible."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            css = Path(tmp) / "style.css"
+            css.write_text(""".rem { font-size: 0.5rem; }
+.px { font-size: 8px; }
+.fractional { font-size: 11.5px; }
+.pt { font-size: 8pt; }
+.safe { font-size: 12px; }
+.unknown { font-size: 0.6em; }
+.dynamic { font-size: clamp(0.5rem, 2vw, 1rem); }
+.computed { font-size: calc(1rem - 2px); }
+.variable { font-size: var(--font-size); }
+/* .comment { font-size: 1px; } */
+:root { --font-size: 1px; }
+""", encoding="utf-8")
+            output = Path(tmp) / "result.json"
+            subprocess.run([sys.executable, str(script), "--target", tmp, "--output", str(output)],
+                           capture_output=True, text=True, check=True)
+            data = json.loads(output.read_text(encoding="utf-8"))
+            typography = [c for c in data["candidates"] if c["rule_id"] == "illegible-micro-typography"]
+            self.assertEqual([c["line_number"] for c in typography], [1, 2, 3, 4])
+            self.assertEqual(data["font_size_values_unparsed"], 4)
+            summary = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                     capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(summary.stdout)["font_size_values_unparsed"], 4)
+
+            css.write_text(".only { font-size: clamp(0.5rem, 2vw, 1rem); }", encoding="utf-8")
+            summary = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                     capture_output=True, text=True, check=True)
+            unknown_only = json.loads(summary.stdout)
+            self.assertEqual(unknown_only["candidates"], [])
+            self.assertEqual(unknown_only["font_size_values_unparsed"], 1)
+
     def test_scan_ui_ux_considers_co_loaded_page_stylesheets_for_focus_visible(self):
         """[agents-p9u] scan_ui_ux does not emit false missing-focus-visible-state when a
         co-loaded stylesheet on the same HTML page defines :focus-visible (e.g. projects.css + product.css)."""
