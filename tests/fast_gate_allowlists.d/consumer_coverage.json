@@ -35,7 +35,6 @@
       "tests/containment_harness.py"
     ],
     "findings": [
-      "tests/test_candidate_identity.py",
       "tests/test_factory_core.py",
       "tests/test_factory_truth.py",
       "tests/test_perf_review.py"
