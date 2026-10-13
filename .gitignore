@@ -27,6 +27,13 @@ credentials.json
 # the same day. Scoped to the root deliberately - if this package ever declares a real dependency,
 # delete this rule so its lockfile can be committed.
 /package-lock.json
+# Fast-gate scratch suites (agents-xawg): tests/test_fast_gate_mapping.py writes a probe test into tests/
+# for the duration of a gate run, because the gate has to RUN it, and removes it in a `finally`. A suite that
+# the gate's own bound KILLS leaves the probe behind, and a lane committing with `git add -A` would then land
+# a stray test nobody owns. Ignoring the pattern is the load-bearing half; setUpClass in that suite also
+# clears any leftover, so the leak heals on the next run.
+tests/test_*_probe_tmp.py
+
 # Staged Pages artifact (tools/stage_site.py) — build output, never committed
 _site/
 node_modules/
