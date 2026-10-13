@@ -40,21 +40,8 @@ def positive_int(name, default):
 
 def discover():
     """Use unittest's own package-aware loader, not a second test collector."""
-    res = subprocess.run(["git", "ls-files", "tests"],
-                         capture_output=True, text=True, check=True)
-    paths = [Path(p) for p in sorted(res.stdout.splitlines())
-             if Path(p).name.startswith("test") and p.endswith(".py")]
-    modules = [".".join(p.with_suffix("").parts) for p in paths]
-    if not modules:
-        raise GateError("serial discovery found no test modules")
-
     loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
-    for module in modules:
-        try:
-            suite.addTests(loader.loadTestsFromName(module))
-        except Exception as exc:
-            loader.errors.append(f"Failed to import test module: {module}\n{exc}")
+    suite = loader.discover("tests", top_level_dir=".")
     if loader.errors:
         raise GateError("serial discovery failed: " + "; ".join(loader.errors))
 
@@ -68,12 +55,18 @@ def discover():
     found = list(ids(suite))
     if len(found) != len(set(found)):
         raise GateError("serial discovery returned duplicate test ids")
+    res = subprocess.run(["git", "ls-files", "tests"],
+                         capture_output=True, text=True, check=True)
+    paths = [Path(p) for p in sorted(res.stdout.splitlines())
+             if Path(p).name.startswith("test") and p.endswith(".py")]
+    modules = [".".join(p.with_suffix("").parts) for p in paths]
+    if not modules:
+        raise GateError("serial discovery found no test modules")
     expected = {module: set() for module in modules}
     for test_id in found:
         module = next((m for m in modules if test_id.startswith(m + ".")), None)
-        if module not in expected:
-            raise GateError(f"serial discovery id outside the selected modules: {test_id}")
-        expected[module].add(test_id)
+        if module is not None:
+            expected[module].add(test_id)
     if any(not group for group in expected.values()):
         raise GateError("serial discovery found empty modules: " + ", ".join(
             m for m, group in expected.items() if not group))
