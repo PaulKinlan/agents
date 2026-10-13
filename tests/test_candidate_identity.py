@@ -125,8 +125,9 @@ class TestThePropertyAgainstTheReconstruction(unittest.TestCase):
         TWO findings in the same file is the case agents-x9my step 2 deliberately does not fix: its
         location fallback is refused when a run reports more than one finding at a path, because two
         rows sharing a path and a bound label would be handed the same snippet and COLLAPSE. So
-        those rows stay bound to the model's prose - and re-wording moves them, which is the
-        new+fixed pair below. The scanner's own ids do not move, because the file did not change.
+        those rows stay bound to the model's prose - and re-wording moves them. That movement is now
+        booked as a RE-KEY rather than as a new+fixed pair (agents-l606), which is the outcome
+        asserted below; the scanner's own ids do not move, because the file did not change.
         """
         scan_a, scan_b = self._candidate(), self._candidate()
         self.assertEqual(scan_a[CANDIDATE_ID_FIELD], scan_b[CANDIDATE_ID_FIELD])  # the copy: stable
@@ -147,16 +148,23 @@ class TestThePropertyAgainstTheReconstruction(unittest.TestCase):
                     self._finding("innerHTML assignment", 40)]
             run2 = [self._finding("the POST route to /api/auth", 12),
                     self._finding("DOM sink writing user input", 40)]
-            _, s1, _ = store.process_run("vuln-discovery", run1, candidate_index=ci)
+            p1, s1, _ = store.process_run("vuln-discovery", run1, candidate_index=ci)
             processed, s2, fixed2 = store.process_run("vuln-discovery", run2, candidate_index=ci)
             store.close()
 
         # The reconstruction stays on the model's prose (step 2's guard refused the location
         # fallback, because this run reports TWO findings in one file and handing both the same
-        # candidate would collapse them) and therefore books the same unchanged findings as new AND
-        # fixed...
+        # candidate would collapse them), so the same unchanged findings MOVE KEY when re-worded:
         self.assertEqual(s1["new"], 2)
-        self.assertEqual((s2["new"], s2["fixed"]), (2, 2), s2)
+        self.assertNotEqual({f["fingerprint"] for f in p1}, {f["fingerprint"] for f in processed},
+                            "re-wording must still move a prose-bound identity")
+        # THEY ARE NOT DISCOVERIES (agents-l606). Both appearances sit at the exact location of a row
+        # this same run retires, which is the same finding under a fresh fingerprint, so they leave
+        # `new` for the re-key count and the rows they moved from still book as fixed. Before this,
+        # the run reported two new findings beside the two that retired - the pair this test used to
+        # record as the measured gap.
+        self.assertEqual((s2["new"], s2["rekeyed"], s2["fixed"]), (0, 2, 2), s2)
+        self.assertEqual({f["change"] for f in processed}, {"rekeyed"})
         self.assertEqual({f["identity_source"] for f in processed}, {"model-snippet"})
         # ...while the scanner's ids for the same unchanged file are byte-identical across scans.
         self.assertEqual(scan_a[CANDIDATE_ID_FIELD], scan_b[CANDIDATE_ID_FIELD])
