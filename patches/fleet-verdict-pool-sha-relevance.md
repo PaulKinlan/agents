@@ -1,4 +1,4 @@
-# `fleet-verdict-pool-sha-relevance.patch`
+## `fleet-verdict-pool-sha-relevance.patch`
 
 This is the write-up for the artifact beside it. It was previously an edit to `patches/README.md`; main replaced
 that file with a convention (one `.md` per artifact, no shared index), so the same content now lives here and the
@@ -7,10 +7,6 @@ payload re-cut, which is why the byte-identity proof survives it.
 
 In the composed delivery this is step 3 of 5; the composition and its ordering are described in
 `patches/fleet-land-message-composition.md` (lands separately, with that stack).
-
-  git apply /path/to/fleet-verdict-model-families-filter.patch
-  bash tests/fleet-land-message.test.sh
-  ```
 
 - **Target repository:** `PaulKinlan/fleet`
 - **Target files:**
