@@ -78,6 +78,17 @@
 # engine's install dir explicitly, e.g.:
 #   tools/generate-tool-pins.sh --lookup-path "$HOME/.local/bin"
 #
+# THE SKIP IS REPORTED AT GENERATION TIME, NOT ONLY IN THE FILE (agents-2mlo). Those
+# omissions used to live ONLY as comments inside the pins file, while stdout said "Wrote
+# tool pins to ..." either way - so an operator following the documented invocation
+# (docs/INTEGRATION.md) got a file with no bd pin and no signal, and found out when a
+# bd-dependent run refused later. bd is the case that bites in this fleet because it is NOT in a
+# system dir: it lives in ~/.local/bin (the ~/fleet/bin shim is deliberately NOT
+# pinned, agents-1pnh), so the default lookup cannot see it. The warning below names every
+# tool that was not pinned, the lookup it was confined to, and the explicit fix, because the
+# pins file CANNOT distinguish "installed elsewhere" from "not installed" - and only the
+# operator can.
+#
 # This is an explicit operator/runner step, never auto-run by the factory — the factory does
 # not generate or relax pins on its own.
 set -euo pipefail
@@ -205,6 +216,7 @@ if [ -z "$MKDIR" ] || [ -z "$DIRNAME_BIN" ] || [ -z "$DATE" ]; then
 fi
 
 TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
+UNPINNED=""
 
 "$MKDIR" -p "$("$DIRNAME_BIN" "$OUT")"
 {
@@ -219,6 +231,7 @@ TOOLS="bwrap gh bd git semgrep gitleaks node npm npx pi claude agentapi"
     path="$(resolve_in_lookup "$tool" "$PIN_LOOKUP_PATH" || true)"
     if [ -z "$path" ]; then
       echo "# $tool: not found in the pinned lookup dirs — no pin"
+      UNPINNED="${UNPINNED}${UNPINNED:+ }${tool}"
       continue
     fi
     case "$path" in
@@ -250,5 +263,24 @@ print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$path")"
     echo "  sha256: $hash"
   done
 } > "$OUT"
+# agents-2mlo: THE OMISSION IS ANNOUNCED, not merely recorded in the file. stdout is left exactly as
+# it was (a consumer may parse it), so this goes to stderr, and it is deliberately NOT a refusal:
+# a tool that is genuinely absent on this host is a legitimate, documented outcome, and refusing
+# here would break every host and runner that does not install the optional scanners. What is not
+# legitimate is silence about a tool the fleet does install, which is what this closes.
+if [ -n "$UNPINNED" ]; then
+  {
+    echo "warning: no pin was emitted for: $UNPINNED"
+    echo "  A run that resolves one of these REFUSES rather than running it unverified, and the pins"
+    echo "  file cannot tell a tool that is NOT INSTALLED from one that is INSTALLED OUTSIDE the"
+    echo "  confined lookup dirs - so the omission is named here rather than left as a comment in"
+    echo "  the file (agents-2mlo). Lookup was confined to: $PIN_LOOKUP_PATH"
+    echo "  If a tool above is installed elsewhere, pin it by passing its directory EXPLICITLY:"
+    echo "    tools/generate-tool-pins.sh --lookup-path \"\$HOME/.local/bin\" $OUT"
+    echo "  bd is the case that bites in this fleet: it installs to ~/.local/bin, so the default"
+    echo "  lookup above cannot see it and a bd-dependent run fails closed later."
+    echo "  A tool that is genuinely absent on this host is an expected entry here, not an error."
+  } >&2
+fi
 echo "Wrote tool pins to $OUT (lookup confined to: $PIN_LOOKUP_PATH)"
 echo "Hand it to the run: factory --tool-pins \"$OUT\" run <agent> --target <target>"

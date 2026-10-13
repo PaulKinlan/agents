@@ -887,6 +887,101 @@ class LookupPathContractTests(unittest.TestCase):
                 resolve_tool("bd", pins=bad_pins)
 
 
+@unittest.skipUnless(shutil.which("bash"), "the generator is a bash script")
+class TheSkippedToolsAreAnnouncedTests(unittest.TestCase):
+    """agents-2mlo: a tool that is NOT pinned is NAMED at generation time, not only inside the file.
+
+    WHY AN ANNOUNCEMENT AND NOT A REFUSAL. An absent tool is a documented, legitimate outcome
+    ("an absent tool stays absent rather than blocking the run"), so refusing would break every host
+    and runner that does not install the optional scanners - and LookupPathContractTests' control
+    arm pins that the bare invocation still exits 0, so a refusal would contradict a test that
+    exists for a reason. What was wrong was the SILENCE: stdout said "Wrote tool pins to ..."
+    whether or not anything was skipped, so an operator following the documented invocation got a
+    pins file with no bd pin and no signal, and discovered it later when a bd-dependent run refused.
+
+    THE ASSERTION IS AN EQUIVALENCE, NOT A FIXED LIST, because which tools are absent is a property
+    OF THE HOST: every tool the pins file records as not found must also be named on stderr. That
+    holds on a host with all eleven tools installed (both sets empty) and on this VM (bd, semgrep,
+    gitleaks, agentapi). The second test is the forced case that keeps the first from being vacuous:
+    a synthetic tool in an operator dir is unpinned and named without the flag, and pinned and
+    unnamed with it.
+    """
+
+    SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "generate-tool-pins.sh"
+
+    def _generate(self, tmpdir: Path, out: Path, *args: str) -> subprocess.CompletedProcess:
+        res = subprocess.run(
+            ["bash", str(self.SCRIPT), str(out), *args],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "HOME": str(tmpdir)},
+        )
+        self.assertEqual(res.returncode, 0, f"generator failed: {res.stderr[:300]}")
+        return res
+
+    @staticmethod
+    def _recorded_omissions(out: Path) -> set[str]:
+        """The tools the generated file itself records as not found - the other half of the
+        equivalence, read from the artefact rather than from a list in this test."""
+        names = set()
+        for line in out.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^# (\S+): not found in the pinned lookup dirs", line)
+            if match:
+                names.add(match.group(1))
+        return names
+
+    @staticmethod
+    def _announced(stderr: str) -> set[str]:
+        first = next((line for line in stderr.splitlines() if line.startswith("warning: no pin")), "")
+        return set(first.rsplit(":", 1)[-1].split()) if first else set()
+
+    def test_the_omission_is_announced_and_stops_being_announced_once_pinned(self):
+        """The property AND its forced case, in one test on purpose.
+
+        Each arm needs the real generator to run (~3 s: it hashes claude + pi twice each), and the
+        arm pair shares a bare run, so they are one test rather than two paying for the same work.
+
+        THE EQUIVALENCE FIRST: every tool the pins file records as not found is named on stderr, in
+        both directions. Neither direction is cosmetic - a tool the file omits and stderr does not
+        name is the silent omission this bead is about, and a tool stderr names that the file did
+        not omit would send an operator looking for a problem that is not there.
+
+        THEN THE FORCED CASE, so a green above cannot come from two empty sets by accident: the
+        first tool this host does omit is given a synthetic executable in an operator dir. Without
+        the flag it is unpinned and announced; with `--lookup-path` it is pinned and must NOT be
+        announced any more. A host that pins every tool in the generator's list skips this half
+        with the reason named - the equivalence arm still ran, and there is nothing to announce.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            bare = tmpdir / "pins-bare.yaml"
+            res = self._generate(tmpdir, bare)
+            omitted = self._recorded_omissions(bare)
+            self.assertEqual(self._announced(res.stderr), omitted,
+                             f"the announcement and the file disagree\nstderr:\n{res.stderr}")
+
+            if not omitted:
+                self.skipTest("this host pins every tool in the generator's list: with nothing "
+                              "omitted there is nothing to announce")
+            self.assertIn("--lookup-path", res.stderr,
+                          "the announcement must name the explicit fix, not only the omission")
+            self.assertIn("refuses", res.stderr.lower(),
+                          "it must say what the omission costs at run time")
+            self.assertIn("bd", res.stderr,
+                          "bd is the case that bites in this fleet and must be named")
+
+            tool = sorted(omitted)[0]
+            outside = tmpdir / "operator-dir"
+            outside.mkdir()
+            _make_tool(outside, tool, "#!/bin/sh\nexit 0\n")
+            pinned = tmpdir / "pins-pinned.yaml"
+            res = self._generate(tmpdir, pinned, "--lookup-path", str(outside))
+
+            self.assertIn(tool, load_tool_pins(pinned),
+                          "the operator dir must pin the tool the default lookup could not see")
+            self.assertNotIn(tool, self._announced(res.stderr),
+                             "a tool that IS pinned must not be announced as missing")
+
+
 if __name__ == "__main__":
     unittest.main()
 

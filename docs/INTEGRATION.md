@@ -260,12 +260,24 @@ Generate it with the bundled helper (explicit operator/runner step — the facto
 ```bash
 tools/generate-tool-pins.sh                       # writes $HOME/.config/factory/tools.pins.yaml
 
+# A tool installed OUTSIDE the confined system dirs needs its directory named explicitly.
+# bd is the case that bites in this fleet: it installs to ~/.local/bin, which the default
+# lookup cannot see, so the file above has NO bd pin and a bd-dependent run refuses later.
+tools/generate-tool-pins.sh --lookup-path "$HOME/.local/bin"
+
 # hand this run the file it selected - an EXPLICIT argument, and it must precede the subcommand:
 factory --tool-pins "$HOME/.config/factory/tools.pins.yaml" run secret-scan --target ...
 
 # one-liner for a single tool
 printf 'gh:\n  path: %s\n  sha256: %s\n' "$(command -v gh)" "$(sha256sum "$(command -v gh)" | cut -d' ' -f1)"
 ```
+
+**The generator announces what it did NOT pin (agents-2mlo).** Those omissions used to be recorded
+only as comments inside the generated file, so the documented invocation above printed `Wrote tool
+pins to ...` either way and a missing pin surfaced later as a refused run. Every skipped tool is now
+named on stderr at generation time, with the lookup it was confined to and the `--lookup-path` fix.
+It does not refuse: a tool that is genuinely absent on a host is a documented outcome, and the pins
+file cannot tell "not installed" from "installed outside the lookup dirs" - only the operator can.
 
 Semantics: an **unset** `FACTORY_TOOL_PINS`, or a path that does not exist, leaves the repo pins unchanged (still fail-closed); a **malformed** host file raises rather than being silently ignored. The pins read is bounded (agents-28nn round 3): a non-regular file (FIFO, device, socket), an over-bound file, or one that grows while being read is refused with the cause named BEFORE any unbounded allocation. The generator resolves each tool — and its own hasher — by explicit per-directory filesystem tests against the confined lookup dirs, never `command -v` (exported shell functions answer it before the filesystem), and refuses to emit a non-absolute path. The only way to run with unpinned tools is the explicit dev/test opt-in `FACTORY_ALLOW_UNPINNED_TOOLS=1` (never the default).
 
