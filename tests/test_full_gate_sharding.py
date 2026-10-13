@@ -31,6 +31,10 @@ class TestFullGateSharding(unittest.TestCase):
     def run_gate(self, *args, **settings):
         env = dict(os.environ, FLEET_CHECKS_DIR=str(self.root / "checks"),
                    FULL_GATE_SHARDS="2", FULL_GATE_BUDGET_S="20")
+        # The nested gate must not inherit the PARENT gate's shard-child marker: with it set, the
+        # child behaves as a shard, skips the serial-only test this case constructs deliberately,
+        # and exits 0 - which is exactly the assertion below failing for the wrong reason.
+        env.pop("FULL_GATE_SHARD_CHILD", None)
         env.update(settings)
         return subprocess.run(["bash", str(self.root / "tools" / "full-gate.sh"), *args],
                               cwd=self.root, env=env, capture_output=True, text=True,
