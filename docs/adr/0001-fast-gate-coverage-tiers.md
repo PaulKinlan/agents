@@ -125,6 +125,24 @@ However, because consumer coverage validates the fast-gate's own integrity acros
   2. `consumer_coverage="tests/test_fast_gate_consumer_coverage.py"` (mapping contract and consumer coverage).
 Separating them into distinct modules preserves the purity of the tree-guard tier while ensuring both structural invariants run unconditionally on every gate execution.
 
+### The Assertion-Consumer Class: When an Importer Is Not a Consumer (`agents-g9e2`, `agents-iwaj`)
+
+Section 2's criterion is about the DOMAIN OF AN INVARIANT, not the import graph: *can the domain over which an invariant asserts grow or change through a file that the fast gate resolves without selecting that invariant's suite?*
+
+`lib/line_numbers.py` is the worked example. Its only code-importing suite is its own, so a change to it fell into the generic `lib/*.py` arm and ran `tests/test_line_numbers.py` alone. But `tests/test_redaction.py` asserts at line 338 that line 0 is the unknown marker, "matching `lib.line_numbers.usable_line_number`" - a behavioural contract with that module expressed WITHOUT an import. A comment is not an import, and a contract need not be one.
+
+The coverage oracle cannot see this, and not by accident. Its rule is a code import (`test_fast_gate_consumer_coverage.py`, `_importing_suites`), and it strips comments and docstrings first. That stripping was calibrated against the fleet oracle in `agents-pdth`: without it the oracle counted a suite that only MENTIONS a module, over-reporting `lib/sandbox.py` by one. The rule is correct for what it measures and structurally blind to this class.
+
+**The decision: declare the assertion-consumers explicitly in the arm.** `lib/line_numbers.py` now selects `tests/test_line_numbers.py`, `tests/test_redaction.py`, `tests/test_sandbox_fixtures.py`, `tests/test_vuln_triage_prepass.py` and `tests/test_vuln_verify_prepass.py`. This ADR establishes NO general transitive or indirect rule - importers are not assertion-consumers, and a closure keyed on who mentions a name would spend the gate's runtime to buy nothing, which is the failure this ADR exists to prevent.
+
+**The exclusions, recorded so they are not re-litigated:**
+
+* `tests/test_sinks.py` and `tests/test_factory_core.py` - they name the module inside MODULE LISTS as part of whole-tree sweeps. Their subject is the whole tree, which is the Tier-1 shape, not "this module changed".
+* `tests/test_gen_site.py` - it names line numbers as a redaction SUBJECT, not as this module's contract.
+* `tests/test_line_numbers.py` - its own module-contract suite, which the generic arm already selects; naming it again in a specific arm would be a second copy of the same rule (it is listed in the arm only for readability of the dry run).
+
+**Cost:** the four added suites run only when `lib/line_numbers.py` itself changes; every other module's mapping is untouched. Measured on this VM across two runs: 8.14s and 11.75s for the four together.
+
 ### Re-entrancy Protection and Invocation Independence (`agents-q615`, `agents-dv23`)
 Tests that inspect the fast-gate mapping (such as `tests/test_fast_gate_mapping.py`) must prevent recursive re-entrancy loops where the gate resolves the active diff, selects the mapping test itself, and spawns runaway child runs. In practice, invocations avoid this via two distinct mechanisms:
 1. **Dry-Run Resolution:** Setting `FAST_GATE_DRY_RUN=1` resolves planned suites and exits immediately without executing runner subprocesses (used both with simulated `GIT_CHANGED` and with base ref overrides via `GIT_BASE`).

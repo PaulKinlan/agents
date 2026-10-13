@@ -417,6 +417,20 @@ while IFS= read -r f; do
       # Tracker-sink adapters (fleet-km8): covered by the sink harness, the bd contract, promotion, layering, and adapter registry/commands.
       mapped="$mapped tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_sink_adapters.py"
       ;;
+    lib/line_numbers.py)
+      # agents-g9e2 + agents-iwaj: THE ONE MODULE IN THIS FILE WHOSE ASSERTION-CONSUMERS ARE NOT ITS
+      # IMPORTERS. The coverage oracle's rule is a CODE import (test_fast_gate_consumer_coverage.py,
+      # _importing_suites), and it strips comments and docstrings on purpose - that stripping was
+      # calibrated against the fleet oracle in agents-pdth, and without it the count was wrong by one.
+      # So the oracle cannot see tests/test_redaction.py, which asserts this module's contract at line
+      # 338 ("matching lib.line_numbers.usable_line_number") WITHOUT importing it: a comment is not an
+      # import, and a behavioural contract need not be. These are the four suites that assert this
+      # module's behaviour rather than merely naming it. Deliberately NOT here: tests/test_sinks.py and
+      # tests/test_factory_core.py (whole-tree sweeps, Tier-3 business), tests/test_gen_site.py (names
+      # line numbers as a redaction subject) and tests/test_line_numbers.py, which the generic lib/*.py
+      # arm below already selects.
+      mapped="$mapped tests/test_line_numbers.py tests/test_redaction.py tests/test_sandbox_fixtures.py tests/test_vuln_triage_prepass.py tests/test_vuln_verify_prepass.py"
+      ;;
     lib/findings.py)
       # The findings store and the delta renderer. Its own suite is not enough: the store's record
       # and stats shape is what the sink/record layers assert, and a change here broke
