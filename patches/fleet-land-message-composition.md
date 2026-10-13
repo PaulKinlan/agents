@@ -3,19 +3,23 @@
 - **Bead:** `agents-ymh2` (coord ruling, 2026-10-13: compose `agents-2tov` + `agents-9lew` + `agents-m6fr` into one
   delivery, because all three patch the same 61KB file in the SAME PIPELINE - choose a verdict, then decide whether
   it clears this tip).
-- **Status: NOT YET GREEN - 345 passed / 10 failed.** This document is the composition's diagnosis and its exact
+- **Status: NOT YET GREEN - 348 passed / 10 failed.** This document is the composition's diagnosis and its exact
   remaining work, not a request to land. The three source deliveries are individually reviewed; the composition is
-  where they meet, and they do not meet cleanly. wwss is folded in as STEP 0 (coord's ruling), so this one artifact
-  carries the whole series.
-- **Patch:** `patches/fleet-land-message-composition.patch` (1048 lines, sha256 `8920c99901496951…`) against pristine
-  `~/fleet` copies. Applies with `patch -p1 --fuzz=0`, is byte-identical to the assembled tree, and REPRODUCES the
-  345/10 state.
+  where they meet, and they do not meet cleanly.
+- **The delivery is TWO artifacts, applied IN THIS ORDER** (coord's ruling - the composed delivery first, wwss re-cut
+  on top, because two artifacts cannot both be applied to the same live file without one being re-cut):
+  1. `patches/fleet-land-message-composition.patch` (886 lines, sha256 `2ba196a31b5351af…`) - the stack
+     (scanner + families + 9lew + 2tov) with m6fr's one conflicting hunk resolved;
+  2. `patches/fleet-land-message-wwss-recut-after-stack.patch` (208 lines, sha256 `4b2b4024f0b28a3c…`) - agents-wwss
+     RE-CUT to apply after step 1, carrying its `--landed-tip` change, the agents-orjl tie check, and agents-jlfq's
+     two diagnosis fixes.
+  Verified as a series: both apply at fuzz 0, the result is byte-identical to the assembled tree, and the final
+  suite reports 348 passed / 10 failed.
 
 ## The stack, and the order that matters
 
 | step | artifact | author | applies |
 |---|---|---|---|
-| 0 | the `--landed-tip` / gate-refusal change | agents-wwss | clean, but ONLY as step 0: applied AFTER the stack it needs re-cuts (measured both ways) |
 | 1 | `patches/fleet-verdict-transcription-scanner.patch` | (shelf, already in main) | clean |
 | 2 | `patches/fleet-verdict-model-families-filter.patch` | (shelf, already in main) | clean |
 | 3 | `patches/fleet-verdict-pool-sha-relevance.patch` | agents-9lew | clean |
@@ -86,11 +90,31 @@ author-sourced is precisely the confusion m6fr exists to close.
    commit must still CONTAIN the tip being recorded, and (after agents-orjl) while the tip must ALSO be tied to the
    named branch. It moves the OPERAND, never the decision.
 
-THE FOLD MADE CONSTRAINT 2 CONCRETE RATHER THAN THEORETICAL: folding wwss in produced exactly ONE conflict, on the
-shared declaration line - the stack's `AUTHOR_MODEL_ARG` against wwss's `LANDED_TIP`. Two independent columns on one
-line, so both were kept, which is the same resolution m6fr's hunk needed. Three deliveries met on a single line and
-no value was overwritten - and the fold added 14 passing cases with NO new failures, so the interaction is bounded
-and understood rather than merely present.
+THE FOLD MADE CONSTRAINT 2 CONCRETE RATHER THAN THEORETICAL: attempting the fold produced exactly ONE conflict, on
+the shared declaration line - the stack's `AUTHOR_MODEL_ARG` against wwss's `LANDED_TIP`. Two independent columns on
+one line, so both were kept, which is the same resolution m6fr's hunk needed. Three deliveries met on a single line
+and no value was overwritten. That one-conflict measurement is also what produced the re-cut artifact shipped above
+with confidence: the fold was NOT thrown away as a dead end, it is the experiment that proves the re-cut is bounded
+and understood rather than a rewrite - and wwss's 14 cases came back green on the folded tree with no new failures.
+
+### What the wwss re-cut adds beyond the original wwss change
+
+The original wwss artifact could not certify which BRANCH it was clearing. Two review findings fixed here, both on the
+same parameter, which is why they belong in one pass:
+
+- **agents-orjl (P2):** a tip from an UNRELATED branch falsely certified the named branch, because the check was
+  containment of the tip while nothing tied it to the branch. The tip must now be an ANCESTOR of the named branch, or
+  share its tree (a rebase that changed no files); anything else refuses. Discriminator both ways: 292/2 against the
+  revision the finding describes (both failures being the finding's cases), 294/0 with the fix.
+- **agents-jlfq (P3):** a bad `--landed-tip` was diagnosed as BRANCH ADVANCEMENT rather than as the tip not being
+  contained, sending the operator to the wrong object; and the gate identity named only one tip. Now: a containment
+  failure with an explicit tip says `--landed-tip <t> is NOT CONTAINED by the gate commit` and does NOT print the
+  advancement advice, while a valid explicit tip prints `explicit landed tip <t> for <branch> (at <current-tip>)` -
+  so one landing message carries BOTH the tip that was gated and where the branch now is. 41e/41f/41g pin all three
+  behaviours.
+
+Together they say what the parameter always meant: it must name BOTH the branch it certifies and the tip it records,
+and a mismatch must be diagnosed as a mismatch.
 
 ## The conflict that is NOT mechanical - THE FINDING
 
@@ -121,6 +145,13 @@ Two classes of remaining work, and they need different owners:
    ~1474 (37a).
 
 ## What the reviewer must check (one reviewer, all of it at once)
+
+The series is presented together because its parts are clean alone and interact here. The reviewer should confirm, on
+the FINAL tree: the application order (steps 1-4 apply with zero failed hunks on the stated base; the re-cut applies
+on top of the result); that no field name or parser is shared between which lane AUTHORED and which lane POSTED a
+verdict; that `--landed-tip` still cannot override the decision, and that the tip it records must be tied to the
+branch it certifies (agents-orjl) and diagnosed as an uncontained tip rather than as branch advancement
+(agents-jlfq); and that the 10 failures are the classification clash below rather than anything mechanical.
 
 1. the application order, and that steps 1-4 apply with zero failed hunks on the stated base;
    (the folded patch applies to pristine copies at fuzz 0 and reproduces 345 passed / 10 failed exactly)
