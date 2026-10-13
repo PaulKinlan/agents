@@ -67,10 +67,25 @@ discipline, not tooling — in the failure message itself.
   changed *nothing* — so a caller can retry in seconds instead of blocking a tool call for minutes.
 - **Reports go to stderr.** stdout carries bd's JSON for callers such as `bd show --json`; a report there
   would corrupt a parse.
-- **The lock fd is closed for the bd payload only** (`"$real" "$@" {fleet_bd_lock_fd}>&-`), so a child bd
-  leaves behind cannot keep every lane on the VM queued behind it after bd has exited. `flock(1)`'s child
-  inherits the fd (measured), so the old shim was exposed to this too; a shell rewrite loses even the
-  attempt unless the fd is closed explicitly — mine did, until `tests/bd-lock-holder.test.sh` caught it.
+- **THE LOCK IS HELD BY THE WORK, NOT BY THIS SHELL'S LIFETIME (P1, found by review).** bd **inherits** the
+  lock fd, so the lock survives this shim being SIGKILLed for as long as bd is still writing — and this
+  fleet SIGKILLs shims all day (bounded gates, the reaper, lane restarts), so that is normal operation.
+  An earlier revision of this patch closed the fd for bd (`{fleet_bd_lock_fd}>&-`) to stop a stray
+  descendant holding the lock after bd exited; the reviewer's probe measured what that cost:
+
+  | SIGKILL the shim while `bd` is still writing, then run a second call | result |
+  | --- | --- |
+  | as deployed (`flock(1)`'s child inherits the fd) | waits 5s for the work, then runs — **serialised** |
+  | with the fd closed for the child (the earlier revision) | runs immediately, 0s, rc=0 — **BYPASS, two writers** |
+  | this revision (bd inherits) | refused: rc=75 with a 1s bound, while the first bd was **still writing** |
+
+  The two failure directions are not symmetric, and that is what decides it: **over-holding** (a descendant
+  that outlives bd keeps the lock) delays other lanes, while **under-holding** (the lock released while bd
+  writes) breaks the one invariant this shim exists for. So the inheritance stays and the over-hold is
+  *reported* rather than prevented: a record whose pid is gone while the lock is still held is exactly that
+  case, and the waiter says the record is stale and the lock is still held. `tests/bd-lock-holder.test.sh`
+  case 9 pins it, and it is the only case that distinguishes this revision from the one it replaces
+  (against the fd-closing revision exactly 9a and 9b fail, 54 passed / 2 failed).
 - **An unannotated holder is not a mystery:** a holder from before this patch, a record written by
   something else, or a record with an unusable pid is reported as `UNNAMED`, with the fact that the lock
   releases automatically when a holder exits.
@@ -90,7 +105,8 @@ name, and a planted record must each carry no bead text (and a freeform subcomma
 | rig | result |
 | --- | --- |
 | patched shim, new suite | **56 passed, 0 failed** (35 behaviour + 21 privacy/shape cases) |
-| **pre-change shim, the same suite** | **27 passed, 29 failed** — the 27 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
+| **the revision this replaces** (lock fd closed for bd), the same suite | **54 passed, 2 failed** — and the two are exactly case 9a/9b, the killed-shim bypass |
+| **shim as deployed, the same suite** | **24 passed, 32 failed** — the 24 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
 | patched shim, existing `tests/bd-shim.test.sh` | **15 passed, 0 failed** (serialisation and the nesting escape still hold) |
 | composed with `fleet-worktree-beads-guard.patch`, **both orders** | applies both ways; composed shim valid bash; **56/56 + 15/15 + that patch's own 13/13** |
 | the three probes, first version vs this revision | operation **LEAK → no**, env lane/role **LEAK → no**, planted record **LEAK → no** |
@@ -143,7 +159,17 @@ it again.
   starting to print arguments.
 - **The record is advisory, not authoritative.** It is written by the shim, so a holder that predates this
   patch reports `UNNAMED`. On a VM mid-rollout you get named and unnamed holders both.
-- **Option (b) is not implemented here.** Posting the verdict as a COMMENT before the label writes remains
+- **A stray descendant can hold the lock past bd's exit, and that is now the accepted direction to fail.**
+  The alternative — releasing the lock when this shell dies — was measured to allow two concurrent writers,
+  which is worse. The cost is a delay, not corruption, and the waiter reports it (a record whose pid is gone
+  while the lock is still held reads as stale). A sweep that reclaims a lock held by an orphaned descendant
+  would need its own bead: naming the real holder requires scanning other processes for the lock fd, which is
+  a capability this patch deliberately does not add.
+- **Option (b) from the review is NOT a fix for the P1.** Revalidating the record against the holder's
+  liveness cannot close it: while the shim is dead and bd is writing, the lock is FREE, so a second call
+  acquires it without ever seeing contention and nothing on the waiting side is consulted. Correctness comes
+  from the fd, which is why the fix is the inheritance. (The record's liveness check stays useful for the
+  stale-record case, and that is all it is.) Posting the verdict as a COMMENT before the label writes remains
   lane discipline; the timeout message tells the caller to do it rather than doing it for them.
 - **`flock` is still the only serialisation.** Nothing here changes the critical section, and nothing here
   makes a timed-out call retry — it tells the caller to.

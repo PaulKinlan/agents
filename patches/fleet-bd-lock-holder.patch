@@ -1,4 +1,4 @@
-From db5139a25942768e6ce7888ac12a5064f143cb5e Mon Sep 17 00:00:00 2001
+From 6c9098c3754eade4fe9bc2f79c46077c43132819 Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
@@ -43,14 +43,43 @@ interleaved 40-call runs). Applies in both orders with the other pending bin/bd 
 (fleet-worktree-beads-guard.patch); the composed shim passes all three suites.
 
 Release-note: none (fleet tooling; no user-facing surface)
+
+--- P1 FIX (found by review, on the revision above): THE LOCK MUST BE HELD BY THE WORK, NOT BY THIS SHELL ---
+
+The revision above closed the lock fd for the bd child, and a reviewer's probe found what that costs:
+SIGKILL the shim while bd is STILL WRITING and the lock is released, so a second bd runs CONCURRENTLY with
+the first. Measured here, both directions:
+
+  SIGKILL the shim while bd is writing, then run a second call:
+    as deployed (flock(1)'s child inherits the fd):  waits 5s for the work, then runs  -> serialised
+    the revision above (fd closed for the child):    runs IMMEDIATELY, 0s, rc=0        -> BYPASS, two writers
+    this revision (bd inherits):                     refused, rc=75 with a 1s bound,
+                                                     while the first bd was STILL WRITING
+
+Killing a shim is normal operation in this fleet (bounded gates, the reaper, lane restarts), so this was a
+bypass we would have hit rather than an exotic one - and it defeated the entire point of the lock. bd now
+INHERITS the lock fd, so the lock outlives the shim for as long as the WORK lasts. The fd close was a fix
+for a real but lesser problem (a stray descendant holding the lock after bd exits), and the two failure
+directions are not symmetric: OVER-holding delays other lanes, while UNDER-holding - the lock released
+while bd writes - breaks the one invariant this shim exists for. The inheritance stays and the over-hold is
+REPORTED rather than prevented: a record whose pid is gone while the lock is still held is exactly that
+case, and the waiter says the record is stale and the lock is still held. Nothing on the waiting side could
+have fixed this: while the shim is dead and bd is writing, the lock is FREE, so a second call acquires it
+without ever seeing contention - correctness comes from the fd.
+
+Case 9 of tests/bd-lock-holder.test.sh pins it, and it is the only case that distinguishes this revision
+from the one it replaces: against the fd-closing revision exactly 9a and 9b fail (54 passed / 2 failed),
+and against the shim as deployed the suite is 24 passed / 32 failed.
+
+Release-note: none (fleet tooling; no user-facing surface)
 ---
- bin/bd                       | 294 ++++++++++++++++++++++++++++++++++-
- tests/bd-lock-holder.test.sh | 219 ++++++++++++++++++++++++++
- 2 files changed, 512 insertions(+), 1 deletion(-)
+ bin/bd                       | 303 ++++++++++++++++++++++++++++++++++-
+ tests/bd-lock-holder.test.sh | 254 +++++++++++++++++++++++++++++
+ 2 files changed, 556 insertions(+), 1 deletion(-)
  create mode 100644 tests/bd-lock-holder.test.sh
 
 diff --git a/bin/bd b/bin/bd
-index 723856f..fe17d4f 100755
+index 723856f..774c510 100755
 --- a/bin/bd
 +++ b/bin/bd
 @@ -246,6 +246,280 @@ guard_worktree_beads_decoy() {
@@ -334,7 +363,7 @@ index 723856f..fe17d4f 100755
  if [ -n "${FLEET_BD_LOCKED:-}" ]; then
    "$real" "$@"
    rc=$?
-@@ -254,7 +528,25 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+@@ -254,7 +528,34 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
  fi
  
  export FLEET_BD_LOCKED=1
@@ -349,13 +378,22 @@ index 723856f..fe17d4f 100755
 +if [ "$rc" -ne 0 ]; then
 +  exit "$rc"          # timed out: the holder was named on stderr, and nothing ran
 +fi
-+# The lock fd is closed FOR bd ONLY. The shim holds the lock for exactly as long as bd runs, but bd's own
-+# children do not inherit the fd. Without this, anything bd leaves running in the background keeps the
-+# whole VM's bead writes queued behind it after bd itself has exited - measured: a child that outlives its
-+# holder keeps the lock (that is how a `git push` keeps it for the network round-trip), and a killed
-+# holder left its payload holding the lock as well. flock(1)'s child inherits the fd, so the old shim was
-+# exposed to this too; a shell rewrite loses even the attempt unless the fd is closed explicitly.
-+"$real" "$@" {fleet_bd_lock_fd}>&-
++# THE LOCK MUST BE HELD BY THE WORK, NOT BY THIS SHELL'S LIFETIME (P1 - found by review of this patch, bead agents-elu6). bd INHERITS the
++# lock fd, so the lock stays held for as long as the work does, even if this shim is SIGKILLed - and this
++# fleet SIGKILLs shims all day (bounded gates, the reaper, lane restarts), so that is normal operation
++# rather than an exotic case. The earlier revision closed the fd for bd (`{fleet_bd_lock_fd}>&-`) to stop a
++# stray descendant holding the lock after bd exited; the reviewer's probe measured what that cost:
++#
++#   SIGKILL the shim while `bd` is still writing, then run a second call:
++#     as deployed (flock(1)'s child inherits):  waits 5s for the work, then runs   -> serialised
++#     with the fd closed for the child:         runs IMMEDIATELY, 0s, rc=0         -> BYPASS, two writers
++#
++# The two failure directions are not symmetric, which is what decides this: OVER-holding (a descendant that
++# outlives bd keeps the lock) delays other lanes, while UNDER-holding (the lock released while bd writes)
++# breaks the one invariant this whole shim exists for. So the inheritance stays, and the over-hold is
++# reported instead of prevented - a record whose pid is gone while the lock is still held is exactly that
++# case, and the waiter says so.
++"$real" "$@"
  rc=$?
 +: >"$fleet_bd_lock" 2>/dev/null || true     # clear our record while we still hold the lock
 +exec {fleet_bd_lock_fd}>&-                  # release
@@ -363,10 +401,10 @@ index 723856f..fe17d4f 100755
  exit "$rc"
 diff --git a/tests/bd-lock-holder.test.sh b/tests/bd-lock-holder.test.sh
 new file mode 100644
-index 0000000..3a5e0b3
+index 0000000..b145182
 --- /dev/null
 +++ b/tests/bd-lock-holder.test.sh
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,254 @@
 +#!/usr/bin/env bash
 +# tests/bd-lock-holder.test.sh — bin/bd: a contended lock NAMES ITS HOLDER, and the wait is bounded (agents-elu6).
 +#
@@ -515,6 +553,50 @@ index 0000000..3a5e0b3
 +has "$ROOT/e8" "WAITING" "8b while the report went to stderr"
 +release
 +
++echo "9. P1 REGRESSION (found by review, reproduced here): the lock outlives a KILLED shim for as long as the work lasts"
++# This case REPLACES an assertion that pinned the OPPOSITE (that bd's children do NOT inherit the lock fd).
++# That assertion was the bypass: it made the lock depend on the shim's lifetime, so SIGKILLing the shim while
++# bd was still writing released it and a second bd ran concurrently - measured here as 0s vs the 5s the work
++# still needed. A lock released while the work continues breaks the one invariant this shim exists for; a lock
++# held slightly too long only delays other lanes. That asymmetry decides the direction of the fix.
++: > "$LOCK"
++cat > "$T/.local/bin/bd" <<'WORKSTUB'
++#!/usr/bin/env bash
++if [ "$1" = work ]; then echo $$ > "$WORK_PID"; touch "$WORK_STARTED"; sleep 4; touch "$WORK_DONE"; fi
++echo "REAL-BD:$*"
++WORKSTUB
++chmod +x "$T/.local/bin/bd"
++WORK_PID="$ROOT/wpid" WORK_STARTED="$ROOT/wstarted" WORK_DONE="$ROOT/wdone" \
++  HOME="$T" FLEET_LANE=impl-other bash "$SHIM" work >/dev/null 2>&1 & KIDS="$KIDS $!"
++sleep 0.7
++kill -9 $(pgrep -f "bash $SHIM work" | head -1) 2>/dev/null    # SIGKILL the shim; bd is STILL writing
++sleep 0.3
++FLEET_BD_LOCK_WAIT=1 shim probe >"$ROOT/o9" 2>"$ROOT/e9"; rc=$?
++eq "$rc" "75" "9a a second call could NOT acquire the lock after the shim was killed"
++has "$ROOT/e9" "TIMEOUT" "9b it timed out rather than running concurrently"
++[ -f "$ROOT/wdone" ] && bad "9c the first work had already finished (the overlap would not have been real)" "" \
++  || ok "9c the first bd was STILL WRITING when the second call was refused"
++[ -f "$ROOT/wpid" ] && kill -9 "$(cat "$ROOT/wpid")" 2>/dev/null
++for _ in $(seq 1 60); do [ -f "$ROOT/wdone" ] && break; sleep 0.2; done
++FLEET_BD_LOCK_WAIT=2 shim probe >"$ROOT/o9b" 2>"$ROOT/e9b"; rc=$?
++eq "$rc" "0" "9d once the work ended the lock was released and the next call ran"
++# restore the standard stub for the later cases
++cat > "$T/.local/bin/bd" <<'STUB'
++#!/usr/bin/env bash
++echo "REAL-BD:$*"
++if [ "${STUB_SLEEP:-0}" -gt 0 ]; then
++  if [ "${STUB_SECRET_ARGV:-0}" -gt 0 ]; then
++    ( exec -a "SENTINEL-PRIVATE-PAYLOAD" sleep "$STUB_SLEEP" ) &
++  else
++    ( exec -a "git push --force-with-lease refs/dolt/data" sleep "$STUB_SLEEP" ) &
++  fi
++  wait $!
++fi
++exit "${STUB_RC:-0}"
++STUB
++chmod +x "$T/.local/bin/bd"
++release
++
 +echo "10. PRIVACY (agents-zoch, the reviewer's probe): bead text must reach neither the shared record nor another lane's stderr"
 +# rev-elu6 drove this: `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` used to appear in the lock file AND in
 +# the waiter's stderr. The fix reports the OPERATION from a fixed vocabulary instead of the arguments.
@@ -574,15 +656,6 @@ index 0000000..3a5e0b3
 +has "$ROOT/e14b" "unrecognised" "14e the planted operation is replaced by 'unrecognised'"
 +has "$ROOT/e14b" "pid is gone" "14f and the bogus pid is called out as stale"
 +release
-+
-+echo "9. the lock fd is NOT inherited by bd's children: a grandchild cannot keep the fleet locked after its parent exits"
-+out=$(STUB_ORPHAN=1 shim version 2>"$ROOT/e9a")
-+eq "$out" "REAL-BD:version" "9a the holder ran and exited"
-+s9=$SECONDS; out=$(FLEET_BD_LOCK_WAIT=2 shim version 2>"$ROOT/e9b"); rc=$?; d9=$((SECONDS - s9))
-+eq "$rc" "0" "9b the next call did not fail"
-+hasnt "$ROOT/e9b" "WAITING" "9c no wait was reported"
-+[ "$d9" -le 1 ] && ok "9d the lock was free THE MOMENT the holder exited (waited ${d9}s, not the orphan's 3s lifetime)" \
-+  || bad "9d the child it left behind kept the fleet locked after its parent exited" "waited ${d9}s"
 +
 +printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 +[ "$FAIL" -eq 0 ]
