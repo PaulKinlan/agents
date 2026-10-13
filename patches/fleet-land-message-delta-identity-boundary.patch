@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index 0c53d94..66b499e 100755
+index 0c53d94..c97a51f 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
 @@ -223,7 +223,7 @@ REV_CAND=$(jq --arg fam "${FLEET_VERDICT_MODEL_FAMILIES:-deepseek|zai|kimi|kimi-
@@ -11,26 +11,48 @@ index 0c53d94..66b499e 100755
  
  # ---------- reviewer independence: which verdicts may be operative (fleet-ry7m, fleet-transcription-provenance) ----------
  # A verdict comment authored by the branch author lane cannot mask a verdict from another actor when
-@@ -360,6 +360,36 @@ flm_select() {
+@@ -360,6 +360,58 @@ flm_select() {
          rev_cleared=false
        fi
  
 +# Normalize diff hunks by stripping hunk headers and trimming boundary blank lines per file (fleet-6ihq).
-+# Allows pure offset moves and hunk boundary whitespace shifts (e.g. context blank becoming added blank)
-+# to evaluate as content-identical when the substantive added/removed payload is unchanged.
++# Preserves binary patch content and postimage blob identities, file mode changes, and file boundaries
++# so altered binary payloads or file mode changes refuse delta identity while pure offset moves and
++# hunk boundary whitespace shifts (e.g. context blank becoming added blank) evaluate as content-identical.
 +flm_normalize_diff() {
 +  awk '
 +    /^diff --git / {
 +      flush()
 +      cur_file = $3
++      cur_post = ""
 +      print "FILE:" cur_file
 +      next
 +    }
-+    index($0, "+++") == 1 || index($0, "---") == 1 || /^index/ || /^@@/ { next }
++    /^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+/ {
++      val = $2
++      sub(/^[0-9a-fA-F]+\.\./, "", val)
++      cur_post = val
++      next
++    }
++    /^@@/ { next }
++    index($0, "+++") == 1 || index($0, "---") == 1 { next }
++    /^(old mode|new mode|deleted file mode|new file mode)/ {
++      print $0
++      next
++    }
++    /^(GIT binary patch|Binary files|literal |delta )/ || in_binary {
++      if (!in_binary) {
++        in_binary = 1
++        if (cur_post != "") print "POSTIMAGE:" cur_post
++      }
++      print $0
++      next
++    }
 +    /^[+-]/ {
 +      lines[count++] = $0
 +    }
 +    function flush() {
++      in_binary = 0
 +      start = 0
 +      while (start < count && lines[start] ~ /^[+-][[:space:]]*$/) start++
 +      end = count - 1
@@ -48,7 +70,7 @@ index 0c53d94..66b499e 100755
        # DELTA-IDENTITY FALLBACK (fleet-15b5, fleet-7347):
        # When rev_sha does not equal tip, compare the reviewed delta against the current tip's
        # own delta for the branch's files. A rebase changes commit SHAs but preserves the delta.
-@@ -407,10 +437,19 @@ flm_select() {
+@@ -407,10 +459,19 @@ flm_select() {
              rev_diff=$(git diff --binary "$rev_base..$rev_full" 2>/dev/null)
              tip_diff=$(git diff --binary "$tip_base..$tip_full" 2>/dev/null)
  
@@ -69,7 +91,7 @@ index 0c53d94..66b499e 100755
              fi
  
              if [ "$delta_match" = true ]; then
-@@ -418,14 +457,6 @@ flm_select() {
+@@ -418,14 +479,6 @@ flm_select() {
                rev_delta_identical=true
                # same shared decision as above - never a second word list
                if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
@@ -84,7 +106,7 @@ index 0c53d94..66b499e 100755
              fi
            elif [ -n "$tip_files" ] || [ -n "$rev_files" ]; then
              rev_delta_mismatch="files changed"
-@@ -692,7 +723,11 @@ fi
+@@ -692,7 +745,11 @@ fi
  if [ "$rev_state" = "CURRENT" ]; then
    if [ "$rev_cleared" = true ]; then
      if [ "$rev_delta_identical" = true ]; then
@@ -97,7 +119,7 @@ index 0c53d94..66b499e 100755
      else
        rev_line="PASS (verdict: $rev_verdict) for commit ${rev_sha:-$tip} by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence]"
      fi
-@@ -968,6 +1003,7 @@ if [ "$JSON" = 1 ]; then
+@@ -968,6 +1025,7 @@ if [ "$JSON" = 1 ]; then
      --arg rev_who "${rev_who:-}" --arg rev_at "${rev_at:-}" --argjson rev_unreviewed "${rev_unreviewed:-0}" \
      --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
      --argjson rev_delta_identical "${rev_delta_identical:-false}" \
@@ -105,7 +127,7 @@ index 0c53d94..66b499e 100755
      --arg rev_delta_mismatch "${rev_delta_mismatch:-}" \
      --arg rev_run_id "${rev_run_id:-}" \
      --arg cleared_sha "${cleared_label_sha:-}" \
-@@ -985,7 +1021,7 @@ if [ "$JSON" = 1 ]; then
+@@ -985,7 +1043,7 @@ if [ "$JSON" = 1 ]; then
                unreviewed_commits:$rev_unreviewed,author:$rev_who,at:$rev_at,cleared:$rev_cleared,
                selected_comment_index:($rev_comment_index|if .=="" then null else tonumber end),
                selected_comment_author:$rev_who,author_lane_transcription:$author_lane_transcription,
@@ -115,7 +137,7 @@ index 0c53d94..66b499e 100755
                reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
                author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
 diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
-index 0dd6274..4dfb0db 100755
+index 0dd6274..8fc9aec 100755
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
 @@ -1497,7 +1497,7 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "content changed" "37g delta
@@ -127,7 +149,7 @@ index 0dd6274..4dfb0db 100755
  git -C "$ROOT/repo" checkout -q -b fleet/pos-base-old main
  printf "line1\nline2\n" > "$ROOT/repo/pos.txt"
  git -C "$ROOT/repo" add pos.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "pos base old"
-@@ -1524,9 +1524,47 @@ cat > "$B" <<J
+@@ -1524,9 +1524,75 @@ cat > "$B" <<J
    "text":"VERDICT: PASS\nDelta: tk-1 $pos_base_old..$pos_rev branch fleet/pos-tip\nFindings: none"}]
  J
  j_out=$(run --print-json tk-1 fleet/pos-tip)
@@ -175,6 +197,34 @@ index 0dd6274..4dfb0db 100755
 +eq "$(jq -r '.review.delta_normalized' <<<"$j_f5a5")" "true" "37m f5a5 boundary blank shift delta_normalized is true"
 +out_f5a5=$(run tk-1 fleet/f5a5-tip 2>&1)
 +has "$out_f5a5" "[normalized]" "37n f5a5 boundary blank shift landing message notes normalized"
++
++# 37o-37q: altered binary payload refuses delta identity and reports content changed
++git -C "$ROOT/repo" checkout -q -b fleet/bin-base main
++printf "base\x00data\n" > "$ROOT/repo/payload.bin"
++git -C "$ROOT/repo" add payload.bin && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "bin base"
++bin_base=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/bin-rev
++printf "first\x00data\n" > "$ROOT/repo/payload.bin"
++git -C "$ROOT/repo" add payload.bin && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "bin rev"
++bin_rev=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/bin-tip
++printf "second\x00data\n" > "$ROOT/repo/payload.bin"
++git -C "$ROOT/repo" add payload.bin && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "bin tip"
++bin_tip=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: bin.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 $bin_base..$bin_rev branch fleet/bin-tip\nFindings: none"}]
++J
++j_bin=$(run --print-json tk-1 fleet/bin-tip)
++eq "$(jq -r '.review.delta_mismatch' <<<"$j_bin")" "content changed" "37o altered binary payload reports content changed"
++eq "$(jq -r '.review.cleared' <<<"$j_bin")" "false" "37p altered binary payload does not clear"
++out_bin=$(run tk-1 fleet/bin-tip 2>&1 || true)
++has "$out_bin" "content changed" "37q refusal line reports content changed on binary mismatch"
  
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
