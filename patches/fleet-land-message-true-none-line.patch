@@ -1,0 +1,26 @@
+diff --git a/bin/fleet-land-message b/bin/fleet-land-message
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
+@@ -676,7 +676,7 @@
+ elif [ "$rev_state" = "FAIL" ]; then
+   rev_line="FAIL: verdict was $rev_verdict for commit ${rev_sha:-$tip} by $rev_who at $rev_at — NOT CLEARED"
+ else
+-  rev_line="NONE: no review verdict found on bead $BEAD"
++  rev_line="NONE: no parseable review verdict comment found on bead $BEAD"
+ fi
+ 
+ # Invalidate clearance if review is STALE, DIVERGED, UNRESOLVED, UNPINNED, AMBIGUOUS, or FAIL (fleet-qv84, fleet-nxko, fleet-60zh)
+diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
+--- a/tests/fleet-land-message.test.sh
++++ b/tests/fleet-land-message.test.sh
+@@ -1034,6 +1034,10 @@
+ hasnt "$(cat "$FIX/bd-comments-added.log" 2>/dev/null)" "clearance rejected" "14t no verdict posts no rejection comment"
+ has "$out_none2" "label left as it was" "14u ...and it says the queue state was not touched"
+ 
++# 14w1: emit prints honest NONE review line
++out_honest_none=$(run --allow-stale tk-1 fleet/delta1)
++has "$out_honest_none" "NONE: no parseable review verdict comment found on bead tk-1" "14w1 landing message prints honest NONE review line"
++
+ # 14v-14y: a documented multi-line WHAT: is not a missing block
+ cat > "$B" <<J
+ [{"author":"proj-lane-1","created_at":"2026-10-10T10:00:00Z",
