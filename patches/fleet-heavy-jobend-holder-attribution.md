@@ -65,6 +65,25 @@ accused the innocent. Theirs uses a stub job and a SIBLING victim, so the innoce
 group while the job's own fd never reaches it. **When a fixture fails to reproduce, the trigger is the
 thing to vary, not the assertion.**
 
+### The setsid assumption, stated as an assumption (agents-bz7j)
+
+The sweep treats a holder that is in THIS script's own process group as the measurement pipeline and
+skips it. That is true of the pipeline - its fork, `grep` and `tr` are children of our own `$( )` - but
+it is NOT a property of leaks, and the reviewer measured the counter-example: a job that backgrounds a
+child WITHOUT `setsid` leaves that child in our group, holding the slot fd, reparented to init. It is a
+genuine leak and the sweep will not kill it.
+
+What happens to such a holder instead, so the cost is stated rather than implied: it is left to
+`reclaim_abandoned_slot`, which finds it through the orphan signatures (ppid 1) once the grace has
+passed. Measured on the reviewer's rig: `--status` reports the slot as `held:unknown` and the next
+waiter reclaims it after grace plus one poll, about 65s with defaults, rather than at job end.
+
+That is a debt, not a design. It is taken because the alternative - killing a whole process group that
+contains our own instrument - is the agents-z5pp defect, which kills innocent bystanders. The durable fix
+is to exclude the instrument by IDENTITY inside `slot_fd_holders` rather than by group membership at the
+call site, which is agents-lhow; when that lands, this exclusion can be narrowed and a same-group leak
+can be killed at job end again.
+
 ### What is NOT claimed
 
 That the collateral kill was ever observed on the hub. It is reproduced on the reviewer's rig, which is
