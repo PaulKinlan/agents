@@ -1,51 +1,63 @@
-From c54c12ed5f53e797dc38bb56935aba8632d9e994 Mon Sep 17 00:00:00 2001
+From 2eb6714ce4b3f798dbed1eec41501fb91968cec4 Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
-Subject: [PATCH] fix(bd): a contended lock names its holder, and the wait is
- visible and bounded (agents-elu6)
+Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
+ bounded waits and content-free diagnostics (agents-elu6)
 
 `flock -w 300 <lock> <cmd>` waits in silence and then exits 1 with NO output at all (measured against
 util-linux 2.39.3). Measured cost of that on 2026-10-13: a COMPLETE cross-family review could not record
 its verdict for more than four minutes because another lane's `bd dolt push` held this VM's shared lock
 for the whole network round-trip of its child `git push --force-with-lease refs/dolt/data` - so a lane
-holding a finished result produced no output, looked IDLE, and the failure carried no reason at all. It
-is the zombie-lane and silent-spawn failure shape one layer down, and the verdict it delays is the
-artefact that authorises a landing.
+holding a finished result produced no output, looked IDLE, and the failure carried no reason. It is the
+zombie-lane and silent-spawn failure shape one layer down, and the verdict it delays is the artefact that
+authorises a landing.
 
 The holder now names itself: while it holds the lock it writes one record line into the lock FILE (a lock
 object, never a data file - flock's lock is on the fd/inode, so writing the record does not disturb it)
 and clears it before releasing. A waiter that cannot take the lock reports the holder's lane, role, pid,
-the bd command it is running, how long it has held it, and the holder's whole descendant tree - which is
-where a push actually spends its minutes.
+operation and how long it has been held, plus the holder's descendant processes - which is where a push
+actually spends its minutes.
+
+A DIAGNOSTIC MUST NOT NEED THE CONTENT IT IS DIAGNOSING (agents-zoch). The first version of this patch
+stored and reported the holder's full argv, and rev-elu6 defeated it by DRIVING it rather than reading it:
+`bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` put that text into the shared lock file AND into the waiting
+lane's stderr. Both surfaces belong to other people - the lock file is shared by every lane on the VM and
+the report is written into a lane that did not type the text - and bead text can be anything an operator
+or an agent typed. So nothing freeform is copied: the operation comes from a fixed vocabulary (anything
+else is `unrecognised`), descendant processes are named from a fixed vocabulary (anything else is `other`),
+and no bead id, body or argument is stored or printed at all. Fail-closed, so a spelling nobody has thought
+of cannot leak either.
 
 - patience is unchanged (300s) and no longer silent: a report on first contention, then at most one per
   FLEET_BD_LOCK_REPORT (default 30s); FLEET_BD_LOCK_WAIT bounds the whole wait
-- on expiry it fails FAST with EX_TEMPFAIL (75), the holder named, having changed nothing - so a caller
-  can retry in seconds instead of blocking a tool call for minutes
+- on expiry it fails FAST with EX_TEMPFAIL (75), the holder named, having changed nothing
 - reports go to STDERR: stdout carries bd's JSON for callers such as `bd show --json`
-- the lock fd is closed FOR THE bd PAYLOAD ONLY, so a child bd leaves behind cannot keep every lane on
-  the VM queued behind it after bd has exited (flock(1) got this for free by exec'ing with the fd
-  inherited; a shell rewrite loses it silently, and did)
-- an unannotated holder (one from before this change, or a stale record naming a dead pid) is reported
-  as unnamed/stale rather than as a mystery
+- the lock fd is closed FOR THE bd PAYLOAD ONLY, so a child bd leaves behind cannot keep every lane on the
+  VM queued behind it after bd has exited (flock(1)'s child inherits the fd; a shell rewrite loses even
+  the attempt unless the fd is closed explicitly)
+- an unannotated holder, or a record naming a dead pid, is reported as unnamed/stale rather than as a
+  mystery
 
-tests/bd-lock-holder.test.sh pins it hermetically: a stub $HOME/.local/bin/bd and a throwaway home, so
-it never contends with the fleet. 35 cases; against the pre-change shim the same file reports 15 passed
-and 18 failed (the failing ones are exactly the new behaviour), while the existing tests/bd-shim.test.sh
-stays 15/15. Uncontended cost: +0.47ms per call (8.23 -> 8.70ms, best of 6 interleaved 40-call runs).
+tests/bd-lock-holder.test.sh pins all of it hermetically: a stub $HOME/.local/bin/bd and a throwaway home,
+so it never contends with the fleet. 46 cases, including three that reproduce the reviewer's probe - the
+shared record, the waiter's stderr and a descendant's argument vector must each contain no bead text.
+Against the pre-change shim the same file reports 23 passed / 23 failed, while the existing
+tests/bd-shim.test.sh stays 15/15. Uncontended cost: +0.47ms per call (8.23 -> 8.70ms, best of 6
+interleaved 40-call runs). Applies in both orders with the other pending bin/bd patch
+(fleet-worktree-beads-guard.patch); the composed shim passes all three suites.
 
 Release-note: none (fleet tooling; no user-facing surface)
 ---
- bin/bd                       | 158 ++++++++++++++++++++++++++++++++++-
- tests/bd-lock-holder.test.sh | 150 +++++++++++++++++++++++++++++++++
- 2 files changed, 307 insertions(+), 1 deletion(-)
+ bin/bd                       | 223 ++++++++++++++++++++++++++++++++++-
+ tests/bd-lock-holder.test.sh | 187 +++++++++++++++++++++++++++++
+ 2 files changed, 409 insertions(+), 1 deletion(-)
  create mode 100644 tests/bd-lock-holder.test.sh
 
 diff --git a/bin/bd b/bin/bd
-index 723856f..216b208 100755
+index 723856f..ac56b8e 100755
 --- a/bin/bd
 +++ b/bin/bd
-@@ -246,6 +246,144 @@ guard_worktree_beads_decoy() {
+@@ -246,6 +246,209 @@ guard_worktree_beads_decoy() {
  
  guard_worktree_beads_decoy "$@"
  
@@ -62,8 +74,20 @@ index 723856f..216b208 100755
 +# THE HOLDER NAMES ITSELF. While it holds the lock, the holder writes one record line into the lock FILE
 +# (a lock object, never a data file: flock's lock is on the fd/inode, so writing the record does not
 +# disturb it) and clears it before releasing. A waiter that cannot take the lock reads that record and
-+# reports the holder's lane, pid, the bd command it is running and how long it has held it - plus, while
-+# it waits, the holder's child processes, which is where the minutes actually go (`git push`).
++# reports the holder's lane, pid and operation, and how long it has held it - plus, while it waits, the
++# holder's descendant processes, which is where the minutes actually go (`git`).
++#
++# A DIAGNOSTIC MUST NOT NEED THE CONTENT IT IS DIAGNOSING (agents-zoch). The first version of this record
++# stored and reported the holder's full argv, and rev-elu6 defeated it by DRIVING it rather than reading
++# it: `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` put that text in the shared lock file AND in the
++# waiting lane's stderr. Both surfaces are other people's: the lock file is shared by every lane on the VM
++# and the report is written into a lane that is not the one that typed the text, so one lane's diagnostic
++# is another lane's leak - and bead text can be anything an operator or an agent typed. The fix is not to
++# filter that text but to never need it: every reported word now comes from a fixed vocabulary (the
++# subcommand, the `dolt` operation, a process name), and anything outside it is reported as the literal
++# `unrecognised` / `other`. That is the fail-closed shape the reviewer guard above already uses, and it
++# cannot be defeated by a spelling nobody has thought of yet - including a subcommand position holding
++# freeform text.
 +#
 +# Reports go to STDERR: bd writes JSON on stdout for callers such as `bd show --json`, and a message there
 +# would corrupt a parse.
@@ -74,35 +98,86 @@ index 723856f..216b208 100755
 +# (75) and the holder named, so the caller can retry in seconds rather than block for minutes - and the
 +# durable order is `bd comment` (the artefact) BEFORE the label and status writes (the state), so a retry
 +# never loses the thing that matters.
++fleet_bd_lock_shape() {
++  # THE OPERATION, FROM A FIXED VOCABULARY. Never an argument, never an id, never a body: see agents-zoch
++  # in the header. The subcommand position is scanned for the first bare word (skipping flags and the value
++  # of a known value-taking flag), because a global flag can sit before it - but the word is only reported
++  # if it is in the list below, so `bd "<private text>" ...` reports `unrecognised`, not the text.
++  local sub="" op="" a expect_value=0
++  for a in "$@"; do
++    if [ "$expect_value" = 1 ]; then expect_value=0; continue; fi
++    case "$a" in
++      --actor|--database|--db|--dolt-auto-commit|--mem-profile|--directory|-C) expect_value=1; continue ;;
++      -*) continue ;;
++    esac
++    if [ -z "$sub" ]; then sub="$a"; elif [ -z "$op" ]; then op="$a"; fi
++  done
++  case "$sub" in
++    "") printf 'unknown' ;;
++    show|comments|list|search|ready|query|children|blocked|provenance|prime|status|url|help|version|\
++    create|comment|note|dep|link|label|q|remember|update|close|reopen|delete|\
++    sync|worktree|gate|heartbeat|compact|batch|init|setup|doctor|stats|history|import|export)
++      printf '%s' "$sub" ;;
++    dolt)
++      case "$op" in
++        push|pull|status|fetch|log|show|version|remote) printf 'dolt %s' "$op" ;;
++        "") printf 'dolt' ;;
++        *) printf 'dolt unrecognised' ;;
++      esac ;;
++    *) printf 'unrecognised' ;;
++  esac
++}
++
++fleet_bd_lock_procname() {
++  # A PROCESS NAME, FROM A FIXED VOCABULARY - never its argument vector. `ps -o args=` was the other half of
++  # agents-zoch: a descendant is freeform too (`git commit -m '<private text>'`), and comm itself can be set
++  # to arbitrary short text by any program, so it is filtered to the characters a program name uses and then
++  # matched against this list. Anything else is `other`; a name whose process is gone is `gone`.
++  local name
++  name="$(tr -dc '[:alnum:]._+-' <"/proc/$1/comm" 2>/dev/null | cut -c1-16)"
++  case "$name" in
++    "") printf 'gone' ;;
++    bd|git|git-remote-https|git-remote-http|ssh|flock|sleep|sh|bash|dash|timeout|python3|node|ps|sed|head|jq|awk|grep)
++      printf '%s' "$name" ;;
++    *) printf 'other' ;;
++  esac
++}
++
 +fleet_bd_lock_field() {
 +  # One key=value field out of a holder record. Tokens are split first, so a field at the START of the
 +  # line (pid= is first) matches exactly like one in the middle - a regex needing a leading space before
 +  # the key silently returned UNNAMED for every holder until the test in tests/bd-lock-holder.test.sh
-+  # caught it. argv= is read to end-of-line: it contains the command's own spaces.
-+  if [ "$2" = argv ]; then
-+    printf '%s' "$1" | sed -n 's/.*[[:space:]]argv=//p'
-+  else
-+    printf '%s' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
++  # caught it. `cmd=` is the LAST field and may hold two words (`dolt push`), so it is read to
++  # end-of-line: token-splitting it returned `cmd=dolt` and the operation silently lost its verb
++  # (caught by the test's `running: bd dolt push` assertion, which is why that assertion names both words).
++  if [ "$2" = cmd ]; then
++    printf '%s' "$1" | tr '\n' ' ' | sed -n 's/.*[[:space:]]cmd=//p'
++    return 0
 +  fi
++  printf '%s' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
 +}
 +
 +fleet_bd_lock_note() {
 +  # Our own holder record. Written while we hold the lock, cleared before we release it. Never fails the
-+  # call: a lock file we cannot annotate is not a reason to refuse to run bd. `printf '%(%s)T'` and "$*"
-+  # are shell builtins - a `$(date +%s)` fork here cost 8ms on EVERY bd call on the VM (measured), which
-+  # is 68% of the shim's own uncontended cost and is not worth paying on the path that never contends.
++  # call: a lock file we cannot annotate is not a reason to refuse to run bd. `printf '%(%s)T'` is a shell
++  # builtin - a `$(date +%s)` fork here cost 8ms on EVERY bd call on the VM (measured), which is not worth
++  # paying on the path that never contends. NOTHING freeform goes in here: lane/role are the fleet's own
++  # names, and the command is reduced to its operation by fleet_bd_lock_shape (agents-zoch).
 +  local lock="$1"; shift
 +  printf -v fleet_bd_now '%(%s)T' -1 2>/dev/null || fleet_bd_now=0
 +  {
-+    printf 'pid=%s lane=%s role=%s since=%s argv=bd %s\n' \
-+      "$$" "${FLEET_LANE:-unknown}" "${FLEET_ROLE:-unknown}" "${fleet_bd_now:-0}" "$*"
++    # cmd LAST: it is the only field that can contain a space (`dolt push`), and fleet_bd_lock_field reads
++    # it to end-of-line.
++    printf 'pid=%s lane=%s role=%s since=%s cmd=%s\n' \
++      "$$" "${FLEET_LANE:-unknown}" "${FLEET_ROLE:-unknown}" "${fleet_bd_now:-0}" "$(fleet_bd_lock_shape "$@")"
 +  } >"$lock" 2>/dev/null || true
 +}
 +
 +fleet_bd_lock_descendants() {
 +  # The holder's whole descendant tree, which is where a dolt push spends its minutes: the holder runs bd,
 +  # which runs git, which runs git-remote-https for the round-trip to origin. Bounded to 4 levels so a
-+  # pathological or cyclic parent graph can never turn a report into an unbounded walk.
++  # pathological or cyclic parent graph can never turn a report into an unbounded walk. Each entry is a pid
++  # and a VOCABULARY process name - no argument vectors (agents-zoch).
 +  local frontier="$1" level=0 next kids p k all
 +  while [ -n "$frontier" ] && [ "$level" -lt 4 ]; do
 +    next=""
@@ -113,14 +188,15 @@ index 723856f..216b208 100755
 +    frontier="$next"
 +    level=$((level + 1))
 +  done
-+  [ -n "$all" ] || return 0
-+  ps -o pid=,args= -p $(printf '%s' "$all" | tr -s ' ') 2>/dev/null | head -6 | sed 's/^[[:space:]]*/bd:     */'
++  for k in $all; do
++    printf 'bd:     %s %s\n' "$k" "$(fleet_bd_lock_procname "$k")"
++  done
 +}
 +
 +fleet_bd_lock_report() {
 +  # $1 lock file, $2 seconds held, $3 mode: wait|timeout, $4 quiet_holder=1 to skip the holder block
 +  # (the timeout of an invocation that already reported the holder must not repeat all of it)
-+  local lock="$1" held="$2" mode="$3" rec pid lane role since argv human kids
++  local lock="$1" held="$2" mode="$3" rec pid lane role since cmd human kids
 +  local quiet_holder="${4:-}"
 +  rec="$(head -c 400 "$lock" 2>/dev/null | tr '\n' ' ')"
 +  human="$((held / 60))m$((held % 60))s"
@@ -141,9 +217,9 @@ index 723856f..216b208 100755
 +    lane="$(fleet_bd_lock_field "$rec" lane)"
 +    role="$(fleet_bd_lock_field "$rec" role)"
 +    since="$(fleet_bd_lock_field "$rec" since)"
-+    argv="$(fleet_bd_lock_field "$rec" argv)"
++    cmd="$(fleet_bd_lock_field "$rec" cmd)"
 +    echo "bd:   holder: lane=${lane:-?} role=${role:-?} pid=$pid${since:+ since $(date -d "@$since" -u +%H:%M:%SZ 2>/dev/null || printf '?')}" >&2
-+    echo "bd:   running: ${argv:-?}" >&2
++    echo "bd:   running: bd ${cmd:-unknown}   (operation only: arguments can hold bead text - agents-zoch)" >&2
 +    if [ -d "/proc/$pid" ]; then
 +      kids="$(fleet_bd_lock_descendants "$pid")"
 +      [ -n "$kids" ] && printf '%s\n' "$kids" >&2
@@ -160,7 +236,8 @@ index 723856f..216b208 100755
 +}
 +
 +fleet_bd_lock_acquire() {
-+  # $1 lock file, $2 lock fd, $3... the bd argv (for the record). 0 = held, 75 = timed out, reported.
++  # $1 lock file, $2 lock fd, $3... the bd argv (reduced to its operation by fleet_bd_lock_shape)
++  # 0 = held, 75 = timed out and reported.
 +  local lock="$1" fd="$2" wait="${FLEET_BD_LOCK_WAIT:-300}" every="${FLEET_BD_LOCK_REPORT:-30}"
 +  local start=$SECONDS held next=0 reported=0
 +  shift 2
@@ -190,7 +267,7 @@ index 723856f..216b208 100755
  if [ -n "${FLEET_BD_LOCKED:-}" ]; then
    "$real" "$@"
    rc=$?
-@@ -254,7 +392,25 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+@@ -254,7 +457,25 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
  fi
  
  export FLEET_BD_LOCKED=1
@@ -209,8 +286,8 @@ index 723856f..216b208 100755
 +# children do not inherit the fd. Without this, anything bd leaves running in the background keeps the
 +# whole VM's bead writes queued behind it after bd itself has exited - measured: a child that outlives its
 +# holder keeps the lock (that is how a `git push` keeps it for the network round-trip), and a killed
-+# holder left its payload holding the lock as well. So this is also what makes two behaviours below true:
-+# a killed holder releases at once, and a payload cannot leak the lock past its own exit.
++# holder left its payload holding the lock as well. flock(1)'s child inherits the fd, so the old shim was
++# exposed to this too; a shell rewrite loses even the attempt unless the fd is closed explicitly.
 +"$real" "$@" {fleet_bd_lock_fd}>&-
  rc=$?
 +: >"$fleet_bd_lock" 2>/dev/null || true     # clear our record while we still hold the lock
@@ -219,10 +296,10 @@ index 723856f..216b208 100755
  exit "$rc"
 diff --git a/tests/bd-lock-holder.test.sh b/tests/bd-lock-holder.test.sh
 new file mode 100644
-index 0000000..cb05043
+index 0000000..1dc3f38
 --- /dev/null
 +++ b/tests/bd-lock-holder.test.sh
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,187 @@
 +#!/usr/bin/env bash
 +# tests/bd-lock-holder.test.sh — bin/bd: a contended lock NAMES ITS HOLDER, and the wait is bounded (agents-elu6).
 +#
@@ -272,7 +349,11 @@ index 0000000..cb05043
 +  ( exec sleep 3 ) & disown 2>/dev/null || true    # a child that outlives bd, holding or not holding the lock fd
 +fi
 +if [ "${STUB_SLEEP:-0}" -gt 0 ]; then
-+  ( exec -a "git push --force-with-lease refs/dolt/data" sleep "$STUB_SLEEP" ) &
++  if [ "${STUB_SECRET_ARGV:-0}" -gt 0 ]; then
++    ( exec -a "SENTINEL-PRIVATE-PAYLOAD" sleep "$STUB_SLEEP" ) &
++  else
++    ( exec -a "git push --force-with-lease refs/dolt/data" sleep "$STUB_SLEEP" ) &
++  fi
 +  wait $!
 +fi
 +exit "${STUB_RC:-0}"
@@ -283,7 +364,7 @@ index 0000000..cb05043
 +# a holder from BEFORE agents-elu6: it takes the lock and writes no record
 +hold_raw() { ( exec 9>>"$LOCK"; flock -n 9 || exit 1; sleep "$1" ) & KIDS="$KIDS $!"; }
 +# a holder that goes through the shim, so it writes the holder record a waiter reads
-+hold_shim() { STUB_SLEEP="$1" HOME="$T" FLEET_LANE="${HOLDER_LANE:-impl-other}" bash "$SHIM" slow-run & KIDS="$KIDS $!"; }
++hold_shim() { local secs="$1"; shift; STUB_SLEEP="$secs" HOME="$T" FLEET_LANE="${HOLDER_LANE:-impl-other}" bash "$SHIM" "$@" & KIDS="$KIDS $!"; }
 +release() {
 +  [ -n "$KIDS" ] && { kill $KIDS 2>/dev/null; wait $KIDS 2>/dev/null; }
 +  KIDS=""
@@ -302,18 +383,18 @@ index 0000000..cb05043
 +[ -s "$LOCK" ] && bad "1f record left after a failing call" "$(cat "$LOCK")" || ok "1f record cleared even when bd fails"
 +
 +echo "2. contended: the holder is named at once, and the call still runs"
-+hold_shim 3; sleep 0.5
++hold_shim 3 dolt push; sleep 0.5
 +out=$(shim version 2>"$ROOT/e2"); rc=$?
 +eq "$out" "REAL-BD:version" "2a the call ran after the wait"
 +eq "$rc" "0" "2b exit 0"
 +has "$ROOT/e2" "WAITING 0m0s" "2c the report is immediate, not after a threshold"
 +has "$ROOT/e2" "lane=impl-other" "2d the holder's LANE is named"
-+has "$ROOT/e2" "running: bd slow-run" "2e the holder's COMMAND is named"
++has "$ROOT/e2" "running: bd dolt push" "2e the holder's OPERATION is named (dolt push - the shape of the real incident)"
 +has "$ROOT/e2" "pid=" "2f a pid is named"
 +release
 +
 +echo "3. beyond the bound: fail fast with EX_TEMPFAIL, holder named, call NOT run"
-+hold_shim 6; sleep 0.5
++hold_shim 6 dolt push; sleep 0.5
 +out=$(FLEET_BD_LOCK_WAIT=1 shim version 2>"$ROOT/e3"); rc=$?
 +eq "$rc" "75" "3a EX_TEMPFAIL (75), not an unexplained 1"
 +has "$ROOT/e3" "TIMEOUT (agents-elu6)" "3b it says TIMEOUT"
@@ -322,7 +403,7 @@ index 0000000..cb05043
 +has "$ROOT/e3" "FLEET_BD_LOCK_WAIT" "3e the bound is overridable, and the message says how"
 +[ -n "$out" ] && bad "3f bd ran after a timeout" "$out" || ok "3f bd did not run"
 +has "$ROOT/e3" "COMMENT first" "3g it points at the durable order for posting a verdict"
-+eq "$(grep -c 'running: bd slow-run' "$ROOT/e3")" "1" "3h the holder block is printed once, not repeated by the timeout"
++eq "$(grep -c 'running: bd dolt push' "$ROOT/e3")" "1" "3h the holder block is printed once, not repeated by the timeout"
 +release
 +
 +echo "4. a holder that left no record (one from before this change) is reported as UNNAMED, not as a mystery"
@@ -350,16 +431,49 @@ index 0000000..cb05043
 +release
 +
 +echo "7. the holder's DESCENDANTS are named - the git push is where the minutes are"
-+hold_shim 4; sleep 1
++hold_shim 4 dolt push; sleep 1
 +FLEET_BD_LOCK_WAIT=1 shim version >"$ROOT/o7" 2>"$ROOT/e7"
-+has "$ROOT/e7" "git push --force-with-lease refs/dolt/data" "7a the grandchild doing the waiting is named"
++has "$ROOT/e7" "sleep" "7a the process doing the waiting is named"
++hasnt "$ROOT/e7" "git push" "7b and its ARGUMENT VECTOR is not copied (agents-zoch)"
 +release
 +
 +echo "8. stdout carries only bd's own output: the report goes to stderr"
-+hold_shim 3; sleep 0.5
++hold_shim 3 dolt push; sleep 0.5
 +shim show bead-x --json >"$ROOT/o8" 2>"$ROOT/e8"
 +eq "$(cat "$ROOT/o8")" "REAL-BD:show bead-x --json" "8a stdout is exactly bd's output (no report mixed in)"
 +has "$ROOT/e8" "WAITING" "8b while the report went to stderr"
++release
++
++echo "10. PRIVACY (agents-zoch, the reviewer's probe): bead text must reach neither the shared record nor another lane's stderr"
++# rev-elu6 drove this: `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` used to appear in the lock file AND in
++# the waiter's stderr. The fix reports the OPERATION from a fixed vocabulary instead of the arguments.
++: > "$LOCK"
++STUB_SLEEP=3 HOME="$T" FLEET_LANE=impl-secret bash "$SHIM" comment issue-x SENTINEL-PRIVATE-PAYLOAD & KIDS="$KIDS $!"
++sleep 0.5
++hasnt "$LOCK" "SENTINEL" "10a the SHARED lock record carries no argument text"
++hasnt "$LOCK" "issue-x" "10b nor the bead id"
++has "$LOCK" "cmd=comment" "10c but it does name the OPERATION, which is the diagnostic need"
++FLEET_BD_LOCK_WAIT=1 shim show bead-x >"$ROOT/o10" 2>"$ROOT/e10"
++hasnt "$ROOT/e10" "SENTINEL" "10d the WAITING LANE's stderr carries no argument text"
++hasnt "$ROOT/e10" "issue-x" "10e nor the bead id"
++has "$ROOT/e10" "running: bd comment" "10f but it names the holder's operation"
++release
++
++echo "11. a freeform subcommand position cannot smuggle text in either (the vocabulary is fail-closed)"
++: > "$LOCK"
++STUB_SLEEP=2 HOME="$T" FLEET_LANE=impl-secret bash "$SHIM" "SENTINEL-PRIVATE-PAYLOAD" x & KIDS="$KIDS $!"
++sleep 0.5
++hasnt "$LOCK" "SENTINEL" "11a a freeform subcommand is not echoed into the record"
++has "$LOCK" "cmd=unrecognised" "11b it is reported as the fixed word 'unrecognised'"
++release
++
++echo "12. descendant reporting names processes, not their argument vectors"
++: > "$LOCK"
++STUB_SECRET_ARGV=1 STUB_SLEEP=4 HOME="$T" FLEET_LANE=impl-secret bash "$SHIM" slow-run & KIDS="$KIDS $!"
++sleep 1
++FLEET_BD_LOCK_WAIT=1 shim show bead-x >"$ROOT/o12" 2>"$ROOT/e12"
++hasnt "$ROOT/e12" "SENTINEL" "12a a descendant's ARGV is not copied"
++has "$ROOT/e12" "sleep" "12b the descendant is named by process name"
 +release
 +
 +echo "9. the lock fd is NOT inherited by bd's children: a grandchild cannot keep the fleet locked after its parent exits"
