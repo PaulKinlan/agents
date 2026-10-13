@@ -31,8 +31,8 @@
   1. **`bin/fleet-check`:** In `finish()`, remove `[ -n "$fast" ] &&` from the `cov_script` execution predicate. Full gates now run `check-coverage.py` and populate `.coverage`, `.suites`, `.unmapped`, and `.omitted` in the gate record.
   2. **`remote/check-coverage.py`:** Update marker regex patterns from `^fast-gate:` to `^(?:fast-gate|full-gate):` for suite dispatch/pass/fail, unmapped files, and unknown coverage markers.
   3. **`tests/check-coverage.test.sh`:** Added Section 8 verifying `full-gate: passed:` and `full-gate: unknown:` markers parse identically to fast-gate markers (assertions 8a–8d pass).
-  4. **`tests/fleet-gate-check.test.sh`:** Updated Section 14:
-     - `14v`: Assert full-gate record carries `.coverage`.
+  4. **`tests/fleet-gate-check.test.sh`:** Updated Section 14 with in-test rationale comments explaining the reversal of the legacy `fleet-1n0z` omission:
+     - `14v`: Assert full-gate record carries `.coverage` (reversal of legacy omission).
      - `14v2`: Assert full-gate record without runner evidence records `coverage: "UNKNOWN"`.
      - `14v3`: Assert full-gate record with runner evidence captures executed suites.
      - `14v4`: Assert full-gate record with complete mapping reports 0 unmapped files.

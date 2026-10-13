@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-check b/bin/fleet-check
-index 260c16e..47aa8cb 100755
+index 260c16e..55ce31c 100755
 --- a/bin/fleet-check
 +++ b/bin/fleet-check
 @@ -458,7 +458,8 @@ finish() {
@@ -44,7 +44,7 @@ index 8823d5c..46957fa 100755
                      gate_unknown = True
                      gate_unknown_reason = m_unknown.group(1).strip() or "the gate marked coverage unknown"
 diff --git a/tests/check-coverage.test.sh b/tests/check-coverage.test.sh
-index c0950df..eefea5c 100644
+index c0950df..92856ba 100644
 --- a/tests/check-coverage.test.sh
 +++ b/tests/check-coverage.test.sh
 @@ -216,6 +216,17 @@ printf '== tests/other.test.sh\n-- other finished in 1s\n' > "$ROOT/log-hub-othe
@@ -66,22 +66,28 @@ index c0950df..eefea5c 100644
  printf '%s passed, %s failed\n' "$PASS" "$FAIL"
  [ "$FAIL" = 0 ]
 diff --git a/tests/fleet-gate-check.test.sh b/tests/fleet-gate-check.test.sh
-index da641b1..50d2bb0 100755
+index da641b1..db5dcd5 100755
 --- a/tests/fleet-gate-check.test.sh
 +++ b/tests/fleet-gate-check.test.sh
-@@ -748,17 +748,34 @@ has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/vitest.test.ts" "14t vitest
+@@ -748,17 +748,40 @@ has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/vitest.test.ts" "14t vitest
  has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/test_cls.py" "14u class-qualified pytest output captured in suites"
  wait_curl "[check] FAST gate for"
  
 -# Full check does NOT run coverage extractor or warn on coverage
-+# Full check runs coverage extractor and carries coverage accounting
++# 14v reversal rationale: 14v originally pinned that full-gate records omitted .coverage because fleet-1n0z
++# conceived coverage accounting exclusively as a fast-gate affected-test selection guard under the assumption
++# that full gates always run everything. That deliberate [ -n "$fast" ] gatekeeper left landing verdicts
++# structurally blind to runner evidence (326 full-gate records had .coverage missing, suites=0, unmapped=null).
++# Measured extraction cost on real ~350KB full logs is 8-10s (<1% of full gate execution bound, running
++# asynchronously in the finish worker before inbox notification). 14v now asserts that full-gate records DO
++# carry .coverage, with UNKNOWN recorded when the log lacks runner evidence and complete mapping when suites run.
  rm -f "$CURL_LOG"
  full_rec="$HOME/.fleet/checks/$app_tree.json"
  echo 'CHECK_CMD="echo test ok"; CHECK_TIMEOUT=30' > "$CHECK_CONF"
  ( cd "$COV_REPO" && check )
  wait_check "$full_rec"
 -hasnt "$(jq -c . "$full_rec" 2>/dev/null)" '"coverage"' "14v full gate record omits coverage field"
-+has "$(jq -c . "$full_rec" 2>/dev/null)" '"coverage"' "14v full gate record carries coverage field"
++has "$(jq -c . "$full_rec" 2>/dev/null)" '"coverage"' "14v full gate record carries coverage field (reversal of legacy fleet-1n0z omission)"
 +cov_st=$(jq -r .coverage.coverage "$full_rec" 2>/dev/null)
 +[ "$cov_st" = "UNKNOWN" ] && ok "14v2 full gate without runner evidence records coverage UNKNOWN" || bad "14v2 expected coverage UNKNOWN" "got $cov_st"
  if wait_curl "[check] full gate for"; then
