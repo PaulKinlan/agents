@@ -428,3 +428,23 @@ index 9459cee..3d74ba7 100644
 +
  printf 'fleet-model-audit.test.sh: %d passed, %d failed\n' "$pass" "$fail"
  [ "$fail" -eq 0 ] || exit 1
+diff --git a/tests/pick-model-crossfamily.test.sh b/tests/pick-model-crossfamily.test.sh
+index da5c34b..8a247b6 100644
+--- a/tests/pick-model-crossfamily.test.sh
++++ b/tests/pick-model-crossfamily.test.sh
+@@ -112,6 +112,15 @@ rm -f "$HOME/.fleet/lanes/coord-lane.model"
+ m=$(PATH="$HOME/bin:$PATH" bash "$HERE/remote/impl-model.sh" tk-9)
+ eq "$m" "" "6d nothing determinable -> empty (caller proceeds unguarded)"
+ 
++
++echo "7. picker skips models observed to fall back in events.log (agents-kq0r)"
++cat > "$HOME/.fleet/lanes/prior-lane.events.log" <<'EV'
++10:00:00 ℹ runtime model fell back: antigravity/gemini-3.8-flash -> deepseek/deepseek-flash
++EV
++m=$(bash "$PICK" reviewer r2 2>"$ROOT/err7")
++[ "${m%%/*}" != "antigravity" ] && ok "7a model observed to fall back is skipped (got $m)" || bad "7a picker handed out fallen-back model" "$m"
++has "$(cat "$ROOT/err7")" "pick-model: skipping antigravity/gemini-3.8-flash" "7b logs skip reason to stderr"
++rm -f "$HOME/.fleet/lanes/prior-lane.events.log"
+ if [ "$FAIL" -gt 0 ]; then
+   echo "Failed tests: $FAIL"
+ fi
