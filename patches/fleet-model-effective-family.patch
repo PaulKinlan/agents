@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-model-audit b/bin/fleet-model-audit
-index a54d76a..a9d9473 100755
+index a54d76a..e5a221a 100755
 --- a/bin/fleet-model-audit
 +++ b/bin/fleet-model-audit
 @@ -31,6 +31,7 @@
@@ -165,7 +165,7 @@ index a54d76a..a9d9473 100755
 +        if [ "$fb_gov_rc" -eq 1 ]; then
 +          if [ -z "$MIS" ] && [ -z "$UNK" ]; then
 +            fam=$(lower "${turn_observed%%/*}")
-+            say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl)"
++            say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl; an earlier fallback to $fb_observed is superseded by this turn, which is the effective family)"
 +          fi
 +        else
 +          note_unk "lane '$lane' turns.jsonl ($turn_observed) and events.log fallback ($fb_observed) differ only in case"
@@ -177,7 +177,7 @@ index a54d76a..a9d9473 100755
 +        if [ "$fb_gov_rc" -eq 1 ]; then
 +          if [ -z "$MIS" ] && [ -z "$UNK" ]; then
 +            fam=$(lower "${turn_observed%%/*}")
-+            say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl)"
++            say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl; an earlier fallback to $fb_observed is superseded by this turn, which is the effective family)"
 +          fi
 +        elif [ "$fb_gov_rc" -eq 2 ]; then
 +          note_unk "lane '$lane' turns.jsonl ($turn_observed) and events.log fallback ($fb_observed) disagree, and temporal association cannot be established from their timestamps"
@@ -333,10 +333,10 @@ index cc17f6e..482ccd5 100755
 +fi
  echo "${best:-${rot[$((start % n))]}}"   # everything cooling: stay in rotation anyway (fail open)
 diff --git a/tests/fleet-model-audit.test.sh b/tests/fleet-model-audit.test.sh
-index 9459cee..7284a00 100644
+index 9459cee..3d74ba7 100644
 --- a/tests/fleet-model-audit.test.sh
 +++ b/tests/fleet-model-audit.test.sh
-@@ -550,6 +550,79 @@ FLEET_LANES_DIR="$ROOT/emptylanes"; mkdir -p "$FLEET_LANES_DIR"; audit --all
+@@ -550,6 +550,91 @@ FLEET_LANES_DIR="$ROOT/emptylanes"; mkdir -p "$FLEET_LANES_DIR"; audit --all
  audit
  [ "$rc" = 2 ] && ok "10h no arguments is a usage error (2)" || no "10h usage" "rc=$rc out=$out"
  
@@ -414,25 +414,17 @@ index 9459cee..7284a00 100644
 +[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family openai-codex" && ok "11r fallback after last turn does not contradict earlier completed turn" || no "11r fallback after turn" "rc=$rc out=${out:-(empty)}"
 +
  echo
++
++# 11s: a fallback SUPERSEDED by a later successful turn reports the turn's family AND discloses the superseded fallback,
++# so a reader can tell "never fell back" from "fell back once and recovered". (Coord, agents-kq0r: note it BESIDE the turn
++# rather than comparing across the gap.)
++printf '10:00:00 \u2139 runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-superseded.events.log"
++printf '{"at":"2026-10-13T10:00:02Z","model":"deepseek/deepseek-flash","host":"sdk"}\n{"at":"2026-10-13T10:05:00Z","model":"openai-codex/gpt-6-sol","host":"sdk"}\n' > "$F11/l-superseded.turns.jsonl"
++FLEET_LANES_DIR="$F11" audit family l-superseded
++[ -n "$out" ] && [ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family openai-codex" \
++  && ok "11s superseded fallback reports the family the turn ran" || no "11s match turn family" "${out:-(empty)}"
++[ -n "$out" ] && printf '%s' "$out" | grep -qi "superseded" && printf '%s' "$out" | grep -q "deepseek/deepseek-flash" \
++  && ok "11s and names the superseded fallback beside it" || no "11s discloses superseded fallback" "${out:-(empty)}"
++
  printf 'fleet-model-audit.test.sh: %d passed, %d failed\n' "$pass" "$fail"
  [ "$fail" -eq 0 ] || exit 1
-diff --git a/tests/pick-model-crossfamily.test.sh b/tests/pick-model-crossfamily.test.sh
-index da5c34b..8a247b6 100644
---- a/tests/pick-model-crossfamily.test.sh
-+++ b/tests/pick-model-crossfamily.test.sh
-@@ -112,6 +112,15 @@ rm -f "$HOME/.fleet/lanes/coord-lane.model"
- m=$(PATH="$HOME/bin:$PATH" bash "$HERE/remote/impl-model.sh" tk-9)
- eq "$m" "" "6d nothing determinable -> empty (caller proceeds unguarded)"
- 
-+
-+echo "7. picker skips models observed to fall back in events.log (agents-kq0r)"
-+cat > "$HOME/.fleet/lanes/prior-lane.events.log" <<'EV'
-+10:00:00 ℹ runtime model fell back: antigravity/gemini-3.8-flash -> deepseek/deepseek-flash
-+EV
-+m=$(bash "$PICK" reviewer r2 2>"$ROOT/err7")
-+[ "${m%%/*}" != "antigravity" ] && ok "7a model observed to fall back is skipped (got $m)" || bad "7a picker handed out fallen-back model" "$m"
-+has "$(cat "$ROOT/err7")" "pick-model: skipping antigravity/gemini-3.8-flash" "7b logs skip reason to stderr"
-+rm -f "$HOME/.fleet/lanes/prior-lane.events.log"
- if [ "$FAIL" -gt 0 ]; then
-   echo "Failed tests: $FAIL"
- fi

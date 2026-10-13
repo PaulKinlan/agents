@@ -183,3 +183,15 @@ git apply -p1 /path/to/patches/fleet-model-effective-family.patch
 bash tests/fleet-model-audit.test.sh
 bash tests/pick-model-crossfamily.test.sh
 ```
+
+## Disclosure of a superseded fallback (coord's clause, agents-kq0r)
+
+When a fallback is SUPERSEDED by a later successful turn, the MATCH line names the turn's family and ALSO names the fallback it
+superseded - "source: turns.jsonl; an earlier fallback to <model> is superseded by this turn, which is the effective family" -
+so a reader can tell "never fell back" from "fell back once and recovered". Without it the two states print the same line, and
+that distinction is the whole point of this tool.
+
+Pinned by case 11s in tests/fleet-model-audit.test.sh. RED-FIRST, measured: against the previous tip the case is
+`127 passed, 1 failed` - the disclosure assertion fails and prints the line that lacks it - and with this change it is
+`128 passed, 0 failed`. The other half of 11s (that the turn's family is reported) passes on both, so it is a GUARD, not a
+discriminator, and it is named as such rather than counted as coverage.
