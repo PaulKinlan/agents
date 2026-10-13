@@ -45,6 +45,14 @@
   residual case that `--author-model` covers; the wrong-object attribution is what the branch-name derivation
   fixes.
 
+- **COMPATIBILITY NOTE ABOUT THE FLAG (a patch that adds a flag has to say who understands it):**
+  `--author-model <provider/id>` is understood only by the PATCHED helper. An unpatched `bin/fleet-land-message`
+  rejects it as an unknown flag, which the red run below pins explicitly (three of the twelve failures are the flag
+  assertions), so any caller - a lane script, a wrapper, or a human following an older recipe - must not pass it to
+  an unapplied bundle. It is an INPUT, not a mode: a value that is same-family with the reviewer still refuses, and
+  the message and `--print-json` both record the provenance as `supplied by the lander (--author-model)` so a
+  supplied value is never indistinguishable from a derived one.
+
 - **REVIEW, STATED PLAINLY SO NOBODY WAITS FOR ONE:** this delivery needs a CROSS-FAMILY REVIEW ON THE HUB SIDE
   before it is applied to `~/fleet`. **No review on this project VM is pending and none will be requested**: the
   specialist slot here is held by other work, the reviewer lane that had this branch (round 1, tip 5295b3e) was
