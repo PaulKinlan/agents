@@ -179,6 +179,13 @@ fi
 run=""
 mapped=""
 unmatched=""
+# agents-dtml: a SPACE-separated GIT_CHANGED list arrives here as ONE path (the input is read one path
+# per line, the shape `git diff --name-only` prints), and the abort it produces points the reader at the
+# arm table - the file agents-hr6q measured as edited by 20.2% of landings - for paths that already have
+# arms. These two hold the shape so the abort can NAME it. Detection happens in the read loop, below,
+# because that is the last place the RAW line still exists; it is a discriminator, not a parser.
+ws_list_line=""
+ws_list_tokens=""
 
 # Contract-declared cross-file coverage dependencies (agents-1kzf)
 if [ -e "tests/coverage-contract.json" ]; then
@@ -339,6 +346,30 @@ while IFS= read -r f; do
   done
   if [ -z "$_fast_gate_matched" ]; then
     unmatched="$unmatched $f"
+    # agents-dtml: is this ONE path, or several paths a caller joined with spaces? Report, never split:
+    # a path MAY legally contain spaces, so the shape is only called out when the whole line is not a
+    # path that exists AND at least two of its whitespace-separated tokens ARE paths that exist. For a
+    # real path with spaces the first test is false; for `no such file.xyz` the second is.
+    #
+    # Written as a parameter expansion rather than a case statement over the changed path, because
+    # tests/test_fast_gate_mapping.py forbids that shape in this file: the arm table lives in
+    # tools/fast-gate-arms.d/ (ADR 0002), and that guard caught the first version of this line. The guard
+    # is right - a case table over the changed path is how the arm table would come back - so the
+    # whitespace test is spelled without one.
+    if [ "$f" != "${f//[[:space:]]/}" ]; then
+      if [ ! -e "$f" ]; then
+        _ws_count=0
+        _ws_exist=0
+        for _ws_t in $f; do
+          _ws_count=$((_ws_count + 1))
+          [ -e "$_ws_t" ] && _ws_exist=$((_ws_exist + 1))
+        done
+        if [ "$_ws_count" -ge 2 ] && [ "$_ws_exist" -ge 2 ]; then
+          ws_list_line="$f"
+          ws_list_tokens="$_ws_count"
+        fi
+      fi
+    fi
   fi
 done <<< "$changed"
 
@@ -357,6 +388,16 @@ if [ -n "$unmatched" ]; then
         ;;
     esac
   done
+  # agents-dtml: name the input shape BEFORE the arm-table instruction, or the reader edits the arm table
+  # for paths whose arms already exist. Not a substitute for the failure above - rc is still 1.
+  if [ -n "$ws_list_line" ]; then
+    echo "fast-gate: NOTE (agents-dtml): one of the paths above is $ws_list_tokens whitespace-separated tokens and" >&2
+    echo "fast-gate:   is not a path that exists, so it looks like a SPACE-separated list. GIT_CHANGED is read" >&2
+    echo "fast-gate:   ONE PATH PER LINE, the shape \`git diff --name-only\` prints, so the whole line arrived as" >&2
+    echo "fast-gate:   a single path. Write it one per line instead, e.g.:" >&2
+    echo "fast-gate:     GIT_CHANGED=\$(printf '%s\\n' $ws_list_line)" >&2
+    echo "fast-gate:   (A path MAY legally contain spaces, so this is named and never split.)" >&2
+  fi
   echo "fast-gate: To fix, add an arm fragment under tools/fast-gate-arms.d/ - the registry tools/fast-gate.sh loads, whose README.md states the precedence and the guards - mapping the path to its test suite, or an ignore arm under '--- Ignore list (agents-9nir) ---' with documented search evidence (agents-9nir, agents-ows4, agents-dtj6)." >&2
   exit 1
 fi

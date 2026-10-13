@@ -866,6 +866,50 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertEqual(res.returncode, 1)
         self.assertIn("fast-gate: aborted: exit 1 (stage: checking unmapped files)", res.stderr)
 
+    def test_a_space_separated_changed_list_is_named_as_a_format_error_not_as_an_arm_gap(self):
+        """agents-dtml: `GIT_CHANGED="$a $b"` is the obvious way to build the variable by hand or from a
+        shell list, and GIT_CHANGED is read ONE PATH PER LINE (the shape `git diff --name-only`
+        prints), so the whole line arrives as a single path and matches no arm.
+
+        The failure that used to come out was the generic 'match no mapping arm' abort - which sends the
+        reader to tools/fast-gate.sh's arm table, measured by agents-hr6q as edited by 20.2% of all
+        landings, to add arms for paths that ALREADY HAVE THEM (each of the three resolves to its own
+        suite on its own line). The abort must still fail closed; it must also name the input shape,
+        and name it BEFORE the arm-table instruction so a reader stops at the right sentence.
+        """
+        joined = " ".join(["lib/tool_pins.py", "lib/findings.py", "docs/INTEGRATION.md"])
+        res = run_fast_gate([joined])
+        self.assertEqual(res.returncode, 1, "fail-closed is not negotiable: a space-separated list must never be accepted")
+        self.assertIn("NOTE (agents-dtml)", res.stderr, "the abort must name the space-separated shape")
+        self.assertIn("ONE PATH PER LINE", res.stderr, "and must state the format GIT_CHANGED is read in")
+        self.assertIn("printf", res.stderr, "and show the accepted form, not just describe it")
+        self.assertIn("never split", res.stderr, "a path MAY contain spaces, so the gate reports and does not split")
+        self.assertLess(
+            res.stderr.index("NOTE (agents-dtml)"),
+            res.stderr.index("To fix, add an arm fragment"),
+            "the note must come BEFORE the arm-table instruction, or it does not stop the misdirection it exists for",
+        )
+
+    def test_the_space_separated_note_does_not_fire_on_a_single_path_with_spaces(self):
+        """agents-dtml, the half that makes the note safe to read: it is a DISCRIMINATOR, not a parser.
+
+        Two shapes must stay silent, and both are ordinary: (a) one path that exists and contains
+        spaces - the whole line IS a path, so there is no list to report; (b) a nonexistent path whose
+        tokens are not paths either - guessing a list from the presence of whitespace alone would fire
+        on any typo and teach readers to ignore the note.
+        """
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            spaced = Path(tmp) / "a path with spaces.xyz"
+            spaced.write_text("", encoding="utf-8")
+            rel = str(spaced.relative_to(ROOT))
+            exists = run_fast_gate([rel])
+            self.assertEqual(exists.returncode, 1, "an unmatched path is still fail-closed")
+            self.assertNotIn("NOTE (agents-dtml)", exists.stderr, "a single path that exists is not a list")
+        absent = run_fast_gate(["no such file.xyz"])
+        self.assertEqual(absent.returncode, 1)
+        self.assertNotIn("NOTE (agents-dtml)", absent.stderr,
+                         "whitespace alone is not evidence of a list: the tokens must look like paths")
+
     def test_fast_gate_sigterm_emits_aborted_marker_with_stage(self):
         """agents-adhc: an external SIGTERM signal must emit a fail-visible 'fast-gate: aborted:' line
 naming the signal and stage.
