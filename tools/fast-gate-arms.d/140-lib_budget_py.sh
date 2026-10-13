@@ -38,7 +38,7 @@ fast_gate_arms_140_lib_budget_py() {
       # cannot know a suite was split, so this one is a LIST - the same treatment
       # tests/containment_harness.py) gets above for the same reason. Measured cost of the addition:
       # about 8 s (61.5 s for the eight files against 53.3 s for the two the fallback chose).
-      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_child_env.py"
+      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_child_env.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
     lib/embargo.py)
       # agents-iqyz: this arm REPLACES the generic `lib/*.py` arm further down for this path, and must
@@ -82,7 +82,7 @@ fast_gate_arms_140_lib_budget_py() {
       # is the IMPORT GRAPH, not the changed file's name.
       # tests/test_egress_proxy.py is listed explicitly because an EXPLICIT ARM REPLACES THE GENERIC
       # ONE: naming only the six would silently drop the module's own suite (agents-mo75's lesson).
-      mapped="$mapped tests/test_egress_proxy.py tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py"
+      mapped="$mapped tests/test_egress_proxy.py tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
     lib/*.py)
       name="$(basename "$f" .py)"

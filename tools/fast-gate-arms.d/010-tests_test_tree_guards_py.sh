@@ -38,7 +38,7 @@ fast_gate_arms_010_tests_test_tree_guards_py() {
       # of them: a harness change reaches every inherited execution, and the shape test is
       # what catches a test method creeping into it (measured: with no arm the gate
       # fail-closed on this file as unmapped, which is how the omission was found).
-      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_shape.py"
+      mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_shape.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
     *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn
   esac
