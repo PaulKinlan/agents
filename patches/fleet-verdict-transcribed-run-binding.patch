@@ -1,21 +1,37 @@
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index 5b96d61..b636580 100755
+index 5b96d61..db3d3c2 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
-@@ -275,7 +275,11 @@ flm_select() {
+@@ -275,7 +275,27 @@ flm_select() {
      c_after=$(sed -E "s/^[[:space:]*#_]*(${VPFX})?${VTOK}([[:space:]]*(${VPFX})?${VTOK})*[[:space:]*#_]*//I" <<<"$v_line" | tr -d '`*' | xargs)
      c_raw="$c_after"
      c_verdict=""
 -    c_run_id=$(grep -oE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" <<<"$c_text" | head -1 || echo "")
-+    # Prefer cued run ID ('(run <id>)', 'run id <id>', 'run_id = <id>') over foreign UUIDs
-+    c_run_id=$(sed -nE 's/.*(\(run[[:space:]]+|run[[:space:]]+(id[[:space:]]+)?|run_id[[:space:]]*[:=][[:space:]]*)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}).*/\3/p' <<<"$c_text" | head -1 || true)
-+    if [ -z "$c_run_id" ]; then
-+      c_run_id=$(grep -oE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" <<<"$c_text" | tail -1 || echo "")
++    # Parse reviewer run ID: disambiguate against quoted scout or foreign UUIDs.
++    # Single UUID is accepted directly; multiple UUIDs require an unambiguous reviewer cue;
++    # ambiguous or competing citations leave c_run_id empty so report-only unknown is preserved.
++    local _c_uuids _c_count _c_rev _c_rcount _c_vline
++    _c_uuids=$(grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" <<<"$c_text" | tr '[:upper:]' '[:lower:]')
++    _c_count=$(grep -c . <<<"$_c_uuids" 2>/dev/null || true)
++    c_run_id=""
++    if [ "$_c_count" -eq 1 ]; then
++      c_run_id="$_c_uuids"
++    elif [ "$_c_count" -gt 1 ]; then
++      _c_rev=$(sed -nE "s/.*(reviewer|review).*\b(\(run[[:space:]]+|run[[:space:]]+(id[[:space:]]+)?|run_id[[:space:]]*[:=][[:space:]]*)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}).*/\4/Ip" <<<"$c_text" | tr '[:upper:]' '[:lower:]' | sort -u)
++      _c_rcount=$(grep -c . <<<"$_c_rev" 2>/dev/null || true)
++      if [ "$_c_rcount" -eq 1 ]; then
++        c_run_id="$_c_rev"
++      elif [ "$_c_rcount" -eq 0 ] && [ -n "$v_line" ]; then
++        _c_vline=$(grep -oE "\([[:space:]]*run[[:space:]]+[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[[:space:]]*\)" <<<"$v_line" | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" | tr '[:upper:]' '[:lower:]' | sort -u)
++        if [ "$(grep -c . <<<"$_c_vline" 2>/dev/null || true)" -eq 1 ]; then
++          c_run_id="$_c_vline"
++        fi
++      fi
 +    fi
  
      # Reject conflicting verdict tokens (e.g. PASS: FAIL, PASS/FAIL, FAIL: PASS) - a comment that argues with
      # itself is not a clearance, whatever else it says. Matched on a lowercased copy: the shared vocabulary is
-@@ -654,7 +658,7 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+@@ -654,7 +674,7 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
    # class and the reason are carried out to the PASS line and the JSON, where a merger or coordinator
    # can see WHICH clearance rests on a claim rather than an artefact, and nothing is blocked.
    if [ -n "$src_who" ] && [ "$rev_who" = "$src_who" ] && [ "$rev_independence" = "cross-family" ]; then
@@ -25,7 +41,7 @@ index 5b96d61..b636580 100755
        verified:*)   rev_independence="transcribed-verified";   rev_run_reason="${_trs#verified: }" ;;
        unverified:*) rev_independence="transcribed-unverified"; rev_run_reason="${_trs#unverified: }" ;;
 diff --git a/bin/fleet-verdict-words.sh b/bin/fleet-verdict-words.sh
-index b3f7bb9..e64392a 100644
+index b3f7bb9..880e706 100644
 --- a/bin/fleet-verdict-words.sh
 +++ b/bin/fleet-verdict-words.sh
 @@ -109,7 +109,7 @@ fleet_verdict_model_family() { printf '%s' "${1:-}" | cut -d/ -f1 | tr '[:upper:
@@ -63,17 +79,18 @@ index b3f7bb9..e64392a 100644
    [ -n "$rid" ] || return 0
    for r in ${root:-${TMPDIR:-/tmp}}/pi-subagents-*/async-subagent-runs; do
      if [ -d "$r/$rid" ]; then d="$r/$rid"; break; fi
-@@ -172,6 +171,20 @@ fleet_verdict_transcribed_run_status() {
+@@ -172,6 +171,21 @@ fleet_verdict_transcribed_run_status() {
      printf 'unverified: run %s records model %s, which is not the named reviewer model %s' "$rid" "${model:-<none>}" "$named"
      return 0
    fi
-+  # Bead/branch relevance check: verify the run directory references the expected bead or branch
++  # Bead/branch relevance check: verify the run directory references the expected bead or branch.
++  # Whole-identifier word boundaries are required so identifier prefixes do not falsely match.
 +  if [ -n "$bead" ] || [ -n "$branch" ]; then
 +    local matched=false
 +    for logfile in "$d/output-0.log" "$d/recovery-descriptor.json" "$d/events.jsonl"; do
 +      if [ -r "$logfile" ]; then
-+        if [ -n "$bead" ] && grep -qF "$bead" "$logfile" 2>/dev/null; then matched=true; break; fi
-+        if [ -n "$branch" ] && grep -qF "$branch" "$logfile" 2>/dev/null; then matched=true; break; fi
++        if [ -n "$bead" ] && grep -qE "(^|[^a-zA-Z0-9_-])$bead([^a-zA-Z0-9_-]|$)" "$logfile" 2>/dev/null; then matched=true; break; fi
++        if [ -n "$branch" ] && grep -qE "(^|[^a-zA-Z0-9/_-])$branch([^a-zA-Z0-9/_-]|$)" "$logfile" 2>/dev/null; then matched=true; break; fi
 +      fi
 +    done
 +    if [ "$matched" = false ]; then
@@ -85,7 +102,7 @@ index b3f7bb9..e64392a 100644
  }
  
 diff --git a/tests/fleet-verdict-transcribed-run.test.sh b/tests/fleet-verdict-transcribed-run.test.sh
-index 3be2fb9..6fb0387 100644
+index 3be2fb9..da75601 100644
 --- a/tests/fleet-verdict-transcribed-run.test.sh
 +++ b/tests/fleet-verdict-transcribed-run.test.sh
 @@ -28,7 +28,7 @@ ckempty() {  # a case whose correct answer is SILENCE: ckempty <name> <actual>
@@ -107,7 +124,7 @@ index 3be2fb9..6fb0387 100644
  }
  
  RID=ffc6fb50-d7de-4f8f-a290-21a818b4df13
-@@ -112,6 +115,16 @@ mkrun "$root" "bbbbbbbb-1111-2222-3333-444444444444" reviewer "antigravity/gemin
+@@ -112,6 +115,24 @@ mkrun "$root" "bbbbbbbb-1111-2222-3333-444444444444" reviewer "antigravity/gemin
  ck "10 a run with no completion record does not verify" "unverified:" \
    "$(fleet_verdict_transcribed_run_status "bbbbbbbb-1111-2222-3333-444444444444" "antigravity/gemini-3.8-flash" "$root")"
  
@@ -120,6 +137,14 @@ index 3be2fb9..6fb0387 100644
 +# 12. Bead relevance binding: unrelated reviewer run reports unverified
 +ck "12 unrelated reviewer run missing bead/branch references does not verify" "unverified: run" \
 +  "$(fleet_verdict_transcribed_run_status "$RID_BOUND" "antigravity/gemini-3.8-flash" "$root" "foreign-bead" "foreign-branch")"
++
++# 13. Bead prefix mismatch: run referencing tk-10 does not verify claim for tk-1
++RID_PREFIX=33333333-abcd-ef01-2345-6789abcdef01
++mkrun "$root" "$RID_PREFIX" reviewer "antigravity/gemini-3.8-flash" "complete" "Reviewed fleet/other on tk-10"
++ck "13 run referencing tk-10 does not verify claim for tk-1" "unverified: run" \
++  "$(fleet_verdict_transcribed_run_status "$RID_PREFIX" "antigravity/gemini-3.8-flash" "$root" "tk-1" "fleet/different")"
++ck "13b run referencing tk-10 verifies claim for tk-10" "verified" \
++  "$(fleet_verdict_transcribed_run_status "$RID_PREFIX" "antigravity/gemini-3.8-flash" "$root" "tk-10" "fleet/other")"
 +
  echo
  echo "$pass passed, $fail failed"
