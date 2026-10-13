@@ -7,16 +7,21 @@
     host fallback records (`events.log`) from mutable pointer files (`.model`), with strict exit-code
     precedence (MISMATCH [1] > UNKNOWN [3] > MATCH [0]). Resolves temporal correlation between fallback
     lines and turns so historical fallbacks from prior runs do not falsely contradict newer turns (agents-1to3).
+    Anchors fallback line detection and sed extractions strictly to host record shape at the start of the line
+    so tool command lines quoting fallback text cannot qualify; ambiguous non-host fallback lines report UNKNOWN
+    (exit 3), never MISMATCH (agents-kq0r P2).
   - `remote/pick-model.sh` — derives the observed-fallback set dynamically from
-    `ℹ runtime model fell back: <requested> -> <effective>` lines in `~/.fleet/lanes/*.events.log`,
-    and skips handing out requested models that have been observed to fall back, logging skips to stderr.
-  - `tests/fleet-model-audit.test.sh` — Section 11 added, with 18 assertions (11a–11r) covering single-turn,
-    multi-turn, same-run agreeing fallback, same-run contradicting fallback, historical fallback followed by
-    newer turn on different model (reviewer reproducer), stale fallback outside run window, fallback logged
-    after last completed turn, events-only fallback, pointer-only refusal, missing records, and usage error.
-    All assertion blocks guard with `[ -n "$out" ]` so an empty output fails explicitly rather than passing vacuously.
-  - `tests/pick-model-crossfamily.test.sh` — Section 7 added, verifying that `pick-model.sh` skips models
-    observed to fall back in `events.log` and logs the skip to stderr.
+    `^[0-9]{2}:[0-9]{2}:[0-9]{2} ℹ runtime model fell back: <requested> -> <effective>` lines in `~/.fleet/lanes/*.events.log`,
+    anchored to line start so tool command lines quoting fallback text do not blacklist requested models, and skips
+    handing out requested models that have been observed to fall back, logging skips to stderr.
+  - `tests/fleet-model-audit.test.sh` — Section 11 added, covering single-turn, multi-turn, same-run agreeing
+    fallback, same-run contradicting fallback, historical fallback followed by newer turn on different model,
+    stale fallback outside run window, fallback logged after last completed turn, events-only fallback, pointer-only
+    refusal, missing records, usage error, superseded fallback disclosure, tool-command quoting line (MATCH without
+    fallback disclosure), ambiguous fallback line (UNKNOWN exit 3), and guards for real contradiction and superseded fallbacks.
+  - `tests/pick-model-crossfamily.test.sh` — Sections 7 and 8 added, verifying that `pick-model.sh` skips models
+    observed to fall back in `events.log` and logs the skip to stderr, and does NOT skip models when the fallback text
+    appears inside a tool-command execution line.
 
 ### APPLIES TO (Live File Content Identity)
 
@@ -42,10 +47,10 @@ sha256sum bin/fleet-model-audit remote/pick-model.sh tests/fleet-model-audit.tes
   `38a235a861f06682cb3cc6f6e24cd68c9c8b7da7fa6c869af67eb540c84748c7  tests/fleet-model-audit.test.sh`
   `ad844d21150fdab530cdfc6a5b37a29af704b0fc68acf0f92ba0e52ba5c6a956  tests/pick-model-crossfamily.test.sh`
 - **Patched file hashes:**
-  `39ea56535bd11313185b3b6772c6d25ef347c3798e18c1973afa12cf14e2366c  bin/fleet-model-audit`
-  `31c3c195ca7ef50fd0ba513ae3d7111dbca0a4c0172621290acae85c78d70327  remote/pick-model.sh`
-  `626ef0f55278b8f7d1c6dd76cc574fe096392cf3344413523fc0d4aba8bb42ae  tests/fleet-model-audit.test.sh`
-  `3ed077718c9ad86ca6d4bfe4669cb4426d34c04070ba30a5ace2d40c5ccb3579  tests/pick-model-crossfamily.test.sh`
+  `a079b8f1752ed968a69d8e83651297d9986531f45bcb698490218d2c1b3f5d1c  bin/fleet-model-audit`
+  `009afdc3e04543ec3b525f2641ef4d6169b6c8fab7dec0c01c0bdbcad1da6b92  remote/pick-model.sh`
+  `ce39bc8bbf0cb36213d58f4786904d08c148d27839c3c533c117be7808e028d4  tests/fleet-model-audit.test.sh`
+  `e588eff5cff3a1496f6e3ec2f647cfd8734b5bd1ad83f129c0f722d40bfc1da2  tests/pick-model-crossfamily.test.sh`
 
 ### Problem statement (agents-kq0r)
 
@@ -107,6 +112,7 @@ A recurring defect family across this bead was treating missing, unestablished, 
 3. Treating an unestablished record as proof of contradiction.
 
 In `fleet-model-audit family`, absence is strictly non-evidentiary: absence of durable records is `UNKNOWN` (exit 3) — never `MATCH` and never `MISMATCH`.
+Likewise, ambiguity is not contradiction: a line containing `runtime model fell back:` that does not match the host's record shape reports `UNKNOWN` (exit 3), never `MISMATCH` (exit 1).
 
 ### Established Mechanism & Rules
 
@@ -120,59 +126,57 @@ In `fleet-model-audit family`, absence is strictly non-evidentiary: absence of d
 
 - `bin/fleet-model-audit:31-36`: USAGE updated to document `fleet-model-audit family <lane-name>`.
 - `bin/fleet-model-audit:506-597`: `fb_governs_turn()` implemented. Evaluates temporal association between `events.log` fallback lines and `turns.jsonl` records using timestamps and run window bounds.
-- `bin/fleet-model-audit:599-710`: `lane_family()` implemented. Validates encoding via `trust_bytes`, extracts the last turn model from `turns.jsonl` with `turn_model` and `dup_keys`, extracts the last runtime fallback from `events.log`, and reconciles:
+- `bin/fleet-model-audit:599-716`: `lane_family()` implemented. Validates encoding via `trust_bytes`, extracts the last turn model from `turns.jsonl` with `turn_model` and `dup_keys`, extracts the last runtime fallback from `events.log` anchored strictly to `^[0-9]{2}:[0-9]{2}:[0-9]{2} ℹ runtime model fell back: `, flags ambiguous non-host fallback lines as UNKNOWN (3), and reconciles:
   - Both present and agreeing: `MATCH family <fam> (lane <lane> ran <model>, source: turns.jsonl and events.log)` (exit 0).
   - Both present, disagreeing, and same run window: `note_mis` -> `MISMATCH` (exit 1).
-  - Both present, disagreeing, but fallback is historical (outside window or intervening turn): `MATCH family <fam> (lane <lane> ran <model>, source: turns.jsonl)` (exit 0).
+  - Both present, disagreeing, but fallback is historical (outside window or intervening turn): `MATCH family <fam> (lane <lane> ran <model>, source: turns.jsonl; an earlier fallback to <model> is superseded by this turn, which is the effective family)` (exit 0).
   - Turns only: `MATCH family <fam> (lane <lane> ran <model>, source: turns.jsonl)` (exit 0).
   - Fallback events only (e.g. lane retired or 0 turns completed): `MATCH family <fam> (lane <lane> fell back to <model>, source: events.log)` (exit 0).
+  - Ambiguous fallback line in events log: `note_unk` naming ambiguous fallback line (exit 3).
   - Pointer only: `note_unk` naming `source: pointer-only` (exit 3).
   - No records: `note_unk` (exit 3).
-- `bin/fleet-model-audit:728-745`: Dispatches `family <lane>` and `lane <lane> --family`.
-- `remote/pick-model.sh:17-48`: `observed_fallback()` scans `*.events.log` for `ℹ runtime model fell back: <req> -> <eff>` lines; `skip_observed_fallback()` logs skips to stderr once per model; `is_healthy()` skips models in the observed-fallback set.
+- `bin/fleet-model-audit:734-751`: Dispatches `family <lane>` and `lane <lane> --family`.
+- `remote/pick-model.sh:17-48`: `observed_fallback()` scans `*.events.log` for `^[0-9]{2}:[0-9]{2}:[0-9]{2} ℹ runtime model fell back: <req> -> <eff>` lines, anchored to line-start so tool-command quoting lines cannot qualify; `skip_observed_fallback()` logs skips to stderr once per model; `is_healthy()` skips models in the observed-fallback set.
 - `remote/pick-model.sh:137-147`: `pick_subagent_model()` fail-open avoids handing out models with observed fallbacks.
 - `remote/pick-model.sh:264`: Lane rotation loop skips models with observed fallbacks.
 - `remote/pick-model.sh:274-284`: Lane rotation fail-open loop skips models with observed fallbacks and falls open to non-fallen-back rotation models if available.
-- `tests/fleet-model-audit.test.sh:550-642`: Section 11 extended with tests 11a–11r, including same-run agreement/disagreement and across-run historical fallback handling, with non-empty output assertions.
+- `tests/fleet-model-audit.test.sh`: Section 11 extended with tests 11a–11w (133 tests total), covering same-run agreement/disagreement, historical fallback handling, disclosure of superseded fallbacks, tool-command quoting regression (11t), ambiguous fallback handling (11u), and same-run/superseded guards (11v, 11w).
+- `tests/pick-model-crossfamily.test.sh`: Sections 7 and 8 added (29 tests total), verifying observed fallback skip in events.log (7a-7b) and non-skipping of tool-command quoting lines (8a-8c).
 
-### Red-First Verification (Reviewer Reproducer)
+### Red-First Verification (P2 Quoting Tool Line Reproducer)
 
-Fixture (`recovered`):
-- `recovered.events.log`: `10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash`
-- `recovered.turns.jsonl`:
-  `{"at":"2026-10-13T10:00:02Z","model":"deepseek/deepseek-flash"}`
-  `{"at":"2026-10-13T10:05:00Z","model":"openai-codex/gpt-6-sol"}`
+Fixture (`l-quoting`):
+- `l-quoting.events.log`:
+  `19:29:46 ⚙ bash: printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > /tmp/x.events.log`
+- `l-quoting.turns.jsonl`:
+  `{"at":"2026-10-13T19:40:00Z","model":"openai-codex/gpt-6-sol","host":"sdk"}`
 
-**RED (Unfixed tool, increment 1):**
+**RED (Unfixed tool, db116d80):**
 ```text
-$ FLEET_LANES_DIR=/tmp/lanes fleet-model-audit family recovered
-MISMATCH lane 'recovered' last turn ran openai-codex/gpt-6-sol (source: turns.jsonl) but events.log recorded fallback to deepseek/deepseek-flash (source: events.log)
-         a result produced by a different model is NOT attributable to the one requested - if this was
-         a cross-family review, the review rule is not satisfied. Re-dispatch, or record the substitute.
-$ echo $?
-1
+$ FLEET_LANES_DIR=/tmp/fam fleet-model-audit family l-quoting
+MATCH    family openai-codex (lane l-quoting ran openai-codex/gpt-6-sol, source: turns.jsonl; an earlier fallback to deepseek/deepseek-flash\n' is superseded by this turn, which is the effective family)
 ```
+Assertion `! grep -qiE "fallback|superseded|deepseek"` fails: names a fallback that never occurred.
+Under other timing (`19:29:48`), reports false `MISMATCH` (exit 1).
+In picker: `observed_fallback` blacklists `antigravity/gemini-3.8-flash`, skipping it and logging to stderr.
 
-**GREEN (Fixed tool with temporal association):**
+**GREEN (Fixed tool with host-record anchoring):**
 ```text
-$ FLEET_LANES_DIR=/tmp/lanes fleet-model-audit family recovered
-MATCH    family openai-codex (lane recovered ran openai-codex/gpt-6-sol, source: turns.jsonl)
+$ FLEET_LANES_DIR=/tmp/fam fleet-model-audit family l-quoting
+MATCH    family openai-codex (lane l-quoting ran openai-codex/gpt-6-sol, source: turns.jsonl)
 $ echo $?
 0
 ```
+No fallback named anywhere in output.
+In picker: `observed_fallback` returns 1, does not blacklist, hands out `antigravity/gemini-3.8-flash`.
 
 ### Verification Against Live Files
 
 Tested in isolated throwaway copies without modifying live files:
-1. `tests/fleet-model-audit.test.sh`: **126 passed, 0 failed** (108 baseline tests preserved + 18 Section 11 tests 11a–11r).
-2. `tests/pick-model-crossfamily.test.sh`: **26 passed, 0 failed** (24 baseline tests preserved + 2 tests 7a–7b).
+1. `tests/fleet-model-audit.test.sh`: **133 passed, 0 failed** (108 baseline tests preserved + 25 Section 11 tests 11a–11w).
+2. `tests/pick-model-crossfamily.test.sh`: **29 passed, 0 failed** (24 baseline tests preserved + 5 tests 7a–7b, 8a–8c).
 3. `tests/quota-horizon.test.sh`: **19 passed, 0 failed**.
 4. `tests/subagent-cooldown.test.sh`: **27 passed, 0 failed**.
-5. Live lane spot-checks on read-only live lane store (`~/.fleet/lanes/`):
-   - `family impl-tdot` -> `MATCH family deepseek (lane impl-tdot ran deepseek/deepseek-flash, source: turns.jsonl and events.log)` (rc=0)
-   - `family impl-f6du` -> `MATCH family openai-codex (lane impl-f6du ran openai-codex/gpt-6-sol, source: turns.jsonl)` (rc=0)
-   - `family 5qe-opus` (retired lane) -> `MATCH family deepseek (lane 5qe-opus ran deepseek/deepseek-flash, source: turns.jsonl and events.log)` (rc=0)
-   - `family rev-9lew` -> `MATCH family openai-codex (lane rev-9lew ran openai-codex/gpt-6-sol, source: turns.jsonl)` (rc=0)
 
 ### Hub Application
 
@@ -183,15 +187,3 @@ git apply -p1 /path/to/patches/fleet-model-effective-family.patch
 bash tests/fleet-model-audit.test.sh
 bash tests/pick-model-crossfamily.test.sh
 ```
-
-## Disclosure of a superseded fallback (coord's clause, agents-kq0r)
-
-When a fallback is SUPERSEDED by a later successful turn, the MATCH line names the turn's family and ALSO names the fallback it
-superseded - "source: turns.jsonl; an earlier fallback to <model> is superseded by this turn, which is the effective family" -
-so a reader can tell "never fell back" from "fell back once and recovered". Without it the two states print the same line, and
-that distinction is the whole point of this tool.
-
-Pinned by case 11s in tests/fleet-model-audit.test.sh. RED-FIRST, measured: against the previous tip the case is
-`127 passed, 1 failed` - the disclosure assertion fails and prints the line that lacks it - and with this change it is
-`128 passed, 0 failed`. The other half of 11s (that the turn's family is reported) passes on both, so it is a GUARD, not a
-discriminator, and it is named as such rather than counted as coverage.
