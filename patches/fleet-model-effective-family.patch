@@ -1,0 +1,302 @@
+diff --git a/bin/fleet-model-audit b/bin/fleet-model-audit
+index a54d76a..7afb06e 100755
+--- a/bin/fleet-model-audit
++++ b/bin/fleet-model-audit
+@@ -31,6 +31,7 @@
+ # USAGE
+ #   fleet-model-audit run  <run-dir|run-id> --asked <provider/model>   audit one subagent run
+ #   fleet-model-audit lane <lane-name> [--asked <model>]               audit a lane
++#   fleet-model-audit family <lane-name>                               determine effective model family and evidence source
+ #   fleet-model-audit --all                every lane that has a model pointer: pointer vs its most recent turn
+ #                                          (use `lane <name> --asked M` to check a lane's whole history)
+ #
+@@ -505,6 +506,99 @@ lane_verdict() {  # <lane> [asked] [asked_supplied]
+   finalize "lane $lane"
+ }
+ 
++lane_family() {  # <lane>
++  MIS=""; UNK=""
++  local lane=$1 tf ef pf pointer turn_observed="" fb_observed=""
++  local line m dup_rc fb_line fb_req fb_eff fam
++  tf="$LANES/$lane.turns.jsonl"; ef="$LANES/$lane.events.log"; pf="$LANES/$lane.model"
++
++  for _f in "$tf" "$ef" "$pf"; do
++    trust_bytes "$_f" "lane '$lane' record" || { finalize "lane $lane family"; return $?; }
++  done
++
++  if [ -f "$tf" ] && [ -s "$tf" ]; then
++    line=$(tail -1 "$tf")
++    if [ -z "$line" ]; then
++      note_unk "the most recent turn record of lane '$lane' is blank, so what it last ran is not recorded"
++    else
++      dup_rc=0; dup_keys "$line" || dup_rc=$?
++      if [ "$dup_rc" = 0 ]; then
++        note_unk "the most recent turn record of lane '$lane' carries a DUPLICATE key (possibly an escaped spelling of one), which jq silently collapses to the last, so the observed model is not established"
++      elif [ "$dup_rc" = 2 ]; then
++        note_unk "the most recent turn record of lane '$lane' cannot be checked for duplicate keys on this host, so the observed model is not established"
++      else
++        m=$(turn_model "$line")
++        if [ -z "$m" ]; then
++          note_unk "the most recent turn record of lane '$lane' is not valid JSON with a string model, so what it last ran is not recorded"
++        else
++          turn_observed="$m"
++        fi
++      fi
++    fi
++  fi
++
++  if [ -f "$ef" ]; then
++    fb_line=$(grep -E '(^|[0-9]{2}:[0-9]{2}:[0-9]{2} )ℹ runtime model fell back: ' "$ef" 2>/dev/null | tail -1 || true)
++    if [ -n "$fb_line" ]; then
++      fb_req=$(printf '%s\n' "$fb_line" | sed -E 's/.*ℹ runtime model fell back: ([^ ]+) -> ([^ ]+).*/\1/')
++      fb_eff=$(printf '%s\n' "$fb_line" | sed -E 's/.*ℹ runtime model fell back: ([^ ]+) -> ([^ ]+).*/\2/')
++      if [ -z "$fb_eff" ] || ! value_is_plain "$fb_eff" || [[ "$fb_eff" != */* ]]; then
++        note_unk "the events log of lane '$lane' recorded a fallback with an invalid effective model: $fb_eff"
++      else
++        fb_observed="$fb_eff"
++      fi
++    fi
++  fi
++
++  if [ -n "$turn_observed" ] && [ -n "$fb_observed" ]; then
++    case $(compare "$fb_observed" "$turn_observed") in
++      MATCH)
++        if [ -z "$MIS" ] && [ -z "$UNK" ]; then
++          fam=$(lower "${turn_observed%%/*}")
++          say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl and events.log)"
++        fi
++        ;;
++      CASE)
++        note_unk "lane '$lane' turns.jsonl ($turn_observed) and events.log fallback ($fb_observed) differ only in case"
++        ;;
++      *)
++        note_mis "lane '$lane' last turn ran $turn_observed (source: turns.jsonl) but events.log recorded fallback to $fb_observed (source: events.log)"
++        ;;
++    esac
++  elif [ -n "$turn_observed" ]; then
++    if [ -z "$MIS" ] && [ -z "$UNK" ]; then
++      fam=$(lower "${turn_observed%%/*}")
++      say "MATCH    family $fam (lane $lane ran $turn_observed, source: turns.jsonl)"
++    fi
++  elif [ -n "$fb_observed" ]; then
++    if [ -z "$MIS" ] && [ -z "$UNK" ]; then
++      fam=$(lower "${fb_observed%%/*}")
++      say "MATCH    family $fam (lane $lane fell back to $fb_observed, source: events.log)"
++    fi
++  else
++    pointer=$(cat "$pf" 2>/dev/null; printf '\001')
++    pointer=${pointer%$'\001'}
++    case "$pointer" in *$'\n') pointer=${pointer%$'\n'} ;; esac
++    case "$pointer" in
++      [$' \t\r\v\f']*|*[$' \t\r\v\f'])
++        note_unk "the pointer file $pf is padded with whitespace at one end, so the value it holds is not a plain model id"
++        finalize "lane $lane family"; return $? ;;
++      *[$'\001'-$'\037']*|*[$'\177']*)
++        note_unk "the pointer file $pf carries a control character, which cannot be compared faithfully"
++        finalize "lane $lane family"; return $? ;;
++    esac
++    if [ -n "$pointer" ]; then
++      note_unk "lane '$lane' has only pointer evidence ($pointer, source: pointer-only); what actually ran cannot be established without turns.jsonl or events.log"
++    elif [ -f "$LANES/$lane.asks.jsonl" ]; then
++      note_unk "lane '$lane' has only ask evidence (source: asks.jsonl); what actually ran cannot be established without turns.jsonl or events.log"
++    else
++      note_unk "lane '$lane' has no turn record, fallback event, or model pointer, so what family it ran cannot be established"
++    fi
++  fi
++
++  finalize "lane $lane family"
++}
++
+ [ $# -ge 1 ] || { usage >&2; exit 2; }
+ case $1 in
+   run)
+@@ -522,15 +616,23 @@ case $1 in
+     done
+     [ -n "$asked" ] || die "run needs a non-empty --asked <provider/model>: the run record cannot be trusted to hold the ask (the extension overwrites it with the substitute)"
+     run_verdict "$rdir" "$asked"; exit $? ;;
++  family)
++    [ $# -ge 2 ] || die "family needs a lane name"
++    lane_family "$2"; exit $? ;;
+   lane)
+     [ $# -ge 2 ] || die "lane needs a lane name"
+-    lname=$2; shift 2; lasked=""; lsupplied=0
++    lname=$2; shift 2; lasked=""; lsupplied=0; lfamily=0
+     while [ $# -gt 0 ]; do
+       case $1 in
+         --asked) [ $# -ge 2 ] || die "--asked needs a value"; lasked=$(trim "$2"); lsupplied=1; shift 2 ;;
++        --family) lfamily=1; shift ;;
+         *) die "unknown option for lane: $1" ;;
+       esac
+     done
++    if [ "$lfamily" = 1 ]; then
++      [ "$lsupplied" = 0 ] || die "--family and --asked cannot be combined"
++      lane_family "$lname"; exit $?
++    fi
+     # Whether --asked was SUPPLIED is tracked separately from its value: '--asked ""' used to trim to empty and
+     # fall through into pointer mode, so a caller who asked for a history check got a pointer check that could
+     # exit 0 while the recorded history contradicted it (review P1).
+diff --git a/remote/pick-model.sh b/remote/pick-model.sh
+index cc17f6e..482ccd5 100755
+--- a/remote/pick-model.sh
++++ b/remote/pick-model.sh
+@@ -13,7 +13,38 @@ CD="${FLEET_COOLDOWN_FILE:-$HOME/.fleet/model-cooldown.json}"; now=$(date -u +%F
+ MW="${FLEET_WINDOWS_FILE:-$HOME/.fleet/model-windows.json}"
+ cooling() { [ -f "$CD" ] && jq -e --arg p "${1%%/*}" --arg now "$now" '(.[$p] // "") > $now' "$CD" >/dev/null 2>&1; }
+ known() { [ ! -s "$MW" ] || jq -e --arg m "$1" 'has($m)' "$MW" >/dev/null 2>&1; }
+-is_healthy() { ! cooling "$1" && known "$1"; }
++
++_observed_fallbacks=""
++_observed_fallbacks_loaded=0
++observed_fallback() {
++  local target="${1%%:*}"
++  local lanes_dir="${FLEET_LANES_DIR:-$HOME/.fleet/lanes}"
++  if [ "$_observed_fallbacks_loaded" -eq 0 ]; then
++    _observed_fallbacks=$(grep -hE '(^|[0-9]{2}:[0-9]{2}:[0-9]{2} )ℹ runtime model fell back: ' "$lanes_dir"/*.events.log 2>/dev/null \
++      | sed -E 's/.*ℹ runtime model fell back: ([^ ]+) -> .*/\1/' \
++      | sort -u)
++    _observed_fallbacks_loaded=1
++  fi
++  [ -n "$_observed_fallbacks" ] && grep -qxF "$target" <<< "$_observed_fallbacks"
++}
++
++_skipped_logged=""
++skip_observed_fallback() {
++  local m=$1
++  if observed_fallback "$m"; then
++    case " $_skipped_logged " in
++      *" $m "*) ;;
++      *)
++        echo "pick-model: skipping $m (observed runtime fallback in events.log)" >&2
++        _skipped_logged="${_skipped_logged:+$_skipped_logged }$m"
++        ;;
++    esac
++    return 0
++  fi
++  return 1
++}
++
++is_healthy() { ! skip_observed_fallback "$1" && ! cooling "$1" && known "$1"; }
+ 
+ preferred_reviewer() {
+   case $1 in
+@@ -103,6 +134,14 @@ pick_subagent_model() {
+   for m in "${r_arr[@]}"; do
+     local p="${m%%/*}"
+     if [ -z "$parent_prov" ] || [ "$p" != "$parent_prov" ]; then
++      if ! skip_observed_fallback "$m"; then
++        echo "$m"
++        return 0
++      fi
++    fi
++  done
++  for m in "${r_arr[@]}"; do
++    if ! skip_observed_fallback "$m"; then
+       echo "$m"
+       return 0
+     fi
+@@ -222,6 +261,7 @@ for pass in 1 2; do
+   for k in $(seq 0 $((n - 1))); do m=${rot[$(( (start + k) % n ))]}
+     [ "${3:-}" = --next ] && [ "$m" = "${4:-}" ] && continue
+     [ $pass = 1 ] && [[ "$used" == *" $m "* ]] && continue
++    skip_observed_fallback "$m" && continue
+     cooling "$m" || ! known "$m" || { echo "$m"; exit 0; }; done
+ done
+ # fleet-2y1x: everything cooling - fail open on the entry that RECOVERS SOONEST rather than the
+@@ -231,9 +271,15 @@ done
+ # cooldowns can be stale, and a lane must run on something.
+ best=""; best_at=""
+ for k in $(seq 0 $((n - 1))); do m=${rot[$(( (start + k) % n ))]}; p=${m%%/*}
++  skip_observed_fallback "$m" && continue
+   at=$(jq -r --arg p "$p" '(.[$p] // "")' "$CD" 2>/dev/null || true)
+   at=$(sed 's/\.[0-9]\{1,3\}Z$/Z/' <<<"$at")   # normalize ms precision: ".832Z" vs "Z" must order equally (fleet-2y1x rev P3)
+   if [ -z "$at" ]; then best="$m"; best_at=""; break; fi
+   if [ -z "$best" ] || [ "$at" \< "$best_at" ]; then best="$m"; best_at="$at"; fi
+ done
++if [ -z "$best" ]; then
++  for k in $(seq 0 $((n - 1))); do m=${rot[$(( (start + k) % n ))]}
++    if ! observed_fallback "$m"; then best="$m"; break; fi
++  done
++fi
+ echo "${best:-${rot[$((start % n))]}}"   # everything cooling: stay in rotation anyway (fail open)
+diff --git a/tests/fleet-model-audit.test.sh b/tests/fleet-model-audit.test.sh
+index 9459cee..47b2290 100644
+--- a/tests/fleet-model-audit.test.sh
++++ b/tests/fleet-model-audit.test.sh
+@@ -550,6 +550,57 @@ FLEET_LANES_DIR="$ROOT/emptylanes"; mkdir -p "$FLEET_LANES_DIR"; audit --all
+ audit
+ [ "$rc" = 2 ] && ok "10h no arguments is a usage error (2)" || no "10h usage" "rc=$rc out=$out"
+ 
++# 11. EFFECTIVE FAMILY QUERY: what model family did a lane ACTUALLY run? (agents-kq0r)
++F11="$ROOT/fam"; mkdir -p "$F11"
++printf '{"at":"2026-10-13T00:01:00Z","model":"deepseek/deepseek-flash","host":"sdk"}\n' > "$F11/l-single.turns.jsonl"
++FLEET_LANES_DIR="$F11" audit family l-single
++[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11a family query reports turn record family" || no "11a single turn" "rc=$rc out=$out"
++printf '%s' "$out" | grep -q "source: turns.jsonl" && ok "11b and states source is turns.jsonl" || no "11b source turns.jsonl" "$out"
++
++cat > "$F11/l-multi.turns.jsonl" << 'TURNS'
++{"at":"2026-10-13T00:01:00Z","model":"kimi/k3","host":"sdk"}
++{"at":"2026-10-13T00:02:00Z","model":"deepseek/deepseek-flash","host":"sdk"}
++TURNS
++FLEET_LANES_DIR="$F11" audit family l-multi
++[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11c multi-turn lane reports last turn's family" || no "11c multi-turn" "rc=$rc out=$out"
++
++cat > "$F11/l-agree.turns.jsonl" << 'TURNS'
++{"at":"2026-10-13T00:01:00Z","model":"kimi/k3","host":"sdk"}
++{"at":"2026-10-13T00:02:00Z","model":"deepseek/deepseek-flash","host":"sdk"}
++TURNS
++printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-agree.events.log"
++FLEET_LANES_DIR="$F11" audit family l-agree
++[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11d last turn and fallback agreeing exits 0" || no "11d agreeing fallback" "rc=$rc out=$out"
++printf '%s' "$out" | grep -q "source: turns.jsonl and events.log" && ok "11e and states source is turns.jsonl and events.log" || no "11e source both" "$out"
++
++cat > "$F11/l-disagree.turns.jsonl" << 'TURNS'
++{"at":"2026-10-13T00:01:00Z","model":"kimi/k3","host":"sdk"}
++{"at":"2026-10-13T00:02:00Z","model":"deepseek/deepseek-flash","host":"sdk"}
++TURNS
++printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> openai-codex/gpt-6-sol\n' > "$F11/l-disagree.events.log"
++FLEET_LANES_DIR="$F11" audit family l-disagree
++[ "$rc" = 1 ] && ok "11f contradiction between turns and fallback is MISMATCH (1)" || no "11f contradiction rc" "rc=$rc out=$out"
++printf '%s' "$out" | grep -qE "^MISMATCH " && ok "11g and outputs MISMATCH" || no "11g mismatch output" "$out"
++
++printf '10:00:00 ℹ runtime model fell back: pi-claude-code-provider/sonnet -> deepseek/deepseek-flash\n' > "$F11/l-evonly.events.log"
++FLEET_LANES_DIR="$F11" audit family l-evonly
++[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11h events-only fallback reports effective family" || no "11h events only" "rc=$rc out=$out"
++printf '%s' "$out" | grep -q "source: events.log" && ok "11i and states source is events.log" || no "11i source events.log" "$out"
++
++printf 'pi-claude-code-provider/sonnet\n' > "$F11/l-ptronly.model"
++FLEET_LANES_DIR="$F11" audit family l-ptronly
++[ "$rc" = 3 ] && ok "11j pointer-only evidence is UNKNOWN (3)" || no "11j pointer only" "rc=$rc out=$out"
++printf '%s' "$out" | grep -q "source: pointer-only" && ok "11k and names source as pointer-only" || no "11k source pointer-only" "$out"
++
++FLEET_LANES_DIR="$F11" audit family l-missing
++[ "$rc" = 3 ] && ok "11l lane with no records is UNKNOWN (3)" || no "11l missing lane" "rc=$rc out=$out"
++
++FLEET_LANES_DIR="$F11" audit lane l-single --family
++[ "$rc" = 0 ] && printf '%s' "$out" | grep -qE "^MATCH    family deepseek" && ok "11m lane <name> --family alias produces same verdict" || no "11m lane --family" "rc=$rc out=$out"
++
++audit family
++[ "$rc" = 2 ] && ok "11n family without lane name is usage error (2)" || no "11n usage" "rc=$rc out=$out"
++
+ echo
+ printf 'fleet-model-audit.test.sh: %d passed, %d failed\n' "$pass" "$fail"
+ [ "$fail" -eq 0 ] || exit 1
+diff --git a/tests/pick-model-crossfamily.test.sh b/tests/pick-model-crossfamily.test.sh
+index da5c34b..8a247b6 100644
+--- a/tests/pick-model-crossfamily.test.sh
++++ b/tests/pick-model-crossfamily.test.sh
+@@ -112,6 +112,15 @@ rm -f "$HOME/.fleet/lanes/coord-lane.model"
+ m=$(PATH="$HOME/bin:$PATH" bash "$HERE/remote/impl-model.sh" tk-9)
+ eq "$m" "" "6d nothing determinable -> empty (caller proceeds unguarded)"
+ 
++
++echo "7. picker skips models observed to fall back in events.log (agents-kq0r)"
++cat > "$HOME/.fleet/lanes/prior-lane.events.log" <<'EV'
++10:00:00 ℹ runtime model fell back: antigravity/gemini-3.8-flash -> deepseek/deepseek-flash
++EV
++m=$(bash "$PICK" reviewer r2 2>"$ROOT/err7")
++[ "${m%%/*}" != "antigravity" ] && ok "7a model observed to fall back is skipped (got $m)" || bad "7a picker handed out fallen-back model" "$m"
++has "$(cat "$ROOT/err7")" "pick-model: skipping antigravity/gemini-3.8-flash" "7b logs skip reason to stderr"
++rm -f "$HOME/.fleet/lanes/prior-lane.events.log"
+ if [ "$FAIL" -gt 0 ]; then
+   echo "Failed tests: $FAIL"
+ fi
