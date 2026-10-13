@@ -43,6 +43,14 @@
   residual case that `--author-model` covers; the wrong-object attribution is what the branch-name derivation
   fixes.
 
+- **REVIEW, STATED PLAINLY SO NOBODY WAITS FOR ONE:** this delivery needs a CROSS-FAMILY REVIEW ON THE HUB SIDE
+  before it is applied to `~/fleet`. **No review on this project VM is pending and none will be requested**: the
+  specialist slot here is held by other work, the reviewer lane that had this branch (round 1, tip 5295b3e) was
+  retired without posting a verdict, and the branch moves again after it (rounds 2-4 are the remedy naming, the
+  base/ownership documentation and the record of which theory survived measurement, all prose except the remedy
+  text). The change was reviewed by ME only in the sense that I drove both directions of its test; that is not a
+  verdict and is not offered as one.
+
 - **Changes:**
   1. **The author of a branch is derived from the branch** (`fleet_author_lane_from_branch`): the longest lane
      name recorded as `~/.fleet/lanes/<lane>.model` that matches `fleet/<lane>-<bead>` at a name boundary, so
