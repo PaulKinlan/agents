@@ -64,18 +64,68 @@ else
     echo "↻ Updating existing Software Factory checkout in $FACTORY_DIR..."
     # agents-yow5: A FAILED UPDATE MUST NOT LOOK LIKE A SUCCESSFUL INSTALL. This was
     # `|| true`, so a VM whose pull failed installed skills from a checkout of unknown age,
-    # printed its success lines and EXITED 0 - and the caller (remote/provision.sh:970) runs
-    # this installer with ALL OUTPUT SUPPRESSED, so the exit code is the only signal that
-    # survives it. The factory tracks main deliberately (no pin), which is precisely why the
-    # update failing has to be visible: otherwise the nightly runs against a station set of
-    # unknown age while every health check still passes.
-    if ! git -C "$FACTORY_DIR" pull --ff-only --quiet; then
+    # printed its success lines and EXITED 0. The factory tracks main deliberately (no pin),
+    # which is precisely why the update failing has to be visible: otherwise the nightly runs
+    # against a station set of unknown age while every health check still passes.
+    #
+    # WHERE THIS BRANCH IS ACTUALLY REACHED (corrected by agents-rn78 - the original comment here
+    # claimed the caller runs the installer with all output suppressed, and that is no longer true:
+    # fleet-24zj made provision.sh print, and provision.log is where that output lands). This pull
+    # runs for the DOCUMENTED one-liner when the target directory already exists and the script is
+    # not itself inside a checkout. IT DOES NOT RUN FOR PROVISIONING: remote/provision.sh:988 pulls
+    # ~/agents itself and :995 then invokes this installer from INSIDE the checkout, where the
+    # shortcut above takes FACTORY_DIR=$SCRIPT_DIR and no pull happens at all. A reviewer measured
+    # exactly that on a clone whose bare origin had been deleted: outside the checkout rc=1 with a
+    # class, the way provisioning invokes it rc=0 with none. Provisioning's own pull failure is
+    # classified by agents_pull_failure_class in remote/provision.sh.
+    #   patches/provision-failed-pull-names-its-class.patch (agents-rn78).
+    #
+    # agents-a1ko: AND IT MUST NAME THE CLASS OF FAILURE, because a bare exit code forces the
+    # operator to guess between a transient NETWORK outage and a DIVERGED checkout, and those want
+    # OPPOSITE responses (retry later versus investigate the checkout on the host). The class is read
+    # from git's own error text, which is MEASURED rather
+    # than assumed - all three shapes are driven against real git in
+    # tests/test_gate_entrypoint_config.py - and THE THIRD CLASS EXISTS SO AN UNRECOGNISED FAILURE
+    # IS REPORTED AS UNRECOGNISED rather than guessed into one of the other two. That matters here
+    # specifically: the wording of the local-state case is NOT stable - MEASURED in two runs of the
+    # same shape on this VM, git said "error: cannot pull with rebase: You have unstaged changes."
+    # under the host's global pull.rebase=true and "error: Your local changes to the following files
+    # would be overwritten by merge" with that setting pinned false - so a two-class rule would have
+    # to guess on one of them.
+    if ! update_error="$(git -C "$FACTORY_DIR" pull --ff-only --quiet 2>&1)"; then
       stale="$(git -C "$FACTORY_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+      failure_class="checkout-local-state"
+      failure_action="The checkout has uncommitted changes, or a git config routes the pull through a rebase, so the pull cannot fast-forward. Inspect the checkout on the host; the network is not the problem."
+      case "$update_error" in
+        # agents-uvzh (found reviewing agents-a1ko): AUTHENTICATION IS NOT A NETWORK OUTAGE, and git's text
+        # for the two OVERLAPS - a refused key prints "Permission denied (publickey)." immediately followed by
+        # "fatal: Could not read from remote repository." (MEASURED with a real pull against an ssh:// remote
+        # and a refusing GIT_SSH_COMMAND stub). So this arm must come FIRST: below the unreachable arm, a
+        # wrong credential was reported as transient and the operator would retry a failure that cannot fix
+        # itself.
+        *"Permission denied"* | *"Authentication failed"* | *"publickey"* | \
+        *"could not read Username"* | *"terminal prompts disabled"* | *"Host key verification failed"*)
+          failure_class="remote-auth-denied"
+          failure_action="The remote was reachable and REFUSED this host - credentials or permissions - which is NOT transient, so retrying cannot fix it. Check what this checkout authenticates with (ssh key or agent, a token in the remote URL) and that the files it writes are writable, then re-run."
+          ;;
+        *"does not appear to be a git repository"* | *"Could not read from remote repository"* | \
+        *"Could not resolve host"* | *"unable to access"* | *"Connection refused"* | \
+        *"Connection timed out"* | *"No route to host"* | *"Temporary failure in name resolution"*)
+          failure_class="remote-unreachable"
+          failure_action="The remote could not be reached, which is usually transient: retrying the pull later is safe and no local state was changed."
+          ;;
+        *"Not possible to fast-forward"* | *"Diverging branches"* | *"non-fast-forward"*)
+          failure_class="checkout-diverged"
+          failure_action="The checkout has local commits (or a rewritten history) the remote does not have, so the pull cannot fast-forward. Investigate the checkout on the host; retrying fails the same way."
+          ;;
+      esac
       {
         echo "✗ install.sh: could not update the Software Factory checkout in $FACTORY_DIR"
-        echo "  'git pull --ff-only' failed, so this run would install station skills from a"
-        echo "  stale checkout (currently at $stale). Resolve the checkout or the network and"
-        echo "  re-run; nothing was installed from it (agents-yow5)."
+        echo "  FAILURE CLASS: $failure_class (agents-a1ko)"
+        echo "  $failure_action"
+        while IFS= read -r line; do echo "  git: $line"; done <<<"$update_error"
+        echo "  The checkout is still at $stale, so this run would have installed station skills"
+        echo "  from a stale checkout; nothing was installed from it (agents-yow5)."
       } >&2
       exit 1
     fi
