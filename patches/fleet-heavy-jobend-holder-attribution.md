@@ -44,8 +44,13 @@ field the kernel maintains, which is why the fix can be a field test rather than
 
 ### How it was verified
 
-Both directions, on a **copy** in `/tmp` (the hub's copy under `~/fleet` is not writable here), driving
-the failure rather than reasoning about it:
+Both directions, driving the failure rather than reasoning about it.
+
+**Provenance of the tree tested.** The runs below used a **copy in `/tmp` of the file at exactly the
+revision named above** - `~/fleet/bin/fleet-heavy`, 14378 bytes, sha256 33ecf140e615852a..., copied before
+any edit and patched only with the diff in this directory. `~/fleet` is not writable from a project VM,
+so the hub's file could not be tested in place; a copy taken from that revision is what makes these runs
+reproducible by whoever applies the patch, and no other file was involved.
 
 | run | warned? |
 | --- | --- |
