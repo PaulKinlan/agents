@@ -1,4 +1,4 @@
-# `fleet-merger-refusal-stops-script.patch` (agents-qngy)
+## `fleet-merger-refusal-stops-script.patch` (agents-qngy)
 
 - **Target repository:** `PaulKinlan/fleet`
 - **Target files:**
