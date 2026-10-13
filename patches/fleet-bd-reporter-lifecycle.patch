@@ -1,0 +1,162 @@
+From b0d82c7031f06d1c86e8be4f1a2bccc53737441d Mon Sep 17 00:00:00 2001
+From: agents-factory-impl-f6du <agents-factory-impl-f6du@exe.xyz>
+Date: Tue, 13 Oct 2026 16:52:43 +0000
+Subject: [PATCH] Reap reporter timer and pin fd containment
+
+---
+ bin/bd                         |  10 ++-
+ tests/bd-lock-reporter.test.sh | 119 +++++++++++++++++++++++++++++++++
+ 2 files changed, 127 insertions(+), 2 deletions(-)
+ create mode 100755 tests/bd-lock-reporter.test.sh
+
+diff --git a/bin/bd b/bin/bd
+index 19e6f16..0073e53 100755
+--- a/bin/bd
++++ b/bin/bd
+@@ -509,10 +509,16 @@ fleet_bd_lock_acquire() {
+   timeout -k 2 "$wait" flock "$fd" & waiter=$!
+   fleet_bd_lock_report "$lock" 0 wait
+   # This reporter never owns the lock fd: otherwise a reporter orphaned by SIGKILL
+-  # could hold the lock AFTER the payload exits. It also exits when its parent dies.
++  # could hold the lock AFTER the payload exits. Reap its timer on normal shutdown:
++  # killing a shell blocked in foreground `sleep` otherwise orphans one sleep per call.
+   (
+     exec {fleet_bd_lock_fd}>&-
+-    while sleep "$every"; do
++    timer=""
++    trap 'if [ -n "$timer" ]; then kill "$timer" 2>/dev/null || true; wait "$timer" 2>/dev/null || true; fi; exit 0' TERM INT
++    while :; do
++      sleep "$every" & timer=$!
++      wait "$timer" || break
++      timer=""
+       kill -0 "$parent" 2>/dev/null || break
+       fleet_bd_lock_report "$lock" "$((SECONDS - start))" wait
+     done
+diff --git a/tests/bd-lock-reporter.test.sh b/tests/bd-lock-reporter.test.sh
+new file mode 100755
+index 0000000..0ed0071
+--- /dev/null
++++ b/tests/bd-lock-reporter.test.sh
+@@ -0,0 +1,119 @@
++#!/usr/bin/env bash
++# Hermetic reporter lifecycle/fd regression for bin/bd (agents-u2st).
++# Applies after the elu6 holder patch and nbka kernel-queued acquisition patch.
++set -uo pipefail
++HERE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
++SHIM="${BD_SHIM_OVERRIDE:-$HERE/bin/bd}"
++ROOT=$(mktemp -d)
++FHOME="$ROOT/home"
++KIDS=''
++cleanup() {
++  # A SIGKILLed shim can leave a reporter alive until its next heartbeat.
++  # Kill only fixture processes carrying THIS throwaway HOME, never by a reused
++  # process-group id or a generic `pkill sleep` that could touch another lane.
++  python3 - "$FHOME" "$$" <<'PY'
++import os
++import signal
++import sys
++home = ('HOME=' + sys.argv[1]).encode()
++exclude = {os.getpid(), int(sys.argv[2])}
++for item in os.scandir('/proc'):
++    if not item.name.isdigit() or int(item.name) in exclude:
++        continue
++    try:
++        with open(item.path + '/environ', 'rb') as f:
++            if home in f.read().split(b'\0'):
++                os.kill(int(item.name), signal.SIGTERM)
++    except (OSError, PermissionError):
++        continue
++PY
++  for pid in $KIDS; do kill "$pid" 2>/dev/null || true; done
++  wait 2>/dev/null || true
++  rm -rf "$ROOT"
++}
++trap cleanup EXIT
++HOME="$FHOME"; export HOME
++unset FLEET_BD_LOCKED
++export FLEET_ROLE=implementer
++mkdir -p "$HOME/.fleet" "$HOME/.local/bin"
++LOCK="$HOME/.fleet/bd.lock"
++LOG="$ROOT/calls.log"; export LOG
++cat > "$HOME/.local/bin/bd" <<'STUB'
++#!/usr/bin/env bash
++printf '%s\n' "$*" >> "$LOG"
++STUB
++chmod +x "$HOME/.local/bin/bd"
++
++# Count only the fixture's `sleep 8` processes by their unique HOME. No host
++# process list, bead database, or other lane's sleep contributes to the count.
++sleeps_for_home() {
++  python3 - "$HOME" <<'PY'
++import os
++import sys
++home = ('HOME=' + sys.argv[1]).encode()
++count = 0
++for item in os.scandir('/proc'):
++    if not item.name.isdigit():
++        continue
++    try:
++        with open(item.path + '/environ', 'rb') as f:
++            if home not in f.read().split(b'\0'):
++                continue
++        with open(item.path + '/cmdline', 'rb') as f:
++            argv = f.read().split(b'\0')
++        if len(argv) >= 2 and os.path.basename(os.fsdecode(argv[0])) == 'sleep' and argv[1] == b'8':
++            count += 1
++    except (OSError, PermissionError):
++        continue
++print(count)
++PY
++}
++wait_held() {
++  for _ in $(seq 1 100); do flock -n "$LOCK" true 2>/dev/null || return 0; sleep .01; done
++  echo 'FAIL holder never acquired the fixture lock'; exit 1
++}
++
++# Normal completion: the reporter must reap its timer child before the shim
++# returns. The old nbka implementation killed the reporter but orphaned sleep 8.
++(flock -x "$LOCK" bash -c 'sleep .5') & holder=$!; KIDS="$KIDS $holder"
++wait_held
++FLEET_BD_LOCK_REPORT=8 FLEET_BD_LOCK_WAIT=10 bash "$SHIM" probe normal >"$ROOT/normal.out" 2>"$ROOT/normal.err" & shim=$!
++wait "$shim"; rc=$?
++wait "$holder" || true
++if [ "$rc" -ne 0 ] || [ "$(sleeps_for_home)" -ne 0 ]; then
++  printf 'FAIL normal contended call rc=%s orphan_sleeps=%s\n' "$rc" "$(sleeps_for_home)"
++  exit 1
++fi
++printf 'PASS: reporter and timer child exited on normal acquisition\n'
++
++# SIGKILL while still queued: the reporter MUST close its inherited lock fd.
++# If it keeps that fd, it holds the lock for up to REPORT=8s after the raw
++# holder exits; a fresh 1s bounded contender must then FAIL.
++(flock -x "$LOCK" bash -c 'sleep 2') & holder=$!; KIDS="$KIDS $holder"
++wait_held
++FLEET_BD_LOCK_REPORT=8 FLEET_BD_LOCK_WAIT=10 bash "$SHIM" probe killed >"$ROOT/killed.out" 2>"$ROOT/killed.err" & shim=$!
++# Wait for the blocking flock child to join the real kernel queue. Match the
++# FULL lock identity, not an inode shared by an unrelated filesystem.
++KEY=$(python3 - "$LOCK" <<'PY'
++import os
++import sys
++st = os.stat(sys.argv[1])
++print(f'{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}')
++PY
++)
++queued=0
++for _ in $(seq 1 200); do
++  if awk -v key="$KEY" '$2 == "->" && $3 == "FLOCK" && $7 == key { found=1 } END { exit !found }' /proc/locks; then queued=1; break; fi
++  sleep .01
++done
++if [ "$queued" -ne 1 ]; then echo 'FAIL shim never queued on fixture lock'; exit 1; fi
++kill -KILL "$shim" 2>/dev/null || true
++wait "$shim" 2>/dev/null || true
++wait "$holder" || true
++if ! flock -w 1 "$LOCK" true; then
++  echo 'FAIL reporter retained lock fd after shim SIGKILL and holder exit'; exit 1
++fi
++if grep -q '^probe killed$' "$LOG"; then
++  echo 'FAIL SIGKILLed shim ran bd payload'; exit 1
++fi
++printf 'PASS: SIGKILLed shim leaves no reporter lock fd; fresh caller acquires within 1s\n'
+-- 
+2.43.0
+
