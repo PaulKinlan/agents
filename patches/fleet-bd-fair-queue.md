@@ -12,6 +12,14 @@ The uncontended `flock -n` fast path is unchanged. Under contention, the shim no
 
 This joins the Linux kernel's lock wait queue instead of the one-second `sleep`/`flock -n` polling loop, avoiding the measured missed-release polling failure. **It does not promise strict FIFO priority** across all kernels or a maximum queue wait under overload. Batching related bead calls under a single short hold still reduces demand but cannot itself guarantee access. A hard FIFO requirement would need a separate ticket protocol with stale-ticket recovery, not an undocumented claim about this patch.
 
+## Why the 300-second default remains (agents-atom)
+
+An independent read-only `/proc/locks` instrument sampled the live VM for **59.8s at 445 samples** during active work: lock duty held **84.9%**, about **23 acquisitions/minute**, and observed individual holder durations median **1.9s**, mean **2.2s**, max **13.5s**. This is a holder distribution, **not** the distribution of a caller's successful time waiting in the queue. The earlier 30s/299-sample result above measures holder *turnovers* at 100ms resolution and cannot supply a successful-wait p99 either. Both windows are too short to establish the tail of a network `bd dolt push`.
+
+A maximum holder duration of X does **not** bound a queued wait to X. Acquisition can wait through the remaining current hold **plus the sum of holds ahead of it**; for example, three 13.5s holders ahead imply about 40.5s before acquisition, even though each holder is below 20s. End-to-end `bd` call time then adds the caller's own operation **after** acquisition. Thus changing the default to 20s from the measured one-holder maximum would turn a healthy crowded queue into a false refusal. Batching calls lowers demand but does not change this arithmetic.
+
+**Decision:** retain the pre-existing **300s** `FLEET_BD_LOCK_WAIT` default for compatibility while the new blocking queue removes the missed-release failure. It is a **safety net, not a performance knob**, and 300s is not claimed to be a measured optimum or a derived p99. The independent holder heartbeat makes a long wait visible; if the bound fires, the shim reports TIMEOUT and exits 75 without executing `bd`. Before reducing the default, measure a *longer busy-window distribution of successful acquisition waits*, queue depth at arrival, and successful network `bd dolt push` hold tails; choose a bound with headroom for the queue depth and tails it must tolerate. Keep `FLEET_BD_LOCK_WAIT` available for an operator who explicitly needs a different bound. This documentation is a follow-up to cleared nbka @03fae05; its runtime patch is unchanged.
+
 ## Verification (scratch copy; live host untouched)
 
 - On the reviewed elu6 baseline, `tests/bd-lock-holder.test.sh`: **63/63 PASS**; after this patch: **63/63 PASS**. It covers holder diagnostics, timeout/refusal, fd inheritance across shim SIGKILL, and data redaction.
