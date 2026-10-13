@@ -27,6 +27,36 @@ Verified, not assumed: the base is the live bundle by content (`bin/fleet-land-m
 reports **341 passed / 0 failed** - 2tov's own claimed figure, reproduced. All five patch files were re-extracted
 from their current remote tips and their sha256s are unchanged, so these measurements are current.
 
+### The five source objects, so the stack can be re-checked against the SAME objects
+
+| artifact | sha256 |
+|---|---|
+| `fleet-verdict-transcription-scanner.patch` | `8bc661311874838afe80f096d0455b1573bdc5ed46713f27a2ee22d234a8bbc2` |
+| `fleet-verdict-model-families-filter.patch` | `10087eef55ef51b809860a4d8cb42286f7e40251ea6509cb0870ce5474bcc590` |
+| `fleet-verdict-pool-sha-relevance.patch` (agents-9lew) | `86d3a682942a8781d095dba21b6fd25de94a2163dcc2da1d76e81a5089aca21d` |
+| `fleet-land-message-author-identity.patch` (agents-2tov) | `6be81c76ed665ec6fb5485f611ca3562cc88cac7ad0cb025338242a6415ea2a7` |
+| `fleet-verdict-transcribed-run.patch` (agents-m6fr) | `25c603aa1e12d5a08069f4eddfa5672133974aef817557718dde4c1f4772aa4c` |
+
+These are what made the measurements durable rather than stale: the zero-failed-hunk applies, the 341/0 suite and
+the m6fr conflict at line 588 all still hold because the objects are the same objects.
+
+### WHAT "IT IS IN MAIN" DOES NOT MEAN
+
+**Three of these five artifacts are already in `origin/main`'s `patches/` directory, and that does NOT mean they are
+APPLIED.** The live `bin/fleet-land-message` still hashes `980899b73c2cbd87…` - 2tov's declared PRE-STACK base. The
+shelf holds delivered artifacts; the hub still has to apply them. **COMMITTED ARTIFACT, APPLIED STATE AND INSTALLED
+STATE ARE THREE DIFFERENT THINGS**, and "it is in main" is not "it is running". This is the same shape as the
+agents-kxbv delivery: its repo half MERGED while its upstream half stayed parked and its install remained a third
+step - three layers, and any sentence that collapses them is wrong about which one it is describing.
+
+### The label that was true about the artifact and wrong about the tip (agents-9lew)
+
+agents-9lew's `cleared:` label was **true about the artifact** - byte-identical to what the reviewer read - and its
+`merge-queue` label was **wrong**, because landing it alone is the knowingly-wrong intermediate this composition
+exists to prevent: the pool reordering running against the independence value 2tov has not yet fixed. Coord removed
+the queue label and the ruling wins; 9lew lands ONLY inside this stack. This is the same distinction drawn for
+agents-elu6, applied to a LABEL rather than to a tip: an artifact-level truth is not a tip-level claim.
+
 **THE TREE ORDER IS THE REVERSE OF THE SEMANTIC ORDER, AND BOTH ARE TRUE.** 9lew's reordering consults the
 independence value 2tov corrects, so 2tov must be understood FIRST - but 2tov's patch is cut ON TOP OF 9lew, and
 applying it before step 3 fails 2 of 9 hunks. The delivery lands as one change, so there is no landing hazard; the
