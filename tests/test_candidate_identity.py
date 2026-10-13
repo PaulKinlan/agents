@@ -120,7 +120,7 @@ class TestThePropertyAgainstTheReconstruction(unittest.TestCase):
         return candidate
 
     def test_the_copy_is_stable_where_the_reconstruction_still_moves(self):
-        """The measured gap this bead closes, on an UNCHANGED file.
+        """The measured gap this bead records, on an UNCHANGED file - and what the delta now says about it.
 
         TWO findings in the same file is the case agents-x9my step 2 deliberately does not fix: its
         location fallback is refused when a run reports more than one finding at a path, because two
@@ -158,13 +158,14 @@ class TestThePropertyAgainstTheReconstruction(unittest.TestCase):
         self.assertEqual(s1["new"], 2)
         self.assertNotEqual({f["fingerprint"] for f in p1}, {f["fingerprint"] for f in processed},
                             "re-wording must still move a prose-bound identity")
-        # THEY ARE NOT DISCOVERIES (agents-l606). Both appearances sit at the exact location of a row
-        # this same run retires, which is the same finding under a fresh fingerprint, so they leave
-        # `new` for the re-key count and the rows they moved from still book as fixed. Before this,
-        # the run reported two new findings beside the two that retired - the pair this test used to
-        # record as the measured gap.
-        self.assertEqual((s2["new"], s2["rekeyed"], s2["fixed"]), (0, 2, 2), s2)
-        self.assertEqual({f["change"] for f in processed}, {"rekeyed"})
+        # AND THE RUN NOW SAYS SO (agents-l606): the delta still books them new, because a location
+        # cannot prove they are the same finding as the two that retired - every attempt to
+        # reclassify them was reproduced as a way to hide work (agents-wcki, agents-hci2) - but it
+        # counts the pair and discloses it, so the new+fixed wave is no longer indistinguishable from
+        # a genuine discovery wave. The scanner's ids for the same unchanged file are byte-identical
+        # across scans (asserted above and again below).
+        self.assertEqual((s2["new"], s2["possible_rekey"], s2["fixed"]), (2, 2, 2), s2)
+        self.assertEqual({f["change"] for f in processed}, {"new"})
         self.assertEqual({f["identity_source"] for f in processed}, {"model-snippet"})
         # ...while the scanner's ids for the same unchanged file are byte-identical across scans.
         self.assertEqual(scan_a[CANDIDATE_ID_FIELD], scan_b[CANDIDATE_ID_FIELD])
