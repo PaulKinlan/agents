@@ -1020,6 +1020,47 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
                       "the registry's README is committed markdown: docs_drift walks it, so it is mapped "
                       "rather than left to fail loudly")
 
+    def test_an_unmatched_file_is_named_once_not_once_per_pass(self):
+        """agents-ywb5: THE O(N^2) SHAPE HAS AN OBSERVABLE SIGNATURE, and this drives it rather than reading
+        for it. The change that moved the arms into a fragment directory left the old loop header above the
+        new loop, so the loader was redefined and re-run per changed path, the mapping loop re-read all N
+        paths N times, and every unmatched file was named N times. MEASURED on the nested version: three
+        unmatched paths printed each path THREE times, and a 40-path delta took 6.76s against 0.16s for one
+        pass. A duplicate in the output is the cheap detector for the whole class, so it is pinned here -
+        the reading-for-a-string half is the structural test below."""
+        dupes = ["unmatched_alpha.xyz", "unmatched_beta.xyz", "unmatched_gamma.xyz"]
+        res = run_fast_gate(dupes)
+        self.assertNotEqual(res.returncode, 0, "three unmapped files must still fail the gate loudly")
+        for path in dupes:
+            self.assertEqual(res.stderr.count(path), 1,
+                             f"{path} must be named exactly once: a count of N means the mapping loop ran N "
+                             f"times over the same changed-file list (agents-ywb5)\n{res.stderr}")
+
+    def test_the_registry_is_loaded_once_and_mapped_in_one_pass(self):
+        """The structural half of agents-ywb5, because the duplicate-output signature above only fires for
+        an UNMATCHED path. The shape itself is what matters: one loop over the delta, one loader call. Two
+        `done <<< "$changed"` terminators is how the nested version announced itself."""
+        script = FAST_GATE.read_text(encoding="utf-8")
+        self.assertEqual(script.count('done <<< "$changed"'), 1,
+                         "exactly one loop may consume the changed-file list (agents-ywb5)")
+        self.assertEqual(script.count("while IFS= read -r f; do"), 1,
+                         "the mapping loop must not be nested inside another read loop")
+        self.assertEqual(script.count("fast_gate_arms_load || exit 1"), 1,
+                         "the fragments must be loaded once per run, not once per changed path")
+
+    def test_every_suite_named_in_the_registry_exists(self):
+        """Fragment consistency (agents-t12i): a fragment naming a suite that does not exist would select
+        nothing when its path changes, and the failure would appear only on that path's next change. The
+        registry is read as text so a typo is caught by the mapping suite instead."""
+        # COMMENTS ARE EXCLUDED, for the same reason the pattern scan excludes them: an arm's rationale
+        # quotes example paths (one cites a deliberately nonexistent suite from a contract test), and a
+        # prose quotation is not a reference the gate will try to run.
+        code_lines = [line for line in arm_registry_text().split("\n") if not line.lstrip().startswith("#")]
+        named = sorted(set(re.findall(r"(tests/[A-Za-z0-9_]+\.py)", "\n".join(code_lines))))
+        self.assertGreaterEqual(len(named), 30, "the registry names far fewer suites than it should - scan broken?")
+        missing = [suite for suite in named if not (ROOT / suite).is_file()]
+        self.assertEqual(missing, [], f"the registry names suites that do not exist: {missing}")
+
     def test_a_duplicate_pattern_fails_rather_than_being_resolved_by_position(self):
         """agents-v8xv's obligation. Precedence is now carried by filenames, so an arm declared twice
         would be resolved silently by position - which is the accident this shape must not have. BOTH arm

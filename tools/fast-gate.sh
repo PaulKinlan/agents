@@ -248,9 +248,6 @@ print(' '.join(sorted(out)))
 fi
 
 FAST_GATE_STAGE="mapping changed files"
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-FAST_GATE_STAGE="mapping changed files"
 
 # agents-hr6q (ADR 0002 sections 2 and 4): THE ARM TABLE IS A DIRECTORY OF FRAGMENTS. It used to be one
 # `case` table here - 144 landings touched this file, 40 of them changing it on both sides, and 84 of
@@ -343,8 +340,6 @@ while IFS= read -r f; do
   if [ -z "$_fast_gate_matched" ]; then
     unmatched="$unmatched $f"
   fi
-done <<< "$changed"
-
 done <<< "$changed"
 
 FAST_GATE_STAGE="checking unmapped files"
