@@ -1,0 +1,157 @@
+diff --git a/bin/fleet-land-message b/bin/fleet-land-message
+index 5d0b20d..0c53d94 100755
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
+@@ -418,7 +418,17 @@ flm_select() {
+               rev_delta_identical=true
+               # same shared decision as above - never a second word list
+               if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
++            else
++              rev_hunks=$(git diff "$rev_base..$rev_full" 2>/dev/null | grep '^[+-][^+-]' || true)
++              tip_hunks=$(git diff "$tip_base..$tip_full" 2>/dev/null | grep '^[+-][^+-]' || true)
++              if [ -n "$rev_hunks" ] && [ "$rev_hunks" = "$tip_hunks" ]; then
++                rev_delta_mismatch="position/offset moved (added/removed lines identical)"
++              else
++                rev_delta_mismatch="content changed"
++              fi
+             fi
++          elif [ -n "$tip_files" ] || [ -n "$rev_files" ]; then
++            rev_delta_mismatch="files changed"
+           fi
+         fi
+       fi
+@@ -692,9 +702,9 @@ if [ "$rev_state" = "CURRENT" ]; then
+     rev_line="FAIL: verdict was $rev_verdict for commit ${rev_sha:-$tip} by $rev_who at $rev_at — NOT CLEARED"
+   fi
+ elif [ "$rev_state" = "STALE" ]; then
+-  rev_line="STALE: review covered $rev_sha, but origin/$BRANCH moved to $tip (+$rev_unreviewed commit(s) unreviewed) — NOT CLEARED"
++  rev_line="STALE: review covered $rev_sha, but origin/$BRANCH moved to $tip (+$rev_unreviewed commit(s) unreviewed${rev_delta_mismatch:+; delta: $rev_delta_mismatch}) — NOT CLEARED"
+ elif [ "$rev_state" = "DIVERGED" ]; then
+-  rev_line="DIVERGED: review covered $rev_sha, but origin/$BRANCH tip is $tip (not in history) — NOT CLEARED"
++  rev_line="DIVERGED: review covered $rev_sha, but origin/$BRANCH tip is $tip (not in history${rev_delta_mismatch:+; delta: $rev_delta_mismatch}) — NOT CLEARED"
+ elif [ "$rev_state" = "UNRESOLVED" ]; then
+   rev_line="UNRESOLVED: reviewed commit $rev_sha cannot be resolved on origin/$BRANCH — NOT CLEARED"
+ elif [ "$rev_state" = "UNPINNED" ]; then
+@@ -733,9 +743,9 @@ if [ "$JSON" = 0 ] && [ -z "$GATE_SHA" ] && [ "${ALLOW_STALE:-0}" = 0 ]; then
+   if [ "$rev_state" = "STALE" ] || [ "$rev_state" = "DIVERGED" ]; then
+     if [ ${#rm_labels[@]} -gt 0 ]; then
+       bdf update "$BEAD" "${rm_labels[@]}" >/dev/null 2>&1 || true
+-      bdf comments add "$BEAD" "merge-queue clearance invalidated: branch tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)). Re-review required." >/dev/null 2>&1 || true
++      bdf comments add "$BEAD" "merge-queue clearance invalidated: branch tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)${rev_delta_mismatch:+, delta: $rev_delta_mismatch}). Re-review required." >/dev/null 2>&1 || true
+     fi
+-    echo "fleet-land-message: REFUSING: origin/$BRANCH tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)). Clearance invalidated$([ "$has_mq" = 1 ] && echo " and merge-queue label removed from $BEAD")." >&2
++    echo "fleet-land-message: REFUSING: origin/$BRANCH tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)${rev_delta_mismatch:+, delta: $rev_delta_mismatch}). Clearance invalidated$([ "$has_mq" = 1 ] && echo " and merge-queue label removed from $BEAD")." >&2
+     exit 1
+   elif [ "$rev_state" = "UNRESOLVED" ]; then
+     if [ ${#rm_labels[@]} -gt 0 ]; then
+@@ -958,6 +968,7 @@ if [ "$JSON" = 1 ]; then
+     --arg rev_who "${rev_who:-}" --arg rev_at "${rev_at:-}" --argjson rev_unreviewed "${rev_unreviewed:-0}" \
+     --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
+     --argjson rev_delta_identical "${rev_delta_identical:-false}" \
++    --arg rev_delta_mismatch "${rev_delta_mismatch:-}" \
+     --arg rev_run_id "${rev_run_id:-}" \
+     --arg cleared_sha "${cleared_label_sha:-}" \
+     --arg rev_independence "${rev_independence:-unknown}" --arg rev_reviewer_model "${rev_reviewer_model:-}" \
+@@ -974,7 +985,7 @@ if [ "$JSON" = 1 ]; then
+               unreviewed_commits:$rev_unreviewed,author:$rev_who,at:$rev_at,cleared:$rev_cleared,
+               selected_comment_index:($rev_comment_index|if .=="" then null else tonumber end),
+               selected_comment_author:$rev_who,author_lane_transcription:$author_lane_transcription,
+-              delta_identical:$rev_delta_identical,run_id:$rev_run_id,cleared_sha:$cleared_sha,
++              delta_identical:$rev_delta_identical,delta_mismatch:$rev_delta_mismatch,run_id:$rev_run_id,cleared_sha:$cleared_sha,
+               branch_author:$branch_author,independence:$rev_independence,
+               reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
+               author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
+diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
+index cd6d1c5..0dd6274 100755
+--- a/tests/fleet-land-message.test.sh
++++ b/tests/fleet-land-message.test.sh
+@@ -1445,6 +1445,89 @@ eq "$(jq -r '.review.state' <<<"$j36i_custom")" "CURRENT" "36i2 custom family re
+ eq "$(jq -r '.review.verdict' <<<"$j36i_custom")" "PASS" "36i3 custom family verdict extracted"
+ eq "$(jq -r '.review.author_lane_transcription' <<<"$j36i_custom")" "true" "36i4 author-lane transcription identified"
+ 
++# 37. sha-relevance outranks independence; delta mismatch reasons
++echo "37. sha-relevance outranks independence; delta mismatch reasons"
++# 37a-37c: author-lane verdict for current tip is NOT masked by dead non-author verdict for older sha
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$d1_rev branch fleet/delta1\nFindings: none"},
++ {"author":"proj-lane-1","created_at":"2026-10-12T12:00:00Z",
++  "text":"Transcribed review:\nVERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nIndependent Reviewer: openai-codex/gpt-6-sol (author: antigravity/gemini-3.8-flash)\nFindings: none"}]
++J
++out=$(run tk-1 fleet/delta1); rc=$?
++[ "$rc" = 0 ] && ok "37a author-lane verdict for current tip is not masked by dead non-author verdict" || bad "37a expected exit 0" "rc=$rc out=$out"
++j_out=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.state' <<<"$j_out")" "CURRENT" "37b review state is CURRENT for tip-pinned author verdict"
++eq "$(jq -r '.review.reviewed_sha' <<<"$j_out")" "$d1_tip" "37c reviewed sha is current tip"
++
++# 37d-37f: on the SAME tip, non-author outranks author-lane
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-lane-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"Transcribed review:\nVERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nIndependent Reviewer: openai-codex/gpt-6-sol (author: antigravity/gemini-3.8-flash)\nFindings: none"},
++ {"author":"proj-rev-1","created_at":"2026-10-12T12:00:00Z",
++  "text":"VERDICT: FAIL\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: one issue"}]
++J
++out=$(run tk-1 fleet/delta1); rc=$?
++[ "$rc" = 1 ] && ok "37d on same tip non-author outranks author-lane" || bad "37d expected exit 1" "rc=$rc out=$out"
++j_out=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.author' <<<"$j_out")" "proj-rev-1" "37e operative review author is non-author lane"
++eq "$(jq -r '.review.author_lane_verdicts_ignored' <<<"$j_out")" "1" "37f author-lane verdict on same tip is ignored"
++
++# 37g-37h: delta mismatch reports content changed
++git -C "$ROOT/repo" checkout -q -b fleet/mismatch-content main
++echo "different content" > "$ROOT/repo/mismatch.txt"
++git -C "$ROOT/repo" add mismatch.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "mismatch"
++mc_rev=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++git -C "$ROOT/repo" checkout -q -b fleet/mismatch-tip main
++echo "completely other content" > "$ROOT/repo/mismatch.txt"
++git -C "$ROOT/repo" add mismatch.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "tip content"
++mc_tip=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: mismatch.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$mc_rev branch fleet/mismatch-tip\nFindings: none"}]
++J
++j_out=$(run --print-json tk-1 fleet/mismatch-tip)
++eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "content changed" "37g delta mismatch reports content changed"
++out=$(run tk-1 fleet/mismatch-tip 2>&1 || true)
++has "$out" "content changed" "37h refusal line reports content changed"
++
++# 37i-37j: position/offset moved when added/removed lines are identical
++git -C "$ROOT/repo" checkout -q -b fleet/pos-base-old main
++printf "line1\nline2\n" > "$ROOT/repo/pos.txt"
++git -C "$ROOT/repo" add pos.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "pos base old"
++pos_base_old=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/pos-rev
++printf "line1\nline2\nadded line\n" > "$ROOT/repo/pos.txt"
++git -C "$ROOT/repo" add pos.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "pos rev"
++pos_rev=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q main
++printf "prefix\nline1\nline2\n" > "$ROOT/repo/pos.txt"
++git -C "$ROOT/repo" add pos.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "main advance"
++
++git -C "$ROOT/repo" checkout -q -b fleet/pos-tip
++printf "prefix\nline1\nline2\nadded line\n" > "$ROOT/repo/pos.txt"
++git -C "$ROOT/repo" add pos.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "pos tip"
++pos_tip=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: pos.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 $pos_base_old..$pos_rev branch fleet/pos-tip\nFindings: none"}]
++J
++j_out=$(run --print-json tk-1 fleet/pos-tip)
++eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "position/offset moved (added/removed lines identical)" "37i delta mismatch reports position offset when hunks differ only by offset"
++out=$(run tk-1 fleet/pos-tip 2>&1 || true)
++has "$out" "position/offset moved" "37j refusal line reports position/offset moved"
++
+ if [ "$FAIL" -gt 0 ]; then
+   echo "Failed tests ($FAIL):"
+   for f in "${FAILED_TESTS[@]}"; do
