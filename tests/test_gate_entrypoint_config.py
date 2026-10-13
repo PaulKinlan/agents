@@ -1097,5 +1097,34 @@ class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
                           "since the class is the installer's inference and the text is not")
 
 
+
+    def test_a_denied_authentication_is_not_reported_as_a_transient_outage(self):
+        """agents-uvzh (found reviewing this change): git's text for a REFUSED credential and for an
+        UNREACHABLE remote OVERLAP - a denied key prints "Permission denied (publickey)." and then
+        "fatal: Could not read from remote repository." (MEASURED here with a real pull against an ssh://
+        remote whose GIT_SSH_COMMAND refuses). Until this class existed, the unreachable arm matched that
+        text first, so an operator was told to retry a failure that retrying cannot fix - which is worse
+        than no class at all, because the wording is an instruction."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            _origin, _seed, checkout = self._working_checkout(root)
+            stub = root / "ssh-refuses"
+            stub.write_text("#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n",
+                            encoding="utf-8")
+            stub.chmod(0o755)
+            self._git(checkout, "remote", "set-url", "origin", "ssh://git@example.invalid/repo.git")
+            self._git(checkout, "config", "core.sshCommand", str(stub))
+
+            res = self._run_installer(root, checkout, home)
+            output = self._assert_installs_nothing_and_names(
+                res, home, checkout, "remote-auth-denied", "remote-unreachable", "checkout-diverged")
+            self.assertIn("Permission denied", output, "git's own text must be quoted as evidence")
+            self.assertIn("NOT transient", output)
+            self.assertNotIn("usually transient", output,
+                             "the auth class must not borrow the unreachable wording: that wording is an "
+                             "instruction to retry")
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,4 @@
-## `provision-failed-pull-names-its-class.patch` (agents-rn78)
+## `provision-failed-pull-names-its-class.patch` (agents-rn78, agents-uvzh)
 
 - **Target repository:** `PaulKinlan/fleet`
 - **Target files:**
@@ -8,14 +8,23 @@
 - **Baseline file hashes:**
   `31d1669c85dcdd86de490633832940f10fc20bbfd9a350ffd398d93f189e2607  remote/provision.sh`
   `f890c2be8ca2948f47b7cdd9872eccf286e7fb9314d0fffc246cd7a3273abc3c  tests/provision.test.sh`
-  (patched: `1c2921c396e3d6f1463e0c1a97829baca6bbaceee797c55ef5d5b798adb9d43b`,
-  `bc22502237db620867bb97042c4bc3f9c22b37bcdf61e85d7619c1715e02eb44`)
+  (patched: `abb3c8d87a624f16cdbf5a4378cb6047480dd326b878c772521705495bd88e7a`,
+  `f82384da29eae231cd7785cad9c4baecf7943e37fe3e786f6acb03d1bae87238`)
 - **Problem statement (agents-rn78, P2, found reviewing agents-a1ko).** The Software Factory's
   provisioning path cannot tell an operator *why* its update failed. `remote/provision.sh:988` pulls
   `~/agents` and, on failure, emits one generic line — `WARN: agents pull failed` — which is the same
   sentence for a transient network outage and for a checkout that has diverged, two failures that want
   opposite responses (retry later vs investigate the host). `git`'s own text is in `provision.log`, but
   the warning an operator greps for names no class.
+
+- **Problem statement 2 (agents-uvzh, found reviewing the first delivery of this patch).** The classifier
+  conflated an **authentication denial** with an **unreachable remote**, and the two want opposite
+  responses. Git's text for them OVERLAPS: a refused key prints `Permission denied (publickey).` and then
+  `fatal: Could not read from remote repository.` (MEASURED with a real `git pull --ff-only -q` against an
+  `ssh://` origin and a `GIT_SSH_COMMAND` stub that refuses). Because `Permission denied` and
+  `Could not read from remote repository` sat in the unreachable arm, a wrong credential was reported as
+  `remote-unreachable: ... usually transient - retrying the pull later is safe`. That is worse than no class
+  at all: the wording is an *instruction*, and retrying cannot fix a credential.
 
 - **Established, by reading and by measuring:**
   1. **The installer's classifier is unreachable in provisioning** (the reason this patch is not in
@@ -38,29 +47,36 @@
      diagnosis fix. Recorded as an open observation rather than silently re-scoped (see below).
 
 - **Changes:**
-  - `agents_pull_failure_class()` maps git's own message onto one of three classes — `remote-unreachable`,
-    `checkout-diverged`, `checkout-local-state-or-unrecognised` — and prints the class *with the operator
-    action* so one log line is actionable. The vocabulary and the class-splitting mirror `install.sh`
+  - `agents_pull_failure_class()` maps git's own message onto one of FOUR classes — `remote-auth-denied`,
+    `remote-unreachable`, `checkout-diverged`, `checkout-local-state-or-unrecognised` — and prints the class
+    *with the operator action* so one log line is actionable. The **auth arm comes FIRST and before the
+    unreachable arm**, because the unreachable arm's own patterns match git's auth text as well; `Permission
+    denied` was removed from that arm for the same reason, since a pattern no later arm can reach is a dead
+    arm inside an alternation (the same defect class the registry guards reject). The vocabulary and the class-splitting mirror `install.sh`
     (agents-a1ko) on purpose: the same failure should read the same way in `provision.log` and in the
     installer's output. **The third case is the default**, so a failure git words in a way this script
     has never produced is reported as unrecognised rather than guessed into one of the two whose
     actions are opposite.
   - The `~/agents` pull failure branch now captures git's output and calls that helper inside the
     warning, keeping git's text verbatim on the same line as the evidence.
-  - One wording constraint came from the fleet's own structural test: section 12v scans
-    `provision.sh` for bare `which` calls, and the first draft's prose ("which is usually transient")
-    matched it. The patch is `which`-free. This was found by running the suite, not by reading it.
+  - One wording constraint came from the fleet's own structural test, TWICE: section 12v scans
+    `provision.sh` for bare `which` calls, and the prose of both the unreachable arm ("which is usually
+    transient") and the auth arm ("which is NOT transient") tripped it. The patch is `which`-free. Both
+    were found by running the suite, not by reading it.
 
 - **Verification:**
   - **The fleet's own harness, pristine vs patched** (`bash tests/provision.test.sh`, fake HOME,
     throwaway git repos, no network, no root): pristine **207 passed, 3 failed**; patched
-    **214 passed, the same 3 failed** (`16a`, `16s1`, `16t1` — beads/Dolt config assertions that fail
-    identically on the unpatched copy in this environment, so they are not from this change). The 7 new
+    **216 passed, the same 3 failed** (`16a`, `16s1`, `16t1` — beads/Dolt config assertions that fail
+    identically on the unpatched copy in this environment, so they are not from this change). The 9 new
     assertions are section 17.
   - **The classifier is driven with the measured messages**, not asserted: `17c` network →
     `remote-unreachable`, `17d` diverged → `checkout-diverged`, `17e` the two strings differ, `17f` an
     unseen message lands in the unrecognised class (the control that keeps `17c`/`17d` from passing for
-    a classifier that answers one class to everything).
+    a classifier that answers one class to everything), `17h` the measured auth pair →
+    `remote-auth-denied`, and `17i` that class must NOT contain the unreachable arm's wording, because that
+    wording is an instruction to retry. `17h`/`17i` are the pair that pins the ARM ORDER: swap the two arms
+    and both fail.
   - **The wiring is pinned** (`17g`): the failure branch must call the helper, so the function cannot
     become decoration.
   - `git apply --check` passes against pristine copies of both files, and applying it reproduces the

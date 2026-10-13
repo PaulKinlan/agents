@@ -97,10 +97,20 @@ else
       failure_class="checkout-local-state"
       failure_action="The checkout has uncommitted changes, or a git config routes the pull through a rebase, so the pull cannot fast-forward. Inspect the checkout on the host; the network is not the problem."
       case "$update_error" in
+        # agents-uvzh (found reviewing agents-a1ko): AUTHENTICATION IS NOT A NETWORK OUTAGE, and git's text
+        # for the two OVERLAPS - a refused key prints "Permission denied (publickey)." immediately followed by
+        # "fatal: Could not read from remote repository." (MEASURED with a real pull against an ssh:// remote
+        # and a refusing GIT_SSH_COMMAND stub). So this arm must come FIRST: below the unreachable arm, a
+        # wrong credential was reported as transient and the operator would retry a failure that cannot fix
+        # itself.
+        *"Permission denied"* | *"Authentication failed"* | *"publickey"* | \
+        *"could not read Username"* | *"terminal prompts disabled"* | *"Host key verification failed"*)
+          failure_class="remote-auth-denied"
+          failure_action="The remote was reachable and REFUSED this host - credentials or permissions - which is NOT transient, so retrying cannot fix it. Check what this checkout authenticates with (ssh key or agent, a token in the remote URL) and that the files it writes are writable, then re-run."
+          ;;
         *"does not appear to be a git repository"* | *"Could not read from remote repository"* | \
         *"Could not resolve host"* | *"unable to access"* | *"Connection refused"* | \
-        *"Connection timed out"* | *"No route to host"* | *"Temporary failure in name resolution"* | \
-        *"Permission denied"*)
+        *"Connection timed out"* | *"No route to host"* | *"Temporary failure in name resolution"*)
           failure_class="remote-unreachable"
           failure_action="The remote could not be reached, which is usually transient: retrying the pull later is safe and no local state was changed."
           ;;
