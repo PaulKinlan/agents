@@ -1,0 +1,49 @@
+--- /home/exedev/fleet/remote/check-coverage.py	2026-10-12 19:42:41.000000000 +0000
++++ /tmp/hbz3-r2.py	2026-10-13 03:04:27.634561801 +0000
+@@ -672,12 +672,44 @@
+                     cleaned = re.sub(r'`(?:\\.|[^`\\])*`', '', cleaned, flags=re.DOTALL)
+                     cleaned = re.sub(r'//.*', '', cleaned)
+                     cleaned = re.sub(r'#.*', '', cleaned)
++                    # agents-hbz3 (round 2, agents-mjsq): THE NAME IS NOT THE EVIDENCE, THE BINDING IS.
++                    # Round 1 qualified the call names to subprocess.* / os.*, which recovered eight phantoms but LOST real
++                    # consumers: a suite doing `from subprocess import Popen` and then calling the bare `Popen([...])` is a
++                    # genuine invocation and stopped matching. Under-inclusion is the worse half, because a mapping that
++                    # misses a real consumer is silent. So the discriminator is WHERE THE CALLEE CAME FROM:
++                    #   * the ATTRIBUTE branch matches subprocess.<X>, or <alias>.<X> for `import subprocess as <alias>`;
++                    #   * the NAME branch matches <X> only when `from subprocess import ...` in this module binds it, AND
++                    #     only when the call is a bare name - a preceding dot means an object's method (self.run(...),
++                    #     runner.run(...)), which is not a process no matter what the method is called;
++                    #   * so a bare `run(` or `call(` with no subprocess binding stays OUT.
++                    # A wildcard (`from subprocess import *`) cannot be resolved by a binding rule at all; it is treated as
++                    # binding the known call names, i.e. it FAILS OPEN, because for a consumer oracle a missed real consumer
++                    # is silent while a phantom is visible and reviewable.
++                    _bind_names, _bind_attr, _bind_star = set(), "subprocess", False
++                    for _m in re.finditer(r'^[ \t]*from[ \t]+subprocess[ \t]+import[ \t]+([^\n#]+)', cleaned, re.M):
++                        _spec = _m.group(1).strip()
++                        if _spec == "*":
++                            _bind_star = True
++                        else:
++                            for _item in _spec.split(","):
++                                _nm = _item.strip().split(" as ")[-1].strip()
++                                if _nm:
++                                    _bind_names.add(_nm)
++                    for _m in re.finditer(r'^[ \t]*import[ \t]+subprocess[ \t]+as[ \t]+(\w+)', cleaned, re.M):
++                        _bind_attr = _m.group(1)
++                    _CALL_NAMES = ("run", "Popen", "call", "check_output", "check_call", "getoutput")
++                    if _bind_star:
++                        _bind_names |= set(_CALL_NAMES)
++                    _call_alts = [re.escape(_bind_attr) + r"\.(?:" + "|".join(_CALL_NAMES) + r")"]
++                    _call_alts += [r"(?<!\\.)" + re.escape(n) for n in sorted(_bind_names) if n in _CALL_NAMES]
+                     subp_pattern = (
+-                        r'(?:subprocess|Popen|exec|spawn|run|fork|call|check_output|system)\s*\([^)]*?'
+-                        r'(?:' + re.escape(file_path) + r'|' + re.escape(base) + r'|\b' + re.escape(stem) + r'(?:\.[a-z]+)?\b)'
++                        r"(?:" + "|".join(_call_alts) + r")\s*\([^)]*?"
++                        r"(?:" + re.escape(file_path) + r"|\b" + re.escape(base) + r"\b|\b" + re.escape(stem) + r"(?:\.[a-z]+)?\b)"
+                     )
+                     if re.search(subp_pattern, cleaned, re.DOTALL):
+                         candidates.add(rel)
++
++
+                 except Exception:
+                     pass
+         return sorted(list(candidates))
