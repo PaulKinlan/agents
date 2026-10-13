@@ -82,6 +82,8 @@ class DocsDesignTest(unittest.TestCase):
         """The committed hints style code descendants without dropping the gradient fallback."""
         css = (DOCS / "css" / "factory.css").read_text(encoding="utf-8")
         self.assertIn("pre:has(> code) { container-type: scroll-state; }", css)
+        self.assertIn("pre > code { display: inline-grid; vertical-align: top;", css,
+                      "inline-grid must not add a baseline descender gap to every code block")
         for direction, indicator in (("inline-start", "before"), ("inline-end", "after")):
             self.assertIn(f"@container scroll-state(scrollable: {direction}) "
                           f"{{ pre > code::{indicator} {{ opacity: 1; }} }}", css)
