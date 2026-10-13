@@ -176,6 +176,54 @@ def catches_a_missing_module(handler: ast.ExceptHandler) -> bool:
     return any(n in {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"} for n in names)
 
 
+def type_checking_names(tree: ast.AST) -> set[str]:
+    """The names in one module that hold `typing.TYPE_CHECKING` (agents-b8ke).
+
+    Both spellings are collected, because both are used: `from typing import TYPE_CHECKING as TC`
+    binds `TC`, and `import typing` leaves `typing.TYPE_CHECKING` as an attribute.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "") == "typing":
+            for alias in node.names:
+                if alias.name == "TYPE_CHECKING":
+                    names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "typing":
+                    names.add(f"{alias.asname or alias.name}.TYPE_CHECKING")
+    return names
+
+
+def import_time_truth(test: ast.expr, type_checking: set[str]) -> bool | None:
+    """What a module-level `if` test evaluates to WHILE THE MODULE IS BEING IMPORTED.
+
+    True/False when the value is statically known, None when it is not (`sys.version_info`, an
+    environment lookup, anything read at runtime). Callers ask `is False`: a guard whose value is
+    unknown runs as far as this rule is concerned, exactly like an unguarded import.
+    """
+    if isinstance(test, ast.Constant) and isinstance(test.value, (bool, type(None))):
+        return bool(test.value)
+    if isinstance(test, ast.Name) and test.id in type_checking:
+        return False
+    if isinstance(test, ast.Attribute) and ast.unparse(test) in type_checking:
+        return False
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = import_time_truth(test.operand, type_checking)
+        return None if inner is None else not inner
+    if isinstance(test, ast.BoolOp):
+        values = [import_time_truth(value, type_checking) for value in test.values]
+        if isinstance(test.op, ast.And):
+            if any(value is False for value in values):
+                return False
+            return True if all(value is True for value in values) else None
+        if isinstance(test.op, ast.Or):
+            if any(value is True for value in values):
+                return True
+            return False if all(value is False for value in values) else None
+    return None
+
+
 def staged_runtime_missing_modules(root: Path) -> list[str]:
     """Staging lists in tests/ that do NOT carry the modules the runtime they build imports.
 
@@ -196,8 +244,12 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
       - module scope only - an import inside a function runs when it is called, so a tree that
         never calls it needs no copy of the module;
       - NOT under `try: ... except ImportError` - an optional dependency by construction;
-      - NOT under `if TYPE_CHECKING:` - that never runs at all (lib/scheduler.py is imported that
-        way, which is why requiring the raw closure demanded a module these suites do not need).
+      - NOT under a `TYPE_CHECKING` guard that is STATICALLY FALSE at import time - `if
+        TYPE_CHECKING:` never runs at all (lib/scheduler.py is imported that way, which is why
+        requiring the raw closure demanded a module these suites do not need), while
+        `if not TYPE_CHECKING:` DOES run, so what it imports is required (agents-b8ke: the first
+        rule asked whether the test's source TEXT mentioned TYPE_CHECKING, which is just as true
+        of the negation, and that false negative was invisible to this guard's own tests).
     Where the closure had to be a judgement, it was made by running it: the raw module-scope
     closure flagged six sites for lib/sandbox.py (imported at module scope by lib/egress_proxy.py)
     while every one of those suites passes, so the rule is the closure of the ENTRY POINTS a tree
@@ -235,8 +287,13 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         except SyntaxError:
             return set()
         optional: set[int] = set()
+        type_checking = type_checking_names(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+            # agents-b8ke: ask what the test EVALUATES to at import time, not whether its source
+            # TEXT mentions TYPE_CHECKING. `if not TYPE_CHECKING:` runs, so its imports are
+            # required; the text match called them optional and a staged tree that omitted the
+            # module raised ModuleNotFoundError while this guard reported nothing.
+            if isinstance(node, ast.If) and import_time_truth(node.test, type_checking) is False:
                 for sub in ast.walk(node):
                     if isinstance(sub, (ast.Import, ast.ImportFrom)):
                         optional.add(id(sub))
@@ -345,6 +402,38 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
     return problems
 
 
+def staged_suite_source(modules: tuple[str, ...]) -> str:
+    """The bytes of the synthetic staging suite used by the fixtures below.
+
+    One source of truth on purpose (agents-fe64): the assertion that the diagnostic carries
+    `file:line` COMPUTES the loop's line from this text instead of copying a literal, so it cannot
+    pass while the promise is broken and cannot fail for a fixture that moved.
+    """
+    listed = ", ".join(f'"{module}"' for module in modules)
+    return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+            f"MODULES = ({listed})\n"
+            "def build(root):\n    for module in MODULES:\n"
+            '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+
+def staged_tree(findings_source: str) -> Path:
+    """A synthetic factory tree whose ONLY staging list copies findings.py and embargo.py.
+
+    findings.py's siblings are supplied as embargo.py and extra.py, so a module the source imports
+    but the list does not copy is exactly the failure this guard exists to catch.
+    """
+    directory = Path(tempfile.mkdtemp())
+    (directory / "lib").mkdir()
+    (directory / "tests").mkdir()
+    (directory / "factory").write_text("from lib.embargo import x\n", encoding="utf-8")
+    (directory / "lib" / "findings.py").write_text(findings_source, encoding="utf-8")
+    (directory / "lib" / "embargo.py").write_text("x = 1\n", encoding="utf-8")
+    (directory / "lib" / "extra.py").write_text("required = 1\n", encoding="utf-8")
+    (directory / "tests" / "test_staged.py").write_text(
+        staged_suite_source(("findings.py", "embargo.py")), encoding="utf-8")
+    return directory
+
+
 class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
     """agents-o7e2: a staging list must carry the modules its runtime imports at module scope."""
 
@@ -359,26 +448,21 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         copy - the exact failure measured on 2026-10-13 - must be reported with the site and the
         module named. Without this, a guard that silently reports nothing would look identical to
         a tree with nothing wrong.
+
+        agents-fe64: the diagnostic also promises the LINE, so the line is asserted - computed
+        from the fixture (the loop is on the 6th line of it, not the 5th the reviewer guessed)
+        rather than copied, so removing `:{node.lineno}` from the diagnostic fails this test.
         """
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            (tmp / "lib").mkdir()
-            (tmp / "tests").mkdir()
-            (tmp / "lib" / "findings.py").write_text(
-                "from lib.embargo import x\nfrom lib.newthing import y\n", encoding="utf-8")
-            (tmp / "lib" / "embargo.py").write_text("x = 1\n", encoding="utf-8")
-            (tmp / "lib" / "newthing.py").write_text("y = 1\n", encoding="utf-8")
-            (tmp / "factory").write_text("from lib.embargo import x\n", encoding="utf-8")
-            (tmp / "tests" / "test_staged.py").write_text(
-                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
-                'MODULES = ("findings.py", "embargo.py")\n'
-                'def build(root):\n    for module in MODULES:\n'
-                '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n',
-                encoding="utf-8")
-            problems = staged_runtime_missing_modules(tmp)
-            self.assertEqual(len(problems), 1, problems)
-            self.assertIn("test_staged.py", problems[0])
-            self.assertIn("newthing.py", problems[0])
+        tmp = staged_tree("from lib.embargo import x\nfrom lib.newthing import y\n")
+        (tmp / "lib" / "newthing.py").write_text("y = 1\n", encoding="utf-8")
+        problems = staged_runtime_missing_modules(tmp)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("test_staged.py", problems[0])
+        self.assertIn("newthing.py", problems[0])
+        suite_line = next(index for index, line in enumerate(
+            staged_suite_source(("findings.py", "embargo.py")).splitlines(), 1)
+            if "for module in MODULES" in line)
+        self.assertIn(f"test_staged.py:{suite_line}:", problems[0])
 
     def test_the_requirement_is_derived_from_the_source_and_enforced(self):
         """agents-eq11, found by a reviewer: the earlier version of this test was VACUOUS.
@@ -417,21 +501,7 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         a genuine `except ImportError:` fallback must stay unflagged, or the fix would demand modules
         from trees that run perfectly well without them.
         """
-        def synthetic(findings_source):
-            directory = Path(tempfile.mkdtemp())
-            (directory / "lib").mkdir()
-            (directory / "tests").mkdir()
-            (directory / "factory").write_text("from lib.embargo import x\n", encoding="utf-8")
-            (directory / "lib" / "findings.py").write_text(findings_source, encoding="utf-8")
-            (directory / "lib" / "embargo.py").write_text("x = 1\n", encoding="utf-8")
-            (directory / "lib" / "extra.py").write_text("required = 1\n", encoding="utf-8")
-            (directory / "tests" / "test_staged.py").write_text(
-                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
-                'MODULES = ("findings.py", "embargo.py")\n'
-                'def build(root):\n    for module in MODULES:\n'
-                '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n',
-                encoding="utf-8")
-            return directory
+        synthetic = staged_tree
 
         class_body = synthetic("from lib.embargo import x\n\nclass Init:\n"
                                "    from lib.extra import required\n")
@@ -450,6 +520,51 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
                                   "except ImportError:\n    required = None\n")
         self.assertEqual(staged_runtime_missing_modules(real_fallback), [],
                          "a genuine ImportError fallback means the tree runs without the module")
+
+    def test_a_type_checking_guard_is_read_by_what_it_evaluates_to_at_runtime(self):
+        """agents-b8ke, the reviewer's repro: `if not TYPE_CHECKING:` RUNS at import time.
+
+        The rule used to ask whether the test's SOURCE TEXT contained "TYPE_CHECKING", which is just
+        as true of the negation, so an import under `if not TYPE_CHECKING:` counted as optional: a
+        staged tree that omitted the module raised ModuleNotFoundError while this guard reported
+        nothing (reproduced on the reviewed tip, and - the point of the merger's gate datum -
+        invisible to this class's own tests). The four controls below are the shapes that must NOT
+        move: a plain `if TYPE_CHECKING:` never runs, `TYPE_CHECKING and X` can never be true either,
+        and `TYPE_CHECKING or X` CAN run, so its import is required like any other.
+        """
+        def findings(body: str) -> str:
+            return "from lib.embargo import x\nfrom typing import TYPE_CHECKING\n" + body
+
+        def missing(root: Path) -> str:
+            return "\n".join(staged_runtime_missing_modules(root))
+
+        negated = staged_tree(findings("if not TYPE_CHECKING:\n    from lib.extra import required\n"))
+        self.assertIn("extra.py", missing(negated),
+                      "`if not TYPE_CHECKING:` runs, so the module it imports is required")
+
+        aliased = staged_tree("from lib.embargo import x\nfrom typing import TYPE_CHECKING as TC\n"
+                              "if not TC:\n    from lib.extra import required\n")
+        self.assertIn("extra.py", missing(aliased),
+                      "the alias is the same guard and the same requirement")
+
+        attribute = staged_tree("from lib.embargo import x\nimport typing\n"
+                                "if not typing.TYPE_CHECKING:\n    from lib.extra import required\n")
+        self.assertIn("extra.py", missing(attribute),
+                      "the attribute spelling is the same import-time guard")
+
+        plain = staged_tree(findings("if TYPE_CHECKING:\n    from lib.extra import required\n"))
+        self.assertEqual(staged_runtime_missing_modules(plain), [],
+                         "a TYPE_CHECKING guard never runs, so its import stays optional")
+
+        conjunction = staged_tree(findings(
+            "if TYPE_CHECKING and __debug__:\n    from lib.extra import required\n"))
+        self.assertEqual(staged_runtime_missing_modules(conjunction), [],
+                         "`TYPE_CHECKING and X` can never be true, so it never runs either")
+
+        disjunction = staged_tree(findings(
+            "if TYPE_CHECKING or __debug__:\n    from lib.extra import required\n"))
+        self.assertIn("extra.py", missing(disjunction),
+                      "`TYPE_CHECKING or X` can run at import time, so the import is required")
 
 
 if __name__ == "__main__":
