@@ -18,6 +18,15 @@
 # NOT changed to satisfy the scanner: the verdict is recorded here instead, so this class stops
 # re-entering triage every night.
 #
+# PLUS 2 BY-DESIGN ROWS (paul-kinlan-me-dpr, 2026-10-13): the two sequential-await-waterfall rows the
+# 2026-10-13 paul.kinlan.me perf-review flagged HIGH - lib/whatwg-flora.ts:43 (stream chunk order is the
+# response body's byte order) and link.js:17 (a short-circuiting first-match-wins selector scan in a local
+# dev CLI). Both were confirmed with behaviour evidence BEFORE suppression, both are candidate-id bound
+# (they keep matching while the expression stays where it is), and the whatwg-flora order contract is now
+# pinned by that target's own fast gate (tests/whatwg-flora-order.test.mjs, mutation-checked) - a
+# suppression removes the page that would otherwise show that contract regressing, so the test is what
+# keeps the row honest.
+#
 # MEASURED, not assumed (agents-43ft): re-running the deterministic secret-scan prepass over this tree
 # re-derived 55 of these fingerprints byte for byte, and driving the
 # engine over that live candidate set booked the registered rows `wontfix` with change="suppressed" -
@@ -435,4 +444,12 @@ c742e223f6c31a50df2ddf161d809a417cc1c0df827d27a45fcdecc6536b39cd:
 eda70bbe0d159bdd4dbbcb44cf35f0d230ec463071fe0000ffaf6ef967c88101:
   reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:275 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
   author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+5d74c8dd11b77a36e523097749a2db6a33887acde8a607d599d466c938b126f1:
+  reason: "BY DESIGN, confirmed in paul-kinlan-me-dpr: link.js is a local dev CLI (nothing imports it; not referenced by package.json, .github, api/, lib/, layouts/, tests/ or middleware.ts) that writes content/<date>-<slug>.md from a URL. Its loop is a first-match-wins priority scan that SHORT-CIRCUITS: measured with a Page.prototype.$ probe against local fixtures, a page carrying meta[name='author'] costs exactly 1 probe, not 6, and a page with no meta author falls through in the documented order to .author-name (4 probes). Fanning the probes out would cost more work than the common first-hit path AND would still have to re-impose priority, so the serial form is the cheaper correct one. Evidence harness: /tmp/dpr-evidence/link-cli-probe.mjs."
+  author: "paul-kinlan-me-hugo-guess"
+  date: "2026-10-13"
+75c0bdf43a67a8694ec4e0b7376973ac4c38467ad9ce2d3e715b2507d26b0879:
+  reason: "BY DESIGN, confirmed in paul-kinlan-me-dpr: the serial `await enqueueItem(...)` chain is the output contract of the ReadableStream that api/ask-paul.ts hands to `new Response` (api/ask-paul.ts:57, :95), so chunk order IS the byte order of a response body. Measured on this tree: a value that resolves later is still emitted in template order, arrays and nested streams land byte-exact with falsy values skipped, and a naive parallel control that enqueues as each value settles reorders the document - so a concurrent form needs order re-assembly, which is what the scanner's own remediation asks for. The contract is pinned in the target's fast gate by tests/whatwg-flora-order.test.mjs (mutation-checked), which is what makes this suppression safe. Evidence harness: /tmp/dpr-evidence/flora-order.mjs."
+  author: "paul-kinlan-me-hugo-guess"
   date: "2026-10-13"
