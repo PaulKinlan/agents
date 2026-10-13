@@ -22,7 +22,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRACKED="$ROOT/tools/check.conf"
-OVERRIDE="${FLEET_CHECK_CONF:-$HOME/.fleet/check.conf}"
+# agents-0utp: WHERE --install WRITES IS ITS OWN DECISION, AND THE DEFAULT IS REPO-LOCAL. The header has always
+# described two lives for this file; the installer used to behave as if only one existed and wrote the
+# MACHINE-GLOBAL path by default - which is how installing from repo A silently gave repo B a gate command naming
+# a file A has and B does not (other repos' gates then died with EXIT 127, reporting a missing tool where the
+# truth was a foreign config). PRECEDENCE: an explicit FLEET_CHECK_CONF wins (the override workflow, unchanged);
+# --global is the explicit opt-in for the host-wide file that every repo on this machine reads; otherwise the
+# destination is a repo-local file OUTSIDE the checkout, named for this repo, so a timer that resets the checkout
+# cannot take it away.
+GLOBAL_CONF="$HOME/.fleet/check.conf"
+REPO_CONF="$HOME/.fleet/$(basename "$ROOT")-check.conf"
+OVERRIDE="${FLEET_CHECK_CONF:-$GLOBAL_CONF}"
+INSTALL_GLOBAL=0
 
 if [ ! -r "$TRACKED" ]; then
   echo "check-cmd: the TRACKED gate config is missing: $TRACKED" >&2
@@ -132,6 +143,33 @@ fi
 # malformed, corrupted, or has syntax errors, an installer whose job is to replace it
 # with clean tracked defaults must NOT fail by sourcing the broken file first.
 if [ "${1:-}" = "--install" ]; then
+  # --global is the explicit opt-in for the host-wide file. Without it (and without FLEET_CHECK_CONF) the default
+  # is the repo-local file, because writing the shared path is the claim that THIS repo's gate commands are the
+  # host's - a claim that belongs to an operator, never to a default.
+  case "${2:-}" in
+    --global)
+      if [ -n "${FLEET_CHECK_CONF:-}" ]; then
+        echo "check-cmd: --global ignored: FLEET_CHECK_CONF=$FLEET_CHECK_CONF is explicit and wins" >&2
+      else
+        INSTALL_GLOBAL=1; OVERRIDE="$GLOBAL_CONF"
+      fi;;
+    "") ;;
+    *) echo "check-cmd: unknown option '$2' (expected --global, or nothing)" >&2; exit 2;;
+  esac
+  # Decide the destination ONCE, then classify it - the class is a function of the decision, not a parallel
+  # computation that can disagree with it (the first version of this edit classified before deciding).
+  if [ -n "${FLEET_CHECK_CONF:-}" ]; then
+    OVERRIDE="$FLEET_CHECK_CONF"
+  elif [ "$INSTALL_GLOBAL" = 1 ]; then
+    OVERRIDE="$GLOBAL_CONF"
+  else
+    OVERRIDE="$REPO_CONF"
+  fi
+  case "$OVERRIDE" in
+    "$GLOBAL_CONF") DEST_CLASS="MACHINE-GLOBAL (every repo on this host reads it by default)";;
+    "$REPO_CONF")   DEST_CLASS="repo-local override";;
+    *)              DEST_CLASS="explicit override (FLEET_CHECK_CONF)";;
+  esac
   dest="${OVERRIDE}"
   mkdir -p "$(dirname "$dest")"
 
@@ -185,7 +223,12 @@ TUNE
     printf '%s\n' "$tune_lines"
     grep -E '^[A-Z_]+=' "$TRACKED"
   } > "$dest"
-  echo "check-cmd: installed the project's gate command into $dest"
+  echo "check-cmd: installed the project's gate command into $dest ($DEST_CLASS)"
+  if [ "$DEST_CLASS" = "repo-local override" ]; then
+    echo "check-cmd: NOTE - repo-local by default: a lane that wants it sets FLEET_CHECK_CONF=$dest; --global writes the host-wide $GLOBAL_CONF instead." >&2
+  else
+    echo "check-cmd: NOTE - $dest is MACHINE-GLOBAL: this replaces the active gate command for every repo on this host." >&2
+  fi
   exit 0
 fi
 

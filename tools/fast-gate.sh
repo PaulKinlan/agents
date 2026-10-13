@@ -65,7 +65,7 @@ if [ -f "$CHECK_CMD_SH" ]; then
   if [ "$drift_rc" -eq 1 ]; then
     drift_line="${drift_line#check-cmd: DRIFT keys: }"
     echo "fast-gate: WARNING (agents-d081): this host's per-VM gate config differs from the tracked tools/check.conf - differing keys: $drift_line" >&2
-    echo "fast-gate:   detail: bash tools/check-cmd.sh --check - repair: bash tools/check-cmd.sh --install - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
+    echo "fast-gate:   detail: bash tools/check-cmd.sh --check - repair: bash tools/check-cmd.sh --install --global (or set FLEET_CHECK_CONF to the file you mean) - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
   fi
 fi
 

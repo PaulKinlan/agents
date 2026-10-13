@@ -33,6 +33,7 @@ change, and the tracked file stays the source of truth a PR can review.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -113,7 +114,7 @@ def _entrypoint_env(home: str) -> dict:
     env = dict(os.environ)
     env["HOME"] = home
     env["FLEET_LANE"] = "merger"
-    env.pop("FLEET_CHECK_CONF", None)
+    env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
     return env
 
 
@@ -540,7 +541,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         home = _registered_tmp_home(self, "ia3p-drift-")
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         for _ in range(2):  # idempotent: installing twice must not compound anything
             r = subprocess.run(["bash", str(RESOLVER), "--install"],
                                capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -629,7 +630,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
 
         r = subprocess.run(["bash", str(RESOLVER), "--install"],
                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -650,7 +651,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
 
         r = subprocess.run(["bash", str(RESOLVER), "--install"],
                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -672,7 +673,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
 
         r = subprocess.run(["bash", str(RESOLVER), "--install"],
                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -691,6 +692,9 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         self.assertNotIn("WARNING", r2.stderr)
 
 
+# agents-0utp: --install DEFAULTS TO A REPO-LOCAL DESTINATION (tools/check-cmd.sh). Every case below is ABOUT the
+# host-wide file - its subject is the per-VM config the whole machine reads - so each one now asks for it
+# EXPLICITLY with --global. That is the intent-preserving change: the default moved, the subject did not.
 class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
     """agents-d081: --check is the detector this suite cannot be, and the reason is the same one
     agents-024z recorded for the docstring above - the drift lives in a MACHINE-GLOBAL file, so a test
@@ -708,7 +712,7 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
     def _run(self, *args, home):
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         return subprocess.run(["bash", str(RESOLVER), *args], capture_output=True, text=True,
                               timeout=60, env=env, cwd=str(ROOT))
 
@@ -806,7 +810,7 @@ class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
     def _run_gate(self, home, changed=".beads/metadata.json"):
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         env["GIT_CHANGED"] = changed
         env["FAST_GATE_DRY_RUN"] = "1"
         return subprocess.run(["bash", str(ROOT / "tools" / "fast-gate.sh")], capture_output=True,
@@ -815,7 +819,7 @@ class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
     def _install_into(self, home):
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         return subprocess.run(["bash", str(RESOLVER), "--install"], capture_output=True, text=True,
                               timeout=60, env=env, cwd=str(ROOT))
 
@@ -1233,3 +1237,57 @@ class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheDefaultInstallDestinationIsRepoLocal(unittest.TestCase):
+    """agents-0utp ACCEPTANCE, which coord named and which nobody had run: INSTALL IN REPO A, GATE IN REPO B,
+    GLOBAL UNTOUCHED - with the host-wide file's HASH UNCHANGED before and after, because 'untouched' is a claim
+    about bytes and not about a command's exit code.
+
+    Why the hash and not just existence: the hazard this bead was filed for is a repo's install OVERWRITING the
+    shared config that other repos read, so an assertion that the file does not exist would pass on a machine
+    where it never existed and say nothing about the overwrite. Here a foreign global config is created first,
+    and the test asks the filesystem what it holds afterwards.
+    """
+
+    def test_default_install_writes_repo_local_and_leaves_the_host_wide_hash_unchanged(self):
+        home = _registered_tmp_home(self, "0utp-abi-")
+        global_conf = Path(home) / ".fleet" / "check.conf"
+        global_conf.parent.mkdir(parents=True, exist_ok=True)
+        pre = ('# Project: agents-factory (/some/other/repo)\n'
+               'CHECK_CMD="bash tools/full-gate.sh"\n'
+               'CHECK_FAST_CMD="bash tools/fast-gate.sh"\n')
+        global_conf.write_text(pre, encoding="utf-8")
+        before = hashlib.sha256(global_conf.read_bytes()).hexdigest()
+
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        r = subprocess.run(["bash", str(RESOLVER), "--install"],
+                           capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+
+        self.assertEqual(hashlib.sha256(global_conf.read_bytes()).hexdigest(), before,
+                         "a DEFAULT --install must not write the host-wide config that every repo on this "
+                         "machine reads (agents-0utp); the hash is the claim, the exit code is not")
+        self.assertEqual(global_conf.read_text(encoding="utf-8"), pre,
+                         "the host-wide file must be byte-identical afterwards")
+
+        repo_conf = Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
+        self.assertTrue(repo_conf.exists(),
+                        f"the default destination is the repo-local file, expected {repo_conf}")
+        self.assertIn("THIS COPY IS A REPO-LOCAL OVERRIDE", repo_conf.read_text(encoding="utf-8"))
+
+    def test_global_flag_is_the_explicit_opt_in_for_the_host_wide_file(self):
+        """The escape hatch has to work, or the default is a cage: provisioning (install.sh) claims the machine's
+        config on purpose, and it does so by asking."""
+        home = _registered_tmp_home(self, "0utp-global-")
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        r = subprocess.run(["bash", str(RESOLVER), "--install", "--global"],
+                           capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+        global_conf = Path(home) / ".fleet" / "check.conf"
+        self.assertTrue(global_conf.exists(), "--global must still reach the host-wide path")
+        self.assertIn("THIS COPY IS MACHINE-GLOBAL", global_conf.read_text(encoding="utf-8"))
