@@ -49,6 +49,12 @@
   - Silent where it should be: no annotation on success, and none for `list`.
   - Zero internal bead IDs in patch or writeup.
 
+- **Relationship to the worktree guard:**
+  Both this patch and the per-worktree beads guard (`fleet-worktree-beads-guard.patch`) touch the same target
+  file (`bin/bd`), but are orthogonal: this patch changes WHAT bd says when an issue is missing (which happens on
+  every missing issue, everywhere); the other guards against a per-worktree database becoming authoritative.
+  Whichever lands second must resolve against the first.
+
 - **Hub Application:**
   ```bash
   cd ~/fleet

@@ -30,7 +30,15 @@
     bead visible → one `bd show`, no pull, no warning;
     bead missing → `show`, `dolt pull`, `show`, then warning;
     pull failing → non-fatal, warning still printed, exit status unaffected.
+  - **Limitation stated rather than hidden:** the spawn path itself was NOT executed, because running
+    `lanes.sh spawn` creates a lane on the VM — a side effect this artifact does not need. The reviewer of
+    the delivery should treat the three cases above as the evidence and the integration as unproven until it
+    runs on a VM where spawning is expected.
   - Zero internal bead IDs in patch or writeup.
+- **Relationship to the other changes:**
+  `fleet-bd-annotate-missing-bead.patch` makes the failure say which database world it is in for every caller and path;
+  this patch removes the cause for the spawned-lane case; the worktree beads guard protects against a per-worktree
+  database becoming authoritative. Deliberately separate changes touching different files and reviewable in isolation.
 - **Hub Application:**
   ```bash
   cd ~/fleet
