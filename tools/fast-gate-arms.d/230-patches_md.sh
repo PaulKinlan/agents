@@ -9,7 +9,12 @@ fast_gate_arms_230_patches_md() {
       # (lib/exclusions.py:23-43), so the docs-drift scanner (agents/docs-drift/scripts/check_docs.py)
       # walks these markdown files, and tests/test_docs_drift.py asserts reference and anchor
       # validity across the real repository tree.
-      mapped="$mapped tests/test_docs_drift.py"
+      #
+      # Patch write-up structural shape (agents-2to0 / agents-hzug). tests/test_patch_writeups.py
+      # asserts that each write-up starts with '## ' (section heading), has balanced code fences,
+      # ends with a newline, and names its patch artifact. Closing clearance gap where write-ups
+      # starting with '# ' passed fast gate but failed merger full gate.
+      mapped="$mapped tests/test_docs_drift.py tests/test_patch_writeups.py"
       ;;
     *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn
   esac
