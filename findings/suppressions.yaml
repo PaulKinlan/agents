@@ -9,3 +9,430 @@
 #   reason: "Rationale for suppression"
 #   author: "developer"
 #   date: "YYYY-MM-DD"
+#
+# WHAT IS IN HERE (agents-43ft): 101 credential-shaped findings the triage has booked as FALSE
+# POSITIVES in test fixtures - the deliberate literals the redaction/containment/embargo tests assert
+# against. 54 are named in the 2026-10-13 nightly's "Triaged False Positives" section and the rest are
+# the same class from earlier runs; one (tests/test_embargo.py:160) was added from a live re-scan of this
+# tree because it is newer than the last triage, and was confirmed a fixture by reading it. The source is
+# NOT changed to satisfy the scanner: the verdict is recorded here instead, so this class stops
+# re-entering triage every night.
+#
+# MEASURED, not assumed (agents-43ft): re-running the deterministic secret-scan prepass over this tree
+# re-derived 55 of these fingerprints byte for byte, and driving the
+# engine over that live candidate set booked the registered rows `wontfix` with change="suppressed" -
+# the numbers are in the bead. So the effect is verified on this tree rather than argued from the format.
+#
+# HOW LONG AN ENTRY LASTS, stated because it differs per row:
+#   - an entry whose finding was recognised by the scanner's own candidate id (55 rows here) is stable:
+#     the same literal at the same place keeps the same fingerprint, so the entry keeps working.
+#   - an entry whose identity rested on the MODEL'S PROSE (46 rows here, marked in its reason) stops
+#     matching the moment that wording changes. It is kept because it is harmless - an unmatched entry
+#     suppresses nothing and is silent - but such a row can reappear as a fresh false positive. Closing
+#     that gap for good is the identity work, not this register.
+#
+
+db34a26660aeeb1ff569b46dd5a6b5d6a2e4529310e0515b73280a0f5a61c0cf:
+  reason: "openai-key match in a test fixture at tests/test_adapter_auth_failure.py:62 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+f8a0b507806f689b4857a765f2ea9c8cdda45df58820504f7b9d886cc67fa63d:
+  reason: "openai-key match in a test fixture at tests/test_adapter_auth_failure.py:67 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+a66a9664484c40efa02bbb3c46e1c84ab84287eaf6fd9d96dc2b64d60c5ef75c:
+  reason: "openai-key match in a test fixture at tests/test_adapter_auth_failure.py:83 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+9bd4466ef7d77df5022520d176892cd543be064d88a1d81d3924c20a81782e85:
+  reason: "openai-key match in a test fixture at tests/test_adapter_auth_failure.py:88 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+87dab0f7eb4ea35a5cbd8b069a27915cf5f824703a6edcf26d47379806d1543d:
+  reason: "aws-access-key match in a test fixture at tests/test_candidate_id_emission.py:38 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+3d66fbbaa8c79a763ed934bc8171ee023e70f96dd291b1a3053f2c677ea2a610:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:621 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+b3553fa430ef76e479682749247de7c4480e34f2488b4c739132e10d9f176684:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:690 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+c40eba065195936dc0e39b80b5ba2dd64c3e04e2d574ce2bfe93b12819691538:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:725 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+15244d7af762c58c82ad3f3ef9423504dc262cbaa00ddd9994c8706dc5060d99:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:744 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+42c17ac22ff91d7bc638a058369ef1c9ca6fe663bc91794ed47a6dd7c090da9a:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:765 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+d3bf96aa4a1ca99a0e4dd402cb45087d450b09cd576c6e629940ab2e777b89af:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:1044 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+29c0c969ca1712e330a1bf5bd500928528c9beffd25f502cc921dbc0fa2825a7:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:1048 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+16643f5b4e57339fd2254eabee1f4b721bba184ca7f74e962065df3975c6e7e7:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:1061 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+330211ffaf44a2416855a520f91c32f0e0dc34f3e5a2abe25a79bee43e34ff01:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:1271 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+1e48faa3320913e485a0e06ff6b3f52e5156cb8264d015ae2e76fd6aafe83393:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:1359 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+0c502a31887781d4cef8b254a76dc04693e2e89fc08ee2beef6bb8dd6d87728d:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:1450 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+dd732dc8b57f104f6c7c38a9c6b5cbdf7625949a59e333f752e757e4094bc62a:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:1474 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+9ab2351ca029190858fa1d7cd5fc3ce3691427fc5b44f611bb7f00f1a8510277:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:2020 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+3c1c5e029722b2c35e6756f8cc7e259194b20aa79d0d03d11e9ef37f106504fc:
+  reason: "openai-key match in a test fixture at tests/test_containment.py:2983 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+1fc7e93cfbbd1ef5dc2fc970669505373b22b51d71a910142d150340a97e03d0:
+  reason: "openai-key match in a test fixture at tests/test_containment_adapters.py:543 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+7459cf94c1ff001701e082846a4f4c79d8168497f92a6fb1b8eb37d2c76c852b:
+  reason: "openai-key match in a test fixture at tests/test_containment_adapters.py:547 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+82179d81e450b7a1315e2cbd5b90af53e8f91cf8ebec5d73d81c68a4020e1e71:
+  reason: "openai-key match in a test fixture at tests/test_containment_adapters.py:560 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+bf809482878d36053735aacb7ae0d75dcd71df618bee32a267da0c4b468997b6:
+  reason: "openai-key match in a test fixture at tests/test_containment_engine_credentials.py:104 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+bc7100ae64b4cb04c1e410b5e9d58034211b5efbdd37886f1a9c50f44a774133:
+  reason: "openai-key match in a test fixture at tests/test_credential_broker.py:28 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+075c15a425664cedff32adf4b77fd86e021e401245ff084b89a73bb01d1b1622:
+  reason: "openai-key match in a test fixture at tests/test_credential_broker.py:29 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+9907729b368c99d805e6bec34d5418c1451a90fa15025f35578db2658b4c3ad8:
+  reason: "openai-key match in a test fixture at tests/test_credential_broker.py:31 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+740c50a413740c305d86b198ca8368686d0f6128863a4889abcb4db0cafa3309:
+  reason: "openai-key match in a test fixture at tests/test_credential_broker.py:32 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+eaea055658c5acdc28d2da909df334efd714422bc335155c9047d2a532a59b7b:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:97 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+d7fb5366dd453436e607273a7ea0e12cc550f1403d41a26b5edb93250a254d0d:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:97 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+f47b3486dee7f1729d3ac8e5da558ab937d67300b20b67f4d2cb5c7c9a497afb:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:98 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+75382987c8d75493221ad90ddb26d50d84f1cf2a25a8d75d904a9b8942349625:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:98 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+df7dcd52e5aff2219471d3f3b253ccc9b47c75f4e62a793bc2e5c4e6260c7f7b:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:99 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+2fc9c4b227e209df90d5bf8a8f3c253cca263304adaf2defb4abd113aedddeeb:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:99 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+4cd8a759421fb56a5bf3d7c35c78e944a8e08da5faae5500fba48dd176244f5f:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:100 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+0d5bb9d730db48ec15aec3072695ff6a15cda8f12f661a0b03229e0400a667a2:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:101 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+28f6a0854fc6f3b3f67b783ed1437ad6fec46be4e5f4c42bf7ba01635f3f0a8e:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:102 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+a7717fe11fab04adc13906b66a27d235ee715a911185027fcc5d60ec7f4b3198:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:103 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+20a18fbf4a7b7d63dd4383db5a5d8c166375db229bf0fa29f59d2e72494dc6e8:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:104 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+f2df65a7a4550f18c5fc80c9d6facaa1671dc31321daee2e43b876b8a3f7edff:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:105 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+9e308786b7dc0966ebdad71ec29d053fa817bd75a7ccce0ccb0d38f49d86a282:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:107 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+51f611adf2ad48479c74ece6ef3fda801d4d0c6f99a19f0273b493c091d87dea:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:108 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+50778a857154675ae8e5785a37b1b4c092a2d9f86b49652f7240faff5fdcf467:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:121 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+5fb146e87782e334a73723f9c478e5b713c1853ddf717e5d60190ab814e52c94:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:125 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+004fbbfe55081e2aac0d10006486b3f665d550adccef9951edf32b3c277bf4e0:
+  reason: "aws-access-key match in a test fixture at tests/test_embargo.py:126 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+907915cb1ad7b6208f891f0c6d8b9710a204f8afdf5af6e757a89ad0b71397d6:
+  reason: "github-pat match in a test fixture at tests/test_embargo.py:127 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+9189fad1fd4d09997c1d29192959a2e98a981df87136bdc76cbc61def927df91:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:128 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+d5f54e40ee11205ccd66d3275fd456afb54b509c40680cb414cc74ceca329c8b:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:138 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+bb13c2875c13f2905edba2d9093839e8b8476e6f1a3c8249125653e8969d02eb:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:140 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+495ea9dd2116461fa9dadc5c7e61d50005a0c1dd6125e77a3854e1c75ef7e458:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:141 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+a61b53e3db451145bd42d680c563435aab790c61a708e42acfa5fb5fd8f6b25a:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:142 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+58174683b8067322343abd0ce9b5af94068c1b525f55fa63c7767cd31ed9d819:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:143 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+dc8f75f6916bf9928b9426519975853e5df6e922a283a6a5047b725085034609:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:150 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+2c1809ba3e9edf9c323aec41dad6f73396142f44f9f24715d1a6bf65e9ed023a:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:160 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Added from a live re-scan of this tree, read and confirmed a test fixture."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+0f4bd118aeb7b079c6ccb08dba7ba9c52c1d075f887a6ae29c0fac0011072798:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:253 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+a305897b677876a7a14f55dc5e849c1662aeef8473aeb66a6582d31efdaedd12:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:254 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+2298c4fa1b46000c573862ff625eb49e880f7dbc616e043a1c48d0be1bbab5a4:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:259 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+f552bd9804abcba8e8b6dfb9941ce1cf48623b3feec2feb81ba8f4ea4c3a2859:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:264 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+50705bdf3105b59ca5cd36d7c2fca2ec268cd963dae99e9a7cc1d2b3521a28d2:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:265 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+739d95e6e2ea37620ea598d79d7199b2b8c1d567f21b6b20c8c4dbd6f717f929:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:270 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+60ce8a10da998285542c1c3293766126942de815398dabad19a840c7890bedd8:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:299 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+17c6e3c62cb9c1865ed131c1c9e762ea7d1c3f23a2ea0a24b2837033a68cf4e4:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:300 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+a5038e645b95967074af37a321cfbd41d4ad434bf4e53716917136b992ed5701:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:305 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+3f4129072f2bc42327fa764855307685df66da6acf327f30776d37066ab44bc2:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:310 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+d40cd206aef30295561e249b913b44449e29b5eb1b24f27f49f63496758d7cbf:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:311 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+7edfd2af9796984744e9bfc146a0e17a7fc81c32ff219ed8767105f33797c54e:
+  reason: "openai-key match in a test fixture at tests/test_findings.py:316 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+a83a6f4ddc1360252d4e496f542d16ed1c0c50d612b6347b2ccfc1da2cc77767:
+  reason: "openai-key match in a test fixture at tests/test_gen_site.py:231 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+3bc49857e49e2099e568c95aeb72e00089631c97e8b281925d66cd522c063aa0:
+  reason: "openai-key match in a test fixture at tests/test_gen_site.py:237 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+7876260aa429fef33f936168ea1f6a49101305969ce8c43170b6d8a62464e892:
+  reason: "openai-key match in a test fixture at tests/test_gen_site.py:239 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+e44a615c9980dd3457f879533878ff5163aee6205cc14526278812cb7222490a:
+  reason: "private-key match in a test fixture at tests/test_gen_site.py:263 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+622fd9aae456fbd40151c93f17edf68b630121e4fe43d339131aa90cd8085574:
+  reason: "jwt-token match in a test fixture at tests/test_gen_site.py:268 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+6564dbdf28ed31bc3021f433e7bfcd639d3f9e4013ff74a959dc0dd8c52e343d:
+  reason: "aws-access-key match in a test fixture at tests/test_gen_site.py:274 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+fab210ae7db0a937e98c576e014bd4a884f9740cacbdebd76a07065bbeccf458:
+  reason: "aws-access-key match in a test fixture at tests/test_gen_site.py:281 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+4ab5f4609c1d5a8e2518824a66999ee2ed7bf41d7d9f995da385403557a3cf64:
+  reason: "aws-access-key match in a test fixture at tests/test_gen_site.py:283 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+f4a57ec8cc4cdf35a314d59922a6725c0eda7775beef23712404e0564541d2a8:
+  reason: "aws-access-key match in a test fixture at tests/test_gen_site.py:303 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+c1efcf81fdcc69c33994b116e69be9f2d29150c3f34c3fad74c0169d71990151:
+  reason: "aws-access-key match in a test fixture at tests/test_gen_site.py:311 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+7a88652f34bbe0c039404a4442252e1bee8f90c92c2d7e38bb3d70d69a689d9f:
+  reason: "openai-key match in a test fixture at tests/test_gen_site.py:316 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+a099e9145ae6c2cf08bbd670b14f6f3fec42f136f6321df22d95c096800b3849:
+  reason: "openai-key match in a test fixture at tests/test_gen_site.py:323 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+8ca4a5591cb95bd57a1debb37217051765bc848c55b609023b2ddfe25acc5988:
+  reason: "jwt-token match in a test fixture at tests/test_gen_site.py:327 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+938b281c4dc9aa7966b3b02b26736bc639e476c6e3c5a0bf22665ac141915faa:
+  reason: "generic-api-key match in a test fixture at tests/test_issue_triage_prepass.py:42 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+250f3cfe8fc74d4c01afe61d7c6e20567a4f72c1c8269d170669c7b522b10a18:
+  reason: "generic-api-key match in a test fixture at tests/test_issue_triage_prepass.py:108 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+70e86563fdcd8a518dd7087d33a9c1a9b0f53f4cd371187a374fe5bb2cdef484:
+  reason: "openai-key match in a test fixture at tests/test_model_rule_id.py:231 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+949a2df6930d7589c594ef256ad342a08b8b192158949637a1c6e3229b58330b:
+  reason: "openai-key match in a test fixture at tests/test_model_rule_id.py:233 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+229f379ec9c13daa3bfde138d7aefb4938fc1072e49e5c1a05d12dc3e4f634f6:
+  reason: "openai-key match in a test fixture at tests/test_model_rule_id.py:235 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+7041a991f0426104e7185291703a9e5b7488ef62c622540f26bd4f85ef941afc:
+  reason: "openai-key match in a test fixture at tests/test_model_rule_id.py:237 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+2877b4d3eafd2045a9ed9a1c222d5b87352d104dda9758e734a83d19faf5e6e0:
+  reason: "openai-key match in a test fixture at tests/test_prepass_truth.py:36 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+1f920d209c152214e47a4de28bedd687a664e76210493a14e665ad8761697c03:
+  reason: "openai-key match in a test fixture at tests/test_prepass_truth.py:36 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+402115ab2703c0de0d57a6846ea5aad62dd60492611e0ab72434e6e0ee013ead:
+  reason: "generic-api-key match in a test fixture at tests/test_prepass_truth.py:37 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+60621f9024874a90ec763697d76372abf966edec3011c4d49ca08d7097ddd0b2:
+  reason: "openai-key match in a test fixture at tests/test_sandbox.py:387 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+6c9ae8d20551c98c2a91572289a25c9fbfbf0a18a9b925b89c5fb29f96abc6b7:
+  reason: "openai-key match in a test fixture at tests/test_sandbox.py:547 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+6eb8cec185c753f716d6a1e0000ab35d5a3efcbd1ee2b0cb6300270953311c70:
+  reason: "openai-key match in a test fixture at tests/test_sandbox.py:927 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+9968e288b5903c6b17b98e2976dea5b15979bab5188a546403bb3348c66f1573:
+  reason: "openai-key match in a test fixture at tests/test_sandbox.py:1087 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+b9af61f47143deee0a7de375fe6579f79655ce28d1eeed969ec7a918e133b5ba:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:179 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+06d4a08e96bae5ea165e5749237bd35bced80a04211992230d3cac5abe06626f:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:182 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+1a18c57454aa16559211daaee431f8c449be025298f46eda0cf90fcae3e5d8a5:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:216 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+0efc540291349846ec3749f09c0e9fa04b621903ad0a60fb7480f5d16ec4333a:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:219 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+bf27bdfe78fde1155fb48c9b3d982b0e0098fecee934b99052329532c01e909b:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:223 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+3849991a451793fdbc5775282965d34232e34d03990d6cc1e43500530e8712c5:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:229 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+fc045d6301e7130eaf544139e4ad90374f38a3560bfd0b2fdf84ff70e19aaeb4:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:238 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft) Prose-bound identity: this entry stops matching if the model's wording changes."
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+c742e223f6c31a50df2ddf161d809a417cc1c0df827d27a45fcdecc6536b39cd:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:260 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+38cdcc5e3d0c16d2cb7b5c8a78f9105b2f50178afc2a4f819eaab61685fcbe53:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:266 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
+eda70bbe0d159bdd4dbbcb44cf35f0d230ec463071fe0000ffaf6ef967c88101:
+  reason: "openai-key match in a test fixture at tests/test_sink_adapters.py:275 - one of the deliberate literals the redaction/containment tests assert against, not a credential. Triaged false positive; the source is deliberately NOT changed. (agents-43ft)"
+  author: "agents-factory-impl-l2xb"
+  date: "2026-10-13"
