@@ -1,0 +1,340 @@
+diff --git a/bin/fleet-land-message b/bin/fleet-land-message
+index 0c53d94..dc740ab 100755
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
+@@ -9,6 +9,13 @@
+ #   fleet-land-message --from-comment <n> <bead> <branch> [...] when a bead has several LAND-SUMMARY blocks and
+ #                                                             the last one is not the one to use (n is the
+ #                                                             index from `bd comments <bead> --json`)
++#   fleet-land-message --author-model <provider/id> <bead> <branch> [...]
++#                                                             supply the AUTHORING model when no object on the
++#                                                             VM can (a lane restarted or rotated since the
++#                                                             work was authored). This is an INPUT to the
++#                                                             independence rule, not a way around it: the
++#                                                             comparison still runs, and the message records
++#                                                             that the value was supplied (agents-2tov).
+ #
+ # It PRINTS; it never commits, merges, amends or pushes. The merger uses it in place of the one-line subject:
+ #
+@@ -39,7 +46,7 @@
+ set -uo pipefail
+ export PATH="$HOME/fleet/bin:$HOME/.local/bin:$PATH"
+ 
+-GATE_SHA=""; JSON=0; BEADS=(); ARGS=(); FROM_COMMENT=""; ALLOW_STALE=0; REPO_DIR=""
++GATE_SHA=""; JSON=0; BEADS=(); ARGS=(); FROM_COMMENT=""; ALLOW_STALE=0; REPO_DIR=""; AUTHOR_MODEL_ARG=""
+ while [ $# -gt 0 ]; do
+   case $1 in
+     --gate) GATE_SHA=${2:?--gate needs a sha}; shift 2 ;;
+@@ -48,6 +55,8 @@ while [ $# -gt 0 ]; do
+     --gate=*) GATE_SHA=${1#--gate=}; shift ;;
+     --allow-stale) ALLOW_STALE=1; shift ;;
+     --print-json|--json) JSON=1; shift ;;
++    --author-model) AUTHOR_MODEL_ARG=${2:?--author-model needs provider/id}; shift 2 ;;
++    --author-model=*) AUTHOR_MODEL_ARG=${1#--author-model=}; shift ;;
+     --repo) REPO_DIR=${2:?--repo needs a directory}; shift 2 ;;
+     --repo=*) REPO_DIR=${1#--repo=}; shift ;;
+     --worktree) REPO_DIR=${2:?--worktree needs a directory}; shift 2 ;;
+@@ -231,6 +240,74 @@ rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_run_id=""
+ # quality (tip-pinned vs branch-owned) and demotes author-lane verdicts only when a non-author verdict
+ # exists for that rank. When only author-lane verdicts exist, the transcription remains operative with an
+ # explicit warning naming the survivor.
++# ---------- WHO AUTHORED THIS BRANCH (agents-2tov) ----------
++# THE AUTHOR OF A BRANCH IS NAMED BY THE BRANCH, not by whoever last appended a LAND-SUMMARY. Until this was
++# fixed the author was taken from the ACTOR of the operative LAND-SUMMARY comment, so a summary appended by a
++# different lane (a coordinator replacing a block whose author's bd writes timed out - a supported workflow)
++# made THAT lane the author: measured on agents-jb8m, where the replacement block is coord's, so the author was
++# read as coord (deepseek/deepseek-flash) while the deepseek reviewer was refused as 'same-family' - a false
++# negative on a branch whose own lane file (~/.fleet/lanes/impl-f6du.model) reads openai-codex/gpt-6-sol, i.e.
++# genuinely cross-family. The same wrong object was used for the author-lane verdict filter, which is the same
++# defect pointed the other way: with an appender of a different family, an AUTHOR's own verdict stops being
++# discounted. Both now ask this one question, and the answer names its SOURCE so a wrong derivation is visible
++# rather than confident.
++fleet_author_lane_from_branch() {
++  local rem=${1#fleet/} best="" cand base
++  [ -d "$HOME/.fleet/lanes" ] || return 0
++  for cand in "$HOME/.fleet/lanes"/*.model; do
++    [ -f "$cand" ] || continue
++    base=$(basename "$cand"); base=${base%.model}
++    [ -n "$base" ] || continue
++    # A branch is fleet/<lane>-<bead> (or fleet/<lane>), and lanes contain hyphens, so the match must be at a
++    # boundary and the LONGEST known lane wins: fleet/impl-l2xb-followup2 is impl-l2xb, not impl.
++    case "$rem" in
++      "$base"|"$base"-*|"$base"/*) [ "${#base}" -gt "${#best}" ] && best=$base ;;
++    esac
++  done
++  printf '%s' "$best"
++}
++# agents-8ab7 (rev-2tov3, P2): the author's ACTOR is derived from the OBJECTS, never synthesized from the
++# executing VM. FLEET_VM names the VM RUNNING this check, and a branch delivered from a project VM to the hub
++# carries actors prefixed with the PROJECT's VM (test-vm-thing2), so prefixing the lane with the local FLEET_VM
++# invented an actor that exists nowhere: the author-lane filter then failed to recognize the author's own
++# comments and RETAINED an author's own verdict as independent evidence - the unsafe direction this change
++# exists to close. So the author is matched BY LANE (an actor belongs to it when it IS the lane or ends with
++# "-<lane>"), and the actor shown in messages is a real one taken from the bead when any object names it.
++fleet_author_lane_of_actor() {
++  case "$1" in
++    "$2"|*"-$2") return 0 ;;
++    *) return 1 ;;
++  esac
++}
++src_author=""; src_lane=""; src_author_source=""
++if [ -n "$BRANCH" ]; then
++  _bl=$(fleet_author_lane_from_branch "$BRANCH" 2>/dev/null || true)
++  if [ -n "$_bl" ]; then
++    src_lane="$_bl"; src_author_source="branch-name"
++    if [ -n "$src_who" ] && fleet_author_lane_of_actor "$src_who" "$src_lane"; then
++      src_author="$src_who"
++    elif [ -n "$COMMENTS" ]; then
++      # Scan the bead's own comments for an actor that belongs to this lane: the author's hand-off, or a verdict
++      # posted by the author's lane, carries the PROJECT VM prefix and is the identity to compare against.
++      src_author=$(jq -r --arg l "$src_lane" '.[] | (.author // "") | select(. == $l or endswith("-" + $l))' \
++        <<<"$COMMENTS" 2>/dev/null | head -1)
++    fi
++    [ -n "$src_author" ] || src_author="$src_lane"
++  fi
++fi
++if [ -z "$src_lane" ] && [ -n "$src_who" ]; then
++  src_author="$src_who"; src_lane=${src_who#"${FLEET_VM:-fleet-manager}-"}; src_author_source="summary-author"
++fi
++# ONE author-lane predicate, used at every filter site: an actor belongs to the author's lane when it is the
++# lane or ends with "-<lane>". `l` may be empty (no lane derivable), and then only the exact actor compares -
++# the pre-existing behaviour, not a widening.
++if [ -n "$src_lane" ]; then
++  AUTHOR_MATCH_NONAUTH='($2 != a) && ($2 != l) && ($2 !~ ("-" l "$"))'
++  AUTHOR_MATCH_AUTH='($2 == a) || ($2 == l) || ($2 ~ ("-" l "$"))'
++else
++  AUTHOR_MATCH_NONAUTH='($2 != a)'
++  AUTHOR_MATCH_AUTH='($2 == a)'
++fi
+ REV_POOL="$REV_CAND"; rev_author_ignored=0; rev_author_ignored_shas=""
+ 
+ # fleet-260l: SELECTION IS A FUNCTION OF A POOL, not a single newest-first walk.
+@@ -495,9 +572,9 @@ if [ -n "$REV_POOL" ]; then
+   if [ -n "$POOL_TIP" ]; then
+     _tip_nonauth=""
+     _tip_auth=""
+-    if [ -n "$src_who" ]; then
+-      _tip_nonauth=$(awk -F'\t' -v a="$src_who" '$2 != a' <<<"$POOL_TIP")
+-      _tip_auth=$(awk -F'\t' -v a="$src_who" '$2 == a' <<<"$POOL_TIP")
++    if [ -n "$src_author" ]; then
++      _tip_nonauth=$(awk -F'\t' -v a="$src_author" -v l="$src_lane" "$AUTHOR_MATCH_NONAUTH" <<<"$POOL_TIP")
++      _tip_auth=$(awk -F'\t' -v a="$src_author" -v l="$src_lane" "$AUTHOR_MATCH_AUTH" <<<"$POOL_TIP")
+     fi
+     _tip_operative="$POOL_TIP"
+     if [ -n "$_tip_nonauth" ]; then
+@@ -538,9 +615,9 @@ if [ -n "$REV_POOL" ]; then
+   elif [ -n "$POOL_OWN" ]; then
+     _own_nonauth=""
+     _own_auth=""
+-    if [ -n "$src_who" ]; then
+-      _own_nonauth=$(awk -F'\t' -v a="$src_who" '$2 != a' <<<"$POOL_OWN")
+-      _own_auth=$(awk -F'\t' -v a="$src_who" '$2 == a' <<<"$POOL_OWN")
++    if [ -n "$src_author" ]; then
++      _own_nonauth=$(awk -F'\t' -v a="$src_author" -v l="$src_lane" "$AUTHOR_MATCH_NONAUTH" <<<"$POOL_OWN")
++      _own_auth=$(awk -F'\t' -v a="$src_author" -v l="$src_lane" "$AUTHOR_MATCH_AUTH" <<<"$POOL_OWN")
+     fi
+     _own_operative="$POOL_OWN"
+     if [ -n "$_own_nonauth" ]; then
+@@ -633,14 +710,20 @@ fi
+ #                   without a summary anyway.
+ # A determinable SAME family refuses even when the actor differs (cross-family is the fleet's rule for
+ # every review, not only same-lane transcriptions).
+-rev_independence="unknown"; rev_reviewer_model=""; rev_author_model=""; rev_block=""
++rev_independence="unknown"; rev_reviewer_model=""; rev_author_model=""; rev_author_model_source="comment cue"; rev_block=""
+ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+   _pm=$(fleet_verdict_split_models "${verdict_line:-}" "$rev_text" 2>/dev/null || true)
+   rev_reviewer_model=$(sed -n 1p <<<"$_pm"); rev_author_model=$(sed -n 2p <<<"$_pm")
+-  if [ -z "$rev_author_model" ] && [ -n "$src_who" ]; then
+-    _lane=${src_who#"${FLEET_VM:-fleet-manager}-"}
+-    if [ "$_lane" != "$src_who" ] && [ -f "$HOME/.fleet/lanes/$_lane.model" ]; then
+-      rev_author_model=$(tr -d '[:space:]' < "$HOME/.fleet/lanes/$_lane.model" 2>/dev/null || true)
++  if [ -z "$rev_author_model" ] && [ -n "$AUTHOR_MODEL_ARG" ]; then
++    # agents-2tov: the operator with the evidence supplies the missing OPERAND, rather than overriding the
++    # rule. The comparison below still runs on it, and this text is what the message and JSON record, so a
++    # supplied value is never indistinguishable from a derived one.
++    rev_author_model="$AUTHOR_MODEL_ARG"; rev_author_model_source="supplied by the lander (--author-model)"
++  fi
++  if [ -z "$rev_author_model" ] && [ -n "$src_lane" ]; then
++    if [ -f "$HOME/.fleet/lanes/$src_lane.model" ]; then
++      rev_author_model=$(tr -d '[:space:]' < "$HOME/.fleet/lanes/$src_lane.model" 2>/dev/null || true)
++      rev_author_model_source="lane record $src_lane (${src_author_source:-unknown} author)"
+     fi
+   fi
+   _fam=""
+@@ -651,13 +734,22 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+       _fam="same"
+     fi
+   fi
+-  if [ -n "$src_who" ] && [ "$rev_who" != "$src_who" ]; then
++  # agents-8ab7: the author owns EVERY actor that belongs to its lane, whatever VM prefix it carries - an
++  # exact-actor compare here classified the author's own verdict as someone else's ("other-lane"), which is the
++  # false-positive direction. With no lane derivable the compare stays exact, as before.
++  _rev_is_author=false
++  if [ -n "$src_lane" ]; then
++    fleet_author_lane_of_actor "$rev_who" "$src_lane" && _rev_is_author=true
++  elif [ -n "$src_author" ] && [ "$rev_who" = "$src_author" ]; then
++    _rev_is_author=true
++  fi
++  if [ -n "$src_author" ] && [ "$_rev_is_author" = false ]; then
+     if [ "$_fam" = "same" ]; then
+       rev_independence="same-family"
+     else
+       rev_independence="other-lane"
+     fi
+-  elif [ -n "$src_who" ]; then
++  elif [ -n "$src_author" ]; then
+     if [ -z "$rev_reviewer_model" ]; then
+       rev_independence="self-certified"
+     elif [ -z "$rev_author_model" ]; then
+@@ -679,11 +771,11 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+         ;;
+       incomplete-provenance)
+         rev_cleared=false
+-        rev_block="independence: incomplete-provenance (reviewer model: $rev_reviewer_model; author model: not determinable - not named on the verdict, and no ~/.fleet/lanes lane record) — name the implementer's model on the verdict or record the lane's model, so the reviewer's family can be compared (fleet-ry7m)"
++        rev_block="independence: incomplete-provenance (reviewer model: $rev_reviewer_model; author model: not determinable for lane ${src_lane:-?} (${src_author_source:-no author lane}); not named on the verdict and no ~/.fleet/lanes lane record - supply it with --author-model <provider/id>, which the message records as supplied) — name the implementer's model on the verdict or record the lane's model, so the reviewer's family can be compared (fleet-ry7m)"
+         ;;
+       same-family)
+         rev_cleared=false
+-        rev_block="independence: same-family (reviewer model: $rev_reviewer_model; author model: $rev_author_model) — the fleet's rule is a different model family reviews every change, so this review cannot clear it (fleet-ry7m)"
++        rev_block="independence: same-family (reviewer model: $rev_reviewer_model; author model: $rev_author_model, from ${rev_author_model_source:-unknown}) — the fleet's rule is a different model family reviews every change, so this review cannot clear it (fleet-ry7m). If the author model above is the wrong object (a lane restarted or rotated since the work was authored), supply the authoring model with --author-model <provider/id> and the comparison runs on it; the value is recorded as supplied (agents-2tov)"
+         ;;
+     esac
+   fi
+@@ -972,7 +1064,9 @@ if [ "$JSON" = 1 ]; then
+     --arg rev_run_id "${rev_run_id:-}" \
+     --arg cleared_sha "${cleared_label_sha:-}" \
+     --arg rev_independence "${rev_independence:-unknown}" --arg rev_reviewer_model "${rev_reviewer_model:-}" \
+-    --arg rev_author_model "${rev_author_model:-}" --arg branch_author "${src_who:-}" \
++    --arg rev_author_model "${rev_author_model:-}" --arg branch_author "${src_author:-$src_who}" \
++    --arg author_lane "${src_lane:-}" --arg author_source "${src_author_source:-}" \
++    --arg rev_author_model_source "${rev_author_model_source:-}" \
+     --arg newer_not_used "${flm_newer_passed:-}" --arg disagreement "${rev_disagree:-}" --arg rev_named_branch "${rev_branch:-}" \
+     --argjson rev_author_ignored "${rev_author_ignored:-0}" --arg rev_author_ignored_shas "${rev_author_ignored_shas:-}" \
+     --arg gate_identity "${gate_identity:-}" \
+@@ -986,7 +1080,8 @@ if [ "$JSON" = 1 ]; then
+               selected_comment_index:($rev_comment_index|if .=="" then null else tonumber end),
+               selected_comment_author:$rev_who,author_lane_transcription:$author_lane_transcription,
+               delta_identical:$rev_delta_identical,delta_mismatch:$rev_delta_mismatch,run_id:$rev_run_id,cleared_sha:$cleared_sha,
+-              branch_author:$branch_author,independence:$rev_independence,
++              branch_author:$branch_author,author_lane:$author_lane,author_source:$author_source,
++              independence:$rev_independence,author_model_source:$rev_author_model_source,
+               reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
+               author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
+               newer_not_used:$newer_not_used,disagreement:$disagreement,named_branch:$rev_named_branch},
+diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
+index 0dd6274..5e16712 100755
+--- a/tests/fleet-land-message.test.sh
++++ b/tests/fleet-land-message.test.sh
+@@ -74,6 +74,9 @@ J
+ 
+ B="$ROOT/fix/comments.json"
+ run() { GATE_FIXTURE="$ROOT/fix/gate.json" timeout 60 bash "$LM" "$@" 2>&1; }
++# agents-8ab7: the same invocation as a HUB-side check, where FLEET_VM is the hub and the actors in the bead
++# carry the PROJECT VM prefix. run() uses FLEET_VM=test-vm (set above), so this is the cross-VM control.
++run_hub() { FLEET_VM=fleet-manager GATE_FIXTURE="$ROOT/fix/gate.json" timeout 60 bash "$LM" "$@" 2>&1; }
+ 
+ echo "1. a well-formed block on the author's hand-off comment"
+ cat > "$B" <<'J'
+@@ -1528,6 +1531,102 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "position/offset moved (added
+ out=$(run tk-1 fleet/pos-tip 2>&1 || true)
+ has "$out" "position/offset moved" "37j refusal line reports position/offset moved"
+ 
++# 38. agents-2tov: the author of the branch comes from the BRANCH, not from whoever appended the operative
++# LAND-SUMMARY. THE LIVE CASE, reproduced on agents-jb8m: a coordinator appends a replacement block (the
++# author's bd writes were timing out), so the old derivation made COORD the author, read
++# ~/.fleet/lanes/coord.model, and refused a deepseek reviewer as 'same-family' - while the branch's own lane
++# record reads openai-codex/gpt-6-sol, i.e. genuinely cross-family. The branch here is fleet/thing2, whose lane
++# is 'thing2' by the fleet/ <lane>-<bead> convention.
++mkdir -p "$HOME/.fleet/lanes"
++printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
++printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/coord.model"        # the appender's family: the trap
++cat > "$B" <<J
++[{"author":"test-vm-thing2","created_at":"2026-10-09T10:00:00Z","text":"Hand-off.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY, APPENDED BY COORD AT THE AUTHOR'S REQUEST (their bd writes timed out).\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++J
++j=$(run --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.author_lane' <<<"$j")" "thing2" "38a the author lane comes from the branch name"
++eq "$(jq -r '.review.author_source' <<<"$j")" "branch-name" "38b ...and says so, so a wrong derivation is visible"
++eq "$(jq -r '.review.branch_author' <<<"$j")" "test-vm-thing2" "38c the author is the branch's lane, not the appender"
++eq "$(jq -r '.review.author_model' <<<"$j")" "openai-codex/gpt-6-sol" "38d the AUTHOR lane's model, not the appender's"
++# 38e asserts the CLASS, not the finer label: the verdict here is posted by a DIFFERENT lane
++# (test-vm-rev-y), so the correct classification is other-lane ("independent by actor"); what matters is
++# that it is no longer refused as same-family, which is the false negative agents-jb8m hit.
++eq "$(jq -r '.review.independence' <<<"$j")" "other-lane" "38e a genuinely independent verdict is not refused as same-family"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38f ...and it clears"
++# 38g/38h: the same derivation must still REFUSE when the author lane's own family matches the reviewer, and
++# the refusal must name the source it used (the old text named the model with no provenance at all)
++printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/thing2.model"
++j=$(run --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.independence' <<<"$j")" "same-family" "38g a same-family author lane still refuses"
++eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38h ...and does not clear"
++has "$(run tk-2 fleet/thing2)" "from lane record thing2 (branch-name author)" "38i the refusal names where the author model came from"
++has "$(run tk-2 fleet/thing2)" "--author-model" "38i2 ...and names the remedy that supplies the missing operand"
++# 38j: the AUTHOR-LANE VERDICT FILTER asks the same question, so a verdict posted by the branch's own lane is
++# the one that is discounted - not one posted by whoever appended the summary
++printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
++cat > "$B" <<J
++[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"},
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:10:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++J
++j=$(run --print-json tk-2 fleet/thing2)
++# 38j asserts the OBSERVABLE rather than the counter: on the applied-state base (which includes the
++# rank-scoped pool patch) the demotion of an author-lane verdict is expressed by which verdict is SELECTED,
++# and author_lane_verdicts_ignored is 0 in this fixture. What matters is that the verdict selected is the
++# OTHER lane's, i.e. the branch lane's own verdict did not carry the landing, and that the author lane is
++# still derived from the branch (38a) rather than from the appender (test-vm-coord).
++eq "$(jq -r '.review.selected_comment_author' <<<"$j")" "test-vm-rev-y" "38j the branch lane's own verdict is the one demoted, not the appender's"
++# 38q (agents-8ab7, found by rev-2tov3): THE AUTHOR'S ACTOR IS NAMED BY THE OBJECTS, NOT BY THE VM RUNNING THE
++# CHECK. A branch delivered from a project VM to the hub carries actors prefixed by the PROJECT's VM, so a
++# hub-side run (FLEET_VM=fleet-manager) must still recognise test-vm-thing2 as the author's own lane and demote
++# its verdict. The fixture DISCRIMINATES by making the author-lane verdict a FAIL and another lane's a PASS on
++# the same tip: demoting the author's FAIL lets the independent PASS clear, while failing to demote it makes two
++# verdicts disagree and refuses - which is exactly the pre-fix result on the hub, where the author's actor was
++# synthesized as $FLEET_VM-$lane (fleet-manager-thing2), matched no comment, and the author's own FAIL was
++# treated as an independent review.
++printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
++cat > "$B" <<J
++[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: FAIL (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"},
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:10:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++J
++j_proj=$(run     --print-json tk-2 fleet/thing2)
++j_hub=$(run_hub  --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.author_lane' <<<"$j_hub")" "thing2" "38q the lane is derived on the hub exactly as on the project VM"
++eq "$(jq -r '.review.author_lane_verdicts_ignored' <<<"$j_hub")" "1" "38q2 the hub-side check demotes the author lane's own FAIL instead of retaining it as independent evidence"
++eq "$(jq -r '.review.selected_comment_author' <<<"$j_hub")" "test-vm-rev-y" "38q3 the operative verdict is the independent lane's PASS"
++eq "$(jq -r '.review.verdict' <<<"$j_hub")" "PASS" "38q4 ...so the landing is not refused on the author's own FAIL"
++eq "$(jq -r '.review.verdict' <<<"$j_hub")" "$(jq -r '.review.verdict' <<<"$j_proj")" "38q5 the answer is the same on either VM (author identity is stable across the delivery boundary)"
++# 38k: the TRANSCRIBED-subagent path, which is where the author model is the whole argument - the verdict is
++# posted by the branch's own lane, so there is no other-actor independence to lean on and the families must
++# genuinely differ. Before this fix the comparison used the appender's family and would have refused it.
++printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
++cat > "$B" <<J
++[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash vs implementer openai-codex/gpt-6-sol)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++J
++j=$(run --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "38k transcribed verdict with a named reviewer is cross-family"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38l ...and clears on the author lane's family, not the appender's"
++# 38m/38n: WHEN NO OBJECT SETTLES IT, the person with the evidence supplies the OPERAND rather than overriding
++# the rule (agents-2tov): the lane record here says deepseek (the appender's family, and the trap), the reviewer
++# is deepseek, and the lander knows the authoring model was gpt-6-sol. The comparison still runs, it clears, and
++# the value is recorded as SUPPLIED so it is never indistinguishable from a derived one.
++printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/thing2.model"
++cat > "$B" <<J
++[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++J
++j=$(run --print-json --author-model openai-codex/gpt-6-sol tk-2 fleet/thing2)
++eq "$(jq -r '.review.author_model' <<<"$j")" "openai-codex/gpt-6-sol" "38m a supplied authoring model is used"
++has "$(jq -r '.review.author_model_source' <<<"$j")" "supplied" "38n ...and is recorded as SUPPLIED, not derived"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38o ...and the comparison still runs and clears"
++j=$(run --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38p without the supplied operand the same tree still refuses"
++rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
++
+ if [ "$FAIL" -gt 0 ]; then
+   echo "Failed tests ($FAIL):"
+   for f in "${FAILED_TESTS[@]}"; do
