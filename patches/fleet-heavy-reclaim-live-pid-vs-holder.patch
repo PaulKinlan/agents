@@ -1,0 +1,23 @@
+--- /home/exedev/fleet/bin/fleet-heavy	2026-10-12 21:10:28.000000000 +0000
++++ /tmp/fleet-heavy-l95	2026-10-13 01:22:12.125131322 +0000
+@@ -92,7 +92,19 @@
+   # A LIVE WRAPPER IS NEVER TOUCHED. fleet-heavy stays alive for the whole job (it waits on `nice` then exits),
+   # so a live recorded pid means the job is running - however slow - and a slow gate is what this queue exists
+   # to protect.
+-  [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null && return 1
++  # agents-5n28: A LIVE PID IS NOT THE SAME AS A LIVE WRAPPER. kill -0 tested the pid the label records,
++  # and $hp is a PID - so after the wrapper died and its pid was REUSED, kill -0 succeeded, this function
++  # concluded that an honest slow gate held the slot, and returned. Every waiter then politely declined,
++  # and the slot stayed held by orphans until somebody killed them by hand (measured on the hub: 6743s,
++  # released immediately once the husks were killed).
++  # THE DISCRIMINATOR IS ALREADY COMPUTED ABOVE: $holders is the set of processes actually holding the
++  # slot fd. A live wrapper is ALWAYS one of them - it takes the flock and holds it for the whole job.
++  # A reused pid holds nothing. So membership in $holders is the test, not liveness, and it is a field
++  # the kernel maintains rather than a heuristic.
++  if [ -n "$hp" ]; then
++    case " $holders " in *" $hp "*) return 1 ;; esac   # a live WRAPPER: the honest slow job
++    echo "fleet-heavy: slot$i label names pid $hp, alive but holding no fd - not our wrapper (agents-5n28)" >&2
++  fi
+   # Two orphan signatures, both exact:
+   #   (a) the label names a pid that is GONE while the fd is still held - a killed wrapper and its descendants;
+   #   (b) there is NO label at all while the fd is held - the holder died before/without writing one (the
