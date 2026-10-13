@@ -1,4 +1,4 @@
-From 4e158bff690a58079cb8ec5386904431487e0fde Mon Sep 17 00:00:00 2001
+From b728bb1f025867d78d769ef8bfc56d26a642cf06 Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
@@ -115,6 +115,22 @@ in this revision: the glob/order property pinned last round is MOOT, because the
 exists - removing the field answers that class more strongly than a pin could, and it is stated in the
 write-up rather than silently dropped. The P1 fix is unaffected: the SIGKILL probe still reports rc=75 with
 the first bd still writing. Suite 63/63.
+
+--- DOCS: the threat-model boundary is now stated, not inferred (coord's request) ---
+
+Coord asked for the threat model to be stated plainly rather than left for a reader to infer, since three
+successive reviews found the same class in three successive positions. New section "What this patch promises,
+and where the boundary is": the property (no lane's text reaches a shared file or another lane's log; every
+value is a closed vocabulary or a validated integer, re-validated on read), the BOUNDARY (the lock file is
+0644 and the lane registry 0755 - both writable by the single unix user every lane runs as, so the guarantee is
+NOT that the record is authentic, only that nothing a same-uid writer puts there is ever printed; a lane cannot
+prove its identity to another lane on this VM, and naming needs a trust boundary the fleet controls), and what
+is explicitly NOT promised (the wait is not shortened; flock -w polls rather than queues, so the fairness
+defect is agents-nbka, because a timeout cannot be tuned into a queue).
+
+DOCS ONLY - no behaviour change. Verified below: the applied bin/bd and tests/bd-lock-holder.test.sh are
+byte-identical to the copies the reviewers saw for 602bec9, so the P1 verdict (lock inheritance) and the
+reader-side revalidation conclusions carry over unchanged; only the write-up differs.
 ---
  bin/bd                       | 288 ++++++++++++++++++++++++++++++++-
  tests/bd-lock-holder.test.sh | 301 +++++++++++++++++++++++++++++++++++

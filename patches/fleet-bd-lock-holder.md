@@ -1,4 +1,4 @@
-## `fleet-bd-lock-holder.patch` (agents-elu6; revised for agents-zoch)
+## `fleet-bd-lock-holder.patch` (agents-elu6; revised for agents-zoch, agents-ttxh, agents-6e77)
 
 **Applies on top of** `~/fleet/bin/bd` (14480 bytes, sha256 `f0e2f7c79b51819bed188af45ea8aa207cbe4843b6008591faf82fbd7c8c2478` — the shim
 as deployed on `agents-factory` at 2026-10-12 21:11Z). **Also adds** `tests/bd-lock-holder.test.sh`.
@@ -31,6 +31,38 @@ The bead's three preferences were: (a) name the holder once the lock has been he
 (b) make the write path resilient, (c) if the wait is unavoidable, fail fast with a retry rather than
 blocking a tool call for minutes. This patch implements **(a) and (c)**, and points at (b) — which is lane
 discipline, not tooling — in the failure message itself.
+
+### What this patch promises, and where the boundary is (threat model)
+
+This is stated as a BOUNDARY, not left for a reader to infer, because three successive reviews found the same
+class in three successive positions.
+
+**The property.** No lane's text reaches a shared file or another lane's log. Every value this shim writes to
+the lock record and every value it prints is drawn from a **closed vocabulary** (bd operations, dolt
+operations, roles, a process-name list) or is a **validated integer** (pid, timestamp). Nothing freeform is
+copied, sanitised or escaped anywhere, and the reader re-validates every field it reads, so a record planted by
+another process is no more dangerous than an honest one. Suffix after suffix was closed by *removing* the
+content-bearing position rather than filtering it: the argument vector, then the environment-supplied lane
+name, then a descendant's argv, then the lane name itself (below).
+
+**The boundary, and it is a real one.** The lock file is 0644 and the lane registry is 0755, both owned by the
+single unix user that **every lane runs as**. So a same-uid process can *write* anything it likes into the
+record, and can create `~/.fleet/lanes/<anything>.model`. What this patch guarantees is therefore **not** that
+the record is authentic — it is that **nothing a same-uid writer puts there is ever printed**. Concretely:
+
+  * anything unparseable or out of vocabulary is reported as `unrecognised` / `other` / `UNNAMED`;
+  * no field with an OPEN vocabulary is reported at all — that is why the lane name was removed rather than
+    validated harder (agents-6e77): validating a name against a directory the attacker can write is not
+    validation, and tightening the registry's permissions does not help when every lane is the same uid;
+  * a diagnostic that *needs* the content it is diagnosing is refused as a design (agents-zoch);
+  * a lane cannot prove its identity to another lane on this VM. Anything that must show a lane name to a human
+    needs a trust boundary the fleet controls — per-lane uids, or a hub-attested registry — which is its own
+    piece of work and deliberately not smuggled in here.
+
+**What is explicitly NOT promised.** This patch does not shorten the wait. `flock -w` polls rather than queues,
+so under load a caller can be refused for minutes while the lock is never idle; the shim now makes that
+**visible, named and bounded** and fails fast with a retry hint, but the fairness defect is a separate finding
+(agents-nbka) because a timeout cannot be tuned into a queue.
 
 ### What it changes
 
@@ -71,7 +103,7 @@ discipline, not tooling — in the failure message itself.
   and exedev-owned — every lane can write it** — so it is not an independent trust boundary, and a same-uid
   caller could create a file, set `FLEET_LANE`, and put chosen text into the shared record and from there
   into another lane's stderr. The repair is not to validate harder against a writable directory (that is
-  polishing the bypass) but to **remove the field**: on a shared-uid VM nothing proves a name — the registry
+  polishing the bypass) but to **remove the field** — the boundary that forces this is stated in full above: on a shared-uid VM nothing proves a name — the registry
   is writable, `FLEET_LANE` is environment, and a process names itself. So the holder is described by what
   can be proved: `role` (a closed vocabulary), `pid` and age (integers), the operation (a closed
   vocabulary) and its descendant process names (the same closed vocabulary). Anything an attacker writes
