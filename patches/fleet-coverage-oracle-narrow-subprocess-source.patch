@@ -1,0 +1,26 @@
+--- /home/exedev/fleet/remote/check-coverage.py	2026-10-12 19:42:41.000000000 +0000
++++ /tmp/hbz3-cc.py	2026-10-13 02:54:53.868174772 +0000
+@@ -672,9 +672,21 @@
+                     cleaned = re.sub(r'`(?:\\.|[^`\\])*`', '', cleaned, flags=re.DOTALL)
+                     cleaned = re.sub(r'//.*', '', cleaned)
+                     cleaned = re.sub(r'#.*', '', cleaned)
++                    # agents-hbz3: THE FOURTH SOURCE EXISTS BECAUSE A CLI/SUBPROCESS INVOCATION IS A REAL CONSUMER
++                    # CHANNEL - a suite that runs lib/x.py as a command consumes it exactly as an importer does. So this
++                    # is NARROWED, not deleted, in two directions:
++                    #   (1) THE CALL NAMES ARE QUALIFIED. The bare alternation included run, exec and call, which are
++                    #       ordinary METHOD names - four of the five phantom entries published for lib/sandbox.py matched
++                    #       the literal text 'run(self, sandbox', a test helper taking a sandbox argument, not a process.
++                    #       An invocation now requires an attribute on the subprocess or os module.
++                    #   (2) THE STEM IS ANCHORED. The file and stem branches had no word boundary, so a LONGER IDENTIFIER
++                    #       containing the stem matched: test_hermetic_env.py was published as consuming lib/sandbox.py
++                    #       because its unittest DISCOVERY PATTERN is '-p test_sandbox', inside a subprocess.run that runs
++                    #       discovery. \b on both sides fixes that, and _ counts as a word character, so test_sandbox
++                    #       stops matching sandbox while a genuine "sandbox" argument still does.
+                     subp_pattern = (
+-                        r'(?:subprocess|Popen|exec|spawn|run|fork|call|check_output|system)\s*\([^)]*?'
+-                        r'(?:' + re.escape(file_path) + r'|' + re.escape(base) + r'|\b' + re.escape(stem) + r'(?:\.[a-z]+)?\b)'
++                        r'(?:subprocess\.(?:run|Popen|call|check_output|check_call|getoutput)|os\.(?:system|popen|spawn[a-z_]*|exec[a-z_]*))\s*\([^)]*?'
++                        r'(?:' + re.escape(file_path) + r'|' + r'\b' + re.escape(base) + r'\b' + r'|\b' + re.escape(stem) + r'(?:\.[a-z]+)?\b)'
+                     )
+                     if re.search(subp_pattern, cleaned, re.DOTALL):
+                         candidates.add(rel)
