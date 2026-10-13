@@ -19,7 +19,7 @@ from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
 from lib.child_env import child_environment
-from lib.credential_broker import PLACEHOLDER_PREFIX
+from lib.credential_broker import PLACEHOLDER_PREFIX, keyless_providers
 from lib.sandbox import sandbox_available
 from lib.tool_pins import ToolPinError
 
@@ -86,10 +86,24 @@ class TestDrainingReportStub(unittest.TestCase):
 class TestPiKeylessModels(unittest.TestCase):
     def test_every_supported_keyless_provider_has_models(self):
         self.assertEqual(set(factory_cli.PI_KEYLESS_MODELS), set(factory_cli.PI_PROVIDER_API))
+        self.assertEqual(set(factory_cli.PI_PROVIDER_API), set(keyless_providers()))
         for provider, ids in factory_cli.PI_KEYLESS_MODELS.items():
             with self.subTest(provider=provider):
                 self.assertTrue(ids, f"{provider} must not emit models: []")
                 self.assertEqual(len(ids), len(set(ids)))
+
+    def test_broker_keyless_provider_without_pi_api_row_refuses_at_import(self):
+        # A new broker provider must not get as far as the writer's silent
+        # unsupported-provider return and leave pi without models.json.
+        with mock.patch.dict(factory_cli.PROVIDERS,
+                             {"newkeyless": ("http://127.0.0.1:9/v1", "none", ())}):
+            loader = importlib.machinery.SourceFileLoader("factory_missing_pi_api",
+                                                          str(FACTORY_ROOT / "factory"))
+            spec = importlib.util.spec_from_loader("factory_missing_pi_api", loader)
+            module = importlib.util.module_from_spec(spec)
+            with self.assertRaisesRegex(RuntimeError,
+                                        "PI provider API table does not match broker keyless providers"):
+                loader.exec_module(module)
 
     def test_missing_or_empty_model_row_refuses_before_writing_config(self):
         broker = mock.Mock(providers={name: None for name in factory_cli.PI_PROVIDER_API},
