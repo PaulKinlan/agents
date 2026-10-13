@@ -1,0 +1,69 @@
+{
+  "kind": "consumer_coverage",
+  "declared_by": "base - migrated from CONSUMER_COVERAGE_ALLOWLIST by agents-nerv",
+  "modules": {
+    "candidate_identity": [
+      "tests/test_findings.py",
+      "tests/test_scan_surface.py"
+    ],
+    "child_env": [
+      "tests/containment_harness.py",
+      "tests/test_containment.py",
+      "tests/test_containment_adapters.py",
+      "tests/test_containment_declarations.py",
+      "tests/test_containment_egress.py",
+      "tests/test_containment_engine_credentials.py",
+      "tests/test_containment_prepass_pins.py",
+      "tests/test_factory_core.py"
+    ],
+    "containment": [
+      "tests/containment_harness.py"
+    ],
+    "credential_broker": [
+      "tests/containment_harness.py",
+      "tests/test_child_env.py",
+      "tests/test_containment.py",
+      "tests/test_containment_adapters.py",
+      "tests/test_containment_declarations.py",
+      "tests/test_containment_egress.py",
+      "tests/test_containment_engine_credentials.py",
+      "tests/test_containment_prepass_pins.py",
+      "tests/test_factory_core.py",
+      "tests/test_line_andon.py"
+    ],
+    "egress_proxy": [
+      "tests/containment_harness.py"
+    ],
+    "findings": [
+      "tests/test_candidate_identity.py",
+      "tests/test_factory_core.py",
+      "tests/test_factory_truth.py",
+      "tests/test_perf_review.py"
+    ],
+    "sandbox": [
+      "tests/containment_harness.py",
+      "tests/test_adapter_auth_failure.py",
+      "tests/test_containment.py",
+      "tests/test_containment_adapters.py",
+      "tests/test_containment_declarations.py",
+      "tests/test_containment_egress.py",
+      "tests/test_containment_engine_credentials.py",
+      "tests/test_containment_prepass_pins.py",
+      "tests/test_factory_core.py",
+      "tests/test_factory_truth.py",
+      "tests/test_factory_truth_2.py",
+      "tests/test_line_andon.py",
+      "tests/test_pi_keyless_broker.py",
+      "tests/test_prompt_exposure.py",
+      "tests/test_report_schema.py"
+    ],
+    "tool_pins": [
+      "tests/test_bench_runner.py",
+      "tests/test_containment_prepass_pins.py",
+      "tests/test_factory_core.py",
+      "tests/test_hermetic_env.py",
+      "tests/test_sink_adapters.py",
+      "tests/test_store_lock_timeout.py"
+    ]
+  }
+}

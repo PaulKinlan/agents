@@ -364,6 +364,17 @@ while IFS= read -r f; do
       # payload turns THIS arm red and leaves the five sibling containment modules green.
       mapped="$mapped tests/test_containment_engine_credentials.py"
       ;;
+    tests/fast_gate_allowlists.d/*)
+      # agents-nerv: the per-lane allowlist FRAGMENTS. Before this arm the gate REFUSED a change to one
+      # of them ("changed file(s) match no mapping arm"), which would have made the fragments worse than
+      # the single dict they replace: a lane that omits a consumer must be able to drop its own file and
+      # get a gate, not a refusal. SEARCH PERFORMED: the fragments are read by exactly one suite - the
+      # loader in tests/test_fast_gate_consumer_coverage.py is the only consumer of this directory (the
+      # JSON is that test's allowlist, not part of the gate's own arm selection). That suite is also
+      # added to every mapped run by the consumer_coverage pin below, so this arm's remaining job is to
+      # make the path MAPPED at all: an unmapped path fails loudly before any runner starts.
+      mapped="$mapped tests/test_fast_gate_consumer_coverage.py"
+      ;;
     tests/coverage-contract.json)
       # Contract-declared cross-file coverage dependencies (agents-1kzf).
       mapped="$mapped tests/test_coverage_contract.py tests/test_fast_gate_mapping.py"
