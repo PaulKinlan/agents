@@ -23,3 +23,4 @@
   git apply /path/to/fleet-check-lock-classification.patch
   bash tests/fleet-check-lock.test.sh
   ```
+

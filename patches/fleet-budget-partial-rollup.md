@@ -73,3 +73,4 @@
   git apply /path/to/fleet-budget-partial-rollup.patch
   bin/fleet-budget          # the R5 lines now describe the fast gate; partial files appear on their own line
   ```
+

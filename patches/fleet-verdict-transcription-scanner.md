@@ -36,3 +36,4 @@
   git apply /path/to/fleet-verdict-transcription-scanner.patch
   bash tests/fleet-land-message.test.sh
   ```
+

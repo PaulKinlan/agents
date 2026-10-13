@@ -27,3 +27,4 @@
   git apply /path/to/fleet-check-status-caller-provenance.patch
   bash tests/fleet-gate-check.test.sh
   ```
+

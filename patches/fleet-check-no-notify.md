@@ -85,3 +85,4 @@
   git apply /path/to/fleet-check-no-notify.patch
   bash tests/fleet-check-scope.test.sh      # 12/12, and no notification is delivered
   ```
+

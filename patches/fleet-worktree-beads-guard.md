@@ -23,3 +23,4 @@
   git apply /path/to/fleet-worktree-beads-guard.patch
   bash tests/bd-worktree-decoy.test.sh
   ```
+

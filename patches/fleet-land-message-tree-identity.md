@@ -27,3 +27,4 @@
   git apply /path/to/fleet-land-message-tree-identity.patch
   bash tests/fleet-land-message.test.sh
   ```
+

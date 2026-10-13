@@ -62,3 +62,4 @@
   git apply /path/to/fleet-verdict-transcribed-run.patch
   bash tests/fleet-verdict-transcribed-run.test.sh     # 11 passed, 0 failed
   ```
+

@@ -104,3 +104,4 @@
 - **What revision 2 changes in the diff:** the fleet-check patch only — the record assembly line and the serve-path
   sentence. The oracle patch is untouched, so its four measured directions and the reviewer's reproduction stand as
   they were.
+

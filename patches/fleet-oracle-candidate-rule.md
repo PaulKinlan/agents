@@ -37,3 +37,4 @@
   git apply /path/to/fleet-oracle-candidate-rule.patch
   bash tests/check-coverage.test.sh
   ```
+

@@ -70,6 +70,28 @@ class TestPatchDirectoryShape(unittest.TestCase):
         self.assertEqual(listed, set(), f"README.md names individual artifacts again: {sorted(listed)}")
         self.assertLess(len(text.split("\n")), 60, "README.md is growing back into the shared file")
 
+    def test_each_writeup_ends_with_a_newline(self):
+        """Round 2 of agents-hzug: the separator lives in the file, not in a join rule.
+
+        Round 1's assertion was strict and answered the wrong question - it was about MY joining
+        rule, and a reviewer running a plain concatenation measured a different number. The
+        migration is now exact: the write-ups, in the order the replaced file listed them,
+        concatenate to it byte for byte (54695 bytes, delta 0), which is a property any consumer
+        can check without knowing a rule.
+
+        This test pins only what a directory can state about itself - that no write-up is trunca-
+        ted mid-line. It deliberately does NOT pin the separator: the source's separators were NOT
+        uniform (ten write-ups end with a blank line and two end with just a newline, because those
+        two sections were followed by a heading that had no preceding blank), so a uniform rule
+        would have been a claim that was false of the artifact it described. The exact reconstruction
+        needs the ORIGINAL ORDER, which the file does not carry, so the byte-exact check is a
+        one-time migration assertion recorded on the bead rather than a property of this directory.
+        """
+        for path in _writeups():
+            with self.subTest(path.name):
+                self.assertTrue(path.read_text(encoding="utf-8").endswith("\n"),
+                                f"{path.name} does not end with a newline - it was truncated")
+
     def test_the_directory_is_not_trivially_empty(self):
         self.assertGreaterEqual(len(_writeups()), EXPECTED_MINIMUM_WRITEUPS)
 
