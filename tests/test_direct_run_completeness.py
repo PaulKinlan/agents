@@ -35,7 +35,21 @@ import ast
 import pathlib
 import unittest
 
+from tests import tracked_test_paths
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def walked_test_modules() -> list:
+    """The test modules this contract walks: the TRACKED ones (agents-4ieg).
+
+    Not `ROOT.glob("tests/test_*.py")`: the fast-gate probes in tests/test_fast_gate_mapping.py create and
+    delete real test modules in tests/ during a run, and the gate's witness says untracked files are not
+    witnessed - so a filesystem walk can see a file that is gone by the time it is read. Measured as a full
+    gate failure on union tree 906d415e7b89a1765c8277bf8ab4cd78754c7215:
+    "FileNotFoundError: .../tests/test_multi_a_probe_tmp.py" in this module, with both modules in shard 1.
+    """
+    return tracked_test_paths("tests/test_*.py")
 #: The modules agents-9lh8 relocated a mid-file block in. Named explicitly so the walk cannot
 #: silently stop covering them (see test_the_walk_covers_the_modules_agents_9lh8_named).
 BEAD_MODULES = (
@@ -76,7 +90,7 @@ class TheDirectRunContractTest(unittest.TestCase):
     def test_no_test_module_runs_a_subset_when_executed_directly(self):
         offenders = []
         walked = 0
-        for path in sorted(ROOT.glob("tests/test_*.py")):
+        for path in walked_test_modules():
             walked += 1
             offenders += mid_file_main_blocks(
                 path.read_text(), str(path.relative_to(ROOT)))
@@ -87,9 +101,27 @@ class TheDirectRunContractTest(unittest.TestCase):
 
     def test_the_walk_covers_the_modules_agents_9lh8_named(self):
         """Non-vacuity for the walk: the files this bead was about are inside the glob."""
-        walked = {str(p.relative_to(ROOT)) for p in ROOT.glob("tests/test_*.py")}
+        walked = {str(p.relative_to(ROOT)) for p in walked_test_modules()}
         for name in BEAD_MODULES:
             self.assertIn(name, walked)
+
+    def test_the_walk_is_blind_to_a_probe_that_exists_only_during_a_run(self):
+        """agents-4ieg, DRIVEN AGAINST THE WALK ITSELF: a file that exists transiently must not be in the
+        walk, because the walk reads what it finds and the probes are deleted the moment their case ends.
+        Red against the glob this replaces (which lists the probe) and green against tracked_test_paths,
+        which sees exactly what the gate witnesses: the tracked tree.
+        """
+        probe = ROOT / "tests" / "test_walker_probe_tmp.py"
+        probe.write_text("import unittest\n", encoding="utf-8")
+        try:
+            walked = {str(p.relative_to(ROOT)) for p in walked_test_modules()}
+            self.assertNotIn("tests/test_walker_probe_tmp.py", walked,
+                             "an untracked, transient probe file must not be walked: the walker reads every "
+                             "path it finds, and test_fast_gate_mapping.py deletes its probes mid-run")
+            self.assertIn("tests/test_direct_run_completeness.py", walked,
+                          "the walk must still see the tracked modules - non-vacuity for the pin")
+        finally:
+            probe.unlink(missing_ok=True)
 
     def test_the_detection_fires_on_a_mid_file_block_and_stays_quiet_on_a_last_one(self):
         """The detector is proven to fire, so a green run is not a green light for a dead check."""

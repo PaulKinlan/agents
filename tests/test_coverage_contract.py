@@ -18,6 +18,7 @@ The remedy is a declarative contract in tests/coverage-contract.json. This suite
    if not executed.
 """
 
+from tests import tracked_test_paths
 import ast
 import json
 from pathlib import Path
@@ -78,7 +79,7 @@ class TestCoverageContract(unittest.TestCase):
 
         # 2. Check all tests for mock.patch.object targeting these functions
         undeclared = []
-        for tf in sorted(ROOT.glob("tests/test_*.py")):
+        for tf in tracked_test_paths("tests/test_*.py"):
             content = tf.read_text(encoding="utf-8")
             tree = ast.parse(content)
 
