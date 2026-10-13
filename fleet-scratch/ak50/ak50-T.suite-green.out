@@ -1,0 +1,451 @@
+1. a well-formed block on the author's hand-off comment
+  ok   1a WHAT extracted
+  ok   1b WHY extracted
+  ok   1c EFFECT extracted
+  ok   1d provenance names the comment
+  ok   1e no fallback warning (wording)
+  ok   1f no fallback warning (substance)
+2. fleet-e8op: a LATER comment mentions LAND-SUMMARY in prose (the review dispatch)
+  ok   2a prose mention does NOT win
+  ok   2b the block's comment is named
+  ok   2c no false 'no summary' (wording)
+  ok   2d ...and it did not silently degrade (fleet-e8op)
+3. two real blocks: the LAST wins, the other is named as rejected
+  ok   3a the last block wins
+  ok   3b the earlier block is not used
+  ok   3c the rejected block is named
+  ok   3d and it says so
+4. --from-comment overrides the choice
+  ok   4a the named block is used
+  ok   4b provenance
+5. a comment with a stray WHAT: but no block is NOT a block
+  ok   5a falls back, visibly
+  ok   5b the title is used
+  ok   5c it says the phrase appeared but no block did
+  ok   5d and it does not claim a block
+6. a WHAT: line BEFORE the block must not supply a field
+  ok   6a the block's WHAT is used
+  ok   6b prose above the block is not
+7. the gate record names the TREE (which survives the merger's --amend)
+  ok   7a tree named
+  ok   7b run time carried
+  ok   7c trailers carried
+  ok   7d trailer text carried
+8. the prompt budget is MEASURED from the branch, not quoted
+  ok   8a no budget line when the branch has no roles/common.md
+  ok   8b an oversized common.md is called out (fleet sync would refuse)
+  ok   8c the real byte count is printed at the tip
+9. --print-json exposes the same choice (for tools and for tests like this one)
+  ok   9a JSON names the block's index
+  ok   9b JSON names its author
+  ok   9c JSON carries WHAT
+  ok   9d JSON counts the prose mentions
+  ok   9e JSON carries the gate state
+10. two batch merges: pre-merge and post-merge do not quote unrelated cached PASS (fleet-agl1)
+  ok   10a pre-merge message does NOT quote branch tip PASS
+  ok   10b pre-merge reports merge tree pending
+  ok   10c merge commit does not quote b1 tip PASS when merge tree differs
+  ok   10d reports no cached verdict for merged tree
+  ok   10e amended message with --gate carries PASS
+  ok   10f gate record carries the merged tree
+  ok   10i post-merge no-argument form carries PASS for HEAD tree
+  ok   10j tree in message matches HEAD tree
+  ok   10k --gate refusing pre-merge commit missing branch
+  ok   10l unresolvable --gate exits 1
+  ok   10l2 refusal error explains not a commit
+  ok   10m --repo resolves gate in external worktree
+  ok   10n tree-object --gate exits 1
+  ok   10n2 tree-object --gate refused as not a commit
+  ok   10o differing tree --gate exits 1
+  ok   10p differing tree --gate error names tree mismatch
+  ok   10q unresolvable branch --gate exits 1
+  ok   10r unresolvable branch error explains cannot resolve branch
+  ok   10s premerge branch differing tree --gate exits 1
+  ok   10t premerge branch differing tree error names tree mismatch
+  ok   10u unborn HEAD --gate exits 1
+  ok   10v unborn HEAD error explains cannot resolve HEAD tree
+  ok   10g stale local branch does not select HEAD's PASS for unmerged remote
+  ok   10h stale local branch correctly identifies merge tree pending
+[fleet/rebased a87fc41] feat: rebase test amended
+ Date: Tue Oct 13 21:16:14 2026 +0000
+ 1 file changed, 1 insertion(+)
+ create mode 100644 rebase.txt
+  ok   10w1 branch ref moved after amend
+  ok   10w2 branch tree unchanged after amend
+  ok   10w3 new branch ref is not an ancestor of merge commit
+  ok   10w4 no-op rebase --gate succeeds (rc 0)
+  ok   10w5 no-op rebase carries PASS
+  ok   10w6 message prints tree identity was accepted
+  ok   10x JSON carries tree identity
+  ok   10y1 genuine tree mismatch exits 1
+  ok   10y2 refusal explains does not contain branch
+  ok   10y3 stdout is empty on refusal (0 bytes)
+  ok   10z1 amend with empty message aborts
+  ok   10z2 git aborts due to empty message
+  ok   10z3 default branch HEAD untouched after aborted amend
+  ok   10za1 branch matching merge union tree is refused (rc 1)
+  ok   10za2 refusal error explains does not contain branch
+  ok   10za3 merge union tree match refusal emits 0 stdout bytes
+  ok   10aa1 deep rebased ref is not an ancestor
+  ok   10aa2 fast-forward landed branch with no-op rebase succeeds (rc 0)
+  ok   10aa3 fast-forward landed branch carries PASS
+  ok   10aa4 fast-forward prints tree identity
+  ok   10ab1 unrelated branch matching historical main tree is refused (rc 1)
+  ok   10ab2 refusal error explains does not contain branch
+  ok   10ab3 unrelated refusal emits 0 stdout bytes
+11. review verdict verification and tip movement invalidation (fleet-qv84)
+  ok   11a review section present in landing message
+  ok   11b review verdict matching tip is reported as PASS
+  ok   11c JSON review state is CURRENT
+  ok   11d JSON review cleared is true
+  ok   11d2 JSON review tip_sha matches branch tip
+  ok   11d3 JSON review cleared_sha matches bead label (fleet-60zh)
+  ok   11e pre-merge invocation refuses and exits 1 when tip moved after review
+  ok   11f refusal error explains tip moved
+  ok   11g merge-queue label stripped from bead
+  ok   11g2 cleared label stripped from bead (fleet-60zh)
+  ok   11h invalidation comment added to bead
+  ok   11h2 the refusal message NAMES the queue-label removal it performed (fleet-fudl: a tool that changes state must say so)
+  ok   11i JSON review state is STALE
+  ok   11j JSON review cleared is false
+  ok   11k --allow-stale allows printing STALE review
+  ok   11l --gate post-merge amend does not refuse
+  ok   11m pre-merge invocation refuses on VERDICT: FAIL
+  ok   11n refusal error on FAIL verdict
+  ok   11o review verdict with @<sha> matches tip
+  ok   11p pre-merge invocation refuses on UNPINNED verdict
+  ok   11q refusal error explains unpinned verdict
+  ok   11r msg=$(...) && git merge halts before merge on refusal
+  ok   11s HEAD remains unchanged after refusal
+  ok   11t pre-merge invocation refuses on UNRESOLVED verdict
+  ok   11u refusal error explains unresolved commit
+  ok   11v Delta text containing words with 'n' matches and pins tip
+  ok   11w1 trailing prose after PASS clears landing
+  ok   11x1 landing message carries PASS verdict
+  ok   11w2 VERDICT: OK on branch @ sha clears landing
+  ok   11x2 landing message carries OK verdict
+  ok   11w3 markdown-formatted VERDICT: PASS clears landing
+  ok   11x3 landing message carries PASS verdict
+  ok   11w4 VERDICT: FAIL refuses landing
+  ok   11x4 refusal error names FAIL verdict
+  ok   11x5 FAIL strips merge-queue label
+  ok   11x5b FAIL adds review-failed label
+  ok   11x6 FAIL posts fix and re-review comment
+  ok   11w5 unrecognized verdict refuses as AMBIGUOUS
+  ok   11x7 refusal error explains ambiguous verdict
+  ok   11x8 refusal message confirms merge-queue preserved
+  ok   11x9 AMBIGUOUS does NOT strip merge-queue label
+  ok   11x10 AMBIGUOUS does NOT post accusatory comment
+  ok   11x11 JSON review state is AMBIGUOUS
+  ok   11x12 JSON review cleared is false
+  ok   11w7 conflicting verdict PASS/FAIL refuses as AMBIGUOUS
+  ok   11x13 refusal error names PASS/FAIL as ambiguous
+  ok   11x14 merge-queue preserved on PASS/FAIL
+  ok   11x15 PASS/FAIL does NOT strip merge-queue label
+  ok   11x16 PASS/FAIL does NOT post accusatory comment
+  ok   11w8 malformed token PASS_with_notes refuses as AMBIGUOUS
+  ok   11x17 refusal error names PASS_with_notes as ambiguous
+  ok   11x18 PASS_with_notes does NOT strip merge-queue label
+  ok   11w9 PASS-with-notes/FAIL refuses as AMBIGUOUS without falling back to PASS
+  ok   11x19 refusal error names PASS-with-notes/FAIL as ambiguous
+  ok   11x20 PASS-with-notes/FAIL does NOT strip merge-queue label
+  ok   11x21 PASS-with-notes/FAIL does NOT post accusatory comment
+  ok   11w10 PASS-FAIL refuses as AMBIGUOUS without falling back to PASS
+  ok   11x22 refusal error names PASS-FAIL as ambiguous
+  ok   11x23 PASS-FAIL does NOT strip merge-queue label
+  ok   11w11 PASS: FAIL refuses as AMBIGUOUS without clearing
+  ok   11x24 refusal error names PASS: FAIL as ambiguous
+  ok   11x25 PASS: FAIL does NOT strip merge-queue label
+  ok   11x26 PASS: FAIL does NOT post accusatory comment
+  ok   11y pre-merge detects remote tip movement when local branch is stale
+  ok   11z remote tip refusal error explains remote tip moved
+12. delta-identity fallback, placeholder filtering, and author-agnostic review (fleet-15b5)
+  ok   12a pure rebase clears landing via delta identity fallback
+  ok   12b landing message explains rebase delta identity
+  ok   12c JSON review state is CURRENT on delta identity
+  FAIL 12d JSON review cleared is true on delta identity
+      got [false] want [true]
+  ok   12e JSON review delta_identical is true
+  ok   12e2 JSON review run_id extracted
+  ok   12f differing delta after rebase refuses to land
+  ok   12g refusal error explains tip moved when deltas differ
+  ok   12h merge-queue stripped when deltas differ
+  ok   12i invalid explicit delta base fails closed without falling back to inferred base
+  ok   12i2 malformed non-hex explicit delta base fails closed
+  ok   12i3 dotted explicit delta base fails closed
+  ok   12j whitespace-only modification after rebase refuses to land
+  ok   12k whitespace change refusal error explains tip moved
+  ok   12l later placeholder VERDICT comment does NOT override earlier real verdict
+  ok   12m landing message retains earlier real PASS verdict
+  ok   12n comment with only placeholder is not picked as verdict (state NONE)
+  ok   12o comment with only placeholder is not cleared
+  ok   12p tip: <sha> with colon extracts reviewed SHA and clears via delta identity
+  ok   12q landing message extracts commit from tip: <sha>
+  ok   12r review comment inheriting authoring lane actor clears without refusal
+  ok   12s landing message carries PASS for subagent reviewer
+  ok   12t relayed review verdict clears landing
+  ok   12u landing message carries OK verdict for relayed review
+  ok   12v JSON review state is CURRENT for relayed review
+  FAIL 12w JSON review cleared is true for relayed review
+      got [false] want [true]
+  ok   12x relayed placeholder is not picked as verdict (state NONE)
+  ok   12y relayed placeholder is not cleared
+  ok   12z missing review verdict refuses to land
+  ok   12z1 refusal error explains no review verdict found
+  ok   12z2 missing review verdict does NOT strip the merge-queue label (fleet-fudl: a tool that cannot read the queue must not write to it)
+  ok   12z2b the refusal names the vocabulary it looked for
+  ok   12z2c ...and says the queue state was not touched
+  ok   12z3 unqueued bead with missing review verdict refuses to land
+  ok   12z4 refusal message explains bead was not queued
+  ok   12z5 unqueued bead does NOT strip merge-queue or run bd update
+  ok   12z6 unqueued bead does NOT have rejection comment posted
+  ok   12z7 nested verdict prefix clears landing
+  ok   12z8 landing message carries OK verdict for nested prefix
+  ok   12z9 JSON review state is CURRENT for nested prefix
+  ok   12z10 JSON review cleared is true for nested prefix
+  ok   12z11 Merge verdict: prefix clears landing
+  ok   12z12 landing message carries OK verdict for Merge verdict:
+  ok   12z13 pending review refuses as ambiguous
+  ok   12z14 refusal error explains ambiguous pending verdict
+  ok   12z15 'No reviewer verdict:' does not match as verdict (state NONE)
+  ok   12z16 'No reviewer verdict:' is not cleared
+13. prose-shadow fallback and conflicting SHA detection (fleet-0hs7)
+  ok   13a later prose opening with VERDICT does NOT shadow earlier real verdict
+  ok   13b landing message retains earlier real PASS verdict
+  ok   13c prose without SHA falls back to earlier real verdict
+  ok   13d landing message retains earlier real OK verdict
+  ok   13e conflicting SHA between prose and verdict refuses as AMBIGUOUS
+  ok   13f refusal error indicates ambiguous verdict on conflicting SHA
+  ok   13g only unparseable prose refuses as AMBIGUOUS
+  ok   13h refusal error names raw prose
+  ok   13i intermediate conflicting SHA in newer prose refuses as AMBIGUOUS
+  ok   13j refusal error indicates ambiguous verdict on intermediate conflicting SHA
+14. fleet-fudl: one verdict vocabulary (HOLDS/APPROVE), and an unparseable verdict never changes queue state
+  ok   14a VERDICT: HOLDS clears a landing
+  ok   14b landing message carries the HOLDS verdict and its pin
+  ok   14c JSON carries the HOLDS token
+  ok   14d HOLDS verdict is CURRENT
+  ok   14e HOLDS clears the landing
+  ok   14f VERDICT: APPROVE clears a landing
+  ok   14g JSON carries APPROVE
+  ok   14h VERDICT: APPROVED clears a landing
+  ok   14i APPROVED normalizes to the canonical APPROVE token
+  ok   14j 'Review verdict: VERDICT: PASS' clears a landing
+  ok   14k ...and its pin is read from the Delta line
+  ok   14l an unrecognized verdict token does not land
+  ok   14m the refusal says the verdict could not be parsed
+  ok   14n ...and the refusal names the accepted vocabulary
+  ok   14o unrecognized token does NOT strip the merge-queue label
+  ok   14p unrecognized token posts no rejection comment
+  ok   14q no verdict line at all refuses to land
+  ok   14r the refusal names what is missing
+  ok   14s no verdict does NOT strip the merge-queue label
+  ok   14t no verdict posts no rejection comment
+  ok   14u ...and it says the queue state was not touched
+  ok   14v a multi-line WHAT is used
+  ok   14w ...including its second line
+  ok   14x a multi-line WHAT does not trigger the false 'no block' caveat
+  ok   14y ...nor the caveat that calls the used block second-best
+  ok   14z GATE says NOT a pass when no verdict is cached for the tree
+  ok   14z2 the line under GATE carries no diffstat table
+
+  ok   25a newer author-lane self-PASS cannot clear over a reviewer FAIL
+  ok   25b the reviewer-lane verdict is operative, not masked
+  ok   25c operative verdict classified independent by actor
+  FAIL 25d the ignored author-lane verdict is counted
+      got [0] want [1]
+  ok   25e the once-masked reviewer FAIL now refuses the landing
+  FAIL 26a a same-lane transcription of a different family STILL CLEARS (fleet-15b5 as amended: the clearance stands, the label is transcribed-verified)
+      got [false] want [true]
+  FAIL 26b independence is cross-family
+      got [incomplete-provenance] want [transcribed-verified]
+  ok   26c reviewer model surfaced
+  FAIL 26d author model read from the comment cue
+      got [] want [zai/glm-5.3]
+  FAIL 26e landing line shows the independence
+      expected to find: independence: transcribed-verified
+  ok   27a other-actor PASS clears with no model named
+  ok   27b classified independent by actor
+  ok   28a same-family transcribed verdict cannot clear
+  ok   28b classified same-family
+  ok   28c refusal names the rule and the bead
+  ok   29a bare author-lane PASS cannot clear
+  ok   29b classified self-certified
+  ok   29c refusal says self-certified and what to add
+  ok   30a incomplete provenance cannot clear (was: unknown-clears)
+  ok   30b classified incomplete-provenance, not unknown
+  ok   30c refusal says exactly what to add
+  ok   30d other-lane with same-family models cannot clear
+  ok   30e classified same-family despite the different actor
+  FAIL 31a lane record supplies the author model (cross)
+      got [incomplete-provenance] want [transcribed-verified]
+  FAIL 31b lane record supplies the author model (same -> blocked)
+      got [incomplete-provenance] want [same-family]
+  ok   31c and the same-family case refuses to clear
+  ok   32a without a branch author the classification is unknown
+  ok   32b and nothing is demoted (old behavior pinned)
+  ok   33a verdict-line reviewer wins over prose models
+  FAIL 33b prose baseline model cannot flip the independence reading
+      got [incomplete-provenance] want [transcribed-verified]
+  FAIL 33c and the genuine cross-family review still clears
+      got [false] want [true]
+  ok   33d prose outside-family model cannot launder a same-family verdict
+  FAIL 34a trailing period stripped from the author model
+      got [] want [zai/glm-5.3]
+  FAIL 34b family compare unaffected by the stripped punctuation
+      got [incomplete-provenance] want [transcribed-verified]
+35. fleet-260l: clearance is decided by PIN QUALITY, not by which verdict was posted last
+  ok   35a a NEWER stale-pin verdict does not revoke the tip-pinned one
+  ok   35b the tip-pinned verdict is the one used
+  ok   35c and the newer candidate is REPORTED, not silently ignored
+  ok   35d ...with the reason it was not used
+  ok   35e reversed order clears too (order-independence is the point)
+  ok   35f ...and still uses the tip-pinned verdict
+  ok   35i a NEWER sibling-branch verdict does not revoke this branch's clearance
+  ok   35j this branch's own verdict is the one used
+  ok   35k and the sibling verdict is named, with its branch
+  ok   35l a sibling-only verdict refuses
+  ok   35m JSON names the OTHER-BRANCH state
+  ok   35n ...and says which branch the verdict is about
+  ok   35o and it changes NO queue state (nothing here was ever this branch's)
+  ok   35p a newer PASS over an older FAIL on one tip is refused
+  ok   35q ...and the disagreement is stated, not silently resolved
+  ok   35r ...and the conservative verdict is the one reported
+36. verdict-transcription form and scanner recognition of implementer-posted verdicts
+  ok   36a1 review state is CURRENT for inline Independent Reviewer prefix
+  ok   36a2 verdict is PASS for inline Independent Reviewer prefix
+  ok   36a3 reviewer model extracted from inline prefix
+  ok   36a4 run_id extracted from inline prefix
+  ok   36a5 flagged as author_lane_transcription
+  ok   36b1 rebased tip review state is CURRENT despite older non-author review
+  FAIL 36b2 author-transcribed review on new tip clears when no non-author review exists for new tip
+      got [false] want [true]
+  ok   36b3 reviewed sha is the new tip
+  FAIL 36b4 JSON marks author_lane_transcription
+      got [false] want [true]
+  FAIL 36c landing message carries author-lane warning naming the survivor
+      expected to find: WARNING: operative review is an author-lane transcription
+  ok   36d1 non-author reviewer is selected
+  FAIL 36d2 author-lane review on same tip is demoted
+      got [0] want [1]
+  ok   36d3 author_lane_transcription is false when non-author reviewed
+  FAIL 36e1 non-author reviewer is selected despite author FAIL
+      got [test-vm-imp-x] want [test-vm-rev-5br9c]
+  FAIL 36e2 verdict remains PASS from non-author review
+      got [FAIL] want [PASS]
+  FAIL 36e3 non-author PASS clears despite demoted author FAIL
+      got [false] want [true]
+  FAIL 36e4 author FAIL is ignored as demoted
+      got [0] want [1]
+  ok   36f1 conflicting inline verdicts refused as AMBIGUOUS
+  ok   36f2 conflicting inline verdicts do not clear
+  ok   36g1 pre-arrow verdict word after model does not match inline prefix
+  ok   36g2 pre-arrow verdict word after model does not clear
+  ok   36g3 pre-arrow verdict word before model does not match inline prefix
+  ok   36g4 pre-arrow verdict word before model does not clear
+  ok   36g5 verdict token in model slot does not match inline prefix
+  ok   36g6 verdict token in model slot does not clear
+  ok   36g7 slash-joined verdict words do not match inline prefix
+  ok   36g8 slash-joined verdict words do not clear
+  ok   36h1 non-author reviewer is selected
+  ok   36h2 review state remains CURRENT, not AMBIGUOUS from demoted author comment
+  ok   36h3 non-author PASS clears despite newer author comment on old commit
+  ok   36i1 off-list custom family not recognized by default
+  ok   36i2 custom family recognized when FLEET_VERDICT_MODEL_FAMILIES is set
+  ok   36i3 custom family verdict extracted
+  ok   36i4 the tip verdict IS an author-lane transcription when the vote came from the same actor that appended the summary (a last-resort author still establishes a transcription; it cannot clear on it)
+37. sha-relevance outranks independence; delta mismatch reasons
+  ok   37a an author-lane tip verdict on an unestablished branch author is NOT resolved by a dead older verdict (it refuses)
+  ok   37b review state is CURRENT for tip-pinned author verdict
+  ok   37c reviewed sha is current tip
+  ok   37d on same tip non-author outranks author-lane
+jq: parse error: Invalid numeric literal at line 1, column 36
+  FAIL 37e operative review author is non-author lane
+      got [] want [proj-rev-1]
+jq: parse error: Invalid numeric literal at line 1, column 36
+  FAIL 37f a verdict IS attributed to the author lane when the vote came from the same actor that appended the summary
+      got [] want [1]
+  ok   37g delta mismatch reports content changed
+  ok   37h refusal line reports content changed
+  ok   37i delta mismatch reports position offset when hunks differ only by offset
+  ok   37j refusal line reports position/offset moved
+  ok   38a the author lane comes from the branch name
+  ok   38b ...and says so, so a wrong derivation is visible
+  ok   38c the author is the branch's lane, not the appender
+  ok   38d the AUTHOR lane's model, not the appender's
+  ok   38e a genuinely independent verdict is not refused as same-family
+  ok   38f ...and it clears
+  ok   38g a same-family author lane still refuses
+  ok   38h ...and does not clear
+  ok   38i the refusal names where the author model came from
+  ok   38i2 ...and names the remedy that supplies the missing operand
+jq: parse error: Invalid numeric literal at line 1, column 36
+  FAIL 38j the branch lane's own verdict is the one demoted, not the appender's
+      got [] want [test-vm-rev-y]
+  ok   38k a VERIFIED same-lane transcription of a cross-family review reads transcribed-verified
+  ok   38l ...and still CLEARS on the author lane's family rather than the appender's (the 15b5 amendment), which needs the run id
+  ok   38m a supplied authoring model is used
+  ok   38n ...and is recorded as SUPPLIED, not derived
+  ok   38o ...and the comparison still runs and clears
+  ok   38p without the supplied operand the same tree still refuses
+  ok   38q the branch author comes from the BRANCH, not the summary appender
+  ok   38q2 an author-lane verdict is not an independent review, so it does not clear
+  ok   38q3 ...and independence reports the transcription, not an independent review
+  ok   38q4 ...while the verdict stays operative rather than being discarded
+40. agents-wwss: a branch that ADVANCED past the gated merge, and --landed-tip
+  ok   40a an advanced branch is still refused (the guard is intact)
+  ok   40b refusal NAMES the branch tip
+  ok   40c ...and the merge's landed tip
+  ok   40d ...and how far it advanced
+  ok   40e ...and says which side moved
+  ok   40f --landed-tip records the gate for the tip that was gated
+  ok   40g ...and the record says it was explicit
+  ok   40h ...with no refusal
+  ok   40i a --landed-tip NOT in the gate commit is still refused
+  ok   40j ...and carries no gate record
+41. agents-orjl: an explicit tip from an UNRELATED branch must not certify the named branch
+  ok   41a a branch that was not merged is refused
+  ok   41b an unrelated branch's tip does not certify THIS branch (agents-orjl)
+  ok   41c ...and carries no gate record
+  ok   41d the named branch's own tip is not rejected as untied
+  ok   41e a bad --landed-tip is diagnosed as the tip not being contained
+  ok   41f ...and NOT as the branch having advanced (agents-jlfq)
+  ok   41g the gate identity names the landed tip AND the branch's current tip
+  ok   39a every awk by-lane matcher consumes the single derived author value
+  ok   39b no lane comparison reads src_who or src_author directly
+jq: parse error: Invalid numeric literal at line 1, column 36
+  FAIL 39c author_lane comes from the BRANCH with a project-VM prefix on the hand-off
+      got [] want [thing2]
+jq: parse error: Invalid numeric literal at line 1, column 36
+  FAIL 39d ...and an independent PASS still clears it
+      got [] want [true]
+  ok   39e ...and the same holds on the other VM (FLEET_VM unset/default)
+  ok   39f ...with the branch author named for the VM in force, not the appender
+Failed tests (26):
+  - 12d JSON review cleared is true on delta identity
+  - 12w JSON review cleared is true for relayed review
+  - 25d the ignored author-lane verdict is counted
+  - 26a a same-lane transcription of a different family STILL CLEARS (fleet-15b5 as amended: the clearance stands, the label is transcribed-verified)
+  - 26b independence is cross-family
+  - 26d author model read from the comment cue
+  - 26e landing line shows the independence
+  - 31a lane record supplies the author model (cross)
+  - 31b lane record supplies the author model (same -> blocked)
+  - 33b prose baseline model cannot flip the independence reading
+  - 33c and the genuine cross-family review still clears
+  - 34a trailing period stripped from the author model
+  - 34b family compare unaffected by the stripped punctuation
+  - 36b2 author-transcribed review on new tip clears when no non-author review exists for new tip
+  - 36b4 JSON marks author_lane_transcription
+  - 36c landing message carries author-lane warning naming the survivor
+  - 36d2 author-lane review on same tip is demoted
+  - 36e1 non-author reviewer is selected despite author FAIL
+  - 36e2 verdict remains PASS from non-author review
+  - 36e3 non-author PASS clears despite demoted author FAIL
+  - 36e4 author FAIL is ignored as demoted
+  - 37e operative review author is non-author lane
+  - 37f a verdict IS attributed to the author lane when the vote came from the same actor that appended the summary
+  - 38j the branch lane's own verdict is the one demoted, not the appender's
+  - 39c author_lane comes from the BRANCH with a project-VM prefix on the hand-off
+  - 39d ...and an independent PASS still clears it
+342 passed, 26 failed
