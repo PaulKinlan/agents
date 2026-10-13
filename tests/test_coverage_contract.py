@@ -54,7 +54,15 @@ class TestCoverageContract(unittest.TestCase):
 
         for src, suites in data.items():
             src_path = ROOT / src
-            self.assertTrue(src_path.exists(), f"contract source path {src!r} does not exist")
+            # A pattern may be a GLOB, which is what tools/fast-gate.sh's own validator accepts
+            # (glob.glob(pat)) and what the harness oracle matches with fnmatch - the arm registry is a
+            # directory whose members are added one file at a time (agents-hr6q), so listing 29 literal
+            # paths in the contract would make every new arm edit this file too. A pattern must still
+            # MATCH something, so a typo cannot declare coverage for a file that does not exist.
+            if any(ch in src for ch in "*?["):
+                self.assertTrue(sorted(ROOT.glob(src)), f"contract pattern {src!r} matches no file")
+            else:
+                self.assertTrue(src_path.exists(), f"contract source path {src!r} does not exist")
             self.assertIsInstance(suites, list, f"contract suites for {src!r} must be a list")
             self.assertTrue(suites, f"contract suites for {src!r} must not be empty")
             for suite in suites:
