@@ -29,7 +29,7 @@ fast_gate_arms_250_beads() {
     # So the reason in an ignore arm must record the SEARCH PERFORMED AND ITS RESULT,
     # never a judgement about who reads the path - a judgement is unfalsifiable, and that
     # is what made the original canvas `*.md` ignore arm's reason false.
-    .beads/*)
+    .beads/.gitignore|.beads/README.md|.beads/config.yaml|.beads/hooks/post-checkout|.beads/hooks/post-merge|.beads/hooks/pre-commit|.beads/hooks/pre-push|.beads/hooks/prepare-commit-msg|.beads/interactions.jsonl|.beads/metadata.json)
       # The scanner never sees these: it skips dot dirs and .beads is in DEFAULT_IGNORE_DIRS
       # (lib/exclusions.py:23-43). Search performed: every .beads reference in tests mkdirs
       # its own tmp fixture (test_bd_json_contract.py:64, test_factory_core.py:727, test_sinks.py:92,
@@ -37,6 +37,16 @@ fast_gate_arms_250_beads() {
       # corrected numbers were 190/4/4 lines stale; the fourth (:64) held, and THAT is why this list
       # was reported at a different size every time it was scanned. Each number below is that suite's
       # own `.beads` fixture line.
+      # agents-3jb4 (P3, found while verifying agents-dxtx, which narrowed `.codex/*` for the same
+      # reason): this arm was `.beads/*`, i.e. as broad as the DIRECTORY, and the directory is NOT inert -
+      # it holds five executable git hooks (.beads/hooks/*), so the glob was a permanent exemption for
+      # exactly the class of file the unmatched-path protection exists to catch. Reproduced with the glob:
+      # FAST_GATE_DRY_RUN=1 GIT_CHANGED=.beads/unexpected.sh bash tools/fast-gate.sh -> rc 0 and an empty
+      # suite list. The exemption is now the ten TRACKED paths, listed from
+      # `git ls-tree -r --name-only origin/main .beads/`, so a new file in that directory resolves to
+      # nothing and the gate refuses loudly and names it. A new tracked file under .beads/ must be added
+      # here deliberately, with its own recorded search - and tests/test_fast_gate_mapping.py asserts both
+      # halves of that (every tracked path exempt, every other path in the directory refused by name).
       ;;
     # --- Ignored agent configuration (agents-l80j) --------------------------------------
     # Six paths that no arm claimed, so a lane editing one of them could not get a green fast gate
