@@ -38,7 +38,8 @@ as the code it checks is not an independent check.
 member of the spawn/exec/popen/system family in `dir(os)` is driven through the REAL oracle CLI - not a
 reimplementation of its rule - and must be reported as a candidate:
 
-| `os.<name>` | expected | base | round 8 | **round 9** |
+| `os.<name>`<br>POPULATION: every lowercase non-private member of the spawn/exec/popen/system
+family in `dir(os)` | EXPECTED<br>what a consumer channel requires | pristine base | round 8 | round 9 |
 | --- | --- | --- | --- | --- |
 | execl, execle, execlp, execlpe | match | no | yes | **yes** |
 | execv, execve, execvp, execvpe | match | no | yes | **yes** |
@@ -63,6 +64,36 @@ and the shapes that must NOT match, driven the same way:
 reviewer found, where the hand-written table was green. Deriving the expectation from `dir(os)` is what makes
 the next omission fail loudly instead of silently.
 
+
+## The whole os family, checked against `dir(os)` rather than against the shapes I thought of
+
+`agents-apqc` asked for exactly this, and it is the check that would have caught the finding. Population: every
+non-private member of `dir(os)` whose name contains `fork`, `spawn`, `exec`, `system`, `popen` or `posix` (58
+names). Instrument: the real oracle CLI, one run per name, the name called with a `lib/sandbox.py` argument.
+Direction: pristine -> this revision.
+
+**Eleven names this revision catches that the pristine oracle did NOT** - a widening, not a narrowing:
+
+    execl · execle · execlp · execlpe · execv · execve · execvp · execvpe · popen · posix_spawnp · (posix_spawn
+    and system already matched)
+
+The pristine pattern's name branch was `exec|spawn|popen? no - it listed subprocess|Popen|exec|spawn|run|fork|
+call|check_output|system`, and each of those had to be followed immediately by `\s*\(`, so `os.execv(` did not
+match `exec` (a `v` follows) and `os.popen(` matched nothing at all. The modelled os class is therefore
+strictly better coverage than what it replaces, which is worth stating because the two findings above are
+about what it dropped.
+
+**Two names the pristine oracle caught and this revision does not, both deliberately:**
+
+| name | why it is not modelled |
+| --- | --- |
+| `os.register_at_fork` | a phantom, and one this revision removes: pristine matched it on the bare substring `fork` inside `register_at_fork`. It registers a callback; it launches nothing. |
+| `os.fork` | `fork()` takes no arguments, so it can never carry a file path in its own call - the only way the source could see a module is inside `exec*` in the child, which the exec class already covers. Modelling it would re-admit the `register_at_fork` phantom for no coverage. |
+
+Neither is a lost channel: a channel requires a call that can name the module. Both are recorded here rather
+than silently dropped, because "we considered this and the reason is X" is the difference between a limit and
+an oversight.
+
 ## Census, re-derived here with the method named (agents-y30x)
 
 `agents-y30x` is right that the round-8 census table did not reproduce, and right that one of its rows was
@@ -82,8 +113,9 @@ internally impossible. Correcting the record on both halves, because they are di
   counts. Method: real oracle CLI, one commit per allowlisted module touching `lib/<M>.py`, zero-suite log
   line; the fourth-source column repeats the run with that source disabled.
 
-| module | omitted, base -> this revision | fourth-source-alone, base -> this revision |
+| module<br>POPULATION: the eight `pdth`-allowlisted modules | omitted-suite COUNT<br>INSTRUMENT: real oracle CLI, one commit per module touching `lib/<M>.py`, zero-suite log<br>DIRECTION: pristine -> this revision | fourth-source-alone CONTRIBUTION<br>INSTRUMENT: the same run with the subprocess source disabled, subtracted<br>DIRECTION: pristine -> this revision |
 | --- | --- | --- |
+| *(no column is quoted; every number below was measured for this revision)* | | |
 | sandbox | 21 -> 16 | 5 -> 0 |
 | findings | 13 -> 11 | 2 -> 0 |
 | tool_pins | 10 -> 10 | 0 -> 0 |
