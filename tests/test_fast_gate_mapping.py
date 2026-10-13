@@ -713,8 +713,14 @@ class TestFastGateMapping(unittest.TestCase):
                               f"{path} must map to the gate entrypoint suite (agents-ows4)")
 
     def test_unmatched_file_fails_loudly_naming_the_file(self):
-        """A changed file matching neither a mapping arm nor the ignore list must fail and name itself."""
-        for path in ("package.json", ".agents/skills/beads/SKILL.md"):
+        """A changed file matching neither a mapping arm nor the ignore list must fail and name itself.
+
+        agents-l80j: the fixture paths are `targets/README.md` (walked markdown, deliberately loud -
+        see test_walked_but_unpinned_markdown_fails_loudly) and `package.json`. The second used to be
+        `.agents/skills/beads/SKILL.md`, which is now covered by a documented ignore arm, so what is
+        pinned here is the BEHAVIOUR (loud failure that names the file) rather than that one path.
+        """
+        for path in ("package.json", "targets/README.md"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0, f"{path}: unmatched file must fail loudly (agents-9nir)")
@@ -760,10 +766,65 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
-        res = run_fast_gate(["lib/sandbox.py", ".agents/skills/beads/SKILL.md"])
+        res = run_fast_gate(["lib/sandbox.py", "targets/README.md"])
         self.assertNotEqual(res.returncode, 0, "unmatched file masked by a mapped sibling (agents-9nir)")
-        self.assertIn(".agents/skills/beads/SKILL.md", res.stderr, "the failure must name the unmatched file")
+        self.assertIn("targets/README.md", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
+
+    def test_agent_config_and_data_paths_are_claimed_or_deliberately_loud(self):
+        """agents-l80j: of the nine tracked paths that no arm claimed, seven are now claimed - six by a
+        documented ignore arm and one (the modern-web guidance catalogue) by a real suite mapping -
+        while the two whose loud failure is DELIBERATE keep failing.
+
+        DISCRIMINATOR: on the revision before this change all seven aborted with "match no mapping
+        arm and no ignore-list arm", so this test is red against the revision it replaces rather
+        than being a pin born green.
+        """
+        claimed_without_a_suite = (
+            ".agents/skills/beads/SKILL.md",
+            ".agents/skills/beads/agents/openai.yaml",
+            ".claude/settings.json",
+            ".codex/config.toml",
+            ".codex/hooks.json",
+            "skills",
+        )
+        for path in claimed_without_a_suite:
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertEqual(res.returncode, 0,
+                                 f"{path}: must not abort the gate (agents-l80j)\n{res.stderr}")
+                self.assertNotIn("no mapping arm", res.stderr, f"{path}: still reads as unmapped")
+
+        # The catalogue is this station's DEFAULT input, so the station's own suite must run for it.
+        catalogue = "agents/modern-web/scripts/guides_index.json"
+        mapped = resolve_fast_gate([catalogue])
+        self.assertIn("tests/test_modern_web.py", mapped,
+                      f"{catalogue} is loaded by default at scan_modern_web.py:60, so the suite that "
+                      "loads the catalogue (tests/test_modern_web.py:515-519) must be selected")
+        self.assertIn("tests/test_factory_core.py", mapped,
+                      f"{catalogue} is asserted against all 146 guides at "
+                      "tests/test_factory_core.py:1029, so a lost guide must be able to fail the gate")
+
+        # Deliberate loud failures stay loud: walked markdown (agents-9nir P0) and the npm manifest,
+        # which no suite reads (searched repo-wide; the gate's own suites use their own fixtures).
+        for path in ("package.json", "targets/README.md"):
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertNotEqual(res.returncode, 0,
+                                    f"{path}: deliberate loud failure must not be silenced (agents-9nir)")
+                self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
+
+        # agents-dxtx (rev-l80j, P2): the exemption above is per-FILE, so a path that appears in an
+        # exempted directory LATER must still be loud. DISCRIMINATOR for that finding: with the earlier
+        # `.codex/*` pattern these paths resolved silently (rc 0, empty suite list) rather than being
+        # refused, so this test is red against the revision the finding describes.
+        for path in (".codex/unreviewed.sh", ".codex/new_helper.py"):
+            with self.subTest(path=path):
+                res = run_fast_gate([path])
+                self.assertNotEqual(res.returncode, 0,
+                                    f"{path}: a new file in an exempt directory must NOT be exempt "
+                                    "(agents-dxtx - the exemption is per file, not per directory)")
+                self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
 
     def test_tree_guard_tier_runs_on_every_mapped_delta(self):
         """agents-dv23 (ADR agents-c07o): tests/test_tree_guards.py is an always-on tier that must
