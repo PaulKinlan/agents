@@ -17,16 +17,22 @@ class TestFullGateSharding(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.root, check=True)
         (self.root / "tools").mkdir()
         (self.root / "tests").mkdir()
         (self.root / "checks").mkdir()
         (self.root / "tests" / "__init__.py").write_text("")
         shutil.copy2(ROOT / "tools" / "full-gate.sh", self.root / "tools" / "full-gate.sh")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
 
     def module(self, name, body):
-        (self.root / "tests" / f"test_{name}.py").write_text(
+        p = self.root / "tests" / f"test_{name}.py"
+        p.write_text(
             "import os, time, unittest\nclass Case(unittest.TestCase):\n" + body,
             encoding="utf-8")
+        subprocess.run(["git", "add", str(p)], cwd=self.root, check=True)
 
     def run_gate(self, *args, **settings):
         env = dict(os.environ, FLEET_CHECKS_DIR=str(self.root / "checks"),
@@ -63,9 +69,11 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertIn("module=tests.test_described", res.stdout)
 
     def test_serial_default_pattern_includes_test_without_underscore(self):
-        (self.root / "tests" / "testextra.py").write_text(
+        p = self.root / "tests" / "testextra.py"
+        p.write_text(
             "import unittest\nclass Case(unittest.TestCase):\n"
             " def test_extra(self): pass\n", encoding="utf-8")
+        subprocess.run(["git", "add", str(p)], cwd=self.root, check=True)
         res = self.run_gate()
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("executed ids=1 expected=1", res.stdout)
@@ -101,11 +109,29 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertIn("tests.test_nested.Case.test_only_in_serial", res.stdout)
 
     def test_module_import_failure_is_not_mistaken_for_zero_tests(self):
-        (self.root / "tests" / "test_bad.py").write_text("raise RuntimeError('injected import failure')\n")
+        p = self.root / "tests" / "test_bad.py"
+        p.write_text("raise RuntimeError('injected import failure')\n")
+        subprocess.run(["git", "add", str(p)], cwd=self.root, check=True)
         res = self.run_gate()
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("serial discovery failed", res.stdout)
         self.assertIn("injected import failure", res.stdout)
+
+    def test_untracked_debris_is_not_absorbed_by_full_gate(self):
+        """A check must read git's objects rather than the filesystem (agents-jcd2).
+
+        Untracked test debris in tests/ left by an interrupted run must not be absorbed
+        or executed by serial discovery in the full gate.
+        """
+        self.module("tracked", " def test_ok(self): pass\n")
+        debris = self.root / "tests" / "test_zz_debris_probe_tmp.py"
+        debris.write_text(
+            "import unittest\nclass Case(unittest.TestCase):\n def test_debris(self): pass\n",
+            encoding="utf-8")
+        res = self.run_gate()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("executed ids=1 expected=1 missing=0 extra=0 duplicate=0", res.stdout)
+        self.assertNotIn("test_zz_debris_probe_tmp", res.stdout)
 
     def test_over_budget_is_not_a_pass(self):
         self.module("slow", " def test_one(self): time.sleep(1.1)\n")

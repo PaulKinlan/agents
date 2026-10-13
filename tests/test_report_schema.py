@@ -100,7 +100,33 @@ class TestValidate(unittest.TestCase):
         self.assertEqual(validate("anything", {"description": "d", "title": "t"}), [])
 
 
+def _tracked_report_schemas():
+    out = subprocess.run(
+        ["git", "-C", str(FACTORY_ROOT), "ls-files", "agents/*/report.schema.json"],
+        capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    schemas = sorted(FACTORY_ROOT / p for p in out)
+    if not schemas:
+        raise RuntimeError("no tracked report schemas found")
+    return schemas
+
+
 class TestDeclaredSchema(unittest.TestCase):
+    def test_report_schemas_ignores_untracked_debris(self):
+        """A check must read git's objects rather than the filesystem (agents-jcd2).
+
+        Untracked debris matching agents/*/report.schema.json must not be absorbed.
+        """
+        debris = FACTORY_ROOT / "agents" / "zz_debris_probe_tmp"
+        debris.mkdir(parents=True, exist_ok=True)
+        (debris / "report.schema.json").write_text("{}", encoding="utf-8")
+        try:
+            schemas = _tracked_report_schemas()
+            self.assertNotIn(debris / "report.schema.json", schemas)
+            self.assertIn(FACTORY_ROOT / "agents" / "secret-scan" / "report.schema.json", schemas)
+        finally:
+            shutil.rmtree(debris, ignore_errors=True)
+
     def test_undeclared_schema_returns_none(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.assertIsNone(validate_agent_report(Path(tmpdir), {}, {"anything": True}))
@@ -133,7 +159,7 @@ class TestDeclaredSchema(unittest.TestCase):
         supported = {"$schema", "title", "description", "type", "required",
                      "properties", "items", "enum", "minimum", "maximum",
                      "maxLength", "minLength"}
-        for schema_path in sorted(FACTORY_ROOT.glob("agents/*/report.schema.json")):
+        for schema_path in _tracked_report_schemas():
             with self.subTest(schema=schema_path):
                 def walk(node):
                     if not isinstance(node, dict):
@@ -155,7 +181,7 @@ class TestDeclaredSchema(unittest.TestCase):
         'rule_id' (string) and 'severity' whose enum is exactly list(VALID_SEVERITIES)
         from lib.embargo (agents-hqgs)."""
         expected_severities = list(VALID_SEVERITIES)
-        schemas = sorted(FACTORY_ROOT.glob("agents/*/report.schema.json"))
+        schemas = _tracked_report_schemas()
         self.assertEqual(len(schemas), 22,
                          "expected 22 agent report schemas matching agents/*/report.schema.json; "
                          "if an agent station was added or removed, update this count")

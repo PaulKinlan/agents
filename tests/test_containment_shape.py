@@ -14,8 +14,19 @@ import ast
 import unittest
 from pathlib import Path
 
+from tests import tracked_test_paths
+
 ROOT = Path(__file__).resolve().parent.parent
-MODULES = sorted(ROOT.glob("tests/test_containment*.py")) + [ROOT / "tests/containment_harness.py"]
+
+
+def containment_modules():
+    tracked = tracked_test_paths("tests/test_containment*.py")
+    if not tracked:
+        raise RuntimeError("no tracked containment test modules found")
+    return sorted(tracked) + [ROOT / "tests/containment_harness.py"]
+
+
+MODULES = containment_modules()
 
 
 def _classes(path):
@@ -43,6 +54,20 @@ class TestTheContainmentSuitesDoNotReRunInheritedTests(unittest.TestCase):
         self.assertEqual(offenders, {},
                          "the harness module must hold setUp and helpers only: a test method in ANY "
                          "class here is never collected and never run (agents-3iog)")
+
+    def test_containment_modules_ignores_untracked_debris(self):
+        """A check must read git's objects rather than the filesystem (agents-jcd2).
+
+        Untracked debris matching tests/test_containment*.py must not be absorbed into MODULES.
+        """
+        probe = ROOT / "tests" / "test_containment_debris_probe_tmp.py"
+        probe.write_text("import unittest\n", encoding="utf-8")
+        try:
+            modules = containment_modules()
+            self.assertNotIn(probe, modules)
+            self.assertIn(ROOT / "tests" / "test_containment_shape.py", modules)
+        finally:
+            probe.unlink(missing_ok=True)
 
     def test_no_containment_case_inherits_from_a_class_that_has_tests(self):
         with_tests = {}

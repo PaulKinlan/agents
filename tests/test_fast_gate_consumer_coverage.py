@@ -223,6 +223,18 @@ def _why_omitted(module, suite):
     )
 
 
+def _tracked_test_files(root=None):
+    root = root or ROOT
+    out = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "tests"],
+        capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    paths = sorted(root / p for p in out if p.endswith(".py"))
+    if not paths:
+        raise RuntimeError(f"no tracked test files found under {root / 'tests'}")
+    return paths
+
+
 @functools.lru_cache(maxsize=None)
 def _importing_suites(stem, root=None):
     """Suites under tests/ whose CODE imports `stem` - the oracle's consumer set.
@@ -233,7 +245,7 @@ def _importing_suites(stem, root=None):
     root = root or ROOT
     pattern = re.compile(_IMPORT_RE.format(stem=re.escape(stem)), re.MULTILINE)
     found = set()
-    for path in sorted((root / "tests").rglob("*.py")):
+    for path in _tracked_test_files(root):
         try:
             src = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -324,6 +336,8 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
                 encoding="utf-8",
             )
             (fake / "lib" / "orphan.py").write_text("def orphan():\n    return 2\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=fake, check=True)
+            subprocess.run(["git", "add", "."], cwd=fake, check=True)
             # KNOWN BAD: widget.py has a consumer, so the consumer set is non-empty. The probe does not
             # ask the gate (there is no gate in a temp tree); it asserts the ORACLE SEES the reference.
             self.assertEqual(
@@ -338,6 +352,28 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
                 set(),
                 "the oracle invented a consumer for a module nothing imports (agents-pdth)",
             )
+
+    def test_untracked_debris_is_not_absorbed_by_consumer_coverage(self):
+        """A check must read git's objects rather than the filesystem (agents-jcd2).
+
+        Untracked debris left under tests/ by an interrupted run must not be absorbed
+        into the consumer set or the oracle's importers.
+        """
+        probe = ROOT / "tests" / "test_zz_debris_probe_tmp.py"
+        probe.write_text("import unittest\nfrom lib import child_env\n", encoding="utf-8")
+        try:
+            _importing_suites.cache_clear()
+            importers = _importing_suites("child_env")
+            self.assertNotIn("tests/test_zz_debris_probe_tmp.py", importers)
+            self.assertIn("tests/test_containment.py", importers)
+            if _FLEET_ORACLE.exists():
+                oracle = _load_oracle()
+                oracle_importers = _oracle_importers(oracle, "child_env", suites_only=False)
+                self.assertNotIn("tests/test_zz_debris_probe_tmp.py", oracle_importers)
+                self.assertIn("tests/test_containment.py", oracle_importers)
+        finally:
+            probe.unlink(missing_ok=True)
+            _importing_suites.cache_clear()
 
     def test_a_consumer_the_gate_does_not_select_must_be_allowlisted(self):
         failures = []
@@ -391,7 +427,7 @@ def _load_oracle():
 def _oracle_importers(oracle, module, suites_only):
     """What the ORACLE's rule says, optionally restricted to the files it calls suites."""
     found = set()
-    for path in sorted((ROOT / "tests").rglob("*.py")):
+    for path in _tracked_test_files(ROOT):
         if suites_only and not oracle.is_test_filename(str(path)):
             continue
         try:
