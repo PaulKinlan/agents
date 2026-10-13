@@ -1,5 +1,5 @@
 --- /home/exedev/fleet/remote/check-coverage.py	2026-10-12 19:42:41.000000000 +0000
-+++ /tmp/hbz3-r2.py	2026-10-13 03:04:27.634561801 +0000
++++ /tmp/i8xn-fixed.py	2026-10-13 03:26:23.410414776 +0000
 @@ -672,12 +672,44 @@
                      cleaned = re.sub(r'`(?:\\.|[^`\\])*`', '', cleaned, flags=re.DOTALL)
                      cleaned = re.sub(r'//.*', '', cleaned)
@@ -33,7 +33,7 @@
 +                    if _bind_star:
 +                        _bind_names |= set(_CALL_NAMES)
 +                    _call_alts = [re.escape(_bind_attr) + r"\.(?:" + "|".join(_CALL_NAMES) + r")"]
-+                    _call_alts += [r"(?<!\\.)" + re.escape(n) for n in sorted(_bind_names) if n in _CALL_NAMES]
++                    _call_alts += [r"(?<!\.)" + re.escape(n) for n in sorted(_bind_names) if n in _CALL_NAMES]
                      subp_pattern = (
 -                        r'(?:subprocess|Popen|exec|spawn|run|fork|call|check_output|system)\s*\([^)]*?'
 -                        r'(?:' + re.escape(file_path) + r'|' + re.escape(base) + r'|\b' + re.escape(stem) + r'(?:\.[a-z]+)?\b)'

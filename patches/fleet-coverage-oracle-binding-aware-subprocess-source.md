@@ -30,7 +30,31 @@ Yes, and it is narrowed rather than deleted. A suite that runs `lib/x.py` as a c
 as an importer does, and nothing else in the oracle sees that channel. The next reader should not read
 this as "the pattern was a mistake".
 
+### agents-i8xn: the dot-guard was inert, and HOW I FAILED TO SEE IT
+
+`agents-i8xn` (P2) reported that the dot-guard did not work. It was right, and the mechanism is worth more
+than the fix: **the guard line was built with a doubled backslash**, so the regex read `(?<!\\.)run` -
+"not preceded by a backslash-then-any-character" - instead of `(?<!\\.)run`. It asserted a condition that
+is true before every call site, i.e. **no guard at all**.
+
+**Why my own rig did not catch it, which is the part to keep:** the rig matched against a *separate*
+`block-body.py` copy while the patch was cut from a *different* file, `/tmp/hbz3-r2.py`. A fix I applied to
+the body did not reach the artefact, because the script that wrote the artefact **aborted on an `IndexError`
+before that write** - and a stale `hbz3-r2.py` was what `diff` consumed. So the twelve cases I drove and
+published as passing were driving an object that is not the thing that ships. **The check and the thing
+checked were different objects.** The rig now re-extracts the block **from the spliced artefact itself**,
+so the two cannot diverge again, and the guard's effect is asserted directly as a property (a method call
+with a binding must NOT match; a bare bound-name call MUST) rather than only via the twelve cases.
+
+**Why the guard did not hold even in the file that had it:** nothing else, once the escaping was right - the
+lookbehind's position, the surrounding alternation and the `\s*\(` that follows were all correct, and the
+direct property test now passes three of three. The defect was purely the escaping layer, which is why it
+was invisible to a rig that read a differently-built copy.
+
 ### Verification - twelve cases, both directions in one rig
+
+**This table is produced by a rig that reads the artefact's own block**, re-extracted from the spliced file,
+so it cannot describe a different object from the one delivered.
 
 | # | case | required | result |
 | --- | --- | --- | --- |
@@ -73,3 +97,24 @@ The four remaining are three different things, and only one of them is a defect 
   a look-alike local variable, not the module, and no binding rule on the callee can see the difference.
   The `child_env` pair predates this work (it is 2 in OLD as well).
 * Round 1 had 12 and this has 4, with **no new noise in any module**.
+
+### Does the no-gains property survive the dot-guard fix? YES.
+
+Re-measured after the guard was made to work, with the rig reading the delivered artefact, old oracle vs
+this patch across every module `pdth` allowlists:
+
+| module | OLD | this patch | fixed | round-4-only |
+| --- | --- | --- | --- | --- |
+| sandbox | 7 | 1 | 6 | **none** |
+| findings | 3 | 1 | 2 | **none** |
+| child_env | 2 | 2 | 0 | **none** |
+| containment, egress_proxy, credential_broker, tool_pins, candidate_identity | 0 | 0 | 0 | **none** |
+| **TOTAL** | **12** | **4** | **8** | **0** |
+
+**ROUND-4-ONLY TOTAL IS ZERO.** Making the dot-guard actually fire removed no genuine consumer and re-admitted
+no phantom, so the strongest claim on this branch - that no module gains noise - is unchanged by the fix.
+
+### Revision note on this file
+
+40977 bytes, sha256 d60e9ad23d460ac1..., mtime 2026-10-12 19:42 - re-read when this
+revision was cut, so the prerequisite anchor still holds.
