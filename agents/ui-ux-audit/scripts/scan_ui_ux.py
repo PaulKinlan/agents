@@ -35,6 +35,8 @@ except ImportError:
     }
 
 UI_EXTS = {".html", ".htm", ".css", ".scss", ".js", ".ts", ".jsx", ".tsx", ".vue", ".svelte"}
+FONT_SIZE_DECL = re.compile(r"(?<![-\w])font-size\s*:\s*([^;}\n]+)", re.IGNORECASE)
+FONT_SIZE_LENGTH = re.compile(r"(\d+(?:\.\d*)?|\.\d+)(px|rem|pt)", re.IGNORECASE)
 
 
 def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
@@ -42,6 +44,7 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
     scanned_files = 0
     css_custom_props_count = 0
     hardcoded_color_count = 0
+    font_size_unparsed_count = 0
 
     discovered_files: List[Path] = []
     file_contents: Dict[Path, str] = {}
@@ -212,10 +215,21 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
                         "rationale": "Hardcoding white/light surfaces without `color-scheme: light dark`, `light-dark()`, or `@media (prefers-color-scheme: dark)` causes blinding glare for dark-mode users."
                     })
 
-            # Rule 4: Small font sizes (< 12px) or magic z-index
-            small_font = re.search(r"font-size\s*:\s*([0-9]|1[01])px\b", content, re.IGNORECASE)
-            if small_font:
-                line_no = content.count("\n", 0, small_font.start()) + 1
+            # Rule 4: Resolve simple px/rem/pt lengths; other expressions are not proof of legibility.
+            # Preserve character offsets while ignoring CSS comments (including example declarations).
+            css_text = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group()), content, flags=re.DOTALL)
+            for declaration in FONT_SIZE_DECL.finditer(css_text):
+                value = re.sub(r"\s*!important\s*$", "", declaration.group(1).strip(), flags=re.IGNORECASE).strip()
+                length = FONT_SIZE_LENGTH.fullmatch(value)
+                if not length and value != "0":
+                    # Includes em, %, var(), clamp(), calc(), and malformed values: no false clean verdict.
+                    font_size_unparsed_count += 1
+                    continue
+                size_px = (float(length.group(1)) * {"px": 1, "rem": 16, "pt": 96 / 72}[length.group(2).lower()]
+                           if length else 0)
+                if size_px >= 12:
+                    continue
+                line_no = content.count("\n", 0, declaration.start()) + 1
                 candidates.append({
                     "rule_id": "illegible-micro-typography",
                     "dimension": "Typography & Hierarchy",
@@ -223,8 +237,8 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
                     "line_number": line_no,
                     "snippet": lines[line_no - 1].strip()[:180],
                     "severity": "medium",
-                    "title": f"Illegible Font Size ({small_font.group(0)}) Below 12px Readability Floor",
-                    "rationale": "Body or UI copy below 12px (0.75rem) impairs legibility on high-DPI and mobile displays; use relative rem units with a 0.75rem–0.875rem minimum."
+                    "title": f"Illegible Font Size (font-size: {value}) Below 12px Readability Floor",
+                    "rationale": "This simple length is below 12px (rem estimated at a 16px root; pt at 96dpi). Root font overrides and inherited sizing require contextual review."
                 })
 
         # 2. Async UI States check (JS/TS/HTML components calling fetch() without loading/error feedback)
@@ -265,6 +279,8 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
         **artefact_scheme_fields(),
         "target": target_dir.name,
         "scanned_files": scanned_files,
+        # Top-level scalar also survives the intentionally redacted CLI stdout summary.
+        "font_size_values_unparsed": font_size_unparsed_count,
         "design_system_metrics": {
             "css_custom_properties_defined": css_custom_props_count,
             "hardcoded_color_literals": hardcoded_color_count

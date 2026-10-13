@@ -20,6 +20,7 @@ While `accessibility` checks strict WCAG 2.1 AA markup compliance, your role is 
    - Ensure surfaces and text adapt cleanly via `color-scheme: light dark` and modern `light-dark(#fff, #121212)` or semantic CSS variables.
 5. **Typography, Hierarchy & Scannability (`illegible-micro-typography`)**:
    - Enforce readable measure (`max-width: 65ch` on prose), clear typographic scale, `rem` font sizing (`>= 0.75rem`), and comfortable line height (`1.4–1.6` for body copy).
+   - The deterministic font-size pre-pass reads simple `px`, `rem` (estimated at a 16px root), `pt` (96/72 px), and unitless zero. It does **not** resolve context-dependent `em`/`%`, `var()`, `clamp()`, `calc()`, or other units: `font_size_values_unparsed` counts these values. A zero-candidate result with a nonzero unparsed count is not proof that all font sizes are legible.
 6. **Touch & Pointer Ergonomics (`tap-target-too-small`)**:
    - Ensure interactive controls provide at least `24x24px` (WCAG 2.2 AA) and ideally `44x44px` hit targets.
 7. **Responsive & Viewport Resilience (`missing-responsive-viewport-meta`)**:
