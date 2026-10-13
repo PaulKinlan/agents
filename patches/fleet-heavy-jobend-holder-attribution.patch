@@ -1,0 +1,57 @@
+--- /home/exedev/fleet/bin/fleet-heavy	2026-10-12 21:10:28.000000000 +0000
++++ /tmp/fleet-heavy-nxj8-r2	2026-10-13 01:31:14.707359075 +0000
+@@ -197,10 +197,52 @@
+         # minutes, blocking every gate on the VM, their wrapper long gone.
+         # So before releasing, sweep anything that is holding the slot and is not us. This is the source fix;
+         # reclaim_abandoned_slot() is the safety net for holders that pre-date it.
+-        leaked=$(slot_fd_holders "$i" | grep -v "^$$\$" | tr '\n' ' ')
++        # agents-nxj8: DO NOT COUNT THE MEASUREMENT AS THE LEAK, AND KILL ONLY WHAT WAS ACCUSED.
++        # (a) This substitution INHERITS the open fd on the slot file, so its fork, grep and tr are holders
++        #     by slot_fd_holders' own fd test. They are GRANDCHILDREN (ppid = the substitution's subshell),
++        #     and the fleet-91fr exclusion covers only $$ and its DIRECT children - so the sweep reported its
++        #     own pipeline as leaked descendants. They share OUR process group; a real leaked holder is
++        #     setsid-detached with its own. Measured 2026-10-13: the warning named the fork, `grep -v
++        #     ^<ourpid>$` and `tr \n`, in that order, three runs running.
++        # (b) agents-z5pp: A GROUP KILL MUST ACCUSE THE SAME POPULATION THE FD TEST ACCUSED. Widening a
++        #     specific pid to its whole process group takes bystanders the sweep never accused - the
++        #     agents-52sa rule, and the reason that rule exists. So the group is signalled ONLY when every
++        #     process in it is already accused; otherwise the accused pids are signalled directly. A leaked
++        #     husk is setsid-detached, so its group contains only the leak and takes the group path; a
++        #     holder sharing a group with an innocent takes the pid path. The preemption path uses a bare
++        #     group kill by design (fleet-uhxq) because its accused IS the whole job tree.
++        our_pg=$(ps -o pgid= -p $$ | tr -d ' ')
++        leaked=""
++        for p in $(slot_fd_holders "$i"); do
++          [ "$p" = "$$" ] && continue
++          pg=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')
++          [ -z "$pg" ] && continue
++          [ "$pg" = "$our_pg" ] && continue
++          leaked="$leaked $p"
++        done
+         if [ -n "${leaked// /}" ]; then
+           echo "fleet-heavy: warning - descendants still held slot$i after the job finished ($leaked); killing them so the slot is released" >&2
+-          kill -TERM $leaked 2>/dev/null; sleep 1; kill -KILL $leaked 2>/dev/null
++          # distinct groups among the accused, computed once, so TERM and KILL act on the same set
++          accused_groups=$(
++            for p in $leaked; do ps -o pgid= -p "$p" 2>/dev/null | tr -d ' '; echo; done | sort -u
++          )
++          signal_accused() {  # <signal>
++            local sig=$1 gpid in_group accused="" group_only
++            for gpid in $accused_groups; do
++              [ -z "$gpid" ] && continue
++              [ "$gpid" = "$our_pg" ] && continue
++              # EVERY process of this group must be accused, or the group kill takes bystanders
++              group_only=1
++              for member in $(ps -eo pid=,pgid= | awk -v g="$gpid" '$2 == g {print $1}'); do
++                case " $leaked " in *" $member "*) ;; *) group_only=0 ;; esac
++              done
++              if [ "$group_only" = 1 ]; then kill -"$sig" -"$gpid" 2>/dev/null
++              else accused="$leaked"; kill -"$sig" $accused 2>/dev/null; return 0; fi
++            done
++          }
++          signal_accused TERM
++          sleep 1
++          signal_accused KILL
+         fi
+         rm -f "$dir/slot$i.who"; exit $rc
+       fi

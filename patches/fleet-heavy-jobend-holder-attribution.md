@@ -1,0 +1,72 @@
+## `fleet-heavy-jobend-holder-attribution.patch` (agents-nxj8, round 2)
+
+**Applies on top of** `~/fleet/bin/fleet-heavy` as of 2026-10-12 21:10 - 14378 bytes, sha256 33ecf140e615852a... - the
+revision that carries `reclaim_abandoned_slot`. Replaces the round-1 delivery; round 1 was reviewed and
+FAILED on `agents-z5pp`, and a re-cut tip needs a fresh verdict, so this file supersedes it rather than
+amending it in place.
+
+### Why
+
+The sweep that runs when a job ends walks `/proc` for processes holding the slot fd and kills what it
+finds. It was accused of two defects, and both are real.
+
+**(1) It counted its own measurement as the leak (agents-nxj8).** The holder list is computed inside a
+`$( )`, and that substitution INHERITS the open fd on the slot file - so its own fork, `grep` and `tr`
+are holders by the function's own fd test. They are GRANDCHILDREN (their parent is the substitution's
+subshell) and the fleet-91fr exclusion skips only `$$` and its DIRECT children. The sweep therefore
+reported its own pipeline as leaked descendants. Measured repeatedly on this VM: the warning named the
+fork, `grep -v ^<pid>$` and `tr \n`, in that order, on every gate that ran.
+
+**(2) It widened a pid kill to a process group, and took bystanders (agents-z5pp).** Round 1 also
+switched the job-end kill from the accused pids to their whole process groups, copying the preemption
+path's technique. A group is a bigger population than the accusation: a process that shares the group
+but holds no slot fd - a concurrent waiter's transient fd, or any sibling - dies without ever having
+been named. The rule this fleet took from an earlier incident is exact: a cleanup pattern must match a
+property the target has and the innocent does not.
+
+### What it changes
+
+* The holders are collected into a list, excluding only this script's own pid and its own process
+  group. A leaked holder is `setsid`-detached with its own group, so the exclusion is precise; the
+  instrument shares our group, so it is excluded by construction rather than by pattern.
+* A group is signalled ONLY when every process in it is already among the accused; otherwise the accused
+  pids are signalled directly, and a group is never signalled across the boundary of our own group.
+  This is STRICTLY NARROWER than round 1 in every case: it cannot kill anything round 1 would have
+  spared.
+* `TERM` and `KILL` act on the same set, computed once.
+
+### The citation, corrected (agents-bz7j)
+
+Round 1 attributed the negative-pid kill to the orphan path. It is the **PREEMPTION** path - L221-224,
+the merger ticket class, `if [ "$myticket" -lt 1000000000 ]` - which kills a whole group by design
+because there the accused IS the whole job tree (fleet-uhxq). Read from the file, not inferred. A fix
+whose argument is that two places should use the same treatment cannot afford to misname which place it
+is copying.
+
+### How it was verified
+
+On a copy in `/tmp` of the file at the named revision, with an isolated `FLEET_HEAVY_DIR`:
+
+| run | fixture | expected | observed |
+| --- | --- | --- | --- |
+| R1 | unpatched, forced refusal | the instrument fires | warns, naming the fork/grep/tr |
+| R2 | round 2, same refusal | the instrument is silent | silent |
+| R3 | round 2 + a **job-spawned** setsid husk | fires on the real leak only | warns naming EXACTLY the husk, slot free after |
+| R4 | unpatched + same husk | fires on husk AND instrument | warns with both mixed together |
+| P2 | **the reviewer's own z5pp rig**, verbatim | v1 kills the bystander; round 2 spares it | v1: innocent DEAD, warning named two pids, innocent not among them. round 2: innocent ALIVE, same two accused named. Holder gone in both. |
+
+R3's fixture is a descendant that OUTLIVES the job, which is the incident's shape - my first attempt
+planted the holder BEFORE the job, so the job never took the slot and nothing was swept. That null
+result was the probe, not the code.
+
+The P2 row was run with the invocation the reviewer kept in `/tmp/rev-l200-fh`, because my own
+construction could not see the mechanism: mine ran a REAL GATE as the job, so the fd test had already
+accused the innocent. Theirs uses a stub job and a SIBLING victim, so the innocent sits in the victim's
+group while the job's own fd never reaches it. **When a fixture fails to reproduce, the trigger is the
+thing to vary, not the assertion.**
+
+### What is NOT claimed
+
+That the collateral kill was ever observed on the hub. It is reproduced on the reviewer's rig, which is
+the strongest form available for a race of this shape. The bystander in that rig holds no slot fd; a
+process that DOES hold one is accused and killed, which is intended.
