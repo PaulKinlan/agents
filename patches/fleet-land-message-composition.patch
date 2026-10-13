@@ -464,7 +464,7 @@ diff -ruN A/bin/fleet-verdict-words.sh B/bin/fleet-verdict-words.sh
 +}
 diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 --- A/tests/fleet-land-message.test.sh	2026-10-12 19:42:41.000000000 +0000
-+++ B/tests/fleet-land-message.test.sh	2026-10-13 19:17:00.682321917 +0000
++++ B/tests/fleet-land-message.test.sh	2026-10-13 19:19:30.651111144 +0000
 @@ -23,12 +23,34 @@
  FAILED_TESTS=()
  ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -872,11 +872,11 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 +printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
 +cat > "$B" <<J
 +[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
-+ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash vs implementer openai-codex/gpt-6-sol)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash vs implementer openai-codex/gpt-6-sol)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json tk-2 fleet/thing2)
-+eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "38k transcribed verdict with a named reviewer is cross-family"
-+eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38l ...and clears on the author lane's family, not the appender's"
++eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-verified" "38k a VERIFIED same-lane transcription of a cross-family review reads transcribed-verified"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38l ...and still CLEARS on the author lane's family rather than the appender's (the 15b5 amendment), which needs the run id"
 +# 38m/38n: WHEN NO OBJECT SETTLES IT, the person with the evidence supplies the OPERAND rather than overriding
 +# the rule (agents-2tov): the lane record here says deepseek (the appender's family, and the trap), the reviewer
 +# is deepseek, and the lander knows the authoring model was gpt-6-sol. The comparison still runs, it clears, and
@@ -902,12 +902,12 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 +printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
 +cat > "$B" <<J
 +[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
-+ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json tk-2 fleet/thing2)
 +eq "$(jq -r '.review.branch_author' <<<"$j")" "test-vm-thing2" "38q the branch author comes from the BRANCH, not the summary appender"
 +eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38q2 an author-lane verdict is not an independent review, so it does not clear"
-+eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-verified" "38q3 ...and independence reports the transcription, not an independent review"
++eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-unverified" "38q3 ...and independence reports the transcription, not an independent review"
 +eq "$(jq -r '.review.selected_comment_author' <<<"$j")" "test-vm-thing2" "38q4 ...while the verdict stays operative rather than being discarded"
 +
 +rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"

@@ -116,8 +116,8 @@ diff -ruN B/bin/fleet-land-message Cold/bin/fleet-land-message
    fi
    target_tree=$(git rev-parse --verify -q "${gate_commit}^{tree}" 2>/dev/null || echo "")
 diff -ruN B/tests/fleet-land-message.test.sh Cold/tests/fleet-land-message.test.sh
---- B/tests/fleet-land-message.test.sh	2026-10-13 19:17:00.682321917 +0000
-+++ Cold/tests/fleet-land-message.test.sh	2026-10-13 19:17:34.502504025 +0000
+--- B/tests/fleet-land-message.test.sh	2026-10-13 19:19:30.651111144 +0000
++++ Cold/tests/fleet-land-message.test.sh	2026-10-13 19:19:57.003245375 +0000
 @@ -1643,6 +1643,84 @@
  
  rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
