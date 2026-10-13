@@ -1,4 +1,4 @@
-## `fleet-bd-lock-holder.patch` (agents-elu6, revised for agents-zoch)
+## `fleet-bd-lock-holder.patch` (agents-elu6; revised for agents-zoch)
 
 **Applies on top of** `~/fleet/bin/bd` (14480 bytes, sha256 `f0e2f7c79b51819bed188af45ea8aa207cbe4843b6008591faf82fbd7c8c2478` — the shim
 as deployed on `agents-factory` at 2026-10-12 21:11Z). **Also adds** `tests/bd-lock-holder.test.sh`.
@@ -41,35 +41,26 @@ discipline, not tooling — in the failure message itself.
 - **A waiter reports the holder** — lane, role, pid, operation, how long it has been held, and the holder's
   **whole descendant tree** (bounded to 4 levels), because that is where the minutes actually go: the shim
   runs bd, bd runs git, git runs the remote helper doing the round-trip.
-- **A DIAGNOSTIC MUST NOT NEED THE CONTENT IT IS DIAGNOSING (agents-zoch).** The first version of this
-  patch stored and reported the holder's full argument vector. rev-elu6 defeated it by **driving** it
-  rather than reading it:
+- **THE DIAGNOSTIC NEEDS NO CONTENT, IN EVERY FIELD AND EVERY POSITION (agents-zoch).** The first version
+  stored and reported the holder's full argument vector; rev-elu6 defeated it by **driving** it rather than
+  reading it. Since a whitelist is the only shape that survives an adversary — a filter has to anticipate
+  the payload, a vocabulary cannot express one — **every reported value is now one of: a vocabulary word**
+  (bd operations, `dolt` operations, process names, roles), **a validated integer** (pid, timestamp), **or a
+  lane name the fleet's own registry on this VM vouches for**; everything else becomes the literal
+  `unrecognised` / `other` / `unregistered` / `unknown`. Four positions had to be covered, and the last
+  three were found by attacking this patch rather than the original defect:
 
-  ```
-  HOME=$H FLEET_ROLE=implementer bash bin/bd comment issue-x SENTINEL-PRIVATE-PAYLOAD &
-    → lock record: pid=… argv=bd comment issue-x SENTINEL-PRIVATE-PAYLOAD     ← LEAK in the shared file
-    → waiter stderr: bd: running: bd comment issue-x SENTINEL-PRIVATE-PAYLOAD ← LEAK in another lane's log
-  ```
+  | position | attack | before | now |
+  | --- | --- | --- | --- |
+  | the **operation** | `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` | record + waiter stderr carried the text | `cmd=comment` / `running: bd comment` |
+  | the **subcommand slot** | `bd "<private text>" …` | (would have been echoed) | `unrecognised` |
+  | **`FLEET_LANE` / `FLEET_ROLE`** | env set by the holder's own actor | `lane=SENTINEL-PRIVATE-PAYLOAD` in the record **and** another lane's stderr | `lane=unregistered role=other` |
+  | a **planted record** (the 0644 lock file is writable by anyone) | arbitrary text in every field | echoed into another lane's stderr | `UNNAMED` + `unregistered` / `unrecognised` |
+  | a **descendant's argv** | `ps -o args=` on the holder's children | full argv (`git commit -m '<private text>'`) | pid + vocabulary process name |
 
-  Both surfaces belong to someone else: the lock file is shared by every lane on the VM, and the report is
-  written into a lane that did not type the text — and bead text can be anything an operator or an agent
-  typed. The fix is not to filter that text but to stop needing it: **every reported word now comes from a
-  fixed vocabulary** — the subcommand and the `dolt` operation (`fleet_bd_lock_shape`), and a process name
-  (`fleet_bd_lock_procname`) — with anything outside it reported as the literal `unrecognised` / `other`,
-  and `gone` for a process that has exited. That is the fail-closed shape the reviewer guard above already
-  uses, so a spelling nobody has thought of yet cannot leak either, **including freeform text in the
-  subcommand position** (`bd "<private text>" …`). No bead id, body or argument is stored or printed.
-  Applying the same probe now:
-
-  ```
-  lock record: pid=… lane=impl-secret role=implementer since=… cmd=comment
-  waiter stderr: holder: lane=impl-secret role=implementer pid=… since 13:43:59Z
-                 running: bd comment    (operation only: arguments can hold bead text - agents-zoch)
-                   3689496 bash
-                   3689497 sleep
-  LEAK in record: no      LEAK in waiter stderr: no
-  ```
-
+  Validation runs on **both sides**: the holder only writes validated values, the waiter re-validates
+  everything it reads, so a planted record is no more dangerous than an honest one. No bead id, body or
+  argument is stored or printed anywhere.
 - **The wait is unbounded no longer, and never silent.** Patience stays at 300s (`FLEET_BD_LOCK_WAIT`
   overrides it); a report is emitted on first contention and then at most once per `FLEET_BD_LOCK_REPORT`
   seconds (default 30). On expiry the call **fails fast with `EX_TEMPFAIL` (75)**, holder named, having
@@ -80,28 +71,29 @@ discipline, not tooling — in the failure message itself.
   leaves behind cannot keep every lane on the VM queued behind it after bd has exited. `flock(1)`'s child
   inherits the fd (measured), so the old shim was exposed to this too; a shell rewrite loses even the
   attempt unless the fd is closed explicitly — mine did, until `tests/bd-lock-holder.test.sh` caught it.
-- **An unannotated holder is not a mystery:** a holder from before this patch, a record-less holder, or a
-  record naming a dead pid is reported as `UNNAMED` / `stale`, with the fact that the lock releases
-  automatically when a holder exits.
+- **An unannotated holder is not a mystery:** a holder from before this patch, a record written by
+  something else, or a record with an unusable pid is reported as `UNNAMED`, with the fact that the lock
+  releases automatically when a holder exits.
 
 The gate guards and the comment-dash guard above it are untouched; the nested `FLEET_BD_LOCKED` path is
 unchanged (it must not take the lock again, and does not).
 
 ### How it was verified
 
-`tests/bd-lock-holder.test.sh` is hermetic — a stub `$HOME/.local/bin/bd` and a throwaway home — so it
-never contends with the fleet's real lock, and it can be re-run in a gate or a review. Three of its cases
-are the reviewer's probe as a regression test: the shared record, the waiting lane's stderr, and a
-descendant's argument vector must each contain **no** bead text, and a freeform subcommand must be
-reported as `unrecognised`.
+`tests/bd-lock-holder.test.sh` is hermetic — a stub `$HOME/.local/bin/bd`, a throwaway home and a
+throwaway lane registry — so it never contends with the fleet's real lock, and it can be re-run in a gate
+or a review. Sixteen of its cases are the attacks above as regression tests: the shared record, the
+waiting lane's stderr, a descendant's argument vector, a freeform subcommand, an environment-supplied lane
+name, and a planted record must each carry no bead text (and a freeform subcommand must report
+`unrecognised`, an unregistered lane `unregistered`).
 
 | rig | result |
 | --- | --- |
-| patched shim, new suite | **46 passed, 0 failed** (35 behaviour + 11 privacy/shape cases) |
-| **pre-change shim, the same suite** | **23 passed, 23 failed** — the 23 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
+| patched shim, new suite | **56 passed, 0 failed** (35 behaviour + 21 privacy/shape cases) |
+| **pre-change shim, the same suite** | **27 passed, 29 failed** — the 27 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
 | patched shim, existing `tests/bd-shim.test.sh` | **15 passed, 0 failed** (serialisation and the nesting escape still hold) |
-| composed with `fleet-worktree-beads-guard.patch`, both orders | applies both ways; composed shim is valid bash; **46/46 + 15/15 + that patch's own 13/13** |
-| the reviewer's probe, reviewed tip vs this fix | leak in record **YES → no**, leak in waiter stderr **YES → no** |
+| composed with `fleet-worktree-beads-guard.patch`, **both orders** | applies both ways; composed shim valid bash; **56/56 + 15/15 + that patch's own 13/13** |
+| the three probes, first version vs this revision | operation **LEAK → no**, env lane/role **LEAK → no**, planted record **LEAK → no** |
 
 Live evidence on the **real** lock, with a **real** `bd dolt push` through the patched shim as the holder:
 
@@ -134,22 +126,27 @@ it again.
 - **It does not shorten the wait.** A Dolt push still holds the lock for its git round-trip, and other
   lanes still wait for it. This makes the wait *visible, nameable and boundable*; shortening it is the
   cross-VM push cost, not this shim.
-- **No forensic copy of the arguments was kept, deliberately.** The finding suggested a lane-local file
-  as an alternative home for them. It was not taken: every lane on a VM runs as the **same unix user**, so
-  a lane-local 0600 file is readable by every lane (the shim's own reviewer guard says the same about
-  itself — "a speed bump, not a boundary"). That would move the leak rather than close it, and the
-  diagnostic need — *which operation is holding the lock* — is met by the vocabulary. If the fleet wants
-  argument-level forensics later it should be its own bead with its own threat model.
+- **No forensic copy of the arguments was kept, deliberately — an operator-invisible tradeoff.** The
+  finding suggested a lane-local file as an alternative home for them. It was not taken: every lane on a
+  VM runs as the **same unix user**, so a lane-local 0600 file is readable by every lane (the shim's own
+  reviewer guard says the same about itself — "a speed bump, not a boundary"). That would move the leak
+  rather than close it, and it would do so *while looking safe*, which is worse than the original. The
+  trade is explicit: **argument-level forensics are given up, in exchange for the guarantee that no lane's
+  text reaches a shared file or another lane's log.** If the fleet wants that forensics it should be its
+  own bead with its own threat model.
+- **A registered lane name can be lied about.** A hostile writer can put *another lane's* registered name
+  in the record, so the report can misattribute (a lie, not a disclosure — the text still cannot be
+  arbitrary). Detecting a lying writer needs per-lane identities, which is bigger than this patch.
+- **The vocabularies are a maintenance point.** A new bd subcommand or a new process name is reported as
+  `unrecognised` / `other` until it is listed, and a lane whose registry file is missing is
+  `unregistered`. That is the correct direction to fail: the report degrades to an opaque label instead of
+  starting to print arguments.
 - **The record is advisory, not authoritative.** It is written by the shim, so a holder that predates this
-  patch (or anything else that takes the same flock without annotating it) is reported as `UNNAMED`. On a
-  VM mid-rollout you get named and unnamed holders both.
+  patch reports `UNNAMED`. On a VM mid-rollout you get named and unnamed holders both.
 - **Option (b) is not implemented here.** Posting the verdict as a COMMENT before the label writes remains
   lane discipline; the timeout message tells the caller to do it rather than doing it for them.
 - **`flock` is still the only serialisation.** Nothing here changes the critical section, and nothing here
   makes a timed-out call retry — it tells the caller to.
-- **The vocabulary is a maintenance point.** A new bd subcommand that holds the lock will be reported as
-  `unrecognised` until it is added to `fleet_bd_lock_shape`, which is the correct direction to fail (the
-  report degrades to an opaque label rather than starting to print arguments).
 - **Not measured:** behaviour if the system clock jumps backwards mid-hold (`since` would then read wrong);
   the record is display-only, and every decision (contention, bound, liveness) comes from the lock and
   `/proc`, never from the record's clock.

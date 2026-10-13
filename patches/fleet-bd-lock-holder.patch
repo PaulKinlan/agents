@@ -1,4 +1,4 @@
-From 2eb6714ce4b3f798dbed1eec41501fb91968cec4 Mon Sep 17 00:00:00 2001
+From db5139a25942768e6ce7888ac12a5064f143cb5e Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
@@ -16,48 +16,44 @@ The holder now names itself: while it holds the lock it writes one record line i
 object, never a data file - flock's lock is on the fd/inode, so writing the record does not disturb it)
 and clears it before releasing. A waiter that cannot take the lock reports the holder's lane, role, pid,
 operation and how long it has been held, plus the holder's descendant processes - which is where a push
-actually spends its minutes.
+actually spends its minutes. The wait keeps its 300s of patience (FLEET_BD_LOCK_WAIT overrides) but is
+reported on first contention and at most every FLEET_BD_LOCK_REPORT seconds, and on expiry it fails FAST
+with EX_TEMPFAIL (75), holder named, having changed nothing. The lock fd is closed FOR THE bd PAYLOAD
+ONLY, so a child bd leaves behind cannot keep the fleet locked after bd exits.
 
-A DIAGNOSTIC MUST NOT NEED THE CONTENT IT IS DIAGNOSING (agents-zoch). The first version of this patch
-stored and reported the holder's full argv, and rev-elu6 defeated it by DRIVING it rather than reading it:
-`bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` put that text into the shared lock file AND into the waiting
-lane's stderr. Both surfaces belong to other people - the lock file is shared by every lane on the VM and
-the report is written into a lane that did not type the text - and bead text can be anything an operator
-or an agent typed. So nothing freeform is copied: the operation comes from a fixed vocabulary (anything
-else is `unrecognised`), descendant processes are named from a fixed vocabulary (anything else is `other`),
-and no bead id, body or argument is stored or printed at all. Fail-closed, so a spelling nobody has thought
-of cannot leak either.
+A DIAGNOSTIC MUST NOT NEED THE CONTENT IT IS DIAGNOSING (agents-zoch), IN EVERY FIELD AND EVERY POSITION.
+The first version of this patch stored and reported the holder's full argv, and rev-elu6 defeated it by
+DRIVING it rather than reading it: `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` put that text into the
+shared lock file AND into the waiting lane's stderr. Both surfaces belong to other people. Since a filter
+must anticipate the payload while a vocabulary cannot express one, every reported value is now a
+vocabulary word (bd operations, dolt operations, process names, roles), a validated integer (pid,
+timestamp), or a lane name the fleet's OWN REGISTRY on this VM vouches for; anything else is the literal
+`unrecognised` / `other` / `unregistered` / `unknown`. Four positions are covered and the last three were
+found by attacking this patch: the operation, the subcommand slot (freeform text), FLEET_LANE/FLEET_ROLE
+(environment, so the holder copies what an actor set - measured leaking before this revision), and the
+RECORD ITSELF, which is a 0644 file any process can write - so the waiter re-validates every field it
+reads and a planted record with arbitrary text in every field now reports UNNAMED. A descendant's argv
+(`ps -o args=`) is gone too: pid plus a vocabulary process name only.
 
-- patience is unchanged (300s) and no longer silent: a report on first contention, then at most one per
-  FLEET_BD_LOCK_REPORT (default 30s); FLEET_BD_LOCK_WAIT bounds the whole wait
-- on expiry it fails FAST with EX_TEMPFAIL (75), the holder named, having changed nothing
-- reports go to STDERR: stdout carries bd's JSON for callers such as `bd show --json`
-- the lock fd is closed FOR THE bd PAYLOAD ONLY, so a child bd leaves behind cannot keep every lane on the
-  VM queued behind it after bd has exited (flock(1)'s child inherits the fd; a shell rewrite loses even
-  the attempt unless the fd is closed explicitly)
-- an unannotated holder, or a record naming a dead pid, is reported as unnamed/stale rather than as a
-  mystery
-
-tests/bd-lock-holder.test.sh pins all of it hermetically: a stub $HOME/.local/bin/bd and a throwaway home,
-so it never contends with the fleet. 46 cases, including three that reproduce the reviewer's probe - the
-shared record, the waiter's stderr and a descendant's argument vector must each contain no bead text.
-Against the pre-change shim the same file reports 23 passed / 23 failed, while the existing
-tests/bd-shim.test.sh stays 15/15. Uncontended cost: +0.47ms per call (8.23 -> 8.70ms, best of 6
+tests/bd-lock-holder.test.sh pins all of it hermetically: a stub $HOME/.local/bin/bd, a throwaway home and
+a throwaway lane registry, so it never contends with the fleet. 56 cases, 21 of them the attacks above as
+regression tests. Against the pre-change shim the same file reports 27 passed / 29 failed, while the
+existing tests/bd-shim.test.sh stays 15/15. Uncontended cost: +0.47ms per call (8.23 -> 8.70ms, best of 6
 interleaved 40-call runs). Applies in both orders with the other pending bin/bd patch
 (fleet-worktree-beads-guard.patch); the composed shim passes all three suites.
 
 Release-note: none (fleet tooling; no user-facing surface)
 ---
- bin/bd                       | 223 ++++++++++++++++++++++++++++++++++-
- tests/bd-lock-holder.test.sh | 187 +++++++++++++++++++++++++++++
- 2 files changed, 409 insertions(+), 1 deletion(-)
+ bin/bd                       | 294 ++++++++++++++++++++++++++++++++++-
+ tests/bd-lock-holder.test.sh | 219 ++++++++++++++++++++++++++
+ 2 files changed, 512 insertions(+), 1 deletion(-)
  create mode 100644 tests/bd-lock-holder.test.sh
 
 diff --git a/bin/bd b/bin/bd
-index 723856f..ac56b8e 100755
+index 723856f..fe17d4f 100755
 --- a/bin/bd
 +++ b/bin/bd
-@@ -246,6 +246,209 @@ guard_worktree_beads_decoy() {
+@@ -246,6 +246,280 @@ guard_worktree_beads_decoy() {
  
  guard_worktree_beads_decoy "$@"
  
@@ -77,17 +73,27 @@ index 723856f..ac56b8e 100755
 +# reports the holder's lane, pid and operation, and how long it has held it - plus, while it waits, the
 +# holder's descendant processes, which is where the minutes actually go (`git`).
 +#
-+# A DIAGNOSTIC MUST NOT NEED THE CONTENT IT IS DIAGNOSING (agents-zoch). The first version of this record
-+# stored and reported the holder's full argv, and rev-elu6 defeated it by DRIVING it rather than reading
-+# it: `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` put that text in the shared lock file AND in the
-+# waiting lane's stderr. Both surfaces are other people's: the lock file is shared by every lane on the VM
-+# and the report is written into a lane that is not the one that typed the text, so one lane's diagnostic
-+# is another lane's leak - and bead text can be anything an operator or an agent typed. The fix is not to
-+# filter that text but to never need it: every reported word now comes from a fixed vocabulary (the
-+# subcommand, the `dolt` operation, a process name), and anything outside it is reported as the literal
-+# `unrecognised` / `other`. That is the fail-closed shape the reviewer guard above already uses, and it
-+# cannot be defeated by a spelling nobody has thought of yet - including a subcommand position holding
-+# freeform text.
++# A DIAGNOSTIC MUST NOT NEED THE CONTENT IT IS DIAGNOSING (agents-zoch), AND THAT HAS TO HOLD FOR EVERY
++# FIELD AND EVERY POSITION. rev-elu6 defeated the first version - which stored the holder's full argv - by
++# DRIVING it rather than reading it: `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` put that text into the
++# shared lock file AND into the waiting lane's stderr. Both surfaces are other people's: the lock file is
++# shared by every lane on the VM and the report is written into a lane that is not the one that typed the
++# text, and bead text can be anything an operator or an agent typed. So there is no filtering anywhere
++# below: EVERY reported value is either a fixed vocabulary word (operations, process names, roles), a
++# validated integer (pid, timestamp), or a lane name that the fleet's own registry on this VM vouches for.
++# Anything else becomes the literal `unrecognised` / `other` / `unregistered` / `unknown`.
++#
++# Why vocabulary rather than sanitising: a filter has to anticipate the payload, a vocabulary cannot
++# express one. That is the same fail-closed shape the reviewer guard above uses. It also has to cover the
++# positions that look harmless - the adversarial pairs that a filter-shaped fix misses, each measured
++# against the first version of this patch:
++#   * the SUBCOMMAND position can hold freeform text:      `bd "<private text>" ...`
++#   * `FLEET_LANE`/`FLEET_ROLE` are ENVIRONMENT, so the holder copies what an actor set: lane=<private text>
++#   * the RECORD ITSELF is writable by anyone (0644), so a planted line's pid/lane/role/since/cmd all reach
++#     another lane's stderr
++#   * a DESCENDANT's argv is freeform too (`ps -o args=`): `git commit -m '<private text>'`
++# Validating on both sides - the writer only writes validated values, the waiter only prints validated
++# values - is what makes a planted record no more dangerous than an honest one.
 +#
 +# Reports go to STDERR: bd writes JSON on stdout for callers such as `bd show --json`, and a message there
 +# would corrupt a parse.
@@ -98,11 +104,22 @@ index 723856f..ac56b8e 100755
 +# (75) and the holder named, so the caller can retry in seconds rather than block for minutes - and the
 +# durable order is `bd comment` (the artefact) BEFORE the label and status writes (the state), so a retry
 +# never loses the thing that matters.
++fleet_bd_lock_word() {
++  # ONE vocabulary word, or a literal that says "not in the vocabulary". Never a copy of the input.
++  case "$1" in
++    show|comments|list|search|ready|query|children|blocked|provenance|prime|status|url|help|version|\
++    create|comment|note|dep|link|label|q|remember|update|close|reopen|delete|\
++    sync|worktree|gate|heartbeat|compact|batch|init|setup|doctor|stats|history|import|export)
++      printf '%s' "$1" ;;
++    "") printf 'unknown' ;;
++    *) printf 'unrecognised' ;;
++  esac
++}
++
 +fleet_bd_lock_shape() {
-+  # THE OPERATION, FROM A FIXED VOCABULARY. Never an argument, never an id, never a body: see agents-zoch
-+  # in the header. The subcommand position is scanned for the first bare word (skipping flags and the value
-+  # of a known value-taking flag), because a global flag can sit before it - but the word is only reported
-+  # if it is in the list below, so `bd "<private text>" ...` reports `unrecognised`, not the text.
++  # THE OPERATION OF A bd CALL, FROM THE VOCABULARY. Never an argument, never an id, never a body.
++  # The subcommand position is scanned for the first bare word (skipping flags and the value of a known
++  # value-taking flag, because a global flag can sit before it), then reduced by fleet_bd_lock_word.
 +  local sub="" op="" a expect_value=0
 +  for a in "$@"; do
 +    if [ "$expect_value" = 1 ]; then expect_value=0; continue; fi
@@ -112,27 +129,71 @@ index 723856f..ac56b8e 100755
 +    esac
 +    if [ -z "$sub" ]; then sub="$a"; elif [ -z "$op" ]; then op="$a"; fi
 +  done
-+  case "$sub" in
-+    "") printf 'unknown' ;;
-+    show|comments|list|search|ready|query|children|blocked|provenance|prime|status|url|help|version|\
-+    create|comment|note|dep|link|label|q|remember|update|close|reopen|delete|\
-+    sync|worktree|gate|heartbeat|compact|batch|init|setup|doctor|stats|history|import|export)
-+      printf '%s' "$sub" ;;
-+    dolt)
++  if [ "$sub" = dolt ]; then
++    case "$op" in
++      push|pull|status|fetch|log|show|version|remote) printf 'dolt %s' "$op" ;;
++      "") printf 'dolt' ;;
++      *) printf 'dolt unrecognised' ;;
++    esac
++    return 0
++  fi
++  fleet_bd_lock_word "$sub"
++}
++
++fleet_bd_lock_cmd() {
++  # Re-validate a `cmd=` value READ FROM THE RECORD. Anyone can write the record, so the waiter never
++  # trusts it: only vocabulary shapes survive.
++  case "$1" in
++    "dolt "*) local op="${1#dolt }"
 +      case "$op" in
 +        push|pull|status|fetch|log|show|version|remote) printf 'dolt %s' "$op" ;;
 +        "") printf 'dolt' ;;
 +        *) printf 'dolt unrecognised' ;;
 +      esac ;;
-+    *) printf 'unrecognised' ;;
++    *) fleet_bd_lock_word "$1" ;;
 +  esac
 +}
 +
++fleet_bd_lock_int() {
++  # A validated positive integer, or nothing at all. pid and since are printed into another lane's log.
++  case "$1" in
++    ""|*[!0-9]*) return 1 ;;
++  esac
++  printf '%s' "$1"
++}
++
++fleet_bd_lock_role() {
++  # Roles come from the environment and the record; both are text until they match this list.
++  case "$1" in
++    implementer|reviewer|merger|architect|designer|coordinator|coord|hub|operator|planner|investigator)
++      printf '%s' "$1" ;;
++    "") printf 'unknown' ;;
++    *) printf 'other' ;;
++  esac
++}
++
++fleet_bd_lock_lane() {
++  # A LANE NAME MUST BE ONE THE FLEET ITSELF REGISTERED ON THIS VM (~/.fleet/lanes/<name>.model|.conf).
++  # FLEET_LANE is environment and the record is writable by anyone, so the name is unvalidated text until
++  # the fleet's own registry vouches for it; measured before this check: lane=SENTINEL-PRIVATE-PAYLOAD
++  # reached both the shared record and another lane's stderr. The character class is checked FIRST so the
++  # name can never act as a glob.
++  local name="$1"
++  case "$name" in
++    ""|*[!A-Za-z0-9._-]*) printf 'unregistered'; return 0 ;;
++  esac
++  [ "${#name}" -le 64 ] || { printf 'unregistered'; return 0; }
++  if [ -e "$HOME/.fleet/lanes/$name.model" ] || [ -e "$HOME/.fleet/lanes/$name.conf" ]; then
++    printf '%s' "$name"
++  else
++    printf 'unregistered'
++  fi
++}
++
 +fleet_bd_lock_procname() {
-+  # A PROCESS NAME, FROM A FIXED VOCABULARY - never its argument vector. `ps -o args=` was the other half of
-+  # agents-zoch: a descendant is freeform too (`git commit -m '<private text>'`), and comm itself can be set
-+  # to arbitrary short text by any program, so it is filtered to the characters a program name uses and then
-+  # matched against this list. Anything else is `other`; a name whose process is gone is `gone`.
++  # A PROCESS NAME, FROM A FIXED VOCABULARY - never its argument vector. comm can be set to arbitrary
++  # short text by any program, so it is filtered to the characters a program name uses and then matched
++  # against this list; anything else is `other`, and `gone` when the process has exited.
 +  local name
 +  name="$(tr -dc '[:alnum:]._+-' <"/proc/$1/comm" 2>/dev/null | cut -c1-16)"
 +  case "$name" in
@@ -151,25 +212,29 @@ index 723856f..ac56b8e 100755
 +  # end-of-line: token-splitting it returned `cmd=dolt` and the operation silently lost its verb
 +  # (caught by the test's `running: bd dolt push` assertion, which is why that assertion names both words).
 +  if [ "$2" = cmd ]; then
-+    printf '%s' "$1" | tr '\n' ' ' | sed -n 's/.*[[:space:]]cmd=//p'
++    printf '%s' "$1" | tr '\n' ' ' | sed -n 's/.*[[:space:]]cmd=//p' | sed 's/[[:space:]]*$//'
 +    return 0
 +  fi
 +  printf '%s' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
 +}
 +
 +fleet_bd_lock_note() {
-+  # Our own holder record. Written while we hold the lock, cleared before we release it. Never fails the
-+  # call: a lock file we cannot annotate is not a reason to refuse to run bd. `printf '%(%s)T'` is a shell
-+  # builtin - a `$(date +%s)` fork here cost 8ms on EVERY bd call on the VM (measured), which is not worth
-+  # paying on the path that never contends. NOTHING freeform goes in here: lane/role are the fleet's own
-+  # names, and the command is reduced to its operation by fleet_bd_lock_shape (agents-zoch).
++  # Our own holder record, written while we hold the lock and cleared before we release it. Never fails the
++  # call: a lock file we cannot annotate is not a reason to refuse to run bd. EVERY value is validated
++  # here as well as on read, so the shared file never holds unvalidated text even if this lane's
++  # environment does. `printf '%(%s)T'` is a shell builtin: a `$(date +%s)` fork here cost 8ms on EVERY bd
++  # call on the VM (measured), which is not worth paying on the path that never contends.
 +  local lock="$1"; shift
 +  printf -v fleet_bd_now '%(%s)T' -1 2>/dev/null || fleet_bd_now=0
 +  {
 +    # cmd LAST: it is the only field that can contain a space (`dolt push`), and fleet_bd_lock_field reads
 +    # it to end-of-line.
 +    printf 'pid=%s lane=%s role=%s since=%s cmd=%s\n' \
-+      "$$" "${FLEET_LANE:-unknown}" "${FLEET_ROLE:-unknown}" "${fleet_bd_now:-0}" "$(fleet_bd_lock_shape "$@")"
++      "$(fleet_bd_lock_int "$$" || printf '0')" \
++      "$(fleet_bd_lock_lane "${FLEET_LANE:-}")" \
++      "$(fleet_bd_lock_role "${FLEET_ROLE:-}")" \
++      "$(fleet_bd_lock_int "${fleet_bd_now:-0}" || printf '0')" \
++      "$(fleet_bd_lock_shape "$@")"
 +  } >"$lock" 2>/dev/null || true
 +}
 +
@@ -198,7 +263,7 @@ index 723856f..ac56b8e 100755
 +  # (the timeout of an invocation that already reported the holder must not repeat all of it)
 +  local lock="$1" held="$2" mode="$3" rec pid lane role since cmd human kids
 +  local quiet_holder="${4:-}"
-+  rec="$(head -c 400 "$lock" 2>/dev/null | tr '\n' ' ')"
++  rec="$(head -c 400 "$lock" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
 +  human="$((held / 60))m$((held % 60))s"
 +  if [ "$mode" = timeout ]; then
 +    echo "bd: TIMEOUT (agents-elu6): the VM-wide bd lock was held for ${human}. THIS CALL DID NOT RUN and changed nothing." >&2
@@ -212,14 +277,16 @@ index 723856f..ac56b8e 100755
 +    fi
 +    return 0
 +  fi
-+  pid="$(fleet_bd_lock_field "$rec" pid)"
++  # EVERY field is re-validated on read: the record is a shared file that any process can write, so this is
++  # the difference between a diagnostic and an injection channel (agents-zoch).
++  pid="$(fleet_bd_lock_int "$(fleet_bd_lock_field "$rec" pid)")" || pid=""
 +  if [ -n "$pid" ]; then
-+    lane="$(fleet_bd_lock_field "$rec" lane)"
-+    role="$(fleet_bd_lock_field "$rec" role)"
-+    since="$(fleet_bd_lock_field "$rec" since)"
-+    cmd="$(fleet_bd_lock_field "$rec" cmd)"
-+    echo "bd:   holder: lane=${lane:-?} role=${role:-?} pid=$pid${since:+ since $(date -d "@$since" -u +%H:%M:%SZ 2>/dev/null || printf '?')}" >&2
-+    echo "bd:   running: bd ${cmd:-unknown}   (operation only: arguments can hold bead text - agents-zoch)" >&2
++    lane="$(fleet_bd_lock_lane "$(fleet_bd_lock_field "$rec" lane)")"
++    role="$(fleet_bd_lock_role "$(fleet_bd_lock_field "$rec" role)")"
++    since="$(fleet_bd_lock_int "$(fleet_bd_lock_field "$rec" since)")" || since=""
++    cmd="$(fleet_bd_lock_cmd "$(fleet_bd_lock_field "$rec" cmd)")"
++    echo "bd:   holder: lane=${lane} role=${role} pid=$pid${since:+ since $(date -d "@$since" -u +%H:%M:%SZ 2>/dev/null || printf '?')}" >&2
++    echo "bd:   running: bd ${cmd}   (operation only: arguments can hold bead text - agents-zoch)" >&2
 +    if [ -d "/proc/$pid" ]; then
 +      kids="$(fleet_bd_lock_descendants "$pid")"
 +      [ -n "$kids" ] && printf '%s\n' "$kids" >&2
@@ -227,7 +294,7 @@ index 723856f..ac56b8e 100755
 +      echo "bd:   (that pid is gone, so the record is stale - the lock is still held)" >&2
 +    fi
 +  else
-+    echo "bd:   holder: UNNAMED - the lock file has no holder record (a holder from before agents-elu6, or one that has not written its record yet). The lock releases automatically when the holder exits, so a holder that has died cannot hold it." >&2
++    echo "bd:   holder: UNNAMED - the lock file has no usable holder record (a holder from before agents-elu6, a record written by something else, or one that has not been written yet). The lock releases automatically when the holder exits, so a holder that has died cannot hold it." >&2
 +  fi
 +  if [ "$mode" = timeout ]; then
 +    echo "bd:   retry in a few seconds, or allow a longer wait with FLEET_BD_LOCK_WAIT=<seconds>." >&2
@@ -267,7 +334,7 @@ index 723856f..ac56b8e 100755
  if [ -n "${FLEET_BD_LOCKED:-}" ]; then
    "$real" "$@"
    rc=$?
-@@ -254,7 +457,25 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+@@ -254,7 +528,25 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
  fi
  
  export FLEET_BD_LOCKED=1
@@ -296,10 +363,10 @@ index 723856f..ac56b8e 100755
  exit "$rc"
 diff --git a/tests/bd-lock-holder.test.sh b/tests/bd-lock-holder.test.sh
 new file mode 100644
-index 0000000..1dc3f38
+index 0000000..3a5e0b3
 --- /dev/null
 +++ b/tests/bd-lock-holder.test.sh
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,219 @@
 +#!/usr/bin/env bash
 +# tests/bd-lock-holder.test.sh — bin/bd: a contended lock NAMES ITS HOLDER, and the wait is bounded (agents-elu6).
 +#
@@ -340,6 +407,10 @@ index 0000000..1dc3f38
 +trap cleanup EXIT
 +T="$ROOT/home"; mkdir -p "$T/.local/bin" "$T/.fleet"
 +LOCK="$T/.fleet/bd.lock"
++# The shim only reports a lane name that THIS VM's registry vouches for (~/.fleet/lanes/<name>.model), so a
++# hermetic run registers its own lanes. That is the property cases 13-14 attack.
++mkdir -p "$T/.fleet/lanes"
++for l in impl-other impl-secret impl-ozmt probe-A probe-B probe-C; do : > "$T/.fleet/lanes/$l.model"; done
 +
 +# stub real bd: echo its argv, optionally spawn a git-shaped child and sleep (the shape of the real latency)
 +cat > "$T/.local/bin/bd" <<'STUB'
@@ -410,15 +481,15 @@ index 0000000..1dc3f38
 +hold_raw 2; sleep 0.4
 +FLEET_BD_LOCK_WAIT=1 shim version >"$ROOT/o4" 2>"$ROOT/e4"
 +has "$ROOT/e4" "UNNAMED" "4a unnamed holder is stated plainly"
-+has "$ROOT/e4" "no holder record" "4b and the reason is given"
++has "$ROOT/e4" "no usable holder record" "4b and the reason is given"
 +has "$ROOT/e4" "releases automatically" "4c with the fact that a dead holder cannot hold it forever"
 +release
 +
 +echo "5. a record naming a dead pid is reported as STALE, never as a live holder"
 +hold_raw 2; sleep 0.3
-+printf 'pid=999999 lane=ghost role=reviewer since=%s argv=bd dolt push\n' "$(date +%s)" > "$LOCK"
++printf 'pid=999999 lane=impl-other role=reviewer since=%s cmd=dolt push\n' "$(date +%s)" > "$LOCK"
 +FLEET_BD_LOCK_WAIT=1 shim version >"$ROOT/o5" 2>"$ROOT/e5"
-+has "$ROOT/e5" "lane=ghost" "5a the stale record is shown"
++has "$ROOT/e5" "lane=impl-other" "5a the stale record is shown"
 +has "$ROOT/e5" "pid is gone" "5b and called stale"
 +release
 +
@@ -474,6 +545,34 @@ index 0000000..1dc3f38
 +FLEET_BD_LOCK_WAIT=1 shim show bead-x >"$ROOT/o12" 2>"$ROOT/e12"
 +hasnt "$ROOT/e12" "SENTINEL" "12a a descendant's ARGV is not copied"
 +has "$ROOT/e12" "sleep" "12b the descendant is named by process name"
++release
++
++echo "13. ADVERSARIAL: the ENVIRONMENT cannot inject text through lane/role (they are validated, not copied)"
++: > "$LOCK"
++STUB_SLEEP=2 HOME="$T" FLEET_LANE='SENTINEL-PRIVATE-PAYLOAD' FLEET_ROLE='SENTINEL-ROLE-PAYLOAD' \
++  bash "$SHIM" comment issue-y SEKRIT & KIDS="$KIDS $!"
++sleep 0.5
++hasnt "$LOCK" "SENTINEL" "13a an unregistered lane name never reaches the shared record"
++has "$LOCK" "lane=unregistered" "13b it is reported as the fixed word 'unregistered'"
++has "$LOCK" "role=other" "13c a non-vocabulary role is reported as 'other'"
++FLEET_BD_LOCK_WAIT=1 shim show y >"$ROOT/o13" 2>"$ROOT/e13"
++hasnt "$ROOT/e13" "SENTINEL" "13d nor another lane's stderr"
++release
++
++echo "14. ADVERSARIAL: a PLANTED record cannot inject text either (any process can write the 0644 lock file)"
++: > "$LOCK"
++hold_raw 2; sleep 0.3
++printf 'pid=SENTINEL-PRIVATE-PAYLOAD lane=SENTINEL-LANE role=SENTINEL-ROLE since=SENTINEL-SINCE cmd=SENTINEL-CMD\n' > "$LOCK"
++FLEET_BD_LOCK_WAIT=1 shim show y >"$ROOT/o14" 2>"$ROOT/e14"
++hasnt "$ROOT/e14" "SENTINEL" "14a a planted record's fields are never echoed"
++has "$ROOT/e14" "UNNAMED" "14b a non-numeric pid makes the holder unnamed rather than trusted"
++: > "$LOCK"; hold_raw 2; sleep 0.3
++printf 'pid=999999 lane=SENTINEL-LANE role=SENTINEL-ROLE since=SENTINEL-SINCE cmd=SENTINEL-CMD\n' > "$LOCK"
++FLEET_BD_LOCK_WAIT=1 shim show y >"$ROOT/o14b" 2>"$ROOT/e14b"
++hasnt "$ROOT/e14b" "SENTINEL" "14c a numeric-but-bogus pid with planted text still leaks nothing"
++has "$ROOT/e14b" "unregistered" "14d the planted lane name is replaced by 'unregistered'"
++has "$ROOT/e14b" "unrecognised" "14e the planted operation is replaced by 'unrecognised'"
++has "$ROOT/e14b" "pid is gone" "14f and the bogus pid is called out as stale"
 +release
 +
 +echo "9. the lock fd is NOT inherited by bd's children: a grandchild cannot keep the fleet locked after its parent exits"
