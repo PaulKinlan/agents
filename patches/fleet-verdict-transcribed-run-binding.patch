@@ -1,8 +1,8 @@
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index 5b96d61..2ac10c8 100755
+index 5b96d61..cbc5cbc 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
-@@ -275,7 +275,36 @@ flm_select() {
+@@ -275,7 +275,10 @@ flm_select() {
      c_after=$(sed -E "s/^[[:space:]*#_]*(${VPFX})?${VTOK}([[:space:]]*(${VPFX})?${VTOK})*[[:space:]*#_]*//I" <<<"$v_line" | tr -d '`*' | xargs)
      c_raw="$c_after"
      c_verdict=""
@@ -10,37 +10,11 @@ index 5b96d61..2ac10c8 100755
 +    # Parse reviewer run ID: disambiguate against quoted scout or foreign UUIDs.
 +    # Single UUID is accepted directly; multiple UUIDs require an unambiguous reviewer cue;
 +    # ambiguous or competing citations leave c_run_id empty so report-only unknown is preserved.
-+    local _c_uuids _c_count _c_rev _c_rcount _c_vline
-+    _c_uuids=$(grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" <<<"$c_text" | tr '[:upper:]' '[:lower:]')
-+    _c_count=$(grep -c . <<<"$_c_uuids" 2>/dev/null || true)
-+    c_run_id=""
-+    if [ "$_c_count" -eq 1 ]; then
-+      c_run_id="$_c_uuids"
-+    elif [ "$_c_count" -gt 1 ]; then
-+      # Partition by clause delimiters (newline, semicolon, pipe, "and") so runs in distinct clauses
-+      # do not greedily conflate across foreign UUIDs
-+      _c_rev=$(sed -E "s/([;\n|]|\band\b)/\n/g" <<<"$c_text" \
-+        | grep -iE "\b(reviewer|review)\b" \
-+        | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" \
-+        | tr '[:upper:]' '[:lower:]' \
-+        | sort -u)
-+      _c_rcount=$(grep -c . <<<"$_c_rev" 2>/dev/null || true)
-+      if [ "$_c_rcount" -eq 1 ]; then
-+        c_run_id="$_c_rev"
-+      elif [ "$_c_rcount" -eq 0 ] && [ -n "$v_line" ]; then
-+        _c_vline=$(grep -oE "\([[:space:]]*run[[:space:]]+[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[[:space:]]*\)" <<<"$v_line" \
-+          | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" \
-+          | tr '[:upper:]' '[:lower:]' \
-+          | sort -u)
-+        if [ "$(grep -c . <<<"$_c_vline" 2>/dev/null || true)" -eq 1 ]; then
-+          c_run_id="$_c_vline"
-+        fi
-+      fi
-+    fi
++    c_run_id=$(fleet_verdict_extract_run_id "$c_text" "$v_line")
  
      # Reject conflicting verdict tokens (e.g. PASS: FAIL, PASS/FAIL, FAIL: PASS) - a comment that argues with
      # itself is not a clearance, whatever else it says. Matched on a lowercased copy: the shared vocabulary is
-@@ -654,7 +683,7 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+@@ -654,7 +657,7 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
    # class and the reason are carried out to the PASS line and the JSON, where a merger or coordinator
    # can see WHICH clearance rests on a claim rather than an artefact, and nothing is blocked.
    if [ -n "$src_who" ] && [ "$rev_who" = "$src_who" ] && [ "$rev_independence" = "cross-family" ]; then
@@ -50,7 +24,7 @@ index 5b96d61..2ac10c8 100755
        verified:*)   rev_independence="transcribed-verified";   rev_run_reason="${_trs#verified: }" ;;
        unverified:*) rev_independence="transcribed-unverified"; rev_run_reason="${_trs#unverified: }" ;;
 diff --git a/bin/fleet-verdict-words.sh b/bin/fleet-verdict-words.sh
-index b3f7bb9..880e706 100644
+index b3f7bb9..29a1087 100644
 --- a/bin/fleet-verdict-words.sh
 +++ b/bin/fleet-verdict-words.sh
 @@ -109,7 +109,7 @@ fleet_verdict_model_family() { printf '%s' "${1:-}" | cut -d/ -f1 | tr '[:upper:
@@ -88,7 +62,7 @@ index b3f7bb9..880e706 100644
    [ -n "$rid" ] || return 0
    for r in ${root:-${TMPDIR:-/tmp}}/pi-subagents-*/async-subagent-runs; do
      if [ -d "$r/$rid" ]; then d="$r/$rid"; break; fi
-@@ -172,6 +171,21 @@ fleet_verdict_transcribed_run_status() {
+@@ -172,6 +171,72 @@ fleet_verdict_transcribed_run_status() {
      printf 'unverified: run %s records model %s, which is not the named reviewer model %s' "$rid" "${model:-<none>}" "$named"
      return 0
    fi
@@ -110,8 +84,59 @@ index b3f7bb9..880e706 100644
    printf 'verified: run %s is a completed reviewer run on %s' "$rid" "${model:-<unknown model>}"
  }
  
++
++# fleet_verdict_extract_run_id <comment-text> [verdict-line]
++# Extract an unambiguous reviewer subagent run UUID from comment text and verdict line.
++# - If verdict line carries (run <uuid>), that cue is authoritative.
++# - If a single UUID exists in comment text, it is accepted directly.
++# - If multiple UUIDs exist, only a UUID unambiguously cued as the reviewer run is accepted.
++# - Competing or ambiguous reviewer citations leave output empty (unknown).
++fleet_verdict_extract_run_id() {
++  local c_text="${1:-}" v_line="${2:-}"
++  local _c_uuids _c_count _c_vline _c_rev _c_rcount
++
++  # If the verdict line itself carries (run <uuid>), that cue is authoritative
++  if [ -n "$v_line" ]; then
++    _c_vline=$(grep -oE "\([[:space:]]*run[[:space:]]+[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[[:space:]]*\)" <<<"$v_line" \
++      | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" \
++      | tr "[:upper:]" "[:lower:]" \
++      | sort -u)
++    if [ "$(grep -c . <<<"$_c_vline" 2>/dev/null || true)" -eq 1 ]; then
++      printf "%s" "$_c_vline"
++      return 0
++    fi
++  fi
++
++  local full_text="$c_text"$'
++'"$v_line"
++  _c_uuids=$(grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" <<<"$full_text" | tr "[:upper:]" "[:lower:]" | sort -u)
++  _c_count=$(grep -c . <<<"$_c_uuids" 2>/dev/null || true)
++  [ "$_c_count" -gt 0 ] || return 0
++
++  if [ "$_c_count" -eq 1 ]; then
++    printf "%s" "$_c_uuids"
++    return 0
++  fi
++
++  # In prose with multiple UUIDs, extract UUIDs cued explicitly as the reviewer run.
++  # Plural "reviewer runs" or multiple UUIDs in reviewer context is competing/ambiguous.
++  if ! grep -iqE "(^|[^a-zA-Z0-9_-])(reviewer|review)[[:space:]]+runs([^a-zA-Z0-9_-]|$)" <<<"$full_text"; then
++    local cue_re="(^|[^a-zA-Z0-9_-])(independent[[:space:]]+)?review(er)?([[:space:]]+(subagent|agent|pi))?([[:space:]]*\([[:space:]]*run|[[:space:]]+run([[:space:]]+id)?|[[:space:]]*:)[:[:space:]]*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
++    _c_rev=$(grep -ioE "$cue_re" <<<"$full_text" \
++      | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" \
++      | tr "[:upper:]" "[:lower:]" \
++      | sort -u)
++    _c_rcount=$(grep -c . <<<"$_c_rev" 2>/dev/null || true)
++    if [ "$_c_rcount" -eq 1 ]; then
++      printf "%s" "$_c_rev"
++      return 0
++    fi
++  fi
++
++  return 0
++}
 diff --git a/tests/fleet-verdict-transcribed-run.test.sh b/tests/fleet-verdict-transcribed-run.test.sh
-index 3be2fb9..da75601 100644
+index 3be2fb9..bd33a51 100644
 --- a/tests/fleet-verdict-transcribed-run.test.sh
 +++ b/tests/fleet-verdict-transcribed-run.test.sh
 @@ -28,7 +28,7 @@ ckempty() {  # a case whose correct answer is SILENCE: ckempty <name> <actual>
@@ -133,7 +158,7 @@ index 3be2fb9..da75601 100644
  }
  
  RID=ffc6fb50-d7de-4f8f-a290-21a818b4df13
-@@ -112,6 +115,24 @@ mkrun "$root" "bbbbbbbb-1111-2222-3333-444444444444" reviewer "antigravity/gemin
+@@ -112,6 +115,45 @@ mkrun "$root" "bbbbbbbb-1111-2222-3333-444444444444" reviewer "antigravity/gemin
  ck "10 a run with no completion record does not verify" "unverified:" \
    "$(fleet_verdict_transcribed_run_status "bbbbbbbb-1111-2222-3333-444444444444" "antigravity/gemini-3.8-flash" "$root")"
  
@@ -154,6 +179,27 @@ index 3be2fb9..da75601 100644
 +  "$(fleet_verdict_transcribed_run_status "$RID_PREFIX" "antigravity/gemini-3.8-flash" "$root" "tk-1" "fleet/different")"
 +ck "13b run referencing tk-10 verifies claim for tk-10" "verified" \
 +  "$(fleet_verdict_transcribed_run_status "$RID_PREFIX" "antigravity/gemini-3.8-flash" "$root" "tk-10" "fleet/other")"
++
++
++# 14. Run ID extraction: single UUID extracted directly
++ck "14 single UUID extracted directly" "11111111-aaaa-bbbb-cccc-000000000001" \
++  "$(fleet_verdict_extract_run_id "Review run 11111111-aaaa-bbbb-cccc-000000000001 complete")"
++
++# 15. Run ID extraction: competing reviewer runs joined by and leaves run_id empty
++ckempty "15 competing reviewer runs joined by and leaves run_id empty" \
++  "$(fleet_verdict_extract_run_id "verified by reviewer runs 11111111-aaaa-bbbb-cccc-000000000001 and 22222222-aaaa-bbbb-cccc-000000000002")"
++
++# 16. Run ID extraction: quoted prior run leaves run_id empty (no foreign pick)
++ckempty "16 quoted prior run alongside another run leaves run_id empty" \
++  "$(fleet_verdict_extract_run_id "the review quoted prior run 11111111-aaaa-bbbb-cccc-000000000001 and run 22222222-aaaa-bbbb-cccc-000000000002")"
++
++# 17. Run ID extraction: scout run alongside reviewer run extracts reviewer run
++ck "17 scout run alongside reviewer run extracts reviewer run" "22222222-aaaa-bbbb-cccc-000000000002" \
++  "$(fleet_verdict_extract_run_id "Scout run 11111111-aaaa-bbbb-cccc-000000000001, reviewer run 22222222-aaaa-bbbb-cccc-000000000002")"
++
++# 18. Run ID extraction: inline verdict line cue overrides quoted foreign runs in body
++ck "18 inline verdict line cue overrides quoted foreign run" "22222222-aaaa-bbbb-cccc-000000000002" \
++  "$(fleet_verdict_extract_run_id "quoted prior run 11111111-aaaa-bbbb-cccc-000000000001" "Independent Reviewer: openai-codex/gpt-6-sol (run 22222222-aaaa-bbbb-cccc-000000000002) -> VERDICT: PASS")"
 +
  echo
  echo "$pass passed, $fail failed"
