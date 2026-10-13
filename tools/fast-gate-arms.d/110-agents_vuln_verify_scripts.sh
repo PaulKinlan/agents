@@ -32,6 +32,20 @@ fast_gate_arms_110_agents_vuln_verify_scripts() {
       # exclusion suite, which exercises this script directly.
       mapped="$mapped tests/test_modern_web.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py"
       ;;
+    agents/modern-web/scripts/guides_index.json)
+      # agents-l80j: the bundled guidance catalogue this station loads BY DEFAULT
+      # (scan_modern_web.py:60 `BUNDLED_GUIDES_INDEX = SCRIPT_DIR / "guides_index.json"`), so it is the
+      # station's data, not prose: tests/test_modern_web.py loads the catalogue and asserts its
+      # contents (:515-519, :568-575) and rejects malformed and truncated copies (:534, :550), and
+      # tests/test_factory_core.py:1029-1050 loads the same catalogue to assert the station covers all
+      # 146 official guides - both can FAIL on this file's content, which is why it is mapped rather
+      # than ignored. It belongs next to the station's own arm because it is that station's default
+      # input. Measured cost of this arm when the file changes: tests/test_modern_web.py 1.0s (25
+      # tests) plus tests/test_factory_core.py 28.5s (42 tests, a whole-tree station suite) - paid
+      # only for a change to the catalogue, which is rare, and accepted because the whole-tree suite
+      # is the one that catches a lost guide.
+      mapped="$mapped tests/test_modern_web.py tests/test_factory_core.py"
+      ;;
     agents/deps-supply-chain/scripts/audit_deps.py)
       # agents-q0mt: emits candidate ids; the pre-pass exclusion suite exercises it too; pin resolution (agents-01qd).
       mapped="$mapped tests/test_audit_deps.py tests/test_prepass_exclusions.py tests/test_candidate_id_emission.py tests/test_station_trusted_tool_pins.py"
