@@ -1,0 +1,134 @@
+From 5052f442dc8db510ed881806400c7951685480a2 Mon Sep 17 00:00:00 2001
+From: fleet-contributor <fleet-contributor@exe.xyz>
+Date: Mon, 12 Oct 2026 16:09:24 +0000
+Subject: [PATCH] fix(bd shim): say WHICH condition 'no issue found matching'
+ observed (bead-visibility)
+
+A lane is told to claim its bead first, so the first bd command in a fresh lane is a lookup of a bead
+someone else just created - and that lookup can fail with 'no issue found matching <id>' in TWO worlds whose
+remedies are opposite:
+
+  (a) THE DATABASE RESOLVED IS THE WRONG ONE. per-worktree-decoy: a per-worktree .beads/embeddeddolt becomes
+      authoritative while the shared ledger is not consulted. The bead exists; the lane is reading a
+      different, empty ledger. Pushing from there would publish that ledger over the shared one.
+  (b) THE LEDGER IS THE RIGHT ONE AND SIMPLY DOES NOT HOLD THE BEAD YET. Beads are written on the hub and
+      reach a project VM after a pull, so a bead created seconds ago may not have arrived.
+
+Measured on a project VM, 2026-10-12, because the failure text identifies the path: the message does NOT come
+from `show` (which says 'Issue <id> not found' with a history hint) but from the paths a lane uses to CLAIM
+and annotate - `bd update <id> --claim`, `bd comments <id>`, `bd close <id>`. A fresh LINKED worktree does not
+by itself produce it: bd resolves through the SHARED GIT COMMON DIR to the canonical checkout (bd info: 494
+issues, nothing created locally). An independent clone fails differently and loudly ('no beads database
+found' plus a hint). So the ambiguous text comes only from a database that is visible, authoritative AND
+lacking the bead - which is exactly (a) or (b).
+
+WHAT THIS PATCH DOES: for the six subcommands a lane can run first that emit this text (show, comments,
+update, close, dep, delete), the shim captures stderr into a temp file, re-emits it verbatim, and - only when
+the call FAILED and the text contains 'no issue found matching' - appends where bd is actually reading from
+plus the remedy for each world. The canonical path is DERIVED (git rev-parse --git-common-dir -> the checkout
+that owns it), so the annotation is correct in the journal and on the hub too, not just in ~/agents-factory.
+
+WHAT IT DELIBERATELY DOES NOT DO: nothing is fetched, repaired or re-resolved; the exit status is passed
+through untouched; stderr is only captured for those six lookups, so a pull or push keeps streaming its
+progress; and it does not touch the guards other beads own.
+
+RE-VERIFICATION: rc fidelity identical to the unpatched shim on four shapes (full output 0; piped-to-head
+141; failing lookup 1; failing claim 1); annotation silent on success and for `list`; only mktemp+cat cost,
+5.0 ms measured, against bd's own 0.6-2.8 s per call.
+---
+ bin/bd | 71 +++++++++++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 63 insertions(+), 8 deletions(-)
+
+diff --git a/bin/bd b/bin/bd
+index 8c44e8f..60d5c9a 100755
+--- a/bin/bd
++++ b/bin/bd
+@@ -33,6 +33,56 @@ if [ "${1:-}" = "comment" ]; then
+   done
+ fi
+ 
++# ---------------------------------------------------------------- bead-visibility ------------------------------------------------
++# 'no issue found matching <id>' IS AMBIGUOUS, AND IT IS THE FIRST THING A NEW LANE SEES.
++#
++# A lane is told to claim its bead first, so the very first bd command in a fresh lane is a lookup of a
++# bead someone else just created. That lookup can fail with 'no issue found matching <id>' in TWO very
++# different worlds, and the text does not say which:
++#   (a) THIS WORKTREE/CWD RESOLVED TO THE WRONG DATABASE (per-worktree-decoy: a per-worktree .beads/embeddeddolt
++#       is authoritative while the shared ledger is not consulted) - the bead exists, you are looking at a
++#       different, empty ledger; or
++#   (b) THE LEDGER IS THE RIGHT ONE AND SIMPLY DOES NOT HAVE THE BEAD YET - the hub writes beads and this
++#       VM sees them after a pull, so a bead created seconds ago may not have arrived.
++# The induced behaviour is worse than the failure: a lane concludes the bead is gone, then creates a
++# duplicate or reports it missing, and both look like new facts afterwards.
++#
++# WHAT THIS DOES, AND WHAT IT DELIBERATELY DOES NOT: it only ANNOTATES - the exit status is passed through
++# untouched and nothing is fetched, repaired or re-resolved. The annotation reports the ONE fact that
++# separates the two worlds, which is where bd is actually reading from (`bd where`), plus the remedy for
++# each. Measured 2026-10-12 on a linked worktree: the resolution normally goes through the SHARED GIT
++# COMMON DIR to <checkout>/.beads, which is why 30+ worktrees share one ledger; a canonical path in this
++# message means the resolution is fine and the bead has not arrived; anything else means (a).
++annotate_missing_bead() {  # rc, stderr-file, "$@"
++  local rc=$1 errfile=$2; shift 2
++  # Only lookups that a lane runs FIRST, and only on failure: capturing stderr on the hot path would delay
++  # a pull's progress output, and there is nothing to annotate on a successful call.
++  case "${1:-}" in show|comments|update|close|dep|delete) ;; *) return 0 ;; esac
++  [ "$rc" -eq 0 ] && return 0
++  grep -q "no issue found matching" "$errfile" 2>/dev/null || return 0
++  # Where SHOULD it have resolved? Derived, not hardcoded: worktrees share a git COMMON dir, which is the
++  # whole reason 30+ of them read one ledger, so the canonical .beads is the .beads of the checkout that
++  # owns that common dir. Falls back to the conventional path when cwd is not in a repo at all.
++  local where common canonical
++  where="$("$real" where 2>/dev/null | sed -n '1p' || true)"
++  common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
++  canonical=""
++  if [ -n "$common" ]; then canonical="$(cd "$common/.." 2>/dev/null && pwd)/.beads"; fi
++  [ -n "$canonical" ] || canonical="${FLEET_CANONICAL_BEADS:-$HOME/agents-factory/.beads}"
++  {
++    echo "bd: THIS LOOKUP FAILED IN A WAY THAT HAS TWO MEANINGS (bead-visibility) - the bead may exist and be invisible:"
++    echo "bd:   resolved database: ${where:-<unknown>}"
++    if [ "${where:-}" = "$canonical" ]; then
++      echo "bd:   that IS the shared ledger, so the bead has probably not ARRIVED yet: run 'bd dolt pull' and retry."
++    else
++      echo "bd:   that is NOT the shared ledger (expected $canonical). This checkout is reading a different"
++      echo "bd:   database - do NOT push from here (a push publishes the whole DB) and do not create a second"
++      echo "bd:   bead; see per-worktree-decoy, then re-resolve before writing."
++    fi
++    echo "bd:   'bd where' shows this at any time; the ledger's issue count is 'bd info'."
++  } >&2
++}
++
+ check_push_failure() {
+   local rc=$1
+   if [ "$rc" -ne 0 ] && [ "$#" -ge 3 ] && [ "$2" = "dolt" ] && [ "$3" = "push" ]; then
+@@ -208,15 +258,20 @@ guard_readonly_destruction() {
+ 
+ guard_readonly_destruction "$@"
+ 
++# Capture stderr ONLY for the lookups that can print the ambiguous message (see annotate_missing_bead):
++# everything else keeps writing straight through, so a pull's progress is not buffered.
++errfile=""
++case "${1:-}" in show|comments|update|close|dep|delete) errfile="$(mktemp "${TMPDIR:-/tmp}/bd-err.XXXXXX")" ;; esac
++
+ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+-  "$real" "$@"
+-  rc=$?
+-  check_push_failure "$rc" "$@"
+-  exit "$rc"
++  if [ -n "$errfile" ]; then "$real" "$@" 2>"$errfile" ; rc=$?; cat "$errfile" >&2
++  else "$real" "$@" ; rc=$?; fi
++else
++  export FLEET_BD_LOCKED=1
++  if [ -n "$errfile" ]; then flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@" 2>"$errfile" ; rc=$?; cat "$errfile" >&2
++  else flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@" ; rc=$?; fi
+ fi
+-
+-export FLEET_BD_LOCKED=1
+-flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
+-rc=$?
++if [ "$rc" -ne 0 ] && [ -n "$errfile" ]; then annotate_missing_bead "$rc" "$errfile" "$@"; fi
++[ -n "$errfile" ] && rm -f "$errfile"
+ check_push_failure "$rc" "$@"
+ exit "$rc"
+-- 
+2.43.0
+

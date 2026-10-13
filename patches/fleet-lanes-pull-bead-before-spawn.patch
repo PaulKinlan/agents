@@ -1,0 +1,63 @@
+From 47f717e13c96106e0634b9e2b03aa956eb7ea74b Mon Sep 17 00:00:00 2001
+From: fleet-contributor <fleet-contributor@exe.xyz>
+Date: Mon, 12 Oct 2026 16:13:22 +0000
+Subject: [PATCH] fix(lanes): make the bead visible before the lane's first
+ command claims it (bead-visibility)
+
+A new lane's first act is to claim the bead it was handed, and that claim can fail with 'no issue found
+matching <id>' when the bead has not reached this VM's ledger yet - text that is indistinguishable from the
+bead not existing. The lane's natural next step is to create a duplicate or report the bead missing, and both
+look like new facts afterwards.
+
+Measured (bead-visibility, on a project VM 2026-10-12): the text comes from the CLAIM path (`bd update <id>
+--claim`, `bd comments <id>`, `bd close <id>`) rather than from `show`; a fresh LINKED worktree resolves
+through the shared git common dir to the canonical ledger (bd info: 494 issues, nothing created locally), so
+visibility is a property of BEAD ARRIVAL, not of the worktree. That makes the spawn path the layer where the
+condition happens, and the bead id is already known there.
+
+THIS CHANGE: at spawn, if the bead is not visible, pull once and retry; if it is STILL not visible, say so
+loudly rather than letting the lane discover it as 'missing'. The normal-case cost is one `bd show`; the pull
+happens only when the bead is not visible. The probe runs in the project checkout (`repo_dir`), so it reads
+the ledger the lane will read, not the journal's.
+
+RELATED, AND DELIBERATELY NOT DUPLICATED: the fleet bd shim patch (patches/fleet-bd-annotate-missing-bead)
+makes the FAILURE say which world it is in, for every caller and every path, including the ones this spawn
+hook cannot see. This change removes the cause for the spawned-lane case; the shim patch reports the
+condition wherever it still occurs. per-worktree-decoy owns the third part - the guard against a per-worktree
+database becoming authoritative.
+---
+ remote/lanes.sh | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/remote/lanes.sh b/remote/lanes.sh
+index be80962..9888306 100755
+--- a/remote/lanes.sh
++++ b/remote/lanes.sh
+@@ -238,6 +238,24 @@ case $c in
+     for l in "${lanes[@]}"; do start_lane "$l"; done ;;
+   spawn)
+     name=${1:?lane name}; model=${2:-}; bead=${3:-}; role=${4:-implementer}   # empty model = role rotation (pick-model.sh)
++
++    # bead-visibility: MAKE THE BEAD VISIBLE BEFORE THE LANE'S FIRST COMMAND NEEDS IT. A new lane's first act is
++    # to claim the bead it was handed - that is the fleet's rule - and a bead that has not reached this VM's
++    # ledger yet fails with "no issue found matching <id>", which is INDISTINGUISHABLE from the bead not
++    # existing. The lane then creates a duplicate or reports the bead missing, and both look like new facts
++    # afterwards. The id is known HERE, and the fix belongs at the cause rather than in the error text: pull
++    # once, and if it is STILL invisible say so, because that is a different problem (a wrong id, or the
++    # wrong ledger) and the lane must not be told the bead is missing. Measured (bead-visibility): the failing
++    # text comes from the claim path, and a fresh linked worktree resolves to the canonical ledger, so
++    # visibility is a property of bead arrival rather than of the worktree. Cost in the normal case is one
++    # `bd show`; the pull happens only when the bead is not visible.
++    if [ -n "$bead" ]; then
++      if ! ( cd "$(repo_dir)" && bd show "$bead" >/dev/null 2>&1 ); then
++        ( cd "$(repo_dir)" && bd dolt pull >/dev/null 2>&1 ) || true
++        ( cd "$(repo_dir)" && bd show "$bead" >/dev/null 2>&1 ) || \
++          echo "lanes: WARNING (bead-visibility): bead $bead is still not visible to this VM's ledger after a pull - do NOT tell the lane it is missing; check the id, and see 'bd where'" >&2
++      fi
++    fi
+     [[ $name =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "bad lane name" >&2; exit 1; }
+     [[ $name == coord || $name == merger ]] && { echo "reserved lane name" >&2; exit 1; }
+     win_exists "$name" && { echo "$name already running"; exit 0; }
+-- 
+2.43.0
+
