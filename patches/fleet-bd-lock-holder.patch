@@ -1,4 +1,4 @@
-From a63c90c99195502abf5ec784cd2cbfcca1c20055 Mon Sep 17 00:00:00 2001
+From 4e158bff690a58079cb8ec5386904431487e0fde Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
@@ -89,17 +89,43 @@ Evidence the pin is load-bearing: against a REORDERED copy of the shim (lookup f
 nine of its places - the four outcome pairs plus 15d - while a suite that only checked outcomes against an
 unplanted registry would have passed that mutation. Suite is 66/66 here, 28/38 against the shim as deployed,
 64/2 against the fd-closing revision (the two are 9a/9b).
+
+--- P2 FIX (agents-6e77, found by review): THE LANE FIELD IS GONE, because nothing can vouch for it ---
+
+The reviewer's sentence: the lane registry is 0755 exedev-owned and IS NOT AN INDEPENDENT TRUST BOUNDARY. The
+previous revision accepted a lane name only when ~/.fleet/lanes/<name>.model existed - but EVERY LANE CAN
+WRITE THAT DIRECTORY, so a same-uid caller creates the file, sets FLEET_LANE, and chosen text reaches the
+shared record and from there another lane's stderr. That is the agents-zoch class again, one layer out: the
+name was validated against a thing the attacker can write.
+
+The repair is NOT to validate harder against a writable directory (that polishes the bypass) but to REMOVE THE
+FIELD. On a shared-uid VM nothing proves a name: the registry is writable, FLEET_LANE is environment, and a
+process names itself. So fleet_bd_lock_lane is deleted, the record carries pid/role/since/cmd, and the report
+describes the holder by role (closed vocabulary), pid and age (integers), the operation (closed vocabulary)
+and its descendant process names (same vocabulary). Anything an attacker writes into the shared record is now
+IGNORED rather than filtered. The lane field was the only field that could carry attacker-chosen text -
+verified by inspecting every other one: pid/since are integers, role and cmd are closed vocabularies, and
+comm is already filtered to a vocabulary (so a descendant that renames its executable reports as 'other',
+which is now case 15e).
+
+Red first: the new case 15 is the reviewer's probe - create the registry file, set FLEET_LANE, and check the
+record AND another lane's stderr - and against the revision before this one it FAILS in exactly those
+assertions (15a/15b/15c of 6 failures, 57 passed), while the deployed shim gives 32 passed / 31 failed. Also
+in this revision: the glob/order property pinned last round is MOOT, because the field it protected no longer
+exists - removing the field answers that class more strongly than a pin could, and it is stated in the
+write-up rather than silently dropped. The P1 fix is unaffected: the SIGKILL probe still reports rc=75 with
+the first bd still writing. Suite 63/63.
 ---
- bin/bd                       | 309 ++++++++++++++++++++++++++++++++++-
- tests/bd-lock-holder.test.sh | 297 +++++++++++++++++++++++++++++++++
- 2 files changed, 605 insertions(+), 1 deletion(-)
+ bin/bd                       | 288 ++++++++++++++++++++++++++++++++-
+ tests/bd-lock-holder.test.sh | 301 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 588 insertions(+), 1 deletion(-)
  create mode 100644 tests/bd-lock-holder.test.sh
 
 diff --git a/bin/bd b/bin/bd
-index 723856f..3c8e909 100755
+index 723856f..311687e 100755
 --- a/bin/bd
 +++ b/bin/bd
-@@ -246,6 +246,286 @@ guard_worktree_beads_decoy() {
+@@ -246,6 +246,265 @@ guard_worktree_beads_decoy() {
  
  guard_worktree_beads_decoy "$@"
  
@@ -218,30 +244,6 @@ index 723856f..3c8e909 100755
 +  esac
 +}
 +
-+fleet_bd_lock_lane() {
-+  # A LANE NAME MUST BE ONE THE FLEET ITSELF REGISTERED ON THIS VM (~/.fleet/lanes/<name>.model|.conf).
-+  # FLEET_LANE is environment and the record is writable by anyone, so the name is unvalidated text until
-+  # the fleet's own registry vouches for it; measured before this check: lane=SENTINEL-PRIVATE-PAYLOAD
-+  # reached both the shared record and another lane's stderr.
-+  #
-+  # THE CHARACTER CLASS IS CHECKED FIRST, AND THE ORDER IS LOAD-BEARING. `..` is resolved by the KERNEL
-+  # inside an otherwise-quoted path, so a name like `../../etc/passwd` would be vouched for by a file OUTSIDE
-+  # the registry; and `*` is a legal filename character even though it is not glob-expanded inside quotes, so
-+  # `impl-*` would be vouched for by a file literally named `impl-*.model`. Measured against a reordered copy
-+  # of this function (lookup first) with those exact files planted: tests/bd-lock-holder.test.sh case 15 goes
-+  # red in all nine of its places - the four outcome pairs and the order assertion together.
-+  local name="$1"
-+  case "$name" in
-+    ""|*[!A-Za-z0-9._-]*) printf 'unregistered'; return 0 ;;
-+  esac
-+  [ "${#name}" -le 64 ] || { printf 'unregistered'; return 0; }
-+  if [ -e "$HOME/.fleet/lanes/$name.model" ] || [ -e "$HOME/.fleet/lanes/$name.conf" ]; then
-+    printf '%s' "$name"
-+  else
-+    printf 'unregistered'
-+  fi
-+}
-+
 +fleet_bd_lock_procname() {
 +  # A PROCESS NAME, FROM A FIXED VOCABULARY - never its argument vector. comm can be set to arbitrary
 +  # short text by any program, so it is filtered to the characters a program name uses and then matched
@@ -281,9 +283,8 @@ index 723856f..3c8e909 100755
 +  {
 +    # cmd LAST: it is the only field that can contain a space (`dolt push`), and fleet_bd_lock_field reads
 +    # it to end-of-line.
-+    printf 'pid=%s lane=%s role=%s since=%s cmd=%s\n' \
++    printf 'pid=%s role=%s since=%s cmd=%s\n' \
 +      "$(fleet_bd_lock_int "$$" || printf '0')" \
-+      "$(fleet_bd_lock_lane "${FLEET_LANE:-}")" \
 +      "$(fleet_bd_lock_role "${FLEET_ROLE:-}")" \
 +      "$(fleet_bd_lock_int "${fleet_bd_now:-0}" || printf '0')" \
 +      "$(fleet_bd_lock_shape "$@")"
@@ -313,7 +314,7 @@ index 723856f..3c8e909 100755
 +fleet_bd_lock_report() {
 +  # $1 lock file, $2 seconds held, $3 mode: wait|timeout, $4 quiet_holder=1 to skip the holder block
 +  # (the timeout of an invocation that already reported the holder must not repeat all of it)
-+  local lock="$1" held="$2" mode="$3" rec pid lane role since cmd human kids
++  local lock="$1" held="$2" mode="$3" rec pid role since cmd human kids
 +  local quiet_holder="${4:-}"
 +  rec="$(head -c 400 "$lock" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
 +  human="$((held / 60))m$((held % 60))s"
@@ -333,11 +334,15 @@ index 723856f..3c8e909 100755
 +  # the difference between a diagnostic and an injection channel (agents-zoch).
 +  pid="$(fleet_bd_lock_int "$(fleet_bd_lock_field "$rec" pid)")" || pid=""
 +  if [ -n "$pid" ]; then
-+    lane="$(fleet_bd_lock_lane "$(fleet_bd_lock_field "$rec" lane)")"
 +    role="$(fleet_bd_lock_role "$(fleet_bd_lock_field "$rec" role)")"
 +    since="$(fleet_bd_lock_int "$(fleet_bd_lock_field "$rec" since)")" || since=""
 +    cmd="$(fleet_bd_lock_cmd "$(fleet_bd_lock_field "$rec" cmd)")"
-+    echo "bd:   holder: lane=${lane} role=${role} pid=$pid${since:+ since $(date -d "@$since" -u +%H:%M:%SZ 2>/dev/null || printf '?')}" >&2
++    # NO LANE NAME IS CLAIMED (agents-6e77). On a shared-uid VM there is no trust boundary for one: the lane
++    # registry is writable by every lane, FLEET_LANE is environment, and a process names itself - so a lane
++    # name would be attacker-chosen text arriving in ANOTHER lane's log, which is the class agents-zoch
++    # closed. Everything printed here is a closed vocabulary (role, operation, process names) or an integer
++    # (pid, age), so nothing an attacker writes into the shared file can carry text.
++    echo "bd:   holder: role=${role} pid=$pid${since:+ since $(date -d "@$since" -u +%H:%M:%SZ 2>/dev/null || printf '?')}" >&2
 +    echo "bd:   running: bd ${cmd}   (operation only: arguments can hold bead text - agents-zoch)" >&2
 +    if [ -d "/proc/$pid" ]; then
 +      kids="$(fleet_bd_lock_descendants "$pid")"
@@ -386,7 +391,7 @@ index 723856f..3c8e909 100755
  if [ -n "${FLEET_BD_LOCKED:-}" ]; then
    "$real" "$@"
    rc=$?
-@@ -254,7 +534,34 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+@@ -254,7 +513,34 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
  fi
  
  export FLEET_BD_LOCKED=1
@@ -424,10 +429,10 @@ index 723856f..3c8e909 100755
  exit "$rc"
 diff --git a/tests/bd-lock-holder.test.sh b/tests/bd-lock-holder.test.sh
 new file mode 100644
-index 0000000..a6706d4
+index 0000000..4f7e966
 --- /dev/null
 +++ b/tests/bd-lock-holder.test.sh
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,301 @@
 +#!/usr/bin/env bash
 +# tests/bd-lock-holder.test.sh — bin/bd: a contended lock NAMES ITS HOLDER, and the wait is bounded (agents-elu6).
 +#
@@ -471,15 +476,21 @@ index 0000000..a6706d4
 +trap cleanup EXIT
 +T="$ROOT/home"; mkdir -p "$T/.local/bin" "$T/.fleet"
 +LOCK="$T/.fleet/bd.lock"
-+# The shim only reports a lane name that THIS VM's registry vouches for (~/.fleet/lanes/<name>.model), so a
-+# hermetic run registers its own lanes. That is the property cases 13-14 attack.
-+mkdir -p "$T/.fleet/lanes"
-+for l in impl-other impl-secret impl-ozmt probe-A probe-B probe-C; do : > "$T/.fleet/lanes/$l.model"; done
++# NO LANE NAME IS CLAIMED ANYWHERE (agents-6e77). An earlier revision accepted a lane name that the VM's
++# lane registry vouched for - but THAT REGISTRY IS WRITABLE BY EVERY LANE, so it is not a trust boundary, and
++# a same-uid caller could put chosen text into the shared record and from there into another lane's stderr.
++# On a shared-uid VM nothing proves a name: the registry is writable, FLEET_LANE is environment, and a process
++# names itself. So every field here is a CLOSED vocabulary (role, operation, process names) or an INTEGER
++# (pid, age), and nothing an attacker writes into the shared file can carry text. Cases 13-15 attack that
++# from the environment, from a planted record, and through a registry file a same-uid caller creates.
 +
 +# stub real bd: echo its argv, optionally spawn a git-shaped child and sleep (the shape of the real latency)
 +cat > "$T/.local/bin/bd" <<'STUB'
 +#!/usr/bin/env bash
 +echo "REAL-BD:$*"
++if [ "${STUB_SECRET_BIN:-0}" -gt 0 ]; then
++  "$SECRET_BIN" & wait $!          # a child whose EXECUTABLE NAME is attacker-chosen
++fi
 +if [ "${STUB_SLEEP:-0}" -gt 0 ]; then
 +  if [ "${STUB_SECRET_ARGV:-0}" -gt 0 ]; then
 +    ( exec -a "SENTINEL-PRIVATE-PAYLOAD" sleep "$STUB_SLEEP" ) &
@@ -520,7 +531,10 @@ index 0000000..a6706d4
 +eq "$out" "REAL-BD:version" "2a the call ran after the wait"
 +eq "$rc" "0" "2b exit 0"
 +has "$ROOT/e2" "WAITING 0m0s" "2c the report is immediate, not after a threshold"
-+has "$ROOT/e2" "lane=impl-other" "2d the holder's LANE is named"
++has "$ROOT/e2" "role=implementer" "2d the holder's ROLE is named"
++grep -q -- "lane" "$ROOT/e2" \
++  && bad "2d2 no lane name is claimed (agents-6e77: no trust boundary for one on a shared-uid VM)" "found a lane field in the report" \
++  || ok "2d2 no lane name is claimed (agents-6e77: no trust boundary for one on a shared-uid VM)"
 +has "$ROOT/e2" "running: bd dolt push" "2e the holder's OPERATION is named (dolt push - the shape of the real incident)"
 +has "$ROOT/e2" "pid=" "2f a pid is named"
 +release
@@ -530,7 +544,7 @@ index 0000000..a6706d4
 +out=$(FLEET_BD_LOCK_WAIT=1 shim version 2>"$ROOT/e3"); rc=$?
 +eq "$rc" "75" "3a EX_TEMPFAIL (75), not an unexplained 1"
 +has "$ROOT/e3" "TIMEOUT (agents-elu6)" "3b it says TIMEOUT"
-+has "$ROOT/e3" "lane=impl-other" "3c the holder is still named"
++has "$ROOT/e3" "role=implementer" "3c the holder's role is still named"
 +has "$ROOT/e3" "THIS CALL DID NOT RUN" "3d it is explicit that nothing was attempted"
 +has "$ROOT/e3" "FLEET_BD_LOCK_WAIT" "3e the bound is overridable, and the message says how"
 +[ -n "$out" ] && bad "3f bd ran after a timeout" "$out" || ok "3f bd did not run"
@@ -548,10 +562,13 @@ index 0000000..a6706d4
 +
 +echo "5. a record naming a dead pid is reported as STALE, never as a live holder"
 +hold_raw 2; sleep 0.3
-+printf 'pid=999999 lane=impl-other role=reviewer since=%s cmd=dolt push\n' "$(date +%s)" > "$LOCK"
++printf 'pid=999999 lane=SENTINEL-LANE role=reviewer since=%s cmd=dolt push\n' "$(date +%s)" > "$LOCK"
 +FLEET_BD_LOCK_WAIT=1 shim version >"$ROOT/o5" 2>"$ROOT/e5"
-+has "$ROOT/e5" "lane=impl-other" "5a the stale record is shown"
++has "$ROOT/e5" "role=reviewer" "5a the stale record's role is shown (a closed vocabulary)"
 +has "$ROOT/e5" "pid is gone" "5b and called stale"
++grep -q -- "SENTINEL" "$ROOT/e5" \
++  && bad "5c a planted field that no longer exists is simply IGNORED, not echoed" "found a sentinel in the report" \
++  || ok "5c a planted field that no longer exists is simply IGNORED, not echoed"
 +release
 +
 +echo "6. the nested escape (FLEET_BD_LOCKED=1) still bypasses the lock entirely"
@@ -607,6 +624,9 @@ index 0000000..a6706d4
 +cat > "$T/.local/bin/bd" <<'STUB'
 +#!/usr/bin/env bash
 +echo "REAL-BD:$*"
++if [ "${STUB_SECRET_BIN:-0}" -gt 0 ]; then
++  "$SECRET_BIN" & wait $!          # a child whose EXECUTABLE NAME is attacker-chosen
++fi
 +if [ "${STUB_SLEEP:-0}" -gt 0 ]; then
 +  if [ "${STUB_SECRET_ARGV:-0}" -gt 0 ]; then
 +    ( exec -a "SENTINEL-PRIVATE-PAYLOAD" sleep "$STUB_SLEEP" ) &
@@ -652,14 +672,16 @@ index 0000000..a6706d4
 +has "$ROOT/e12" "sleep" "12b the descendant is named by process name"
 +release
 +
-+echo "13. ADVERSARIAL: the ENVIRONMENT cannot inject text through lane/role (they are validated, not copied)"
++echo "13. ADVERSARIAL: the ENVIRONMENT cannot inject text - the role is a closed vocabulary, the lane is not claimed"
 +: > "$LOCK"
 +STUB_SLEEP=2 HOME="$T" FLEET_LANE='SENTINEL-PRIVATE-PAYLOAD' FLEET_ROLE='SENTINEL-ROLE-PAYLOAD' \
 +  bash "$SHIM" comment issue-y SEKRIT & KIDS="$KIDS $!"
 +sleep 0.5
-+hasnt "$LOCK" "SENTINEL" "13a an unregistered lane name never reaches the shared record"
-+has "$LOCK" "lane=unregistered" "13b it is reported as the fixed word 'unregistered'"
-+has "$LOCK" "role=other" "13c a non-vocabulary role is reported as 'other'"
++hasnt "$LOCK" "SENTINEL" "13a an environment-supplied lane name never reaches the shared record"
++grep -q -- "lane" "$LOCK" \
++  && bad "13b the record has no lane field to inject through, whatever FLEET_LANE says" "found a lane field: $(cat "$LOCK")" \
++  || ok "13b the record has no lane field to inject through, whatever FLEET_LANE says"
++has "$LOCK" "role=other" "13c a non-vocabulary role is reported as the fixed word 'other'"
 +FLEET_BD_LOCK_WAIT=1 shim show y >"$ROOT/o13" 2>"$ROOT/e13"
 +hasnt "$ROOT/e13" "SENTINEL" "13d nor another lane's stderr"
 +release
@@ -675,53 +697,40 @@ index 0000000..a6706d4
 +printf 'pid=999999 lane=SENTINEL-LANE role=SENTINEL-ROLE since=SENTINEL-SINCE cmd=SENTINEL-CMD\n' > "$LOCK"
 +FLEET_BD_LOCK_WAIT=1 shim show y >"$ROOT/o14b" 2>"$ROOT/e14b"
 +hasnt "$ROOT/e14b" "SENTINEL" "14c a numeric-but-bogus pid with planted text still leaks nothing"
-+has "$ROOT/e14b" "unregistered" "14d the planted lane name is replaced by 'unregistered'"
++grep -q -- "lane" "$ROOT/e14b" \
++  && bad "14d the planted lane field is IGNORED - there is no lane field to read" "found a lane field in the report" \
++  || ok "14d the planted lane field is IGNORED - there is no lane field to read"
 +has "$ROOT/e14b" "unrecognised" "14e the planted operation is replaced by 'unrecognised'"
 +has "$ROOT/e14b" "pid is gone" "14f and the bogus pid is called out as stale"
 +release
 +
-+echo "15. the character-class check precedes the registry lookup, so a glob-shaped lane name can never be trusted"
-+# The OUTCOMES below are only discriminating because the harness registers impl-other/impl-ozmt: 'impl-*'
-+# WOULD match a real registry entry if the lookup ran first, and the name would be reported as trusted.
-+# PLANT the exact files a LOOKUP-FIRST order would accept, so these outcomes discriminate the order rather
-+# than merely agreeing with it: a literal file named 'impl-*.model', and a registry-escaping '../../etc/passwd'
-+# (the kernel resolves '..' inside an otherwise-quoted path, so without the character check a name can reach a
-+# file OUTSIDE the registry - and quoting does not stop that, only the character class does).
-+: > "$T/.fleet/lanes/impl-*.model"; : > "$T/.fleet/lanes/a b.model"; : > "$T/.fleet/lanes/*.model"
-+mkdir -p "$T/etc"; : > "$T/etc/passwd.model"
-+for pair in "impl-*|a glob-shaped name is reported unregistered even though impl-other.model IS registered" \
-+            "../../etc/passwd|a path-shaped name is rejected" \
-+            "a b|a name containing a space is rejected" \
-+            "*|a bare glob is rejected"; do
-+  name="${pair%%|*}"; what="${pair#*|}"
-+  : > "$LOCK"
-+  STUB_SLEEP=2 HOME="$T" FLEET_LANE="$name" bash "$SHIM" comment issue-z X >/dev/null 2>&1 & KIDS="$KIDS $!"
-+  sleep 0.5
-+  has "$LOCK" "lane=unregistered" "15 $what"
-+  grep -Fq -- "lane=$name" "$LOCK" \
-+    && bad "15b the name itself is never trusted into the record: [$name]" "unexpectedly found: lane=$name" \
-+    || ok "15b the name itself is never trusted into the record: [$name]"
-+  release
-+done
++echo "15. P2 (agents-6e77, the reviewer's probe): a WRITABLE lane registry is not a trust boundary, so no lane name is claimed at all"
++# The finding's sentence: the registry is 0755 exedev-owned and IS NOT AN INDEPENDENT TRUST BOUNDARY. A
++# same-uid caller creates ~/.fleet/lanes/SENTINEL-PRIVATE-PAYLOAD.model, sets FLEET_LANE, and the sentinel
++# used to reach the shared record and another lane's stderr. That is the probe, run here as a case.
++mkdir -p "$T/.fleet/lanes"
++: > "$T/.fleet/lanes/SENTINEL-PRIVATE-PAYLOAD.model"
 +: > "$LOCK"
-+STUB_SLEEP=2 HOME="$T" FLEET_LANE=impl-other bash "$SHIM" comment issue-z X >/dev/null 2>&1 & KIDS="$KIDS $!"
++STUB_SLEEP=2 HOME="$T" FLEET_LANE='SENTINEL-PRIVATE-PAYLOAD' FLEET_ROLE=implementer \
++  bash "$SHIM" comment issue-z X & KIDS="$KIDS $!"
 +sleep 0.5
-+has "$LOCK" "lane=impl-other" "15c a genuinely registered name still passes through (the check rejects nothing it should keep)"
++hasnt "$LOCK" "SENTINEL" "15a a self-registered lane name never reaches the shared record"
++hasnt "$LOCK" "lane" "15b no lane field is written at all, so nothing can vouch anything into it"
++FLEET_BD_LOCK_WAIT=1 shim show z >"$ROOT/o15" 2>"$ROOT/e15"
++hasnt "$ROOT/e15" "SENTINEL" "15c nor another lane's stderr"
++has "$ROOT/e15" "role=implementer" "15d the role - a CLOSED vocabulary - is still reported"
 +release
-+# AND THE ORDER ITSELF, because that is WHY it holds: if the registry lookup ran FIRST, 'impl-*' would match
-+# impl-other.model and a glob-shaped name would be reported as trusted. A future reader could reorder these
-+# two statements innocently, so the order is asserted structurally rather than left to the outcomes above.
-+# Read the CODE only: this function's own docstring names ~/.fleet/lanes/<name>.model, so grepping the raw body
-+# numbers a COMMENT as the lookup and the pin fails on its own prose (it did, in the first draft of this case).
-+body=$(sed -n '/^fleet_bd_lock_lane()/,/^}/p' "$SHIM" | grep -v '^[[:space:]]*#')
-+n_case=$(grep -n 'case "\$name" in' <<<"$body" | head -1 | cut -d: -f1)
-+n_look=$(grep -n 'lanes/\$name' <<<"$body" | head -1 | cut -d: -f1)
-+if [ -n "$n_case" ] && [ -n "$n_look" ] && [ "$n_case" -lt "$n_look" ]; then
-+  ok "15d the character-class check is the FIRST statement in fleet_bd_lock_lane, before the registry lookup"
-+else
-+  bad "15d the character-class check no longer precedes the registry lookup (charset line=$n_case, lookup line=$n_look)" \
-+      "restore the order: with a lookup-first order a glob-shaped name matches a real registry entry and is reported as trusted"
-+fi
++# The other self-named channel: a process can rename its own executable, so descendant names come from a
++# vocabulary too. A binary called SENTINEL-PRIV-BIN must report as 'other', never as its chosen name.
++cp "$(command -v sleep)" "$T/SENTINEL-PRIV-BIN" 2>/dev/null || printf '#!/bin/sh\nsleep 4\n' > "$T/SENTINEL-PRIV-BIN"
++chmod +x "$T/SENTINEL-PRIV-BIN"
++: > "$LOCK"
++SECRET_BIN="$T/SENTINEL-PRIV-BIN" STUB_SLEEP=3 STUB_SECRET_BIN=1 \
++  HOME="$T" FLEET_LANE=impl-ozmt bash "$SHIM" version >/dev/null 2>&1 & KIDS="$KIDS $!"
++sleep 1
++FLEET_BD_LOCK_WAIT=1 shim show y >"$ROOT/o15b" 2>"$ROOT/e15b"
++hasnt "$ROOT/e15b" "SENTINEL" "15e a descendant that renamed its executable cannot carry text either (comm is filtered to a vocabulary)"
++release
 +
 +printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 +[ "$FAIL" -eq 0 ]

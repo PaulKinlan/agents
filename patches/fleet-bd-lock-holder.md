@@ -46,26 +46,39 @@ discipline, not tooling — in the failure message itself.
   reading it. Since a whitelist is the only shape that survives an adversary — a filter has to anticipate
   the payload, a vocabulary cannot express one — **every reported value is now one of: a vocabulary word**
   (bd operations, `dolt` operations, process names, roles), **a validated integer** (pid, timestamp), **or a
-  lane name the fleet's own registry on this VM vouches for**; everything else becomes the literal
-  `unrecognised` / `other` / `unregistered` / `unknown`. A lane name is accepted only if the check runs in
-  the right order, and that order is itself pinned (case 15): `..` is resolved by the **kernel** inside an
-  otherwise-quoted path, so `../../etc/passwd` would be vouched for by a file outside the registry, and `*`
-  is a legal filename character even though quotes stop it being expanded, so `impl-*` would be vouched for
-  by a file literally named `impl-*.model`. Against a reordered copy (lookup first) with those files planted,
-  case 15 goes red in **all nine** of its places. Four positions had to be covered in all, and the last
+  lane name the fleet's own registry on this VM vouches for** — and then a second review (agents-6e77) showed
+  that registry is **writable by every lane**, so it is NOT a trust boundary and the field had to go
+  entirely: see "no lane name is claimed" below. Everything else becomes the literal
+  `unrecognised` / `other` / `unknown`. Five positions had to be covered in all, and the last
   three were found by attacking this patch rather than the original defect:
 
   | position | attack | before | now |
   | --- | --- | --- | --- |
   | the **operation** | `bd comment issue-x SENTINEL-PRIVATE-PAYLOAD` | record + waiter stderr carried the text | `cmd=comment` / `running: bd comment` |
   | the **subcommand slot** | `bd "<private text>" …` | (would have been echoed) | `unrecognised` |
-  | **`FLEET_LANE` / `FLEET_ROLE`** | env set by the holder's own actor | `lane=SENTINEL-PRIVATE-PAYLOAD` in the record **and** another lane's stderr | `lane=unregistered role=other` |
-  | a **planted record** (the 0644 lock file is writable by anyone) | arbitrary text in every field | echoed into another lane's stderr | `UNNAMED` + `unregistered` / `unrecognised` |
+  | **`FLEET_LANE` / `FLEET_ROLE`** | env set by the holder's own actor | `lane=SENTINEL-PRIVATE-PAYLOAD` in the record **and** another lane's stderr | role: a closed vocabulary (`other`); **no lane field exists at all** |
+  | **a self-registered lane name** (agents-6e77: the 0755 registry is writable by every lane) | create `~/.fleet/lanes/SENTINEL-PRIVATE-PAYLOAD.model`, set `FLEET_LANE` | the name was "vouched for" and reached the record **and** another lane's stderr | no lane field to vouch anything into |
+  | a **planted record** (the 0644 lock file is writable by anyone) | arbitrary text in every field | echoed into another lane's stderr | `UNNAMED` before anything is printed |
   | a **descendant's argv** | `ps -o args=` on the holder's children | full argv (`git commit -m '<private text>'`) | pid + vocabulary process name |
+  | a **descendant that renamed its executable** | `cp sleep SENTINEL-PRIV-BIN; ./SENTINEL-PRIV-BIN` | (would have echoed `comm`) | `other` — `comm` is filtered to the same vocabulary |
 
   Validation runs on **both sides**: the holder only writes validated values, the waiter re-validates
   everything it reads, so a planted record is no more dangerous than an honest one. No bead id, body or
   argument is stored or printed anywhere.
+- **NO LANE NAME IS CLAIMED, ANYWHERE (agents-6e77).** An earlier revision of this patch reported the lane
+  name of the holder, accepting it only when the VM's lane registry (`~/.fleet/lanes/<name>.model`) vouched
+  for it. A second review found the flaw the whole branch is about, one layer out: **that registry is 0755
+  and exedev-owned — every lane can write it** — so it is not an independent trust boundary, and a same-uid
+  caller could create a file, set `FLEET_LANE`, and put chosen text into the shared record and from there
+  into another lane's stderr. The repair is not to validate harder against a writable directory (that is
+  polishing the bypass) but to **remove the field**: on a shared-uid VM nothing proves a name — the registry
+  is writable, `FLEET_LANE` is environment, and a process names itself. So the holder is described by what
+  can be proved: `role` (a closed vocabulary), `pid` and age (integers), the operation (a closed
+  vocabulary) and its descendant process names (the same closed vocabulary). Anything an attacker writes
+  into the shared file is now *ignored* rather than filtered. Two consequences worth stating: the glob/order
+  property the previous round pinned to that field is **moot** — the field it protected no longer exists,
+  which answers the same class more strongly than a pin could — and a fleet that wants named holders needs a
+  trust boundary it controls (per-lane uids, or a hub-attested registry), which is its own piece of work.
 - **The wait is unbounded no longer, and never silent.** Patience stays at 300s (`FLEET_BD_LOCK_WAIT`
   overrides it); a report is emitted on first contention and then at most once per `FLEET_BD_LOCK_REPORT`
   seconds (default 30). On expiry the call **fails fast with `EX_TEMPFAIL` (75)**, holder named, having
@@ -101,7 +114,7 @@ unchanged (it must not take the lock again, and does not).
 ### How it was verified
 
 `tests/bd-lock-holder.test.sh` is hermetic — a stub `$HOME/.local/bin/bd`, a throwaway home and a
-throwaway lane registry — so it never contends with the fleet's real lock, and it can be re-run in a gate
+throwaway lock file — so it never contends with the fleet's real lock, and it can be re-run in a gate
 or a review. Sixteen of its cases are the attacks above as regression tests: the shared record, the
 waiting lane's stderr, a descendant's argument vector, a freeform subcommand, an environment-supplied lane
 name, and a planted record must each carry no bead text (and a freeform subcommand must report
@@ -109,10 +122,10 @@ name, and a planted record must each carry no bead text (and a freeform subcomma
 
 | rig | result |
 | --- | --- |
-| patched shim, new suite | **66 passed, 0 failed** (45 behaviour + 21 privacy/shape cases) |
+| patched shim, new suite | **63 passed, 0 failed** (42 behaviour + 21 privacy/shape cases) |
 | **the revision this replaces** (lock fd closed for bd), the same suite | **54 passed, 2 failed** — and the two are exactly case 9a/9b, the killed-shim bypass |
-| **a REORDERED shim** (registry lookup before the character-class check), the same suite | **57 passed, 9 failed** — and the nine are exactly all of case 15: the four outcome pairs and the order assertion |
-| **shim as deployed, the same suite** | **24 passed, 32 failed** — the 24 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
+| **the revision before this one** (it still reported a registry-vouched lane name), the same suite | **57 passed, 6 failed** — and the failures include exactly the reviewer's agents-6e77 probe: a self-registered name reaching the shared record and another lane's stderr (15a/15b/15c) |
+| **shim as deployed, the same suite** | **32 passed, 31 failed** — the 32 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
 | patched shim, existing `tests/bd-shim.test.sh` | **15 passed, 0 failed** (serialisation and the nesting escape still hold) |
 | composed with `fleet-worktree-beads-guard.patch`, **both orders** | applies both ways; composed shim valid bash; **56/56 + 15/15 + that patch's own 13/13** |
 | the three probes, first version vs this revision | operation **LEAK → no**, env lane/role **LEAK → no**, planted record **LEAK → no** |
@@ -156,13 +169,13 @@ it again.
   trade is explicit: **argument-level forensics are given up, in exchange for the guarantee that no lane's
   text reaches a shared file or another lane's log.** If the fleet wants that forensics it should be its
   own bead with its own threat model.
-- **A registered lane name can be lied about.** A hostile writer can put *another lane's* registered name
-  in the record, so the report can misattribute (a lie, not a disclosure — the text still cannot be
-  arbitrary). Detecting a lying writer needs per-lane identities, which is bigger than this patch.
+- **The holder is not NAMED BY LANE, deliberately.** The report says `role=implementer pid=3730508` rather
+  than a lane name, because no field on a shared-uid VM proves one (agents-6e77). A lane that wants to know
+  whether a holder is itself can compare the pid; a lane that wants to name another lane to a human cannot
+  get that from this shim, and should not — that is how the injection arrived.
 - **The vocabularies are a maintenance point.** A new bd subcommand or a new process name is reported as
-  `unrecognised` / `other` until it is listed, and a lane whose registry file is missing is
-  `unregistered`. That is the correct direction to fail: the report degrades to an opaque label instead of
-  starting to print arguments.
+  `unrecognised` / `other` until it is listed. That is the correct direction to fail: the report degrades to
+  an opaque label instead of starting to print arguments an attacker chose.
 - **The record is advisory, not authoritative.** It is written by the shim, so a holder that predates this
   patch reports `UNNAMED`. On a VM mid-rollout you get named and unnamed holders both.
 - **A stray descendant can hold the lock past bd's exit, and that is now the accepted direction to fail.**
