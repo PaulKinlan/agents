@@ -113,10 +113,10 @@ index 45048df..913e21e 100755
    wait "$job_pid"
 diff --git a/tests/fleet-heavy-light-class.test.sh b/tests/fleet-heavy-light-class.test.sh
 new file mode 100755
-index 0000000..6e13ba4
+index 0000000..43b3878
 --- /dev/null
 +++ b/tests/fleet-heavy-light-class.test.sh
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,128 @@
 +#!/usr/bin/env bash
 +# tests/fleet-heavy-light-class.test.sh — agents-v2t9: a bounded-small job must not queue behind a
 +# full gate.
@@ -228,10 +228,19 @@ index 0000000..6e13ba4
 +timeout -k 5 20 env FLEET_HEAVY_DIR=$H $FH true
 +[ $? -eq 0 ] && pass "the main job runs once the slot frees" || fail "the main job did not run"
 +
-+echo "6. re-entrancy survives the light path (a nested fleet-heavy call cannot deadlock)"
-+timeout -k 5 10 env FLEET_HEAVY_DIR=$H FLEET_HEAVY_LIGHT_SLOTS=2 FLEET_HEAVY_LIGHT=1 \
-+  bash -c "FLEET_HEAVY_DIR=$H $FH true"
-+[ $? -eq 0 ] && pass "a nested call ran directly" || fail "a nested call deadlocked or failed"
++echo "6. re-entrancy: an OUTER light job runs an INNER fleet-heavy, with pool size 1"
++# agents-ltpg, and it is the reason this assertion is written this way: the first version invoked $FH
++# only ONCE, inside bash -c, so no outer invocation ever held a light slot and re-entry was never
++# exercised - it printed "a nested call ran directly" and passed for a run with no nested call at all.
++# The shape that can actually fail is an outer fleet-heavy HOLDING light1 (pool size 1) whose job
++# invokes fleet-heavy again: the inner call can only succeed because the outer exports
++# FLEET_HEAVY_HELD, so with the re-entrancy guard missing it blocks on the slot its own parent holds
++# and this times out. Verified by mutation, not by reasoning - see the write-up.
++timeout -k 5 12 env FLEET_HEAVY_DIR=$H FLEET_HEAVY_LIGHT_SLOTS=1 FLEET_HEAVY_LIGHT=1 \
++  $FH bash -c "FLEET_HEAVY_DIR=$H $FH true"
++rc=$?
++[ "$rc" -eq 0 ] && pass "the outer light job ran, and its inner fleet-heavy call did not deadlock on the slot its parent holds" \
++                || fail "the nested call did not complete (rc=$rc): the light path holds a slot its own children queue on"
 +
 +echo
 +printf 'fleet-heavy light class: %s passed, %s failed\n' "$((12-fails))" "$fails"

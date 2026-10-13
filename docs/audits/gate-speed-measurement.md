@@ -97,9 +97,41 @@ step here for the flag to hide in.
 
 ## Finding 3: the flag does not change which tests run
 
-Discovery only, both forms, same tree, no test executed: **1575 test ids flat, 1575
-package-aware**, and the sets are equal once the `tests.` module prefix is stripped. `-t .` is a
-module-naming change, not a selection change.
+**This one is NOT from the aggregation above** (nor is Finding 4 below): it is a one-off discovery
+probe, and this is the command that produced the snapshot's numbers - loader-based discovery in both
+forms, no test executed, with the set comparison asserted rather than eyeballed:
+
+```bash
+python3 <<'PROBE'
+import unittest
+
+def ids(top_level):
+    out = []
+    def walk(s):
+        for t in s:
+            walk(t) if isinstance(t, unittest.TestSuite) else out.append(t.id())
+    walk(unittest.TestLoader().discover("tests", top_level_dir=top_level))
+    return sorted(out)
+
+flat = ids("tests")            # the flat form:  -s tests
+pkg = ids(".")                 # package-aware:  -s tests -t .
+pkg_stripped = sorted(i.removeprefix("tests.") for i in pkg)
+only_flat = [i for i in flat if i not in set(pkg_stripped)]
+only_pkg = [i for i in pkg_stripped if i not in set(flat)]
+print(f"flat={len(flat)} pkg={len(pkg)} equal={pkg_stripped == flat}")
+if only_flat or only_pkg:
+    print("named only by flat:", only_flat[:5])
+    print("named only by package-aware:", only_pkg[:5])
+assert pkg_stripped == flat, "the two discovery forms must name the same tests"
+PROBE
+```
+
+**1575 ids under each form in this snapshot, sets equal** once the `tests.` module prefix is stripped.
+The COUNT is tree-specific and this note deliberately does not pin it to a commit: it was 1580 on the
+tree this fix was first written against, 1583 on the tree the fix was committed on, and it will keep
+moving as the suite grows - while the EQUALITY of the two id sets is the invariant the finding rests on. So the block asserts the equality, prints the ids that appear in one form and not the
+other, and prints its counts, rather than reporting a boolean: a comparison that reports only its boolean
+can be wrong about every element and still look tidy.
 
 ## Why the flag is there, since it is not speed
 
@@ -224,8 +256,9 @@ The consequence is a design statement, not a test-suite one: shrinking the selec
 
 ## Reproducing this
 
-Findings 1-3 come from one aggregation over the gate's own records; it is published verbatim below,
-and the generator that wrote this note ran this same text to build those tables:
+Findings 1-2 come from one aggregation over the gate's own records; it is published verbatim below,
+and the generator that wrote this note ran this same text to build those tables. Finding 3 has its own
+block in its own section, because it is a discovery probe and not part of this aggregation:
 
 ```bash
 #!/usr/bin/env bash
@@ -320,9 +353,24 @@ the corpus as machine state rather than in the repo:
 | 5 (partition) | `/tmp/impl-tdot-measure2/group[1-4].json`, `summary.txt` | per-group counts, wall, CPU, rc, result; and the `partition_covers_suite` verdict |
 | 6 (fast gate) | `/tmp/impl-tdot-fastgate/cases.json` | per-case selection, wall, CPU, rc, ran-line |
 
-Each Finding names the command and inputs that produced it, so the three probes are rerunnable; and the
-coverage verdict in Finding 5 is the probe's OWN check, so the table is not read as green unless the
-group counts sum to the discovery count.
+**The commands behind the three probe findings, because their outputs alone cannot rerun them.** The A/B
+and the partition probe were driven by scripts written to `/tmp` for the measurement
+(`/tmp/impl-tdot-measure2.py`, `/tmp/impl-tdot-partition.sh`, `/tmp/impl-tdot-fastgate.py`) and **those
+scripts are not in this repository** - they are machine state, like the gate-record corpus - so the raw
+output paths above are evidence of what was measured rather than a recipe for re-running it:
+
+* Finding 4: `python3 /tmp/impl-tdot-measure2.py` on tree `47b588b9b0fe`, running the same 114-test subset
+  four times, interleaved flat, package-aware, flat, package-aware, with wall AND child CPU per run.
+* Finding 5: `python3 /tmp/impl-tdot-partition.sh`, which splits the discovered modules across 4 groups
+  and runs each group as its OWN `python3 -m unittest` process. The coverage verdict cited here is that
+  probe's own check: the table is not read as green unless the group counts sum to the discovery count.
+* Finding 6: `python3 /tmp/impl-tdot-fastgate.py`, memoised per case, driving `bash tools/fast-gate.sh`
+  with `GIT_CHANGED` set to each representative path.
+
+Both properties are therefore reproducible IN SHAPE rather than by a stored command: (i) the two
+invocation forms cost the same, measured with child CPU beside wall, and (ii) each module's result
+survives a process that did not run the others. Finding 3 is the exception, and deliberately so: its
+block is above, in its section, and can be re-run as it stands.
 
 ## What this instrument cannot see
 
