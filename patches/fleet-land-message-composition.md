@@ -3,18 +3,19 @@
 - **Bead:** `agents-ymh2` (coord ruling, 2026-10-13: compose `agents-2tov` + `agents-9lew` + `agents-m6fr` into one
   delivery, because all three patch the same 61KB file in the SAME PIPELINE - choose a verdict, then decide whether
   it clears this tip).
-- **Status: NOT YET GREEN - 348 passed / 10 failed.** This document is the composition's diagnosis and its exact
-  remaining work, not a request to land. The three source deliveries are individually reviewed; the composition is
-  where they meet, and they do not meet cleanly.
+- **Status: GREEN - 358 passed / 0 failed** on the delivered series, with the ten fixtures the ruling decided now pinning
+  the OUTCOME. This document is the composition's diagnosis, the ordering, and the ruling it implements.
 - **The delivery is TWO artifacts, applied IN THIS ORDER** (coord's ruling - the composed delivery first, wwss re-cut
   on top, because two artifacts cannot both be applied to the same live file without one being re-cut):
-  1. `patches/fleet-land-message-composition.patch` (886 lines, sha256 `2ba196a31b5351af…`) - the stack
-     (scanner + families + 9lew + 2tov) with m6fr's one conflicting hunk resolved;
-  2. `patches/fleet-land-message-wwss-recut-after-stack.patch` (208 lines, sha256 `4b2b4024f0b28a3c…`) - agents-wwss
+  1. `patches/fleet-land-message-composition.patch` (967 lines, sha256 `884cdb089a998ca5…`) - the stack
+     (scanner + families + 9lew + 2tov) with m6fr's one conflicting hunk resolved and the ruling's ten fixtures applied;
+  2. `patches/fleet-land-message-wwss-recut-after-stack.patch` (208 lines, sha256 `1835ddd059fc322b…`) - agents-wwss
      RE-CUT to apply after step 1, carrying its `--landed-tip` change, the agents-orjl tie check, and agents-jlfq's
      two diagnosis fixes.
   Verified as a series: both apply at fuzz 0, the result is byte-identical to the assembled tree, and the final
-  suite reports 348 passed / 10 failed.
+  suite reports 358 passed / 0 failed.
+- **NOT on the merge queue, by the rule:** nothing sets `merge-queue` until a NON-AUTHOR verdict exists on the bead, and
+  a clearance is per-tip. The one reviewer is what puts this in front of the merger.
 
 ## The stack, and the order that matters
 
@@ -115,6 +116,34 @@ same parameter, which is why they belong in one pass:
 
 Together they say what the parameter always meant: it must name BOTH the branch it certifies and the tip it records,
 and a mismatch must be diagnosed as a mismatch.
+
+## THE RULING AND WHAT IT CHANGED (m6fr governs - it AMENDS fleet-15b5, it does not replace its outcome)
+
+The ten fixtures above were NOT a deadlock. The ruling on them:
+
+- **The objects differ, and that is why m6fr wins.** fleet-15b5 was written when the author was derived from the COMMENT
+  APPENDER, so "the author's lane posted a cross-family verdict" could be true while the AUTHORED branch was someone
+  else's. 2tov corrects the derivation to the BRANCH - the right object - so a same-lane clearance now means what it
+  says, and `transcribed-verified` is the honest label for it. **m6fr is right because the INPUT it classifies is right.**
+- **But BOTH paths still clear, and that keeps 15b5's outcome.** A same-lane transcription of a different family is
+  stronger evidence than nothing; the rule has never been "only a different-lane reviewer may clear" - it is that a
+  same-family-author pair is not independent ENOUGH TO BE CALLED cross-family. **The clearance stands; the label changes.**
+- **So the fixtures pin the OUTCOME, not the vocabulary:** that the verdict CLEARS, and that the independence field
+  reads `transcribed-verified`. A fixture that fails because a field was renamed from a weaker claim to a stronger one
+  is testing vocabulary rather than behaviour - the cousin of a green that could never have been red.
+
+What that took: the ten fixtures were `transcribed-unverified`, not merely mislabelled - a same-lane verdict with no run
+id cannot resolve the reviewer it names, so it is the author's word about itself and is refused. They are now given
+what a real transcription carries (a retained reviewer run whose family matches the named model), which is the same
+faithfulness fix as the eight mechanical ones earlier: **a fabricated id still fails.**
+
+**Discriminator, driven in both directions:** with m6fr's rename reverted in the assembled tree the suite is
+**353 passed / 5 failed**, and the five failures are exactly the five assertions rewritten here (26b, 26e, 31a, 33b,
+34b) with no collateral - so the assertions are load-bearing on the rename rather than decorating it. 358/0 as
+shipped.
+
+Coord's words for why this composition had to exist before it could be reviewed: **"m6fr was right in isolation and
+wrong in place, and THREE SEPARATE REVIEWS COULD NEVER HAVE SEEN IT BECAUSE EACH IS CLEAN ON ITS OWN BASE."**
 
 ## The conflict that is NOT mechanical - THE FINDING
 

@@ -451,7 +451,7 @@
 +}
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
-@@ -29,6 +29,23 @@
+@@ -29,6 +29,26 @@
  
  ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
  export HOME="$ROOT/home"; mkdir -p "$HOME/.fleet" "$HOME/bin" "$ROOT/repo" "$ROOT/fix"
@@ -468,6 +468,9 @@
 +  printf '{"agent":"%s","model":"%s"}\n' "${2:-reviewer}" "$3" \
 +    > "$TMPDIR/pi-subagents-uid-0/async-subagent-runs/$1/recovery-descriptor.json"; }
 +mkrun 11112222-3333-4444-5555-666677778888 reviewer "antigravity/gemini-3.8-flash"
++mkrun 5eed1111-2222-3333-4444-555566667777 reviewer "antigravity/gemini-3.8-flash"   # fleet-15b5 as amended: a same-lane transcription of a
++mkrun 5eed2222-2222-3333-4444-555566667777 reviewer "deepseek/deepseek-flash"          # DIFFERENT family still CLEARS; the label is the
++mkrun 5eed3333-2222-3333-4444-555566667777 reviewer "openai-codex/gpt-6-sol"           # stronger transcribed-verified (coord ruling 2026-10-13)
 +mkrun 99998888-7777-6666-5555-444433332222 reviewer "antigravity/gemini-3.8-flash"
 +mkrun aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee reviewer "openai-codex/gpt-6-sol"
 +mkrun f2ab3169-3a74-408d-af18-343734dd2bf0 reviewer "openai-codex/gpt-6-sol"
@@ -475,7 +478,85 @@
  echo main > "$HOME/.fleet/default-branch"
  
  # --- stubs -------------------------------------------------------------------
-@@ -1293,6 +1310,316 @@
+@@ -775,7 +795,7 @@
+ [{"author":"proj-lane-1","created_at":"2026-10-10T10:00:00Z",
+   "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
+  {"author":"proj-lane-1","created_at":"2026-10-10T11:00:00Z",
+-  "text":"Reviewer subagent verdict:\nVERDICT: PASS (reviewer antigravity/gemini-3.8-flash vs implementer deepseek/deepseek-flash)\ntip: $d1_rev\nFindings: none"}]
++  "text":"Reviewer subagent verdict:\nVERDICT: PASS (reviewer antigravity/gemini-3.8-flash vs implementer deepseek/deepseek-flash)\ntip: $d1_rev\nRUN 5eed1111-2222-3333-4444-555566667777\nFindings: none"}]
+ J
+ out_tip_colon=$(run tk-1 fleet/delta1); rc_tip_colon=$?
+ [ "$rc_tip_colon" = 0 ] && ok "12p tip: <sha> with colon extracts reviewed SHA and clears via delta identity" || bad "12p expected exit 0 on tip: <sha>" "rc=$rc_tip_colon out=$out_tip_colon"
+@@ -1089,14 +1109,14 @@
+ # 26. the standard transcribed-subagent shape still clears when it names a cross-family reviewer
+ cat > "$B" <<J
+ [$HANDOFF,
+- {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (round-2 review, antigravity/gemini-3.8-flash, cross-family vs implementer zai/glm-5.3)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (round-2 review, antigravity/gemini-3.8-flash, cross-family vs implementer zai/glm-5.3)\nRUN 5eed1111-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
+ J
+ j=$(run --print-json tk-2 fleet/thing2)
+-eq "$(jq -r '.review.cleared' <<<"$j")" "true" "26a transcribed cross-family verdict clears (fleet-15b5 stands)"
+-eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "26b independence is cross-family"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "26a a same-lane transcription of a different family STILL CLEARS (fleet-15b5 as amended: the clearance stands, the label is transcribed-verified)"
++eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-verified" "26b independence is cross-family"
+ eq "$(jq -r '.review.reviewer_model' <<<"$j")" "antigravity/gemini-3.8-flash" "26c reviewer model surfaced"
+ eq "$(jq -r '.review.author_model' <<<"$j")" "zai/glm-5.3" "26d author model read from the comment cue"
+-has "$(run tk-2 fleet/thing2)" "independence: cross-family" "26e landing line shows the independence"
++has "$(run tk-2 fleet/thing2)" "independence: transcribed-verified" "26e landing line shows the independence"
+ 
+ # 27. a verdict from another actor clears without naming any model (independent by actor)
+ cat > "$B" <<J
+@@ -1134,7 +1154,7 @@
+ # author model are the other-actor ones - the coord relay, 12t/12z11.
+ cat > "$B" <<J
+ [$HANDOFF,
+- {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
+ J
+ rm -f "$HOME/.fleet/lanes/imp-x.model"
+ j=$(run --print-json tk-2 fleet/thing2)
+@@ -1157,10 +1177,10 @@
+ printf 'zai/glm-5.3\n' > "$HOME/.fleet/lanes/imp-x.model"
+ cat > "$B" <<J
+ [$HANDOFF,
+- {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
+ J
+ j=$(run --print-json tk-2 fleet/thing2)
+-eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "31a lane record supplies the author model (cross)"
++eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-verified" "31a lane record supplies the author model (cross)"
+ printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/imp-x.model"
+ j=$(run --print-json tk-2 fleet/thing2)
+ eq "$(jq -r '.review.independence' <<<"$j")" "same-family" "31b lane record supplies the author model (same -> blocked)"
+@@ -1181,11 +1201,11 @@
+ # the verdict line is scanned FIRST and is authoritative; body prose only fills what it leaves empty
+ cat > "$B" <<J
+ [$HANDOFF,
+- {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"Tested against the openai-codex/gpt-6-sol baseline first, then re-ran locally.\nVERDICT: PASS (round-2 review, antigravity/gemini-3.8-flash, cross-family vs implementer zai/glm-5.3)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"Tested against the openai-codex/gpt-6-sol baseline first, then re-ran locally.\nVERDICT: PASS (round-2 review, antigravity/gemini-3.8-flash, cross-family vs implementer zai/glm-5.3)\nRUN 5eed1111-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
+ J
+ j=$(run --print-json tk-2 fleet/thing2)
+ eq "$(jq -r '.review.reviewer_model' <<<"$j")" "antigravity/gemini-3.8-flash" "33a verdict-line reviewer wins over prose models"
+-eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "33b prose baseline model cannot flip the family verdict"
++eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-verified" "33b prose baseline model cannot flip the independence reading"
+ eq "$(jq -r '.review.cleared' <<<"$j")" "true" "33c and the genuine cross-family review still clears"
+ cat > "$B" <<J
+ [$HANDOFF,
+@@ -1197,11 +1217,11 @@
+ # 34. sentence punctuation is not part of a model id (rev round-1 P2)
+ cat > "$B" <<J
+ [$HANDOFF,
+- {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer antigravity/gemini-3.8-flash vs implementer zai/glm-5.3.)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-imp-x","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer antigravity/gemini-3.8-flash vs implementer zai/glm-5.3.)\nRUN 5eed1111-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
+ J
+ j=$(run --print-json tk-2 fleet/thing2)
+ eq "$(jq -r '.review.author_model' <<<"$j")" "zai/glm-5.3" "34a trailing period stripped from the author model"
+-eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "34b family compare unaffected by the stripped punctuation"
++eq "$(jq -r '.review.independence' <<<"$j")" "transcribed-verified" "34b family compare unaffected by the stripped punctuation"
+ 
+ echo "35. fleet-260l: clearance is decided by PIN QUALITY, not by which verdict was posted last"
+ # THE DEFECT THIS SECTION PINS: the tool walked the candidates newest-first and took the first that parsed
+@@ -1293,6 +1313,316 @@
  has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
  has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
  
@@ -640,7 +721,7 @@
 + {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
 +  "text":"VERDICT: PASS\nDelta: tk-1 base..$d1_rev branch fleet/delta1\nFindings: none"},
 + {"author":"proj-lane-1","created_at":"2026-10-12T12:00:00Z",
-+  "text":"Transcribed review:\nVERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nIndependent Reviewer: openai-codex/gpt-6-sol (author: antigravity/gemini-3.8-flash)\nFindings: none"}]
++  "text":"Transcribed review:\nVERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nIndependent Reviewer: openai-codex/gpt-6-sol (author: antigravity/gemini-3.8-flash)\nRUN 5eed3333-2222-3333-4444-555566667777\nFindings: none"}]
 +J
 +out=$(run tk-1 fleet/delta1); rc=$?
 +[ "$rc" = 0 ] && ok "37a author-lane verdict for current tip is not masked by dead non-author verdict" || bad "37a expected exit 0" "rc=$rc out=$out"
@@ -653,7 +734,7 @@
 +[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
 +  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
 + {"author":"proj-lane-1","created_at":"2026-10-12T11:00:00Z",
-+  "text":"Transcribed review:\nVERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nIndependent Reviewer: openai-codex/gpt-6-sol (author: antigravity/gemini-3.8-flash)\nFindings: none"},
++  "text":"Transcribed review:\nVERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nIndependent Reviewer: openai-codex/gpt-6-sol (author: antigravity/gemini-3.8-flash)\nRUN 5eed3333-2222-3333-4444-555566667777\nFindings: none"},
 + {"author":"proj-rev-1","created_at":"2026-10-12T12:00:00Z",
 +  "text":"VERDICT: FAIL\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: one issue"}]
 +J
@@ -726,7 +807,7 @@
 +cat > "$B" <<J
 +[{"author":"test-vm-thing2","created_at":"2026-10-09T10:00:00Z","text":"Hand-off.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
 + {"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY, APPENDED BY COORD AT THE AUTHOR'S REQUEST (their bd writes timed out).\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
-+ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json tk-2 fleet/thing2)
 +eq "$(jq -r '.review.author_lane' <<<"$j")" "thing2" "38a the author lane comes from the branch name"
@@ -751,8 +832,8 @@
 +printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
 +cat > "$B" <<J
 +[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
-+ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"},
-+ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:10:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"},
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:10:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json tk-2 fleet/thing2)
 +# 38j asserts the OBSERVABLE rather than the counter: on the applied-state base (which includes the
@@ -779,7 +860,7 @@
 +printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/thing2.model"
 +cat > "$B" <<J
 +[{"author":"test-vm-coord","created_at":"2026-10-09T10:30:00Z","text":"REPLACEMENT LAND-SUMMARY.\n\nLAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
-+ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json --author-model openai-codex/gpt-6-sol tk-2 fleet/thing2)
 +eq "$(jq -r '.review.author_model' <<<"$j")" "openai-codex/gpt-6-sol" "38m a supplied authoring model is used"
