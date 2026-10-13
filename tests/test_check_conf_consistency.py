@@ -12,8 +12,10 @@ This test proves:
 
 from __future__ import annotations
 
+import ast
 import os
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -125,6 +127,96 @@ def _parse_discovery_args(cmd: str) -> dict:
     return args
 
 
+def _extract_discover_from_source(source: str):
+    py_lines = []
+    in_py = False
+    for line in source.splitlines():
+        if line.startswith("python3 -u -"):
+            in_py = True
+            continue
+        if in_py and line == "PY":
+            break
+        if in_py:
+            py_lines.append(line)
+    py_source = "\n".join(py_lines)
+
+    tree = ast.parse(py_source)
+    selected_nodes = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            selected_nodes.append(node)
+        elif isinstance(node, ast.ClassDef) and node.name == "GateError":
+            selected_nodes.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name == "discover":
+            selected_nodes.append(node)
+
+    mod = ast.Module(body=selected_nodes, type_ignores=[])
+    ast.fix_missing_locations(mod)
+    ns = {}
+    exec(compile(mod, "full-gate.sh", "exec"), ns)
+    if "discover" not in ns:
+        raise AssertionError("full gate does not define discover() function")
+    return ns["discover"]
+
+
+def _assert_full_gate_discovery_is_complete_and_tracked(source: str) -> None:
+    """Assert that full gate discovery derives a complete, tracked-by-construction module set (agents-jcd2).
+
+    Coord's ruling: 'A STRING ASSERTION OF THE MECHANISM CANNOT FAIL WHEN THE BEHAVIOUR BREAKS,
+    and a pin that cannot fail is a pin that certifies nothing.'
+
+    The substance pin must fail if someone reintroduces a filesystem-walking selection
+    that can import untracked files, AND if the tracked list is incomplete.
+    """
+    discover_fn = _extract_discover_from_source(source)
+
+    # 1. Immunity to untracked debris: an untracked probe containing a SyntaxError
+    # must not cause discovery to fail. A filesystem-walking discovery imports what
+    # it finds and fails on malformed debris; a tracked-by-construction discovery
+    # never imports untracked files.
+    probe = ROOT / "tests" / "test_zz_untracked_debris_substance_probe_tmp.py"
+    probe.write_text("this is a syntax error !!!", encoding="utf-8")
+    try:
+        try:
+            discovered = discover_fn()
+        except Exception as exc:
+            raise AssertionError(
+                f"full gate discovery failed in the presence of untracked debris ({exc}); "
+                f"discovery must derive modules from tracked git objects rather than walking the filesystem"
+            ) from exc
+    finally:
+        probe.unlink(missing_ok=True)
+
+    # 2. Derive tracked test modules from git objects
+    res = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "tests"],
+        capture_output=True, text=True, check=True
+    )
+    paths = [Path(p) for p in sorted(res.stdout.splitlines())
+             if Path(p).name.startswith("test") and p.endswith(".py")]
+    tracked_modules = [".".join(p.with_suffix("").parts) for p in paths]
+    if not tracked_modules:
+        raise AssertionError("no tracked test modules found in repository")
+
+    # 3. Completeness check: discovered modules must match tracked modules exactly
+    missing = sorted(set(tracked_modules) - set(discovered.keys()))
+    extra = sorted(set(discovered.keys()) - set(tracked_modules))
+    if missing or extra:
+        raise AssertionError(
+            f"full gate discovery module set mismatch: missing={missing} extra={extra}"
+        )
+
+    # 4. No empty modules
+    empty = [m for m, ids in discovered.items() if not ids]
+    if empty:
+        raise AssertionError(f"full gate discovery found empty modules: {empty}")
+
+    # 5. No duplicate test ids
+    all_ids = [tid for ids in discovered.values() for tid in ids]
+    if len(all_ids) != len(set(all_ids)):
+        raise AssertionError("full gate discovery returned duplicate test ids")
+
+
 def check_ci_and_tracked_config_consistency(ci_commands: list[str], tracked_cmd: str) -> None:
     """Assert that CI discovery commands and tracked CHECK_CMD agree on hermeticity and test selection."""
     if not ci_commands:
@@ -141,10 +233,9 @@ def check_ci_and_tracked_config_consistency(ci_commands: list[str], tracked_cmd:
                 f"CI core command {core!r} diverges from tracked CHECK_CMD {tracked_cmd!r}; "
                 f"start={args['start']!r} filters={args['filters']!r}")
         source = (ROOT / "tools" / "full-gate.sh").read_text(encoding="utf-8")
-        for required in ('loader.discover("tests", top_level_dir=".")',
-                         '"-m", "unittest", module, "-v"'):
-            if required not in source:
-                raise AssertionError(f"full gate lost the package-aware complete module selection: {required}")
+        if '"-m", "unittest", module, "-v"' not in source:
+            raise AssertionError('full gate lost the module runner command: "-m", "unittest", module, "-v"')
+        _assert_full_gate_discovery_is_complete_and_tracked(source)
         for cmd in ci_commands[1:]:
             args = _parse_discovery_args(cmd)
             if args["start"] != "tests" or args["top"] != ".":

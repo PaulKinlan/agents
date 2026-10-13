@@ -67,9 +67,43 @@ def manifest(**overrides):
 
 from tests import containment_harness as harness
 
+
+def _tracked_agent_yamls():
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "agents/*/agent.yaml"],
+        capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    yamls = sorted(ROOT / p for p in out)
+    if not yamls:
+        raise RuntimeError("no tracked agent manifests found")
+    return yamls
+
+
+def _tracked_agent_dirs():
+    return sorted(p.parent for p in _tracked_agent_yamls())
+
+
 class TestShippedManifests(unittest.TestCase):
+    def test_tracked_agents_ignores_untracked_debris(self):
+        """A check must read git's objects rather than the filesystem (agents-jcd2).
+
+        Untracked debris under agents/ must not be absorbed as shipped manifests.
+        """
+        debris = ROOT / "agents" / "zz_debris_probe_tmp"
+        debris.mkdir(parents=True, exist_ok=True)
+        (debris / "agent.yaml").write_text("name: zz_debris\n", encoding="utf-8")
+        try:
+            agent_dirs = _tracked_agent_dirs()
+            self.assertNotIn(debris, agent_dirs)
+            self.assertIn(ROOT / "agents" / "pr-fixer", agent_dirs)
+            yamls = _tracked_agent_yamls()
+            self.assertNotIn(debris / "agent.yaml", yamls)
+            self.assertIn(ROOT / "agents" / "pr-fixer" / "agent.yaml", yamls)
+        finally:
+            shutil.rmtree(debris, ignore_errors=True)
+
     def test_every_shipped_agent_validates_and_gets_a_grantable_policy(self):
-        agents = sorted(p for p in (ROOT / "agents").iterdir() if (p / "agent.yaml").exists())
+        agents = _tracked_agent_dirs()
         self.assertTrue(agents)
         for agent_dir in agents:
             with self.subTest(agent=agent_dir.name):
@@ -294,7 +328,7 @@ class TestDeclarationsFailClosed(unittest.TestCase):
         from lib.child_env import BASE_ALLOW, NETWORK_CREDENTIAL_REQUIREMENTS, prepass_environment
         parent = {"PATH": "/bin", "GH_TOKEN": "t", "GITHUB_TOKEN": "t", "NPM_TOKEN": "t"}
         tools = set(NETWORK_CREDENTIAL_REQUIREMENTS) | {"npm", "curl"}
-        for agent_yaml in (ROOT / "agents").glob("*/agent.yaml"):
+        for agent_yaml in _tracked_agent_yamls():
             caps = factory_cli.load_yaml_simple(agent_yaml).get("capabilities") or {}
             tools.update(caps.get("requires") or [])
         for tool in sorted(tools):
