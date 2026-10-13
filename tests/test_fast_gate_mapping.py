@@ -1001,6 +1001,25 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"a new fragment must be loaded: {res.stderr}")
         self.assertIn("tests/test_the_new_module.py", res.stdout.split())
 
+    def test_a_changed_fragment_is_mapped_by_the_registrys_own_arm(self):
+        """THE FAILURE MEASURED ON THIS CHANGE'S FIRST GATE RUN, pinned so it cannot come back: the
+        registry's own files had no arm, so the gate refused all 29 fragments as unmapped - the loud
+        failure doing its job, and a shape that would have been UNUSABLE, because every delivery that adds
+        a mapping adds one of these files. A registry cannot cover the files that hold its arms unless the
+        arm is there, so this drives the gate rather than reading for a string."""
+        suites = resolve_fast_gate(["tools/fast-gate-arms.d/999-anything.sh"])
+        self.assertIn("tests/test_fast_gate_mapping.py", suites,
+                      "a changed arm fragment must select the suite that owns the mapping contract and the "
+                      "fragment guards")
+        for consumer in ("tests/test_fast_gate_consumer_coverage.py",
+                         "tests/test_fast_gate_importer_boundaries.py",
+                         "tests/test_coverage_contract.py"):
+            self.assertIn(consumer, suites,
+                          f"{consumer} reads the registry, so a changed fragment is a change to its subject")
+        self.assertIn("tests/test_docs_drift.py", resolve_fast_gate(["tools/fast-gate-arms.d/README.md"]),
+                      "the registry's README is committed markdown: docs_drift walks it, so it is mapped "
+                      "rather than left to fail loudly")
+
     def test_a_duplicate_pattern_fails_rather_than_being_resolved_by_position(self):
         """agents-v8xv's obligation. Precedence is now carried by filenames, so an arm declared twice
         would be resolved silently by position - which is the accident this shape must not have. BOTH arm

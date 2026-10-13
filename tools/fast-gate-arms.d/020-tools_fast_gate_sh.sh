@@ -48,6 +48,25 @@ fast_gate_arms_020_tools_fast_gate_sh() {
       # arm), so it adds a suite this arm can afford and no new environment sensitivity.
       mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py tests/test_coverage_contract.py tests/test_gate_entrypoint_config.py"
       ;;
+    tools/fast-gate-arms.d/*.sh)
+      # agents-hr6q: THE REGISTRY'S OWN FILES NEEDED AN ARM, AND THE GATE SAID SO ITSELF. The first run of
+      # the change that created this directory failed loudly with all 29 fragments listed as "match no
+      # mapping arm and no ignore-list arm" - the loud failure agents-9nir built, doing exactly its job. The
+      # omission would have made the shape unusable: every delivery that adds a mapping adds one file here,
+      # and without this arm the gate would REFUSE the change that adds the mapping.
+      # The four suites are the registry's consumers, named rather than guessed:
+      # tests/test_fast_gate_mapping.py owns the mapping contract and the fragment guards;
+      # tests/test_fast_gate_consumer_coverage.py reads the registry to explain which consumers an arm
+      # omits (reading only the old script would answer "lib/*.py" for every module);
+      # tests/test_fast_gate_importer_boundaries.py asserts an arm's text is present, which lives here now;
+      # and tests/test_coverage_contract.py copies the registry into a temp tree to run the gate.
+      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_fast_gate_consumer_coverage.py tests/test_fast_gate_importer_boundaries.py tests/test_coverage_contract.py"
+      ;;
+    tools/fast-gate-arms.d/README.md)
+      # The registry's own documentation. docs_drift walks every committed .md, so a change to it runs the
+      # walker - the same rule the root governance files and patches/*.md follow.
+      mapped="$mapped tests/test_docs_drift.py"
+      ;;
     tools/stage_site.py)
       # agents-1n9i: THIS FILE MATCHED NO ARM AT ALL, so a change to it hit the unmatched
       # bucket and ABORTED THE GATE with exit 1 rather than skipping a suite - the one member
