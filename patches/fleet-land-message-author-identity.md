@@ -33,6 +33,16 @@
     while the author's was read from a file that any restart or rotation overwrites. A check whose two sides are
     read at different times is not an independence check.
 
+- **WHICH THEORY SURVIVED MEASUREMENT (the bead's own theory did not):** agents-2tov was filed with the
+  hypothesis that the check reads `~/.fleet/lanes/<lane>.model`, a file overwritten when a lane is restarted or
+  rotated, so the two sides of the comparison are read at different times. That file is real and that risk is
+  real, but it is NOT what produced this refusal: the lane file was read correctly and the wrong OBJECT was
+  attributed to it. The measured cause is the author being taken from the ACTOR of the operative LAND-SUMMARY
+  instead of from the branch, which is reproducible in one command and does not require a lane to have been
+  restarted at all - the appender's record is simply the wrong record. The mutable-model risk remains as the
+  residual case that `--author-model` covers; the wrong-object attribution is what the branch-name derivation
+  fixes.
+
 - **Changes:**
   1. **The author of a branch is derived from the branch** (`fleet_author_lane_from_branch`): the longest lane
      name recorded as `~/.fleet/lanes/<lane>.model` that matches `fleet/<lane>-<bead>` at a name boundary, so
