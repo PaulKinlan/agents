@@ -5,5 +5,11 @@
   "tools/check-cmd.sh": [
     "tests/test_check_conf_consistency.py",
     "tests/test_gate_entrypoint_config.py"
+  ],
+  "tools/fast-gate-arms.d/*": [
+    "tests/test_fast_gate_mapping.py",
+    "tests/test_fast_gate_consumer_coverage.py",
+    "tests/test_fast_gate_importer_boundaries.py",
+    "tests/test_coverage_contract.py"
   ]
 }
