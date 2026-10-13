@@ -1,0 +1,77 @@
+--- a/tests/fleet-check-scope.test.sh
++++ b/tests/fleet-check-scope.test.sh
+@@ -15,7 +15,73 @@
+ pass() { printf '  ok   %s\n' "$1"; }
+ fail() { printf '  FAIL %s\n' "$1"; fails=$((fails+1)); }
+ 
+-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
++# TEARDOWN: this suite must not leave a gate worker behind, and it must SAY SO if it was going to.
++#
++# WHY (agents-825v): the previous teardown was `rm -rf "$T"`, which deletes the checks dir and the temp HOME
++# out from under a worker fleet-heavy detached - so the worker is reparented to pid 1 with a DELETED cwd and
++# keeps holding its heavy slot. Measured 2026-10-12: three such husks alive for over an hour, one at 1h50m, on
++# a 2-vCPU VM whose single heavy slot they therefore occupied. The private FLEET_HEAVY_DIR set above keeps the
++# suite out of the SHARED queue, but it does not stop the worker outliving the suite; only killing it does.
++#
++# WHY IT BOTH KILLS AND FAILS, which is the whole design point: a teardown that only asserted "nothing
++# survives" would leave the husk holding the slot, and a teardown that only killed would hide the leak behind
++# a green suite. Doing both means the slot is released AND a leak is visible - the same two-sided rule as the
++# control in agents-yltq: an instrument must not be able to report success on a dead one.
++#
++# WHICH PROPERTY IDENTIFIES THE LEAK, and why this pattern and not another: a leaked worker's command line
++# embeds the path of the script fleet-heavy wrote into this suite's checks dir, i.e. it contains $T. Nothing
++# else on the VM has this mktemp path in its argv, so the scan matches exactly the processes this suite
++# started. That is deliberate, and it avoids the two cleanup traps this fleet has already paid for:
++#   * `pgrep -f`/`pkill -f` with a pattern taken from the SUBJECT also matches the INVOKING SHELL's own command
++#     line (cost this lane two shells, exit 143 each; also cost one more while writing this patch);
++#   * a pattern a real gate also matches kills an honest job (coord's rule 52 - a cleanup pattern must match a
++#     property the leak has and the real job does not).
++# A scan for a mktemp path has both properties: the invoking shell's argv does not contain it, and no real gate
++# was ever handed it.
++suite_processes() { # pids whose cmdline references this suite's temp root, excluding this shell and its parent
++  local p pid me=$$ parent
++  parent=$(ps -o ppid= -p "$$" 2>/dev/null | tr -d ' ')
++  for p in /proc/[0-9]*; do
++    pid=${p#/proc/}
++    [ "$pid" = "$me" ] && continue
++    [ -n "$parent" ] && [ "$pid" = "$parent" ] && continue
++    [ -r "$p/cmdline" ] || continue          # a process can vanish between the glob and the read; guard the
++    { tr '\0' ' ' < "$p/cmdline" || true; } 2>/dev/null | grep -qF -- "$T" || continue   # READ, do not redirect
++    printf '%s\n' "$pid"
++  done
++}
++suite_teardown() {
++  local pids i
++  # A gate that is merely parking is not a leak yet: give one a moment to exit on its own so this does not
++  # turn a legitimate finish into a red suite.
++  for i in $(seq 1 20); do
++    [ -z "$(suite_processes)" ] && break
++    sleep 0.1
++  done
++  pids=$(suite_processes)
++  rm -rf "$T"
++  if [ -n "$pids" ]; then
++    # Report the set that HAD TO BE KILLED, captured before killing: reporting the set afterwards reports an
++    # empty list, because killing it is what empties it. (Caught by the red case of this patch's own test.)
++    local killed="$pids" n k
++    n=$(printf '%s\n' "$killed" | wc -l)
++    # shellcheck disable=SC2086
++    kill -TERM $killed 2>/dev/null || true
++    for i in $(seq 1 30); do
++      k=$(suite_processes); [ -z "$k" ] && break; sleep 0.1
++    done
++    k=$(suite_processes)
++    if [ -n "$k" ]; then
++      # shellcheck disable=SC2086
++      kill -KILL $k 2>/dev/null || true
++    fi
++    printf '  FAIL %s worker(s) outlived this suite and HAD TO BE KILLED - their temp tree was about to be\n' "$n"
++    printf '       deleted, which is the agents-825v mechanism; they would have held the heavy slot:\n'
++    printf '       pids: %s\n' "$(printf '%s' "$killed" | tr '\n' ' ')"
++    exit 1   # an EXIT trap may set the final status
++  fi
++}
++T=$(mktemp -d); trap suite_teardown EXIT
+ # THIS SUITE MUST USE ITS OWN HEAVY QUEUE. It runs a REAL gate (fleet-check), and fleet-check takes a slot
+ # through `fleet-heavy` - so without this the suite joins the VM's SHARED queue at /tmp/fleet-heavy. Measured
+ # 2026-10-12: the hub's single slot was held 34 minutes by gate WORKERS whose fixture HOME
