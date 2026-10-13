@@ -18,7 +18,7 @@ import typing
 from unittest import mock
 
 from lib.findings import FindingsStore, compute_fingerprint, normalize_text
-from lib.child_env import child_environment
+from lib.child_env import BROKER_PROVIDERS, ENGINE_CREDENTIALS, child_environment
 from lib.credential_broker import PLACEHOLDER_PREFIX, keyless_providers
 from lib.sandbox import sandbox_available
 from lib.tool_pins import ToolPinError
@@ -103,6 +103,25 @@ class TestPiKeylessModels(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             with self.assertRaisesRegex(RuntimeError,
                                         "PI provider API table does not match broker keyless providers"):
+                loader.exec_module(module)
+
+    def test_every_broker_keyless_provider_is_allowlisted_for_pi(self):
+        allowed = set(ENGINE_CREDENTIALS["pi"])
+        for provider in factory_cli.keyless_providers():
+            with self.subTest(provider=provider):
+                self.assertTrue(allowed & set(BROKER_PROVIDERS[provider][2]), provider)
+
+    def test_missing_pi_credential_row_refuses_at_import(self):
+        # Mimic the actual dropped-row defect: the broker and catalog still agree,
+        # but the dispatcher would never add qwen to its broker provider set.
+        pi_vars = tuple(v for v in ENGINE_CREDENTIALS["pi"] if v != "QWEN_API_KEY")
+        with mock.patch.dict(ENGINE_CREDENTIALS, {"pi": pi_vars}):
+            loader = importlib.machinery.SourceFileLoader("factory_missing_pi_credentials",
+                                                          str(FACTORY_ROOT / "factory"))
+            spec = importlib.util.spec_from_loader("factory_missing_pi_credentials", loader)
+            module = importlib.util.module_from_spec(spec)
+            with self.assertRaisesRegex(RuntimeError,
+                                        "PI keyless providers missing from ENGINE_CREDENTIALS.*qwen"):
                 loader.exec_module(module)
 
     def test_missing_or_empty_model_row_refuses_before_writing_config(self):
