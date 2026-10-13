@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index 0c53d94..d5ee638 100755
+index 0c53d94..69f76c2 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
 @@ -223,7 +223,7 @@ REV_CAND=$(jq --arg fam "${FLEET_VERDICT_MODEL_FAMILIES:-deepseek|zai|kimi|kimi-
@@ -11,65 +11,130 @@ index 0c53d94..d5ee638 100755
  
  # ---------- reviewer independence: which verdicts may be operative (fleet-ry7m, fleet-transcription-provenance) ----------
  # A verdict comment authored by the branch author lane cannot mask a verdict from another actor when
-@@ -360,6 +360,45 @@ flm_select() {
+@@ -360,6 +360,111 @@ flm_select() {
          rev_cleared=false
        fi
  
-+# Normalize diff hunks by stripping hunk headers and context lines per file (fleet-6ihq).
-+# Preserves all substantive added/removed lines (including blank lines), binary patch content,
-+# postimage blob identities (POSTIMAGE:<hash>), file mode changes, and file boundaries. Pure offset
-+# moves and context line shifts evaluate as content-identical while altered text (including blank additions)
-+# or binary payloads refuse delta identity.
-+flm_normalize_diff() {
-+  awk '
-+    /^diff --git / {
-+      cur_file = $3
-+      cur_post = ""
-+      print "FILE:" cur_file
-+      next
-+    }
-+    /^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+/ {
-+      val = $2
-+      sub(/^[0-9a-fA-F]+\.\./, "", val)
-+      cur_post = val
-+      next
-+    }
-+    /^@@/ { next }
-+    index($0, "+++") == 1 || index($0, "---") == 1 { next }
-+    /^(old mode|new mode|deleted file mode|new file mode)/ {
-+      print $0
-+      next
-+    }
-+    /^(GIT binary patch|Binary files|literal |delta )/ || in_binary {
-+      if (!in_binary) {
-+        in_binary = 1
-+        if (cur_post != "") print "POSTIMAGE:" cur_post
++# Extract a named markdown section (from '## <heading>' up to next '## ' or EOF) (delta-identity-boundary, Shape A)
++flm_extract_md_section() {
++  local commit="$1" file="$2" heading="$3"
++  git show "$commit:$file" 2>/dev/null | awk -v h="$heading" '
++    BEGIN { found = 0 }
++    /^## / {
++      line = substr($0, 4)
++      if (line == h || index(line, h) == 1) {
++        found = 1
++        print $0
++        next
++      } else if (found) {
++        exit
 +      }
-+      print $0
-+      next
 +    }
-+    /^[+-]/ {
-+      print $0
-+    }
++    found { print }
 +  '
++}
++
++# Compare rebased objects across all files touched by the branch (delta-identity-boundary, Shape A)
++flm_compare_rebased_objects() {
++  local rev_base="$1" rev_full="$2" tip_base="$3" tip_full="$4"
++  shift 4
++  local files=("$@")
++
++  for f in "${files[@]}"; do
++    [ -n "$f" ] || continue
++
++    # 1. Postimage blob identity: if file at tip_full is byte-identical to rev_full, clear.
++    # Covers newly added files (patches, writeups), untouched binaries, and identical trees.
++    local b_rev b_tip
++    b_rev=$(git rev-parse "$rev_full:$f" 2>/dev/null || true)
++    b_tip=$(git rev-parse "$tip_full:$f" 2>/dev/null || true)
++    if [ -n "$b_rev" ] && [ "$b_rev" = "$b_tip" ]; then
++      continue
++    fi
++
++    # 2. Structured markdown files (e.g. patches/README.md) where sections are added:
++    case "$f" in
++      *.md)
++        local md_headers
++        md_headers=$(git diff "$rev_base..$rev_full" -- "$f" 2>/dev/null | grep '^+## ' | sed 's/^+## //' || true)
++        if [ -n "$md_headers" ]; then
++          local sec_match=true
++          while IFS= read -r hdr; do
++            [ -n "$hdr" ] || continue
++            local s_rev s_tip
++            s_rev=$(flm_extract_md_section "$rev_full" "$f" "$hdr")
++            s_tip=$(flm_extract_md_section "$tip_full" "$f" "$hdr")
++            if [ -z "$s_rev" ] || [ "$s_rev" != "$s_tip" ]; then
++              sec_match=false
++              break
++            fi
++          done <<<"$md_headers"
++
++          if [ "$sec_match" = true ]; then
++            # Verify no lines were modified outside the added sections
++            local rev_rem tip_rem
++            rev_rem=$(git diff "$rev_base..$rev_full" -- "$f" 2>/dev/null | grep -E '^-[^-]' || true)
++            tip_rem=$(git diff "$tip_base..$tip_full" -- "$f" 2>/dev/null | grep -E '^-[^-]' || true)
++            if [ -z "$rev_rem" ] && [ -z "$tip_rem" ]; then
++              continue
++            fi
++          fi
++        fi
++        ;;
++    esac
++
++    # 3. Pure append to a text file (e.g. pos.txt):
++    local n_rev_b n_rev_f n_tip_b n_tip_f
++    n_rev_b=$(git show "$rev_base:$f" 2>/dev/null | wc -l)
++    n_rev_f=$(git show "$rev_full:$f" 2>/dev/null | wc -l)
++    n_tip_b=$(git show "$tip_base:$f" 2>/dev/null | wc -l)
++    n_tip_f=$(git show "$tip_full:$f" 2>/dev/null | wc -l)
++    n_rev_b=${n_rev_b//[!0-9]/}
++    n_rev_f=${n_rev_f//[!0-9]/}
++    n_tip_b=${n_tip_b//[!0-9]/}
++    n_tip_f=${n_tip_f//[!0-9]/}
++    : "${n_rev_b:=0}" "${n_rev_f:=0}" "${n_tip_b:=0}" "${n_tip_f:=0}"
++    if [ "$n_rev_f" -gt "$n_rev_b" ] && [ "$n_tip_f" -gt "$n_tip_b" ]; then
++      local k_rev=$((n_rev_f - n_rev_b))
++      local k_tip=$((n_tip_f - n_tip_b))
++      if [ "$k_rev" -eq "$k_tip" ]; then
++        local app_rev app_tip
++        app_rev=$(git show "$rev_full:$f" 2>/dev/null | tail -n "$k_rev")
++        app_tip=$(git show "$tip_full:$f" 2>/dev/null | tail -n "$k_tip")
++        if [ "$app_rev" = "$app_tip" ]; then
++          local base_rev_sub base_tip_sub
++          base_rev_sub=$(git show "$rev_full:$f" 2>/dev/null | head -n "$n_rev_b")
++          base_tip_sub=$(git show "$tip_full:$f" 2>/dev/null | head -n "$n_tip_b")
++          if [ "$base_rev_sub" = "$(git show "$rev_base:$f" 2>/dev/null)" ] && \
++             [ "$base_tip_sub" = "$(git show "$tip_base:$f" 2>/dev/null)" ]; then
++            continue
++          fi
++        fi
++      fi
++    fi
++
++    # Fail closed on any other modified file (unstructured, altered, binary mismatch)
++    return 1
++  done
++
++  return 0
 +}
 +
        # DELTA-IDENTITY FALLBACK (fleet-15b5, fleet-7347):
        # When rev_sha does not equal tip, compare the reviewed delta against the current tip's
        # own delta for the branch's files. A rebase changes commit SHAs but preserves the delta.
-@@ -407,10 +446,19 @@ flm_select() {
+@@ -407,10 +512,18 @@ flm_select() {
              rev_diff=$(git diff --binary "$rev_base..$rev_full" 2>/dev/null)
              tip_diff=$(git diff --binary "$tip_base..$tip_full" 2>/dev/null)
  
 -            # Require byte-identical diffs for pure rebase (fleet-15b5 review)
-+            # Require byte-identical diffs or normalized content-identical diffs for pure rebase (fleet-15b5, fleet-6ihq)
++            # Require byte-identical diffs or object-level rebase identity for pure rebase (delta-identity-boundary, Shape A)
              delta_match=false
              if [ -n "$rev_diff" ] && [ "$rev_diff" = "$tip_diff" ]; then
                delta_match=true
 +            elif [ -n "$rev_diff" ] && [ -n "$tip_diff" ]; then
-+              rev_norm=$(flm_normalize_diff <<<"$rev_diff")
-+              tip_norm=$(flm_normalize_diff <<<"$tip_diff")
-+              if [ -n "$rev_norm" ] && [ "$rev_norm" = "$tip_norm" ]; then
++              readarray -t _cand_files <<<"$tip_files"
++              if flm_compare_rebased_objects "$rev_base" "$rev_full" "$tip_base" "$tip_full" "${_cand_files[@]}"; then
 +                delta_match=true
 +                rev_delta_normalized=true
 +              else
@@ -78,7 +143,7 @@ index 0c53d94..d5ee638 100755
              fi
  
              if [ "$delta_match" = true ]; then
-@@ -418,14 +466,6 @@ flm_select() {
+@@ -418,14 +531,6 @@ flm_select() {
                rev_delta_identical=true
                # same shared decision as above - never a second word list
                if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
@@ -93,7 +158,7 @@ index 0c53d94..d5ee638 100755
              fi
            elif [ -n "$tip_files" ] || [ -n "$rev_files" ]; then
              rev_delta_mismatch="files changed"
-@@ -692,7 +732,11 @@ fi
+@@ -692,7 +797,11 @@ fi
  if [ "$rev_state" = "CURRENT" ]; then
    if [ "$rev_cleared" = true ]; then
      if [ "$rev_delta_identical" = true ]; then
@@ -106,7 +171,7 @@ index 0c53d94..d5ee638 100755
      else
        rev_line="PASS (verdict: $rev_verdict) for commit ${rev_sha:-$tip} by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence]"
      fi
-@@ -968,6 +1012,7 @@ if [ "$JSON" = 1 ]; then
+@@ -968,6 +1077,7 @@ if [ "$JSON" = 1 ]; then
      --arg rev_who "${rev_who:-}" --arg rev_at "${rev_at:-}" --argjson rev_unreviewed "${rev_unreviewed:-0}" \
      --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
      --argjson rev_delta_identical "${rev_delta_identical:-false}" \
@@ -114,7 +179,7 @@ index 0c53d94..d5ee638 100755
      --arg rev_delta_mismatch "${rev_delta_mismatch:-}" \
      --arg rev_run_id "${rev_run_id:-}" \
      --arg cleared_sha "${cleared_label_sha:-}" \
-@@ -985,7 +1030,7 @@ if [ "$JSON" = 1 ]; then
+@@ -985,7 +1095,7 @@ if [ "$JSON" = 1 ]; then
                unreviewed_commits:$rev_unreviewed,author:$rev_who,at:$rev_at,cleared:$rev_cleared,
                selected_comment_index:($rev_comment_index|if .=="" then null else tonumber end),
                selected_comment_author:$rev_who,author_lane_transcription:$author_lane_transcription,
@@ -123,8 +188,17 @@ index 0c53d94..d5ee638 100755
                branch_author:$branch_author,independence:$rev_independence,
                reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
                author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
+@@ -1007,7 +1117,7 @@ elif [ -n "$MENTION_NOBLOCK" ]; then
+   printf '        (a block is a line that IS LAND-SUMMARY plus WHAT:/WHY:/EFFECT: lines; last mention: comment #%s by %s at %s)\n' \
+     "$(tail -n1 <<<"$MENTION_NOBLOCK" | cut -f1)" "$(tail -n1 <<<"$MENTION_NOBLOCK" | cut -f2)" "$(tail -n1 <<<"$MENTION_NOBLOCK" | cut -f3)"
+ fi
+-[ "$JSON" = 1 ] || printf '\n' 
++[ "$JSON" = 1 ] || printf '\n'
+ printf 'WHY\n%s\n\n' "$why"
+ printf 'WHAT CHANGED\n%s\n\n' "$what"
+ printf 'USER-VISIBLE EFFECT\n%s\n\n' "$eff"
 diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
-index 0dd6274..ec31567 100755
+index 0dd6274..b9205dc 100755
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
 @@ -1497,7 +1497,7 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "content changed" "37g delta
@@ -132,11 +206,11 @@ index 0dd6274..ec31567 100755
  has "$out" "content changed" "37h refusal line reports content changed"
  
 -# 37i-37j: position/offset moved when added/removed lines are identical
-+# 37i-37j: position/offset moved when added/removed lines are identical clears via normalized delta identity (fleet-6ihq)
++# 37i-37j: position/offset moved when added/removed lines are identical clears via normalized delta identity (delta-identity-boundary)
  git -C "$ROOT/repo" checkout -q -b fleet/pos-base-old main
  printf "line1\nline2\n" > "$ROOT/repo/pos.txt"
  git -C "$ROOT/repo" add pos.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "pos base old"
-@@ -1524,9 +1524,103 @@ cat > "$B" <<J
+@@ -1524,9 +1524,220 @@ cat > "$B" <<J
    "text":"VERDICT: PASS\nDelta: tk-1 $pos_base_old..$pos_rev branch fleet/pos-tip\nFindings: none"}]
  J
  j_out=$(run --print-json tk-1 fleet/pos-tip)
@@ -236,10 +310,127 @@ index 0dd6274..ec31567 100755
 +  "text":"VERDICT: PASS\nDelta: tk-1 $blank_base..$blank_rev branch fleet/blank-tip\nFindings: none"}]
 +J
 +j_blank=$(run --print-json tk-1 fleet/blank-tip)
-+eq "$(jq -r '.review.delta_mismatch' <<<"$j_blank")" "content changed" "37r altered text with trailing blank addition reports content changed"
-+eq "$(jq -r '.review.cleared' <<<"$j_blank")" "false" "37s altered text with trailing blank addition does not clear"
-+out_blank=$(run tk-1 fleet/blank-tip 2>&1 || true)
-+has "$out_blank" "content changed" "37t refusal line reports content changed on trailing blank addition"
++# 37u-37w: context blank flip (f5a5 shape: blank is context in rev, added in tip) clears via Shape A section extraction
++git -C "$ROOT/repo" checkout -q -b fleet/flip-base main
++printf "A\nB\n\n" > "$ROOT/repo/flip.md"
++git -C "$ROOT/repo" add flip.md && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "flip base"
++flip_base=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/flip-rev
++printf "A\nB\n\n## sec\nx\n" > "$ROOT/repo/flip.md"
++git -C "$ROOT/repo" add flip.md && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "flip rev"
++flip_rev=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q main
++printf "A\nB\n" > "$ROOT/repo/flip.md"
++git -C "$ROOT/repo" add flip.md && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "flip main advance"
++
++git -C "$ROOT/repo" checkout -q -b fleet/flip-tip
++printf "A\nB\n\n## sec\nx\n" > "$ROOT/repo/flip.md"
++git -C "$ROOT/repo" add flip.md && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "flip tip"
++flip_tip=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: flip.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 $flip_base..$flip_rev branch fleet/flip-tip\nFindings: none"}]
++J
++j_flip=$(run --print-json tk-1 fleet/flip-tip)
++eq "$(jq -r '.review.state' <<<"$j_flip")" "CURRENT" "37u context blank flip state is CURRENT"
++eq "$(jq -r '.review.cleared' <<<"$j_flip")" "true" "37v context blank flip cleared is true"
++eq "$(jq -r '.review.delta_normalized' <<<"$j_flip")" "true" "37w context blank flip delta_normalized is true"
++
++# 37x-37z: different dashdash-leading line removals refuse delta identity (F2)
++git -C "$ROOT/repo" checkout -q -b fleet/dash-base main
++printf "intro\n--verbose flag\n--quiet flag\nend\n" > "$ROOT/repo/flags.md"
++git -C "$ROOT/repo" add flags.md && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "dash base"
++dash_base=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/dash-rev
++printf "intro\n--quiet flag\nend\n" > "$ROOT/repo/flags.md"
++git -C "$ROOT/repo" add flags.md && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "dash rev"
++dash_rev=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/dash-tip main
++printf "intro\n--verbose flag\nend\n" > "$ROOT/repo/flags.md"
++git -C "$ROOT/repo" add flags.md && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "dash tip"
++dash_tip=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: dash.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 $dash_base..$dash_rev branch fleet/dash-tip\nFindings: none"}]
++J
++j_dash=$(run --print-json tk-1 fleet/dash-tip)
++eq "$(jq -r '.review.delta_mismatch' <<<"$j_dash")" "content changed" "37x different dashdash removals report content changed"
++eq "$(jq -r '.review.cleared' <<<"$j_dash")" "false" "37y different dashdash removals do not clear"
++out_dash=$(run tk-1 fleet/dash-tip 2>&1 || true)
++has "$out_dash" "content changed" "37z refusal line reports content changed on dashdash removal mismatch"
++
++# 37aa-37ac: trailing newline presence difference refuses delta identity (F3)
++git -C "$ROOT/repo" checkout -q -b fleet/nl-base main
++printf "x" > "$ROOT/repo/nl.txt"
++git -C "$ROOT/repo" add nl.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "nl base"
++nl_base=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/nl-rev
++printf "y" > "$ROOT/repo/nl.txt"
++git -C "$ROOT/repo" add nl.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "nl rev"
++nl_rev=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q main
++printf "x\n" > "$ROOT/repo/nl.txt"
++git -C "$ROOT/repo" add nl.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "nl base2"
++
++git -C "$ROOT/repo" checkout -q -b fleet/nl-tip
++printf "y\n" > "$ROOT/repo/nl.txt"
++git -C "$ROOT/repo" add nl.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "nl tip"
++nl_tip=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: nl.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 $nl_base..$nl_rev branch fleet/nl-tip\nFindings: none"}]
++J
++j_nl=$(run --print-json tk-1 fleet/nl-tip)
++eq "$(jq -r '.review.delta_mismatch' <<<"$j_nl")" "content changed" "37aa trailing newline difference reports content changed"
++eq "$(jq -r '.review.cleared' <<<"$j_nl")" "false" "37ab trailing newline difference does not clear"
++out_nl=$(run tk-1 fleet/nl-tip 2>&1 || true)
++has "$out_nl" "content changed" "37ac refusal line reports content changed on trailing newline difference"
++
++# 37ad-37af: binary before text refuses on binary mismatch without state leak (F4)
++git -C "$ROOT/repo" checkout -q -b fleet/f4-base main
++printf "basebin\x00" > "$ROOT/repo/f4.bin"
++printf "basetext\n" > "$ROOT/repo/f4.txt"
++git -C "$ROOT/repo" add f4.bin f4.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "f4 base"
++f4_base=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/f4-rev
++printf "revbin\x00" > "$ROOT/repo/f4.bin"
++printf "basetext\nappended\n" > "$ROOT/repo/f4.txt"
++git -C "$ROOT/repo" add f4.bin f4.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "f4 rev"
++f4_rev=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++git -C "$ROOT/repo" checkout -q -b fleet/f4-tip main
++printf "tipbin\x00" > "$ROOT/repo/f4.bin"
++printf "basetext\nappended\n" > "$ROOT/repo/f4.txt"
++git -C "$ROOT/repo" add f4.bin f4.txt && git -c user.email=t@t -c user.name=t -C "$ROOT/repo" commit -q -m "f4 tip"
++f4_tip=$(git -C "$ROOT/repo" rev-parse --short HEAD)
++
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: f4.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 $f4_base..$f4_rev branch fleet/f4-tip\nFindings: none"}]
++J
++j_f4=$(run --print-json tk-1 fleet/f4-tip)
++eq "$(jq -r '.review.delta_mismatch' <<<"$j_f4")" "content changed" "37ad binary mismatch before text reports content changed"
++eq "$(jq -r '.review.cleared' <<<"$j_f4")" "false" "37ae binary mismatch before text does not clear"
++out_f4=$(run tk-1 fleet/f4-tip 2>&1 || true)
++has "$out_f4" "content changed" "37af refusal line reports content changed on binary mismatch before text"
  
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
