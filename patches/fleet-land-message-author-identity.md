@@ -11,7 +11,7 @@
   4. `patches/fleet-verdict-pool-sha-relevance.patch` (agents-9lew);
   5. **this patch**, which applies on top of all four.
   Measured on a fresh copy of the live files: steps 2-4 apply with no failures and the bundle's own suite passes
-  **324/0**, then this patch applies with no failures and the suite passes **341/0**. Applying this patch before
+  **324/0**, then this patch applies with no failures and the suite passes **346/0**. Applying this patch before
   step 4 is what FAILS (2 of 9 hunks), which is why the order above is part of the delivery and not a footnote.
 - **Problem Statement (agents-2tov):** the independence check classified a review by comparing the reviewer's
   family with the *author's*, and it took the author from the ACTOR OF THE OPERATIVE LAND-SUMMARY COMMENT
@@ -53,6 +53,28 @@
   the message and `--print-json` both record the provenance as `supplied by the lander (--author-model)` so a
   supplied value is never indistinguishable from a derived one.
 
+- **THE CROSS-VM DEFECT THE REVIEWER FOUND (agents-8ab7, P2, rev-2tov3) AND WHAT CHANGED.** The first artifact
+  passed its own fixture set while being WRONG one delivery boundary away: it synthesized the author's actor as
+  `${FLEET_VM}-${lane}`, but `FLEET_VM` names the VM RUNNING the check while the bead's actors carry the
+  ORIGINATING project VM's prefix. On the hub the synthesized name (`fleet-manager-thing2` for a
+  `test-vm-thing2` branch) matched no comment, so the author-lane filter RETAINED the author's own verdict as
+  independent evidence and the classification fell back to `other-lane` - the unsafe direction this patch exists
+  to close, left open by a name that nobody could have written. The same wrong question was still being asked at
+  four rank-scoped filter sites and at the other-lane classification, because the earlier re-cut moved only the
+  sites the plain-live layout happened to have.
+  - **Fix:** the author is matched BY LANE - an actor belongs to the author when it IS the lane or ends with
+    `-<lane>`, whatever VM prefix it carries - and the displayed actor comes from the bead's own objects (the
+    operative LAND-SUMMARY's actor when it belongs to the lane, otherwise the first comment whose actor does),
+    with the lane as the label of last resort. A prefix is never invented from `FLEET_VM`. One predicate is
+    built once and used at EVERY filter site, including the other-lane classification.
+  - **Discriminator, not a demonstration: case 38q.** The fixture makes the author lane's verdict a FAIL and
+    another lane's a PASS on the same tip, then compares a `FLEET_VM=fleet-manager` run with a project-side one.
+    Against the previous artifact with the same test file it fails exactly where the defect lives - ignored 0 vs
+    1, the selected verdict is the author's own `test-vm-thing2` instead of `test-vm-rev-y`, and the landing
+    verdict is the author's FAIL instead of the independent PASS. (A first version of 38q used PASS/PASS and did
+    NOT discriminate - the values were identical in both runs - which is the "a pin that is not selected is the
+    same as no pin" failure in its fixture form, caught before delivery.)
+
 - **REVIEW, STATED PLAINLY SO NOBODY WAITS FOR ONE:** this delivery needs a CROSS-FAMILY REVIEW ON THE HUB SIDE
   before it is applied to `~/fleet`. **No review on this project VM is pending and none will be requested**: the
   specialist slot here is held by other work, the reviewer lane that had this branch (round 1, tip 5295b3e) was
@@ -90,7 +112,7 @@
 
 - **Verification (measured, and both directions):**
   - GREEN on the applied-state base, on two independent trees: `bash tests/fleet-land-message.test.sh` ->
-    **341 passed, 0 failed** (the earlier patches' 324 assertions unchanged, plus this change's 17).
+    **346 passed, 0 failed** (the earlier patches' 324 assertions unchanged, plus this change's 22).
   - BASE WITHOUT THIS CHANGE, for the difference: the same suite on the applied state without this patch ->
     **324 passed, 0 failed**, and this change's fixture produces no author-identity JSON at all there.
   - RED against the plain-live helper (the same test file, so the pin is shown to be aimed at the defect):
