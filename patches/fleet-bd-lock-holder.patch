@@ -1,4 +1,4 @@
-From 717e5bffd00ae52f376c886cb5b02c5819035e4b Mon Sep 17 00:00:00 2001
+From 3b79c6a25f273da1549784c345dcabfd12136ae4 Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
@@ -147,6 +147,20 @@ and survivable.
 
 DOCS ONLY again, verified: applied bin/bd and tests/bd-lock-holder.test.sh are byte-identical to the copies the
 reviewers saw for 602bec9 (cmp), so every behaviour conclusion carries over and only the write-up differs.
+
+--- DOCS: the rollout story, measured on the real lock (coord's request) ---
+
+Coord: the UNNAMED-holder case is the rollout story and belongs in the write-up, because "patched waiter,
+unpatched holder" is what the fleet will actually run for a while. New section "The rollout story": the live
+transcripts from the real lock while writing that section (reports at 0m0s and 0m30s, holder UNNAMED because a
+PRE-PATCH bd held it, then the call ran; and a second attempt that hit its 1m30s bound and changed nothing),
+plus a table of the three states - patched/patched names role+pid+operation+descendants; pre-patch holder with
+a patched waiter degrades to UNNAMED with the reason rather than inventing one; and a pre-patch waiter prints
+nothing at all for up to 300s, which is the state this patch removes. Also stated: the record is advisory
+throughout (the lock is the fd, so a pre-patch holder is safely serialised against a patched waiter), and an
+empty lock file beside an active lock means "a holder whose record I cannot read", not "nobody is here".
+
+DOCS ONLY, verified: applied bin/bd and tests/ byte-identical to the reviewers' copies for 602bec9 (cmp).
 ---
  bin/bd                       | 288 ++++++++++++++++++++++++++++++++-
  tests/bd-lock-holder.test.sh | 301 +++++++++++++++++++++++++++++++++++

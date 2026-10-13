@@ -55,6 +55,39 @@ cannot be proved on a shared-uid VM). What it does not do is shorten any wait, a
 fair; it makes the wait **visible, nameable, bounded, and survivable**, so a lane can retry instead of
 disappearing.
 
+### The rollout story: what the fleet will actually run for a while
+
+This patch is on one side of the lock at a time, so the state that matters is a MIX. Measured on the real lock
+while writing this patch - patched shim waiting, **pre-patch** `bd` holding:
+
+    bd: WAITING 0m0s for the VM-wide bd lock (one Dolt write at a time; a dolt push holds it for its git
+        round-trip to origin).
+    bd:   holder: UNNAMED - the lock file has no usable holder record ...
+    bd: WAITING 0m30s ...
+    -> then the call RAN (the comment was added and the push completed)
+
+and a second attempt against the same contention:
+
+    bd: WAITING 0m0s ... 0m30s ... 1m0s ... 1m30s ...
+    bd: TIMEOUT (agents-elu6): the VM-wide bd lock was held for 1m30s. THIS CALL DID NOT RUN and changed
+        nothing.
+    bd:   retry in a few seconds, or allow a longer wait with FLEET_BD_LOCK_WAIT=<seconds>.
+    bd:   Posting a verdict? The COMMENT first, then the labels: a retry then never loses the verdict.
+
+Three states, and none of them lies:
+
+| holder | waiter | what the waiter prints |
+| --- | --- | --- |
+| patched | patched | `role=implementer pid=… since …`, the operation, the descendant process names |
+| **pre-patch** | patched | **`UNNAMED`**, with the reason: no usable holder record - "a holder exists whose identity I cannot see" rather than a guess |
+| any | pre-patch | nothing at all for up to 300 s, then exit 1 with no output - the state this patch removes |
+
+So during rollout the report degrades to `UNNAMED` rather than to an invention, and the record is advisory
+throughout: the lock itself is the fd, so a pre-patch holder is still safely serialised against a patched
+waiter because they contend on the same `flock`. Nothing about the format depends on both sides being upgraded
+together, and the file is truncated between holders, which is why an empty lock file beside an active lock means
+"a holder whose record I cannot read", not "nobody is here".
+
 ### What this patch promises, and where the boundary is (threat model)
 
 This is stated as a BOUNDARY, not left for a reader to infer, because three successive reviews found the same
