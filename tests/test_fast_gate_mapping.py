@@ -124,6 +124,56 @@ def suites_importing(dotted: str) -> set[str]:
 class TestFastGateMapping(unittest.TestCase):
     """Pin the fast-gate mapping contract against regressions."""
 
+    PROBE_GLOB = "test_*_probe_tmp.py"
+
+    @staticmethod
+    def clear_probe_leftovers():
+        """Remove scratch suites a KILLED run left behind, and report what was removed (agents-xawg).
+
+        The probe tests below write a scratch suite into tests/ because the gate has to RUN it, and they
+        remove it in a `finally`. A `finally` does not run when the process is KILLED, and the fast gate's
+        runner does kill suites on its bound - tests/test_fast_gate_mapping.py has a test for exactly that
+        SIGTERM path. The leftover is a VALID unittest module in tests/, it is untracked (so the gate does
+        not witness it), and lanes commit with `git add -A` - this was found when one nearly landed. So the
+        leak is self-healing on the next run of this class, and .gitignore carries the load-bearing half:
+        the pattern cannot be committed even between runs.
+        """
+        removed = []
+        for leftover in sorted((ROOT / "tests").glob(TestFastGateMapping.PROBE_GLOB)):
+            leftover.unlink()
+            removed.append(leftover.name)
+        return removed
+
+    @classmethod
+    def setUpClass(cls):
+        cls.probe_leftovers_cleared = cls.clear_probe_leftovers()
+
+    def test_a_killed_run_cannot_leave_a_committable_probe(self):
+        """agents-xawg, both halves, each measured rather than asserted.
+
+        (1) THE HAZARD IS CLOSED: a leaked probe is an ignored path, so `git add -A` cannot land it. Driven
+        through git itself rather than by reading .gitignore, because the rule is only as good as git's
+        opinion of it.
+        (2) THE LEAK IS SELF-HEALING: a file a killed run left is removed by the next run of this class,
+        which is the cleanup setUpClass calls.
+        """
+        probe = "tests/test_pass_probe_tmp.py"
+        res = subprocess.run(["git", "check-ignore", "-q", "--no-index", probe], cwd=ROOT,
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0,
+                         f"{probe} must be IGNORED: a probe left by a killed run is a valid test file in "
+                         f"tests/, it is untracked (so the gate never witnesses it), and lanes commit with "
+                         f"`git add -A` (agents-xawg)")
+        leftover = ROOT / "tests" / "test_leaked_probe_tmp.py"
+        leftover.write_text("import unittest\nclass _L(unittest.TestCase):\n    def test_ok(self): pass\n",
+                            encoding="utf-8")
+        try:
+            self.assertIn("test_leaked_probe_tmp.py", self.clear_probe_leftovers(),
+                          "a leftover from a killed run must be reported as removed")
+            self.assertFalse(leftover.exists(), "the leftover must be gone after the cleanup runs")
+        finally:
+            leftover.unlink(missing_ok=True)
+
     def test_findings_py_maps_to_security_and_suppression_contracts(self):
         """lib/findings.py must run redaction (security), suppressions (register) and the store's own
         consumer expectations (the candidate-identity index/rekey counts)."""
