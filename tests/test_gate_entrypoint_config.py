@@ -586,7 +586,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         installed = conf.read_text(encoding="utf-8")
         tracked_cmd = _tracked_fields()["CHECK_CMD"]
         self.assertIn(tracked_cmd, installed)
-        self.assertIn("-t .", installed)
+        self.assertIn('CHECK_CMD="bash tools/full-gate.sh"', installed)
 
     def test_install_overwrites_malformed_per_vm_config_with_tracked_values(self):
         """agents-r1o7: when an existing per-VM check.conf contains invalid syntax or corruption,
@@ -607,7 +607,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         installed = conf.read_text(encoding="utf-8")
         tracked_cmd = _tracked_fields()["CHECK_CMD"]
         self.assertIn(tracked_cmd, installed)
-        self.assertIn("-t .", installed)
+        self.assertIn('CHECK_CMD="bash tools/full-gate.sh"', installed)
 
     def test_install_warns_when_overwriting_foreign_project_config(self):
         """agents-f6no: when ~/.fleet/check.conf already exists without agents-factory stamp
@@ -847,7 +847,7 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
         self.assertEqual(m.group(1), _tracked_fields()["CHECK_CMD"],
                          "provisioning must install the TRACKED command; a divergence means a "
                          "hand-edit or a stale install, and this test cannot tell them apart")
-        self.assertIn("-t .", installed)
+        self.assertIn('CHECK_CMD="bash tools/full-gate.sh"', installed)
 
     def test_install_sh_repairs_a_stale_per_vm_config(self):
         """The 'repaired host' half of the acceptance, which is the half a fresh-host check
@@ -863,7 +863,7 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
 
         installed = conf.read_text(encoding="utf-8")
         self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
-        self.assertIn("-t .", installed)
+        self.assertIn('CHECK_CMD="bash tools/full-gate.sh"', installed)
 
     def test_install_sh_says_what_it_repaired_and_checks_the_repair_landed(self):
         """agents-d081: THE REPAIR ABOVE USED TO BE SILENT, so a host that had been running a

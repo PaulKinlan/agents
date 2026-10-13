@@ -20,10 +20,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# These two are the only users of FLEET_CHECKS_DIR in the repo, so pinning both pins the surface.
-# The full gate writes .summary.txt (agents-j1te, tools/check.conf); the fast gate writes
-# .fast.summary.txt (agents-6jmx, tools/fast-gate.sh).
-WRITERS = ("tools/fast-gate.sh", "tools/check.conf")
+# These are the two verdict-summary writers. The full gate writes .summary.txt;
+# the fast gate writes .fast.summary.txt. A cost cache is not a verdict summary.
+WRITERS = ("tools/fast-gate.sh", "tools/full-gate.sh")
 
 # The old IDENTITY_FIELDS/HEADER_MARKERS blocks are superseded by NAME_FIELD_TOKENS,
 # DERIVATION_TOKENS and the header checks below (agents-undf).
@@ -189,7 +188,8 @@ class TestSummaryFileNameCarriesRunIdentity(unittest.TestCase):
         for rel in WRITERS:
             with self.subTest(writer=rel):
                 code = _code_only(_src(rel))
-                runner_lines = [ln for ln in code.splitlines() if "unittest" in ln]
+                runner_lines = [ln for ln in code.splitlines()
+                                if "unittest" in ln or "python3 -u - \"$@\"" in ln]
                 self.assertTrue(runner_lines, f"{rel}: no runner command found to check")
                 runner = "\n".join(runner_lines)
                 self.assertIn(

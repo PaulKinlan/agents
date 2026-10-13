@@ -40,11 +40,11 @@ def _tracked_fields(text: str | None = None) -> dict:
 
 
 def _discovery_commands() -> list[str]:
-    """Every `unittest discover` invocation in the deployed CI workflow, regardless of interpreter variant."""
+    """The core full gate and every additional unittest discovery in deployed CI."""
     commands = []
     for line in CI_YML.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if "unittest discover" in stripped:
+        if "unittest discover" in stripped or stripped == "bash tools/full-gate.sh":
             if stripped.startswith("run:"):
                 stripped = stripped[4:].strip()
             commands.append(stripped)
@@ -130,6 +130,27 @@ def check_ci_and_tracked_config_consistency(ci_commands: list[str], tracked_cmd:
     if not ci_commands:
         raise AssertionError("expected at least one discovery invocation in ci.yml")
 
+    # The production entrypoint owns the full selection; the other CI discovery is
+    # deliberately narrowed to the no-bwrap parity guard. Keep the old parser below
+    # for explicit legacy/synthetic commands, which still must refuse narrowing.
+    if tracked_cmd == "bash tools/full-gate.sh":
+        core = ci_commands[0]
+        if core != tracked_cmd:
+            args = _parse_discovery_args(core)
+            raise AssertionError(
+                f"CI core command {core!r} diverges from tracked CHECK_CMD {tracked_cmd!r}; "
+                f"start={args['start']!r} filters={args['filters']!r}")
+        source = (ROOT / "tools" / "full-gate.sh").read_text(encoding="utf-8")
+        for required in ('loader.discover("tests", top_level_dir=".")',
+                         '"-m", "unittest", module, "-v"'):
+            if required not in source:
+                raise AssertionError(f"full gate lost the package-aware complete module selection: {required}")
+        for cmd in ci_commands[1:]:
+            args = _parse_discovery_args(cmd)
+            if args["start"] != "tests" or args["top"] != ".":
+                raise AssertionError(f"CI guard lost package-aware discovery: {cmd!r}")
+        return
+
     tracked_args = _parse_discovery_args(tracked_cmd)
 
     # 1. EVERY discovery command in CI must carry -t . (package-aware) and -s tests
@@ -201,10 +222,8 @@ class TestTrackedCheckConfig(unittest.TestCase):
             self.assertIn(required, fields, f"missing required field: {required}")
 
         cmd = fields["CHECK_CMD"]
-        self.assertIn("discover", cmd, f"CHECK_CMD is not a discovery command: {cmd!r}")
-        self.assertRegex(cmd, r"(^|\s)-t\s+\.",
-                         f"CHECK_CMD must carry `-t .` or the hermetic declaration never "
-                         f"runs: {cmd!r}")
+        self.assertEqual(cmd, "bash tools/full-gate.sh")
+        check_ci_and_tracked_config_consistency(_discovery_commands(), cmd)
 
     def test_tracked_fields_parser_accepts_inner_quotes_and_unquoted_values(self):
         """The parser must accept escaped inner quotes (e.g. bash -c commands) and unquoted values."""
@@ -277,6 +296,8 @@ class TestTrackedCheckConfig(unittest.TestCase):
         commands = _discovery_commands()
         self.assertTrue(commands, "expected at least one discovery invocation in ci.yml")
         for cmd in commands:
+            if cmd == "bash tools/full-gate.sh":
+                continue  # package-aware loader checked by the shared entrypoint pin
             with self.subTest(command=cmd):
                 self.assertRegex(cmd, r"(^|\s)-t\s+\.",
                                  f"ci.yml runs package-blind discovery, so the hermetic "
@@ -326,7 +347,7 @@ class TestTrackedCheckConfig(unittest.TestCase):
     def test_narrowed_tracked_check_cmd_fails_consistency_check(self):
         """agents-h4tg: assert that tracked CHECK_CMD carrying -p or -k fails consistency check.
         The full gate command in tools/check.conf must select the complete test suite."""
-        commands = _discovery_commands()
+        commands = ["python3 -m unittest discover -s tests -t . -v"]
         narrowed_tracked_cmds = [
             "python3 -m unittest discover -s tests -t . -v -p test_no_bwrap_guard.py",
             "python3 -m unittest discover -s tests -t . -v --pattern=test_no_bwrap_guard.py",
@@ -445,8 +466,8 @@ class TestConfigIsResolvedLoudly(unittest.TestCase):
             res = subprocess.run(["bash", str(resolver), "CHECK_CMD"],
                                  capture_output=True, text=True, timeout=30, env=env)
             self.assertEqual(res.returncode, 0, f"a missing OVERRIDE is fine: {res.stderr}")
-            self.assertIn("-t .", res.stdout,
-                          "the resolved command must come from the tracked config")
+            self.assertEqual(res.stdout.strip(), _tracked_fields()["CHECK_CMD"],
+                         "the resolved command must come from the tracked config")
 
     def test_install_honors_fleet_check_conf_destination_and_docs_agree(self):
         """tools/check-cmd.sh --install respects FLEET_CHECK_CONF and docs describe it (agents-80go)."""

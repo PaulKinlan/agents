@@ -290,6 +290,11 @@ while IFS= read -r f; do
       # every inherited execution, so the arm names them all.
       mapped="$mapped tests/test_containment.py tests/test_containment_declarations.py tests/test_containment_adapters.py tests/test_containment_engine_credentials.py tests/test_containment_prepass_pins.py tests/test_containment_egress.py tests/test_containment_shape.py tests/test_containment_broker.py tests/test_containment_confinement.py tests/test_containment_hardening.py tests/test_containment_run_isolation.py tests/test_containment_session_patch.py tests/test_containment_write_grants.py"
       ;;
+    tools/full-gate.sh)
+      # The full gate is the merger/CI entrypoint; exercise its synthetic shard
+      # failures and the tracked wiring/summary identity whenever it changes.
+      mapped="$mapped tests/test_full_gate_sharding.py tests/test_check_conf_consistency.py tests/test_summary_identity.py"
+      ;;
     tools/fast-gate.sh)
       # agents-8jx1: THE GATE'S OWN SCRIPT HAD AN ARM THAT MAPPED ONLY
       # tests/test_fast_gate_mapping.py. A change to tools/fast-gate.sh therefore selected the

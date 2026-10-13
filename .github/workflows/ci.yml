@@ -36,7 +36,7 @@ jobs:
 
       - name: Run Core Unit Tests
         run: |
-          python3 -m unittest discover -s tests -t . -v
+          bash tools/full-gate.sh
 
       # Even on a laptop where bubblewrap works, exercise the GitHub runner's
       # no-sandbox condition: successful engine runs must skip, but pi must still
