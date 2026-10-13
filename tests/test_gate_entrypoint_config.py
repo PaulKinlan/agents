@@ -561,11 +561,51 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         # never reads the live file). The two facts the header may state are pinned here: the file
         # is machine-global, and it names the repair. The negative assertion is what makes the
         # false promise unable to come back - it is the falsifiable half of this bead.
-        self.assertIn("MACHINE-GLOBAL", installed)
+        #
+        # agents-0utp: AND IT MUST NAME WHICH LIFE THIS COPY LEADS, not assert the global one
+        # whatever the destination was. At the default path the global claim is true; the
+        # discriminating case is the next test, where FLEET_CHECK_CONF points at a per-repo
+        # override and the same header would have told its reader that --install maintains it -
+        # while --install without the variable replaces the host's shared file instead.
+        self.assertIn("THIS COPY IS MACHINE-GLOBAL", installed)
+        self.assertIn("BY DEFAULT for any repo invoked", installed)
         self.assertIn("--install", installed)
         self.assertNotIn("fails on any divergence", installed,
                          "the emitted header must not promise a guard no test performs "
                          "(agents-024z): nothing in this suite reads the live per-VM file")
+
+    def test_header_names_a_per_repo_override_as_repo_local_rather_than_machine_global(self):
+        """agents-0utp, the discriminating half of the pair above: with FLEET_CHECK_CONF pointing at a
+        per-repo path, the SAME generator must not write a header that calls the file machine-global.
+
+        The defect this pins: the header asserted MACHINE-GLOBAL whatever $dest was, and told its reader
+        "the repair is --install". A reader who believed it and ran --install WITHOUT the variable set
+        would replace the host's shared ~/.fleet/check.conf - which is precisely the incident this
+        bead was filed for. The negative assertion below FAILS on the old wording and passes on the new
+        one, which is what makes it a pin rather than a guard. The last assertion asks the filesystem
+        what it holds instead of asking the script what it computed: the global path must not exist.
+        """
+        home = _registered_tmp_home(self, "0utp-lives-")
+        dest = Path(home) / "repo-override" / "agents-factory-check.conf"
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["FLEET_CHECK_CONF"] = str(dest)
+        r = subprocess.run(["bash", str(RESOLVER), "--install"],
+                           capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+
+        installed = dest.read_text(encoding="utf-8")
+        self.assertIn("THIS COPY IS A REPO-LOCAL OVERRIDE", installed)
+        self.assertIn(str(dest), installed,
+                      "an override must name the path it is read from, or the reader cannot tell "
+                      "which file FLEET_CHECK_CONF has to name")
+        self.assertNotIn("THIS COPY IS MACHINE-GLOBAL", installed,
+                         "with FLEET_CHECK_CONF set this file is NOT the host's shared config; a header "
+                         "that says it is tells the reader that --install maintains it (agents-0utp)")
+        self.assertIn("WITHOUT it set replaces the machine-global", installed,
+                      "the header must name the trap, not just the truth")
+        self.assertFalse((Path(home) / ".fleet" / "check.conf").exists(),
+                         "installing to an override must NOT also write the machine-global path")
 
     def test_install_overwrites_stale_per_vm_config_with_tracked_values(self):
         """When an existing per-VM check.conf carries a stale command (e.g. without -t .),
@@ -630,7 +670,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         installed = conf.read_text(encoding="utf-8")
         self.assertIn("# Project: agents-factory", installed)
-        self.assertIn("# WARNING: This file is MACHINE-GLOBAL", installed)
+        self.assertIn("# THIS COPY IS MACHINE-GLOBAL", installed)
 
         # Idempotent second install should NOT warn
         r2 = subprocess.run(["bash", str(RESOLVER), "--install"],

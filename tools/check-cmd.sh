@@ -141,14 +141,34 @@ if [ "${1:-}" = "--install" ]; then
     echo "check-cmd: WARNING: overwriting $dest which was not stamped by agents-factory (shared-HOME host)" >&2
   fi
 
+  # agents-0utp: NAME THE LIFE THIS COPY LEADS. The header used to assert MACHINE-GLOBAL whatever $dest was,
+  # which is only true at the default path. When FLEET_CHECK_CONF names a per-repo override, a file that calls
+  # itself machine-global tells its reader that --install maintains it - and --install WITHOUT the variable set
+  # replaces the host's shared ~/.fleet/check.conf instead, which is the incident: a repair whose own
+  # documentation instructs the reader to trigger the bug. Generated rather than literal because $dest is known
+  # here and nowhere else.
+  if [ "$dest" = "$HOME/.fleet/check.conf" ]; then
+    life_lines=$(cat <<'LIFE'
+# THIS COPY IS MACHINE-GLOBAL (~/.fleet/check.conf). fleet-check reads it BY DEFAULT for any repo invoked on
+# this host, so --install without FLEET_CHECK_CONF set REPLACES THE ACTIVE GATE COMMAND FOR EVERY REPO HERE.
+LIFE
+)
+  else
+    life_lines=$(cat <<LIFE
+# THIS COPY IS A REPO-LOCAL OVERRIDE, at $dest.
+# fleet-check reads it ONLY when FLEET_CHECK_CONF names this path, and --install writes here ONLY when that
+# variable is set at install time. Running --install WITHOUT it set replaces the machine-global
+# ~/.fleet/check.conf for every repo on this host instead, and leaves this file untouched.
+LIFE
+)
+  fi
   {
-    printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p, agents-f6no)."
+    printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p, agents-f6no, agents-0utp)."
     printf '%s\n' "# Project: agents-factory ($ROOT)"
-    printf '%s\n' "# WARNING: This file is MACHINE-GLOBAL (~/.fleet/check.conf). fleet-check reads this file"
-    printf '%s\n' "# for any repo invoked on this host; running --install replaces the active gate command."
+    printf '%s\n' "$life_lines"
     printf '%s\n' "# DO NOT HAND-EDIT FOR TUNING: a hand-edit and a stale install are indistinguishable"
-    printf '%s\n' "# from the files alone, so --install overwrites both. No test reads this file (it is"
-    printf '%s\n' "# machine state, and fleet-check sources whatever it says): the repair is --install."
+    printf '%s\n' "# from the files alone, so --install overwrites the file it is pointed at. No test reads this"
+    printf '%s\n' "# file (it is machine state, and fleet-check sources whatever it says): the repair is --install."
     printf '%s\n' "# To tune, edit tools/check.conf and re-run: bash tools/check-cmd.sh --install (agents-024z)."
     grep -E '^[A-Z_]+=' "$TRACKED"
   } > "$dest"
