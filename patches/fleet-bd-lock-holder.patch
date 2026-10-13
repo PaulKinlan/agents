@@ -1,4 +1,4 @@
-From 6c9098c3754eade4fe9bc2f79c46077c43132819 Mon Sep 17 00:00:00 2001
+From a63c90c99195502abf5ec784cd2cbfcca1c20055 Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
@@ -72,17 +72,34 @@ from the one it replaces: against the fd-closing revision exactly 9a and 9b fail
 and against the shim as deployed the suite is 24 passed / 32 failed.
 
 Release-note: none (fleet tooling; no user-facing surface)
+
+--- ALSO IN THIS REVISION: the glob/path property is now PINNED, outcome and order (coord's call) ---
+
+Reviews asked whether the character-class check before the registry lookup is tested, and it was not - only
+argued. Case 15 now does both, and measuring it corrected the mechanism I had described: bash does NOT
+glob-expand inside `[ -e "..." ]`, so the property does not rest on globbing at all. It rests on two things
+the character class stops regardless of quoting: `..` is resolved by the KERNEL inside an otherwise-quoted
+path, so `../../etc/passwd` would be vouched for by a file OUTSIDE the registry; and `*` is a legal filename
+character, so `impl-*` would be vouched for by a file literally named `impl-*.model`. Case 15 plants both
+files, so its four outcome assertions discriminate the ORDER rather than merely agreeing with it, and 15d
+asserts the order structurally by reading the function's CODE (not its comments - this function's own
+docstring names ~/.fleet/lanes/<name>.model, and the first draft of 15d failed on that prose).
+
+Evidence the pin is load-bearing: against a REORDERED copy of the shim (lookup first) case 15 goes red in all
+nine of its places - the four outcome pairs plus 15d - while a suite that only checked outcomes against an
+unplanted registry would have passed that mutation. Suite is 66/66 here, 28/38 against the shim as deployed,
+64/2 against the fd-closing revision (the two are 9a/9b).
 ---
- bin/bd                       | 303 ++++++++++++++++++++++++++++++++++-
- tests/bd-lock-holder.test.sh | 254 +++++++++++++++++++++++++++++
- 2 files changed, 556 insertions(+), 1 deletion(-)
+ bin/bd                       | 309 ++++++++++++++++++++++++++++++++++-
+ tests/bd-lock-holder.test.sh | 297 +++++++++++++++++++++++++++++++++
+ 2 files changed, 605 insertions(+), 1 deletion(-)
  create mode 100644 tests/bd-lock-holder.test.sh
 
 diff --git a/bin/bd b/bin/bd
-index 723856f..774c510 100755
+index 723856f..3c8e909 100755
 --- a/bin/bd
 +++ b/bin/bd
-@@ -246,6 +246,280 @@ guard_worktree_beads_decoy() {
+@@ -246,6 +246,286 @@ guard_worktree_beads_decoy() {
  
  guard_worktree_beads_decoy "$@"
  
@@ -205,8 +222,14 @@ index 723856f..774c510 100755
 +  # A LANE NAME MUST BE ONE THE FLEET ITSELF REGISTERED ON THIS VM (~/.fleet/lanes/<name>.model|.conf).
 +  # FLEET_LANE is environment and the record is writable by anyone, so the name is unvalidated text until
 +  # the fleet's own registry vouches for it; measured before this check: lane=SENTINEL-PRIVATE-PAYLOAD
-+  # reached both the shared record and another lane's stderr. The character class is checked FIRST so the
-+  # name can never act as a glob.
++  # reached both the shared record and another lane's stderr.
++  #
++  # THE CHARACTER CLASS IS CHECKED FIRST, AND THE ORDER IS LOAD-BEARING. `..` is resolved by the KERNEL
++  # inside an otherwise-quoted path, so a name like `../../etc/passwd` would be vouched for by a file OUTSIDE
++  # the registry; and `*` is a legal filename character even though it is not glob-expanded inside quotes, so
++  # `impl-*` would be vouched for by a file literally named `impl-*.model`. Measured against a reordered copy
++  # of this function (lookup first) with those exact files planted: tests/bd-lock-holder.test.sh case 15 goes
++  # red in all nine of its places - the four outcome pairs and the order assertion together.
 +  local name="$1"
 +  case "$name" in
 +    ""|*[!A-Za-z0-9._-]*) printf 'unregistered'; return 0 ;;
@@ -363,7 +386,7 @@ index 723856f..774c510 100755
  if [ -n "${FLEET_BD_LOCKED:-}" ]; then
    "$real" "$@"
    rc=$?
-@@ -254,7 +528,34 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+@@ -254,7 +534,34 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
  fi
  
  export FLEET_BD_LOCKED=1
@@ -401,10 +424,10 @@ index 723856f..774c510 100755
  exit "$rc"
 diff --git a/tests/bd-lock-holder.test.sh b/tests/bd-lock-holder.test.sh
 new file mode 100644
-index 0000000..b145182
+index 0000000..a6706d4
 --- /dev/null
 +++ b/tests/bd-lock-holder.test.sh
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,297 @@
 +#!/usr/bin/env bash
 +# tests/bd-lock-holder.test.sh — bin/bd: a contended lock NAMES ITS HOLDER, and the wait is bounded (agents-elu6).
 +#
@@ -422,7 +445,10 @@ index 0000000..b145182
 +# reports lane, pid, command, how long it has been held, and the holder's descendant tree (where a push
 +# actually spends its time); the wait keeps 300s of patience by default and is overridable; on expiry it
 +# fails FAST with EX_TEMPFAIL (75) without running the call; and NOTHING of this appears on stdout, which
-+# carries bd's JSON for callers like `bd show --json`.
++# carries bd's JSON for callers like `bd show --json`. THE LOCK IS HELD BY THE WORK, NOT BY THE SHIM'S
++# LIFETIME (P1, found by review): bd inherits the lock fd, so SIGKILLing the shim while bd is writing does
++# not release the lock - this fleet kills shims all day, and an earlier revision of this patch closed that
++# fd and was measured letting two bd processes write concurrently. Case 9 pins it.
 +#
 +# Hermetic by construction: a stub $HOME/.local/bin/bd means no real bead and no real lock is touched -
 +# the lock under test is $HOME/.fleet/bd.lock inside a throwaway home. The one real-lock measurement (a
@@ -454,9 +480,6 @@ index 0000000..b145182
 +cat > "$T/.local/bin/bd" <<'STUB'
 +#!/usr/bin/env bash
 +echo "REAL-BD:$*"
-+if [ "${STUB_ORPHAN:-0}" -gt 0 ]; then
-+  ( exec sleep 3 ) & disown 2>/dev/null || true    # a child that outlives bd, holding or not holding the lock fd
-+fi
 +if [ "${STUB_SLEEP:-0}" -gt 0 ]; then
 +  if [ "${STUB_SECRET_ARGV:-0}" -gt 0 ]; then
 +    ( exec -a "SENTINEL-PRIVATE-PAYLOAD" sleep "$STUB_SLEEP" ) &
@@ -656,6 +679,49 @@ index 0000000..b145182
 +has "$ROOT/e14b" "unrecognised" "14e the planted operation is replaced by 'unrecognised'"
 +has "$ROOT/e14b" "pid is gone" "14f and the bogus pid is called out as stale"
 +release
++
++echo "15. the character-class check precedes the registry lookup, so a glob-shaped lane name can never be trusted"
++# The OUTCOMES below are only discriminating because the harness registers impl-other/impl-ozmt: 'impl-*'
++# WOULD match a real registry entry if the lookup ran first, and the name would be reported as trusted.
++# PLANT the exact files a LOOKUP-FIRST order would accept, so these outcomes discriminate the order rather
++# than merely agreeing with it: a literal file named 'impl-*.model', and a registry-escaping '../../etc/passwd'
++# (the kernel resolves '..' inside an otherwise-quoted path, so without the character check a name can reach a
++# file OUTSIDE the registry - and quoting does not stop that, only the character class does).
++: > "$T/.fleet/lanes/impl-*.model"; : > "$T/.fleet/lanes/a b.model"; : > "$T/.fleet/lanes/*.model"
++mkdir -p "$T/etc"; : > "$T/etc/passwd.model"
++for pair in "impl-*|a glob-shaped name is reported unregistered even though impl-other.model IS registered" \
++            "../../etc/passwd|a path-shaped name is rejected" \
++            "a b|a name containing a space is rejected" \
++            "*|a bare glob is rejected"; do
++  name="${pair%%|*}"; what="${pair#*|}"
++  : > "$LOCK"
++  STUB_SLEEP=2 HOME="$T" FLEET_LANE="$name" bash "$SHIM" comment issue-z X >/dev/null 2>&1 & KIDS="$KIDS $!"
++  sleep 0.5
++  has "$LOCK" "lane=unregistered" "15 $what"
++  grep -Fq -- "lane=$name" "$LOCK" \
++    && bad "15b the name itself is never trusted into the record: [$name]" "unexpectedly found: lane=$name" \
++    || ok "15b the name itself is never trusted into the record: [$name]"
++  release
++done
++: > "$LOCK"
++STUB_SLEEP=2 HOME="$T" FLEET_LANE=impl-other bash "$SHIM" comment issue-z X >/dev/null 2>&1 & KIDS="$KIDS $!"
++sleep 0.5
++has "$LOCK" "lane=impl-other" "15c a genuinely registered name still passes through (the check rejects nothing it should keep)"
++release
++# AND THE ORDER ITSELF, because that is WHY it holds: if the registry lookup ran FIRST, 'impl-*' would match
++# impl-other.model and a glob-shaped name would be reported as trusted. A future reader could reorder these
++# two statements innocently, so the order is asserted structurally rather than left to the outcomes above.
++# Read the CODE only: this function's own docstring names ~/.fleet/lanes/<name>.model, so grepping the raw body
++# numbers a COMMENT as the lookup and the pin fails on its own prose (it did, in the first draft of this case).
++body=$(sed -n '/^fleet_bd_lock_lane()/,/^}/p' "$SHIM" | grep -v '^[[:space:]]*#')
++n_case=$(grep -n 'case "\$name" in' <<<"$body" | head -1 | cut -d: -f1)
++n_look=$(grep -n 'lanes/\$name' <<<"$body" | head -1 | cut -d: -f1)
++if [ -n "$n_case" ] && [ -n "$n_look" ] && [ "$n_case" -lt "$n_look" ]; then
++  ok "15d the character-class check is the FIRST statement in fleet_bd_lock_lane, before the registry lookup"
++else
++  bad "15d the character-class check no longer precedes the registry lookup (charset line=$n_case, lookup line=$n_look)" \
++      "restore the order: with a lookup-first order a glob-shaped name matches a real registry entry and is reported as trusted"
++fi
 +
 +printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 +[ "$FAIL" -eq 0 ]

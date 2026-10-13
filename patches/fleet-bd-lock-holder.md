@@ -47,7 +47,12 @@ discipline, not tooling — in the failure message itself.
   the payload, a vocabulary cannot express one — **every reported value is now one of: a vocabulary word**
   (bd operations, `dolt` operations, process names, roles), **a validated integer** (pid, timestamp), **or a
   lane name the fleet's own registry on this VM vouches for**; everything else becomes the literal
-  `unrecognised` / `other` / `unregistered` / `unknown`. Four positions had to be covered, and the last
+  `unrecognised` / `other` / `unregistered` / `unknown`. A lane name is accepted only if the check runs in
+  the right order, and that order is itself pinned (case 15): `..` is resolved by the **kernel** inside an
+  otherwise-quoted path, so `../../etc/passwd` would be vouched for by a file outside the registry, and `*`
+  is a legal filename character even though quotes stop it being expanded, so `impl-*` would be vouched for
+  by a file literally named `impl-*.model`. Against a reordered copy (lookup first) with those files planted,
+  case 15 goes red in **all nine** of its places. Four positions had to be covered in all, and the last
   three were found by attacking this patch rather than the original defect:
 
   | position | attack | before | now |
@@ -104,8 +109,9 @@ name, and a planted record must each carry no bead text (and a freeform subcomma
 
 | rig | result |
 | --- | --- |
-| patched shim, new suite | **56 passed, 0 failed** (35 behaviour + 21 privacy/shape cases) |
+| patched shim, new suite | **66 passed, 0 failed** (45 behaviour + 21 privacy/shape cases) |
 | **the revision this replaces** (lock fd closed for bd), the same suite | **54 passed, 2 failed** — and the two are exactly case 9a/9b, the killed-shim bypass |
+| **a REORDERED shim** (registry lookup before the character-class check), the same suite | **57 passed, 9 failed** — and the nine are exactly all of case 15: the four outcome pairs and the order assertion |
 | **shim as deployed, the same suite** | **24 passed, 32 failed** — the 24 are exactly the pre-existing behaviours (uncontended call, exit-code pass-through, nested bypass, stdout purity) |
 | patched shim, existing `tests/bd-shim.test.sh` | **15 passed, 0 failed** (serialisation and the nesting escape still hold) |
 | composed with `fleet-worktree-beads-guard.patch`, **both orders** | applies both ways; composed shim valid bash; **56/56 + 15/15 + that patch's own 13/13** |
