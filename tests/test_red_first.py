@@ -223,6 +223,22 @@ class TestRedFirst(unittest.TestCase):
         self.assertIn("neither-direction-verified", res.stderr)
         self.assertIn("absent marker 'GLITTERBERRY_UNRELATED_TOKEN_77' is not justified by delta", res.stderr)
 
+    def test_non_code_delta_path_cannot_certify_implementation(self):
+        """Tooth 2: marker from a committed non-code delta path (e.g. root notes.txt) cannot certify green implementation."""
+        (self.repo_dir / "notes.txt").write_text("NEW_NOTE_UNRELATED_TO_IMPL_6611\n", encoding="utf-8")
+        self._run_cmd(["git", "-C", str(self.repo_dir), "add", "."])
+        self._run_cmd(["git", "-C", str(self.repo_dir), "commit", "-m", "add notes with unrelated token"])
+
+        res = self._run_red_first([
+            "--base", self.base_commit,
+            "--expect-absent", "NEW_NOTE_UNRELATED_TO_IMPL_6611",
+            "--expect-present", "test_multiply_discriminator",
+            "tests/test_calc.py",
+        ])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("neither-direction-verified", res.stderr)
+        self.assertIn("absent marker 'NEW_NOTE_UNRELATED_TO_IMPL_6611' is not justified by delta", res.stderr)
+
     def test_untracked_file_cannot_certify_green_tree(self):
         """Tooth 2: an untracked file cannot certify the green tree (empty match refuses, never falls back)."""
         (self.repo_dir / "untracked-probe.txt").write_text("UNTRACKED_MARKER_XYZ_90210\n", encoding="utf-8")

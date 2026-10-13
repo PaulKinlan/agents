@@ -406,10 +406,27 @@ fi
 # Content verification in BOTH directions
 echo "--- Content verification of constructed red tree ---"
 
+# Implementation source path allow-list: source code extensions only, excluding tests, docs, reports
+IMPL_SRC_PATTERNS=(
+  '*.py' '*.sh' '*.bash'
+  '*.js' '*.ts' '*.mjs' '*.cjs' '*.jsx' '*.tsx'
+  '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hpp'
+  '*.rs' '*.go'
+)
+IMPL_EXCLUDE_PATTERNS=(
+  ':(exclude)tests*'
+  ':(exclude)docs*'
+  ':(exclude)reports*'
+)
+IMPL_PATH_FILTERS=("${IMPL_SRC_PATTERNS[@]}" "${IMPL_EXCLUDE_PATTERNS[@]}")
+if [ "${#TEST_FILES[@]}" -gt 0 ]; then
+  IMPL_PATH_FILTERS+=("${TEST_FILES[@]/#/:(exclude)}")
+fi
+
 # Direction 1: a string that exists ONLY in the new implementation must be ABSENT (expect 0)
 if [ -z "$EXPECT_ABSENT" ]; then
-  # Auto-derive candidate from git diff of non-test files
-  diff_additions="$(git diff "$PRE_FIX_SHA...HEAD" -- . ':(exclude)tests*' ':(exclude)docs*' ':(exclude)reports*' "${TEST_FILES[@]/#/:(exclude)}" | sed -n 's/^+[^+[:space:]].*/&/p' || true)"
+  # Auto-derive candidate from git diff of implementation source files
+  diff_additions="$(git diff "$PRE_FIX_SHA...HEAD" -- "${IMPL_PATH_FILTERS[@]}" | sed -n 's/^+[^+[:space:]].*/&/p' || true)"
   if [ -n "$diff_additions" ]; then
     # Pick a non-trivial line or distinctive token
     while IFS= read -r line; do
@@ -447,32 +464,35 @@ precondition_failed=0
 
 # Delta justification checks for caller-supplied markers
 if [ "$EXPECT_ABSENT_SUPPLIED" -eq 1 ] && [ -n "$EXPECT_ABSENT" ]; then
-  delta_non_test_additions="$(git diff -U0 "$PRE_FIX_SHA...HEAD" -- . ':(exclude)tests*' ':(exclude)docs*' ':(exclude)reports*' "${TEST_FILES[@]/#/:(exclude)}" 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+  delta_non_test_additions="$(git diff -U0 "$PRE_FIX_SHA...HEAD" -- "${IMPL_PATH_FILTERS[@]}" 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
   if ! grep -Fq "$EXPECT_ABSENT" <<< "$delta_non_test_additions"; then
-    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' is not justified by delta (not found in added lines of non-test paths)" >&2
-    echo "red-first:   A caller-supplied marker must be justified by the delta; exclusivity precondition is unverified" >&2
+    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' is not justified by delta (not found in added lines of implementation source paths)" >&2
+    echo "red-first:   Marker path must be an implementation source (.py, .sh, etc., not tests/docs/reports/notes); path check does not prove implementation" >&2
     precondition_failed=1
+  else
+    echo "red-first: delta-justification: absent marker '$EXPECT_ABSENT' verified in delta implementation source path (marker path is an implementation source, does not prove implementation)"
   fi
 fi
 
 if [ "$EXPECT_PRESENT_SUPPLIED" -eq 1 ] && [ -n "$EXPECT_PRESENT" ]; then
-  delta_test_additions="$(git diff -U0 "$PRE_FIX_SHA...HEAD" -- 'tests*' "${TEST_FILES[@]}" 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+  delta_test_additions="$(git diff -U0 "$PRE_FIX_SHA...HEAD" -- 'tests/' 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
   if ! grep -Fq "$EXPECT_PRESENT" <<< "$delta_test_additions"; then
-    echo "red-first: FAIL: content verification precondition failed: present marker '$EXPECT_PRESENT' is not justified by delta (not found in added lines of test paths)" >&2
-    echo "red-first:   A caller-supplied marker must be justified by the delta; exclusivity precondition is unverified" >&2
+    echo "red-first: FAIL: content verification precondition failed: present marker '$EXPECT_PRESENT' is not justified by delta (not found in added lines of test paths under tests/)" >&2
+    echo "red-first:   A caller-supplied marker must be justified by the delta; present marker must come from under tests/" >&2
     precondition_failed=1
   fi
 fi
 
 if [ -n "$EXPECT_ABSENT" ]; then
   green_absent_matches=0
-  green_absent_output="$(git grep -n -F "$EXPECT_ABSENT" "$GREEN_TREE" -- . ':(exclude)tests*' ':(exclude)docs*' ':(exclude)reports*' "${TEST_FILES[@]/#/:(exclude)}" 2>/dev/null || true)"
+  green_absent_output="$(git grep -n -F "$EXPECT_ABSENT" "$GREEN_TREE" -- "${IMPL_PATH_FILTERS[@]}" 2>/dev/null || true)"
   if [ -n "$green_absent_output" ]; then
     green_absent_matches="$(printf '%s\n' "$green_absent_output" | wc -l)"
   fi
-  echo "red-first: content-verification precondition (expect > 0 in green): checking '$EXPECT_ABSENT' in green tree (excl tests/) -> count: $green_absent_matches"
+  echo "red-first: content-verification precondition (expect > 0 in green): checking '$EXPECT_ABSENT' in green tree implementation source paths -> count: $green_absent_matches"
+  echo "red-first:   note: marker path is an implementation source (path-based check, does not prove implementation)"
   if [ "$green_absent_matches" -eq 0 ]; then
-    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' was NOT found in green tree (expected > 0 in green implementation, got 0)" >&2
+    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' was NOT found in green tree implementation source paths (expected > 0 in green implementation source paths, got 0)" >&2
     echo "red-first:   A marker that does not exist anywhere trivially satisfies absence; exclusivity precondition is unverified" >&2
     precondition_failed=1
   fi
@@ -480,7 +500,7 @@ fi
 
 if [ -n "$EXPECT_PRESENT" ]; then
   prefix_present_matches=0
-  prefix_test_output="$(git grep -n -F "$EXPECT_PRESENT" "$PRE_FIX_SHA" -- 'tests*' "${TEST_FILES[@]}" 2>/dev/null || true)"
+  prefix_test_output="$(git grep -n -F "$EXPECT_PRESENT" "$PRE_FIX_SHA" -- 'tests/' 2>/dev/null || true)"
   if [ -n "$prefix_test_output" ]; then
     prefix_present_matches="$(printf '%s\n' "$prefix_test_output" | wc -l)"
   fi
@@ -507,7 +527,8 @@ if [ -n "$EXPECT_ABSENT" ]; then
   if [ -n "$absent_output" ]; then
     absent_matches="$(printf '%s\n' "$absent_output" | wc -l)"
   fi
-  echo "red-first: content-verification (expect 0): grep -rnF '$EXPECT_ABSENT' '$RED_DIR' (excl tests/) -> count: $absent_matches"
+  echo "red-first: content-verification (expect 0): grep -rnF '$EXPECT_ABSENT' '$RED_DIR' (implementation source paths) -> count: $absent_matches"
+  echo "red-first:   note: marker path is an implementation source (path-based check, does not prove implementation)"
   if [ "$absent_matches" -ne 0 ]; then
     echo "red-first: FAIL: content verification failed: string '$EXPECT_ABSENT' exists in red implementation tree (expected 0, got $absent_matches)" >&2
     echo "red-first:   A partially applied patch looks exactly like a passing pin: new implementation leaked into red tree" >&2
