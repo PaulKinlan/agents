@@ -361,7 +361,7 @@ output paths above are evidence of what was measured rather than a recipe for re
 
 * Finding 4: `python3 /tmp/impl-tdot-measure2.py` on tree `47b588b9b0fe`, running the same 114-test subset
   four times, interleaved flat, package-aware, flat, package-aware, with wall AND child CPU per run.
-* Finding 5: `python3 /tmp/impl-tdot-partition.sh`, which splits the discovered modules across 4 groups
+* Finding 5: `bash /tmp/impl-tdot-partition.sh`, which splits the discovered modules across 4 groups
   and runs each group as its OWN `python3 -m unittest` process. The coverage verdict cited here is that
   probe's own check: the table is not read as green unless the group counts sum to the discovery count.
 * Finding 6: `python3 /tmp/impl-tdot-fastgate.py`, memoised per case, driving `bash tools/fast-gate.sh`
