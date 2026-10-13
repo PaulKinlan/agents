@@ -30,8 +30,16 @@ TRACKED="$ROOT/tools/check.conf"
 # --global is the explicit opt-in for the host-wide file that every repo on this machine reads; otherwise the
 # destination is a repo-local file OUTSIDE the checkout, named for this repo, so a timer that resets the checkout
 # cannot take it away.
-GLOBAL_CONF="$HOME/.fleet/check.conf"
-REPO_CONF="$HOME/.fleet/$(basename "$ROOT")-check.conf"
+# agents-7mby: these two lines used to expand $HOME at TOP LEVEL, unconditionally, so a caller with a scrubbed
+# environment - a subshell, a service unit, a CI step, `env -i` - died on "HOME: unbound variable" BEFORE it could
+# use the FLEET_CHECK_CONF it had explicitly set. The old one-liner did not have that fault because ${V:-$HOME/...}
+# expands its default LAZILY. So: expand lazily again (${HOME:+...} yields empty when HOME is unset, and touches
+# nothing otherwise), and DECIDE what the repo-local default means without HOME rather than only avoiding the
+# crash: it has no location, because the whole sentence is "the default lives under $HOME/.fleet/<repo>-check.conf"
+# and that sentence has no referent. A READ with an explicit FLEET_CHECK_CONF therefore works with no HOME at all;
+# an --install that would need the default refuses and NAMES the missing referent.
+GLOBAL_CONF="${HOME:+$HOME/.fleet/check.conf}"
+REPO_CONF="${HOME:+$HOME/.fleet/$(basename "$ROOT")-check.conf}"
 OVERRIDE="${FLEET_CHECK_CONF:-$GLOBAL_CONF}"
 INSTALL_GLOBAL=0
 
@@ -164,6 +172,11 @@ if [ "${1:-}" = "--install" ]; then
     OVERRIDE="$GLOBAL_CONF"
   else
     OVERRIDE="$REPO_CONF"
+  fi
+  if [ -z "$OVERRIDE" ]; then
+    echo "check-cmd: cannot --install: HOME is unset, so the repo-local default (\$HOME/.fleet/$(basename "$ROOT")-check.conf) has no location, and no FLEET_CHECK_CONF was given to name one." >&2
+    echo "  Fix: export HOME, or pass a destination explicitly: FLEET_CHECK_CONF=<path> bash tools/check-cmd.sh --install" >&2
+    exit 2
   fi
   case "$OVERRIDE" in
     "$GLOBAL_CONF") DEST_CLASS="MACHINE-GLOBAL (every repo on this host reads it by default)";;
