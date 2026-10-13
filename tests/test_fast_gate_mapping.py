@@ -125,12 +125,15 @@ class TestFastGateMapping(unittest.TestCase):
     """Pin the fast-gate mapping contract against regressions."""
 
     def test_findings_py_maps_to_security_and_suppression_contracts(self):
-        """lib/findings.py must run redaction (security) and suppressions (register) contracts."""
+        """lib/findings.py must run redaction (security), suppressions (register) and the store's own
+        consumer expectations (the candidate-identity index/rekey counts)."""
         mapped = resolve_fast_gate(["lib/findings.py"])
         self.assertIn("tests/test_findings.py", mapped)
         self.assertIn("tests/test_sinks.py", mapped)
         self.assertIn("tests/test_redaction.py", mapped, "redaction contract omitted (agents-q0mt)")
         self.assertIn("tests/test_suppressions.py", mapped, "suppressions contract omitted (agents-vt7w)")
+        self.assertIn("tests/test_candidate_identity.py", mapped,
+                      "findings-store index expectations omitted (agents-l606, agents-ozmt)")
 
     def test_report_schema_py_maps_to_schema_unit_and_perf_review(self):
         """lib/report_schema.py must run its own unit test and the concurrency guard suite."""

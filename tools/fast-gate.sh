@@ -441,6 +441,14 @@ while IFS= read -r f; do
       # (agents-q0mt) - the contract is fail-closed, so it is a real consumer of this module.
       # tests/test_suppressions.py asserts the committed suppressions register contract (agents-vt7w).
       mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py tests/test_redaction.py tests/test_suppressions.py"
+      # tests/test_candidate_identity.py imports FindingsStore and load_candidate_index, so it asserts
+      # this module's index/rekey expectations and moves with it - agents-l606 changed the store's
+      # (new, rekeyed, fixed) counts and this suite's expected (2, 2) went RED while the fast gate stayed
+      # green, because the suite sat in the consumer-coverage allowlist instead of in this arm; the author
+      # only found it by running the omitted suites by hand. The allowlist entry is deleted with this
+      # mapping (agents-ozmt), and the two-sided guard in tests/test_fast_gate_consumer_coverage.py keeps
+      # it deleted: restoring the entry now fails as stale, and dropping this name fails as an omission.
+      mapped="$mapped tests/test_candidate_identity.py"
       # The lock is only observable from OUTSIDE a single process, so this suite is the only one
       # that can see a regression to the unbounded wait (agents-4sij).
       mapped="$mapped tests/test_store_lock_timeout.py"
