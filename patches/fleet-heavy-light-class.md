@@ -103,7 +103,8 @@
   4. a second light job waited: the cap is real, not unlimited concurrency
   4. a waiting light job leaves a lightwait marker
   5. the main job runs once the slot frees
-  6. a nested fleet-heavy call runs directly (no deadlock)
+  6. re-entrancy: an OUTER light job (pool size 1) runs an inner fleet-heavy, which completes because the
+     outer exports FLEET_HEAVY_HELD, so the inner call does not queue on the slot its own parent holds
   7. the live queue dir has no light slots
   ```
 
@@ -126,6 +127,15 @@
      exits at the first match, the writer takes SIGPIPE, and the pipeline's status becomes non-zero
      **even though grep matched** — so every check silently read as "not held". They are `case` matches
      on captured output now.
+  5. **Found by REVIEW, not by me (agents-ltpg), and recorded differently for that reason.** Assertion 6
+     was a FALSE GREEN: it invoked the tool only ONCE, inside `bash -c`, so no outer invocation ever held
+     a slot and re-entry was never exercised — it printed "a nested call ran directly" for a run with no
+     nested call at all. The reviewer applied the patch to copies, ran the delivered test, and proved it.
+     The assertion is now an OUTER light job holding `light1` (pool size 1) whose job invokes the tool
+     again, and it is **verified by MUTATION rather than by passing**: delete the re-entrancy guard from
+     the patched tool and the assertion FAILS (rc=124, the inner call blocked on the slot its parent
+     holds); restore it and 12/12 pass. A test for a deadlock that cannot deadlock is worse than no test,
+     because it gets quoted as coverage.
 
 - **Enabling it (the whole change, on this VM):**
 
