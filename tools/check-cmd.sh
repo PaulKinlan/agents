@@ -178,10 +178,15 @@ if [ "${1:-}" = "--install" ]; then
     echo "  Fix: export HOME, or pass a destination explicitly: FLEET_CHECK_CONF=<path> bash tools/check-cmd.sh --install" >&2
     exit 2
   fi
+  # agents-0utp: THREE LIVES, NOT TWO, AND THE HEADER IS GENERATED FROM THIS SAME CLASSIFICATION. The first
+  # version of this edit told the header about two lives while this case statement already knew three, so a file
+  # written to the repo-local DEFAULT was described by the override text - which is how a header came to name a
+  # repair command that writes a DIFFERENT file (agents-0utp follow-up: the three claims below were all written
+  # before --install's default moved, and each one describes the pre-change behaviour).
   case "$OVERRIDE" in
-    "$GLOBAL_CONF") DEST_CLASS="MACHINE-GLOBAL (every repo on this host reads it by default)";;
-    "$REPO_CONF")   DEST_CLASS="repo-local override";;
-    *)              DEST_CLASS="explicit override (FLEET_CHECK_CONF)";;
+    "$GLOBAL_CONF") DEST_CLASS="MACHINE-GLOBAL (every repo on this host reads it by default)"; DEST_LIFE="global";;
+    "$REPO_CONF")   DEST_CLASS="the repo-local default (read only when FLEET_CHECK_CONF names it)"; DEST_LIFE="repo-default";;
+    *)              DEST_CLASS="explicit override (FLEET_CHECK_CONF)"; DEST_LIFE="explicit";;
   esac
   dest="${OVERRIDE}"
   mkdir -p "$(dirname "$dest")"
@@ -198,50 +203,77 @@ if [ "${1:-}" = "--install" ]; then
   # replaces the host's shared ~/.fleet/check.conf instead, which is the incident: a repair whose own
   # documentation instructs the reader to trigger the bug. Generated rather than literal because $dest is known
   # here and nowhere else.
-  if [ "$dest" = "$HOME/.fleet/check.conf" ]; then
-    life_lines=$(cat <<'LIFE'
+  case "$DEST_LIFE" in
+    global)
+      # THE ONE CLAIM THAT MATTERS HERE IS NOT "this file is machine-global" BUT "what command repairs THIS
+      # file" - and after the default moved, the bare form is no longer it. A reader who follows a repair that
+      # writes somewhere else keeps the stale command running while believing they repaired it, which is the
+      # failure mode agents-d081 exists to detect (a fix that cannot reach the machine whose copy is stale).
+      life_lines=$(cat <<'LIFE'
 # THIS COPY IS MACHINE-GLOBAL (~/.fleet/check.conf). fleet-check reads it BY DEFAULT for any repo invoked on
-# this host, so --install without FLEET_CHECK_CONF set REPLACES THE ACTIVE GATE COMMAND FOR EVERY REPO HERE.
+# this host, so REPLACING IT CHANGES THE ACTIVE GATE COMMAND FOR EVERY REPO HERE. A bare --install no longer
+# writes here - it writes a repo-local file that fleet-check does not read by default - so the command that
+# repairs THIS file is the one named under "To tune" below (agents-0utp).
 LIFE
 )
-    tune_lines=$(cat <<'TUNE'
-# To tune, edit tools/check.conf and re-run: bash tools/check-cmd.sh --install (agents-024z).
+      tune_lines=$(cat <<'TUNE'
+# To tune, edit tools/check.conf and re-run INTO THIS FILE: bash tools/check-cmd.sh --install --global (agents-024z, agents-0utp).
 TUNE
 )
-  else
-    life_lines=$(cat <<LIFE
-# THIS COPY IS A REPO-LOCAL OVERRIDE, at $dest.
-# fleet-check reads it ONLY when FLEET_CHECK_CONF names this path, and --install writes here ONLY when that
-# variable is set at install time. Running --install WITHOUT it set replaces the machine-global
-# ~/.fleet/check.conf for every repo on this host instead, and leaves this file untouched.
+      ;;
+    repo-default)
+      life_lines=$(cat <<LIFE
+# THIS COPY IS THE REPO-LOCAL DEFAULT, at $dest - NOT machine-global.
+# fleet-check reads it ONLY when FLEET_CHECK_CONF names this path, and a bare --install from this repo
+# rewrites exactly this file. The host-wide file that fleet-check reads by default for every repo on this
+# machine is $GLOBAL_CONF, and only --install --global writes THAT (agents-0utp).
 LIFE
 )
-    # agents-mnvd (review finding on the first attempt at agents-0utp): the tune instruction must not be the one
-    # bare command this header just warned about. A header that says "running --install WITHOUT the variable
-    # replaces the host's shared config" and then says "re-run: bash tools/check-cmd.sh --install" hands the
-    # reader the trap two lines after naming it. In this life the variable IS the path, so it is named.
-    tune_lines=$(cat <<TUNE
-# To tune, edit tools/check.conf and re-run WITH THIS FILE SELECTED, so the global config is not written:
-#   FLEET_CHECK_CONF=$dest bash tools/check-cmd.sh --install   (agents-024z, agents-mnvd)
+      tune_lines=$(cat <<'TUNE'
+# To tune, edit tools/check.conf and re-run (a bare --install rewrites this file):
+#   bash tools/check-cmd.sh --install   (agents-024z)
 TUNE
 )
-  fi
+      ;;
+    *)
+      # agents-mnvd (review finding on the first attempt at agents-0utp), restated for the life that actually
+      # holds the trap now: the tune instruction must not be a command that writes a file OTHER than the one the
+      # reader is looking at. A bare --install from this repo writes $REPO_CONF, so for an explicitly named
+      # override the variable IS the path and it is named.
+      life_lines=$(cat <<LIFE
+# THIS COPY IS AN EXPLICIT OVERRIDE, at $dest - NOT machine-global, and not the repo-local default.
+# fleet-check reads it ONLY when FLEET_CHECK_CONF names this path, and only that variable makes --install
+# write here: a BARE --install from this repo would write $REPO_CONF instead - a different file - and would
+# leave this one and $GLOBAL_CONF untouched (agents-0utp).
+LIFE
+)
+      tune_lines=$(cat <<TUNE
+# To tune, edit tools/check.conf and re-run WITH THIS FILE SELECTED, so a different file is not written:
+#   FLEET_CHECK_CONF=$dest bash tools/check-cmd.sh --install   (agents-024z, agents-mnvd, agents-0utp)
+TUNE
+)
+      ;;
+  esac
   {
     printf '%s\n' "# Written by tools/check-cmd.sh --install from tools/check.conf (agents-ia3p, agents-f6no, agents-0utp)."
     printf '%s\n' "# Project: agents-factory ($ROOT)"
     printf '%s\n' "$life_lines"
     printf '%s\n' "# DO NOT HAND-EDIT FOR TUNING: a hand-edit and a stale install are indistinguishable"
     printf '%s\n' "# from the files alone, so --install overwrites the file it is pointed at. No test reads this"
-    printf '%s\n' "# file (it is machine state, and fleet-check sources whatever it says): the repair is --install."
+    printf '%s\n' "# file (it is machine state, and fleet-check sources whatever it says): the repair is the install"
+    printf '%s\n' "# command this header names, which is the one that writes THIS file."
     printf '%s\n' "$tune_lines"
     grep -E '^[A-Z_]+=' "$TRACKED"
   } > "$dest"
   echo "check-cmd: installed the project's gate command into $dest ($DEST_CLASS)"
-  if [ "$DEST_CLASS" = "repo-local override" ]; then
-    echo "check-cmd: NOTE - repo-local by default: a lane that wants it sets FLEET_CHECK_CONF=$dest; --global writes the host-wide $GLOBAL_CONF instead." >&2
-  else
-    echo "check-cmd: NOTE - $dest is MACHINE-GLOBAL: this replaces the active gate command for every repo on this host." >&2
-  fi
+  case "$DEST_LIFE" in
+    global)
+      echo "check-cmd: NOTE - $dest is MACHINE-GLOBAL: this replaces the active gate command for every repo on this host." >&2;;
+    repo-default)
+      echo "check-cmd: NOTE - repo-local by default: a lane that wants it sets FLEET_CHECK_CONF=$dest; --global writes the host-wide $GLOBAL_CONF instead." >&2;;
+    *)
+      echo "check-cmd: NOTE - explicit override: it is read only when FLEET_CHECK_CONF names it; nothing else was written." >&2;;
+  esac
   exit 0
 fi
 

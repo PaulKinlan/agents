@@ -524,8 +524,9 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     suite non-hermetic and turn it red on every host that has not run --install, which is the
     machine-state pathology the fleet's speed guidance names. What a divergent live file does in
     practice: the deployed entrypoint SOURCES it, so the live command is what runs until someone
-    repairs it, and the repair is the documented `bash tools/check-cmd.sh --install` (or editing
-    tools/check.conf and re-running it). A stale PASS record cannot quietly hide that: the cache-hit
+    repairs it, and the repair is the install command that WRITES THAT FILE, which since agents-0utp is
+    `bash tools/check-cmd.sh --install --global` (the bare form now writes a repo-local file the deployed
+    gate does not read by default) - or editing tools/check.conf and re-running it). A stale PASS record cannot quietly hide that: the cache-hit
     path requires a record whose `.cmd` equals the command actually resolved, which
     TestTheEntrypointResolvesTheInstalledCommand pins. Drift between the TRACKED file and CI is
     guarded by tests/test_check_conf_consistency.py, not here.
@@ -534,7 +535,8 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     override and a STALE INSTALL are the same bytes. There is no marker that distinguishes "I
     meant this locally" from "the tracked file moved on". So --install refuses to guess and
     overwrites both, which is what the repair tests below measure; the documented way to update or
-    tune is editing tools/check.conf and re-running `bash tools/check-cmd.sh --install`.
+    tune is editing tools/check.conf and re-running the install command that writes the file you mean
+    (`--install --global` for the host-wide config the deployed gate reads).
     """
 
     def test_install_is_idempotent_and_matches_the_tracked_command(self):
@@ -570,9 +572,15 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         # while --install without the variable replaces the host's shared file instead.
         self.assertIn("THIS COPY IS MACHINE-GLOBAL", installed)
         self.assertIn("BY DEFAULT for any repo invoked", installed)
-        # In the GLOBAL life the bare form is the correct instruction - it rewrites this very file - so the
-        # pair is complete: bare here, variable-selected in the override life (agents-mnvd).
-        self.assertIn("re-run: bash tools/check-cmd.sh --install", installed)
+        # agents-0utp FOLLOW-UP: the GLOBAL life's repair command must be the one that WRITES THIS FILE, and
+        # after the default moved that is --global. The assertion that used to stand here pinned the bare form
+        # and justified it with "it rewrites this very file" - which stopped being true the moment --install
+        # defaulted to a repo-local destination. So the test was pinning a repair that writes somewhere else
+        # and leaves this file stale: agents-d081's failure mode, a fix that cannot reach the copy that runs.
+        self.assertIn("--install --global", installed)
+        self.assertNotIn("re-run: bash tools/check-cmd.sh --install", installed,
+                         "the machine-global copy must not be told to run the bare form: that writes the "
+                         "repo-local default instead and leaves this file, which fleet-check reads, stale")
         self.assertIn("--install", installed)
         self.assertNotIn("fails on any divergence", installed,
                          "the emitted header must not promise a guard no test performs "
@@ -582,12 +590,13 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         """agents-0utp, the discriminating half of the pair above: with FLEET_CHECK_CONF pointing at a
         per-repo path, the SAME generator must not write a header that calls the file machine-global.
 
-        The defect this pins: the header asserted MACHINE-GLOBAL whatever $dest was, and told its reader
-        "the repair is --install". A reader who believed it and ran --install WITHOUT the variable set
-        would replace the host's shared ~/.fleet/check.conf - which is precisely the incident this
-        bead was filed for. The negative assertion below FAILS on the old wording and passes on the new
-        one, which is what makes it a pin rather than a guard. The last assertion asks the filesystem
-        what it holds instead of asking the script what it computed: the global path must not exist.
+        The defect this pins: the header asserted MACHINE-GLOBAL whatever $dest was, so a repo-local override
+        described itself as the host's shared config and named a repair that does not write it. agents-0utp
+        FOLLOW-UP (this revision): the previous wording of this test also pinned a sentence that had gone stale
+        in the OPPOSITE direction - "running --install WITHOUT it set replaces the machine-global
+        ~/.fleet/check.conf" - which was true before the default moved and false after, so the header kept
+        warning about a trap the tool no longer sets. The trap now is that a bare --install writes a DIFFERENT
+        file than the one in front of the reader, and that is what is asserted below.
         """
         home = _registered_tmp_home(self, "0utp-lives-")
         dest = Path(home) / "repo-override" / "agents-factory-check.conf"
@@ -599,15 +608,25 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[:300])
 
         installed = dest.read_text(encoding="utf-8")
-        self.assertIn("THIS COPY IS A REPO-LOCAL OVERRIDE", installed)
+        self.assertIn("THIS COPY IS AN EXPLICIT OVERRIDE", installed)
         self.assertIn(str(dest), installed,
                       "an override must name the path it is read from, or the reader cannot tell "
                       "which file FLEET_CHECK_CONF has to name")
         self.assertNotIn("THIS COPY IS MACHINE-GLOBAL", installed,
                          "with FLEET_CHECK_CONF set this file is NOT the host's shared config; a header "
                          "that says it is tells the reader that --install maintains it (agents-0utp)")
-        self.assertIn("WITHOUT it set replaces the machine-global", installed,
-                      "the header must name the trap, not just the truth")
+        self.assertIn("NOT machine-global", installed,
+                      "the header must state the negative too: an override is neither the host-wide file nor "
+                      "the repo-local default, and a reader who assumes either runs the wrong repair")
+        repo_default = Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
+        self.assertIn(str(repo_default), installed,
+                      "an explicit override must name the file a bare --install WOULD write (agents-0utp "
+                      "follow-up): the old header said a bare install replaces the host's shared config, which "
+                      "stopped being true when the default moved, and a reader who believes it cannot see that "
+                      "the obvious repair targets a different file")
+        self.assertNotIn("replaces the machine-global", installed,
+                         "the override header must not describe the pre-default-move behaviour of a bare "
+                         "--install (agents-0utp follow-up)")
         # agents-mnvd, the review finding on the first attempt: the header warned that a bare --install replaces
         # the host's shared config and then, four lines later, instructed the reader to run exactly that. The
         # tune instruction must select THIS file. Both assertions below fail on tip 31582544.
@@ -1272,7 +1291,14 @@ class TestTheDefaultInstallDestinationIsRepoLocal(unittest.TestCase):
         repo_conf = Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
         self.assertTrue(repo_conf.exists(),
                         f"the default destination is the repo-local file, expected {repo_conf}")
-        self.assertIn("THIS COPY IS A REPO-LOCAL OVERRIDE", repo_conf.read_text(encoding="utf-8"))
+        repo_text = repo_conf.read_text(encoding="utf-8")
+        self.assertIn("THIS COPY IS THE REPO-LOCAL DEFAULT", repo_text,
+                      "the file a bare --install writes must SAY it is the repo-local default: the header used "
+                      "to call every destination machine-global, and after the default moved the more damaging "
+                      "half of that was the repair it named (agents-0utp)")
+        self.assertNotIn("THIS COPY IS MACHINE-GLOBAL", repo_text)
+        self.assertIn("bash tools/check-cmd.sh --install", repo_text,
+                      "in THIS life the bare form does write this file, so it is the correct repair to name")
 
     def test_global_flag_is_the_explicit_opt_in_for_the_host_wide_file(self):
         """The escape hatch has to work, or the default is a cage: provisioning (install.sh) claims the machine's
