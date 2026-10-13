@@ -818,13 +818,15 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
     because `factory` and `agents/` are present in ROOT), so this runs wherever the repo does.
     """
 
-    def _run_installer(self, home: str) -> subprocess.CompletedProcess:
+    def _run_installer(self, home: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["HOME"] = home
         # Keep the installer off any ambient per-VM redirect or alternate checkout: this test
         # is about what PROVISIONING writes for a plain, default host.
         for var in ("FLEET_CHECK_CONF", "SF_INSTALL_DIR", "SF_REPO_URL", "SKILL_FILTER", "SF_LOCAL_BIN"):
             env.pop(var, None)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             ["bash", str(ROOT / "install.sh")],
             capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT),
@@ -869,13 +871,7 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
         can isolate the binary symlink rather than clobbering ~/.local/bin/factory."""
         home = _registered_tmp_home(self, "xcp9-localbin-")
         custom_bin = Path(home) / "custom_bin"
-        env = dict(os.environ)
-        env["HOME"] = home
-        env["SF_LOCAL_BIN"] = str(custom_bin)
-        res = subprocess.run(
-            ["bash", str(ROOT / "install.sh")],
-            capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT),
-        )
+        res = self._run_installer(home, extra_env={"SF_LOCAL_BIN": str(custom_bin)})
         self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
         symlink = custom_bin / "factory"
         self.assertTrue(symlink.is_symlink(), "factory CLI symlink must be created in SF_LOCAL_BIN")
