@@ -1,8 +1,8 @@
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index 5b96d61..db3d3c2 100755
+index 5b96d61..2ac10c8 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
-@@ -275,7 +275,27 @@ flm_select() {
+@@ -275,7 +275,36 @@ flm_select() {
      c_after=$(sed -E "s/^[[:space:]*#_]*(${VPFX})?${VTOK}([[:space:]]*(${VPFX})?${VTOK})*[[:space:]*#_]*//I" <<<"$v_line" | tr -d '`*' | xargs)
      c_raw="$c_after"
      c_verdict=""
@@ -17,12 +17,21 @@ index 5b96d61..db3d3c2 100755
 +    if [ "$_c_count" -eq 1 ]; then
 +      c_run_id="$_c_uuids"
 +    elif [ "$_c_count" -gt 1 ]; then
-+      _c_rev=$(sed -nE "s/.*(reviewer|review).*\b(\(run[[:space:]]+|run[[:space:]]+(id[[:space:]]+)?|run_id[[:space:]]*[:=][[:space:]]*)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}).*/\4/Ip" <<<"$c_text" | tr '[:upper:]' '[:lower:]' | sort -u)
++      # Partition by clause delimiters (newline, semicolon, pipe, "and") so runs in distinct clauses
++      # do not greedily conflate across foreign UUIDs
++      _c_rev=$(sed -E "s/([;\n|]|\band\b)/\n/g" <<<"$c_text" \
++        | grep -iE "\b(reviewer|review)\b" \
++        | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" \
++        | tr '[:upper:]' '[:lower:]' \
++        | sort -u)
 +      _c_rcount=$(grep -c . <<<"$_c_rev" 2>/dev/null || true)
 +      if [ "$_c_rcount" -eq 1 ]; then
 +        c_run_id="$_c_rev"
 +      elif [ "$_c_rcount" -eq 0 ] && [ -n "$v_line" ]; then
-+        _c_vline=$(grep -oE "\([[:space:]]*run[[:space:]]+[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[[:space:]]*\)" <<<"$v_line" | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" | tr '[:upper:]' '[:lower:]' | sort -u)
++        _c_vline=$(grep -oE "\([[:space:]]*run[[:space:]]+[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[[:space:]]*\)" <<<"$v_line" \
++          | grep -oE "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" \
++          | tr '[:upper:]' '[:lower:]' \
++          | sort -u)
 +        if [ "$(grep -c . <<<"$_c_vline" 2>/dev/null || true)" -eq 1 ]; then
 +          c_run_id="$_c_vline"
 +        fi
@@ -31,7 +40,7 @@ index 5b96d61..db3d3c2 100755
  
      # Reject conflicting verdict tokens (e.g. PASS: FAIL, PASS/FAIL, FAIL: PASS) - a comment that argues with
      # itself is not a clearance, whatever else it says. Matched on a lowercased copy: the shared vocabulary is
-@@ -654,7 +674,7 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+@@ -654,7 +683,7 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
    # class and the reason are carried out to the PASS line and the JSON, where a merger or coordinator
    # can see WHICH clearance rests on a claim rather than an artefact, and nothing is blocked.
    if [ -n "$src_who" ] && [ "$rev_who" = "$src_who" ] && [ "$rev_independence" = "cross-family" ]; then
