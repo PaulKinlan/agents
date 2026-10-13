@@ -1,5 +1,6 @@
---- a/bin/fleet-land-message
-+++ b/bin/fleet-land-message
+diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
+--- A/bin/fleet-land-message	2026-10-12 19:42:41.000000000 +0000
++++ B/bin/fleet-land-message	2026-10-13 19:11:29.408362293 +0000
 @@ -9,6 +9,13 @@
  #   fleet-land-message --from-comment <n> <bead> <branch> [...] when a bead has several LAND-SUMMARY blocks and
  #                                                             the last one is not the one to use (n is the
@@ -46,7 +47,7 @@
        | select(test("(?i)VERDICT[*_]*:[ \t*#_]*(<[^>]+>|\\[[^]]*(\\||\\bword\\b|\\bverdict\\b|\\bstatus\\b|\\bplaceholder\\b|\\btodo\\b|\\btbd\\b)[^]]*\\]|\\bTODO\\b|\\bTBD\\b|\\bplaceholder\\b)") | not)
      ] | length > 0)
    | "\(.key)\t\(.value.author // "?")\t\(.value.created_at // "?")"' <<<"$COMMENTS" 2>/dev/null)
-@@ -225,22 +234,49 @@
+@@ -225,22 +234,60 @@
  rev_pick=""; rev_idx=""; rev_who=""; rev_at=""; rev_verdict=""; rev_sha=""; rev_state="NONE"
  rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_run_id=""
  
@@ -97,6 +98,7 @@
 +  printf '%s' "$best"
 +}
 +src_author=""; src_lane=""; src_author_source=""
++_author_ref=""   # the BRANCH author (src_author) with the documented summary-author fallback; see the note where it is set
 +if [ -n "$BRANCH" ]; then
 +  _bl=$(fleet_author_lane_from_branch "$BRANCH" 2>/dev/null || true)
 +  if [ -n "$_bl" ]; then
@@ -106,11 +108,21 @@
 +if [ -z "$src_lane" ] && [ -n "$src_who" ]; then
 +  src_author="$src_who"; src_lane=${src_who#"${FLEET_VM:-fleet-manager}-"}; src_author_source="summary-author"
 +fi
++
++# THE FACT "WHO AUTHORED THIS BRANCH" IS OWNED BY THE BRANCH, NOT BY WHOEVER APPENDED THE LAND-SUMMARY (agents-ak50, P1).
++# src_who is the SUMMARY's appender - which by the landing convention is often the coordinator, not the implementer - while
++# src_author is the lane the BRANCH belongs to. Selection, the author-lane demotion and the transcription flags all mean the
++# branch's author, so they must not be split on the summary appender: doing so put a branch author's own PASS in the
++# non-author pool, ranked it as an independent review, and returned cleared=true for an author-posted PASS with no reviewer
++# run. src_who stays for what it actually is - the summary's author - and _author_ref is used for the branch. It is set
++# OUTSIDE the conditional above: under set -u an assignment inside it leaves _author_ref unbound whenever the branch does
++# not take that path, which is every branch whose name does not map to a lane.
++_author_ref="${src_author:-$src_who}"
 +REV_POOL="$REV_CAND"; rev_author_ignored=0; rev_author_ignored_shas=""
  
  # fleet-260l: SELECTION IS A FUNCTION OF A POOL, not a single newest-first walk.
  # The pool used to be everything, walked newest-first with a break on the first candidate that parsed into a
-@@ -267,7 +303,11 @@
+@@ -267,7 +314,11 @@
      # "Review verdict: VERDICT: PASS" are all the same record. The prefix words are a closed set, so prose
      # that merely mentions a verdict ("the pattern a reviewer would paste is: VERDICT: PASS") still does not
      # match: the label must begin the line and must be one of these words.
@@ -123,7 +135,7 @@
      VTOK='VERDICT[*_]*:'
      v_line=$(grep -iE "^[[:space:]*#_]*(${VPFX})?${VTOK}([[:space:]]*(${VPFX})?${VTOK})*[[:space:]*#_]*[^[:space:]]" <<<"$c_text" \
        | grep -ivE "VERDICT[*_]*:[[:space:]*#_]*(<[^>]+>|\[[^]]*(\||word|verdict|status|placeholder|todo|tbd)[^]]*\]|TODO|TBD|placeholder)" \
-@@ -423,7 +463,17 @@
+@@ -423,7 +474,17 @@
                rev_delta_identical=true
                # same shared decision as above - never a second word list
                if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
@@ -141,16 +153,16 @@
            fi
          fi
        fi
-@@ -488,10 +538,27 @@
+@@ -488,10 +549,27 @@
    # Select from the best non-empty rank. Pool order is comment order, and flm_select walks it newest-first.
    rev_disagree=""
    if [ -n "$POOL_TIP" ]; then
 -    flm_select "$POOL_TIP"
 +    _tip_nonauth=""
 +    _tip_auth=""
-+    if [ -n "$src_who" ]; then
-+      _tip_nonauth=$(awk -F'\t' -v a="$src_who" '$2 != a' <<<"$POOL_TIP")
-+      _tip_auth=$(awk -F'\t' -v a="$src_who" '$2 == a' <<<"$POOL_TIP")
++    if [ -n "$_author_ref" ]; then
++      _tip_nonauth=$(awk -F'\t' -v a="$_author_ref" '$2 != a' <<<"$POOL_TIP")
++      _tip_auth=$(awk -F'\t' -v a="$_author_ref" '$2 == a' <<<"$POOL_TIP")
 +    fi
 +    _tip_operative="$POOL_TIP"
 +    if [ -n "$_tip_nonauth" ]; then
@@ -170,7 +182,7 @@
      if [ -n "$rev_idx" ]; then
        flm_neg=""; flm_have_pos=0; flm_have_neg=0
        while IFS=$'\t' read -r c_idx c_who c_at; do
-@@ -503,7 +570,7 @@
+@@ -503,7 +581,7 @@
          tok=$(fleet_verdict_token_of "$c_after_chk" || true)
          [ -n "$tok" ] || continue
          if fleet_verdict_is_positive "$tok"; then flm_have_pos=1; else flm_have_neg=1; flm_neg+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'; fi
@@ -179,16 +191,16 @@
        # Reported whenever the two exist, whichever won: a clearance that reversed because a second verdict
        # appeared must SAY SO, or the reversal looks arbitrary and a reader cannot tell a revision from a mistake.
        if [ "$flm_have_pos" = 1 ] && [ "$flm_have_neg" = 1 ]; then
-@@ -514,7 +581,23 @@
+@@ -514,7 +592,23 @@
        fi
      fi
    elif [ -n "$POOL_OWN" ]; then
 -    flm_select "$POOL_OWN"
 +    _own_nonauth=""
 +    _own_auth=""
-+    if [ -n "$src_who" ]; then
-+      _own_nonauth=$(awk -F'\t' -v a="$src_who" '$2 != a' <<<"$POOL_OWN")
-+      _own_auth=$(awk -F'\t' -v a="$src_who" '$2 == a' <<<"$POOL_OWN")
++    if [ -n "$_author_ref" ]; then
++      _own_nonauth=$(awk -F'\t' -v a="$_author_ref" '$2 != a' <<<"$POOL_OWN")
++      _own_auth=$(awk -F'\t' -v a="$_author_ref" '$2 == a' <<<"$POOL_OWN")
 +    fi
 +    _own_operative="$POOL_OWN"
 +    if [ -n "$_own_nonauth" ]; then
@@ -204,7 +216,7 @@
    fi
  
    # k1lm's rule must survive the ranking. A newer comment on THIS branch that carries a VERDICT line the tool
-@@ -524,9 +607,11 @@
+@@ -524,9 +618,11 @@
    # candidates rather than over the rank, and it wins: AMBIGUOUS, no clearing.
    if [ -n "$rev_idx" ] && [ -n "$POOL_TIP" ]; then
      rev_full_now=$(git rev-parse -q --verify "${rev_sha:-$tip}^{commit}" 2>/dev/null || echo "")
@@ -212,11 +224,11 @@
      while IFS=$'\t' read -r c_idx c_who c_at; do
        [ -n "$c_idx" ] || continue
        [ "$c_idx" -gt "$rev_idx" ] || continue
-+      [ -n "$src_who" ] && [ "$rev_who" != "$src_who" ] && [ "$c_who" = "$src_who" ] && continue
++      [ -n "$_author_ref" ] && [ "$rev_who" != "$_author_ref" ] && [ "$c_who" = "$_author_ref" ] && continue
        c_text=$(jq -r --argjson i "$c_idx" '.[$i].text // ""' <<<"$COMMENTS" 2>/dev/null)
        cv_line=$(grep -iE "^[[:space:]*#_]*((${VPFX:-x})?${VTOK:-VERDICT[*_]*:})[[:space:]]*[^[:space:]]" <<<"$c_text" | head -1)
        [ -n "$cv_line" ] || continue
-@@ -539,7 +624,7 @@
+@@ -539,7 +635,7 @@
        rev_cleared=false
        raw_verdict="$c_after_chk"
        break
@@ -225,7 +237,7 @@
    fi
  
    # A verdict in a LOWER rank that is NEWER than the winner is reported, never merged in: the operator has to
-@@ -588,19 +673,38 @@
+@@ -588,19 +684,38 @@
  #                   provenance is a FAILURE, not an absence of failure (coord, fleet-ry7m amendment): a
  #                   reviewer that cannot be compared to the author is strictly weaker evidence than an
  #                   explicitly same-family reviewer, so it must not clear under a friendlier label.
@@ -269,7 +281,7 @@
      fi
    fi
    _fam=""
-@@ -611,13 +715,13 @@
+@@ -611,13 +726,13 @@
        _fam="same"
      fi
    fi
@@ -285,7 +297,7 @@
      if [ -z "$rev_reviewer_model" ]; then
        rev_independence="self-certified"
      elif [ -z "$rev_author_model" ]; then
-@@ -630,20 +734,36 @@
+@@ -630,20 +745,36 @@
    elif [ "$_fam" = "same" ]; then
      rev_independence="same-family"
    fi
@@ -293,7 +305,7 @@
 +  # OWN lane, the "cross-family" class above rests on a named model - a claim, not evidence. The run
 +  # id is already parsed (rev_run_id) and is verifiable, so require it to resolve. ONLY this path is
 +  # touched: a verdict from another lane (other-lane) is left exactly as it was.
-+  if [ -n "$src_who" ] && [ "$rev_who" = "$src_who" ] && [ "$rev_independence" = "cross-family" ]; then
++  if [ -n "$_author_ref" ] && [ "$rev_who" = "$_author_ref" ] && [ "$rev_independence" = "cross-family" ]; then
 +    _trs=$(fleet_verdict_transcribed_run_status "${rev_run_id:-}" "$rev_reviewer_model" 2>/dev/null || true)
 +    case "$_trs" in
 +      verified:*)   rev_independence="transcribed-verified";   rev_run_reason="${_trs#verified: }" ;;
@@ -324,7 +336,7 @@
          ;;
      esac
    fi
-@@ -662,9 +782,9 @@
+@@ -662,9 +793,9 @@
      rev_line="FAIL: verdict was $rev_verdict for commit ${rev_sha:-$tip} by $rev_who at $rev_at — NOT CLEARED"
    fi
  elif [ "$rev_state" = "STALE" ]; then
@@ -336,7 +348,7 @@
  elif [ "$rev_state" = "UNRESOLVED" ]; then
    rev_line="UNRESOLVED: reviewed commit $rev_sha cannot be resolved on origin/$BRANCH — NOT CLEARED"
  elif [ "$rev_state" = "UNPINNED" ]; then
-@@ -703,9 +823,9 @@
+@@ -703,9 +834,9 @@
    if [ "$rev_state" = "STALE" ] || [ "$rev_state" = "DIVERGED" ]; then
      if [ ${#rm_labels[@]} -gt 0 ]; then
        bdf update "$BEAD" "${rm_labels[@]}" >/dev/null 2>&1 || true
@@ -348,7 +360,7 @@
      exit 1
    elif [ "$rev_state" = "UNRESOLVED" ]; then
      if [ ${#rm_labels[@]} -gt 0 ]; then
-@@ -928,20 +1048,28 @@
+@@ -928,20 +1059,28 @@
      --arg rev_who "${rev_who:-}" --arg rev_at "${rev_at:-}" --argjson rev_unreviewed "${rev_unreviewed:-0}" \
      --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
      --argjson rev_delta_identical "${rev_delta_identical:-false}" \
@@ -364,7 +376,7 @@
      --argjson rev_author_ignored "${rev_author_ignored:-0}" --arg rev_author_ignored_shas "${rev_author_ignored_shas:-}" \
      --arg gate_identity "${gate_identity:-}" \
 +    --arg rev_comment_index "${rev_idx:-}" \
-+    --argjson author_lane_transcription "$([ -n "$rev_who" ] && [ "$rev_who" = "${src_who:-}" ] && echo true || echo false)" \
++    --argjson author_lane_transcription "$([ -n "$rev_who" ] && [ "$rev_who" = "${_author_ref:-}" ] && echo true || echo false)" \
      '{subject:$subject,bead:$bead,title:$title,what:$what,why:$why,effect:$effect,
        summary:{comment_index:($src_idx|if .=="" then null else tonumber end),author:$src_who,at:$src_at,
                 rejected_blocks:$rejected,mentions_without_a_block:$mentions},
@@ -380,16 +392,17 @@
                reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
                author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
                newer_not_used:$newer_not_used,disagreement:$disagreement,named_branch:$rev_named_branch},
-@@ -972,6 +1100,7 @@
+@@ -972,6 +1111,7 @@
    # is indistinguishable from one that never saw it, which is the whole defect this fixes.
    if [ -n "${rev_disagree:-}" ]; then printf 'REVIEW-NOTE\n%s\n' "$rev_disagree"; fi
    if [ -n "${flm_newer_passed:-}" ]; then printf 'REVIEW-NOTE\nnewer verdict comment(s) on this bead were NOT used:\n%s' "$flm_newer_passed"; fi
-+  [ -n "$src_who" ] && [ "$rev_who" = "$src_who" ] && printf '        (WARNING: operative review is an author-lane transcription from comment #%s; no non-author review operative for this tip)\n' "$rev_idx"
++  [ -n "$_author_ref" ] && [ "$rev_who" = "$_author_ref" ] && printf '        (WARNING: operative review is an author-lane transcription from comment #%s; no non-author review operative for this tip)\n' "$rev_idx"
    [ "${rev_author_ignored:-0}" -gt 0 ] && printf '        (%d verdict comment(s) by the branch author lane ignored - they cannot mask another actor review; comment indices: %s)\n' "$rev_author_ignored" "${rev_author_ignored_shas:-}"
    printf '\n'
  fi
---- a/bin/fleet-verdict-words.sh
-+++ b/bin/fleet-verdict-words.sh
+diff -ruN A/bin/fleet-verdict-words.sh B/bin/fleet-verdict-words.sh
+--- A/bin/fleet-verdict-words.sh	2026-10-11 22:44:43.000000000 +0000
++++ B/bin/fleet-verdict-words.sh	2026-10-13 19:11:29.384362136 +0000
 @@ -72,7 +72,7 @@
  # Known provider families on this fleet (models are provider/id). Keep in sync with the model pool; a model
  # whose provider is not listed is simply not recognised as a model token - it degrades to 'unknown', never
@@ -449,8 +462,9 @@
 +  fi
 +  printf 'verified: run %s is a reviewer run on %s' "$rid" "${model:-<unknown model>}"
 +}
---- a/tests/fleet-land-message.test.sh
-+++ b/tests/fleet-land-message.test.sh
+diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
+--- A/tests/fleet-land-message.test.sh	2026-10-12 19:42:41.000000000 +0000
++++ B/tests/fleet-land-message.test.sh	2026-10-13 19:11:29.388362162 +0000
 @@ -29,6 +29,26 @@
  
  ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
@@ -873,8 +887,9 @@
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
    for f in "${FAILED_TESTS[@]}"; do
---- a/tests/fleet-verdict-transcribed-run.test.sh
-+++ b/tests/fleet-verdict-transcribed-run.test.sh
+diff -ruN A/tests/fleet-verdict-transcribed-run.test.sh B/tests/fleet-verdict-transcribed-run.test.sh
+--- A/tests/fleet-verdict-transcribed-run.test.sh	1970-01-01 00:00:00.000000000 +0000
++++ B/tests/fleet-verdict-transcribed-run.test.sh	2026-10-13 19:11:29.388362162 +0000
 @@ -0,0 +1,89 @@
 +#!/usr/bin/env bash
 +# Unit tests for fleet_verdict_transcribed_run_status (agents-m6fr).

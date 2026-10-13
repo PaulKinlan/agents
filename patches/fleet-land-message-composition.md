@@ -202,3 +202,25 @@ branch it certifies (agents-orjl) and diagnosed as an uncontained tip rather tha
 3. whether the m6fr reclassification is the intended outcome for a same-lane-posted cross-family verdict, or
    whether `fleet-15b5` still governs those shapes;
 4. that the fixture run-root setup makes the fixtures more faithful rather than disabling the check.
+
+## RE-CUT, in progress: the author is derived from the BRANCH, not from the summary appender (agents-ak50)
+
+Review verdict FAIL on 65ccc164..f7190c0c, finding agents-ak50 (P1): a LAND-SUMMARY appended by a NON-AUTHOR lane plus a
+verdict by the BRANCH's own lane returned `cleared:true` with `independence:` reported as `cross-family`. Reproduced on
+the reviewed tip with the reviewer's own script, then fixed: an author-derived value is now read from the object that owns
+it - the BRANCH (`src_author`, lane parsed from the branch name) with the documented summary-author fallback - instead of
+from whoever appended the summary (`src_who`, which by the landing convention is usually the coordinator). Six sites
+changed: the tip and own candidate POOLS (which decide the operative verdict), the candidate skip, the author-lane
+presence check, the `author_lane_transcription` field, and the warning line. `src_who` remains only where it genuinely
+means the summary's author.
+
+Post-fix on the reviewer's repro: `cleared:false`, `independence:transcribed-unverified`, `branch_author:test-vm-thing`.
+
+KNOWN CONFLICT, NOT YET RESOLVED, STATED HERE SO IT IS NOT LOST IN A COMMIT: the same correction flips fixtures 38k and
+38l (356 passed / 2 failed), which assert that a same-lane-posted verdict with a named reviewer of a DIFFERENT family
+CLEARS. Those fixtures and the reviewer's P1 fixture are the SAME case - a summary appended by another lane, one verdict
+posted by the branch's own lane, no run id - with opposite expected outcomes, so the delivery currently encodes two
+irreconcilable rules. My reading is that m6fr's run-id rule governs (no run id means the named reviewer cannot be resolved
+to a review artefact), and that 38k/38l should be repaired by giving their fixture a RUN line so it exercises the FAMILY
+question the amendment is about, leaving this bead's case to pin the no-run-id outcome. That reading is a RULING and is
+NOT the author's to make: it is flagged for the reviewer. This branch is therefore NOT for landing - no merge-queue.
