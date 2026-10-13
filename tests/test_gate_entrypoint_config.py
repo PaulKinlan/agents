@@ -113,7 +113,8 @@ def _entrypoint_env(home: str) -> dict:
     env = dict(os.environ)
     env["HOME"] = home
     env["FLEET_LANE"] = "merger"
-    env.pop("FLEET_CHECK_CONF", None)
+    for var in ("FLEET_CHECK_CONF", "SF_LOCAL_BIN", "SF_INSTALL_DIR", "SF_REPO_URL", "SKILL_FILTER"):
+        env.pop(var, None)
     return env
 
 
