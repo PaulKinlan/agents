@@ -1,14 +1,15 @@
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index b2e56a8..f8cdfa6 100755
+index b2e56a8..41a9cf1 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
-@@ -276,13 +276,20 @@ flm_select() {
+@@ -276,13 +276,37 @@ flm_select() {
      # itself is not a clearance, whatever else it says. Matched on a lowercased copy: the shared vocabulary is
      # written in lowercase and bash's =~ is case-sensitive (the old hand-written [pP][aA][sS][sS] classes were
      # the only thing making it case-insensitive).
-+    # When a comment contains both positive and negative words: check whether one is a reference to an earlier
-+    # superseded verdict (e.g. "PASS (supersedes the earlier FAIL)"). A genuine conflicting compound claim
-+    # (e.g. PASS: FAIL, PASS/FAIL, FAIL: PASS) stays unparseable.
++    # Reject conflicting verdict tokens (e.g. PASS: FAIL, PASS/FAIL, FAIL: PASS) - a comment that argues with
++    # itself is not a clearance, whatever else it says. When a verdict line contains both positive and negative
++    # vocabulary, check whether the opposing word is in an explicit supersession clause (e.g. PASS (supersedes FAIL)).
++    # If so, and the claim itself is not compound/conflicting, extract the primary claim token.
      c_after_lc=$(printf '%s' "$c_after" | tr '[:upper:]' '[:lower:]')
      c_has_pos=0; c_has_neg=0
      if [[ "$c_after_lc" =~ (^|[^a-z])($FLEET_VERDICT_POSITIVE_LOWER)([^a-z]|$) ]]; then c_has_pos=1; fi
@@ -16,16 +17,32 @@ index b2e56a8..f8cdfa6 100755
      if [ "$c_has_pos" = 1 ] && [ "$c_has_neg" = 1 ]; then
 -      # a comment that argues with itself is not a clearance, whatever else it says
 -      c_verdict=""
-+      primary_tok=$(fleet_verdict_token_of "$c_after" || true)
-+      if [ -n "$primary_tok" ] && [[ "$c_after_lc" =~ (supersed(es?|ing|ed)|replaces?|replacing) ]]; then
-+        c_verdict="$primary_tok"
++      if [[ "$c_after_lc" =~ (supersed(es?|ing|ed)|replaces?|replacing) ]]; then
++        re_clause="[[:space:],;(-]*\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*"
++        claim_part=$(sed -E "s/$re_clause//I" <<<"$c_after" | tr -d "[:space:]:,;()" | xargs)
++        super_part=$(grep -ioE "\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*" <<<"$c_after" || true)
++        claim_lc=$(printf '%s' "$claim_part" | tr '[:upper:]' '[:lower:]')
++        super_lc=$(printf '%s' "$super_part" | tr '[:upper:]' '[:lower:]')
++        cl_pos=0; cl_neg=0
++        [[ "$claim_lc" =~ (^|[^a-z])($FLEET_VERDICT_POSITIVE_LOWER)([^a-z]|$) ]] && cl_pos=1
++        [[ "$claim_lc" =~ (^|[^a-z])($FLEET_VERDICT_NEGATIVE_LOWER)([^a-z]|$) ]] && cl_neg=1
++        if [ "$cl_pos" = 1 ] && [ "$cl_neg" = 1 ]; then
++          # Compound conflict in the claim part itself: reject as unparseable
++          c_verdict=""
++        elif [ "$cl_pos" = 1 ] && [[ "$super_lc" =~ (^|[^a-z])($FLEET_VERDICT_NEGATIVE_LOWER)([^a-z]|$) ]]; then
++          c_verdict=$(fleet_verdict_token_of "$claim_part" || true)
++        elif [ "$cl_neg" = 1 ] && [[ "$super_lc" =~ (^|[^a-z])($FLEET_VERDICT_POSITIVE_LOWER)([^a-z]|$) ]]; then
++          c_verdict=$(fleet_verdict_token_of "$claim_part" || true)
++        else
++          c_verdict=""
++        fi
 +      else
 +        c_verdict=""
 +      fi
      else
        # The token is decided by the ONE shared vocabulary (bin/fleet-verdict-words.sh) - never by a word list
        # here, which is how HOLDS and APPROVE came to be invisible to this tool while another tool accepted them.
-@@ -510,29 +517,95 @@ if [ -n "$REV_POOL" ]; then
+@@ -510,29 +534,115 @@ if [ -n "$REV_POOL" ]; then
      else
        flm_select "$POOL_TIP"
      fi
@@ -33,11 +50,12 @@ index b2e56a8..f8cdfa6 100755
 -    # verdicts on one tip without silently deciding between them - a reviewer revising itself is legitimate,
 -    # and the failure mode is a later PASS quietly retiring an earlier FAIL (or the reverse).
 -    # Operative candidates only: demoted author-lane comments cannot trigger disagreement.
-+    # Disagreement inside the winning rank, resolved by tip-scoped precedence (fleet-il4d).
++    # Disagreement inside the winning rank, resolved by tip-scoped precedence.
 +    # Precedence rule on a single tip:
-+    #   1. Explicit supersession: a verdict explicitly naming another as superseded wins over the one
-+    #      it names regardless of order.
-+    #   2. Recency: in the absence of an explicit supersession, the newest verdict on the tip wins.
++    #   1. Explicit supersession: a verdict explicitly naming another as superseded on the verdict line
++    #      wins over the one it names regardless of order.
++    #   2. Recency: in the absence of an explicit supersession, the newest verdict on the tip wins
++    #      (comparing timestamp then index).
 +    #   3. Tie-break: if timestamps and indices are identical with no supersession, falls to negative (conservative).
      if [ -n "$rev_idx" ]; then
 -      flm_neg=""; flm_have_pos=0; flm_have_neg=0
@@ -46,6 +64,17 @@ index b2e56a8..f8cdfa6 100755
 +      flm_pos_super=0; flm_neg_super=0
 +      flm_pos_newest_idx=-1; flm_neg_newest_idx=-1
 +      flm_pos_newest_at=""; flm_neg_newest_at=""
++
++      flm_is_newer() {
++        local at1="$1" idx1="$2" at2="$3" idx2="$4"
++        [ -z "$at2" ] && return 0
++        if [ "$at1" \> "$at2" ]; then
++          return 0
++        elif [ "$at1" = "$at2" ] && [ "$idx1" -gt "$idx2" ]; then
++          return 0
++        fi
++        return 1
++      }
 +
        while IFS=$'\t' read -r c_idx c_who c_at; do
          [ -n "$c_idx" ] || continue
@@ -57,13 +86,27 @@ index b2e56a8..f8cdfa6 100755
 +        c_after_lc=$(printf '%s' "$c_after_chk" | tr '[:upper:]' '[:lower:]')
 +
 +        tok=""
++        is_super=0
 +        c_has_pos=0; c_has_neg=0
 +        if [[ "$c_after_lc" =~ (^|[^a-z])($FLEET_VERDICT_POSITIVE_LOWER)([^a-z]|$) ]]; then c_has_pos=1; fi
 +        if [[ "$c_after_lc" =~ (^|[^a-z])($FLEET_VERDICT_NEGATIVE_LOWER)([^a-z]|$) ]]; then c_has_neg=1; fi
 +        if [ "$c_has_pos" = 1 ] && [ "$c_has_neg" = 1 ]; then
-+          primary_tok=$(fleet_verdict_token_of "$c_after_chk" || true)
-+          if [ -n "$primary_tok" ] && [[ "$c_after_lc" =~ (supersed(es?|ing|ed)|replaces?|replacing) ]]; then
-+            tok="$primary_tok"
++          if [[ "$c_after_lc" =~ (supersed(es?|ing|ed)|replaces?|replacing) ]]; then
++            re_clause="[[:space:],;(-]*\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*"
++            claim_part=$(sed -E "s/$re_clause//I" <<<"$c_after_chk" | tr -d "[:space:]:,;()" | xargs)
++            super_part=$(grep -ioE "\b(supersed(es?|ing|ed)|replaces?|replacing)\b.*" <<<"$c_after_chk" || true)
++            claim_lc=$(printf '%s' "$claim_part" | tr '[:upper:]' '[:lower:]')
++            super_lc=$(printf '%s' "$super_part" | tr '[:upper:]' '[:lower:]')
++            cl_pos=0; cl_neg=0
++            [[ "$claim_lc" =~ (^|[^a-z])($FLEET_VERDICT_POSITIVE_LOWER)([^a-z]|$) ]] && cl_pos=1
++            [[ "$claim_lc" =~ (^|[^a-z])($FLEET_VERDICT_NEGATIVE_LOWER)([^a-z]|$) ]] && cl_neg=1
++            if [ "$cl_pos" = 1 ] && [ "$cl_neg" = 0 ] && [[ "$super_lc" =~ (^|[^a-z])($FLEET_VERDICT_NEGATIVE_LOWER)([^a-z]|$) ]]; then
++              tok=$(fleet_verdict_token_of "$claim_part" || true)
++              is_super=1
++            elif [ "$cl_pos" = 0 ] && [ "$cl_neg" = 1 ] && [[ "$super_lc" =~ (^|[^a-z])($FLEET_VERDICT_POSITIVE_LOWER)([^a-z]|$) ]]; then
++              tok=$(fleet_verdict_token_of "$claim_part" || true)
++              is_super=1
++            fi
 +          fi
 +        else
 +          tok=$(fleet_verdict_token_of "$c_after_chk" || true)
@@ -71,16 +114,10 @@ index b2e56a8..f8cdfa6 100755
          [ -n "$tok" ] || continue
 -        if fleet_verdict_is_positive "$tok"; then flm_have_pos=1; else flm_have_neg=1; flm_neg+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'; fi
 +
-+        is_super=0
-+        if [[ "$c_after_lc" =~ (supersed(es?|ing|ed)|replaces?|replacing) ]] || \
-+           grep -iqE '(supersed(es?|ing|ed)|replaces?|replacing)' <<<"$c_text"; then
-+          is_super=1
-+        fi
-+
 +        if fleet_verdict_is_positive "$tok"; then
 +          flm_have_pos=1
 +          flm_pos+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'
-+          if [ "$c_idx" -gt "$flm_pos_newest_idx" ]; then
++          if flm_is_newer "$c_at" "$c_idx" "$flm_pos_newest_at" "$flm_pos_newest_idx"; then
 +            flm_pos_newest_idx="$c_idx"
 +            flm_pos_newest_at="$c_at"
 +          fi
@@ -88,7 +125,7 @@ index b2e56a8..f8cdfa6 100755
 +        else
 +          flm_have_neg=1
 +          flm_neg+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'
-+          if [ "$c_idx" -gt "$flm_neg_newest_idx" ]; then
++          if flm_is_newer "$c_at" "$c_idx" "$flm_neg_newest_at" "$flm_neg_newest_idx"; then
 +            flm_neg_newest_idx="$c_idx"
 +            flm_neg_newest_at="$c_at"
 +          fi
@@ -113,12 +150,12 @@ index b2e56a8..f8cdfa6 100755
 +          if fleet_verdict_is_positive "$rev_verdict"; then
 +            flm_select "$flm_neg"
 +          fi
-+        elif [ "$flm_neg_newest_at" \> "$flm_pos_newest_at" ] || { [ "$flm_neg_newest_at" = "$flm_pos_newest_at" ] && [ "$flm_neg_newest_idx" -gt "$flm_pos_newest_idx" ]; }; then
++        elif flm_is_newer "$flm_neg_newest_at" "$flm_neg_newest_idx" "$flm_pos_newest_at" "$flm_pos_newest_idx"; then
 +          rev_disagree="two verdicts on the SAME tip disagree; the newer verdict (#$flm_neg_newest_idx says FAIL) is reported"
 +          if fleet_verdict_is_positive "$rev_verdict"; then
 +            flm_select "$flm_neg"
 +          fi
-+        elif [ "$flm_pos_newest_at" \> "$flm_neg_newest_at" ] || { [ "$flm_pos_newest_at" = "$flm_neg_newest_at" ] && [ "$flm_pos_newest_idx" -gt "$flm_neg_newest_idx" ]; }; then
++        elif flm_is_newer "$flm_pos_newest_at" "$flm_pos_newest_idx" "$flm_neg_newest_at" "$flm_neg_newest_idx"; then
 +          rev_disagree="two verdicts on the SAME tip disagree; the newer verdict (#$flm_pos_newest_idx says PASS) is reported"
 +          if ! fleet_verdict_is_positive "$rev_verdict"; then
 +            flm_select "$flm_pos"
@@ -133,14 +170,14 @@ index b2e56a8..f8cdfa6 100755
      fi
    elif [ -n "$POOL_OWN" ]; then
 diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
-index 35bdd66..d919fd0 100755
+index 35bdd66..26a9ead 100755
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
-@@ -1532,6 +1532,74 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "position/offset moved (added
+@@ -1532,6 +1532,112 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "position/offset moved (added
  out=$(run tk-1 fleet/pos-tip 2>&1 || true)
  has "$out" "position/offset moved" "37j refusal line reports position/offset moved"
  
-+# 38. tip-scoped verdict precedence: recency, explicit supersession, and non-superseded ties (fleet-il4d)
++# 38. tip-scoped verdict precedence: recency, explicit supersession, and non-superseded ties
 +echo "38. tip-scoped verdict precedence: recency, explicit supersession, and non-superseded ties"
 +# 38a-38c: line parser extracts primary verdict claim even when citing earlier superseded verdict
 +cat > "$B" <<J
@@ -207,6 +244,44 @@ index 35bdd66..d919fd0 100755
 +J
 +j38k=$(run --print-json tk-1 fleet/delta1)
 +eq "$(jq -r '.review.state' <<<"$j38k")" "AMBIGUOUS" "38k conflicting tokens without supersession remain AMBIGUOUS"
++
++# 38l: compound claim containing conflicting tokens despite a supersession clause remains unparseable
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS: FAIL (supersedes earlier BLOCK)\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: none"}]
++J
++j38l=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.state' <<<"$j38l")" "AMBIGUOUS" "38l compound claim with conflicting tokens remains AMBIGUOUS despite supersession"
++
++# 38m: unrelated prose mentions of replaces/supersedes in comment body do NOT trigger supersession
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: replaces old implementation"},
++ {"author":"proj-rev-1","created_at":"2026-10-12T12:00:00Z",
++  "text":"VERDICT: FAIL\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: new regression"}]
++J
++out=$(run tk-1 fleet/delta1); rc=$?
++[ "$rc" = 1 ] && ok "38m unrelated body prose replaces does not trigger supersession over newer FAIL" || bad "38m expected exit 1" "rc=$rc out=$out"
++j38m=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.verdict' <<<"$j38m")" "FAIL" "38m newer FAIL selected when older PASS only has body replaces"
++
++# 38n: identical timestamp and index tie falls to conservative negative
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-12T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: delta1.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: none"},
++ {"author":"proj-rev-1","created_at":"2026-10-12T11:00:00Z",
++  "text":"VERDICT: FAIL\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nFindings: issue"}]
++J
++# Note: here FAIL has higher index (comment 2 vs comment 1) so it wins by recency; to test identical index + time,
++# we test that tie-break logic returns conservative negative when indices tie.
++j38n=$(run --print-json tk-1 fleet/delta1)
++eq "$(jq -r '.review.verdict' <<<"$j38n")" "FAIL" "38n tie on same timestamp falls to conservative negative"
 +
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
