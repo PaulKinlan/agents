@@ -896,6 +896,78 @@ class TestIdentityAttribution(unittest.TestCase):
             report = findings._render_delta_report("target", processed, stats, fixed)
             self.assertIn("> **Unanchored disappearances**: 2 of 3 finding(s) that left the active set", report)
 
+    def test_new_unanchored_counter_and_section_both_directions(self):
+        """agents-l606: an unanchored appearance is COUNTED, and a re-keyed one is not a finding.
+
+        `new_unanchored` is a subset counter beside `new`, exactly as `fixed_unanchored` is beside
+        `fixed`. A row that shares its location with one this run booked Fixed is the SAME finding
+        moving key - the pairing is positive evidence, so it is reported as re-keyed and leaves `new`
+        instead of being emitted as a new finding beside the Fixed twin of itself.
+        """
+        agent = "vuln-discovery"
+
+        # Direction 1: an ANCHORED appearance is an ordinary new finding.
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, stats, fixed = self._run(td, [self._finding()], ci)
+            self.assertEqual(stats["new"], 1)
+            self.assertEqual(stats["new_unanchored"], 0, "an anchored appearance leaves the counter at 0")
+            self.assertEqual(stats["rekeyed"], 0)
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("## Action Required: New & Regressed Findings", report)
+            self.assertNotIn("Unanchored appearances", report)
+            self.assertNotIn("Re-keyed", report)
+
+        # Direction 2: an UNANCHORED appearance with NO retiring twin stays new, counted as a subset.
+        # It must ALSO stay under Action Required: newness is unattributed, but the row is not
+        # evidence-coloured as a re-key, and a critical row must not be muted by this bookkeeping.
+        with tempfile.TemporaryDirectory() as td:
+            processed, stats, fixed = self._run(td, [self._finding()], None)
+            self.assertEqual(stats["new"], 1, "new still counts an unattributed appearance")
+            self.assertEqual(stats["new_unanchored"], 1, "unanchored appearance increments the subset")
+            self.assertEqual(stats["rekeyed"], 0, "no retiring twin means no re-key")
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("## Action Required: New & Regressed Findings", report)
+            self.assertIn("> **Unanchored appearances**: 1 of 1 new finding(s) had no stable anchor",
+                          report)
+            self.assertNotIn("Re-keyed", report)
+
+        # Direction 3: THE agents-l606 CASE - one finding re-keyed inside one run. The store holds a
+        # row at a location under the model's old wording; this run reports the SAME location with
+        # reworded prose and no candidate set, so the row MOVES KEY: the old row is booked Fixed and
+        # the reworded row appears. Before this change the run booked that appearance as a NEW
+        # finding beside the Fixed twin of itself.
+        with tempfile.TemporaryDirectory() as td:
+            old_fp = findings.compute_fingerprint(agent=agent, rule_id="unclassified",
+                                                  path="tests/x.py", snippet="old wording")
+            row = {old_fp: {"fingerprint": old_fp, "agent": agent, "rule_id": "unclassified",
+                            "path": "tests/x.py", "line_number": 621, "snippet": "old wording",
+                            "identity_source": "no-candidate-index", "severity": "info",
+                            "title": "Mock credential in a test fixture", "description": "d",
+                            "remediation": "r", "state": "new", "change": "unchanged",
+                            "first_seen": "2026-01-01T00:00:00+00:00",
+                            "last_seen": "2026-01-01T00:00:00+00:00"}}
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": row}), encoding="utf-8")
+            reworded = self._finding(rule_id="unclassified", path="tests/x.py", line_number=621,
+                                     snippet="reworded prose")
+
+            processed, stats, fixed = self._run(td, [reworded], None)
+            self.assertEqual(stats["rekeyed"], 1, "the appearance re-keys the row that retired")
+            self.assertEqual(stats["new"], 0, "a re-key is not a new finding")
+            self.assertEqual(stats["new_unanchored"], 0,
+                             "and leaves new_unanchored, which stays a subset of `new`")
+            self.assertEqual(stats["fixed"], 1, "the row it re-keyed is booked Fixed")
+            self.assertEqual(stats["fixed_unanchored"], 1, "and is counted as an unanchored loss")
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertNotIn("## Action Required", report,
+                             "a re-keyed row must not be emitted as a new finding in the run that "
+                             "books its own twin Fixed (agents-l606)")
+            self.assertIn("## Re-keyed Appearances (not new findings)", report)
+            self.assertIn("## Resolved in this Run (Fixed)", report)
+
     def _check_process_run_shared_predicate(self, process_run_source: str):
         """Shared verification helper for drift and mutation checks."""
         self.assertIn("is_unanchored_finding(existing)", process_run_source,
