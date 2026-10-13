@@ -897,12 +897,13 @@ class TestIdentityAttribution(unittest.TestCase):
             self.assertIn("> **Unanchored disappearances**: 2 of 3 finding(s) that left the active set", report)
 
     def test_new_unanchored_counter_and_section_both_directions(self):
-        """agents-l606: an unanchored appearance is COUNTED, and a re-keyed one is not a finding.
+        """agents-l606: an unanchored appearance is COUNTED, and a location match is DISCLOSED, not decided.
 
         `new_unanchored` is a subset counter beside `new`, exactly as `fixed_unanchored` is beside
-        `fixed`. A row that shares its location with one this run booked Fixed is the SAME finding
-        moving key - the pairing is positive evidence, so it is reported as re-keyed and leaves `new`
-        instead of being emitted as a new finding beside the Fixed twin of itself.
+        `fixed`. A row that shares its exact line with one this run booked Fixed is reported as a
+        possible re-key: that is what the same finding moving key looks like, and also what a new finding
+        at a recycled line looks like, so the row KEEPS `new` and stays actionable. The counter is
+        information, and nothing is reclassified - demoting on this hid findings (agents-wcki).
         """
         agent = "vuln-discovery"
 
@@ -968,6 +969,34 @@ class TestIdentityAttribution(unittest.TestCase):
             self.assertIn("Possibly re-keyed, not reclassified", report,
                           "and the report says the pair may be one finding that moved key")
             self.assertIn("## Resolved in this Run (Fixed)", report)
+
+        # Direction 1b (agents-yh0z): an UNKNOWN line is NOT an exact location. The factory's own
+        # unknown marker is the string "?" (lib/line_numbers.UNKNOWN_LINE_MARKER, which the store also
+        # writes when a scanned null line is persisted), and the vuln-triage schema permits a null line,
+        # so two unnamed rows in ONE file compare EQUAL at (path, "?") having no line in common. The
+        # counter says EXACT LOCATION, so unknown-line rows are not paired and the count is a floor.
+        # The rows themselves are untouched: new, actionable and delivered like any other.
+        with tempfile.TemporaryDirectory() as td:
+            old_fp = findings.compute_fingerprint(agent="vuln-discovery", rule_id="unclassified",
+                                                  path="package.json", snippet="old wording")
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": {old_fp: {
+                                "fingerprint": old_fp, "agent": "vuln-discovery",
+                                "rule_id": "unclassified", "path": "package.json",
+                                "line_number": None, "snippet": "old wording",
+                                "identity_source": "no-candidate-index", "severity": "info",
+                                "title": "old row", "description": "d", "remediation": "r",
+                                "state": "new", "change": "unchanged",
+                                "first_seen": "2026-01-01T00:00:00+00:00",
+                                "last_seen": "2026-01-01T00:00:00+00:00"}}}), encoding="utf-8")
+            unnamed = self._finding(rule_id="unclassified", path="package.json",
+                                    line_number="?", snippet="reworded prose")
+            processed, stats, fixed = self._run(td, [unnamed], None)
+            self.assertEqual(stats["possible_rekey"], 0,
+                             "two unnamed rows are not at a shared exact location")
+            self.assertEqual(stats["new"], 1, "so the appearance is an ordinary new finding")
+            self.assertEqual(len(fixed), 1, "and the unnamed row that left is still booked Fixed")
 
     def test_a_recycled_location_is_reported_and_never_reclassified(self):
         """Three reproductions of harm turned into three refusals (agents-wcki/l3j1/hci2).

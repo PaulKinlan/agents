@@ -126,8 +126,9 @@ class TestThePropertyAgainstTheReconstruction(unittest.TestCase):
         location fallback is refused when a run reports more than one finding at a path, because two
         rows sharing a path and a bound label would be handed the same snippet and COLLAPSE. So
         those rows stay bound to the model's prose - and re-wording moves them. That movement is now
-        booked as a RE-KEY rather than as a new+fixed pair (agents-l606), which is the outcome
-        asserted below; the scanner's own ids do not move, because the file did not change.
+        DISCLOSED as a possible re-key rather than booked as a clean new+fixed pair (agents-l606), and
+        that is what the assertions below record: the rows still book new+fixed, the pair is COUNTED,
+        and the scanner's own ids do not move, because the file did not change.
         """
         scan_a, scan_b = self._candidate(), self._candidate()
         self.assertEqual(scan_a[CANDIDATE_ID_FIELD], scan_b[CANDIDATE_ID_FIELD])  # the copy: stable

@@ -88,6 +88,11 @@ from lib.embargo import (effective_severity, embargo_reason, is_false_positive,
 # mismatch fails closed rather than executing an unverified gh/bd.
 from lib.tool_pins import ToolPinError, resolve_tool
 from lib.sinks.github import promote_issue
+# "Is this a line number, or is the location unknown?" is ONE rule, in lib/line_numbers.py
+# (agents-ghtz). The re-key counter needs it: an unknown location is not an EXACT one (agents-yh0z),
+# and the rule also normalises a digit string to its int, so a stored "12" and a scanned 12 are the
+# same line instead of two spellings of it.
+from lib.line_numbers import usable_line_number
 
 
 # Keys of a per-run delta. `false_positive` counts findings the triage itself declared false
@@ -1128,33 +1133,51 @@ class FindingsStore:
             self.data["findings"][fp] = finding_record
             processed.append(finding_record)
 
-        # A RE-KEY IS NOT A DISCOVERY (agents-l606). A row whose identity rests on the model's prose
-        # is re-keyed when that prose is reworded or the rule label is re-derived, so the SAME finding
-        # can appear under a fresh fingerprint while the row it moved from is booked Fixed in this
-        # very run - measured in the 2026-10-13 nightly as six of seven "New" rows having a
-        # same-path:line twin in that run's own Fixed list. An appearance at the exact location of a
-        # row retiring now is therefore that row moving key, not a finding, and is taken out of `new`.
+        # A LOCATION MATCH IS A CANDIDATE, NOT A VERDICT (agents-l606, revised). A row whose identity
+        # rests on the model's prose is re-keyed when that prose is reworded or the rule label is
+        # re-derived, so the SAME finding can appear under a fresh fingerprint while the row it moved from
+        # is booked Fixed in this very run - measured in the 2026-10-13 nightly as six of seven "New" rows
+        # having a same-path:line twin in that run's own Fixed list. An appearance at the exact location of
+        # a row retiring now is REPORTED as a possible re-key, and NOTHING IS RECLASSIFIED.
         #
-        # DELIBERATELY NARROW, because the risk here is documented (see the Option E note on
-        # is_unanchored_finding): matching on location alone would let a genuinely new finding be
-        # absorbed into a location an older row had just left, trading a visible wave for an invisible
-        # one. Requiring the appearance to be UNANCHORED keeps the rule to the case where the identity
-        # is provably unstable, and the evidence is positive rather than a judgement: the run contains
-        # the twin, and the twin is reported as Fixed beside it.
+        # WHY IT DOES NOT DECIDE (agents-wcki, agents-hci2, agents-l3j1, and the withdrawn agent-3sl6
+        # reproduction): matching on location alone cannot separate a re-key from a genuinely new finding,
+        # because "one prose-bound row leaves this location and another arrives" is the shape of BOTH. Two
+        # revisions that DEMOTED a matched appearance were reproduced as harm - a new critical finding hid
+        # from Action Required where an info row retired, and the sink guard written alongside silently
+        # skipped a FAIL-CLOSED tracker check (rc=3 became rc=0) because the fail-closed test happens to
+        # have that shape. Narrowing did not help: requiring both sides to be prose-bound and requiring a
+        # shared rule_id (which matches 0 of 4 real pairs) each left the defect reachable. So the counter
+        # below is INFORMATION and the classification stays `new`: the row keeps its detail, stays in the
+        # actionable list, and is still delivered. A sound classification needs evidence a location does
+        # not carry - the scanner's own match text on BOTH sides, or a persisted occurrence-level identity -
+        # which is a design change (agents-01s2), not a guard.
         retiring = {}
         for _fp, _existing in self.data["findings"].items():
             if _existing.get("agent") != agent or _fp in current_fps:
                 continue
             if _existing.get("state") not in ("new", "accepted", "regressed"):
                 continue
-            retiring.setdefault((normalize_path(_existing.get("path")),
-                                 _hashable_line(_existing.get("line_number"))), _existing)
+            _line = usable_line_number(_existing.get("line_number"))
+            # A KNOWN LINE IS REQUIRED ON BOTH SIDES (agents-yh0z). Unknown locations are not exact
+            # ones: `usable_line_number` returns None for the factory's own "?" marker, for null, for
+            # booleans, for non-positive numbers and for anything non-numeric, so an unnamed row in a
+            # file cannot be paired with another unnamed row in it. The nightly's own paired
+            # package.json rows are exactly this case - one carrying null and one carrying "?" - and
+            # before this the two could key together on a location neither of them had. The counter
+            # says EXACT LOCATION, so it only counts one; unknown-line rows are left out entirely,
+            # which makes the count a FLOOR rather than a guess.
+            if _line is None:
+                continue
+            retiring.setdefault((normalize_path(_existing.get("path")), _line), _existing)
         for record in processed:
             if (record.get("change") != "new" or record.get("false_positive")
                     or not is_unanchored_finding(record)):
                 continue
-            loc = (normalize_path(record.get("path")),
-                   _hashable_line(record.get("line_number")))
+            _line = usable_line_number(record.get("line_number"))
+            if _line is None:
+                continue
+            loc = (normalize_path(record.get("path")), _line)
             # CONSUMED ON MATCH (agents-l3j1): one retiring row explains exactly ONE appearance.
             # Without popping, N unanchored appearances at a recycled location would ALL be re-keyed
             # against a single retiring row - inflating `rekeyed` and taking N rows out of `new` on
@@ -1167,11 +1190,11 @@ class FindingsStore:
             # fail-closed path my own sink guard silently disabled). An ANCHORED twin would have been
             # recognised by its stable key in THIS run - that is what a stable anchor means - so a row
             # it cannot match is EVIDENCE ITSELF. A twin sitting in the retirement set proves its
-            # identity moved, so a location is only explained by a re-key when the row that left it
-            # was prose-bound too. When the twin was anchored, the appearance is a DIFFERENT finding at
-            # a recycled location and keeps `new`: the reproduction was a genuinely new finding at the
-            # line an anchored row had just left, which a location-only rule re-keyed and thereby
-            # skipped the tracker's fail-closed listing check for.
+            # identity moved, so a location is only evidence for a pair when the row that left it was
+            # prose-bound too. When the twin was anchored, the appearance is a DIFFERENT finding at a
+            # recycled location: the reproduction was a genuinely new finding at the line an anchored row
+            # had just left, which a location-only rule re-keyed and thereby skipped the tracker's
+            # fail-closed listing check for. This narrows the COUNT, never the report.
             if not is_unanchored_finding(twin):
                 continue
             # NOTHING HERE DEPENDS ON SEVERITY, deliberately (agents-wcki): the rows where a re-key
@@ -1575,11 +1598,13 @@ def _unanchored_new_note(stats: Dict[str, int]) -> List[str]:
     paired = int(stats.get("possible_rekey", 0) or 0)
     if paired > 0:
         note.append(
-            f"> **Possibly re-keyed, not reclassified**: {paired} of them sit at a location a row this "
-            "run booked Fixed, which is what ONE finding moving key looks like - and also what a new "
-            "finding at a recycled location looks like. They are counted here and left in the "
+            f"> **Possibly re-keyed, not reclassified**: {paired} of them sit at an exact line a row "
+            "this run booked Fixed, which is what ONE finding moving key looks like - and also what a "
+            "new finding at a recycled line looks like. They are counted here and left in the "
             "actionable list, because a location cannot distinguish the two and guessing has hidden "
-            "real findings. (agents-l606, agents-wcki)")
+            "real findings. This is a floor: rows whose line the scanner could not name are not counted, "
+            "so they are never paired on a location neither of them has. (agents-l606, agents-wcki, "
+            "agents-yh0z)")
     note.append("")
     return note
 

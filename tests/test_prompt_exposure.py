@@ -75,7 +75,8 @@ class PromptSandbox:
         shutil.copyfile(ROOT / "lib" / "adapters" / "pi.sh", adapter)
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
         for module in ("findings.py", "redaction.py", "embargo.py",
-                       "tool_pins.py", "net_forward.py", "egress_proxy.py"):
+                       "tool_pins.py", "net_forward.py", "egress_proxy.py",
+                       "line_numbers.py"):
             shutil.copyfile(ROOT / "lib" / module, self.root / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
         shutil.copytree(ROOT / "lib" / "sinks", self.root / "lib" / "sinks", dirs_exist_ok=True)
