@@ -1,6 +1,5 @@
-diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
---- A/bin/fleet-land-message	2026-10-12 19:42:41.000000000 +0000
-+++ B/bin/fleet-land-message	2026-10-13 19:11:29.408362293 +0000
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
 @@ -9,6 +9,13 @@
  #   fleet-land-message --from-comment <n> <bead> <branch> [...] when a bead has several LAND-SUMMARY blocks and
  #                                                             the last one is not the one to use (n is the
@@ -47,7 +46,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
        | select(test("(?i)VERDICT[*_]*:[ \t*#_]*(<[^>]+>|\\[[^]]*(\\||\\bword\\b|\\bverdict\\b|\\bstatus\\b|\\bplaceholder\\b|\\btodo\\b|\\btbd\\b)[^]]*\\]|\\bTODO\\b|\\bTBD\\b|\\bplaceholder\\b)") | not)
      ] | length > 0)
    | "\(.key)\t\(.value.author // "?")\t\(.value.created_at // "?")"' <<<"$COMMENTS" 2>/dev/null)
-@@ -225,22 +234,60 @@
+@@ -225,22 +234,64 @@
  rev_pick=""; rev_idx=""; rev_who=""; rev_at=""; rev_verdict=""; rev_sha=""; rev_state="NONE"
  rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_run_id=""
  
@@ -106,7 +105,11 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
    fi
  fi
 +if [ -z "$src_lane" ] && [ -n "$src_who" ]; then
-+  src_author="$src_who"; src_lane=${src_who#"${FLEET_VM:-fleet-manager}-"}; src_author_source="summary-author"
++  # THE STRIP IS GONE (agents-ak50(b)): deriving a LANE by removing a VM prefix from whoever appended the summary is a
++  # derivation from the wrong object, and its product did not stay in the message - it fed the
++  # $HOME/.fleet/lanes/<lane>.model lookup below, so a coordinator-appended summary could hand the COMPARISON the
++  # coordinator lane's model as the author model.
++  src_author_source="summary-author"
 +fi
 +
 +# THE FACT "WHO AUTHORED THIS BRANCH" IS OWNED BY THE BRANCH, NOT BY WHOEVER APPENDED THE LAND-SUMMARY (agents-ak50, P1).
@@ -117,12 +120,12 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
 +# run. src_who stays for what it actually is - the summary's author - and _author_ref is used for the branch. It is set
 +# OUTSIDE the conditional above: under set -u an assignment inside it leaves _author_ref unbound whenever the branch does
 +# not take that path, which is every branch whose name does not map to a lane.
-+_author_ref="${src_author:-$src_who}"
-+REV_POOL="$REV_CAND"; rev_author_ignored=0; rev_author_ignored_shas=""
++_author_ref="${src_author:-}"   # NO fallback to the summary appender: standing a different object in for the branch author is the defect this line exists to close (agents-ak50(b))
++REV_POOL="$REV_CAND"; rev_author_ignored=0; rev_author_ignored_shas=""; _author_fail=0
  
  # fleet-260l: SELECTION IS A FUNCTION OF A POOL, not a single newest-first walk.
  # The pool used to be everything, walked newest-first with a break on the first candidate that parsed into a
-@@ -267,7 +314,11 @@
+@@ -267,7 +318,11 @@
      # "Review verdict: VERDICT: PASS" are all the same record. The prefix words are a closed set, so prose
      # that merely mentions a verdict ("the pattern a reviewer would paste is: VERDICT: PASS") still does not
      # match: the label must begin the line and must be one of these words.
@@ -135,7 +138,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
      VTOK='VERDICT[*_]*:'
      v_line=$(grep -iE "^[[:space:]*#_]*(${VPFX})?${VTOK}([[:space:]]*(${VPFX})?${VTOK})*[[:space:]*#_]*[^[:space:]]" <<<"$c_text" \
        | grep -ivE "VERDICT[*_]*:[[:space:]*#_]*(<[^>]+>|\[[^]]*(\||word|verdict|status|placeholder|todo|tbd)[^]]*\]|TODO|TBD|placeholder)" \
-@@ -423,7 +474,17 @@
+@@ -423,7 +478,17 @@
                rev_delta_identical=true
                # same shared decision as above - never a second word list
                if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
@@ -153,7 +156,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
            fi
          fi
        fi
-@@ -488,10 +549,27 @@
+@@ -488,10 +553,37 @@
    # Select from the best non-empty rank. Pool order is comment order, and flm_select walks it newest-first.
    rev_disagree=""
    if [ -n "$POOL_TIP" ]; then
@@ -169,6 +172,16 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
 +      if [ -n "$_tip_auth" ]; then
 +        rev_author_ignored=$(grep -c . <<<"$_tip_auth" || true)
 +        rev_author_ignored_shas=$(awk -F'\t' '{print $1}' <<<"$_tip_auth" | tr '\n' ' ' | sed 's/ *$//')
++            while read -r _ai; do
++              [ -n "$_ai" ] || continue
++              _aw=$(jq -r --argjson i "$_ai" '.[$i].text // ""' <<<"$COMMENTS" 2>/dev/null)
++              if fleet_verdict_is_negative "$(fleet_verdict_token_of "$_aw")"; then _author_fail=1; fi
++            done < <(awk -F'\t' '{print $1}' <<<"$_tip_auth")
++            while read -r _ai; do
++              [ -n "$_ai" ] || continue
++              _aw=$(jq -r --argjson i "$_ai" '.[$i].text // ""' <<<"$COMMENTS" 2>/dev/null)
++              if fleet_verdict_is_negative "$(fleet_verdict_token_of "$_aw")"; then _author_fail=1; fi
++            done < <(awk -F'\t' '{print $1}' <<<"$_own_auth")
 +      fi
 +      _tip_operative="$_tip_nonauth"
 +      flm_select "$_tip_nonauth"
@@ -182,7 +195,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
      if [ -n "$rev_idx" ]; then
        flm_neg=""; flm_have_pos=0; flm_have_neg=0
        while IFS=$'\t' read -r c_idx c_who c_at; do
-@@ -503,7 +581,7 @@
+@@ -503,7 +595,7 @@
          tok=$(fleet_verdict_token_of "$c_after_chk" || true)
          [ -n "$tok" ] || continue
          if fleet_verdict_is_positive "$tok"; then flm_have_pos=1; else flm_have_neg=1; flm_neg+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'; fi
@@ -191,7 +204,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
        # Reported whenever the two exist, whichever won: a clearance that reversed because a second verdict
        # appeared must SAY SO, or the reversal looks arbitrary and a reader cannot tell a revision from a mistake.
        if [ "$flm_have_pos" = 1 ] && [ "$flm_have_neg" = 1 ]; then
-@@ -514,7 +592,23 @@
+@@ -514,7 +606,23 @@
        fi
      fi
    elif [ -n "$POOL_OWN" ]; then
@@ -216,7 +229,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
    fi
  
    # k1lm's rule must survive the ranking. A newer comment on THIS branch that carries a VERDICT line the tool
-@@ -524,9 +618,11 @@
+@@ -524,9 +632,11 @@
    # candidates rather than over the rank, and it wins: AMBIGUOUS, no clearing.
    if [ -n "$rev_idx" ] && [ -n "$POOL_TIP" ]; then
      rev_full_now=$(git rev-parse -q --verify "${rev_sha:-$tip}^{commit}" 2>/dev/null || echo "")
@@ -228,7 +241,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
        c_text=$(jq -r --argjson i "$c_idx" '.[$i].text // ""' <<<"$COMMENTS" 2>/dev/null)
        cv_line=$(grep -iE "^[[:space:]*#_]*((${VPFX:-x})?${VTOK:-VERDICT[*_]*:})[[:space:]]*[^[:space:]]" <<<"$c_text" | head -1)
        [ -n "$cv_line" ] || continue
-@@ -539,7 +635,7 @@
+@@ -539,7 +649,7 @@
        rev_cleared=false
        raw_verdict="$c_after_chk"
        break
@@ -237,7 +250,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
    fi
  
    # A verdict in a LOWER rank that is NEWER than the winner is reported, never merged in: the operator has to
-@@ -588,19 +684,38 @@
+@@ -588,21 +698,52 @@
  #                   provenance is a FAILURE, not an absence of failure (coord, fleet-ry7m amendment): a
  #                   reviewer that cannot be compared to the author is strictly weaker evidence than an
  #                   explicitly same-family reviewer, so it must not clear under a friendlier label.
@@ -260,47 +273,75 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
 +# answers WHICH LANE OR MODEL AUTHORED, the run reason answers WHETHER THE POSTED VERDICT HAS AN
 +# ARTEFACT BEHIND IT. They must not share a name or a parser, because a transcribed verdict that reads
 +# as author-sourced is precisely the confusion m6fr exists to close.
-+rev_independence="unknown"; rev_reviewer_model=""; rev_author_model=""; rev_author_model_source="comment cue"; rev_block=""; rev_run_reason=""
++rev_independence="unknown"; rev_reviewer_model=""; rev_author_model=""; rev_author_model_source=""; rev_block=""; rev_run_reason=""; _cue_author_model=""; _cue_block=""
  if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
    _pm=$(fleet_verdict_split_models "${verdict_line:-}" "$rev_text" 2>/dev/null || true)
-   rev_reviewer_model=$(sed -n 1p <<<"$_pm"); rev_author_model=$(sed -n 2p <<<"$_pm")
+-  rev_reviewer_model=$(sed -n 1p <<<"$_pm"); rev_author_model=$(sed -n 2p <<<"$_pm")
 -  if [ -z "$rev_author_model" ] && [ -n "$src_who" ]; then
 -    _lane=${src_who#"${FLEET_VM:-fleet-manager}-"}
 -    if [ "$_lane" != "$src_who" ] && [ -f "$HOME/.fleet/lanes/$_lane.model" ]; then
 -      rev_author_model=$(tr -d '[:space:]' < "$HOME/.fleet/lanes/$_lane.model" 2>/dev/null || true)
-+  if [ -z "$rev_author_model" ] && [ -n "$AUTHOR_MODEL_ARG" ]; then
++  rev_reviewer_model=$(sed -n 1p <<<"$_pm"); _cue_author_model=$(sed -n 2p <<<"$_pm")
++  # agents-ak50 (cue): THE AUTHOR MODEL IS NEVER TAKEN FROM THE VERDICT COMMENT. The cue is written by the party
++  # being checked, so it is a CLAIM to be tested against an anchor, never the anchor itself - the mirror of ABSENCE IS
++  # NEVER EVIDENCE: PRESENCE OF A SELF-DECLARED FIELD IS NOT EVIDENCE EITHER. The trusted sources come FIRST.
++  if [ -n "$AUTHOR_MODEL_ARG" ]; then
 +    # agents-2tov: the operator with the evidence supplies the missing OPERAND, rather than overriding the
 +    # rule. The comparison below still runs on it, and this text is what the message and JSON record, so a
 +    # supplied value is never indistinguishable from a derived one.
 +    rev_author_model="$AUTHOR_MODEL_ARG"; rev_author_model_source="supplied by the lander (--author-model)"
-+  fi
-+  if [ -z "$rev_author_model" ] && [ -n "$src_lane" ]; then
++  elif [ -n "$src_lane" ]; then
 +    if [ -f "$HOME/.fleet/lanes/$src_lane.model" ]; then
 +      rev_author_model=$(tr -d '[:space:]' < "$HOME/.fleet/lanes/$src_lane.model" 2>/dev/null || true)
++      if [ -n "$rev_author_model" ] && [ "$rev_author_model" != "$(tr -d '[:space:]' < "$HOME/.fleet/lanes/$src_lane.model")" ] \
++         && [ "$(fleet_verdict_model_family "$rev_author_model")" != "$(fleet_verdict_model_family "$(tr -d '[:space:]' < "$HOME/.fleet/lanes/$src_lane.model")")" ]; then
++        _cue_block="author-operand-conflict"
++      fi
 +      rev_author_model_source="lane record $src_lane (${src_author_source:-unknown} author)"
      fi
    fi
++  if [ "$src_author_source" = "summary-author" ]; then
++    # agents-ak50 (variant 2): the branch lane record is ABSENT, so the author was inferred from the summary appender -
++    # a weaker actor, and NOT the branch author. Absence is never evidence: the provenance is marked UNESTABLISHED and
++    # cannot clear rather than comparing the reviewer against the wrong party.
++    _cue_block="unestablished-author"
++  fi
    _fam=""
-@@ -611,13 +726,13 @@
+   if [ -n "$rev_reviewer_model" ] && [ -n "$rev_author_model" ]; then
+     if [ "$(fleet_verdict_model_family "$rev_reviewer_model")" != "$(fleet_verdict_model_family "$rev_author_model")" ]; then
+@@ -611,13 +752,13 @@
        _fam="same"
      fi
    fi
 -  if [ -n "$src_who" ] && [ "$rev_who" != "$src_who" ]; then
-+  if [ -n "$src_author" ] && [ "$rev_who" != "$src_author" ]; then
++  if [ -n "$_author_ref" ] && [ "$rev_who" != "$_author_ref" ]; then   # single derivation (agents-ak50(a))
      if [ "$_fam" = "same" ]; then
        rev_independence="same-family"
      else
        rev_independence="other-lane"
      fi
 -  elif [ -n "$src_who" ]; then
-+  elif [ -n "$src_author" ]; then
++  elif [ -n "$_author_ref" ]; then
      if [ -z "$rev_reviewer_model" ]; then
        rev_independence="self-certified"
      elif [ -z "$rev_author_model" ]; then
-@@ -630,20 +745,36 @@
+@@ -630,20 +771,69 @@
    elif [ "$_fam" = "same" ]; then
      rev_independence="same-family"
    fi
++  if [ -n "$_cue_author_model" ] && [ -z "$_cue_block" ]; then
++    if [ -z "$rev_author_model" ]; then
++      _cue_block="untrusted-author-claim"
++    elif [ "$(fleet_verdict_model_family "$_cue_author_model")" != "$(fleet_verdict_model_family "$rev_author_model")" ]; then
++      _cue_block="cue-contradicts-lane"
++    fi
++  fi
++  [ -n "$_cue_block" ] && rev_independence="$_cue_block"
++
++  # coord ruling 2026-10-13: an author-lane FAIL BLOCKS (a withdrawal governs); an author-lane PASS decides nothing.
++  if [ "${_author_fail:-0}" = "1" ] && [ -z "$_cue_block" ]; then
++    _cue_block="author-withdrawal"
++  fi
 +  # TRANSCRIBED-PATH VERIFICATION (agents-m6fr). When the verdict was posted by the branch author's
 +  # OWN lane, the "cross-family" class above rests on a named model - a claim, not evidence. The run
 +  # id is already parsed (rev_run_id) and is verifiable, so require it to resolve. ONLY this path is
@@ -328,6 +369,26 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
          rev_cleared=false
 -        rev_block="independence: incomplete-provenance (reviewer model: $rev_reviewer_model; author model: not determinable - not named on the verdict, and no ~/.fleet/lanes lane record) — name the implementer's model on the verdict or record the lane's model, so the reviewer's family can be compared (fleet-ry7m)"
 +        rev_block="independence: incomplete-provenance (reviewer model: $rev_reviewer_model; author model: not determinable for lane ${src_lane:-?} (${src_author_source:-no author lane}); not named on the verdict and no ~/.fleet/lanes lane record - supply it with --author-model <provider/id>, which the message records as supplied) — name the implementer's model on the verdict or record the lane's model, so the reviewer's family can be compared (fleet-ry7m)"
++        ;;
++      unestablished-author)
++        rev_cleared=false
++        rev_block="independence: unestablished-author - the branch author could NOT be established from the branch (no ~/.fleet/lanes/${src_lane:-?} record matching origin/$BRANCH), so the only 'author' available was the party that appended the summary; comparing the reviewer's family against that weaker actor would clear on the wrong party's provenance. ABSENCE IS NEVER EVIDENCE: name the branch lane's model or supply it with --author-model (agents-ak50 variant 2)"
++        ;;
++      untrusted-author-claim)
++        rev_cleared=false
++        rev_block="independence: untrusted-author-claim - the verdict names the implementer as $_cue_author_model, but that is the AUTHOR'S OWN CLAIM about itself with no trusted operand to check it against. A comment cue is written by the party being checked, so it can never be the trust anchor: PRESENCE OF A SELF-DECLARED FIELD IS NOT EVIDENCE (agents-ak50 cue)"
++        ;;
++      cue-contradicts-lane)
++        rev_cleared=false
++        rev_block="independence: cue-contradicts-lane - the verdict's implementer cue ($_cue_author_model) names a different model FAMILY from the trusted author model ($rev_author_model, from ${rev_author_model_source:-unknown}); a self-declared contradiction is a refusal, never a preference (agents-ak50 cue)"
++        ;;
++      author-operand-conflict)
++        rev_cleared=false
++        rev_block="independence: author-operand-conflict - the --author-model operand names a different family from the branch lane record for ${src_lane:-?}; a contradiction between two trusted sources is a refusal (agents-ak50 cue)"
++        ;;
++      author-withdrawal)
++        rev_cleared=false
++        rev_block="independence: author-withdrawal - the branch author lane posted a FAIL/BLOCK on its own branch. A self-declared failure is a WITHDRAWAL, not noise: it is evidence AGAINST landing and blocks it even when an independent verdict PASSES, because the safer reading of a withdrawal is to stop. An author-lane PASS decides nothing in the other direction, since a pass cannot be self-awarded (coord ruling 2026-10-13)"
          ;;
        same-family)
          rev_cleared=false
@@ -336,7 +397,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
          ;;
      esac
    fi
-@@ -662,9 +793,9 @@
+@@ -662,9 +852,9 @@
      rev_line="FAIL: verdict was $rev_verdict for commit ${rev_sha:-$tip} by $rev_who at $rev_at — NOT CLEARED"
    fi
  elif [ "$rev_state" = "STALE" ]; then
@@ -348,7 +409,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
  elif [ "$rev_state" = "UNRESOLVED" ]; then
    rev_line="UNRESOLVED: reviewed commit $rev_sha cannot be resolved on origin/$BRANCH — NOT CLEARED"
  elif [ "$rev_state" = "UNPINNED" ]; then
-@@ -703,9 +834,9 @@
+@@ -703,9 +893,9 @@
    if [ "$rev_state" = "STALE" ] || [ "$rev_state" = "DIVERGED" ]; then
      if [ ${#rm_labels[@]} -gt 0 ]; then
        bdf update "$BEAD" "${rm_labels[@]}" >/dev/null 2>&1 || true
@@ -360,7 +421,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
      exit 1
    elif [ "$rev_state" = "UNRESOLVED" ]; then
      if [ ${#rm_labels[@]} -gt 0 ]; then
-@@ -928,20 +1059,28 @@
+@@ -928,20 +1118,28 @@
      --arg rev_who "${rev_who:-}" --arg rev_at "${rev_at:-}" --argjson rev_unreviewed "${rev_unreviewed:-0}" \
      --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
      --argjson rev_delta_identical "${rev_delta_identical:-false}" \
@@ -369,7 +430,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
      --arg cleared_sha "${cleared_label_sha:-}" \
      --arg rev_independence "${rev_independence:-unknown}" --arg rev_reviewer_model "${rev_reviewer_model:-}" \
 -    --arg rev_author_model "${rev_author_model:-}" --arg branch_author "${src_who:-}" \
-+    --arg rev_author_model "${rev_author_model:-}" --arg branch_author "${src_author:-$src_who}" \
++    --arg rev_author_model "${rev_author_model:-}" --arg branch_author "${src_author:-}" \
 +    --arg author_lane "${src_lane:-}" --arg author_source "${src_author_source:-}" \
 +    --arg rev_author_model_source "${rev_author_model_source:-}" \
      --arg newer_not_used "${flm_newer_passed:-}" --arg disagreement "${rev_disagree:-}" --arg rev_named_branch "${rev_branch:-}" \
@@ -392,7 +453,7 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
                reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
                author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
                newer_not_used:$newer_not_used,disagreement:$disagreement,named_branch:$rev_named_branch},
-@@ -972,6 +1111,7 @@
+@@ -972,6 +1170,7 @@
    # is indistinguishable from one that never saw it, which is the whole defect this fixes.
    if [ -n "${rev_disagree:-}" ]; then printf 'REVIEW-NOTE\n%s\n' "$rev_disagree"; fi
    if [ -n "${flm_newer_passed:-}" ]; then printf 'REVIEW-NOTE\nnewer verdict comment(s) on this bead were NOT used:\n%s' "$flm_newer_passed"; fi
@@ -400,9 +461,8 @@ diff -ruN A/bin/fleet-land-message B/bin/fleet-land-message
    [ "${rev_author_ignored:-0}" -gt 0 ] && printf '        (%d verdict comment(s) by the branch author lane ignored - they cannot mask another actor review; comment indices: %s)\n' "$rev_author_ignored" "${rev_author_ignored_shas:-}"
    printf '\n'
  fi
-diff -ruN A/bin/fleet-verdict-words.sh B/bin/fleet-verdict-words.sh
---- A/bin/fleet-verdict-words.sh	2026-10-11 22:44:43.000000000 +0000
-+++ B/bin/fleet-verdict-words.sh	2026-10-13 19:11:29.384362136 +0000
+--- a/bin/fleet-verdict-words.sh
++++ b/bin/fleet-verdict-words.sh
 @@ -72,7 +72,7 @@
  # Known provider families on this fleet (models are provider/id). Keep in sync with the model pool; a model
  # whose provider is not listed is simply not recognised as a model token - it degrades to 'unknown', never
@@ -462,9 +522,8 @@ diff -ruN A/bin/fleet-verdict-words.sh B/bin/fleet-verdict-words.sh
 +  fi
 +  printf 'verified: run %s is a reviewer run on %s' "$rid" "${model:-<unknown model>}"
 +}
-diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
---- A/tests/fleet-land-message.test.sh	2026-10-12 19:42:41.000000000 +0000
-+++ B/tests/fleet-land-message.test.sh	2026-10-13 19:19:30.651111144 +0000
+--- a/tests/fleet-land-message.test.sh
++++ b/tests/fleet-land-message.test.sh
 @@ -23,12 +23,34 @@
  FAILED_TESTS=()
  ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -580,7 +639,7 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
  
  echo "35. fleet-260l: clearance is decided by PIN QUALITY, not by which verdict was posted last"
  # THE DEFECT THIS SECTION PINS: the tool walked the candidates newest-first and took the first that parsed
-@@ -1293,6 +1315,334 @@
+@@ -1293,6 +1315,390 @@
  has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
  has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
  
@@ -734,7 +793,12 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 +j36i_custom=$(FLEET_VERDICT_MODEL_FAMILIES="customfamily|deepseek|zai|kimi|kimi-coding|antigravity|openai-codex|qwen-token-plan-individual|pi-claude-code-provider|qwen|gemini|openai|anthropic|claude" run --print-json tk-5br9 fleet/rebase5br9)
 +eq "$(jq -r '.review.state' <<<"$j36i_custom")" "CURRENT" "36i2 custom family recognized when FLEET_VERDICT_MODEL_FAMILIES is set"
 +eq "$(jq -r '.review.verdict' <<<"$j36i_custom")" "PASS" "36i3 custom family verdict extracted"
-+eq "$(jq -r '.review.author_lane_transcription' <<<"$j36i_custom")" "true" "36i4 author-lane transcription identified"
++# 36i4 REPAIRED under the ak50 fix, and the value below is MEASURED, not chosen: this fixture's verdict is posted by
++# test-vm-imp-x while the branch is fleet/rebase5br9, and there is no ~/.fleet/lanes/rebase5br9.model, so the branch author
++# is UNESTABLISHED (it used to be silently taken from the summary appender, which is the defect). Nothing may therefore be
++# attributed to an author lane, and the honest observable is false. The positive side of this property is covered by 26a
++# and 31a, which establish a lane record and assert transcribed-verified.
++eq "$(jq -r '.review.author_lane_transcription' <<<"$j36i_custom")" "false" "36i4 the tip verdict is NOT claimed as an author-lane transcription when the branch author is unestablished"
 +
 +# 37. sha-relevance outranks independence; delta mismatch reasons
 +echo "37. sha-relevance outranks independence; delta mismatch reasons"
@@ -748,7 +812,11 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 +  "text":"Transcribed review:\nVERDICT: PASS\nDelta: tk-1 base..$d1_tip branch fleet/delta1\nIndependent Reviewer: openai-codex/gpt-6-sol (author: antigravity/gemini-3.8-flash)\nRUN 5eed3333-2222-3333-4444-555566667777\nFindings: none"}]
 +J
 +out=$(run tk-1 fleet/delta1); rc=$?
-+[ "$rc" = 0 ] && ok "37a author-lane verdict for current tip is not masked by dead non-author verdict" || bad "37a expected exit 0" "rc=$rc out=$out"
++# 37a REPAIRED under the ak50 fix: with no ~/.fleet/lanes/delta1.model the branch author is unestablished, so the helper
++# refuses with unestablished-author rather than comparing the reviewer's family against the summary appender. Refusing IS
++# the fix, and it INVERTS this case: the pre-fix helper exited 0 here. The property 37a was written for - a dead non-author
++# verdict for an older sha must not mask the tip verdict - is still pinned by 37b/37c (state CURRENT, reviewed_sha = tip).
++[ "$rc" != 0 ] && ok "37a an author-lane tip verdict on an unestablished branch author is NOT resolved by a dead older verdict (it refuses)" || bad "37a expected a refusal" "rc=$rc out=$out"
 +j_out=$(run --print-json tk-1 fleet/delta1)
 +eq "$(jq -r '.review.state' <<<"$j_out")" "CURRENT" "37b review state is CURRENT for tip-pinned author verdict"
 +eq "$(jq -r '.review.reviewed_sha' <<<"$j_out")" "$d1_tip" "37c reviewed sha is current tip"
@@ -766,7 +834,11 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 +[ "$rc" = 1 ] && ok "37d on same tip non-author outranks author-lane" || bad "37d expected exit 1" "rc=$rc out=$out"
 +j_out=$(run --print-json tk-1 fleet/delta1)
 +eq "$(jq -r '.review.author' <<<"$j_out")" "proj-rev-1" "37e operative review author is non-author lane"
-+eq "$(jq -r '.review.author_lane_verdicts_ignored' <<<"$j_out")" "1" "37f author-lane verdict on same tip is ignored"
++# 37f REPAIRED under the ak50 fix, value MEASURED: the pools are split on the single derived author, and with the branch
++# author unestablished there is no author pool to attribute to, so the count is 0 rather than 1. 37d/37e still pin the
++# property that matters here (the non-author verdict is the operative one and its author is named), and 26a/26b pin the
++# ignored-count where a lane record exists.
++eq "$(jq -r '.review.author_lane_verdicts_ignored' <<<"$j_out")" "0" "37f no verdict is attributed to an author lane when the branch author is unestablished"
 +
 +# 37g-37h: delta mismatch reports content changed
 +git -C "$ROOT/repo" checkout -q -b fleet/mismatch-content main
@@ -912,12 +984,54 @@ diff -ruN A/tests/fleet-land-message.test.sh B/tests/fleet-land-message.test.sh
 +
 +rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
 +
++# 39a/39b: THE STRUCTURAL PIN. The rule that decides which candidates belong to the author's lane exists in TWO
++# implementations - awk matchers (the rank-scoped pools) and shell predicates (the skip, the presence check, the
++# transcription flags) - so a future correction to one SILENTLY MISSES the other, and the delivery would look complete
++# while the defect lived on in the rank sites. A value fix cannot pin a duplication; only an assertion about the FILE can.
++# These two read the helper and require that every lane matcher consumes the single derived value.
++_lm_awk_all=$(grep -cF "awk -F'\t' -v a=" "$LM" 2>/dev/null | head -1)
++_lm_awk_ref=$(grep -cF "awk -F'\t' -v a=\"$\_author_ref\"" "$LM" 2>/dev/null | head -1)
++# the operands must be non-empty, or this pin cannot fail and would pass on a missing file - the lesson of four MATCH
++# lines from four empty strings, applied to the pin itself.
++if [ "${_lm_awk_all:-0}" -le 0 ]; then bad "39a harness: the awk-matcher grep matched nothing, so this pin cannot fail"; else
++  eq "$_lm_awk_all" "$_lm_awk_ref" "39a every awk by-lane matcher consumes the single derived author value"
++fi
++# 39b: no LANE COMPARISON may read src_who or src_author - the one derived value is _author_ref. The pattern is
++# deliberately narrow (a comparison operator next to the variable, with a word boundary so src_author_source and
++# src_author_model are not caught): the first version counted every MENTION and reported four.
++# This assertion EXPECTS zero, so its emptiness guard is inverted - the pattern is first proved capable of matching
++# a known leak. A must-be-zero assertion on a pattern that matches nothing is the pin that cannot fail.
++_leak_pat='[!=]= *"?\$[{]?(src_who|src_author)\b'
++printf '%s\n' 'if [ "$rev_who" != "$src_who" ]; then' | grep -qE "$_leak_pat" \
++  || bad "39b harness: the leak pattern does not match a known leak, so this pin cannot fail"
++_leaks=$(grep -nE "$_leak_pat" "$LM" 2>/dev/null | wc -l | head -1)
++eq "${_leaks:-x}" "0" "39b no lane comparison reads src_who or src_author directly"
++# 39c (case 5): THE HAND-OFF IS APPENDED BY THE AUTHOR LANE ITSELF, carrying a project-VM prefix, which is the shape the
++# verifier's earlier fixture could not reach because its hand-off came from the coord actor. Run on BOTH VMs, because the
++# prefix that used to be stripped behaves differently when FLEET_VM is unset. Expected: author_lane from the BRANCH,
++# ignored=1, cleared=true.
++printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
++cat > "$B" <<J
++[{"author":"test-vm-thing2","created_at":"2026-10-09T10:30:00Z","text":"LAND-SUMMARY\nWHAT: the other thing\nWHY: it was missing\nEFFECT: users notice"},
++ {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"},
++ {"author":"test-vm-rev-y","created_at":"2026-10-09T11:10:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nRUN 5eed2222-2222-3333-4444-555566667777\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
++J
++j=$(run --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.author_lane' <<<"$j")" "thing2" "39c author_lane comes from the BRANCH with a project-VM prefix on the hand-off"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "39d ...and an independent PASS still clears it"
++j=$(FLEET_VM=fleet-manager run --print-json tk-2 fleet/thing2)
++eq "$(jq -r '.review.author_lane' <<<"$j")" "thing2" "39e ...and the same holds on the other VM (FLEET_VM unset/default)"
++# 39f runs under FLEET_VM=fleet-manager, which is the point of the pair: the hand-off was appended by
++# test-vm-thing2 while the BRANCH author is the VM in force, so the two are separable and branch_author must
++# name the branch, not the appender. It is a GUARD rather than a pin: the pre-fix helper also derives from the
++# branch when a lane record exists, so it does not go red; it defends against a future fallback to the appender.
++eq "$(jq -r '.review.branch_author' <<<"$j")" "fleet-manager-thing2" "39f ...with the branch author named for the VM in force, not the appender"
++
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
    for f in "${FAILED_TESTS[@]}"; do
-diff -ruN A/tests/fleet-verdict-transcribed-run.test.sh B/tests/fleet-verdict-transcribed-run.test.sh
---- A/tests/fleet-verdict-transcribed-run.test.sh	1970-01-01 00:00:00.000000000 +0000
-+++ B/tests/fleet-verdict-transcribed-run.test.sh	2026-10-13 19:11:29.388362162 +0000
+--- /dev/null
++++ b/tests/fleet-verdict-transcribed-run.test.sh
 @@ -0,0 +1,89 @@
 +#!/usr/bin/env bash
 +# Unit tests for fleet_verdict_transcribed_run_status (agents-m6fr).

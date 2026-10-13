@@ -1,6 +1,5 @@
-diff -ruN B/bin/fleet-land-message Cold/bin/fleet-land-message
---- B/bin/fleet-land-message	2026-10-13 19:11:29.408362293 +0000
-+++ Cold/bin/fleet-land-message	2026-10-13 19:17:19.830425341 +0000
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
 @@ -5,6 +5,12 @@
  #
  #   fleet-land-message <bead> <branch> [bead2 ...]            message for the merge of <branch>
@@ -31,7 +30,7 @@ diff -ruN B/bin/fleet-land-message Cold/bin/fleet-land-message
      --allow-stale) ALLOW_STALE=1; shift ;;
      --print-json|--json) JSON=1; shift ;;
      --author-model) AUTHOR_MODEL_ARG=${2:?--author-model needs provider/id}; shift 2 ;;
-@@ -937,13 +945,79 @@
+@@ -996,13 +1004,79 @@
    # Direct ref ancestry is accepted; if the branch was rebased without changing the tree (no-op rebase),
    # verify that the merged commit contains an ancestor whose tree matches the branch tip tree.
    target_ref_tree=$(git rev-parse --verify -q "${target_ref}^{tree}" 2>/dev/null || echo "")
@@ -115,10 +114,9 @@ diff -ruN B/bin/fleet-land-message Cold/bin/fleet-land-message
      exit 1
    fi
    target_tree=$(git rev-parse --verify -q "${gate_commit}^{tree}" 2>/dev/null || echo "")
-diff -ruN B/tests/fleet-land-message.test.sh Cold/tests/fleet-land-message.test.sh
---- B/tests/fleet-land-message.test.sh	2026-10-13 19:19:30.651111144 +0000
-+++ Cold/tests/fleet-land-message.test.sh	2026-10-13 19:19:57.003245375 +0000
-@@ -1643,6 +1643,84 @@
+--- a/tests/fleet-land-message.test.sh
++++ b/tests/fleet-land-message.test.sh
+@@ -1656,6 +1656,84 @@
  
  rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
  
@@ -200,10 +198,10 @@ diff -ruN B/tests/fleet-land-message.test.sh Cold/tests/fleet-land-message.test.
 +out_both=$( cd "$W" && run --gate "$W_MERGE" --landed-tip "$W_LANDED" tk-1 fleet/wwss )
 +has   "$out_both" "explicit landed tip $W_LANDED for fleet/wwss (at " "41g the gate identity names the landed tip AND the branch's current tip"
 +
- if [ "$FAIL" -gt 0 ]; then
-   echo "Failed tests ($FAIL):"
-   for f in "${FAILED_TESTS[@]}"; do
-@@ -1651,3 +1729,4 @@
+ # 39a/39b: THE STRUCTURAL PIN. The rule that decides which candidates belong to the author's lane exists in TWO
+ # implementations - awk matchers (the rank-scoped pools) and shell predicates (the skip, the presence check, the
+ # transcription flags) - so a future correction to one SILENTLY MISSES the other, and the delivery would look complete
+@@ -1707,3 +1785,4 @@
  fi
  printf '%s passed, %s failed\n' "$PASS" "$FAIL"
  [ "$FAIL" = 0 ]
