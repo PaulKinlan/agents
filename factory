@@ -125,6 +125,17 @@ if set(PI_KEYLESS_MODELS) != set(PI_PROVIDER_API) or any(
         not ids for ids in PI_KEYLESS_MODELS.values()):
     raise RuntimeError("PI keyless provider tables require matching, nonempty model rows")
 
+# The dispatcher builds its broker only from variables allowed into the pi engine.
+# If a keyless provider loses that allowlist entry, the broker silently omits it and
+# _write_pi_models_json returns without writing pi's only provider override.
+_missing_pi_keyless_credentials = sorted(
+    provider for provider in keyless_providers()
+    if not set(BROKER_PROVIDERS[provider][2]) & set(ENGINE_CREDENTIALS["pi"])
+)
+if _missing_pi_keyless_credentials:
+    raise RuntimeError("PI keyless providers missing from ENGINE_CREDENTIALS['pi']: "
+                       + ", ".join(_missing_pi_keyless_credentials))
+
 
 class StationError(RuntimeError):
     """A station failed and produced no verdict — never a clean scan (fleet-ddd, journal-idy).
