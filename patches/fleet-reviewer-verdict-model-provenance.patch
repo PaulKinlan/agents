@@ -1,0 +1,38 @@
+--- a/roles/reviewer.md
++++ b/roles/reviewer.md
+@@ -75,11 +75,24 @@
+ Delta: <bead> <mb-short>..<tip-short> (<n> files, +a/-d)   branch fleet/<x>
+ Gate: fleet-check <state> for <sha> (cached, run by <lane> <at>)   [or UNKNOWN: <why>]
+ Reproduced: <the one behaviour you ran, and what it showed>
++Independence: PI_MODEL=<you> PI_PROVIDER=<you> vs author <model from the bead or lane record>
+ Notes: <file:line - what a reader must know; not a to-do list>
+ Findings: <bead ids> (P1/P2/P3) | none
+ ```
+ Every verdict MUST explicitly name the reviewed commit SHA in `Delta: <mb>..<tip>` or `@<tip>`. An unpinned verdict is rejected by the merger; naming the tip prevents clearance floating across diverging commits (fleet-nick).
+ 
++**Independence is claimed from the FIELDS, never from the lane (agents-q7v2).** Run `printenv PI_MODEL PI_PROVIDER` and
++**quote the output** in `Independence:` above, beside the author's model. Two reasons, both measured:
++- **A subagent inherits the DISPATCHER's `FLEET_LANE`.** When an implementer dispatches a reviewer subagent, the lane in
++  the reviewer's environment is the implementer's - so the lane is not the reviewer's identity and cannot support an
++  independence claim. The fields can, and a later reader can re-check them.
++- **A lane's announced model can be wrong** (fleet-ccfq, agents-kq0r): a lane log recording a model fallback means the
++  model a lane *named* is not always the model that ran. A verdict that quotes the field is checkable; one that rests on
++  a lane name is a claim about a name. A clearance was retracted tonight for exactly this, and the retraction was right.
++
++This is the same shape as `Gate:` - a line naming the EVIDENCE rather than the conclusion. Where you and the author are
++the same family, `Independence:` is where you say so in the required form; coord may still want a second review.
++
+ `PASS` = no finding at P1/P2. `PASS-with-notes` = only P3s, or a caveat that does not change behaviour.
+ On a passing verdict (`PASS` or `PASS-with-notes`), remove any existing `cleared:*` and `review-failed` labels first to prevent accumulating conflicting pins or stale rejection state, then add labels `reviewed` and `cleared:<tip-short>` to the bead (`for cl in $(bd show <bead> --json | jq -r '.[0].labels // [] | .[]' | grep -E '^(cleared:|review-failed$)'); do bd update <bead> --remove-label "$cl"; done && bd update <bead> --add-label reviewed --add-label cleared:<tip-short>`). This records the exact cleared commit SHA on the bead so clearance is readable from the board and independent of mutable branch refs (fleet-60zh).
+ `FAIL` = at least one P1/P2, or the claimed behaviour does not reproduce. On FAIL, do NOT add clearance; remove any stale `cleared:*` label (`for cl in $(bd show <bead> --json | jq -r '.[0].labels // [] | .[]' | grep -E '^cleared:'); do bd update <bead> --remove-label "$cl"; done`), add labels `reviewed` and `review-failed` (`bd update <bead> --add-label reviewed --add-label review-failed --remove-label merge-queue`), and hand back to the author.
+@@ -98,8 +111,8 @@
+ - **Do not re-run suites, gates or factory lines** (`fleet-check` cache is the evidence; the nightly project-audit
+   is `remote/factory-nightly.sh`'s job).
+ - **Do not review your own work or your own lane's work**, and never a change you authored. Cross-family is the
+-  point: if you and the author are the same model family, say so in the verdict comment - it weakens the review
+-  and coord may want a second one.
++  point: if you and the author are the same model family, say so in `Independence:` with the quoted fields - a lane
++  name cannot show it, and a same-family review weakens the verdict, so coord may want a second one.
+ - **Do not merge, push to the default branch, or label a bead `merge-queue`.** Landing is the merger's job.
+ - **Do not review anything that is not ours** (non-`fleet/*` branches, other actors' beads) unless the hub
+   assigns that exact item, and never the other fleet's work.
