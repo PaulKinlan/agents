@@ -1,0 +1,42 @@
+--- a/roles/merger.md
++++ b/roles/merger.md
+@@ -31,9 +31,20 @@
+      the history today: the helper emits the bead id and title, WHY, WHAT changed, the user-visible effect, the
+      delta and the beads spun out of the review. It reads those from the bead's `LAND-SUMMARY` comment, so the
+      author writes them at hand-off (`roles/implementer.md`) and you never invent them from a diff.
+-   - **After the gate passes, amend the message with the gate record** (one command, no extra step in the
+-     procedure): `git commit --amend -F <(bash ~/fleet/bin/fleet-land-message --gate <merged-sha> <bead> fleet/<x>)`
+-     then push. That is how the commit body gets the gate result instead of a claim that a gate ran. **The helper
++   - **After the gate passes, amend the message with the gate record - and CHAIN THE STEPS so a refusal
++     stops the script** (one block, no extra step in the procedure):
++     ```sh
++     msg=$(mktemp)
++     if bash ~/fleet/bin/fleet-land-message --gate <merged-sha> <bead> fleet/<x> > "$msg"; then
++         git commit --amend -F "$msg" && git push origin HEAD:<default>
++     else
++         echo "gate record refused: NOT amending and NOT pushing" >&2
++     fi
++     ```
++     **Do NOT use `-F <(...)` process substitution here.** When the helper refuses, the substitution
++     yields an EMPTY message; `git commit --amend -F` then either aborts with "empty commit message"
++     or, on a path where the amend already has a message, silently leaves a body with no gate record -
++     which is the failure this block exists to prevent (agents-qngy). That is how the commit body gets the gate result instead of a claim that a gate ran. **The helper
+      records the TREE as well as the commit sha**, because `fleet-check` caches by tree and the amend itself
+      changes the sha: the tree is the object the gate actually measured, and it is what a later reader can
+      re-check with `fleet-check --status <sha>`.
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
+@@ -984,11 +984,11 @@
+   [ -n "$gate_identity" ] && printf 'Identity %s\n' "$gate_identity"
+ elif [ -n "$target_tree" ]; then
+   printf 'GATE\nno cached verdict for tree %s (commit %s) yet: NOT a pass. The batch gate result goes in this\nsection with\n' "${target_tree:0:12}" "${gatesha:-this commit}"
+-  printf '  git commit --amend -F <(fleet-land-message --gate <merged-sha> %s %s)\n' "$BEAD" "$BRANCH"
++  printf '  msg=$(mktemp) && fleet-land-message --gate <merged-sha> %s %s > "$msg" && git commit --amend -F "$msg" && git push\n' "$BEAD" "$BRANCH"
+   [ -n "$gate_identity" ] && printf 'Identity %s\n' "$gate_identity"
+ else
+   printf 'GATE\nno cached verdict yet (merge tree pending: NOT a pass). The batch gate result goes in this\nsection with\n'
+-  printf '  git commit --amend -F <(fleet-land-message --gate <merged-sha> %s %s)\n' "$BEAD" "$BRANCH"
++  printf '  msg=$(mktemp) && fleet-land-message --gate <merged-sha> %s %s > "$msg" && git commit --amend -F "$msg" && git push\n' "$BEAD" "$BRANCH"
+ fi
+ if [ -n "$budget" ]; then printf '\nPROMPT BUDGET\n%s\n' "$budget"; fi
+ if [ -n "$spun" ]; then printf '\nSPUN OUT OF REVIEW\n%s\n' "$spun"; fi
