@@ -1,0 +1,177 @@
+diff --git a/bin/fleet-park b/bin/fleet-park
+index 03c110d..745fb6e 100755
+--- a/bin/fleet-park
++++ b/bin/fleet-park
+@@ -2,7 +2,9 @@
+ # fleet-park <branch> "<reason>" [bead]   record a deliberate decision NOT to land a branch (yet)
+ # fleet-park --unpark <branch>            make it a landing candidate again
+ # Parked branches leave the merge queue (and the watchdog's nudges/escalations) and show as "parked"
+-# with the reason on the dashboard. Labelling the owning bead merge-blocked or parked has the same effect.
++# with the reason on the dashboard. The readable parked state is the bead label (parked, merge-blocked,
++# or hub-delivery); fleet-park records the branch-level decision in ~/.fleet/parked and, when a bead is
++# given, labels the bead `parked` so the dashboard and watchdog see it immediately.
+ set -euo pipefail
+ orig_port="${FLEET_INBOX_PORT:-}"
+ FLEET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+@@ -40,4 +42,10 @@ if [ "$code" != "200" ]; then
+   exit 1
+ fi
+ 
++# The readable parked state that dashboard and watchdog derive is the bead label.
++# When a bead is provided, label it as parked so both tools observe it immediately.
++if [ -n "${bead:-}" ] && [ "${1:-}" != "--unpark" ] && command -v bd >/dev/null 2>&1; then
++  bd update "$bead" --add-label parked 2>/dev/null || true
++fi
++
+ echo "$body_out"
+diff --git a/dashboard/lifecycle.mjs b/dashboard/lifecycle.mjs
+index 881cdfd..d4fd19c 100644
+--- a/dashboard/lifecycle.mjs
++++ b/dashboard/lifecycle.mjs
+@@ -6,7 +6,7 @@
+ //   working   in progress (a lane or person has it)
+ //   review    done by the author, waiting for an independent review (label in_review/in-review/review)
+ //   to_land   finished + reviewed, waiting for the merger (label merge-queue)
+-//   parked    deliberately held (no-auto, parked, merge-blocked, waiting, needs-paul)
++//   parked    deliberately held (no-auto, parked, merge-blocked, waiting, needs-paul, hub-delivery)
+ //   landed    closed with label merged
+ //   closed    closed otherwise (done without code, won't do, duplicate)
+ export const STAGES = [
+@@ -15,14 +15,14 @@ export const STAGES = [
+   ["review", "In review", "Author says done; waiting for an independent review."],
+   ["to_land", "Ready to land", "Reviewed; waiting for the merger to put it on main."],
+   ["blocked", "Blocked", "Blocked, deferred, or waiting on another bead."],
+-  ["parked", "Parked", "Deliberately held for a decision (no-auto, parked, needs Paul)."],
++  ["parked", "Parked", "Deliberately held for a decision (no-auto, parked, needs Paul, hub-delivery)."],
+   ["landed", "Landed", "Closed and merged to main."],
+   ["closed", "Closed", "Closed without landing code (done, won't do, duplicate)."],
+ ];
+ const has = (i, re) => (i.labels || []).some((l) => re.test(l));
+ export function stage(i) {
+   if (i.status === "closed" || i.status === "tombstone") return has(i, /^merged$/) ? "landed" : "closed";
+-  if (has(i, /^(no-auto|parked|merge-blocked|waiting|needs-paul|paul-decision)$/)) return "parked";
++  if (has(i, /^(no-auto|parked|merge-blocked|waiting|needs-paul|paul-decision|hub-delivery)$/)) return "parked";
+   if (has(i, /^merge-queue$/)) return "to_land";
+   if (has(i, /^(in_review|in-review|review|needs-review)$/)) return "review";
+   if (i.status === "blocked" || i.status === "deferred" || (i.dependency_count && i.status === "open" && i.blocked)) return "blocked";
+diff --git a/inbox/beads.mjs b/inbox/beads.mjs
+index b01f98f..9fab3a2 100644
+--- a/inbox/beads.mjs
++++ b/inbox/beads.mjs
+@@ -305,15 +305,15 @@ export async function mergeQueue(dflt = "main") {
+       { cwd: d.dir, timeout: 20000 }, (e, o) => resolve(e ? [] : String(o).split("\n").filter(Boolean))));
+     const rows = [];
+     // Parked = a deliberate "not landing this (yet)" decision with a reason: either an explicit park
+-    // (~/.fleet/parked, via fleet-park / dashboard) or a bead labelled merge-blocked / parked.
++    // (~/.fleet/parked, via fleet-park / dashboard) or a bead labelled merge-blocked / parked / hub-delivery.
+     const blockedIds = new Set();
+-    for (const lbl of ["merge-blocked", "parked"]) {
++    for (const lbl of ["merge-blocked", "parked", "hub-delivery"]) {
+       const r = await bd(d.dir, ["list", "--json", "--limit", "0", "--all", "--label", lbl]);
+       for (const i of parse(r.out, [])) blockedIds.add(i.id);
+     }
+     const allQueued = parse(q.out, []);
+     const queued = allQueued.filter((i) => !blockedIds.has(i.id));
+-    const parked = [...allQueued.filter((i) => blockedIds.has(i.id)).map((i) => ({ kind: "bead", key: i.id, title: i.title, reason: "bead labelled merge-blocked/parked" }))];
++    const parked = [...allQueued.filter((i) => blockedIds.has(i.id)).map((i) => ({ kind: "bead", key: i.id, title: i.title, reason: "bead labelled merge-blocked/parked/hub-delivery" }))];
+     function escapeRegex(str) {
+       return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+     }
+@@ -348,7 +348,7 @@ export async function mergeQueue(dflt = "main") {
+           claimedBranches.add(branch);
+         }
+       } else if (ids.some((x) => blockedIds.has(x))) {
+-        parked.push({ kind: "branch", key: branch, ...row, reason: `owning bead ${ids.find((x) => blockedIds.has(x))} is labelled merge-blocked/parked` });
++        parked.push({ kind: "branch", key: branch, ...row, reason: `owning bead ${ids.find((x) => blockedIds.has(x))} is labelled merge-blocked/parked/hub-delivery` });
+       } else {
+         rows.push(row);
+       }
+diff --git a/inbox/lifecycle.mjs b/inbox/lifecycle.mjs
+index 881cdfd..d4fd19c 100644
+--- a/inbox/lifecycle.mjs
++++ b/inbox/lifecycle.mjs
+@@ -6,7 +6,7 @@
+ //   working   in progress (a lane or person has it)
+ //   review    done by the author, waiting for an independent review (label in_review/in-review/review)
+ //   to_land   finished + reviewed, waiting for the merger (label merge-queue)
+-//   parked    deliberately held (no-auto, parked, merge-blocked, waiting, needs-paul)
++//   parked    deliberately held (no-auto, parked, merge-blocked, waiting, needs-paul, hub-delivery)
+ //   landed    closed with label merged
+ //   closed    closed otherwise (done without code, won't do, duplicate)
+ export const STAGES = [
+@@ -15,14 +15,14 @@ export const STAGES = [
+   ["review", "In review", "Author says done; waiting for an independent review."],
+   ["to_land", "Ready to land", "Reviewed; waiting for the merger to put it on main."],
+   ["blocked", "Blocked", "Blocked, deferred, or waiting on another bead."],
+-  ["parked", "Parked", "Deliberately held for a decision (no-auto, parked, needs Paul)."],
++  ["parked", "Parked", "Deliberately held for a decision (no-auto, parked, needs Paul, hub-delivery)."],
+   ["landed", "Landed", "Closed and merged to main."],
+   ["closed", "Closed", "Closed without landing code (done, won't do, duplicate)."],
+ ];
+ const has = (i, re) => (i.labels || []).some((l) => re.test(l));
+ export function stage(i) {
+   if (i.status === "closed" || i.status === "tombstone") return has(i, /^merged$/) ? "landed" : "closed";
+-  if (has(i, /^(no-auto|parked|merge-blocked|waiting|needs-paul|paul-decision)$/)) return "parked";
++  if (has(i, /^(no-auto|parked|merge-blocked|waiting|needs-paul|paul-decision|hub-delivery)$/)) return "parked";
+   if (has(i, /^merge-queue$/)) return "to_land";
+   if (has(i, /^(in_review|in-review|review|needs-review)$/)) return "review";
+   if (i.status === "blocked" || i.status === "deferred" || (i.dependency_count && i.status === "open" && i.blocked)) return "blocked";
+diff --git a/tests/watchdog-drivers.test.sh b/tests/watchdog-drivers.test.sh
+index fd032db..e8bb2f5 100755
+--- a/tests/watchdog-drivers.test.sh
++++ b/tests/watchdog-drivers.test.sh
+@@ -75,5 +75,10 @@ grep -q 'if \[ -t 1 \] && \[ -z "${FLEET_LANE:-}" \]' "$L" && pass "lanes.sh tai
+   || fail "lanes.sh tail can still block a lane (no TTY/FLEET_LANE guard)"
+ grep -q '^  log) tail -n ' "$L" && pass "lanes.sh log is the always-safe, non-following variant" || fail "no safe non-following variant"
+ 
+-echo "watchdog drivers: $((6-fails))/6"
++# D) hub-delivery is recognized as non-landing (excused from idle holder nudges & parked on dashboard)
++grep -q "hub-delivery" "$W" && pass "watchdog EXCUSED includes hub-delivery label" || fail "watchdog EXCUSED missing hub-delivery"
++grep -q "hub-delivery" "$HERE/dashboard/lifecycle.mjs" && pass "dashboard lifecycle stages include hub-delivery in parked" || fail "dashboard lifecycle missing hub-delivery"
++grep -q "hub-delivery" "$HERE/inbox/lifecycle.mjs" && pass "inbox lifecycle stages include hub-delivery in parked" || fail "inbox lifecycle missing hub-delivery"
++
++echo "watchdog drivers: $((9-fails))/9"
+ [ $fails -eq 0 ]
+diff --git a/vmui/lifecycle.mjs b/vmui/lifecycle.mjs
+index 881cdfd..d4fd19c 100644
+--- a/vmui/lifecycle.mjs
++++ b/vmui/lifecycle.mjs
+@@ -6,7 +6,7 @@
+ //   working   in progress (a lane or person has it)
+ //   review    done by the author, waiting for an independent review (label in_review/in-review/review)
+ //   to_land   finished + reviewed, waiting for the merger (label merge-queue)
+-//   parked    deliberately held (no-auto, parked, merge-blocked, waiting, needs-paul)
++//   parked    deliberately held (no-auto, parked, merge-blocked, waiting, needs-paul, hub-delivery)
+ //   landed    closed with label merged
+ //   closed    closed otherwise (done without code, won't do, duplicate)
+ export const STAGES = [
+@@ -15,14 +15,14 @@ export const STAGES = [
+   ["review", "In review", "Author says done; waiting for an independent review."],
+   ["to_land", "Ready to land", "Reviewed; waiting for the merger to put it on main."],
+   ["blocked", "Blocked", "Blocked, deferred, or waiting on another bead."],
+-  ["parked", "Parked", "Deliberately held for a decision (no-auto, parked, needs Paul)."],
++  ["parked", "Parked", "Deliberately held for a decision (no-auto, parked, needs Paul, hub-delivery)."],
+   ["landed", "Landed", "Closed and merged to main."],
+   ["closed", "Closed", "Closed without landing code (done, won't do, duplicate)."],
+ ];
+ const has = (i, re) => (i.labels || []).some((l) => re.test(l));
+ export function stage(i) {
+   if (i.status === "closed" || i.status === "tombstone") return has(i, /^merged$/) ? "landed" : "closed";
+-  if (has(i, /^(no-auto|parked|merge-blocked|waiting|needs-paul|paul-decision)$/)) return "parked";
++  if (has(i, /^(no-auto|parked|merge-blocked|waiting|needs-paul|paul-decision|hub-delivery)$/)) return "parked";
+   if (has(i, /^merge-queue$/)) return "to_land";
+   if (has(i, /^(in_review|in-review|review|needs-review)$/)) return "review";
+   if (i.status === "blocked" || i.status === "deferred" || (i.dependency_count && i.status === "open" && i.blocked)) return "blocked";
+diff --git a/watchdog/watchdog.mjs b/watchdog/watchdog.mjs
+index 637494f..8a5c6b6 100644
+--- a/watchdog/watchdog.mjs
++++ b/watchdog/watchdog.mjs
+@@ -203,7 +203,7 @@ async function checkVm(vm) {
+   // lane (paid re-read of its state), and the old idle-holder restarts came in WAVES and fixed nothing.
+   // An idle lane holding a bead gets ONE cheap nudge per bead per 4 h instead, and only when nothing
+   // excuses the idleness (hold, autopilot off, a running gate/child, a blocked/parked/queued bead).
+-  const EXCUSED = /^(blocked|merge-blocked|parked|no-auto|merge-queue|waiting|needs-paul|review)$/;
++  const EXCUSED = /^(blocked|merge-blocked|parked|no-auto|merge-queue|waiting|needs-paul|review|hub-delivery)$/;
+   state.nudges = state.nudges || {};
+   for (const l of lanes.filter((l) => l.running && !l.stopped)) {
+     const key = `${vm}:${l.lane}`;
