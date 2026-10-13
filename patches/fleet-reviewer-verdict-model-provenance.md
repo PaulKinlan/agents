@@ -1,62 +1,79 @@
 # `fleet-reviewer-verdict-model-provenance.patch`
 
 - **Target repository:** `PaulKinlan/fleet`
-- **Target file:** `roles/reviewer.md` (the verdict shape, and the same-family instruction)
-- **Baseline:** `roles/reviewer.md` as deployed on this VM, 11916 bytes
-- **Bead:** agents-q7v2 (P2, process). Cross-linked with **agents-kq0r increment C** - the sdk-host half of the same
-  question (a loud refusal when a reviewer's effective family equals the implementer's). Same root, different layers:
-  this patch is the HUB half (what a reviewer must state), kq0r C is the MECHANICAL half (what the system can refuse).
+- **Target files:** `roles/reviewer.md` (the verdict shape) and `remote/lanes.sh` (a runtime-model audit)
+- **Beads:** agents-q7v2 (P2) with the runtime-vs-intent half of the spawn P1, delivered as ONE artifact per
+  coord's ruling. Cross-linked with **agents-kq0r increment C** - same root, different layers: this patch is what
+  the HUB can do (state the field, and make drift visible), C is the mechanical refusal in the SDK host.
 
-## Problem
+## The root, in one paragraph
 
 A reviewer subagent dispatched by an implementer **inherits the DISPATCHER's `FLEET_LANE`**, so the lane in the
-reviewer's environment is the implementer's own. Transcribing a subagent's verdict does not change that attribution,
-and it cannot: the lane is not the reviewer's identity and cannot support an independence claim.
-
-Two measured costs, both this VM, both tonight:
-
-1. **A clearance was retracted** because the reviewer's announced model was not the model that ran. The verdict was
-   sincere and the claim was false; the retraction was correct, and "the field says otherwise" is the only repair (a
-   different family member that had been believed, and that a reader could not check).
-2. **The base rate is not small:** 29 lane logs across this VM record a model fallback, 23 of them the same
-   sonnet -> deepseek-flash one. So a lane's *announced* model is not evidence of the model that ran, and the fallback
-   is common enough to matter rather than exotic.
-
-Independence shape today is `Delta:`/`Gate:`/`Reproduced:` - all of them name EVIDENCE rather than conclusions, except
-independence, which rested on a lane name or on the reviewer's own sincerity. That is the gap this closes.
+reviewer's environment is the implementer's own - and transcribing a subagent's verdict cannot change that
+attribution, because the lane is not the reviewer's identity. Meanwhile a lane's **runtime model can differ from the
+model it was spawned with**: 29 lane logs on this VM record a model fallback, 23 of them the same sonnet ->
+deepseek-flash one. So the independence guard at spawn (`fleet-ccfq`) reasons about an INTENT, and an intent that is
+not what runs cannot support the claim it was guarding. Both layers are one question: *what model is actually
+reviewing this, and how would a later reader check?*
 
 ## Changes
 
-1. **The verdict shape gains `Independence:`** - `PI_MODEL=<you> PI_PROVIDER=<you> vs author <model from the bead or
-   lane record>`. One more line of the same kind as `Gate:`, which already tells a reader what to re-check.
-2. **A short rationale beside it**, because a rule without its reason gets dropped: the two measured reasons above,
-   named as such - the inherited lane, and the fallback rate.
-3. **The same-family instruction is sharpened to point at the field** ("say so in `Independence:` with the quoted
-   fields - a lane name cannot show it"), so the existing rule and the new line cannot drift apart.
+1. **`roles/reviewer.md` - the verdict shape gains `Independence:`**: `PI_MODEL=<you> PI_PROVIDER=<you> vs author
+   <model>`. One more line of the same kind the shape already has, since `Delta:`, `Gate:` and `Reproduced:` all name
+   EVIDENCE and independence was the one claim resting on a lane name or on the reviewer's sincerity. A short
+   rationale follows it (so the rule is not dropped), and the same-family instruction is sharpened to point at the
+   field rather than the lane.
+2. **`remote/lanes.sh` - `lanes.sh model-audit`**, plus a marker in `lanes.sh list`. It reads the runtime truth from
+   the pi child's environ - the same source the SDK-mode ownership check already uses - and compares it with the
+   lane's recorded intent (`.model`, else `MODEL` in the conf):
+   - `DRIFT` when the recorded intent is not what is running;
+   - `UNSAFE` when a REVIEWER's EFFECTIVE family equals the `IMPL_MODEL` it was guarded against - the guard's own
+     question, asked of the runtime rather than of the intent;
+   - exit 1 when anything is drifted or unsafe, so a hub-side sweep can act without parsing text;
+   - `LD` now honours `FLEET_LANES_DIR` (default unchanged) so the audit is testable without touching the real lanes.
+3. **The audit is deliberately a report, not a kill**: nothing here stops or restarts a lane. A drift is a fact to
+   surface; the decision to act belongs to coord, and a check that silently kills a running lane would be a worse
+   bug than the drift it found.
 
 ## Verification
 
-- The patch applies to a pristine copy of the deployed `roles/reviewer.md` with `patch -p1 --fuzz=0` and the result is
-  byte-identical to the assembled file.
-- 11916 -> 13212 bytes (+1296). The prompt budget is not a constraint here: `bin/fleet check_prompts` meters
-  `roles/common.md` (16384 target, 65536 hard), and this file is 13212 after the change.
-- **The requirement is followable, demonstrated on this VM:** `printenv PI_MODEL PI_PROVIDER` returns
-  `deepseek-flash` / `deepseek`. That is the line a reviewer pastes - and it is exactly the check that fails when an
-  announced model is not the running one.
-- **The practice already exists and was praised tonight:** rev-l80j2's verdict stated `PI_MODEL=gpt-6-sol
-  (openai-codex), author deepseek`, and coord has adopted the quoted-field form as standing. This patch does not
-  invent a requirement; it writes down the one that has already proved itself, in the file the reviewer reads.
-- **Deliberately NOT touching `remote/lanes.sh`:** that file already refuses to spawn a reviewer LANE on the
-  implementer's family (`fleet-ccfq`, lanes.sh:361-389, with `IMPL_MODEL` recorded for later re-picks and an explicit
-  UNGUARDED notice when the implementer's model is undeterminable). The defect this bead describes is the SUBAGENT
-  case, where `lanes.sh` never runs at all - so a change there would be inert for the actual gap. Saying which half is
-  which is the point of cross-linking kq0r C, which is the half that can refuse mechanically.
+- Applies to pristine copies of both deployed files with `patch -p1 --fuzz=0`, byte-identical to the assembled files;
+  `bash -n remote/lanes.sh` clean.
+- **Discriminator driven in four directions on real machinery** (a fixture lane whose child carries the runtime env,
+  `FLEET_LANES_DIR` pointed at a scratch dir, so the real lanes directory is never touched):
+
+  | case | setup | result |
+  |---|---|---|
+  | i | intent == runtime | `ok`, exit 0 |
+  | ii | recorded intent a different family | `DRIFT recorded=zai/glm-5.3 but running=deepseek/deepseek-flash`, exit 1 |
+  | iii | reviewer, effective family == `IMPL_MODEL` family | `UNSAFE`, exit 1 |
+  | iii-b | the SAME reviewer against a gemini implementer | `ok`, exit 0 |
+
+  iii-b is the case that matters: without it, an always-on alarm would pass i-iii. The check is a comparison, not a
+  verdict about reviewers.
+- **Live run on this VM**, real lanes, real children: `impl-l2xb ok deepseek/deepseek-flash`, `impl-ozmt ok
+  deepseek/deepseek-flash`, `rev-2tov4 ok antigravity/gemini-3.8-flash`, `merger ok deepseek/deepseek-flash`, and
+  not-running lanes reported as such rather than as failures.
+- The requirement is followable: `printenv PI_MODEL PI_PROVIDER` returns `deepseek-flash` / `deepseek` here, and the
+  practice already exists - rev-l80j2 stated its field voluntarily and coord adopted that form as standing.
+
+## Limits, stated rather than overclaimed
+
+- **An earlier fixture of mine was vacuous** (`bash -c 'VAR=x sleep'` execs into `sleep`, so there were no children and
+  every arm collapsed to `not-running`). It is called out here because the first four-way run *looked* like a pass; the
+  fixture now asserts the child exists before the audit runs.
+- **`ls`-adjacent pre-existing fragility, not touched:** `lanes.sh list` sources the conf and prints `"$ROLE"` under
+  `set -u`, so a conf without `ROLE` aborts it (`line 530: ROLE: unbound variable`). A real lane conf always has
+  `ROLE`, and this patch neither causes nor fixes it - noted because my fixture exposed it.
+- **This does not make a same-family review impossible**, only visible and recorded. The refusal half is kq0r C.
+- `remote/lanes.sh` is a shared hub file: no other parked delivery here touches it (kxbv's upstream half is
+  `.beads/hooks`, elu6/3avt are `bin/` and `remote/check-coverage.py`), so ordering with them does not matter.
 
 ## Hub application
 
 ```bash
 cd ~/fleet
 git apply /path/to/fleet-reviewer-verdict-model-provenance.patch
-# the reviewer role is a prompt, not a program: nothing to run, and the next verdict carries the line
 grep -n "Independence:" roles/reviewer.md
+lanes.sh model-audit            # one line per lane; exit 1 if any DRIFT/UNSAFE
 ```

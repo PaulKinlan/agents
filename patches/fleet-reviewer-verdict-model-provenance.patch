@@ -1,3 +1,81 @@
+--- a/remote/lanes.sh
++++ b/remote/lanes.sh
+@@ -38,7 +38,57 @@
+   if [ ! -d "$d/.git" ] && [ ! -e "$d/HEAD" ] && [ "$VM" = "${FLEET_HUB:-}" ] && [ -d "$HOME/fleet/.git" ]; then d="$HOME/fleet"; fi
+   printf '%s' "$d"
+ }
+-LD="$HOME/.fleet/lanes"; mkdir -p "$LD"
++LD="${FLEET_LANES_DIR:-$HOME/.fleet/lanes}"; mkdir -p "$LD"
++
++# --- EFFECTIVE MODEL AUDIT (agents-q7v2, plus the runtime-vs-intent half of the spawn P1) ------------
++# A lane's conf and its .model record the INTENT it was spawned with - and the independence guard at spawn
++# (fleet-ccfq, below) reasons about exactly that intent. What actually RUNS is the pi child's PI_MODEL and
++# PI_PROVIDER, and the two can differ: 29 lane logs on this VM record a model fallback, 23 of them the same
++# sonnet -> deepseek-flash one. So a same-family reviewer check reasoned from the intent can be silently
++# wrong at runtime. This reads the runtime truth from the child's environ - the same source the SDK-mode
++# ownership check lower down already uses - and says so when the two disagree, or when a reviewer's
++# EFFECTIVE family equals the implementer's recorded family.
++lane_effective_model() { # lane [proc_root] -> provider/model of the running pi child; non-zero if not running
++  local lane=$1 root=${2:-/proc} st l_pid cpid env prov mod
++  st="$LD/$lane.state.json"
++  l_pid=$(jq -r '.host_pid // .pid // empty' "$st" 2>/dev/null)
++  [ -n "$l_pid" ] && [ "$l_pid" -gt 1 ] 2>/dev/null || return 1
++  for cpid in $(pgrep -P "$l_pid" 2>/dev/null); do
++    env=$(tr '\0' '\n' < "$root/$cpid/environ" 2>/dev/null) || continue
++    [ -n "$env" ] || continue
++    [ "$(printf '%s\n' "$env" | grep -E '^FLEET_LANE=' | head -1 | cut -d= -f2-)" = "$lane" ] || continue
++    mod=$(printf '%s\n' "$env" | grep -E '^PI_MODEL=' | head -1 | cut -d= -f2-)
++    [ -n "$mod" ] || continue
++    prov=$(printf '%s\n' "$env" | grep -E '^PI_PROVIDER=' | head -1 | cut -d= -f2-)
++    case "$mod" in */*) printf '%s\n' "$mod" ;; *) printf '%s/%s\n' "${prov:-?}" "$mod" ;; esac
++    return 0
++  done
++  return 1
++}
++lane_recorded_intent() { # lane -> the model the lane was spawned with (the .model file, else MODEL in the conf)
++  local lane=$1 m
++  m=$(cat "$LD/$lane.model" 2>/dev/null)
++  [ -n "$m" ] || m=$( ( source "$LD/$lane.conf" 2>/dev/null; printf '%s' "${MODEL:-}" ) )
++  printf '%s' "$m"
++}
++model_audit() { # [proc_root] -> one line per lane; exit 1 if anything drifted or is unsafe
++  local root=${1:-/proc} bad=0 f l impl intent eff
++  for f in "$LD"/*.conf; do [ -f "$f" ] || continue; l=$(basename "$f" .conf)
++    impl=$( ( source "$f" 2>/dev/null; printf '%s' "${IMPL_MODEL:-}" ) )
++    intent=$(lane_recorded_intent "$l")
++    eff=$(lane_effective_model "$l" "$root" || true)
++    if [ -z "$eff" ]; then printf '%-16s not-running  intent=%s\n' "$l" "${intent:--}"; continue; fi
++    if [ -z "$intent" ]; then printf '%-16s %s  (no recorded intent)\n' "$l" "$eff"; continue; fi
++    if [ "$intent" != "$eff" ]; then
++      printf '%-16s DRIFT   recorded=%s but running=%s\n' "$l" "$intent" "$eff"; bad=1
++    elif [ -n "$impl" ] && [ "${eff%%/*}" = "${impl%%/*}" ]; then
++      printf '%-16s UNSAFE  runs %s, the same family as the implementer %s\n' "$l" "$eff" "$impl"; bad=1
++    else
++      printf '%-16s ok      %s\n' "$l" "$eff"
++    fi
++  done
++  return $bad
++}
+ unit() { echo "fleet-lane@$1.service"; }
+ 
+ is_hub() { [ "$VM" = "$FLEET_HUB" ]; }
+@@ -474,6 +524,8 @@
+       ( source "$f"; st=$(lane_status "$l")
+         m=$(cat "$LD/$l.model" 2>/dev/null || echo "")
+         [ -z "$m" ] && m="${MODEL:-(default)}"
++        eff=$(lane_effective_model "$l" 2>/dev/null || true)
++        [ -n "$eff" ] && [ "$eff" != "$m" ] && m="$m!running=$eff"
+         cs=$(checkout_state "$l"); [ -n "$cs" ] && cs="  [$cs]"
+         printf '%-14s %-11s %-8s %s  %s%s\n' "$l" "$ROLE" "$st" "$m" "${WORKDIR:-}" "$cs" ); done ;;
+   check)
+@@ -560,6 +612,7 @@
+       echo "--- (printed the last $_n lines and exited: -f would never return from here, and a lane that blocks is a lane that stops working. Follow live from a terminal, or re-run with a bigger count: lanes.sh tail $_l 200)" >&2
+     fi ;;
+   log) tail -n ${2:-80} "$LD/${1:?lane}.events.log" ;;   # always non-following: the safe one for lanes
++  model-audit) model_audit "${1:-/proc}" ;;   # agents-q7v2: intent vs what is actually running
+   status) lane=${1:?lane}; lane_status "$lane" ;;
+   running|win_exists) lane=${1:?lane}; win_exists "$lane" ;;
+   send)  # lanes.sh send <lane> <text>  -> queued as a follow-up prompt via the lane's control socket
 --- a/roles/reviewer.md
 +++ b/roles/reviewer.md
 @@ -75,11 +75,24 @@
