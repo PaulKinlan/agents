@@ -55,6 +55,14 @@ NO_CACHE="${RED_FIRST_NO_CACHE:-0}"
 CACHE_DIR="${FLEET_CHECKS_DIR:-/tmp/fleet-checks}"
 TREES_ROOT="/tmp/red-first-trees"
 DRY_RUN=0
+EXPECT_ABSENT_SUPPLIED=0
+if [ -n "$EXPECT_ABSENT" ]; then
+  EXPECT_ABSENT_SUPPLIED=1
+fi
+EXPECT_PRESENT_SUPPLIED=0
+if [ -n "$EXPECT_PRESENT" ]; then
+  EXPECT_PRESENT_SUPPLIED=1
+fi
 
 # Parse arguments
 while [ $# -gt 0 ]; do
@@ -69,18 +77,22 @@ while [ $# -gt 0 ]; do
       ;;
     --expect-absent)
       EXPECT_ABSENT="$2"
+      EXPECT_ABSENT_SUPPLIED=1
       shift 2
       ;;
     --expect-absent=*)
       EXPECT_ABSENT="${1#--expect-absent=}"
+      EXPECT_ABSENT_SUPPLIED=1
       shift
       ;;
     --expect-present)
       EXPECT_PRESENT="$2"
+      EXPECT_PRESENT_SUPPLIED=1
       shift 2
       ;;
     --expect-present=*)
       EXPECT_PRESENT="${1#--expect-present=}"
+      EXPECT_PRESENT_SUPPLIED=1
       shift
       ;;
     --artifact)
@@ -397,7 +409,7 @@ echo "--- Content verification of constructed red tree ---"
 # Direction 1: a string that exists ONLY in the new implementation must be ABSENT (expect 0)
 if [ -z "$EXPECT_ABSENT" ]; then
   # Auto-derive candidate from git diff of non-test files
-  diff_additions="$(git diff "$PRE_FIX_SHA...HEAD" -- . ':(exclude)tests' ':(exclude)docs' ':(exclude)reports' | sed -n 's/^+[^+[:space:]].*/&/p' || true)"
+  diff_additions="$(git diff "$PRE_FIX_SHA...HEAD" -- . ':(exclude)tests*' ':(exclude)docs*' ':(exclude)reports*' "${TEST_FILES[@]/#/:(exclude)}" | sed -n 's/^+[^+[:space:]].*/&/p' || true)"
   if [ -n "$diff_additions" ]; then
     # Pick a non-trivial line or distinctive token
     while IFS= read -r line; do
@@ -428,16 +440,33 @@ if [ -z "$EXPECT_PRESENT" ]; then
 fi
 
 # Exclusivity precondition checks:
-# 1. Direction 1: absent marker must be PRESENT in the green tree (count > 0)
-# 2. Direction 2: present marker must be ABSENT from the pre-fix test tree (count == 0)
+# 1. Delta justification: caller-supplied markers must appear in added lines of their respective delta paths
+# 2. Direction 1: absent marker must be PRESENT in the green tree (count > 0)
+# 3. Direction 2: present marker must be ABSENT from the pre-fix test tree (count == 0)
 precondition_failed=0
+
+# Delta justification checks for caller-supplied markers
+if [ "$EXPECT_ABSENT_SUPPLIED" -eq 1 ] && [ -n "$EXPECT_ABSENT" ]; then
+  delta_non_test_additions="$(git diff -U0 "$PRE_FIX_SHA...HEAD" -- . ':(exclude)tests*' ':(exclude)docs*' ':(exclude)reports*' "${TEST_FILES[@]/#/:(exclude)}" 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+  if ! grep -Fq "$EXPECT_ABSENT" <<< "$delta_non_test_additions"; then
+    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' is not justified by delta (not found in added lines of non-test paths)" >&2
+    echo "red-first:   A caller-supplied marker must be justified by the delta; exclusivity precondition is unverified" >&2
+    precondition_failed=1
+  fi
+fi
+
+if [ "$EXPECT_PRESENT_SUPPLIED" -eq 1 ] && [ -n "$EXPECT_PRESENT" ]; then
+  delta_test_additions="$(git diff -U0 "$PRE_FIX_SHA...HEAD" -- 'tests*' "${TEST_FILES[@]}" 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+  if ! grep -Fq "$EXPECT_PRESENT" <<< "$delta_test_additions"; then
+    echo "red-first: FAIL: content verification precondition failed: present marker '$EXPECT_PRESENT' is not justified by delta (not found in added lines of test paths)" >&2
+    echo "red-first:   A caller-supplied marker must be justified by the delta; exclusivity precondition is unverified" >&2
+    precondition_failed=1
+  fi
+fi
 
 if [ -n "$EXPECT_ABSENT" ]; then
   green_absent_matches=0
-  green_absent_output="$(git grep -n -F "$EXPECT_ABSENT" "$GREEN_TREE" -- . ':(exclude)tests' 2>/dev/null || true)"
-  if [ -z "$green_absent_output" ]; then
-    green_absent_output="$(grep -rnI -F "$EXPECT_ABSENT" "$ROOT" --exclude-dir=tests --exclude-dir=.git --exclude-dir=__pycache__ 2>/dev/null || true)"
-  fi
+  green_absent_output="$(git grep -n -F "$EXPECT_ABSENT" "$GREEN_TREE" -- . ':(exclude)tests*' ':(exclude)docs*' ':(exclude)reports*' "${TEST_FILES[@]/#/:(exclude)}" 2>/dev/null || true)"
   if [ -n "$green_absent_output" ]; then
     green_absent_matches="$(printf '%s\n' "$green_absent_output" | wc -l)"
   fi
@@ -451,7 +480,7 @@ fi
 
 if [ -n "$EXPECT_PRESENT" ]; then
   prefix_present_matches=0
-  prefix_test_output="$(git grep -n -F "$EXPECT_PRESENT" "$PRE_FIX_SHA" -- 'tests' "${TEST_FILES[@]}" 2>/dev/null || true)"
+  prefix_test_output="$(git grep -n -F "$EXPECT_PRESENT" "$PRE_FIX_SHA" -- 'tests*' "${TEST_FILES[@]}" 2>/dev/null || true)"
   if [ -n "$prefix_test_output" ]; then
     prefix_present_matches="$(printf '%s\n' "$prefix_test_output" | wc -l)"
   fi
@@ -474,7 +503,7 @@ fi
 # Direction 1 check in red implementation tree (expect 0)
 if [ -n "$EXPECT_ABSENT" ]; then
   absent_matches=0
-  absent_output="$(grep -rn -F "$EXPECT_ABSENT" "$RED_DIR" --exclude-dir=tests --exclude-dir=.git 2>/dev/null || true)"
+  absent_output="$(grep -rn -F "$EXPECT_ABSENT" "$RED_DIR" --exclude-dir=tests --exclude-dir=docs --exclude-dir=reports --exclude-dir=.git 2>/dev/null || true)"
   if [ -n "$absent_output" ]; then
     absent_matches="$(printf '%s\n' "$absent_output" | wc -l)"
   fi

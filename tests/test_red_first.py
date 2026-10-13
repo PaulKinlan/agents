@@ -147,27 +147,94 @@ class TestRedFirst(unittest.TestCase):
 
     def test_content_verification_direction_1_rejects_implementation_leak(self):
         """Tooth 2: expect 0 fails if new implementation string exists in red tree."""
-        # Intentionally ask for a string that DOES exist in base calc.py ('def add')
+        # Create a branch where the added implementation leaks into the pre-fix base
+        self._run_cmd(["git", "-C", str(self.repo_dir), "checkout", "main"])
+        (self.repo_dir / "lib" / "calc.py").write_text(
+            "def add(a, b):\n    return a + b\n\n# leak: def multiply\n",
+            encoding="utf-8",
+        )
+        self._run_cmd(["git", "-C", str(self.repo_dir), "commit", "-am", "base with leaked string"])
+        leak_base = self._get_commit_sha("HEAD")
+
+        self._run_cmd(["git", "-C", str(self.repo_dir), "checkout", "-b", "leak-branch"])
+        (self.repo_dir / "lib" / "calc.py").write_text(
+            "def add(a, b):\n    return a + b\n\n# leak: def multiply\n\ndef multiply(a, b):\n    return a * b\n",
+            encoding="utf-8",
+        )
+        (self.repo_dir / "tests" / "test_calc.py").write_text(
+            "import unittest\n"
+            "from lib.calc import add\n\n"
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_add_guard(self):\n"
+            "        self.assertEqual(add(2, 3), 5)\n\n"
+            "    def test_multiply_discriminator(self):\n"
+            "        from lib.calc import multiply\n"
+            "        self.assertEqual(multiply(3, 4), 12)\n",
+            encoding="utf-8",
+        )
+        self._run_cmd(["git", "-C", str(self.repo_dir), "commit", "-am", "implement multiply and discriminator"])
+
         res = self._run_red_first([
-            "--base", self.base_commit,
-            "--expect-absent", "def add",
+            "--base", leak_base,
+            "--expect-absent", "def multiply",
             "--expect-present", "test_multiply_discriminator",
             "tests/test_calc.py",
         ])
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("content verification failed: string 'def add' exists in red implementation tree", res.stderr)
+        self.assertIn("content verification failed: string 'def multiply' exists in red implementation tree", res.stderr)
         self.assertIn("A partially applied patch looks exactly like a passing pin", res.stderr)
 
     def test_content_verification_direction_2_rejects_missing_tests(self):
         """Tooth 2: expect > 0 fails if new test label is absent from red tree tests."""
+        # Add a second test file in feature branch with a discriminator label
+        (self.repo_dir / "tests" / "test_other.py").write_text(
+            "import unittest\n\n"
+            "class TestOther(unittest.TestCase):\n"
+            "    def test_other_discriminator(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        self._run_cmd(["git", "-C", str(self.repo_dir), "add", "."])
+        self._run_cmd(["git", "-C", str(self.repo_dir), "commit", "-m", "add test_other"])
+
+        # Running red-first with test_other_discriminator but only applying test_calc.py fails
         res = self._run_red_first([
             "--base", self.base_commit,
             "--expect-absent", "def multiply",
-            "--expect-present", "non_existent_test_label_xyz",
+            "--expect-present", "test_other_discriminator",
             "tests/test_calc.py",
         ])
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("content verification failed: label 'non_existent_test_label_xyz' was NOT found in red tree tests", res.stderr)
+        self.assertIn("content verification failed: label 'test_other_discriminator' was NOT found in red tree tests", res.stderr)
+
+    def test_unrelated_marker_is_refused(self):
+        """Tooth 2: marker from an unrelated changed file (e.g. docs) is refused by delta justification."""
+        (self.repo_dir / "docs.md").write_text("GLITTERBERRY_UNRELATED_TOKEN_77\n", encoding="utf-8")
+        self._run_cmd(["git", "-C", str(self.repo_dir), "add", "."])
+        self._run_cmd(["git", "-C", str(self.repo_dir), "commit", "-m", "add docs with unrelated token"])
+
+        res = self._run_red_first([
+            "--base", self.base_commit,
+            "--expect-absent", "GLITTERBERRY_UNRELATED_TOKEN_77",
+            "--expect-present", "test_multiply_discriminator",
+            "tests/test_calc.py",
+        ])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("neither-direction-verified", res.stderr)
+        self.assertIn("absent marker 'GLITTERBERRY_UNRELATED_TOKEN_77' is not justified by delta", res.stderr)
+
+    def test_untracked_file_cannot_certify_green_tree(self):
+        """Tooth 2: an untracked file cannot certify the green tree (empty match refuses, never falls back)."""
+        (self.repo_dir / "untracked-probe.txt").write_text("UNTRACKED_MARKER_XYZ_90210\n", encoding="utf-8")
+
+        res = self._run_red_first([
+            "--base", self.base_commit,
+            "--expect-absent", "UNTRACKED_MARKER_XYZ_90210",
+            "--expect-present", "test_multiply_discriminator",
+            "tests/test_calc.py",
+        ])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("neither-direction-verified", res.stderr)
 
     def test_bogus_markers_are_refused(self):
         """Tooth 2: bogus markers that cannot establish exclusivity preconditions are refused."""
