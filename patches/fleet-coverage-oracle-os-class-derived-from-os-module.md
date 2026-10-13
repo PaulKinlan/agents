@@ -25,77 +25,63 @@ note that the enumerated list was "not narrower in practice than a glob" was fal
 `posix_spawnp?`**, which covers both spellings and still cannot reach `os.respawn` because the alternation is
 anchored at the attribute start.
 
-## The os family, measured against `dir(os)` - a RECORD, NOT A WIRED CHECK
+## The os invocation class: the rule, and how to re-measure it
 
-`agents-ml7z` is right about what this is and it should be read that way. **What is in this file is a written
-record of a measurement, not a check that will fail when the next omission happens.** Only code can fail; a
-table in a `.md` cannot. The earlier draft of this note claimed an "instrument that makes an omission fail
-loudly", which overstated it, and that claim is withdrawn.
+**This section makes no numeric claim, deliberately.** Earlier drafts of this note stated a population size, a
+gained count, and a per-name table, and each of those was wrong or incomplete once and each cost a review
+round. A claim I cannot keep is worse than no claim, so the numbers are gone and the rule and the command
+replace them.
 
-**`agents-ml7z` is also right that the population number was wrong, and the reconciliation is this.** The
-population rule, stated so it can be re-derived exactly:
+**THE RULE**, verbatim, so it can be re-derived rather than recalled:
 
     [x for x in dir(os) if not x.startswith('_')
      and any(k in x for k in ('fork', 'spawn', 'exec', 'system', 'popen', 'posix'))]
 
-That yields **26** names on Python 3.12.3, and it is the number `agents-ml7z` measured. My earlier figure of 58
-came from a DIFFERENT filter - it also matched `wait`, `kill`, `signal` and `pipe` and it lowercased the name
-before matching, which swept in **21 uppercase CONSTANTS that cannot be called at all** (`P_WAIT`, `P_NOWAIT`,
-`O_CLOEXEC`, `POSIX_SPAWN_OPEN`, `WNOWAIT`, `SCHED_RESET_ON_FORK`, ...). 58 was a count of a set that included
-non-callable names; **26 is the callable population and it is the correct number.** My own table's heading had
-also described a third rule, so the same note carried three populations in it.
+**THE COMMAND THAT PRODUCES THE POPULATION:**
 
-**Instrument and direction**, stated per the `agents-y30x` process fix: population as the rule above (26 names);
-instrument the REAL oracle CLI, one scratch repo, one commit per name placing the name in a call with
-`lib/sandbox.py` in its arguments, a zero-suite log line; direction pristine oracle -> this revision. Every
-verdict below was produced that way, and nothing is quoted from anyone else's run.
-
-| `os.<name>` | pristine oracle | this revision | |
-| --- | --- | --- | --- |
-| execl, execle, execlp, execlpe | no | **YES** | GAINED |
-| execv, execve, execvp, execvpe | no | **YES** | GAINED |
-| popen | no | **YES** | GAINED |
-| posix_spawnp | no | **YES** | GAINED |
-| posix_spawn | YES | YES | unchanged |
-| system | YES | YES | unchanged |
-| fork | YES | **no** | dropped, deliberate |
-| register_at_fork | YES | **no** | dropped, deliberate |
-| forkpty, get_exec_path, posix_fadvise, posix_fallocate | no | no | never a paren-arg call |
-
-**TEN names gained, not eleven.** An earlier draft of this note said "eleven" and then listed exactly ten, and
-the correction is worth stating because the count was repeated onward: the gained set is the ten rows above
-marked GAINED. The pristine pattern's name branch was `subprocess|Popen|exec|spawn|run|fork|call|check_output|
-system`, and each alternative had to be followed immediately by `\s*\(`, so `os.execv(` never matched `exec`
-- a `v` follows - and `os.popen(` matched nothing at all. The modelled os class is therefore WIDER coverage
-than what it replaces, which is the context both of the open findings were missing.
-
-**Two names dropped, both deliberate**: `os.register_at_fork` is a phantom this revision REMOVES (pristine
-matched the bare substring `fork` inside it; it registers a callback and launches nothing), and `os.fork`
-takes no arguments, so it can never carry a file path in its own call - the child that would name the module
-is an `exec*` call the exec class already covers. A channel requires a call that can name the module; neither
-of these is one. Recorded rather than silently dropped.
-
-### How to reproduce this table
-
-    # population
     python3 -c "import os;print('\n'.join(sorted(x for x in dir(os) if not x.startswith('_') and any(k in x for k in ('fork','spawn','exec','system','popen','posix')))))"
-    # then, per name: a scratch git repo with a `main` branch, a case branch off it, the case written as
-    #   import os
-    #   os.<name>(["python3", "lib/sandbox.py"])
-    # WITH lib/sandbox.py also touched in the same commit (the oracle only considers changed files), and
-    # printf 'fast-gate: running: tests/zzz_absent.test.sh\n' > log.txt
-    python3 <oracle>.py log.txt <repo> "$SHA" ''    # read .omitted for the case
 
-CONTROL, so a green table is not simply a table that matches nothing: run it against the PRISTINE oracle and
-it must be RED on `execl`, `execv` and `popen`. If the pristine column is not red there, the rig is wrong
-rather than the revision.
+**WHAT THIS IS: a RECORD of a measurement taken once, not a check.** Only code can fail; a table in a
+markdown file cannot. What follows is what was measured, not a mechanism that will notice the next omission.
 
-### Why this is not shipped as a check
+**THE MEASUREMENT, and its control.** Each name in the population was placed in a call carrying
+`lib/sandbox.py` in its arguments and driven through the REAL oracle CLI - never a reimplementation of the
+oracle's matching rule - in a scratch git repo with a `main` branch and a case branch off it, with
+`lib/<M>.py` also touched in the same commit because the oracle only considers CHANGED files, and with a
+zero-suite log line so coverage is KNOWN rather than UNKNOWN. Each of those four details is a way to get an
+all-empty result that reads as "no match" and therefore agrees with the wrong conclusion; they are listed so
+the control below is meaningful.
 
-`agents-ml7z`'s stronger alternative was to make it a real check. It cannot be installed from this host: the
-oracle lives at `~/fleet/remote/check-coverage.py`, inside the hub's read-only tree, and a project lane cannot
-write a test into it. A check would have to be added by the hub, which is the same split as the `agents-825v`
-fixture. Recorded as the reason rather than as a preference.
+**CONTROL**: pristine must be RED on the subset of the population whose name begins `exec`. Pristine's name
+branch was `subprocess|Popen|exec|spawn|run|fork|call|check_output|system` with each alternative required to
+be followed immediately by `\s*\(`, so `os.execv(` never matched `exec` - a `v` follows the `c`. If pristine
+is not red there, the rig is wrong and no other column means anything. That subset is defined by a property
+rather than by a hand-written list, so it cannot be incomplete.
+
+**THE TWO EXCLUSIONS, justified by a criterion rather than by taste.** A name is a *channel* only if a call
+carrying that name can put the module path in its OWN arguments:
+
+- `os.fork` takes no arguments, so no `fork` call can name a module; the child that would name it is an
+  `exec*` call, which the class already covers.
+- `os.register_at_fork` registers a callback and launches nothing. Pristine matched it on the bare substring
+  `fork`, and it is the phantom this class removes.
+
+That criterion is the falsifiable part of this note, and it is the part worth arguing with: an objection to it
+would make those two removals lost channels rather than correct exclusions.
+
+**MATERIAL FOR A REAL CHECK, which cannot live here.** The stronger deliverable is a test that fails on the
+next omission. It cannot be installed from this host: the oracle is at
+`~/fleet/remote/check-coverage.py`, inside the hub's read-only tree, so a project lane cannot write a test
+into it - the same split as the `agents-825v` fixture. What the hub needs to build one is:
+
+1. the population one-liner above;
+2. the control assertion above, defined by the `^exec` property;
+3. the criterion above, which turns "neither pristine nor this revision matches this name" into a decision
+   that must be made rather than a silence.
+
+An assertion of that third kind is the one a table could not make: it fails when a NEW `os.spawn`-style
+function appears, because the name is neither matched nor excused, and that is exactly the omission this
+whole line of work was about.
 
 ## Census, re-derived here with the method named
 
