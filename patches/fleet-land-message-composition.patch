@@ -1,6 +1,16 @@
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
-@@ -9,6 +9,13 @@
+@@ -5,10 +5,23 @@
+ #
+ #   fleet-land-message <bead> <branch> [bead2 ...]            message for the merge of <branch>
+ #   fleet-land-message --gate <sha> <bead> <branch> [...]     ...with the batch gate result filled in
++#   fleet-land-message --gate <sha> --landed-tip <t> <bead> <branch> [...]
++#                                                             ...when the branch has ADVANCED past the
++#                                                             gated merge: verify the tip you actually
++#                                                             merged rather than the branch's CURRENT tip
++#                                                             (agents-wwss - the guarantee is unchanged,
++#                                                             the gate commit must still contain <t>)
+ #   fleet-land-message --print-json <bead> <branch> [...]     the same fields as JSON (for tests/tools)
  #   fleet-land-message --from-comment <n> <bead> <branch> [...] when a bead has several LAND-SUMMARY blocks and
  #                                                             the last one is not the one to use (n is the
  #                                                             index from `bd comments <bead> --json`)
@@ -14,17 +24,20 @@
  #
  # It PRINTS; it never commits, merges, amends or pushes. The merger uses it in place of the one-line subject:
  #
-@@ -39,7 +46,7 @@
+@@ -39,15 +52,19 @@
  set -uo pipefail
  export PATH="$HOME/fleet/bin:$HOME/.local/bin:$PATH"
  
 -GATE_SHA=""; JSON=0; BEADS=(); ARGS=(); FROM_COMMENT=""; ALLOW_STALE=0; REPO_DIR=""
-+GATE_SHA=""; JSON=0; BEADS=(); ARGS=(); FROM_COMMENT=""; ALLOW_STALE=0; REPO_DIR=""; AUTHOR_MODEL_ARG=""
++GATE_SHA=""; JSON=0; BEADS=(); ARGS=(); FROM_COMMENT=""; ALLOW_STALE=0; REPO_DIR=""; AUTHOR_MODEL_ARG=""; LANDED_TIP=""
  while [ $# -gt 0 ]; do
    case $1 in
      --gate) GATE_SHA=${2:?--gate needs a sha}; shift 2 ;;
-@@ -48,6 +55,8 @@
+     --from-comment) FROM_COMMENT=${2:?--from-comment needs a comment index}; shift 2 ;;
+     --from-comment=*) FROM_COMMENT=${1#--from-comment=}; shift ;;
      --gate=*) GATE_SHA=${1#--gate=}; shift ;;
++    --landed-tip) LANDED_TIP=${2:?--landed-tip needs a sha}; shift 2 ;;
++    --landed-tip=*) LANDED_TIP=${1#--landed-tip=}; shift ;;
      --allow-stale) ALLOW_STALE=1; shift ;;
      --print-json|--json) JSON=1; shift ;;
 +    --author-model) AUTHOR_MODEL_ARG=${2:?--author-model needs provider/id}; shift 2 ;;
@@ -32,7 +45,7 @@
      --repo) REPO_DIR=${2:?--repo needs a directory}; shift 2 ;;
      --repo=*) REPO_DIR=${1#--repo=}; shift ;;
      --worktree) REPO_DIR=${2:?--worktree needs a directory}; shift 2 ;;
-@@ -214,10 +223,10 @@
+@@ -214,10 +231,10 @@
  # Do not key on the comment author (fleet-15b5): reviewer subagents inherit the author lane's actor.
  # Clearance is attached to a COMMIT or DELTA, not a branch name: if the branch tip moved after
  # the review verdict was posted and the delta changed, clearance is invalidated.
@@ -46,7 +59,7 @@
        | select(test("(?i)VERDICT[*_]*:[ \t*#_]*(<[^>]+>|\\[[^]]*(\\||\\bword\\b|\\bverdict\\b|\\bstatus\\b|\\bplaceholder\\b|\\btodo\\b|\\btbd\\b)[^]]*\\]|\\bTODO\\b|\\bTBD\\b|\\bplaceholder\\b)") | not)
      ] | length > 0)
    | "\(.key)\t\(.value.author // "?")\t\(.value.created_at // "?")"' <<<"$COMMENTS" 2>/dev/null)
-@@ -225,22 +234,49 @@
+@@ -225,22 +242,49 @@
  rev_pick=""; rev_idx=""; rev_who=""; rev_at=""; rev_verdict=""; rev_sha=""; rev_state="NONE"
  rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_run_id=""
  
@@ -110,7 +123,7 @@
  
  # fleet-260l: SELECTION IS A FUNCTION OF A POOL, not a single newest-first walk.
  # The pool used to be everything, walked newest-first with a break on the first candidate that parsed into a
-@@ -267,7 +303,11 @@
+@@ -267,7 +311,11 @@
      # "Review verdict: VERDICT: PASS" are all the same record. The prefix words are a closed set, so prose
      # that merely mentions a verdict ("the pattern a reviewer would paste is: VERDICT: PASS") still does not
      # match: the label must begin the line and must be one of these words.
@@ -123,7 +136,7 @@
      VTOK='VERDICT[*_]*:'
      v_line=$(grep -iE "^[[:space:]*#_]*(${VPFX})?${VTOK}([[:space:]]*(${VPFX})?${VTOK})*[[:space:]*#_]*[^[:space:]]" <<<"$c_text" \
        | grep -ivE "VERDICT[*_]*:[[:space:]*#_]*(<[^>]+>|\[[^]]*(\||word|verdict|status|placeholder|todo|tbd)[^]]*\]|TODO|TBD|placeholder)" \
-@@ -423,7 +463,17 @@
+@@ -423,7 +471,17 @@
                rev_delta_identical=true
                # same shared decision as above - never a second word list
                if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
@@ -141,7 +154,7 @@
            fi
          fi
        fi
-@@ -488,10 +538,27 @@
+@@ -488,10 +546,27 @@
    # Select from the best non-empty rank. Pool order is comment order, and flm_select walks it newest-first.
    rev_disagree=""
    if [ -n "$POOL_TIP" ]; then
@@ -170,7 +183,7 @@
      if [ -n "$rev_idx" ]; then
        flm_neg=""; flm_have_pos=0; flm_have_neg=0
        while IFS=$'\t' read -r c_idx c_who c_at; do
-@@ -503,7 +570,7 @@
+@@ -503,7 +578,7 @@
          tok=$(fleet_verdict_token_of "$c_after_chk" || true)
          [ -n "$tok" ] || continue
          if fleet_verdict_is_positive "$tok"; then flm_have_pos=1; else flm_have_neg=1; flm_neg+="$c_idx"$'\t'"$c_who"$'\t'"$c_at"$'\n'; fi
@@ -179,7 +192,7 @@
        # Reported whenever the two exist, whichever won: a clearance that reversed because a second verdict
        # appeared must SAY SO, or the reversal looks arbitrary and a reader cannot tell a revision from a mistake.
        if [ "$flm_have_pos" = 1 ] && [ "$flm_have_neg" = 1 ]; then
-@@ -514,7 +581,23 @@
+@@ -514,7 +589,23 @@
        fi
      fi
    elif [ -n "$POOL_OWN" ]; then
@@ -204,7 +217,7 @@
    fi
  
    # k1lm's rule must survive the ranking. A newer comment on THIS branch that carries a VERDICT line the tool
-@@ -524,9 +607,11 @@
+@@ -524,9 +615,11 @@
    # candidates rather than over the rank, and it wins: AMBIGUOUS, no clearing.
    if [ -n "$rev_idx" ] && [ -n "$POOL_TIP" ]; then
      rev_full_now=$(git rev-parse -q --verify "${rev_sha:-$tip}^{commit}" 2>/dev/null || echo "")
@@ -216,7 +229,7 @@
        c_text=$(jq -r --argjson i "$c_idx" '.[$i].text // ""' <<<"$COMMENTS" 2>/dev/null)
        cv_line=$(grep -iE "^[[:space:]*#_]*((${VPFX:-x})?${VTOK:-VERDICT[*_]*:})[[:space:]]*[^[:space:]]" <<<"$c_text" | head -1)
        [ -n "$cv_line" ] || continue
-@@ -539,7 +624,7 @@
+@@ -539,7 +632,7 @@
        rev_cleared=false
        raw_verdict="$c_after_chk"
        break
@@ -225,7 +238,7 @@
    fi
  
    # A verdict in a LOWER rank that is NEWER than the winner is reported, never merged in: the operator has to
-@@ -588,19 +673,38 @@
+@@ -588,19 +681,38 @@
  #                   provenance is a FAILURE, not an absence of failure (coord, fleet-ry7m amendment): a
  #                   reviewer that cannot be compared to the author is strictly weaker evidence than an
  #                   explicitly same-family reviewer, so it must not clear under a friendlier label.
@@ -269,7 +282,7 @@
      fi
    fi
    _fam=""
-@@ -611,13 +715,13 @@
+@@ -611,13 +723,13 @@
        _fam="same"
      fi
    fi
@@ -285,7 +298,7 @@
      if [ -z "$rev_reviewer_model" ]; then
        rev_independence="self-certified"
      elif [ -z "$rev_author_model" ]; then
-@@ -630,20 +734,36 @@
+@@ -630,20 +742,36 @@
    elif [ "$_fam" = "same" ]; then
      rev_independence="same-family"
    fi
@@ -324,7 +337,7 @@
          ;;
      esac
    fi
-@@ -662,9 +782,9 @@
+@@ -662,9 +790,9 @@
      rev_line="FAIL: verdict was $rev_verdict for commit ${rev_sha:-$tip} by $rev_who at $rev_at — NOT CLEARED"
    fi
  elif [ "$rev_state" = "STALE" ]; then
@@ -336,7 +349,7 @@
  elif [ "$rev_state" = "UNRESOLVED" ]; then
    rev_line="UNRESOLVED: reviewed commit $rev_sha cannot be resolved on origin/$BRANCH — NOT CLEARED"
  elif [ "$rev_state" = "UNPINNED" ]; then
-@@ -703,9 +823,9 @@
+@@ -703,9 +831,9 @@
    if [ "$rev_state" = "STALE" ] || [ "$rev_state" = "DIVERGED" ]; then
      if [ ${#rm_labels[@]} -gt 0 ]; then
        bdf update "$BEAD" "${rm_labels[@]}" >/dev/null 2>&1 || true
@@ -348,7 +361,91 @@
      exit 1
    elif [ "$rev_state" = "UNRESOLVED" ]; then
      if [ ${#rm_labels[@]} -gt 0 ]; then
-@@ -928,20 +1048,28 @@
+@@ -806,13 +934,79 @@
+   # Direct ref ancestry is accepted; if the branch was rebased without changing the tree (no-op rebase),
+   # verify that the merged commit contains an ancestor whose tree matches the branch tip tree.
+   target_ref_tree=$(git rev-parse --verify -q "${target_ref}^{tree}" 2>/dev/null || echo "")
++  # agents-wwss: when the caller names the tip it actually merged (--landed-tip), verify THAT against the
++  # gate commit instead of the branch's CURRENT tip. A branch that advanced after the merge - carrying
++  # parked deliveries, a later rebase, or another lane's work - otherwise makes a valid gate record
++  # impossible to write, and the refusal cannot be told apart from having named the wrong branch. The
++  # guarantee is unchanged: the gate commit must still CONTAIN the tip being recorded.
++  check_ref="$target_ref"; check_tree="$target_ref_tree"
++  if [ -n "$LANDED_TIP" ]; then
++    check_ref=$(git rev-parse --verify -q "${LANDED_TIP}^{commit}" 2>/dev/null || echo "")
++    if [ -z "$check_ref" ]; then
++      echo "fleet-land-message: REFUSING: --landed-tip $LANDED_TIP is not a commit in $repo" >&2
++      exit 1
++    fi
++    check_tree=$(git rev-parse --verify -q "${check_ref}^{tree}" 2>/dev/null || echo "")
++    # agents-orjl (rev-wwss, P2): the tip must be TIED TO THE NAMED BRANCH. Checking only that the gate
++    # commit contains the tip let a caller clear ANY branch name by naming a tip from an unrelated branch
++    # that happened to be merged. Reproduced by the reviewer: with a merge of fleet/good into main, calling
++    # --gate <merge> --landed-tip <good-tip> ... fleet/wrong returned rc 0 and recorded BRANCH fleet/wrong
++    # with GATE Identity "explicit landed tip <good-tip>" - a branch that is not an ancestor of the gate and
++    # has a distinct tree. That is a FALSE CLEARANCE, the worse direction, because it authorises a landing
++    # that no reviewer sees again.
++    # The legitimate shape this flag exists for is "the branch ADVANCED past the tip I merged", so the tip
++    # is accepted when it is an ancestor of the named branch's current tip, or when the branch's tip has the
++    # SAME TREE (a rebase that changed no files). Anything else does not certify this branch.
++    if ! git merge-base --is-ancestor "$check_ref" "$target_ref" 2>/dev/null; then
++      _tip_tree=$(git rev-parse --verify -q "${check_ref}^{tree}" 2>/dev/null || echo "")
++      _branch_tree=$(git rev-parse --verify -q "${target_ref}^{tree}" 2>/dev/null || echo "")
++      if [ -z "$_tip_tree" ] || [ "$_tip_tree" != "$_branch_tree" ]; then
++        echo "fleet-land-message: REFUSING: --landed-tip $LANDED_TIP is not tied to $BRANCH ($target_ref)" >&2
++        echo "fleet-land-message:   the tip must be an ANCESTOR of the named branch, or have the SAME TREE (a rebase that changed no files)" >&2
++        echo "fleet-land-message:   a tip from an unrelated branch would certify a branch that was not merged (agents-orjl)" >&2
++        exit 1
++      fi
++    fi
++  fi
+   matched_c=""
+-  if git merge-base --is-ancestor "$target_ref" "$gate_commit" 2>/dev/null; then
+-    gate_identity="commit ref $target_ref (ancestor of $gate_commit)"
+-  elif [ -n "$target_ref_tree" ] && matched_c=$(commit_has_tree "$gate_commit" "$target_ref_tree"); then
+-    gate_identity="tree identity: $target_ref_tree (rebased: tree unchanged, matches merged commit ${matched_c:0:7})"
++  if git merge-base --is-ancestor "$check_ref" "$gate_commit" 2>/dev/null; then
++    if [ -n "$LANDED_TIP" ]; then
++      gate_identity="explicit landed tip $LANDED_TIP for $BRANCH (at $(git rev-parse --short "$target_ref" 2>/dev/null || echo "$target_ref")) - ancestor of $gate_commit"
++    else
++      # Unchanged wording when the caller did not use --landed-tip: the identity text is asserted by the
++      # existing suite, and a cosmetic change here is an unnecessary regression (agents-wwss).
++      gate_identity="commit ref $target_ref (ancestor of $gate_commit)"
++    fi
++  elif [ -n "$check_tree" ] && matched_c=$(commit_has_tree "$gate_commit" "$check_tree"); then
++    gate_identity="tree identity: $check_tree (rebased: tree unchanged, matches merged commit ${matched_c:0:7})"
+   else
+     echo "fleet-land-message: REFUSING: --gate $GATE_SHA does not contain $BRANCH ($target_ref)" >&2
++    # agents-jlfq: when the caller NAMED the tip, a containment failure is about THAT TIP and not about the
++    # branch having advanced - the two have different fixes, and diagnosing one as the other sends the operator
++    # to the wrong object. The advancement diagnosis below is kept for the case it actually describes.
++    if [ -n "$LANDED_TIP" ]; then
++      echo "fleet-land-message:   --landed-tip $LANDED_TIP is NOT CONTAINED by the gate commit $GATE_SHA" >&2
++      echo "fleet-land-message:   $BRANCH is at $(git rev-parse --short "$target_ref" 2>/dev/null || echo "$target_ref") - the named branch is not the problem here, the tip you passed is." >&2
++      echo "fleet-land-message:   pass --landed-tip <the tip actually merged into $GATE_SHA>, or omit it to record the branch's current tip." >&2
++      exit 1
++    fi
++    # agents-wwss: NAME WHICH SIDE MOVED. That one line covered three different situations - a wrong
++    # branch name, a branch that advanced past the merge, and a branch never merged here - so an operator
++    # could not tell whether to fix the branch name or stop. Measured instance: the batch landing of
++    # merge 2b23cbb had second parent 743000b while the branch tip was 056c1e3, with parked-delivery
++    # commits in between; the guard was RIGHT and the message was useless.
++    _wwss_branch_tip=$(git rev-parse --short "$target_ref" 2>/dev/null || echo "$target_ref")
++    echo "fleet-land-message:   branch tip: $_wwss_branch_tip" >&2
++    if _wwss_merged=$(git rev-parse --verify -q "${gate_commit}^2" 2>/dev/null); then
++      _wwss_ahead=$(git rev-list --count "${gate_commit}^2..$target_ref" 2>/dev/null || echo "?")
++      echo "fleet-land-message:   the gate commit is a MERGE whose landed tip is $(git rev-parse --short "$_wwss_merged")" >&2
++      echo "fleet-land-message:   $BRANCH is $_wwss_ahead commit(s) beyond that landed tip" >&2
++      if [ "$_wwss_ahead" != "0" ] && [ "$_wwss_ahead" != "?" ]; then
++        echo "fleet-land-message:   -> THE BRANCH ADVANCED after that merge. Name the branch you actually landed, or pass --landed-tip $(git rev-parse --short "$_wwss_merged") to record the gate for the tip that was gated." >&2
++      fi
++    else
++      echo "fleet-land-message:   the gate commit is not a merge, so it cannot contain a branch merged after it." >&2
++    fi
+     exit 1
+   fi
+   target_tree=$(git rev-parse --verify -q "${gate_commit}^{tree}" 2>/dev/null || echo "")
+@@ -928,20 +1122,28 @@
      --arg rev_who "${rev_who:-}" --arg rev_at "${rev_at:-}" --argjson rev_unreviewed "${rev_unreviewed:-0}" \
      --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
      --argjson rev_delta_identical "${rev_delta_identical:-false}" \
@@ -380,7 +477,7 @@
                reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
                author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
                newer_not_used:$newer_not_used,disagreement:$disagreement,named_branch:$rev_named_branch},
-@@ -972,6 +1100,7 @@
+@@ -972,6 +1174,7 @@
    # is indistinguishable from one that never saw it, which is the whole defect this fixes.
    if [ -n "${rev_disagree:-}" ]; then printf 'REVIEW-NOTE\n%s\n' "$rev_disagree"; fi
    if [ -n "${flm_newer_passed:-}" ]; then printf 'REVIEW-NOTE\nnewer verdict comment(s) on this bead were NOT used:\n%s' "$flm_newer_passed"; fi
@@ -556,7 +653,7 @@
  
  echo "35. fleet-260l: clearance is decided by PIN QUALITY, not by which verdict was posted last"
  # THE DEFECT THIS SECTION PINS: the tool walked the candidates newest-first and took the first that parsed
-@@ -1293,6 +1313,316 @@
+@@ -1293,6 +1313,394 @@
  has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
  has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
  
@@ -870,9 +967,92 @@
 +eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38p without the supplied operand the same tree still refuses"
 +rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
 +
++echo "40. agents-wwss: a branch that ADVANCED past the gated merge, and --landed-tip"
++# Self-contained repo: this case must not depend on the state the earlier cases left in $ROOT/repo.
++W="$ROOT/wwss"; mkdir -p "$W"
++(
++  cd "$W" || exit 1
++  git init -q .
++  git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
++  git branch -M main
++  git checkout -q -b fleet/wwss
++  echo one > w.txt && git add w.txt && git -c user.email=t@t -c user.name=t commit -q -m "the gated work"
++  git rev-parse HEAD > "$ROOT/fix/wwss.landed"
++  git checkout -q main
++  git merge -q --no-ff fleet/wwss -m "Merge fleet/wwss"
++  git rev-parse HEAD > "$ROOT/fix/wwss.merge"
++  git rev-parse 'HEAD^{tree}' > "$ROOT/fix/wwss.tree"
++  # THE MEASURED SITUATION: the branch advances AFTER the merge (the ozmt batch landing's shape).
++  git checkout -q fleet/wwss
++  echo two >> w.txt && git -c user.email=t@t -c user.name=t commit -q -am "a commit added after the merge"
++  git rev-parse HEAD > "$ROOT/fix/wwss.advanced"
++  git checkout -q main
++) >/dev/null 2>&1
++W_LANDED=$(cat "$ROOT/fix/wwss.landed"); W_MERGE=$(cat "$ROOT/fix/wwss.merge")
++W_TREE=$(cat "$ROOT/fix/wwss.tree");     W_ADV=$(cat "$ROOT/fix/wwss.advanced")
++cat > "$ROOT/fix/comments.json" <<'J'
++[{"author":"proj-lane-1","created_at":"2026-10-09T10:00:00Z",
++  "text":"hand-off\n\nLAND-SUMMARY\nWHAT: adds the thing to the widget.\nWHY: the widget had no thing.\nEFFECT: users see the thing."}]
++J
++jq --arg t "$W_TREE" --arg s "$W_MERGE" '.tree=$t | .sha=$s' "$ROOT/fix/gate.json" > "$ROOT/fix/gate.tmp" && mv "$ROOT/fix/gate.tmp" "$ROOT/fix/gate.json"
++
++out_adv=$( cd "$W" && run --gate "$W_MERGE" tk-1 fleet/wwss )
++has   "$out_adv" "does not contain"        "40a an advanced branch is still refused (the guard is intact)"
++has   "$out_adv" "branch tip: $(git -C "$W" rev-parse --short "$W_ADV")" "40b refusal NAMES the branch tip"
++has   "$out_adv" "landed tip is $(git -C "$W" rev-parse --short "$W_LANDED")" "40c ...and the merge's landed tip"
++has   "$out_adv" "1 commit(s) beyond that landed tip" "40d ...and how far it advanced"
++has   "$out_adv" "THE BRANCH ADVANCED"     "40e ...and says which side moved"
++
++out_landed=$( cd "$W" && run --gate "$W_MERGE" --landed-tip "$W_LANDED" tk-1 fleet/wwss )
++has   "$out_landed" "PASS (full gate)"     "40f --landed-tip records the gate for the tip that was gated"
++has   "$out_landed" "explicit landed tip"  "40g ...and the record says it was explicit"
++hasnt "$out_landed" "REFUSING"             "40h ...with no refusal"
++
++out_wrong=$( cd "$W" && run --gate "$W_MERGE" --landed-tip "$W_ADV" tk-1 fleet/wwss )
++has   "$out_wrong" "REFUSING"              "40i a --landed-tip NOT in the gate commit is still refused"
++hasnt "$out_wrong" "PASS (full gate)"      "40j ...and carries no gate record"
++echo "41. agents-orjl: an explicit tip from an UNRELATED branch must not certify the named branch"
++# The reviewer's repro: fleet/good and fleet/wrong from one base; ONLY good is merged.
++V="$ROOT/orjl"; mkdir -p "$V"
++(
++  cd "$V" || exit 1
++  git init -q .
++  git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
++  git branch -M main
++  git checkout -q -b fleet/good && echo g > g.txt && git add g.txt && git -c user.email=t@t -c user.name=t commit -q -m "good work"
++  git rev-parse HEAD > "$ROOT/fix/orjl.good"
++  git checkout -q main && git checkout -q -b fleet/wrong && echo w > w.txt && git add w.txt && git -c user.email=t@t -c user.name=t commit -q -m "wrong work"
++  git rev-parse HEAD > "$ROOT/fix/orjl.wrong"
++  git checkout -q main && git merge -q --no-ff fleet/good -m "Merge fleet/good only"
++  git rev-parse HEAD > "$ROOT/fix/orjl.merge"
++) >/dev/null 2>&1
++V_GOOD=$(cat "$ROOT/fix/orjl.good"); V_WRONG=$(cat "$ROOT/fix/orjl.wrong"); V_MERGE=$(cat "$ROOT/fix/orjl.merge")
++jq --arg t "$(git -C "$V" rev-parse 'HEAD^{tree}')" --arg s "$V_MERGE" '.tree=$t | .sha=$s' "$ROOT/fix/gate.json" > "$ROOT/fix/gate.tmp" && mv "$ROOT/fix/gate.tmp" "$ROOT/fix/gate.json"
++out_plain=$( cd "$V" && run --gate "$V_MERGE" tk-1 fleet/wrong )
++has   "$out_plain" "does not contain"     "41a a branch that was not merged is refused"
++out_unrel=$( cd "$V" && run --gate "$V_MERGE" --landed-tip "$V_GOOD" tk-1 fleet/wrong )
++has   "$out_unrel" "not tied to"          "41b an unrelated branch's tip does not certify THIS branch (agents-orjl)"
++hasnt "$out_unrel" "PASS (full gate)"     "41c ...and carries no gate record"
++out_tied=$( cd "$V" && run --gate "$V_MERGE" --landed-tip "$V_WRONG" tk-1 fleet/wrong )
++hasnt "$out_tied" "not tied to"           "41d the named branch's own tip is not rejected as untied"
++
++# agents-jlfq: when a tip IS passed and is not contained, the diagnosis must be about the TIP, not the branch.
++out_badtip=$( cd "$V" && run --gate "$V_MERGE" --landed-tip "$V_WRONG" tk-1 fleet/wrong )
++has   "$out_badtip" "NOT CONTAINED"         "41e a bad --landed-tip is diagnosed as the tip not being contained"
++hasnt "$out_badtip" "THE BRANCH ADVANCED"   "41f ...and NOT as the branch having advanced (agents-jlfq)"
++# ...and when the tip IS valid, the message carries BOTH tips: the landed one and where the branch now is.
++jq --arg t "$W_TREE" --arg s "$W_MERGE" '.tree=$t | .sha=$s' "$ROOT/fix/gate.json" > "$ROOT/fix/gate.tmp" && mv "$ROOT/fix/gate.tmp" "$ROOT/fix/gate.json"
++out_both=$( cd "$W" && run --gate "$W_MERGE" --landed-tip "$W_LANDED" tk-1 fleet/wwss )
++has   "$out_both" "explicit landed tip $W_LANDED for fleet/wwss (at " "41g the gate identity names the landed tip AND the branch's current tip"
++
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
    for f in "${FAILED_TESTS[@]}"; do
+@@ -1301,3 +1709,4 @@
+ fi
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
++
 --- a/tests/fleet-verdict-transcribed-run.test.sh
 +++ b/tests/fleet-verdict-transcribed-run.test.sh
 @@ -0,0 +1,89 @@

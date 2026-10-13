@@ -5,15 +5,20 @@
   it clears this tip).
 - **Status: GREEN - 358 passed / 0 failed** on the delivered series, with the ten fixtures the ruling decided now pinning
   the OUTCOME. This document is the composition's diagnosis, the ordering, and the ruling it implements.
-- **The delivery is TWO artifacts, applied IN THIS ORDER** (coord's ruling - the composed delivery first, wwss re-cut
-  on top, because two artifacts cannot both be applied to the same live file without one being re-cut):
-  1. `patches/fleet-land-message-composition.patch` (967 lines, sha256 `884cdb089a998ca5…`) - the stack
-     (scanner + families + 9lew + 2tov) with m6fr's one conflicting hunk resolved and the ruling's ten fixtures applied;
-  2. `patches/fleet-land-message-wwss-recut-after-stack.patch` (208 lines, sha256 `1835ddd059fc322b…`) - agents-wwss
-     RE-CUT to apply after step 1, carrying its `--landed-tip` change, the agents-orjl tie check, and agents-jlfq's
-     two diagnosis fixes.
-  Verified as a series: both apply at fuzz 0, the result is byte-identical to the assembled tree, and the final
-  suite reports 358 passed / 0 failed.
+- **The delivery is ONE FOLDED artifact** (coord's final ruling, 2026-10-13): `patches/fleet-land-message-composition.patch`
+  (1147 lines, sha256 `c23794033d5bb956…`) - the stack (scanner + families + 9lew + 2tov) with m6fr's one conflicting
+  hunk resolved, the ruling's ten fixtures applied, AND agents-wwss's change (its `--landed-tip`, the agents-orjl tie
+  check, and agents-jlfq's two diagnosis fixes) folded in. It applies to pristine copies at fuzz 0, is byte-identical to
+  the assembled tree, and reproduces 358 passed / 0 failed.
+  - **Why one artifact and not two:** the wwss change and the stack share hunks in BOTH directions, so two artifacts
+    cannot both be applied to the same live file without one being re-cut; the fold is verified (358/0, wwss's 14 cases
+    added with no new failures); nothing is smuggled, because the SINGLE reviewer reads the whole series including
+    wwss's part - the same reason one reviewer was ruled in the first place; and wwss's own standalone artifact still
+    exists at `90de2dff` **with its own PASS**, so there is no unreviewed half anywhere.
+  - **Superseded form, recorded so it is not reintroduced:** an interim two-artifact shape (stack, then a post-stack
+    wwss re-cut) was pushed at `fd97bbcc` before this ruling. Those source patches still exist in that branch's history
+    and the re-cut file is removed here: nothing was discarded, and producing both now would be exactly the churn the
+    fold avoided.
 - **NOT on the merge queue, by the rule:** nothing sets `merge-queue` until a NON-AUTHOR verdict exists on the bead, and
   a clearance is per-tip. The one reviewer is what puts this in front of the merger.
 
@@ -95,10 +100,11 @@ THE FOLD MADE CONSTRAINT 2 CONCRETE RATHER THAN THEORETICAL: attempting the fold
 the shared declaration line - the stack's `AUTHOR_MODEL_ARG` against wwss's `LANDED_TIP`. Two independent columns on
 one line, so both were kept, which is the same resolution m6fr's hunk needed. Three deliveries met on a single line
 and no value was overwritten. That one-conflict measurement is also what produced the re-cut artifact shipped above
-with confidence: the fold was NOT thrown away as a dead end, it is the experiment that proves the re-cut is bounded
+with confidence: the fold was NOT thrown away as a dead end - it IS the delivery, and it is also the measurement that
+proves the interaction is one line wide
 and understood rather than a rewrite - and wwss's 14 cases came back green on the folded tree with no new failures.
 
-### What the wwss re-cut adds beyond the original wwss change
+### What agents-wwss's change adds, now folded in here
 
 The original wwss artifact could not certify which BRANCH it was clearing. Two review findings fixed here, both on the
 same parameter, which is why they belong in one pass:
