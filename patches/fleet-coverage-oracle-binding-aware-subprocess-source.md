@@ -74,23 +74,40 @@ so it cannot describe a different object from the one delivered.
 Twelve of twelve, zero failures. Case 7 is the one that round 1 failed and case 3 is the alias form that
 a fix must not silently drop.
 
-**Phantom census, every module `pdth` allowlists, old oracle vs this patch:**
+**No gains - and two different yardsticks, named, because `agents-arv4` caught the first version of
+this table not naming its own.** The absolute counts below are MY yardstick: suites the FOURTH SOURCE
+alone claims, i.e. candidates that fail the oracle's own import rule. That is the phantom class this patch
+changes, and it is not the same as the oracle's omitted lists, which include every candidate channel.
 
-| module | OLD | round 2 | fixed | round-2-only |
+| module | OLD | this patch | fixed | round-4-only |
 | --- | --- | --- | --- | --- |
-| sandbox | 7 | 1 | test_hermetic_env, test_path_security, test_pr_fixer_prepass, test_prepass_pin_boundary, test_report_schema, test_vuln_verify_prepass | none |
-| findings | 3 | 1 | test_path_security, test_pr_fixer_prepass | none |
-| child_env | 2 | 2 | - | none |
-| containment, egress_proxy, credential_broker, tool_pins, candidate_identity | 0 | 0 | - | none |
+| sandbox | 7 | 1 | 6 | **none** |
+| findings | 3 | 1 | 2 | **none** |
+| child_env | 2 | 2 | 0 | **none** |
+| containment, egress_proxy, credential_broker, tool_pins, candidate_identity | 0 | 0 | 0 | **none** |
 | **TOTAL** | **12** | **4** | **8** | **0** |
 
-### What it does not fix, stated rather than hidden
+`agents-arv4` measured the same question a different way, through the real oracle CLI on an isolated
+per-module change, and its numbers are the ones to quote for the ORACLE'S OWN omitted sets - attributed,
+since I did not re-derive them: sandbox 21 -> 16 with exactly five drops (test_hermetic_env,
+test_path_security, test_pr_fixer_prepass, test_prepass_pin_boundary, test_vuln_verify_prepass), findings
+13 -> 11 with two, child_env 12 -> 12 and the other five unchanged, and **gains NONE on every module**.
+Both yardsticks agree on the property that matters and disagree on the counts, which is exactly why the
+yardstick has to be named.
+
+**Correction to the previous version of this table:** it listed `test_report_schema` among the sandbox
+fixed entries. `agents-arv4` is right that this is wrong - it is a candidate in BOTH oracles and is not
+dropped, because it genuinely imports the module (`from lib.sandbox import sandbox_available`). It is not
+a phantom and never was; it was a mis-transcribed row.
+
+### What it does not fix### What it does not fix, stated rather than hidden
 
 The four remaining are three different things, and only one of them is a defect of the same kind:
 
 * `test_store_lock_timeout.py` (**not a defect**): it genuinely runs `lib/findings.py`, via
   `subprocess.run([sys.executable, str(ROOT / "lib" / "findings.py"), ...])`. A joined path is a real
   invocation and matching it is correct.
+* **FIXED since the first version of this note (`agents-ay0s`)**: `os.system(...)`/`os.popen(...)` were matched by the OLD oracle only incidentally, through its bare `system` in the alternation, and round 2 dropped them silently - the attribute branch is now `subprocess.<X>` OR `<alias>.<X>` OR `os.(system|popen|spawn*|exec*)`. And an aliased from-import (`from subprocess import Popen as P` then `P([...])`) was computed into `_bind_names` and then DISCARDED by the `n in _CALL_NAMES` filter one line later; the filter is gone, and the alias map now keeps the bound name only when the name on the left is a call name, so `from subprocess import PIPE as Q` still does not become an invocation. Eight probes, all passing.
 * `test_prompt_exposure.py` and the two `child_env` cases (**a different class**): the callee really is
   `subprocess.run` and the binding rule is satisfied; what matches is an **argument or keyword value that
   happens to be named after the module** - `["bash", str(sandbox.root, ...)]` and `env=child_env`. That is
@@ -118,3 +135,8 @@ no phantom, so the strongest claim on this branch - that no module gains noise -
 
 40977 bytes, sha256 d60e9ad23d460ac1..., mtime 2026-10-12 19:42 - re-read when this
 revision was cut, so the prerequisite anchor still holds.
+
+### Revision note
+
+40977 bytes, sha256 d60e9ad23d460ac1..., mtime 2026-10-12 19:42 - unchanged, so
+the prerequisite anchor holds for this re-cut.

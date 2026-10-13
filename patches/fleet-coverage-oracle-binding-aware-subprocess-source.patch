@@ -1,6 +1,6 @@
 --- /home/exedev/fleet/remote/check-coverage.py	2026-10-12 19:42:41.000000000 +0000
-+++ /tmp/i8xn-fixed.py	2026-10-13 03:26:23.410414776 +0000
-@@ -672,12 +672,44 @@
++++ /tmp/hbz3-r4.py	2026-10-13 03:29:56.703797605 +0000
+@@ -672,12 +672,55 @@
                      cleaned = re.sub(r'`(?:\\.|[^`\\])*`', '', cleaned, flags=re.DOTALL)
                      cleaned = re.sub(r'//.*', '', cleaned)
                      cleaned = re.sub(r'#.*', '', cleaned)
@@ -17,6 +17,7 @@
 +                    # A wildcard (`from subprocess import *`) cannot be resolved by a binding rule at all; it is treated as
 +                    # binding the known call names, i.e. it FAILS OPEN, because for a consumer oracle a missed real consumer
 +                    # is silent while a phantom is visible and reviewable.
++                    _CALL_NAMES = ("run", "Popen", "call", "check_output", "check_call", "getoutput")
 +                    _bind_names, _bind_attr, _bind_star = set(), "subprocess", False
 +                    for _m in re.finditer(r'^[ \t]*from[ \t]+subprocess[ \t]+import[ \t]+([^\n#]+)', cleaned, re.M):
 +                        _spec = _m.group(1).strip()
@@ -24,16 +25,26 @@
 +                            _bind_star = True
 +                        else:
 +                            for _item in _spec.split(","):
-+                                _nm = _item.strip().split(" as ")[-1].strip()
-+                                if _nm:
-+                                    _bind_names.add(_nm)
++                                # agents-ay0s: `from subprocess import Popen as P` binds P to a CALL NAME, and the filter
++                                # `n in _CALL_NAMES` used to discard exactly that - the alias P was computed and then thrown
++                                # away. Keep the alias only when the name on the LEFT is one of the call names, which is what
++                                # the filter was for; a non-call name (PIPE, DEVNULL) still does not become an invocation.
++                                _parts = _item.strip().split(" as ")
++                                _orig = _parts[0].strip()
++                                _bound = _parts[-1].strip()
++                                if _bound and _orig in _CALL_NAMES:
++                                    _bind_names.add(_bound)
 +                    for _m in re.finditer(r'^[ \t]*import[ \t]+subprocess[ \t]+as[ \t]+(\w+)', cleaned, re.M):
 +                        _bind_attr = _m.group(1)
-+                    _CALL_NAMES = ("run", "Popen", "call", "check_output", "check_call", "getoutput")
 +                    if _bind_star:
 +                        _bind_names |= set(_CALL_NAMES)
-+                    _call_alts = [re.escape(_bind_attr) + r"\.(?:" + "|".join(_CALL_NAMES) + r")"]
-+                    _call_alts += [r"(?<!\.)" + re.escape(n) for n in sorted(_bind_names) if n in _CALL_NAMES]
++                    _call_alts = [re.escape(_bind_attr) + r"\.(?:" + "|".join(_CALL_NAMES) + r")",
++                                  # agents-ay0s: the os module is a genuine invocation channel. Round 1 preserved it only
++                                  # incidentally - its bare `system` in the alternation matched os.system(...) - and round 2
++                                  # dropped it without saying so. Name the attributes explicitly rather than relying on a
++                                  # bare-name alternative to keep covering them.
++                                  r"os\.(?:system|popen|spawn[a-z_]*|exec[a-z_]*)"]
++                    _call_alts += [r"(?<!\.)" + re.escape(n) for n in sorted(_bind_names)]
                      subp_pattern = (
 -                        r'(?:subprocess|Popen|exec|spawn|run|fork|call|check_output|system)\s*\([^)]*?'
 -                        r'(?:' + re.escape(file_path) + r'|' + re.escape(base) + r'|\b' + re.escape(stem) + r'(?:\.[a-z]+)?\b)'
