@@ -48,15 +48,36 @@ markdown file cannot. What follows is what was measured, not a mechanism that wi
 `lib/sandbox.py` in its arguments and driven through the REAL oracle CLI - never a reimplementation of the
 oracle's matching rule - in a scratch git repo with a `main` branch and a case branch off it, with
 `lib/<M>.py` also touched in the same commit because the oracle only considers CHANGED files, and with a
-zero-suite log line so coverage is KNOWN rather than UNKNOWN. Each of those four details is a way to get an
-all-empty result that reads as "no match" and therefore agrees with the wrong conclusion; they are listed so
-the control below is meaningful.
+zero-suite log line so coverage is KNOWN rather than UNKNOWN.
 
-**CONTROL**: pristine must be RED on the subset of the population whose name begins `exec`. Pristine's name
-branch was `subprocess|Popen|exec|spawn|run|fork|call|check_output|system` with each alternative required to
-be followed immediately by `\s*\(`, so `os.execv(` never matched `exec` - a `v` follows the `c`. If pristine
-is not red there, the rig is wrong and no other column means anything. That subset is defined by a property
-rather than by a hand-written list, so it cannot be incomplete.
+**SIX WAYS A RIG PRODUCES AN ALL-EMPTY RESULT, and they all agree with the wrong conclusion**, so they are
+listed rather than left to be rediscovered:
+
+1. committing the case ONTO `main` - then `merge-base(main, sha)` is the sha itself, the changed set is
+   empty, and the oracle answers "no changed files to cover";
+2. touching only the probe file - candidates are computed per changed file, so if `lib/<M>.py` is not in the
+   changed set the question "who consumes it?" is never asked;
+3. an empty or absent log - coverage is UNKNOWN and `omitted` is empty;
+4. typing the matching rule from memory instead of driving the oracle's own CLI;
+5. **placing the probe in a file that is not test-named**, which changes everything - `is_test_filename` is
+   checked before a file is considered at all, and it is stricter than "ends in .py":
+       stem.startswith("test_") or stem.endswith("_test") or stem.endswith(".test") or stem.endswith(".spec")
+   with `conftest`, `helper`, `helpers`, `fixture`, `fixtures`, `setup`, `utils`, `common` and `base`
+   excluded by name. A probe at `lib/caller.py` is never scanned, so BOTH columns come back empty.
+6. and a one-sided control, which is the trap that hides the other five: see below.
+
+**CONTROL, and it must have BOTH HALVES.** Pristine must be **RED** on the subset of the population whose
+name begins `exec` - pristine's name branch was `subprocess|Popen|exec|spawn|run|fork|call|check_output|
+system` with each alternative required to be followed immediately by `\s*\(`, so `os.execv(` never matched
+`exec`, a `v` following the `c`. **AND this revision must be GREEN on that same subset** - the omitted list
+must be non-empty for it.
+
+The second half is not a formality. `agents-yltq` measured that a one-sided control **passes vacuously on a
+dead rig**: with the probe placed at `lib/caller.py` instead of `tests/test_rig.py`, both the pristine and the
+patched oracle return an empty omitted list, and "pristine is red on `^exec`" is satisfied by the empty list
+in exactly the same way as by a real disagreement. A rig that cannot distinguish "the revision works" from
+"the rig is dead" is not a control, and it fails in the direction of the conclusion you were hoping for.
+Both halves together are what make a green table mean something.
 
 **THE TWO EXCLUSIONS, justified by a criterion rather than by taste.** A name is a *channel* only if a call
 carrying that name can put the module path in its OWN arguments:
@@ -75,7 +96,8 @@ next omission. It cannot be installed from this host: the oracle is at
 into it - the same split as the `agents-825v` fixture. What the hub needs to build one is:
 
 1. the population one-liner above;
-2. the control assertion above, defined by the `^exec` property;
+2. the control assertion above, in BOTH halves - pristine red AND this revision green on the `^exec` subset;
+   a check that asserts only the red half cannot tell a working revision from a dead rig;
 3. the criterion above, which turns "neither pristine nor this revision matches this name" into a decision
    that must be made rather than a silence.
 
