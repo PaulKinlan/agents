@@ -765,6 +765,25 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn(".agents/skills/beads/SKILL.md", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
+    def test_beads_exemption_is_per_file_not_per_directory(self):
+        """agents-3jb4: the `.beads/` ignore arm is a DIRECTORY that holds executable git hooks, so an
+        exemption written as `.beads/*` silences every future file there instead of naming the ten tracked
+        paths the search measured. Both halves are asserted: each tracked path stays exempt, and a path that
+        is not tracked is refused by name. Red against the broad pattern (rc 0, empty suite list)."""
+        tracked = subprocess.check_output(["git", "ls-files", ".beads/"], text=True).split()
+        self.assertTrue(tracked, "the tracked .beads/ paths are the object this exemption is written for")
+        for path in tracked:
+            with self.subTest(tracked=path):
+                self.assertEqual(run_fast_gate([path]).returncode, 0,
+                                 f"{path}: a TRACKED .beads/ path is the measured exemption and stays exempt")
+        for path in (".beads/unexpected.sh", ".beads/scripts/evil.py"):
+            with self.subTest(new=path):
+                res = run_fast_gate([path])
+                self.assertNotEqual(res.returncode, 0,
+                                    f"{path}: a new file under .beads/ must NOT be exempt "
+                                    "(agents-3jb4 - the exemption is per file, not per directory)")
+                self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
+
     def test_tree_guard_tier_runs_on_every_mapped_delta(self):
         """agents-dv23 (ADR agents-c07o): tests/test_tree_guards.py is an always-on tier that must
         be included in every mapped fast-gate run to enforce repo-wide invariants.
