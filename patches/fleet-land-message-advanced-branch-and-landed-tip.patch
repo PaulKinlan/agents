@@ -30,7 +30,7 @@
      --allow-stale) ALLOW_STALE=1; shift ;;
      --print-json|--json) JSON=1; shift ;;
      --repo) REPO_DIR=${2:?--repo needs a directory}; shift 2 ;;
-@@ -806,13 +814,50 @@
+@@ -806,13 +814,70 @@
    # Direct ref ancestry is accepted; if the branch was rebased without changing the tree (no-op rebase),
    # verify that the merged commit contains an ancestor whose tree matches the branch tip tree.
    target_ref_tree=$(git rev-parse --verify -q "${target_ref}^{tree}" 2>/dev/null || echo "")
@@ -47,6 +47,26 @@
 +      exit 1
 +    fi
 +    check_tree=$(git rev-parse --verify -q "${check_ref}^{tree}" 2>/dev/null || echo "")
++    # agents-orjl (rev-wwss, P2): the tip must be TIED TO THE NAMED BRANCH. Checking only that the gate
++    # commit contains the tip let a caller clear ANY branch name by naming a tip from an unrelated branch
++    # that happened to be merged. Reproduced by the reviewer: with a merge of fleet/good into main, calling
++    # --gate <merge> --landed-tip <good-tip> ... fleet/wrong returned rc 0 and recorded BRANCH fleet/wrong
++    # with GATE Identity "explicit landed tip <good-tip>" - a branch that is not an ancestor of the gate and
++    # has a distinct tree. That is a FALSE CLEARANCE, the worse direction, because it authorises a landing
++    # that no reviewer sees again.
++    # The legitimate shape this flag exists for is "the branch ADVANCED past the tip I merged", so the tip
++    # is accepted when it is an ancestor of the named branch's current tip, or when the branch's tip has the
++    # SAME TREE (a rebase that changed no files). Anything else does not certify this branch.
++    if ! git merge-base --is-ancestor "$check_ref" "$target_ref" 2>/dev/null; then
++      _tip_tree=$(git rev-parse --verify -q "${check_ref}^{tree}" 2>/dev/null || echo "")
++      _branch_tree=$(git rev-parse --verify -q "${target_ref}^{tree}" 2>/dev/null || echo "")
++      if [ -z "$_tip_tree" ] || [ "$_tip_tree" != "$_branch_tree" ]; then
++        echo "fleet-land-message: REFUSING: --landed-tip $LANDED_TIP is not tied to $BRANCH ($target_ref)" >&2
++        echo "fleet-land-message:   the tip must be an ANCESTOR of the named branch, or have the SAME TREE (a rebase that changed no files)" >&2
++        echo "fleet-land-message:   a tip from an unrelated branch would certify a branch that was not merged (agents-orjl)" >&2
++        exit 1
++      fi
++    fi
 +  fi
    matched_c=""
 -  if git merge-base --is-ancestor "$target_ref" "$gate_commit" 2>/dev/null; then
@@ -87,7 +107,7 @@
    target_tree=$(git rev-parse --verify -q "${gate_commit}^{tree}" 2>/dev/null || echo "")
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
-@@ -1293,6 +1293,50 @@
+@@ -1293,6 +1293,75 @@
  has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
  has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
  
@@ -135,10 +155,35 @@
 +out_wrong=$( cd "$W" && run --gate "$W_MERGE" --landed-tip "$W_ADV" tk-1 fleet/wwss )
 +has   "$out_wrong" "REFUSING"              "40i a --landed-tip NOT in the gate commit is still refused"
 +hasnt "$out_wrong" "PASS (full gate)"      "40j ...and carries no gate record"
++echo "41. agents-orjl: an explicit tip from an UNRELATED branch must not certify the named branch"
++# The reviewer's repro: fleet/good and fleet/wrong from one base; ONLY good is merged.
++V="$ROOT/orjl"; mkdir -p "$V"
++(
++  cd "$V" || exit 1
++  git init -q .
++  git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
++  git branch -M main
++  git checkout -q -b fleet/good && echo g > g.txt && git add g.txt && git -c user.email=t@t -c user.name=t commit -q -m "good work"
++  git rev-parse HEAD > "$ROOT/fix/orjl.good"
++  git checkout -q main && git checkout -q -b fleet/wrong && echo w > w.txt && git add w.txt && git -c user.email=t@t -c user.name=t commit -q -m "wrong work"
++  git rev-parse HEAD > "$ROOT/fix/orjl.wrong"
++  git checkout -q main && git merge -q --no-ff fleet/good -m "Merge fleet/good only"
++  git rev-parse HEAD > "$ROOT/fix/orjl.merge"
++) >/dev/null 2>&1
++V_GOOD=$(cat "$ROOT/fix/orjl.good"); V_WRONG=$(cat "$ROOT/fix/orjl.wrong"); V_MERGE=$(cat "$ROOT/fix/orjl.merge")
++jq --arg t "$(git -C "$V" rev-parse 'HEAD^{tree}')" --arg s "$V_MERGE" '.tree=$t | .sha=$s' "$ROOT/fix/gate.json" > "$ROOT/fix/gate.tmp" && mv "$ROOT/fix/gate.tmp" "$ROOT/fix/gate.json"
++out_plain=$( cd "$V" && run --gate "$V_MERGE" tk-1 fleet/wrong )
++has   "$out_plain" "does not contain"     "41a a branch that was not merged is refused"
++out_unrel=$( cd "$V" && run --gate "$V_MERGE" --landed-tip "$V_GOOD" tk-1 fleet/wrong )
++has   "$out_unrel" "not tied to"          "41b an unrelated branch's tip does not certify THIS branch (agents-orjl)"
++hasnt "$out_unrel" "PASS (full gate)"     "41c ...and carries no gate record"
++out_tied=$( cd "$V" && run --gate "$V_MERGE" --landed-tip "$V_WRONG" tk-1 fleet/wrong )
++hasnt "$out_tied" "not tied to"           "41d the named branch's own tip is not rejected as untied"
++
  if [ "$FAIL" -gt 0 ]; then
    echo "Failed tests ($FAIL):"
    for f in "${FAILED_TESTS[@]}"; do
-@@ -1301,3 +1345,4 @@
+@@ -1301,3 +1370,4 @@
  fi
  printf '%s passed, %s failed\n' "$PASS" "$FAIL"
  [ "$FAIL" = 0 ]

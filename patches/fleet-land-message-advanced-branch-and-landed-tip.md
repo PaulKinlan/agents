@@ -2,8 +2,8 @@
 
 - **Bead:** `agents-wwss`. **Status:** PARKED HUB DELIVERY - the payload targets `~/fleet`, so the hub applies
   it; it is not for landing in the agents repo.
-- **Patch:** `patches/fleet-land-message-advanced-branch-and-landed-tip.patch` (145 lines, sha256
-  `cd9776a4d828b007…`), against pristine `~/fleet` copies (`bin/fleet-land-message`,
+- **Patch:** `patches/fleet-land-message-advanced-branch-and-landed-tip.patch` (190 lines, sha256
+  `dde341e5320f48be…`), against pristine `~/fleet` copies (`bin/fleet-land-message`,
   `tests/fleet-land-message.test.sh`). Applies with `patch -p1 --fuzz=0`.
 
 ## The bead's premise is wrong, and this patch does not implement it
@@ -58,6 +58,30 @@ instead of the branch's current tip:
 **The guarantee is unchanged**: the gate commit must still contain the tip being recorded. What changes is that
 a branch moving *after* the merge no longer makes a correct gate record impossible to write. The record says
 `explicit landed tip <sha> (ancestor of …)` so the basis of the claim stays visible.
+
+## The review's finding on the first revision, and the third change (agents-orjl, P2)
+
+**A FALSE CLEARANCE, the worse direction.** The first revision checked that the gate commit contains the tip, but
+never that the tip was tied to the branch NAMED on the command line. So a caller could certify any branch by naming
+an unrelated branch's tip that happened to be merged. The reviewer's repro: with `fleet/good` merged into main and
+`fleet/wrong` never merged, `--gate <merge> --landed-tip <good-tip> ... fleet/wrong` returned **rc 0** and recorded
+`BRANCH fleet/wrong` with `GATE Identity explicit landed tip <good-tip>` - a branch that is not an ancestor of the
+gate commit and has a distinct tree. A false clearance authorises a landing no reviewer looks at again, which is
+strictly worse than the refusal this whole change was about.
+
+    if ! git merge-base --is-ancestor "$check_ref" "$target_ref"; then
+      # the tip must be an ANCESTOR of the named branch, or have the SAME TREE (a rebase that changed no files)
+      ...REFUSING: --landed-tip <t> is not tied to <branch>
+    fi
+
+The legitimate shape this flag exists for is "the branch ADVANCED past the tip I merged", so an ancestor is
+accepted; a rebase that changed no files is accepted by tree identity; anything else does not certify this branch.
+
+**DISCRIMINATOR, driven both ways:** against the revision the finding describes the suite reports **292 passed / 2
+failed**, and both failures are the finding's own cases (41b unrelated tip refused, 41c no gate record); with the
+fix the suite is **294 passed / 0 failed**. Cases 41a and 41d pass on both revisions by design and are guards, not
+discriminators - 41a pins that a never-merged branch was already refused, 41d pins that a branch's OWN tip is not
+mistakenly rejected as untied.
 
 ## Verification (driven, and a discriminator rather than a pin born green)
 
