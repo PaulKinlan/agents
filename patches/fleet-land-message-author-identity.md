@@ -1,16 +1,18 @@
 ## `fleet-land-message-author-identity.patch` (agents-2tov)
 
 - **Target repository:** `PaulKinlan/fleet`
-- **Base it was cut against (the live bundle is not a git repo, so the base is named by content):**
-  `~/fleet/bin/fleet-land-message` sha256 `980899b73c2cbd87...` and `~/fleet/tests/fleet-land-message.test.sh`
-  sha256 `647694f31286dce3...` (first 16 hex each, measured with sha256sum on 2026-10-13).
-  It applies with `patch -p1` (or `git am`) to copies of those exact files; if the live files have moved since,
-  the hunk contexts below are the thing to re-cut against.
-- **Target files:**
-  - `bin/fleet-land-message` (author resolution inserted before the verdict-pool filter; the independence block; the `--print-json` emit)
-  - `tests/fleet-land-message.test.sh` (new case 36, 12 assertions)
-  - `bin/fleet-verdict-words.sh` is deliberately **untouched** (the verdict vocabulary is shared with other
-    patches of this same file, so this change does not go near it)
+- **Base it was cut against - the APPLIED STATE, and the order matters:** `~/fleet` is not a repo, so the base is
+  named by the patches already delivered for this file, applied in this order, and by the content of the live
+  files they start from:
+  1. the live bundle: `~/fleet/bin/fleet-land-message` sha256 `980899b73c2cbd87...` (first 16 hex, measured
+     2026-10-13) and `~/fleet/tests/fleet-land-message.test.sh` sha256 `647694f31286dce3...`;
+  2. `patches/fleet-verdict-transcription-scanner.patch`;
+  3. `patches/fleet-verdict-model-families-filter.patch`;
+  4. `patches/fleet-verdict-pool-sha-relevance.patch` (agents-9lew);
+  5. **this patch**, which applies on top of all four.
+  Measured on a fresh copy of the live files: steps 2-4 apply with no failures and the bundle's own suite passes
+  **324/0**, then this patch applies with no failures and the suite passes **341/0**. Applying this patch before
+  step 4 is what FAILS (2 of 9 hunks), which is why the order above is part of the delivery and not a footnote.
 - **Problem Statement (agents-2tov):** the independence check classified a review by comparing the reviewer's
   family with the *author's*, and it took the author from the ACTOR OF THE OPERATIVE LAND-SUMMARY COMMENT
   (`pick` -> `src_who`, and `branch_author` was that value) rather than from the branch. A summary appended by a
@@ -79,9 +81,11 @@
   author-lane verdict filter and the transcribed-subagent path.
 
 - **Verification (measured, and both directions):**
-  - GREEN with the patch applied: `bash tests/fleet-land-message.test.sh` -> **297 passed, 0 failed**
-    (280 pre-existing assertions unchanged, plus the 13 new ones).
-  - RED against the unpatched helper:
+  - GREEN on the applied-state base, on two independent trees: `bash tests/fleet-land-message.test.sh` ->
+    **341 passed, 0 failed** (the earlier patches' 324 assertions unchanged, plus this change's 17).
+  - BASE WITHOUT THIS CHANGE, for the difference: the same suite on the applied state without this patch ->
+    **324 passed, 0 failed**, and this change's fixture produces no author-identity JSON at all there.
+  - RED against the plain-live helper (the same test file, so the pin is shown to be aimed at the defect):
     `LM_OVERRIDE=~/fleet/bin/fleet-land-message bash tests/fleet-land-message.test.sh` -> **rc=1, 284 passed /
     13 failed**, the thirteen being the new case: `author_lane`, `author_source`, `branch_author`, `author_model`,
     `independence`, `cleared`, the refusal's provenance, the author-lane filter, the transcribed-subagent
@@ -97,11 +101,19 @@
 - **Ownership of the other patches to this same file (one writer per file, coord 2026-10-13):** `agents-9lew`
   (verdict-pool sha-relevance, `patches/fleet-verdict-pool-sha-relevance.patch`) is owned by this lane now;
   `agents-m6fr` (clearance shape) is assigned to a lane that is not on this VM, so it is a HUB-SIDE item and
-  deliberately not coordinated from here. `agents-9lew`'s patch declares prerequisites
-  (`fleet-verdict-transcription-scanner.patch`, `fleet-verdict-model-families-filter.patch`) and its hunk in
-  `bin/fleet-land-message` no longer applies to the live file, i.e. it needs a re-cut; that is a separate
-  delivery, not this one.
-
+  deliberately not coordinated from here. **`agents-9lew` does NOT need a re-cut** - I first reported that it did
+  after measuring it against the live bundle WITHOUT its declared prerequisites (1 of 5 hunks fails at :985);
+  applied in its declared order it applies cleanly and the suite is green, so that report is corrected here.
+- **INTEGRATION ON THE APPLIED STATE, which the base above is the reason for:** two things this change had to
+  adapt to once the earlier patches are present. (1) Its test case is **38**, not 36: the scanner patch owns 36
+  (with 36a-36i) and the pool patch owns 37, so the old number collided - a duplicate assertion id is the same
+  class of defect as an id that is never selected. (2) The **pre-rank filter block is deliberately NOT
+  reintroduced**: against plain live this change edited that block in place, but the rank-scoped pool patch
+  supersedes it, and carrying the old block over reverts that fix - measured, not assumed: the first merge of
+  these two patches reintroduced it and broke SIX of the earlier patches' assertions (36b1-36b4, 36c, 37c), all
+  returning to green once the block was dropped. (3) Case 38j asserts the demotion of an author-lane verdict by
+  **which verdict is selected** rather than by `author_lane_verdicts_ignored`, which is 0 in that fixture under
+  the rank-scoped pool.
 - **Composition with the other outstanding patches to this file:** the LAND-SUMMARY block parser and its
   mention/rejection bookkeeping, the verdict-pool ranking (`agents-9lew`), the clearance shape check
   (`agents-m6fr`), the `--gate` path (`agents-wwss`), the withdrawal behaviour and the verdict-word vocabulary

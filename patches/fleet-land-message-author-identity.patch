@@ -1,36 +1,43 @@
-From 2dfa052bd1ccc32e1bf34254d4a471d2cdd76b41 Mon Sep 17 00:00:00 2001
+From 6e5501a7e560fb6a2b406d9d83c19d6f8ad42d5f Mon Sep 17 00:00:00 2001
 From: agents-factory-impl-l2xb <agents-factory-impl-l2xb@exe.xyz>
-Date: Tue, 13 Oct 2026 16:13:55 +0000
+Date: Tue, 13 Oct 2026 16:45:33 +0000
 Subject: [PATCH] fix(fleet-land-message): derive the branch author from the
  branch, and let the lander supply the authoring model (agents-2tov)
 
-The independence check took the "branch author" from the ACTOR of the operative LAND-SUMMARY comment.
-A summary appended by another lane - a coordinator replacing a block whose author's bd writes were
-timing out, a workflow the helper explicitly supports - therefore made the APPENDER the author, and the
-comparison used the appender's family: on agents-jb8m a deepseek reviewer was refused as same-family
-against coord's record while the branch's own lane (impl-f6du) reads openai-codex/gpt-6-sol, i.e.
-genuinely cross-family. THE SAME WRONG OBJECT IS WORSE IN THE OTHER DIRECTION: the author-lane verdict
-filter discounted the APPENDER's verdicts, so with an appender of a different family the AUTHOR's own
-verdict counts as independent evidence - a false POSITIVE, which authorises a landing, rather than a
-false negative, which merely blocks one.
+Rebased onto the APPLIED STATE (live + fleet-verdict-transcription-scanner + fleet-verdict-model-families-filter +
+fleet-verdict-pool-sha-relevance), which is the order the hub applies these patches in and therefore the base this
+patch must be cut against.
+
+The independence check took the "branch author" from the ACTOR of the operative LAND-SUMMARY comment. A summary
+appended by another lane - a coordinator replacing a block whose author's bd writes were timing out, a workflow
+the helper explicitly supports - therefore made the APPENDER the author, and the comparison used the appender's
+family: on agents-jb8m a deepseek reviewer was refused as same-family against coord's record while the branch's
+own lane (impl-f6du) reads openai-codex/gpt-6-sol, i.e. genuinely cross-family. THE SAME WRONG OBJECT IS WORSE IN
+THE OTHER DIRECTION: the author-lane verdict filter discounted the APPENDER's verdicts, so with an appender of a
+different family the AUTHOR's own verdict counts as independent evidence - a false POSITIVE, which authorises a
+landing, rather than a false negative, which merely blocks one.
 
 The author is now derived from the BRANCH NAME (fleet/<lane>-<bead> -> the longest lane recorded in
-~/.fleet/lanes/*.model that matches at a boundary), with the operative summary's actor kept only as a
-labelled fallback, and the derivation's SOURCE is recorded (author_lane, author_source,
-author_model_source in --print-json; named in the refusal text). When no object settles the authoring
-model - a lane restarted or rotated since the work was authored - --author-model supplies the OPERAND
-rather than overriding the rule: the comparison still runs, the value is recorded as supplied, and the
+~/.fleet/lanes/*.model that matches at a boundary), with the operative summary's actor kept only as a labelled
+fallback, and the derivation's SOURCE is recorded (author_lane, author_source, author_model_source in
+--print-json; named in the refusal text). When no object settles the authoring model, --author-model supplies the
+OPERAND rather than overriding the rule: the comparison still runs, the value is recorded as supplied, and the
 refusal names that flag as the remedy.
 
-Verified: tests/fleet-land-message.test.sh 297 passed / 0 failed with the patch, rc=1 and 13 failures
-against the unpatched helper on the new case (LM_OVERRIDE=<path> bash tests/fleet-land-message.test.sh).
+On this base the pre-rank filter block the patch carried against plain live is deliberately NOT reintroduced:
+the rank-scoped pool patch supersedes it. The test case is 38 (the scanner owns 36 and the pool patch owns 37),
+and 38j asserts the demotion by which verdict is SELECTED rather than by author_lane_verdicts_ignored, which is 0
+in that fixture under the rank-scoped pool.
+
+Verified on this base: tests/fleet-land-message.test.sh 341 passed / 0 failed. Against the base WITHOUT this
+change the new case fails (the fixture produces no such JSON at all) while the other patches' 324 assertions pass.
 ---
- bin/fleet-land-message           | 84 ++++++++++++++++++++++++++------
- tests/fleet-land-message.test.sh | 70 ++++++++++++++++++++++++++
- 2 files changed, 139 insertions(+), 15 deletions(-)
+ bin/fleet-land-message           | 78 +++++++++++++++++++++++++++-----
+ tests/fleet-land-message.test.sh | 75 ++++++++++++++++++++++++++++++
+ 2 files changed, 141 insertions(+), 12 deletions(-)
 
 diff --git a/bin/fleet-land-message b/bin/fleet-land-message
-index e1f535a..a6a07a5 100755
+index 0c53d94..6e384fd 100755
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
 @@ -9,6 +9,13 @@
@@ -65,10 +72,10 @@ index e1f535a..a6a07a5 100755
      --repo) REPO_DIR=${2:?--repo needs a directory}; shift 2 ;;
      --repo=*) REPO_DIR=${1#--repo=}; shift ;;
      --worktree) REPO_DIR=${2:?--worktree needs a directory}; shift 2 ;;
-@@ -231,10 +240,46 @@ rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_run_id=""
- # named. This is NOT author keying as a rejection test (fleet-15b5 stands: a reviewer subagent inherits
- # its parent lane's actor, so a same-actor verdict is still eligible when no other-actor verdict exists -
- # the transcribed-subagent path, classified below by the reviewer model it must name).
+@@ -231,6 +240,42 @@ rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_run_id=""
+ # quality (tip-pinned vs branch-owned) and demotes author-lane verdicts only when a non-author verdict
+ # exists for that rank. When only author-lane verdicts exist, the transcription remains operative with an
+ # explicit warning naming the survivor.
 +# ---------- WHO AUTHORED THIS BRANCH (agents-2tov) ----------
 +# THE AUTHOR OF A BRANCH IS NAMED BY THE BRANCH, not by whoever last appended a LAND-SUMMARY. Until this was
 +# fixed the author was taken from the ACTOR of the operative LAND-SUMMARY comment, so a summary appended by a
@@ -106,16 +113,9 @@ index e1f535a..a6a07a5 100755
 +  src_author="$src_who"; src_lane=${src_who#"${FLEET_VM:-fleet-manager}-"}; src_author_source="summary-author"
 +fi
  REV_POOL="$REV_CAND"; rev_author_ignored=0; rev_author_ignored_shas=""
--if [ -n "$src_who" ] && [ -n "$REV_CAND" ]; then
--  _nonauth=$(awk -F'\t' -v a="$src_who" '$2 != a' <<<"$REV_CAND")
--  _auth=$(awk -F'\t' -v a="$src_who" '$2 == a' <<<"$REV_CAND")
-+if [ -n "$src_author" ] && [ -n "$REV_CAND" ]; then
-+  _nonauth=$(awk -F'\t' -v a="$src_author" '$2 != a' <<<"$REV_CAND")
-+  _auth=$(awk -F'\t' -v a="$src_author" '$2 == a' <<<"$REV_CAND")
-   if [ -n "$_nonauth" ]; then
-     REV_POOL="$_nonauth"
-     rev_author_ignored=$(grep -c . <<<"$_auth" || true)
-@@ -593,14 +638,20 @@ fi
+ 
+ # fleet-260l: SELECTION IS A FUNCTION OF A POOL, not a single newest-first walk.
+@@ -633,14 +678,20 @@ fi
  #                   without a summary anyway.
  # A determinable SAME family refuses even when the actor differs (cross-family is the fleet's rule for
  # every review, not only same-lane transcriptions).
@@ -141,7 +141,7 @@ index e1f535a..a6a07a5 100755
      fi
    fi
    _fam=""
-@@ -611,13 +662,13 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+@@ -651,13 +702,13 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
        _fam="same"
      fi
    fi
@@ -157,7 +157,7 @@ index e1f535a..a6a07a5 100755
      if [ -z "$rev_reviewer_model" ]; then
        rev_independence="self-certified"
      elif [ -z "$rev_author_model" ]; then
-@@ -639,11 +690,11 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
+@@ -679,11 +730,11 @@ if [ -n "$rev_verdict" ] && [ -n "$rev_text" ]; then
          ;;
        incomplete-provenance)
          rev_cleared=false
@@ -171,7 +171,7 @@ index e1f535a..a6a07a5 100755
          ;;
      esac
    fi
-@@ -931,7 +982,9 @@ if [ "$JSON" = 1 ]; then
+@@ -972,7 +1023,9 @@ if [ "$JSON" = 1 ]; then
      --arg rev_run_id "${rev_run_id:-}" \
      --arg cleared_sha "${cleared_label_sha:-}" \
      --arg rev_independence "${rev_independence:-unknown}" --arg rev_reviewer_model "${rev_reviewer_model:-}" \
@@ -182,10 +182,10 @@ index e1f535a..a6a07a5 100755
      --arg newer_not_used "${flm_newer_passed:-}" --arg disagreement "${rev_disagree:-}" --arg rev_named_branch "${rev_branch:-}" \
      --argjson rev_author_ignored "${rev_author_ignored:-0}" --arg rev_author_ignored_shas "${rev_author_ignored_shas:-}" \
      --arg gate_identity "${gate_identity:-}" \
-@@ -941,7 +994,8 @@ if [ "$JSON" = 1 ]; then
-       review:{state:$rev_state,verdict:$rev_verdict,reviewed_sha:$rev_sha,tip_sha:$rev_tip,
-               unreviewed_commits:$rev_unreviewed,author:$rev_who,at:$rev_at,cleared:$rev_cleared,
-               delta_identical:$rev_delta_identical,run_id:$rev_run_id,cleared_sha:$cleared_sha,
+@@ -986,7 +1039,8 @@ if [ "$JSON" = 1 ]; then
+               selected_comment_index:($rev_comment_index|if .=="" then null else tonumber end),
+               selected_comment_author:$rev_who,author_lane_transcription:$author_lane_transcription,
+               delta_identical:$rev_delta_identical,delta_mismatch:$rev_delta_mismatch,run_id:$rev_run_id,cleared_sha:$cleared_sha,
 -              branch_author:$branch_author,independence:$rev_independence,
 +              branch_author:$branch_author,author_lane:$author_lane,author_source:$author_source,
 +              independence:$rev_independence,author_model_source:$rev_author_model_source,
@@ -193,14 +193,14 @@ index e1f535a..a6a07a5 100755
                author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
                newer_not_used:$newer_not_used,disagreement:$disagreement,named_branch:$rev_named_branch},
 diff --git a/tests/fleet-land-message.test.sh b/tests/fleet-land-message.test.sh
-index daaecb3..2c410bf 100755
+index 0dd6274..22b0b6b 100755
 --- a/tests/fleet-land-message.test.sh
 +++ b/tests/fleet-land-message.test.sh
-@@ -1293,6 +1293,76 @@ j_dis=$(run --print-json tk-1 fleet/delta1)
- has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
- has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
+@@ -1528,6 +1528,81 @@ eq "$(jq -r '.review.delta_mismatch' <<<"$j_out")" "position/offset moved (added
+ out=$(run tk-1 fleet/pos-tip 2>&1 || true)
+ has "$out" "position/offset moved" "37j refusal line reports position/offset moved"
  
-+# 36. agents-2tov: the author of the branch comes from the BRANCH, not from whoever appended the operative
++# 38. agents-2tov: the author of the branch comes from the BRANCH, not from whoever appended the operative
 +# LAND-SUMMARY. THE LIVE CASE, reproduced on agents-jb8m: a coordinator appends a replacement block (the
 +# author's bd writes were timing out), so the old derivation made COORD the author, read
 +# ~/.fleet/lanes/coord.model, and refused a deepseek reviewer as 'same-family' - while the branch's own lane
@@ -215,24 +215,24 @@ index daaecb3..2c410bf 100755
 + {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json tk-2 fleet/thing2)
-+eq "$(jq -r '.review.author_lane' <<<"$j")" "thing2" "36a the author lane comes from the branch name"
-+eq "$(jq -r '.review.author_source' <<<"$j")" "branch-name" "36b ...and says so, so a wrong derivation is visible"
-+eq "$(jq -r '.review.branch_author' <<<"$j")" "test-vm-thing2" "36c the author is the branch's lane, not the appender"
-+eq "$(jq -r '.review.author_model' <<<"$j")" "openai-codex/gpt-6-sol" "36d the AUTHOR lane's model, not the appender's"
-+# 36e asserts the CLASS, not the finer label: the verdict here is posted by a DIFFERENT lane
++eq "$(jq -r '.review.author_lane' <<<"$j")" "thing2" "38a the author lane comes from the branch name"
++eq "$(jq -r '.review.author_source' <<<"$j")" "branch-name" "38b ...and says so, so a wrong derivation is visible"
++eq "$(jq -r '.review.branch_author' <<<"$j")" "test-vm-thing2" "38c the author is the branch's lane, not the appender"
++eq "$(jq -r '.review.author_model' <<<"$j")" "openai-codex/gpt-6-sol" "38d the AUTHOR lane's model, not the appender's"
++# 38e asserts the CLASS, not the finer label: the verdict here is posted by a DIFFERENT lane
 +# (test-vm-rev-y), so the correct classification is other-lane ("independent by actor"); what matters is
 +# that it is no longer refused as same-family, which is the false negative agents-jb8m hit.
-+eq "$(jq -r '.review.independence' <<<"$j")" "other-lane" "36e a genuinely independent verdict is not refused as same-family"
-+eq "$(jq -r '.review.cleared' <<<"$j")" "true" "36f ...and it clears"
-+# 36g/36h: the same derivation must still REFUSE when the author lane's own family matches the reviewer, and
++eq "$(jq -r '.review.independence' <<<"$j")" "other-lane" "38e a genuinely independent verdict is not refused as same-family"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38f ...and it clears"
++# 38g/38h: the same derivation must still REFUSE when the author lane's own family matches the reviewer, and
 +# the refusal must name the source it used (the old text named the model with no provenance at all)
 +printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/thing2.model"
 +j=$(run --print-json tk-2 fleet/thing2)
-+eq "$(jq -r '.review.independence' <<<"$j")" "same-family" "36g a same-family author lane still refuses"
-+eq "$(jq -r '.review.cleared' <<<"$j")" "false" "36h ...and does not clear"
-+has "$(run tk-2 fleet/thing2)" "from lane record thing2 (branch-name author)" "36i the refusal names where the author model came from"
-+has "$(run tk-2 fleet/thing2)" "--author-model" "36i2 ...and names the remedy that supplies the missing operand"
-+# 36j: the AUTHOR-LANE VERDICT FILTER asks the same question, so a verdict posted by the branch's own lane is
++eq "$(jq -r '.review.independence' <<<"$j")" "same-family" "38g a same-family author lane still refuses"
++eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38h ...and does not clear"
++has "$(run tk-2 fleet/thing2)" "from lane record thing2 (branch-name author)" "38i the refusal names where the author model came from"
++has "$(run tk-2 fleet/thing2)" "--author-model" "38i2 ...and names the remedy that supplies the missing operand"
++# 38j: the AUTHOR-LANE VERDICT FILTER asks the same question, so a verdict posted by the branch's own lane is
 +# the one that is discounted - not one posted by whoever appended the summary
 +printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
 +cat > "$B" <<J
@@ -241,8 +241,13 @@ index daaecb3..2c410bf 100755
 + {"author":"test-vm-rev-y","created_at":"2026-10-09T11:10:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json tk-2 fleet/thing2)
-+eq "$(jq -r '.review.author_lane_verdicts_ignored' <<<"$j")" "1" "36j the branch lane's own verdict is the one discounted"
-+# 36k: the TRANSCRIBED-subagent path, which is where the author model is the whole argument - the verdict is
++# 38j asserts the OBSERVABLE rather than the counter: on the applied-state base (which includes the
++# rank-scoped pool patch) the demotion of an author-lane verdict is expressed by which verdict is SELECTED,
++# and author_lane_verdicts_ignored is 0 in this fixture. What matters is that the verdict selected is the
++# OTHER lane's, i.e. the branch lane's own verdict did not carry the landing, and that the author lane is
++# still derived from the branch (38a) rather than from the appender (test-vm-coord).
++eq "$(jq -r '.review.selected_comment_author' <<<"$j")" "test-vm-rev-y" "38j the branch lane's own verdict is the one demoted, not the appender's"
++# 38k: the TRANSCRIBED-subagent path, which is where the author model is the whole argument - the verdict is
 +# posted by the branch's own lane, so there is no other-actor independence to lean on and the families must
 +# genuinely differ. Before this fix the comparison used the appender's family and would have refused it.
 +printf 'openai-codex/gpt-6-sol\n' > "$HOME/.fleet/lanes/thing2.model"
@@ -251,9 +256,9 @@ index daaecb3..2c410bf 100755
 + {"author":"test-vm-thing2","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash vs implementer openai-codex/gpt-6-sol)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json tk-2 fleet/thing2)
-+eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "36k transcribed verdict with a named reviewer is cross-family"
-+eq "$(jq -r '.review.cleared' <<<"$j")" "true" "36l ...and clears on the author lane's family, not the appender's"
-+# 36m/36n: WHEN NO OBJECT SETTLES IT, the person with the evidence supplies the OPERAND rather than overriding
++eq "$(jq -r '.review.independence' <<<"$j")" "cross-family" "38k transcribed verdict with a named reviewer is cross-family"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38l ...and clears on the author lane's family, not the appender's"
++# 38m/38n: WHEN NO OBJECT SETTLES IT, the person with the evidence supplies the OPERAND rather than overriding
 +# the rule (agents-2tov): the lane record here says deepseek (the appender's family, and the trap), the reviewer
 +# is deepseek, and the lander knows the authoring model was gpt-6-sol. The comparison still runs, it clears, and
 +# the value is recorded as SUPPLIED so it is never indistinguishable from a derived one.
@@ -263,11 +268,11 @@ index daaecb3..2c410bf 100755
 + {"author":"test-vm-rev-y","created_at":"2026-10-09T11:00:00Z","text":"VERDICT: PASS (reviewer deepseek/deepseek-flash)\nDelta: tk-2 main..$t2 branch fleet/thing2"}]
 +J
 +j=$(run --print-json --author-model openai-codex/gpt-6-sol tk-2 fleet/thing2)
-+eq "$(jq -r '.review.author_model' <<<"$j")" "openai-codex/gpt-6-sol" "36m a supplied authoring model is used"
-+has "$(jq -r '.review.author_model_source' <<<"$j")" "supplied" "36n ...and is recorded as SUPPLIED, not derived"
-+eq "$(jq -r '.review.cleared' <<<"$j")" "true" "36o ...and the comparison still runs and clears"
++eq "$(jq -r '.review.author_model' <<<"$j")" "openai-codex/gpt-6-sol" "38m a supplied authoring model is used"
++has "$(jq -r '.review.author_model_source' <<<"$j")" "supplied" "38n ...and is recorded as SUPPLIED, not derived"
++eq "$(jq -r '.review.cleared' <<<"$j")" "true" "38o ...and the comparison still runs and clears"
 +j=$(run --print-json tk-2 fleet/thing2)
-+eq "$(jq -r '.review.cleared' <<<"$j")" "false" "36p without the supplied operand the same tree still refuses"
++eq "$(jq -r '.review.cleared' <<<"$j")" "false" "38p without the supplied operand the same tree still refuses"
 +rm -f "$HOME/.fleet/lanes/thing2.model" "$HOME/.fleet/lanes/coord.model"
 +
  if [ "$FAIL" -gt 0 ]; then
