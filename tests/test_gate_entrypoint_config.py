@@ -186,19 +186,28 @@ def _assert_no_live_process_referencing(case: unittest.TestCase, path: str) -> N
 
     Reads /proc directly rather than shelling out, so the check does not depend on pgrep or ps being
     available, and skips this process, whose own argv can legitimately name the path while the
-    assertion is being made.
+    assertion is being made. THREE CHANNELS, because argv alone missed a real leak (agents-qlqc): a
+    detached worker can reference the home only through cwd or through an inherited environment.
     """
     survivors = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
-        try:
-            raw = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        printable = raw.replace(b"\x00", b" ")
-        if path.encode() in printable:
-            survivors.append((entry.name, printable.decode("utf-8", "replace")[:200]))
+        # agents-qlqc (found by rev-825v): cmdline ALONE IS NOT ENOUGH. A leaked worker can reference
+        # the temp HOME only through its working directory or its environment - the reviewer demonstrated
+        # a detached process with cwd set to the home and an argv that never names it, which escaped this
+        # tripwire while still holding the heavy slot. Measured here: that exact leak read NO on the
+        # landed code and YES with all three channels checked. The survivor record NAMES the channel
+        # that matched, because which one it was is what tells a reader what the fix has to cover.
+        for channel, probe in (("argv", "cmdline"), ("cwd", None), ("env", "environ")):
+            try:
+                raw = os.readlink(f"/proc/{entry.name}/cwd").encode() if probe is None else (entry / probe).read_bytes()
+            except OSError:
+                continue
+            printable = raw.replace(b"\x00", b" ")
+            if path.encode() in printable:
+                survivors.append((entry.name, channel, printable.decode("utf-8", "replace")[:200]))
+                break
     case.assertEqual(
         survivors, [],
         f"a live process still references this test's temp HOME {path} after the test finished: "
