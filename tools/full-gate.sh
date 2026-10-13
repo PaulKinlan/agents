@@ -134,6 +134,10 @@ def save_costs(path, measured):
 def main():
     if len(sys.argv) != 1:
         raise GateError(f"unsupported full-gate arguments: {sys.argv[1:]!r}")
+    # A full gate invoked by a test running in an outer shard inherits this
+    # fixture marker. Its own serial discovery must remain the unsharded set;
+    # run_module adds the marker back only to this gate's child modules.
+    os.environ.pop("FULL_GATE_SHARD_CHILD", None)
     started = time.monotonic()
     expected = discover()
     workers = positive_int("FULL_GATE_SHARDS", min(4, os.cpu_count() or 1))

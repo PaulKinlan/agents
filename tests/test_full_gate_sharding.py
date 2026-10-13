@@ -90,6 +90,16 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertIn("tests.test_a.Case.test_only_in_serial", res.stdout)
         self.assertIn("failing modules: tests.test_a", res.stdout)
 
+    def test_nested_gate_ignores_outer_shard_marker_for_serial_discovery(self):
+        self.module("nested", " def test_one(self): pass\n"
+                              " if os.getenv('FULL_GATE_SHARD_CHILD') != '1':\n"
+                              "  def test_only_in_serial(self): pass\n")
+        res = self.run_gate(FULL_GATE_SHARD_CHILD="1")
+        self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("executed ids=1 expected=2 missing=1", res.stdout)
+        self.assertIn("ID SET MISMATCH", res.stdout)
+        self.assertIn("tests.test_nested.Case.test_only_in_serial", res.stdout)
+
     def test_module_import_failure_is_not_mistaken_for_zero_tests(self):
         (self.root / "tests" / "test_bad.py").write_text("raise RuntimeError('injected import failure')\n")
         res = self.run_gate()
