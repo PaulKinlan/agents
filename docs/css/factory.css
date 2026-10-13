@@ -184,18 +184,9 @@
 
   /* Code: horizontal scroll inside the block at wide widths, with edge shadows that appear only when content is
      clipped; at <= 48rem it wraps instead (see the media query below), so no sideways gesture is needed. */
-  /* TODO(baseline/container-scroll-state-queries): replace the four-gradient stack below with the declarative
-     scroll-state form - `container-type: scroll-state` on this scroller plus a sticky indicator DESCENDANT (the
-     <code> child, not pre::before) toggled by `@container scroll-state(scrollable: inline-start|inline-end)` -
-     once the feature is Baseline Widely Available. agents-eyjv tried it on 2026-10-12 and KEPT the gradients,
-     because the native form cannot be verified on this VM: Chrome 155.0.8059.39 reports
-     `CSS.supports("container-type", "scroll-state")` true and parses the @container rules, but NO scroll-state
-     condition ever matches - named or unnamed, `stuck: top` on a genuinely stuck child, or
-     `scrollable: top|left|inline-start` on genuinely scrolled containers - while a plain size container query in
-     the same page matches. The affordance would have silently disappeared. The indicator must also be a
-     descendant, never the container's own pseudo-element: "You cannot style the container element itself with
-     its own scroll-state query" (Modern Web Guidance, scrollability-affordance-hints). Re-measure in a real
-     browser before acting; the technique below is verified working (see agents-eyjv). */
+  /* TODO(baseline/scroll-state-queries): Remove the four-gradient fallback below after scroll-state queries
+     work across supported browsers. A Chrome 155 build parsed the native rules without ever matching them
+     (agents-eyjv), so @supports alone cannot safely remove these working scroll hints. */
   pre {
     white-space: pre; max-inline-size: 100%; overflow-x: auto; tab-size: 2;
     border-color: var(--doc-hairline); line-height: 1.55; font-size: .85rem;
@@ -208,6 +199,31 @@
       var(--code-bg);
   }
   pre code { color: var(--code-fg); font-size: inherit; }
+  /* The indicators belong to the <code> descendant: a scroller cannot query its own scroll state.
+     Only wide layouts scroll sideways; on narrow layouts the existing wrapped code stays untouched.
+     Retain the gradient fallback for engines without working scroll-state queries. */
+  @supports (container-type: scroll-state) {
+    @media (min-width: 48.001rem) {
+      pre:has(> code) { container-type: scroll-state; }
+      /* Keep <pre> a block so its fallback cover clears at the right edge.
+         Inline grid gives the code its content width; the zero-width side tracks stretch to code height. */
+      pre > code { display: inline-grid; grid-template-columns: 0 max-content 0; min-inline-size: 100%; }
+      pre > code::before, pre > code::after {
+        content: ""; position: sticky; grid-row: 1; inline-size: .9rem; align-self: stretch;
+        opacity: 0; pointer-events: none; z-index: 1;
+      }
+      pre > code::before {
+        grid-column: 1; inset-inline-start: 0;
+        background: linear-gradient(to right, rgb(139 184 255 / 18%), transparent);
+      }
+      pre > code::after {
+        grid-column: 3; inset-inline-end: 0; translate: -.9rem 0;
+        background: linear-gradient(to left, rgb(139 184 255 / 18%), transparent);
+      }
+      @container scroll-state(scrollable: inline-start) { pre > code::before { opacity: 1; } }
+      @container scroll-state(scrollable: inline-end) { pre > code::after { opacity: 1; } }
+    }
+  }
   :not(pre) > code { padding: .05em .3em; border-radius: .25rem; background: var(--surface-raised); }
   .command h3 code, .meta code { padding: 0; background: none; }
 

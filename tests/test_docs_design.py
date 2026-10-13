@@ -78,6 +78,17 @@ class DocsDesignTest(unittest.TestCase):
         self.assertEqual(set(line_ids), {path.stem for path in (ROOT / "lines").glob("*.yaml")})
         self.assertEqual(Counter(command_ids), Counter("integrate list promote run line hillclimb hook skills schedule".split()))
 
+    def test_code_scroll_hints_query_descendants_and_keep_fallback(self):
+        """A scroller cannot query its own state; CSS must style its code descendant."""
+        css = (DOCS / "css" / "factory.css").read_text(encoding="utf-8")
+        self.assertIn("pre:has(> code) { container-type: scroll-state; }", css)
+        for direction, indicator in (("inline-start", "before"), ("inline-end", "after")):
+            self.assertIn(f"@container scroll-state(scrollable: {direction}) "
+                          f"{{ pre > code::{indicator} {{ opacity: 1; }} }}", css)
+        self.assertIn("no-repeat local", css, "keep the gradient fallback for unsupported browsers")
+        self.assertNotIn("pre::before", css.split("  pre {", 1)[1],
+                             "scroll-state cannot style the scroller's own pseudo-element")
+
     def test_pages_have_valid_speculation_rules(self):
         """All public documentation pages must carry moderate-eagerness speculation rules (agents-74qx et al)."""
         for filename in PAGES:
