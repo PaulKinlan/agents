@@ -353,17 +353,26 @@ the corpus as machine state rather than in the repo:
 | 5 (partition) | `/tmp/impl-tdot-measure2/group[1-4].json`, `summary.txt` | per-group counts, wall, CPU, rc, result; and the `partition_covers_suite` verdict |
 | 6 (fast gate) | `/tmp/impl-tdot-fastgate/cases.json` | per-case selection, wall, CPU, rc, ran-line |
 
-**The commands behind the three probe findings, because their outputs alone cannot rerun them.** The A/B
-and the partition probe were driven by scripts written to `/tmp` for the measurement
-(`/tmp/impl-tdot-measure2.py`, `/tmp/impl-tdot-partition.sh`, `/tmp/impl-tdot-fastgate.py`) and **those
-scripts are not in this repository** - they are machine state, like the gate-record corpus - so the raw
-output paths above are evidence of what was measured rather than a recipe for re-running it:
+**The commands behind the three probe findings, because their outputs alone cannot rerun them.** They were
+driven by scripts written to `/tmp` for the measurement: one memoised Python instrument that carries BOTH
+the A/B and the partition stage (`/tmp/impl-tdot-measure2.py`), a second Python instrument
+(`/tmp/impl-tdot-fastgate.py`), and an earlier shell probe (`/tmp/impl-tdot-partition.sh`) that the first
+one replaced. **Those scripts are not in this repository** - they are machine state, like the gate-record
+corpus - so the raw output paths above are evidence of what was measured rather than a recipe for
+re-running it:
 
-* Finding 4: `python3 /tmp/impl-tdot-measure2.py` on tree `47b588b9b0fe`, running the same 114-test subset
-  four times, interleaved flat, package-aware, flat, package-aware, with wall AND child CPU per run.
-* Finding 5: `bash /tmp/impl-tdot-partition.sh`, which splits the discovered modules across 4 groups
-  and runs each group as its OWN `python3 -m unittest` process. The coverage verdict cited here is that
-  probe's own check: the table is not read as green unless the group counts sum to the discovery count.
+* Finding 4: `python3 /tmp/impl-tdot-measure2.py`, its **A/B stage**, on tree `47b588b9b0fe`, running the
+  same 114-test subset four times, interleaved flat, package-aware, flat, package-aware, with wall AND child
+  CPU per run.
+* Finding 5: the same `python3 /tmp/impl-tdot-measure2.py`, in its **partition stage**, which splits the
+  discovered modules across 4 groups and runs each group as its OWN `python3 -m unittest` process. That
+  stage writes `group[1-4].json` and `summary.txt`, and they are what this table is read from - including
+  the `partition_covers_suite` verdict. The earlier shell probe, `bash /tmp/impl-tdot-partition.sh`, asked
+  the same question and wrote its per-group logs under `/tmp/impl-tdot-partition/`; it was preempted
+  part-way (that directory holds two groups, not four), which is why the instrument above replaced it. It is
+  named here only so the two stages are not confused, and NOT as the generator of the table: running it
+  would not reproduce the JSON above. The coverage verdict is the partition stage's own check - the table is
+  not read as green unless the group counts sum to the discovery count.
 * Finding 6: `python3 /tmp/impl-tdot-fastgate.py`, memoised per case, driving `bash tools/fast-gate.sh`
   with `GIT_CHANGED` set to each representative path.
 
