@@ -159,6 +159,23 @@ class TestWorktreeBeadsDecoyGuard(unittest.TestCase):
             self.assertEqual(found, [])
 
 
+def catches_a_missing_module(handler: ast.ExceptHandler) -> bool:
+    """True only when this handler can actually swallow a MISSING MODULE (agents-85ef).
+
+    `except ValueError:` cannot - a missing lib module raises ModuleNotFoundError, which is not a
+    ValueError - so an import under it is required, and the earlier rule ("any *Error handler makes the
+    import optional") dropped a real dependency. A bare `except:` and the four names below can catch it.
+    """
+    if handler.type is None:
+        return True
+    names: list[str] = []
+    if isinstance(handler.type, ast.Name):
+        names = [handler.type.id]
+    elif isinstance(handler.type, ast.Tuple):
+        names = [e.id for e in handler.type.elts if isinstance(e, ast.Name)]
+    return any(n in {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"} for n in names)
+
+
 def staged_runtime_missing_modules(root: Path) -> list[str]:
     """Staging lists in tests/ that do NOT carry the modules the runtime they build imports.
 
@@ -188,6 +205,25 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
     is answered by the dispatcher's own dependency markers (budget.py, child_env.py), not by "it
     copies something only factory imports" - that weaker test failed six healthy sites too.
 
+    TWO MORE SHAPES OF WRONG, both found by reviewers and both fixed here rather than narrowed away
+    (agents-85ef): a class BODY executes at import time, so `class Init: from lib.absent import x`
+    breaks a staged tree exactly as a module-scope import does, and an `except ValueError:` cannot catch
+    a missing module (that raises ModuleNotFoundError), so an import under it is required too. Both were
+    measured against a real staged tree that raised ModuleNotFoundError while this guard reported
+    nothing. A genuine `except ImportError:` fallback is still optional, and the tests hold that control.
+
+    REJECTED ATTEMPTS ARE RECORDED HERE BECAUSE THEY WILL BE RE-PROPOSED, and each was rejected by
+    measuring it rather than by argument:
+      - walk into package directories (lib/sinks/*.py) as part of the closure: the engine closure would
+        gain lib/budget.py through lib/sinks/command.py and SEVEN healthy sites go red demanding a
+        module they never import. The package is staged as a tree by copytree and its internal imports
+        are not the tree's entry points, so a module reachable ONLY through a package is out of scope
+        for this rule - a known, measured false negative rather than a guessed fix;
+      - fail loudly on any staging loop whose module list this guard cannot read: the detector fires on
+        two healthy loops on the current tree, one of which iterates `(ROOT / 'lib').glob('*.py')` and
+        is EXHAUSTIVE BY CONSTRUCTION, so it cannot be missing anything. A dynamic list that adds a
+        module by name is still a hole (agents-n5e0) and needs a discriminator this rule does not have.
+
     Returns a list of 'path:line: stages [...]; missing [...]' strings, or [] when every list is
     complete.
     """
@@ -205,8 +241,7 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                     if isinstance(sub, (ast.Import, ast.ImportFrom)):
                         optional.add(id(sub))
             if isinstance(node, ast.Try):
-                guarded = any(h.type is None or "Error" in ast.unparse(h.type) for h in node.handlers)
-                if guarded:
+                if any(catches_a_missing_module(h) for h in node.handlers):
                     for sub in node.body:
                         for inner in ast.walk(sub):
                             if isinstance(inner, (ast.Import, ast.ImportFrom)):
@@ -215,8 +250,10 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
 
         def walk(node: ast.AST) -> None:
             for child in ast.iter_child_nodes(node):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
-                                      ast.Lambda)):
+                # A CLASS BODY runs at import time, so its imports are required like any other
+                # module-scope import (agents-85ef). A METHOD does not, and is skipped as a
+                # FunctionDef below - which is the whole reason this is not just "walk everything".
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                     continue
                 if id(child) in optional:
                     continue
@@ -303,7 +340,7 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             if missing:
                 problems.append(
                     f"{path.name}:{node.lineno}: this staging list builds a runtime that imports "
-                    f"{sorted(m + '.py' for m in missing)} at module scope but does not copy it"
+                    f"{sorted(m + '.py' for m in missing)} at import time but does not copy it"
                 )
     return problems
 
@@ -343,12 +380,76 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
             self.assertIn("test_staged.py", problems[0])
             self.assertIn("newthing.py", problems[0])
 
-    def test_the_closure_is_derived_and_not_vacuous(self):
-        """The requirement is read from the source, so the guard proves it went and looked."""
-        tree = ast.parse((ROOT / "lib" / "findings.py").read_text(encoding="utf-8"))
-        self.assertTrue(tree.body)
-        source = (ROOT / "lib" / "findings.py").read_text(encoding="utf-8")
-        self.assertIn("from lib.", source)   # findings.py imports siblings; the closure is real
+    def test_the_requirement_is_derived_from_the_source_and_enforced(self):
+        """agents-eq11, found by a reviewer: the earlier version of this test was VACUOUS.
+
+        It asserted that findings.py contains a `from lib.` import and never called the guard, so it
+        would have passed against a guard that returned [] for every tree - a test that cannot fail for
+        the property it names, which is the defect the guard itself exists to remove. This one asserts
+        the derived requirement is ENFORCED: a tree staging the engine without a sibling the engine
+        imports must be reported, and the module it names is one the guard learned by reading the source.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "lib").mkdir()
+            (tmp / "tests").mkdir()
+            (tmp / "factory").write_text("from lib.embargo import x\n", encoding="utf-8")
+            (tmp / "lib" / "findings.py").write_text(
+                "from lib.embargo import needed\n", encoding="utf-8")
+            (tmp / "lib" / "embargo.py").write_text("needed = 1\n", encoding="utf-8")
+            (tmp / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                'MODULES = ("findings.py",)\n'
+                'def build(root):\n    for module in MODULES:\n'
+                '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n',
+                encoding="utf-8")
+            problems = staged_runtime_missing_modules(tmp)
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn("embargo.py", problems[0])
+
+    def test_import_time_imports_are_required_even_in_a_class_body_or_an_odd_handler(self):
+        """agents-85ef, found by a reviewer against a real staged tree rather than by inspection.
+
+        A class body executes at import time, so `class Init: from lib.extra import required` fails a
+        staged tree exactly as a module-scope import does; and `except ValueError:` cannot catch a
+        missing module, so an import under it is required too. Both were measured against a staged tree
+        that raised ModuleNotFoundError while this guard reported nothing. THE THIRD CASE IS THE CONTROL:
+        a genuine `except ImportError:` fallback must stay unflagged, or the fix would demand modules
+        from trees that run perfectly well without them.
+        """
+        def synthetic(findings_source):
+            directory = Path(tempfile.mkdtemp())
+            (directory / "lib").mkdir()
+            (directory / "tests").mkdir()
+            (directory / "factory").write_text("from lib.embargo import x\n", encoding="utf-8")
+            (directory / "lib" / "findings.py").write_text(findings_source, encoding="utf-8")
+            (directory / "lib" / "embargo.py").write_text("x = 1\n", encoding="utf-8")
+            (directory / "lib" / "extra.py").write_text("required = 1\n", encoding="utf-8")
+            (directory / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                'MODULES = ("findings.py", "embargo.py")\n'
+                'def build(root):\n    for module in MODULES:\n'
+                '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n',
+                encoding="utf-8")
+            return directory
+
+        class_body = synthetic("from lib.embargo import x\n\nclass Init:\n"
+                               "    from lib.extra import required\n")
+        self.assertEqual(len(staged_runtime_missing_modules(class_body)), 1,
+                         staged_runtime_missing_modules(class_body))
+        self.assertIn("extra.py", staged_runtime_missing_modules(class_body)[0])
+
+        odd_handler = synthetic("from lib.embargo import x\ntry:\n"
+                                "    from lib.extra import required\n"
+                                "except ValueError:\n    pass\n")
+        self.assertIn("extra.py", "".join(staged_runtime_missing_modules(odd_handler)),
+                      "an except that cannot catch a missing module does not make the import optional")
+
+        real_fallback = synthetic("from lib.embargo import x\ntry:\n"
+                                  "    from lib.extra import required\n"
+                                  "except ImportError:\n    required = None\n")
+        self.assertEqual(staged_runtime_missing_modules(real_fallback), [],
+                         "a genuine ImportError fallback means the tree runs without the module")
 
 
 if __name__ == "__main__":
