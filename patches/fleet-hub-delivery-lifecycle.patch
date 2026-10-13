@@ -1,5 +1,5 @@
 diff --git a/bin/fleet-park b/bin/fleet-park
-index 03c110d..3bde903 100755
+index 03c110d..b6924d1 100755
 --- a/bin/fleet-park
 +++ b/bin/fleet-park
 @@ -2,7 +2,9 @@
@@ -54,7 +54,7 @@ index 03c110d..3bde903 100755
    body=$(jq -nc --arg b "$branch" --arg l "${FLEET_LANE:-cli}" '{branch:$b,unpark:true,lane:$l}')
  else
    branch="${1:-}"
-@@ -40,4 +70,23 @@ if [ "$code" != "200" ]; then
+@@ -40,4 +70,25 @@ if [ "$code" != "200" ]; then
    exit 1
  fi
  
@@ -64,6 +64,8 @@ index 03c110d..3bde903 100755
 +    if bdir=$(resolve_bead_dir "$prev_bead"); then
 +      (cd "$bdir" && bd update "$prev_bead" --remove-label parked >/dev/null 2>&1) || \
 +        echo "fleet-park: warning: could not remove 'parked' label from bead $prev_bead" >&2
++    else
++      echo "fleet-park: warning: bead $prev_bead database not resolved in ~/.fleet/beads-dbs; bead 'parked' label not removed" >&2
 +    fi
 +  fi
 +else
@@ -170,6 +172,57 @@ index 881cdfd..d4fd19c 100644
    if (has(i, /^merge-queue$/)) return "to_land";
    if (has(i, /^(in_review|in-review|review|needs-review)$/)) return "review";
    if (i.status === "blocked" || i.status === "deferred" || (i.dependency_count && i.status === "open" && i.blocked)) return "blocked";
+diff --git a/tests/fleet-park.test.sh b/tests/fleet-park.test.sh
+index bebaa9a..71271df 100755
+--- a/tests/fleet-park.test.sh
++++ b/tests/fleet-park.test.sh
+@@ -501,6 +501,17 @@ if [[ " \$* " =~ " --label merge-queue " ]]; then
+ JSON
+   exit 0
+ fi
++if [[ " \$* " =~ " show " ]]; then
++  if [[ " \$* " =~ " phantom-bead " ]]; then
++    exit 1
++  fi
++  echo '{"id":"mock-bead"}'
++  exit 0
++fi
++if [[ " \$* " =~ " update " ]]; then
++  echo "\$*" >> "$ROOT/mock-bd-updates.log"
++  exit 0
++fi
+ echo "[]"
+ exit 0
+ EOF
+@@ -995,6 +1006,28 @@ fi
+ 
+ rm -f "$ROOT"/comments-*.json
+ 
++# 5z4: parking and unparking with a bead updates bead label and restores eligibility
++PATH="$mock_bin:$PATH" bin/fleet-park "fleet/park-test-branch" "Testing bead label update" "fleet-101" >/dev/null 2>&1
++park_labeled=0; grep -q "fleet-101 --add-label parked" "$ROOT/mock-bd-updates.log" 2>/dev/null && park_labeled=1
++
++PATH="$mock_bin:$PATH" bin/fleet-park --unpark "fleet/park-test-branch" >/dev/null 2>&1
++unpark_unlabeled=0; grep -q "fleet-101 --remove-label parked" "$ROOT/mock-bd-updates.log" 2>/dev/null && unpark_unlabeled=1
++
++if [ "$park_labeled" -eq 1 ] && [ "$unpark_unlabeled" -eq 1 ]; then
++  pass "5z4 parking branch labels bead parked and unpark removes parked label"
++else
++  fail "5z4 park/unpark bead label update" "parked=$park_labeled unparked=$unpark_unlabeled"
++fi
++
++# 5z5: unpark with unresolvable bead warns on stderr
++echo '{"fleet/unresolvable-branch":{"reason":"testing unresolvable","bead":"phantom-bead"}}' > "$TEST_HOME/.fleet/parked"
++err_unpark=$(PATH="$mock_bin:$PATH" bin/fleet-park --unpark "fleet/unresolvable-branch" 2>&1 || true)
++if grep -q "database not resolved in ~/.fleet/beads-dbs" <<<"$err_unpark"; then
++  pass "5z5 unpark with unresolvable bead warns on stderr instead of silent failure"
++else
++  fail "5z5 unpark unresolvable bead warning" "err=$err_unpark"
++fi
++
+ echo ""
+ echo "$PASS passed, $FAIL failed"
+ [ "$FAIL" -eq 0 ]
 diff --git a/tests/watchdog-drivers.test.sh b/tests/watchdog-drivers.test.sh
 index fd032db..5b03a76 100755
 --- a/tests/watchdog-drivers.test.sh
@@ -225,7 +278,7 @@ index 881cdfd..d4fd19c 100644
    if (has(i, /^(in_review|in-review|review|needs-review)$/)) return "review";
    if (i.status === "blocked" || i.status === "deferred" || (i.dependency_count && i.status === "open" && i.blocked)) return "blocked";
 diff --git a/watchdog/watchdog.mjs b/watchdog/watchdog.mjs
-index 637494f..6c8e065 100644
+index 637494f..3a4fa55 100644
 --- a/watchdog/watchdog.mjs
 +++ b/watchdog/watchdog.mjs
 @@ -203,7 +203,7 @@ async function checkVm(vm) {
@@ -246,3 +299,12 @@ index 637494f..6c8e065 100644
          if (!mine.length) continue;
          if (cool(`idlehold:${vm}:${id}`, 20)) {
            await tell(vm, id.split(`${vm}-`)[1],
+@@ -361,7 +361,7 @@ async function checkVm(vm) {
+         const [kvm, klane] = k.split("|");
+         if (kvm !== vm) continue;
+         const stillIdle = idleOf.has(klane) && (idleOf.get(klane) ?? 0) >= T.idleHoldMin;
+-        const stillHolds = b.in_flight.some((i) => i.assignee === klane);
++        const stillHolds = b.in_flight.some((i) => i.assignee === klane && !(i.labels || []).some((x) => EXCUSED.test(x)));
+         if (!(stillIdle && stillHolds)) { delete state.idleHoldNudges[k]; delete state.alerts[`idlehold:${k}`]; }
+       }
+     }
