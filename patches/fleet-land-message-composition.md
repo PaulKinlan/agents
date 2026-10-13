@@ -3,15 +3,19 @@
 - **Bead:** `agents-ymh2` (coord ruling, 2026-10-13: compose `agents-2tov` + `agents-9lew` + `agents-m6fr` into one
   delivery, because all three patch the same 61KB file in the SAME PIPELINE - choose a verdict, then decide whether
   it clears this tip).
-- **Status: NOT YET GREEN - 331 passed / 10 failed.** This document is the composition's diagnosis and its exact
+- **Status: NOT YET GREEN - 345 passed / 10 failed.** This document is the composition's diagnosis and its exact
   remaining work, not a request to land. The three source deliveries are individually reviewed; the composition is
-  where they meet, and they do not meet cleanly.
-- **Patch:** `patches/fleet-land-message-composition.patch` against pristine `~/fleet` copies.
+  where they meet, and they do not meet cleanly. wwss is folded in as STEP 0 (coord's ruling), so this one artifact
+  carries the whole series.
+- **Patch:** `patches/fleet-land-message-composition.patch` (1048 lines, sha256 `8920c99901496951…`) against pristine
+  `~/fleet` copies. Applies with `patch -p1 --fuzz=0`, is byte-identical to the assembled tree, and REPRODUCES the
+  345/10 state.
 
 ## The stack, and the order that matters
 
 | step | artifact | author | applies |
 |---|---|---|---|
+| 0 | the `--landed-tip` / gate-refusal change | agents-wwss | clean, but ONLY as step 0: applied AFTER the stack it needs re-cuts (measured both ways) |
 | 1 | `patches/fleet-verdict-transcription-scanner.patch` | (shelf, already in main) | clean |
 | 2 | `patches/fleet-verdict-model-families-filter.patch` | (shelf, already in main) | clean |
 | 3 | `patches/fleet-verdict-pool-sha-relevance.patch` | agents-9lew | clean |
@@ -38,6 +42,25 @@ columns on purpose**.
 **CONSTRAINT, NOT A NOTE: `author_source` (which lane or model AUTHORED) and m6fr's run-reason (whether the POSTED
 VERDICT has an artifact behind it) must not share a name or a parser.** A transcribed verdict that reads as
 author-sourced is precisely the confusion m6fr exists to close.
+
+## The constraints the delivery must carry (coord's ruling)
+
+1. **APPLICATION ORDER** is stated above, because the tree order and the semantic order are opposite.
+2. **FIELD SEPARATION IS A CONSTRAINT, NOT A NOTE:** `author_source` (which lane or model AUTHORED) and m6fr's
+   run-reason / the poster of the verdict must not share a name or a parser - a transcribed verdict that reads as
+   author-sourced is precisely the confusion m6fr exists to close.
+3. **`agents-6943` STAYS EXPLICITLY AFTER THIS:** its evidence (32 changed lines, per-file digests) must be
+   RE-DERIVED rather than reused if a selection fix moves the delta - a digest is a claim about an object, and the
+   object moves.
+4. **`--landed-tip` IS NOT AN OVERRIDE:** it records the gate for the tip that was ACTUALLY MERGED while the gate
+   commit must still CONTAIN the tip being recorded, and (after agents-orjl) while the tip must ALSO be tied to the
+   named branch. It moves the OPERAND, never the decision.
+
+THE FOLD MADE CONSTRAINT 2 CONCRETE RATHER THAN THEORETICAL: folding wwss in produced exactly ONE conflict, on the
+shared declaration line - the stack's `AUTHOR_MODEL_ARG` against wwss's `LANDED_TIP`. Two independent columns on one
+line, so both were kept, which is the same resolution m6fr's hunk needed. Three deliveries met on a single line and
+no value was overwritten - and the fold added 14 passing cases with NO new failures, so the interaction is bounded
+and understood rather than merely present.
 
 ## The conflict that is NOT mechanical - THE FINDING
 
@@ -70,6 +93,7 @@ Two classes of remaining work, and they need different owners:
 ## What the reviewer must check (one reviewer, all of it at once)
 
 1. the application order, and that steps 1-4 apply with zero failed hunks on the stated base;
+   (the folded patch applies to pristine copies at fuzz 0 and reproduces 345 passed / 10 failed exactly)
 2. the field separation above - two columns, two names, no shared parser;
 3. whether the m6fr reclassification is the intended outcome for a same-lane-posted cross-family verdict, or
    whether `fleet-15b5` still governs those shapes;
