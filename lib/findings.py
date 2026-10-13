@@ -99,7 +99,14 @@ DELTA_KEYS = ("new", "regressed", "fixed", "unchanged", "suppressed", "false_pos
               # Not a table column: a subset counter beside `fixed` (which remains the total).
               # Counts disappearances of rows with no stable anchor (identity_source outside
               # IDENTITY_STABLE_SOURCES), announced as a banner under the counts table (agents-6r8y).
-              "fixed_unanchored")
+              "fixed_unanchored",
+              # The APPEARANCE-side counterpart (agents-l606): a subset counter beside `new`,
+              # counting new findings whose identity rests on model prose (see _unanchored_new_note).
+              "new_unanchored",
+              # Not a table column: appearances that share a location with a row THIS SAME RUN booked
+              # Fixed - the same finding under a fresh fingerprint. Removed FROM `new` rather than
+              # added to it: the run's own Fixed list is the evidence (agents-l606).
+              "rekeyed")
 
 def normalize_text(text: Any) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting.
@@ -347,6 +354,16 @@ IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
                            "candidate-id")
 
 
+def is_unanchored_source(source: Any) -> bool:
+    """Whether an identity SOURCE NAME is outside the stable set - the predicate without a record.
+
+    Factored so the appearance side (agents-l606) and the disappearance side (agents-6r8y) cannot
+    drift into two spellings of one rule: `process_run` holds the source NAME at the point where it
+    decides a fresh appearance's `change`, and a record everywhere else.
+    """
+    return bool(not source or source not in IDENTITY_STABLE_SOURCES)
+
+
 def is_unanchored_finding(finding: Dict[str, Any]) -> bool:
     """Whether a finding has NO stable scanner anchor (identity rests on model prose).
 
@@ -360,8 +377,7 @@ def is_unanchored_finding(finding: Dict[str, Any]) -> bool:
     location an older row had left, trading a visible wave for an invisible one. The marker
     tracks the last-observed anchor stability without inventing speculative re-bindings.
     """
-    source = finding.get("identity_source")
-    return bool(not source or source not in IDENTITY_STABLE_SOURCES)
+    return is_unanchored_source(finding.get("identity_source"))
 
 
 def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
@@ -1028,6 +1044,15 @@ class FindingsStore:
                 suppression_reason = existing.get("suppression_reason")
 
             delta_stats["false_positive" if false_positive else change] += 1
+            # APPEARANCE SIDE (agents-l606): `new` stays the TOTAL number of appearances, with
+            # `new_unanchored` as a subset counter beside it - the same shape as `fixed_unanchored`.
+            # An appearance whose identity rests on the model's prose is indistinguishable from a row
+            # that MOVED KEY: a reword or a rule_id re-derivation mints a fresh fingerprint for an
+            # unchanged finding, so one run books it New while booking the row it re-keyed Fixed.
+            # Measured in the 2026-10-13 nightly: 6 of the 7 New rows had a same-path:line Fixed twin.
+            if (not false_positive and change == "new"
+                    and is_unanchored_source(identity_source)):
+                delta_stats["new_unanchored"] += 1
             finding_record = {
                 "fingerprint": fp,
                 # Which key produced this fingerprint (agents-x9my). Written from the binder's own
@@ -1098,6 +1123,43 @@ class FindingsStore:
             # keeps those receipts while dropping the raw text.
             self.data["findings"][fp] = finding_record
             processed.append(finding_record)
+
+        # A RE-KEY IS NOT A DISCOVERY (agents-l606). A row whose identity rests on the model's prose
+        # is re-keyed when that prose is reworded or the rule label is re-derived, so the SAME finding
+        # can appear under a fresh fingerprint while the row it moved from is booked Fixed in this
+        # very run - measured in the 2026-10-13 nightly as six of seven "New" rows having a
+        # same-path:line twin in that run's own Fixed list. An appearance at the exact location of a
+        # row retiring now is therefore that row moving key, not a finding, and is taken out of `new`.
+        #
+        # DELIBERATELY NARROW, because the risk here is documented (see the Option E note on
+        # is_unanchored_finding): matching on location alone would let a genuinely new finding be
+        # absorbed into a location an older row had just left, trading a visible wave for an invisible
+        # one. Requiring the appearance to be UNANCHORED keeps the rule to the case where the identity
+        # is provably unstable, and the evidence is positive rather than a judgement: the run contains
+        # the twin, and the twin is reported as Fixed beside it.
+        retiring = {}
+        for _fp, _existing in self.data["findings"].items():
+            if _existing.get("agent") != agent or _fp in current_fps:
+                continue
+            if _existing.get("state") not in ("new", "accepted", "regressed"):
+                continue
+            retiring.setdefault((normalize_path(_existing.get("path")),
+                                 _hashable_line(_existing.get("line_number"))), _fp)
+        for record in processed:
+            if (record.get("change") != "new" or record.get("false_positive")
+                    or not is_unanchored_finding(record)):
+                continue
+            loc = (normalize_path(record.get("path")),
+                   _hashable_line(record.get("line_number")))
+            if loc not in retiring:
+                continue
+            record["change"] = "rekeyed"
+            delta_stats["new"] -= 1
+            # `new_unanchored` stays a SUBSET of `new`, so a row leaving `new` leaves it too; a
+            # counter that can exceed the total it is a subset of is the contradiction this
+            # bookkeeping exists to avoid.
+            delta_stats["new_unanchored"] -= 1
+            delta_stats["rekeyed"] += 1
 
         # 2. Check for findings previously detected by this agent that are now missing (fixed)
         fixed_items = []
@@ -1460,6 +1522,28 @@ def _unanchored_fixed_note(stats: Dict[str, int]) -> List[str]:
     ]
 
 
+def _unanchored_new_note(stats: Dict[str, int]) -> List[str]:
+    """The appearance-side counterpart of _unanchored_fixed_note (agents-l606).
+
+    `new` counts the total number of new findings; this note reports the subset whose identity rested
+    on the model's wording rather than on a scanner candidate, whose newness is therefore unattributed
+    - a reworded or re-keyed row looks the same as a discovery. Where such a row shares its location
+    with a row the same run booked Fixed, it is reported as RE-KEYED instead and leaves this count
+    (see the reconciliation in process_run): the pair is what made the 2026-10-13 nightly book six of
+    its seven new rows beside the Fixed twin of themselves.
+    """
+    unanchored = int(stats.get("new_unanchored", 0) or 0)
+    if unanchored <= 0:
+        return []
+    total_new = int(stats.get("new", 0) or 0)
+    return [
+        f"> **Unanchored appearances**: {unanchored} of {total_new} new finding(s) had no stable "
+        "anchor, so their newness is unattributed: a row whose wording was reworded or whose rule "
+        "label was re-derived is indistinguishable from a discovery. (agents-l606)",
+        "",
+    ]
+
+
 def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
                          fixed_items: List[Dict[str, Any]], *, step_summary: bool = False,
                          sink_results: Optional[Dict[str, Any]] = None,
@@ -1481,6 +1565,10 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     false_positives = [f for f in findings if f.get("false_positive")]
     live = [f for f in findings if not f.get("false_positive")]
     new_or_regressed = [f for f in live if f["change"] in ("new", "regressed")]
+    # agents-l606: rows the same run re-keyed - an unanchored appearance at the location of a row this
+    # run booked Fixed - are not new findings and are reported separately, with the Fixed twin beside
+    # them. `new` and `new_unanchored` already exclude them (see the reconciliation in process_run).
+    rekeyed = [f for f in live if f["change"] == "rekeyed"]
     unchanged = [f for f in live if f["change"] == "unchanged"]
     suppressed = [f for f in live if f["state"] == "wontfix"]
     withheld = [f for f in findings if reduced(f)]
@@ -1534,6 +1622,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
 
     lines += _migration_note(stats)
     lines += _unanchored_fixed_note(stats)
+    lines += _unanchored_new_note(stats)
 
     if stations is not None:
         lines.append("## Stations")
@@ -1608,6 +1697,20 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
             if f.get("remediation"):
                 lines.append(f"- **Remediation**: {f['remediation']}")
             lines.append("")
+
+    if rekeyed:
+        lines.append("## Re-keyed Appearances (not new findings)")
+        lines.append("")
+        lines.append("> Each row below appeared under a fresh fingerprint while the row it moved from "
+                     "was booked Fixed in this same run: the identity is the model's wording, so "
+                     "rewording it or re-deriving the rule label re-keys the same finding. The evidence "
+                     "is positive rather than a judgement - the run contains the twin "
+                     "(agents-l606).")
+        lines.append("")
+        for f in rekeyed:
+            lines.append(f"- **`{f.get('rule_id')}`**: {f.get('title')} "
+                         f"(`{f.get('path')}:{f.get('line_number', '?')}`){_identity_note(f)}")
+        lines.append("")
 
     if fixed_items:
         lines.append("## Resolved in this Run (Fixed)")
