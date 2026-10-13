@@ -1,6 +1,6 @@
---- base	2026-10-13 02:01:03.822700762 +0000
-+++ x	2026-10-13 02:41:47.888834865 +0000
-@@ -92,7 +92,27 @@
+--- base-p1	2026-10-13 04:30:01.821540558 +0000
++++ fh-both	2026-10-13 04:29:08.041278206 +0000
+@@ -92,7 +92,35 @@
    # A LIVE WRAPPER IS NEVER TOUCHED. fleet-heavy stays alive for the whole job (it waits on `nice` then exits),
    # so a live recorded pid means the job is running - however slow - and a slow gate is what this queue exists
    # to protect.
@@ -24,12 +24,20 @@
 +    case "$holders" in
 +      "$hp"|"$hp"$'\n'*|*$'\n'"$hp"|*$'\n'"$hp"$'\n'*) return 1 ;;   # a live WRAPPER: honest slow job
 +    esac
-+    echo "fleet-heavy: slot$i label names pid $hp, alive but holding no fd - not our wrapper (agents-5n28)" >&2
++    # agents-2o7z: this line was reached for BOTH a reused LIVE pid and a plain DEAD one and called both
++    # "alive". Two cases, two truthful sentences - the dead case is the common one and it was being
++    # described wrongly, which matters because this diagnostic is what a human reads to decide whether a
++    # silent gate is stuck or gone.
++    if kill -0 "$hp" 2>/dev/null; then
++      echo "fleet-heavy: slot$i label names pid $hp, alive but holding no fd - a reused pid, not our wrapper (agents-5n28, agents-2o7z)" >&2
++    else
++      echo "fleet-heavy: slot$i label names pid $hp, but that pid is GONE - a dead wrapper, not a holder (agents-2o7z)" >&2
++    fi
 +  fi
    # Two orphan signatures, both exact:
    #   (a) the label names a pid that is GONE while the fd is still held - a killed wrapper and its descendants;
    #   (b) there is NO label at all while the fd is held - the holder died before/without writing one (the
-@@ -108,7 +128,10 @@
+@@ -108,7 +136,10 @@
    done
    [ "$oldest" -ge "${FLEET_HEAVY_ORPHAN_GRACE:-60}" ] || return 1
    if [ -n "$hp" ]; then

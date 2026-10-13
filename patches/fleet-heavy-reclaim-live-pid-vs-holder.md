@@ -107,3 +107,41 @@ slot fd, so the substitution's own fork/grep/tr are holders by the function's ow
 defect `agents-nxj8` patches at the job-end sweep call site; the durable fix is **inside**
 `slot_fd_holders`, where it would cover all three callers at once. Filed separately so neither patch
 has to be amended while it is under review.
+
+
+## agents-2o7z: the label diagnostic named a DEAD pid as "alive"
+
+`rev-a9t9` reviewed this patch and found its own diagnostic untruthful in the common case. The line
+
+    fleet-heavy: slot$i label names pid $hp, alive but holding no fd - not our wrapper
+
+is reached when the label names a pid that is NOT a holder, which happens for two quite different reasons: the
+pid was REUSED by an unrelated live process (the case agents-5n28 was about), or the wrapper is simply DEAD.
+It asserted "alive" for both. The second line - the one agents-a9t9 added - was already accurate.
+
+**Two cases, two sentences, chosen by `kill -0`:**
+
+    if kill -0 "$hp" 2>/dev/null; then
+      echo "... label names pid $hp, alive but holding no fd - a reused pid, not our wrapper ..."
+    else
+      echo "... label names pid $hp, but that pid is GONE - a dead wrapper, not a holder ..."
+    fi
+
+Worth fixing rather than documenting, because this diagnostic is what a human reads to decide whether a silent
+gate is STUCK or GONE, and getting that backwards sends the reader to the wrong recovery action.
+
+### Driven, three ways, on the reviewer's own shape (a dead pid in the label, a live flock holding the slot)
+
+| binary | stderr |
+| --- | --- |
+| unpatched | `reclaiming slot1 - holder 1349108 is GONE but 2 process(es) have held it 5s: ...` |
+| this patch BEFORE agents-2o7z | `slot1 label names pid 1350621, alive but holding no fd - not our wrapper` **<- untrue, the pid was dead** |
+| this patch AFTER agents-2o7z | `slot1 label names pid 1353143, but that pid is GONE - a dead wrapper, not a holder` |
+
+The fixture plants a pid that is verified dead before the run and holds the slot with a live `flock`, so the
+label and the fd disagree in exactly the way the reviewer's repro describes.
+
+**And a note on the first attempt at that fixture**, because it is a trap this VM has hit before: `pgrep -f
+"slot1"` matched the INVOKING SHELL's own command line, so the pid it returned was the shell's, and the
+`kill -9` that followed killed the shell running the test (exit 137). The fixture now derives a known-dead pid
+directly rather than by pattern-matching a process list.
