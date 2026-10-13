@@ -69,13 +69,43 @@ else
     # survives it. The factory tracks main deliberately (no pin), which is precisely why the
     # update failing has to be visible: otherwise the nightly runs against a station set of
     # unknown age while every health check still passes.
-    if ! git -C "$FACTORY_DIR" pull --ff-only --quiet; then
+    #
+    # agents-a1ko: AND IT MUST NAME THE CLASS OF FAILURE, because that same suppression means the
+    # exit code is all an operator gets: a transient NETWORK outage and a DIVERGED checkout both
+    # arrived as `exit 1`, and they want OPPOSITE responses (retry later versus investigate the
+    # checkout on the host). The class is read from git's own error text, which is MEASURED rather
+    # than assumed - all three shapes are driven against real git in
+    # tests/test_gate_entrypoint_config.py - and THE THIRD CLASS EXISTS SO AN UNRECOGNISED FAILURE
+    # IS REPORTED AS UNRECOGNISED rather than guessed into one of the other two. That matters here
+    # specifically: the wording of the local-state case is NOT stable - MEASURED in two runs of the
+    # same shape on this VM, git said "error: cannot pull with rebase: You have unstaged changes."
+    # under the host's global pull.rebase=true and "error: Your local changes to the following files
+    # would be overwritten by merge" with that setting pinned false - so a two-class rule would have
+    # to guess on one of them.
+    if ! update_error="$(git -C "$FACTORY_DIR" pull --ff-only --quiet 2>&1)"; then
       stale="$(git -C "$FACTORY_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+      failure_class="checkout-local-state"
+      failure_action="The checkout has uncommitted changes, or a git config routes the pull through a rebase, so the pull cannot fast-forward. Inspect the checkout on the host; the network is not the problem."
+      case "$update_error" in
+        *"does not appear to be a git repository"* | *"Could not read from remote repository"* | \
+        *"Could not resolve host"* | *"unable to access"* | *"Connection refused"* | \
+        *"Connection timed out"* | *"No route to host"* | *"Temporary failure in name resolution"* | \
+        *"Permission denied"*)
+          failure_class="remote-unreachable"
+          failure_action="The remote could not be reached, which is usually transient: retrying the pull later is safe and no local state was changed."
+          ;;
+        *"Not possible to fast-forward"* | *"Diverging branches"* | *"non-fast-forward"*)
+          failure_class="checkout-diverged"
+          failure_action="The checkout has local commits (or a rewritten history) the remote does not have, so the pull cannot fast-forward. Investigate the checkout on the host; retrying fails the same way."
+          ;;
+      esac
       {
         echo "✗ install.sh: could not update the Software Factory checkout in $FACTORY_DIR"
-        echo "  'git pull --ff-only' failed, so this run would install station skills from a"
-        echo "  stale checkout (currently at $stale). Resolve the checkout or the network and"
-        echo "  re-run; nothing was installed from it (agents-yow5)."
+        echo "  FAILURE CLASS: $failure_class (agents-a1ko)"
+        echo "  $failure_action"
+        while IFS= read -r line; do echo "  git: $line"; done <<<"$update_error"
+        echo "  The checkout is still at $stale, so this run would have installed station skills"
+        echo "  from a stale checkout; nothing was installed from it (agents-yow5)."
       } >&2
       exit 1
     fi

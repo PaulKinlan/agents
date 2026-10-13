@@ -950,5 +950,152 @@ class TestTheFleetBundleInterfaceThisSuiteDrives(unittest.TestCase):
                              f"dropping {anchor!r} must be reported, and only it")
 
 
+class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
+    """agents-a1ko: the installer must CLASSIFY a failed update, not merely fail.
+
+    WHY A CLASS AND NOT ONLY A FAILURE (agents-yow5 made the failure loud). The caller
+    (remote/provision.sh:970) runs this installer with all output suppressed, so what an operator
+    actually sees is a non-zero exit and nothing else - and a transient NETWORK outage and a
+    DIVERGED checkout are the same exit code with OPPOSITE responses: retry later, versus
+    investigate the checkout on the host. Naming the class in the installer's own output is the only
+    thing that survives the suppression.
+
+    EVERY SHAPE BELOW IS DRIVEN AGAINST REAL GIT, one fixture mutated three ways, so the
+    classification is pinned to git's behaviour rather than to a string someone remembered. Two
+    properties are asserted per case: the class the installer NAMES is the right one, and the two
+    responses to the other classes do not appear - an operator who cannot distinguish them is where
+    this started.
+
+    THE THIRD CLASS IS THE HONEST ONE, and it is asserted rather than assumed to be unreachable: an
+    unrecognised failure is reported as `checkout-local-state` instead of being guessed into one of
+    the other two. For it the test asserts the CLASS and the git evidence, never git's wording,
+    because that wording is not stable: MEASURED in two runs of the same shape on this VM, git said
+    "error: cannot pull with rebase: You have unstaged changes." under the host's global
+    pull.rebase=true, and "error: Your local changes to the following files would be overwritten by
+    merge" with that setting pinned false. The fixture pins `pull.rebase=false` locally, and the
+    run's environment blinds the host's git config, because a verdict that depends on the machine
+    is a defect in the test rather than evidence about the installer.
+    """
+
+    IDENTITY = ["-c", "user.email=installer@test.invalid", "-c", "user.name=installer"]
+
+    def _git(self, cwd: Path, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(cwd), *args], check=True,
+                              capture_output=True, text=True).stdout
+
+    def _seed_commit(self, seed: Path, origin: Path, message: str) -> None:
+        self._git(seed, "add", "-A")
+        subprocess.run(["git", "-C", str(seed), *self.IDENTITY, "commit", "-q", "-m", message],
+                       check=True, capture_output=True, text=True)
+        self._git(seed, "push", "-q", str(origin), "HEAD:refs/heads/main")
+
+    def _working_checkout(self, root: Path) -> tuple[Path, Path, Path]:
+        """A real checkout that CAN be pulled, so each shape is one mutation of it and the
+        difference between two cases is the mutation rather than two different fixtures."""
+        origin = root / "origin.git"
+        seed = root / "seed"
+        seed.mkdir()
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        self._git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+        subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+        (seed / "tracked.txt").write_text("one\n", encoding="utf-8")
+        self._seed_commit(seed, origin, "one")
+
+        checkout = root / "agents"
+        subprocess.run(["git", "clone", "-q", str(origin), str(checkout)], check=True)
+        self._git(checkout, "config", "pull.rebase", "false")
+        return origin, seed, checkout
+
+    def _run_installer(self, root: Path, checkout: Path, home: Path):
+        """install.sh, run from OUTSIDE a checkout so the update branch is the one under test."""
+        installer_dir = root / "installer"
+        installer_dir.mkdir(exist_ok=True)
+        installer = installer_dir / "install.sh"
+        shutil.copy(ROOT / "install.sh", installer)
+        env = _entrypoint_env(str(home))
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_CONFIG_SYSTEM"] = os.devnull
+        return subprocess.run(["bash", str(installer), "-d", str(checkout)],
+                              capture_output=True, text=True, env=env, cwd=str(root),
+                              timeout=120)
+
+    def _assert_installs_nothing_and_names(self, res, home: Path, checkout: Path,
+                                           expected: str, *not_expected: str) -> str:
+        output = res.stdout + res.stderr
+        self.assertNotEqual(res.returncode, 0, output)
+        self.assertIn(f"FAILURE CLASS: {expected}", output,
+                      "the installer must NAME the class of failure in its own output, because "
+                      "provisioning suppresses everything else it prints")
+        for other in not_expected:
+            self.assertNotIn(f"FAILURE CLASS: {other}", output)
+        short = self._git(checkout, "rev-parse", "--short", "HEAD").strip()
+        self.assertIn(f"still at {short}", output,
+                      "the message must say which revision the checkout is stuck at")
+        self.assertIn("nothing was installed from it", output)
+        self.assertFalse((home / ".pi").exists(),
+                         "a failed update still linked skills into the agent hub")
+        return output
+
+    def test_an_unreachable_remote_is_named_as_unreachable(self):
+        """The transient case: the remote is not there. Retrying later is the right response."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            origin, _seed, checkout = self._working_checkout(root)
+            shutil.rmtree(origin)
+
+            output = self._assert_installs_nothing_and_names(
+                self._run_installer(root, checkout, home), home, checkout,
+                "remote-unreachable", "checkout-diverged", "checkout-local-state")
+            self.assertIn("transient", output,
+                          "the unreachable case must say it is usually transient, which is the "
+                          "response it wants from an operator")
+
+    def test_a_diverged_checkout_is_named_as_diverged(self):
+        """The other operator-relevant case: the histories diverged, so retrying cannot help."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            origin, seed, checkout = self._working_checkout(root)
+            (checkout / "local.txt").write_text("local\n", encoding="utf-8")
+            self._git(checkout, "add", "-A")
+            subprocess.run(["git", "-C", str(checkout), *self.IDENTITY, "commit", "-q", "-m",
+                            "local work"], check=True, capture_output=True, text=True)
+            (seed / "tracked.txt").write_text("two\n", encoding="utf-8")
+            self._seed_commit(seed, origin, "the remote moves on")
+
+            output = self._assert_installs_nothing_and_names(
+                self._run_installer(root, checkout, home), home, checkout,
+                "checkout-diverged", "remote-unreachable", "checkout-local-state")
+            self.assertIn("Investigate", output,
+                          "the diverged case must ask for an investigation on the host rather "
+                          "than a retry")
+
+    def test_a_locally_modified_checkout_is_not_guessed_into_the_other_two_classes(self):
+        """The honest third class: not the network, and not the word we would be guessing.
+
+        A dirty checkout that the incoming commit would overwrite is neither transient nor
+        diverged, and git's wording for it moves with the host's git config, which is exactly why
+        it must be reported as unrecognised rather than mapped onto one of the named two.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            origin, seed, checkout = self._working_checkout(root)
+            (checkout / "tracked.txt").write_text("uncommitted edit\n", encoding="utf-8")
+            (seed / "tracked.txt").write_text("remote change\n", encoding="utf-8")
+            self._seed_commit(seed, origin, "the remote changes the same file")
+
+            output = self._assert_installs_nothing_and_names(
+                self._run_installer(root, checkout, home), home, checkout,
+                "checkout-local-state", "remote-unreachable", "checkout-diverged")
+            self.assertIn("  git: ", output,
+                          "an unrecognised failure must carry git's own text as the evidence, "
+                          "since the class is the installer's inference and the text is not")
+
+
 if __name__ == "__main__":
     unittest.main()
