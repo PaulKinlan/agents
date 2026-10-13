@@ -1,0 +1,15 @@
+diff --git a/roles/reviewer.md b/roles/reviewer.md
+index 34386fd..78117f8 100644
+--- a/roles/reviewer.md
++++ b/roles/reviewer.md
+@@ -36,6 +36,10 @@ you find. Reviewing is the same job whether the work is still on `fleet/<x>` or
+ 2. **The behaviour under review, reproduced.** Reproduce the *specific* behaviour the bead claims — one command or
+    one browser run, bounded (`timeout -k 30 <N>`, `nice -n 10`, and close anything you start in the same command
+    with a `trap`; a lane that leaves Chrome or a server behind gets reaped and looks like a dead lane). Not a survey.
++   - **Review rig hygiene:**
++     - **Never `cp -a ~/fleet`:** `~/fleet` is ~434MB because of `sdk-host/node_modules` (430MB of the 434MB), which review rigs never use. Copying it leaks hundreds of megabytes per review and exhausts disk space. Use `rsync -a --exclude=sdk-host ~/fleet/ /tmp/<rig>/` (~4MB, 100x smaller), or copy only the specific files or directories under review.
++     - **Always trap cleanup:** Any scratch directory must be created with `mktemp -d` and removed via `trap 'rm -rf "$wd"' EXIT` (or a language cleanup block). An untrapped review checkout or test rig is a defect.
++     - **Never run `install.sh` without an isolated `$HOME`:** When testing `install.sh`, always pass `HOME=$(mktemp -d)` or `SF_LOCAL_BIN=$(mktemp -d)`: an un-sandboxed run clobbers the host's `~/.local/bin/factory` with a temporary symlink that goes dangling when deleted.
+ 3. **The gate verdict for that exact tree.** `fleet-check --status <tip>` (or the merger's merged sha) and quote
+    the cached record: state, sha, when, by whom. **Never re-run a suite** - a reviewer re-running the gate is
+    memory it does not have.

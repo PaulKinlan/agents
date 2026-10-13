@@ -124,7 +124,7 @@ ln -sfn "$AGENTS_SRC" "$GEMINI_PLUGIN_DIR/skills"
 echo "  ✓ Gemini/Antigravity: linked plugin -> $GEMINI_PLUGIN_DIR/skills"
 
 # Symlink `factory` binary into ~/.local/bin if writable
-LOCAL_BIN="$HOME/.local/bin"
+LOCAL_BIN="${SF_LOCAL_BIN:-$HOME/.local/bin}"
 mkdir -p "$LOCAL_BIN"
 ln -sfn "$FACTORY_DIR/factory" "$LOCAL_BIN/factory"
 echo "  ✓ CLI binary: linked -> $LOCAL_BIN/factory"

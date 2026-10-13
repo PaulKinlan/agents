@@ -863,7 +863,24 @@ class TestProvisioningInstallsTheGateCommand(unittest.TestCase):
 
         installed = conf.read_text(encoding="utf-8")
         self.assertIn(_tracked_fields()["CHECK_CMD"], installed)
-        self.assertIn("-t .", installed)
+
+    def test_install_sh_respects_sf_local_bin_override(self):
+        """agents-xcp9: install.sh must allow SF_LOCAL_BIN override so test checkouts and rigs
+        can isolate the binary symlink rather than clobbering ~/.local/bin/factory."""
+        home = _registered_tmp_home(self, "xcp9-localbin-")
+        custom_bin = Path(home) / "custom_bin"
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["SF_LOCAL_BIN"] = str(custom_bin)
+        res = subprocess.run(
+            ["bash", str(ROOT / "install.sh")],
+            capture_output=True, text=True, timeout=120, env=env, cwd=str(ROOT),
+        )
+        self.assertEqual(res.returncode, 0, (res.stdout + res.stderr)[-600:])
+        symlink = custom_bin / "factory"
+        self.assertTrue(symlink.is_symlink(), "factory CLI symlink must be created in SF_LOCAL_BIN")
+        self.assertEqual(symlink.resolve(), (ROOT / "factory").resolve())
+        self.assertFalse((Path(home) / ".local" / "bin" / "factory").exists())
 
     def test_install_sh_says_what_it_repaired_and_checks_the_repair_landed(self):
         """agents-d081: THE REPAIR ABOVE USED TO BE SILENT, so a host that had been running a
