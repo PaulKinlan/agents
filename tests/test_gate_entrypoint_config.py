@@ -1235,10 +1235,6 @@ class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
             self.assertNotIn("FAILURE CLASS: remote-auth-denied", output,
                              "a name that does not resolve is not a credential problem")
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTheDefaultInstallDestinationIsRepoLocal(unittest.TestCase):
     """agents-0utp ACCEPTANCE, which coord named and which nobody had run: INSTALL IN REPO A, GATE IN REPO B,
     GLOBAL UNTOUCHED - with the host-wide file's HASH UNCHANGED before and after, because 'untouched' is a claim
@@ -1291,3 +1287,9 @@ class TestTheDefaultInstallDestinationIsRepoLocal(unittest.TestCase):
         global_conf = Path(home) / ".fleet" / "check.conf"
         self.assertTrue(global_conf.exists(), "--global must still reach the host-wide path")
         self.assertIn("THIS COPY IS MACHINE-GLOBAL", global_conf.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
