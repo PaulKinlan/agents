@@ -28,11 +28,11 @@ class TestFullGateSharding(unittest.TestCase):
             "import os, time, unittest\nclass Case(unittest.TestCase):\n" + body,
             encoding="utf-8")
 
-    def run_gate(self, **settings):
+    def run_gate(self, *args, **settings):
         env = dict(os.environ, FLEET_CHECKS_DIR=str(self.root / "checks"),
                    FULL_GATE_SHARDS="2", FULL_GATE_BUDGET_S="20")
         env.update(settings)
-        return subprocess.run(["bash", str(self.root / "tools" / "full-gate.sh")],
+        return subprocess.run(["bash", str(self.root / "tools" / "full-gate.sh"), *args],
                               cwd=self.root, env=env, capture_output=True, text=True,
                               timeout=25, check=False)
 
@@ -48,6 +48,15 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertGreater(costs["seconds"]["tests.test_a"], 0)
         self.assertEqual(len(list((self.root / "checks").glob("*.summary.txt"))), 1)
         self.assertIn("full-gate run: tree=", next((self.root / "checks").glob("*.summary.txt")).read_text())
+
+    def test_docstring_and_plain_test_ids_are_both_counted(self):
+        self.module("described", ' def test_described(self):\n  """A description printed on the next line."""\n  pass\n'
+                                 ' def test_plain(self): pass\n')
+        res = self.run_gate()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("executed ids=2 expected=2 missing=0 extra=0 duplicate=0", res.stdout)
+        self.assertIn("tests.test_described.Case.test_described", res.stdout)
+        self.assertIn("module=tests.test_described", res.stdout)
 
     def test_serial_default_pattern_includes_test_without_underscore(self):
         (self.root / "tests" / "testextra.py").write_text(
@@ -97,6 +106,13 @@ class TestFullGateSharding(unittest.TestCase):
         res = self.run_gate()
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("executed ids=1 expected=1", res.stdout)
+
+    def test_unknown_filter_argument_cannot_narrow_the_full_gate(self):
+        self.module("a", " def test_one(self): pass\n")
+        res = self.run_gate("-p", "test_a.py")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("unsupported full-gate arguments", res.stdout)
+        self.assertNotIn("module=tests.test_a", res.stdout)
 
     def test_invalid_parallelism_refuses_before_running_tests(self):
         self.module("a", " def test_one(self): pass\n")

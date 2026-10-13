@@ -97,7 +97,9 @@ def shard_order(modules, costs, workers):
 
 # unittest -v lines carry the executed ID in parentheses. Never trust rc=0 alone:
 # a runner that exits successfully after skipping a module must fail the union check.
-TEST_LINE = re.compile(r"^\S+ \((tests\.[^()]+)\) \.\.\.", re.MULTILINE)
+# With a docstring, unittest prints the description on the NEXT line and the ID
+# line ends after ')'; without one it ends in ' ... ok'. Capture either ID line.
+TEST_LINE = re.compile(r"^\S+ \((tests\.[^()]+)\)(?= \.\.\.|[ \t]*$)", re.MULTILINE)
 
 
 def run_module(module):
@@ -130,6 +132,8 @@ def save_costs(path, measured):
 
 
 def main():
+    if len(sys.argv) != 1:
+        raise GateError(f"unsupported full-gate arguments: {sys.argv[1:]!r}")
     started = time.monotonic()
     expected = discover()
     workers = positive_int("FULL_GATE_SHARDS", min(4, os.cpu_count() or 1))
