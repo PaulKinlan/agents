@@ -1,10 +1,31 @@
 --- a/tests/fleet-check-scope.test.sh
 +++ b/tests/fleet-check-scope.test.sh
-@@ -15,7 +15,82 @@
+@@ -15,96 +15,124 @@
  pass() { printf '  ok   %s\n' "$1"; }
  fail() { printf '  FAIL %s\n' "$1"; fails=$((fails+1)); }
  
 -T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+-# THIS SUITE MUST USE ITS OWN HEAVY QUEUE. It runs a REAL gate (fleet-check), and fleet-check takes a slot
+-# through `fleet-heavy` - so without this the suite joins the VM's SHARED queue at /tmp/fleet-heavy. Measured
+-# 2026-10-12: the hub's single slot was held 34 minutes by gate WORKERS whose fixture HOME
+-# (/tmp/tmp.I6i63vUAqR) had already been deleted, blocking every real gate on the VM. A test that uses the
+-# shared queue can starve the machine it is testing on, and worse, its orphaned workers outlive it. The slot is
+-# per-FLEET_HEAVY_DIR, so a private dir costs this suite nothing but its own (empty) queue.
+-export FLEET_HEAVY_DIR="$T/heavy"; mkdir -p "$FLEET_HEAVY_DIR"
+-
+-# THIS SUITE TESTS THE GUARD, so it must not inherit the gate's own opt-in: when the suite runs INSIDE a
+-# full gate, FLEET_FULL_GATE_OK=1 is exported (that is how the gate itself is allowed to run), and the
+-# "implementer is refused" case then sees an opted-in process and passes the guard it is meant to test.
+-# Measured 2026-10-11: 5/5 standalone, and the suite FAILED inside the gate for exactly this reason.
+-unset FLEET_FULL_GATE_OK
+-mkdir -p "$T/.fleet/checks"
+-cd "$T" || exit 1
+-git init -q . && git config user.email t@t && git config user.name t
+-newtree() {
+-  echo "$1" > f.txt
+-  for _ in $(seq 1 30); do
+-    if git add f.txt 2>/dev/null && git commit -qm "$1" 2>/dev/null; then return 0; fi
+-    sleep 0.2
 +# TEARDOWN: this suite must not leave a gate worker behind, and it must SAY SO if it was going to.
 +#
 +# WHY (agents-825v): the previous teardown was `rm -rf "$T"`, which deletes the checks dir and the temp HOME
@@ -28,59 +49,168 @@
 +#     property the leak has and the real job does not).
 +# A scan for a mktemp path has both properties: the invoking shell's argv does not contain it, and no real gate
 +# was ever handed it.
-+suite_processes() { # pids whose cmdline references this suite's temp root, excluding this shell and its parent
-+  local p pid me=$$ parent
++# ORDER IS THE WHOLE POINT: kill, then delete. This runs as an EXIT trap, so the tree is deleted either way;
++# what matters is that nothing is still running under it at that moment.
++#
++# KILL THE PROCESS GROUP, NOT THE PID (agents-cpij). A worker that FORKS leaves a child that is not the pid
++# signalled, so killing the pid and waiting for THAT pid satisfies the wait while the child keeps running with
++# the deleted tree under it - the same husk mechanism one level down. The launcher already gives each worker its
++# own group: fleet-check runs it as `setsid nohup bash "$worker_script" ... &` (fleet-check:770), so the
++# worker is a session and group leader and kill -TERM -<pgid> reaches every descendant that has not left it.
++# Verified in the artefact rather than assumed.
++#
++# NEVER SIGNAL OUR OWN GROUP: if a pid's group is this shell's group, the launcher did not setsid it and
++# signalling that group would kill the suite. Those pids get a direct signal instead and are reported.
++suite_tied_pids() { # pids whose CMDLINE or CWD ties them to this tree, excluding this shell and its parent
++  local p pid me=$$ parent cwd
 +  parent=$(ps -o ppid= -p "$$" 2>/dev/null | tr -d ' ')
 +  for p in /proc/[0-9]*; do
 +    pid=${p#/proc/}
 +    [ "$pid" = "$me" ] && continue
 +    [ -n "$parent" ] && [ "$pid" = "$parent" ] && continue
-+    [ -r "$p/cmdline" ] || continue          # a process can vanish between the glob and the read; guard the
-+    { tr '\0' ' ' < "$p/cmdline" || true; } 2>/dev/null | grep -qF -- "$T" || continue   # READ, do not redirect
-+    printf '%s\n' "$pid"
-+  done
++    cwd=$(readlink "$p/cwd" 2>/dev/null) || cwd=""
++    case "$cwd" in *"$T"*) printf '%s\n' "$pid"; continue ;; esac
++    [ -r "$p/cmdline" ] || continue
++    { tr '\0' ' ' < "$p/cmdline" || true; } 2>/dev/null | grep -qF -- "$T" && printf '%s\n' "$pid"
+   done
+-  git add f.txt && git commit -qm "$1"
+ }
+-
+-# The gate commands write a marker that can only come from a real run, plus a per-run marker file, so a
+-# refusal cannot be mistaken for a run (the refusal message QUOTES the command it would have run).
+-printf 'CHECK_CMD="echo RAN_FULL_MARKER"\nCHECK_FAST_CMD="echo RAN_FAST_MARKER"\n' > "$T/.fleet/check.conf"
+-
+-# Wait for an async gate to leave a record, then report the command it recorded.
+-# The fast record is keyed <tree>.fast.json (the kind is part of the cache key), so the suffix is an
+-# argument - looking for the wrong file is a test bug, not a gate failure.
+-await_record() { # await_record <tree> [suffix]
+-  local f="$T/.fleet/checks/$1${2:-}.json" i
+-  for i in $(seq 1 40); do
+-    if [ -s "$f" ] && jq -e '.cmd' "$f" >/dev/null 2>&1; then jq -r '.cmd' "$f"; return 0; fi
+-    sleep 0.5
++suite_groups_of() { # unique process groups of the given pids; never this shell's own group
++  local pid stat rest pgid mine
++  mine=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
++  for pid in $1; do
++    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
++    rest=${stat##*') '}
++    pgid=$(printf '%s' "$rest" | awk '{print $3}')
++    [ -n "$pgid" ] || continue
++    [ "$pgid" = "$mine" ] && continue
++    printf '%s\n' "$pgid"
++  done | sort -u
 +}
-+# ORDER IS THE WHOLE POINT: kill, then delete. This function runs as an EXIT trap, so the tree is deleted
-+# either way; what matters is that no worker is still running at the moment it goes. An earlier draft of this
-+# patch had the delete first - the fixture's original defect, reintroduced by the patch that was written to
-+# remove it - and its own test could not see it, because a test of the END STATE cannot see a SEQUENCE claim.
-+suite_teardown() {
-+  local pids i
-+  # A gate that is merely parking is not a leak yet: give one a moment to exit on its own so this does not
-+  # turn a legitimate finish into a red suite.
-+  for i in $(seq 1 20); do
-+    [ -z "$(suite_processes)" ] && break
-+    sleep 0.1
-+  done
-+  pids=$(suite_processes)
-+  if [ -n "$pids" ]; then
-+    # Report the set that HAD TO BE KILLED, captured before killing: reporting the set afterwards reports an
-+    # empty list, because killing it is what empties it. (Caught by the red case of this patch's own test.)
-+    local killed="$pids" n k
-+    n=$(printf '%s\n' "$killed" | wc -l)
-+    # shellcheck disable=SC2086
-+    kill -TERM $killed 2>/dev/null || true
-+    for i in $(seq 1 30); do
-+      k=$(suite_processes); [ -z "$k" ] && break; sleep 0.1
++suite_survivors() { # anything still tied to the tree: by cwd/cmdline, OR by a group we signalled
++  local pid stat rest pgid g
++  suite_tied_pids
++  [ -n "${KILLED_GROUPS:-}" ] || return 0
++  for p in /proc/[0-9]*; do
++    pid=${p#/proc/}
++    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
++    rest=${stat##*') '}
++    pgid=$(printf '%s' "$rest" | awk '{print $3}')
++    for g in $KILLED_GROUPS; do
++      [ "$pgid" = "$g" ] && printf '%s\n' "$pid"
 +    done
-+    k=$(suite_processes)
-+    if [ -n "$k" ]; then
-+      # shellcheck disable=SC2086
-+      kill -KILL $k 2>/dev/null || true
-+    fi
-+    # 3. ONLY NOW delete the tree. The kill MUST precede this: a worker that is still running when its
-+    #    directories go is reparented to pid 1 with a DELETED cwd, which IS the agents-825v mechanism. An
-+    #    earlier draft of this patch deleted first and killed after, which reproduced the very defect it was
-+    #    written to remove - see the SEQUENCE note at the top of suite_teardown.
-+    rm -rf "$T"
-+    printf '  FAIL %s worker(s) outlived this suite and HAD TO BE KILLED - their temp tree was about to be\n' "$n"
-+    printf '       deleted, which is the agents-825v mechanism; they would have held the heavy slot:\n'
-+    printf '       pids: %s\n' "$(printf '%s' "$killed" | tr '\n' ' ')"
-+    exit 1   # an EXIT trap may set the final status
-+  fi
-+  rm -rf "$T"
++  done | sort -u
 +}
++suite_teardown() {
++  local tied groups n i p g surv killed
++  KILLED_GROUPS=""
++  # 1. A gate that is merely parking is not a leak yet: give it a moment to finish on its own.
++  for i in $(seq 1 20); do
++    [ -z "$(suite_tied_pids)" ] && break
++    sleep 0.1
+   done
+-  echo "NO-RECORD"
++  tied=$(suite_tied_pids)
++  if [ -n "$tied" ]; then
++    groups=$(suite_groups_of "$tied")
++    KILLED_GROUPS="$groups"
++    n=$(printf '%s\n' "$tied" | wc -l)
++    killed="$tied"
++    # 2. Signal each GROUP (covers forked descendants), then any pid left without a usable group.
++    for g in $groups; do kill -TERM "-$g" 2>/dev/null || true; done
++    for p in $tied; do kill -TERM "$p" 2>/dev/null || true; done
++    # 3. Wait for the WHOLE TREE to go, not for one pid.
++    for i in $(seq 1 30); do
++      [ -z "$(suite_survivors)" ] && break
++      sleep 0.1
++    done
++    surv=$(suite_survivors)
++    if [ -n "$surv" ]; then
++      for g in $groups; do kill -KILL "-$g" 2>/dev/null || true; done
++      for p in $surv; do kill -KILL "$p" 2>/dev/null || true; done
++      sleep 0.3
++      surv=$(suite_survivors)
++    fi
++  fi
++  # 4. ONLY NOW delete the tree, and only after the tree is confirmed clear.
++  rm -rf "$T"
++  # 5. Report. An EXIT trap may set the final status.
++  if [ -n "$surv" ]; then
++    printf '  FAIL %s process(es) tied to this suite SURVIVED its teardown - the temp tree was deleted under\n' "$(printf '%s' "$surv" | wc -l)"
++    printf '       them, so they hold the heavy slot with a deleted cwd (the agents-825v/agents-cpij husk):\n'
++    printf '       pids: %s\n' "$(printf '%s' "$surv" | tr '\n' ' ')"
++    exit 1
++  fi
++  if [ -n "$killed" ]; then
++    printf '  FAIL %s worker(s) outlived this suite and HAD TO BE KILLED - their groups were signalled\n' "$n"
++    printf '       before the tree was deleted, so the husk did NOT form; they are still a leak:\n'
++    printf '       pids: %s   groups: %s\n' "$(printf '%s' "$killed" | tr '\n' ' ')" "$(printf '%s' "$KILLED_GROUPS" | tr '\n' ' ')"
++    exit 1
++  fi
+ }
+-tree() { git rev-parse 'HEAD^{tree}'; }
+-
+-# (a) an implementer with no flag: refused, nothing runs, no record
+-newtree a; tr_a=$(tree)
+-out=$(HOME="$T" FLEET_LANE=impl-1 timeout 30 bash "$FC" 2>&1); rc=$?
+-case "$out" in *"FULL gate is the merger's job"*) pass "an implementer is refused the full gate" ;; *) fail "not refused: ${out:0:80}" ;; esac
+-grep -q '^RAN_FULL_MARKER' <<<"$out" && fail "the refused call actually ran the gate" || pass "a refusal runs nothing"
+-[ -s "$T/.fleet/checks/$tr_a.json" ] && fail "a refusal wrote a verdict record" || pass "a refusal records no verdict"
+-
+-# (b) the same lane, meaning it: --full runs
+-newtree b; tr_b=$(tree)
+-HOME="$T" FLEET_LANE=impl-1 timeout 40 bash "$FC" --full >/dev/null 2>&1
+-cmd=$(await_record "$tr_b")
+-case "$cmd" in *RAN_FULL_MARKER*) pass "--full runs the full gate when the lane means it" ;; *) fail "--full did not run it (recorded: $cmd)" ;; esac
+-
+-# (c) the merger runs it by default
+-newtree c; tr_c=$(tree)
+-HOME="$T" FLEET_LANE=merger timeout 40 bash "$FC" >/dev/null 2>&1
+-cmd=$(await_record "$tr_c")
+-case "$cmd" in *RAN_FULL_MARKER*) pass "the merger runs the full gate by default" ;; *) fail "the merger was refused (recorded: $cmd)" ;; esac
+-
+-# (d) --fast is never blocked
+-newtree d; tr_d=$(tree)
+-HOME="$T" FLEET_LANE=impl-1 timeout 40 bash "$FC" --fast >/dev/null 2>&1
+-cmd=$(await_record "$tr_d" .fast)
+-case "$cmd" in *RAN_FAST_MARKER*) pass "--fast runs for any lane" ;; *) fail "--fast was blocked (recorded: $cmd)" ;; esac
+-
+-# (e) NO fast tier configured: the lane is REFUSED, not quietly given the full gate. This case used to assert
+-# "allowed, but said out loud" - it PINNED THE DEFECT, which is how fleet-4n1n survived: a missing fast tier
+-# became the way AROUND the guard, and learnings/mwg-train have no fast gate at all (fleet-1ojy.14), so every
+-# non-merger lane on those two VMs walked straight through it. A test that encodes the bug is worse than none.
+-printf 'CHECK_CMD="echo RAN_FULL_MARKER"\n' > "$T/.fleet/check.conf"
+-newtree e; tr_e=$(tree)
+-out=$(HOME="$T" FLEET_LANE=impl-1 timeout 30 bash "$FC" 2>&1); rc=$?
+-case "$out" in *"NO fast tier"*) pass "with no fast tier it SAYS so instead of silently running the gate" ;; *) fail "no missing-tier message: ${out:0:80}" ;; esac
+-[ "$rc" = 2 ] && pass "and a non-merger is REFUSED when no fast tier exists (fleet-4n1n)" \
+-  || fail "a non-merger was allowed the full gate because no fast tier existed (rc=$rc)"
+-case "$out" in *RAN_FULL_MARKER*) fail "the full gate RAN on a non-merger lane" ;; *) pass "and nothing ran" ;; esac
+-out=$(HOME="$T" FLEET_LANE=impl-1 timeout 30 bash "$FC" --full 2>&1)
+-case "$out" in *RAN_FULL_MARKER*) pass "while --full is still the deliberate way to say it" ;; *) fail "--full stopped working without a fast tier" ;; esac
+-
+-# (f) check.conf has CHECK_FAST_CMD but no CHECK_CMD (auto-detected fallback): implementer is still refused (fleet-4n1n)
+-printf 'CHECK_FAST_CMD="echo RAN_FAST_MARKER"\n' > "$T/.fleet/check.conf"
+-printf '{"name":"x","scripts":{"test":"echo RAN_AUTODETECTED_FULLGATE"}}' > package.json
+-git add package.json && git commit -qm "add package.json for auto-detect"
+-newtree f; tr_f=$(tree)
+-out=$(HOME="$T" FLEET_LANE=impl-1 timeout 30 bash "$FC" 2>&1); rc=$?
+-case "$out" in *"FULL gate is the merger's job"*) pass "an implementer is refused even when CHECK_CMD is auto-detected (fleet-4n1n)" ;; *) fail "auto-detected full gate was not refused: ${out:0:80}" ;; esac
+-[ -s "$T/.fleet/checks/$tr_f.json" ] && fail "auto-detected full gate wrote a record" || pass "refusal of auto-detected full gate records no verdict"
+-
+-echo "fleet-check scope: $((12-fails))/12"
+-[ $fails -eq 0 ]
 +T=$(mktemp -d); trap suite_teardown EXIT
- # THIS SUITE MUST USE ITS OWN HEAVY QUEUE. It runs a REAL gate (fleet-check), and fleet-check takes a slot
- # through `fleet-heavy` - so without this the suite joins the VM's SHARED queue at /tmp/fleet-heavy. Measured
- # 2026-10-12: the hub's single slot was held 34 minutes by gate WORKERS whose fixture HOME
