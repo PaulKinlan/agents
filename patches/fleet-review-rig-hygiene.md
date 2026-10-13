@@ -12,7 +12,7 @@
   Under Step 2 ("The behaviour under review, reproduced"), added explicit **Review rig hygiene** instructions:
   1. **Never `cp -a ~/fleet`:** State explicitly that `sdk-host/node_modules` is 430MB of the 434MB checkout and unused by review rigs; instruct using `rsync -a --exclude=sdk-host ~/fleet/ /tmp/<rig>/` (~4MB, 100x smaller) or copying only the specific files or directories under review.
   2. **Always trap cleanup:** Scratch directories must be created with `mktemp -d` and removed via `trap 'rm -rf "$wd"' EXIT` (or language cleanup context).
-  3. **Never run `install.sh` without an isolated `$HOME`:** When testing `install.sh`, always pass `HOME=$(mktemp -d)` (with exit cleanup trap) so the installer cannot clobber host skills, gate configs, or `~/.local/bin/factory`. `SF_LOCAL_BIN` allows further redirecting the binary destination if needed, but never substitutes for a sandboxed `$HOME`.
+  3. **Never run `install.sh` without an isolated `$HOME`:** When testing `install.sh`, always pass `HOME=$(mktemp -d)` (with exit cleanup trap) and unset or scratch-redirect `FLEET_CHECK_CONF` and `SF_LOCAL_BIN` so the installer cannot clobber host skills, gate configs, or `~/.local/bin/factory`.
 - **Companion Change in `PaulKinlan/agents` (agents-xcp9):**
   - Updated `install.sh` to allow overriding the binary link directory via `LOCAL_BIN="${SF_LOCAL_BIN:-$HOME/.local/bin}"`.
   - Added unit test `test_install_sh_respects_sf_local_bin_override` in `tests/test_gate_entrypoint_config.py`.
