@@ -117,6 +117,18 @@ def _load_allowlist_fragments():
             blob = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise AssertionError(f"{path.name}: not valid JSON ({exc}) - a fragment that does not parse must fail")
+        # agents-tdcf (found by rev-nerv): A FRAGMENT THAT IS VALID JSON BUT NOT AN OBJECT. The
+        # loader used to reach .get() straight after parsing, so a fragment holding a JSON array died
+        # with "AttributeError: 'list' object has no attribute 'get'" - loud, but with no filename in
+        # it, and a directory of fragments is only usable if the error says WHICH fragment is wrong.
+        # A reader who has to bisect the directory to find a typo has been given a worse tool than the
+        # single dict this replaced. The check is ahead of the first .get, and it names the file.
+        if not isinstance(blob, dict):
+            raise AssertionError(
+                f"{path.name}: a fragment must be a JSON object, not {type(blob).__name__} "
+                f"(got {str(blob)[:60]!r}) - a directory of fragments is only usable if the error "
+                f"names the file"
+            )
         kind = blob.get("kind")
         if kind not in ("consumer_coverage", "non_suite_consumers"):
             raise AssertionError(f"{path.name}: kind must be consumer_coverage or non_suite_consumers, got {kind!r}")
