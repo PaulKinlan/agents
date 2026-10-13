@@ -1,0 +1,168 @@
+diff --git a/remote/lanes.sh b/remote/lanes.sh
+index 7d83bdc..5d56e49 100755
+--- a/remote/lanes.sh
++++ b/remote/lanes.sh
+@@ -406,7 +406,17 @@ case $c in
+       waited=$((waited + 1))
+     done
+     if [ "$waited" -ge 20 ]; then
++      # fleet-h006: A READINESS TIMEOUT MUST CARRY THE LANE'S OWN DIAGNOSIS, because it usually has one and the
++      # caller cannot see it. Measured 2026-10-12: this message was read as "a slow VM" while the lane's own log
++      # had been saying `waiting for model antigravity/gemini-3.8-pro to be available (1/6)` since its first
++      # second - a model that is not registered on this VM, which is the whole cause. The lane's log is the file
++      # an operator can open, so quote its last non-empty line and name the file; bounded, because a verbose line
++      # must not flood the caller's terminal. NOT a change to the timeout itself: a start that has not finished
++      # after 5 s is still running (this is the same start run-lane.sh now refuses to complete for a lane that
++      # was retired while it waited), so the message reports rather than cancels.
++      why=$(grep -v '^[[:space:]]*$' "$LD/$name.log" 2>/dev/null | tail -1 | cut -c1-200 || true)
+       echo "error: lane $name did not become ready within 5s" >&2
++      [ -n "$why" ] && echo "  lane log (last line of $LD/$name.log): $why" >&2
+       exit 1
+     fi ;;
+   stop)
+diff --git a/remote/run-lane.sh b/remote/run-lane.sh
+index fcdc928..ba33089 100755
+--- a/remote/run-lane.sh
++++ b/remote/run-lane.sh
+@@ -122,7 +122,35 @@ for i in $(seq 1 6); do
+   grep -qx "$MODEL" <<<"$(timeout -k 15 240 pi --list-models "${MODEL#*/}" 2>/dev/null | awk '{print $1"/"$2}')" && break
+   echo "$(date -u +%FT%TZ) waiting for model $MODEL to be available ($i/6)" >> "$LD/$lane.log"; sleep 30
+ done
+-[ -f "$LD/$lane.stop" ] && exit 0
++# fleet-h006: A START MUST RE-READ THE REGISTRY AT THE DECISION POINT, NOT TRUST WHAT IT READ ON ENTRY.
++#
++# Everything above this line can take minutes (the model-wait loop alone is 6 x 30 s), and the caller that
++# started this process does NOT wait for it: `lanes.sh spawn` gives a lane 5 s to become ready and then returns
++# 1, while in rpc mode the unit (systemd/fleet-lane@.service) keeps THIS process running and in sdk mode
++# sdk-host/host.mjs is still inside `await prepare()`. If the caller retires the lane in that window nothing
++# cancels this process and, before this guard, it started the lane anyway - measured 2026-10-12 15:03-15:07:
++# rev-weekly was spawned, failed readiness, was retired and deregistered at 15:05:23, and came alive at
++# 15:07:19 under the bead it had been retired with, its own log showing the wait loop reaching 6/6 and then
++# starting. It came up on a different model only because lane-host failed the unregistered one over.
++#
++# THE REGISTRATION IS THE CHECK, because it is the one fact `lanes.sh list` also reads: the lane is registered
++# iff $LD/$lane.conf exists, so "still registered" is the fleet's own answer to "does this lane exist". The
++# tombstone beside it is NOT sufficient - not through a bug in retire, which deliberately deletes .stop with the
++# rest of the registration (tests/lanes.test.sh 16u pins that nothing is left for the watchdog to revive), and
++# sdk-host/host.mjs:316 unlinks it again at the start of every start. The .stop check is kept first because it
++# is the cheaper and more specific fact WHEN it is present; the registration check is the one that holds when
++# it is not.
++#
++# The refusal is LOGGED, in the file an operator reads: a start that declines to happen silently is
++# indistinguishable from a lane that found nothing to do, which is the failure mode this bead is about.
++if [ -f "$LD/$lane.stop" ]; then
++  echo "$(date -u +%FT%TZ) run-lane: not starting $lane: $LD/$lane.stop is present - it was stopped or retired after this start began, and a retired lane must not come back under its old bead (fleet-h006)" >> "$LD/$lane.log"
++  exit 0
++fi
++if [ ! -f "$LD/$lane.conf" ]; then
++  echo "$(date -u +%FT%TZ) run-lane: not starting $lane: registration $LD/$lane.conf is gone, so 'lanes.sh list' no longer names this lane and this process is the leftover of a start that was retired while it waited (fleet-h006); spawn the lane again if it is wanted" >> "$LD/$lane.log"
++  exit 1
++fi
+ if [ -f "$LD/$lane.started" ]; then
+   reason=""
+   [ -f "$LD/$lane.reason" ] && reason=$(cat "$LD/$lane.reason" 2>/dev/null)
+diff --git a/tests/lanes.test.sh b/tests/lanes.test.sh
+index b20281d..17a87d7 100755
+--- a/tests/lanes.test.sh
++++ b/tests/lanes.test.sh
+@@ -1061,6 +1061,100 @@ has "$(cat "$HOME/.fleet/lanes/imp-live-rot.model" 2>/dev/null)" "antigravity/ge
+ lanes retire imp-live-rot >/dev/null 2>&1 || true
+ echo '{}' > "$HOME/.fleet/model-cooldown.json"
+ 
++echo "30. a start whose lane is retired WHILE IT WAITS must not bring the lane back (fleet-h006)"
++# Why this section exists, and where the fixture comes from: `lanes.sh spawn` gives a lane 5 s to become ready
++# and then returns 1 WITHOUT waiting for the process it started, and that process can spend minutes in
++# run-lane.sh's model-wait loop. Retiring the lane in that window used to leave the start running, so the lane
++# came back - measured on 2026-10-12 (rev-weekly: spawned 15:03, retired and deregistered 15:05:23, alive
++# 15:07:19, under the bead it had been retired with). The instrument is run-lane.sh itself with
++# FLEET_ASK_RECORD_OVERRIDE, which run-lane.sh calls AFTER it has read the lane's registration and BEFORE it
++# decides to start - exactly where a retire lands - so the fixture REPRODUCES the sequence rather than
++# asserting a state no caller can produce.
++ldir="$HOME/.fleet/lanes"
++h006_lane=impl-h006-flight
++printf 'ROLE=implementer\nMODEL=deepseek/deepseek-flash\nWORKDIR=%s\nBEAD=bead-h006\n' "$HOME" > "$ldir/$h006_lane.conf"
++# Control first: with nothing removed this exact fixture DOES prepare a start. An instrument that cannot see a
++# start cannot report the absence of one, and that is the difference between this section and a green line.
++rm -f "$ldir/$h006_lane.log"
++set +e
++prep=$(timeout 60 env FLEET_PREPARE_JSON=1 bash "$HERE/remote/run-lane.sh" "$h006_lane" 2>/dev/null)
++prep_rc=$?
++set -e
++[ "$prep_rc" -eq 0 ] && grep -q "\"lane\":\"$h006_lane\"" <<<"$prep" \
++  && ok "30a control: the fixture prepares a start when nothing intervenes" \
++  || bad "30a control prepare" "rc=$prep_rc out=[${prep:0:120}]"
++# The incident: the registration and the tombstone both disappear while the start waits (retire deregisters,
++# and deregistration deletes .stop as well - tests/lanes.test.sh 16u pins that cleanup, so the guard cannot
++# rely on the tombstone surviving).
++cat > "$HOME/bin/h006-retire-midflight" <<'MID'
++#!/usr/bin/env bash
++rm -f "$HOME/.fleet/lanes/impl-h006-flight.conf" "$HOME/.fleet/lanes/impl-h006-flight.stop"
++MID
++chmod +x "$HOME/bin/h006-retire-midflight"
++printf 'ROLE=implementer\nMODEL=deepseek/deepseek-flash\nWORKDIR=%s\nBEAD=bead-h006\n' "$HOME" > "$ldir/$h006_lane.conf"
++rm -f "$ldir/$h006_lane.log"
++set +e
++out=$(timeout 60 env FLEET_PREPARE_JSON=1 FLEET_ASK_RECORD_OVERRIDE="$HOME/bin/h006-retire-midflight" bash "$HERE/remote/run-lane.sh" "$h006_lane" 2>&1)
++rc=$?
++set -e
++hasnt "$out" "\"lane\":\"$h006_lane\"" "30b no lane is prepared for a lane retired mid-start"
++[ "$rc" -ne 0 ] && ok "30c the refusal is a non-zero exit, not a silent success" || bad "30c refusal exit code" "got [$rc]"
++has "$(cat "$ldir/$h006_lane.log" 2>/dev/null)" "$ldir/$h006_lane.conf is gone" \
++  "30d the reason is in the lane's own log, where an operator looks"
++grep -q "$h006_lane" <<<"$(lanes list)" && bad "30e the retired lane is not in lanes list" "" \
++  || ok "30e lanes list (the fleet's own answer to 'does this lane exist') does not name it"
++# The .stop arm, unchanged in behaviour and now logged: a lane stopped while its start waited must not start
++# either. Kept here because it is the cheaper check and the one a future editor is most likely to drop.
++printf 'ROLE=implementer\nMODEL=deepseek/deepseek-flash\nWORKDIR=%s\nBEAD=bead-h006\n' "$HOME" > "$ldir/$h006_lane.conf"
++touch "$ldir/$h006_lane.stop"
++rm -f "$ldir/$h006_lane.log"
++set +e
++out=$(timeout 60 env FLEET_PREPARE_JSON=1 bash "$HERE/remote/run-lane.sh" "$h006_lane" 2>&1)
++rc=$?
++set -e
++hasnt "$out" "\"lane\":\"$h006_lane\"" "30f a stopped lane's start does not prepare a lane either"
++has "$(cat "$ldir/$h006_lane.log" 2>/dev/null)" "$ldir/$h006_lane.stop is present" "30g and that refusal is logged too"
++[ "$rc" -eq 0 ] && ok "30h a deliberate stop is still a clean exit (unchanged: a stop is not an error)" \
++  || bad "30h stop arm exit code" "got [$rc]"
++rm -f "$ldir/$h006_lane".*
++
++echo "31. after a real retire the lane is gone from the list and its start cannot resume (fleet-h006)"
++# Coord's acceptance test, phrased as the invariant rather than as a story: the check goes through `lanes list`
++# (the registration files), not through a ps scan. This case passes before and after the guard, deliberately -
++# it is the property the guard has to preserve, and 30b-30d are the cases that fail without it.
++mkconf h006-retired implementer bead-h006
++out=$(lanes retire h006-retired)
++has "$out" "retired h006-retired" "31a retire reports retired"
++grep -q h006-retired <<<"$(lanes list)" && bad "31b lanes list no longer names it" "$(lanes list | grep h006-retired)" \
++  || ok "31b lanes list no longer names the retired lane"
++set +e
++out=$(timeout 60 bash "$HERE/remote/run-lane.sh" h006-retired 2>&1)
++rc=$?
++set -e
++hasnt "$out" '"lane":"h006-retired"' "31c no start is prepared for a deregistered lane"
++rm -f "$ldir/h006-retired".*
++
++echo "32. a readiness timeout carries the lane's own log line, not just the elapsed time (fleet-h006)"
++# The diagnosis existed and the error did not carry it - measured 2026-10-12, when this message was read as
++# "a slow VM" while the lane's log had been naming the real cause (an unregistered model) from its first line.
++# The supervisor stub is replaced for this case only, so the lane genuinely never becomes ready.
++mv "$HOME/bin/systemctl" "$HOME/bin/systemctl.h006"
++printf '#!/usr/bin/env bash\nexit 0\n' > "$HOME/bin/systemctl"
++chmod +x "$HOME/bin/systemctl"
++for f in "$ldir"/*.conf; do [ -f "$f" ] || continue; l=$(basename "$f" .conf); rm -f "$ldir/$l".* ; done
++printf '%s waiting for model antigravity/gemini-3.8-pro to be available (1/6)\n' "$(date -u +%FT%TZ)" > "$ldir/impl-h006-slow.log"
++set +e
++out=$(timeout 60 bash "$LANES" spawn impl-h006-slow "" valid-bead implementer 2>&1)
++rc=$?
++set -e
++has "$out" "did not become ready within 5s" "32a the readiness timeout still reports what it always reported"
++has "$out" "waiting for model antigravity/gemini-3.8-pro to be available (1/6)" \
++  "32b and now carries the lane's own last log line, which is the diagnosis"
++has "$out" "impl-h006-slow.log" "32c and names the file to open"
++[ "$rc" -ne 0 ] && ok "32d spawn still exits non-zero when the lane never became ready" || bad "32d spawn exit code" "got [$rc]"
++mv "$HOME/bin/systemctl.h006" "$HOME/bin/systemctl"
++rm -f "$ldir/impl-h006-slow".*
++
+ echo
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
