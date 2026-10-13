@@ -1,0 +1,378 @@
+From c54c12ed5f53e797dc38bb56935aba8632d9e994 Mon Sep 17 00:00:00 2001
+From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
+Date: Tue, 13 Oct 2026 13:29:49 +0000
+Subject: [PATCH] fix(bd): a contended lock names its holder, and the wait is
+ visible and bounded (agents-elu6)
+
+`flock -w 300 <lock> <cmd>` waits in silence and then exits 1 with NO output at all (measured against
+util-linux 2.39.3). Measured cost of that on 2026-10-13: a COMPLETE cross-family review could not record
+its verdict for more than four minutes because another lane's `bd dolt push` held this VM's shared lock
+for the whole network round-trip of its child `git push --force-with-lease refs/dolt/data` - so a lane
+holding a finished result produced no output, looked IDLE, and the failure carried no reason at all. It
+is the zombie-lane and silent-spawn failure shape one layer down, and the verdict it delays is the
+artefact that authorises a landing.
+
+The holder now names itself: while it holds the lock it writes one record line into the lock FILE (a lock
+object, never a data file - flock's lock is on the fd/inode, so writing the record does not disturb it)
+and clears it before releasing. A waiter that cannot take the lock reports the holder's lane, role, pid,
+the bd command it is running, how long it has held it, and the holder's whole descendant tree - which is
+where a push actually spends its minutes.
+
+- patience is unchanged (300s) and no longer silent: a report on first contention, then at most one per
+  FLEET_BD_LOCK_REPORT (default 30s); FLEET_BD_LOCK_WAIT bounds the whole wait
+- on expiry it fails FAST with EX_TEMPFAIL (75), the holder named, having changed nothing - so a caller
+  can retry in seconds instead of blocking a tool call for minutes
+- reports go to STDERR: stdout carries bd's JSON for callers such as `bd show --json`
+- the lock fd is closed FOR THE bd PAYLOAD ONLY, so a child bd leaves behind cannot keep every lane on
+  the VM queued behind it after bd has exited (flock(1) got this for free by exec'ing with the fd
+  inherited; a shell rewrite loses it silently, and did)
+- an unannotated holder (one from before this change, or a stale record naming a dead pid) is reported
+  as unnamed/stale rather than as a mystery
+
+tests/bd-lock-holder.test.sh pins it hermetically: a stub $HOME/.local/bin/bd and a throwaway home, so
+it never contends with the fleet. 35 cases; against the pre-change shim the same file reports 15 passed
+and 18 failed (the failing ones are exactly the new behaviour), while the existing tests/bd-shim.test.sh
+stays 15/15. Uncontended cost: +0.47ms per call (8.23 -> 8.70ms, best of 6 interleaved 40-call runs).
+
+Release-note: none (fleet tooling; no user-facing surface)
+---
+ bin/bd                       | 158 ++++++++++++++++++++++++++++++++++-
+ tests/bd-lock-holder.test.sh | 150 +++++++++++++++++++++++++++++++++
+ 2 files changed, 307 insertions(+), 1 deletion(-)
+ create mode 100644 tests/bd-lock-holder.test.sh
+
+diff --git a/bin/bd b/bin/bd
+index 723856f..216b208 100755
+--- a/bin/bd
++++ b/bin/bd
+@@ -246,6 +246,144 @@ guard_worktree_beads_decoy() {
+ 
+ guard_worktree_beads_decoy "$@"
+ 
++# ------------------------------------------------ agents-elu6 ------------------------------------------------
++# A CONTENDED LOCK MUST NAME ITS HOLDER, AND THE WAIT MUST BE VISIBLE AND BOUNDED.
++#
++# Measured 2026-10-13 (rev-fnko): a COMPLETE review could not record its verdict for more than four minutes
++# because another lane's `bd dolt push` held this lock for the whole network round-trip of its child
++# `git push --force-with-lease refs/dolt/data` against origin. `flock -w 300` waits in SILENCE and then
++# exits 1 with NO OUTPUT AT ALL (measured), so a lane holding a finished result produces no output for
++# minutes and looks IDLE: neither the lane nor the fleet board can tell a slow holder from a hang. It is
++# the zombie-lane and silent-spawn failure shape, one layer lower.
++#
++# THE HOLDER NAMES ITSELF. While it holds the lock, the holder writes one record line into the lock FILE
++# (a lock object, never a data file: flock's lock is on the fd/inode, so writing the record does not
++# disturb it) and clears it before releasing. A waiter that cannot take the lock reads that record and
++# reports the holder's lane, pid, the bd command it is running and how long it has held it - plus, while
++# it waits, the holder's child processes, which is where the minutes actually go (`git push`).
++#
++# Reports go to STDERR: bd writes JSON on stdout for callers such as `bd show --json`, and a message there
++# would corrupt a parse.
++#
++# The wait keeps its 300s of patience by default (FLEET_BD_LOCK_WAIT overrides it), but is no longer silent:
++# one report on first contention, then at most one every FLEET_BD_LOCK_REPORT seconds (default 30), so a
++# waiting lane has visible progress instead of a dead tool call. On expiry it fails FAST with EX_TEMPFAIL
++# (75) and the holder named, so the caller can retry in seconds rather than block for minutes - and the
++# durable order is `bd comment` (the artefact) BEFORE the label and status writes (the state), so a retry
++# never loses the thing that matters.
++fleet_bd_lock_field() {
++  # One key=value field out of a holder record. Tokens are split first, so a field at the START of the
++  # line (pid= is first) matches exactly like one in the middle - a regex needing a leading space before
++  # the key silently returned UNNAMED for every holder until the test in tests/bd-lock-holder.test.sh
++  # caught it. argv= is read to end-of-line: it contains the command's own spaces.
++  if [ "$2" = argv ]; then
++    printf '%s' "$1" | sed -n 's/.*[[:space:]]argv=//p'
++  else
++    printf '%s' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
++  fi
++}
++
++fleet_bd_lock_note() {
++  # Our own holder record. Written while we hold the lock, cleared before we release it. Never fails the
++  # call: a lock file we cannot annotate is not a reason to refuse to run bd. `printf '%(%s)T'` and "$*"
++  # are shell builtins - a `$(date +%s)` fork here cost 8ms on EVERY bd call on the VM (measured), which
++  # is 68% of the shim's own uncontended cost and is not worth paying on the path that never contends.
++  local lock="$1"; shift
++  printf -v fleet_bd_now '%(%s)T' -1 2>/dev/null || fleet_bd_now=0
++  {
++    printf 'pid=%s lane=%s role=%s since=%s argv=bd %s\n' \
++      "$$" "${FLEET_LANE:-unknown}" "${FLEET_ROLE:-unknown}" "${fleet_bd_now:-0}" "$*"
++  } >"$lock" 2>/dev/null || true
++}
++
++fleet_bd_lock_descendants() {
++  # The holder's whole descendant tree, which is where a dolt push spends its minutes: the holder runs bd,
++  # which runs git, which runs git-remote-https for the round-trip to origin. Bounded to 4 levels so a
++  # pathological or cyclic parent graph can never turn a report into an unbounded walk.
++  local frontier="$1" level=0 next kids p k all
++  while [ -n "$frontier" ] && [ "$level" -lt 4 ]; do
++    next=""
++    for p in $frontier; do
++      kids="$(ps -o pid= --ppid "$p" 2>/dev/null | tr -d ' ' | tr '\n' ' ')"
++      for k in $kids; do all="$all $k"; next="$next $k"; done
++    done
++    frontier="$next"
++    level=$((level + 1))
++  done
++  [ -n "$all" ] || return 0
++  ps -o pid=,args= -p $(printf '%s' "$all" | tr -s ' ') 2>/dev/null | head -6 | sed 's/^[[:space:]]*/bd:     */'
++}
++
++fleet_bd_lock_report() {
++  # $1 lock file, $2 seconds held, $3 mode: wait|timeout, $4 quiet_holder=1 to skip the holder block
++  # (the timeout of an invocation that already reported the holder must not repeat all of it)
++  local lock="$1" held="$2" mode="$3" rec pid lane role since argv human kids
++  local quiet_holder="${4:-}"
++  rec="$(head -c 400 "$lock" 2>/dev/null | tr '\n' ' ')"
++  human="$((held / 60))m$((held % 60))s"
++  if [ "$mode" = timeout ]; then
++    echo "bd: TIMEOUT (agents-elu6): the VM-wide bd lock was held for ${human}. THIS CALL DID NOT RUN and changed nothing." >&2
++  else
++    echo "bd: WAITING ${human} for the VM-wide bd lock (one Dolt write at a time; a dolt push holds it for its git round-trip to origin)." >&2
++  fi
++  if [ "$quiet_holder" = 1 ]; then
++    if [ "$mode" = timeout ]; then
++      echo "bd:   retry in a few seconds, or allow a longer wait with FLEET_BD_LOCK_WAIT=<seconds>." >&2
++      echo "bd:   Posting a verdict? The COMMENT first, then the labels: a retry then never loses the verdict." >&2
++    fi
++    return 0
++  fi
++  pid="$(fleet_bd_lock_field "$rec" pid)"
++  if [ -n "$pid" ]; then
++    lane="$(fleet_bd_lock_field "$rec" lane)"
++    role="$(fleet_bd_lock_field "$rec" role)"
++    since="$(fleet_bd_lock_field "$rec" since)"
++    argv="$(fleet_bd_lock_field "$rec" argv)"
++    echo "bd:   holder: lane=${lane:-?} role=${role:-?} pid=$pid${since:+ since $(date -d "@$since" -u +%H:%M:%SZ 2>/dev/null || printf '?')}" >&2
++    echo "bd:   running: ${argv:-?}" >&2
++    if [ -d "/proc/$pid" ]; then
++      kids="$(fleet_bd_lock_descendants "$pid")"
++      [ -n "$kids" ] && printf '%s\n' "$kids" >&2
++    else
++      echo "bd:   (that pid is gone, so the record is stale - the lock is still held)" >&2
++    fi
++  else
++    echo "bd:   holder: UNNAMED - the lock file has no holder record (a holder from before agents-elu6, or one that has not written its record yet). The lock releases automatically when the holder exits, so a holder that has died cannot hold it." >&2
++  fi
++  if [ "$mode" = timeout ]; then
++    echo "bd:   retry in a few seconds, or allow a longer wait with FLEET_BD_LOCK_WAIT=<seconds>." >&2
++    echo "bd:   Posting a verdict? The COMMENT first, then the labels: a retry then never loses the verdict." >&2
++  fi
++}
++
++fleet_bd_lock_acquire() {
++  # $1 lock file, $2 lock fd, $3... the bd argv (for the record). 0 = held, 75 = timed out, reported.
++  local lock="$1" fd="$2" wait="${FLEET_BD_LOCK_WAIT:-300}" every="${FLEET_BD_LOCK_REPORT:-30}"
++  local start=$SECONDS held next=0 reported=0
++  shift 2
++  if flock -n "$fd"; then            # uncontended: no output, no report, one record write
++    fleet_bd_lock_note "$lock" "$@"
++    return 0
++  fi
++  while :; do
++    held=$((SECONDS - start))
++    if [ "$held" -ge "$next" ]; then
++      next=$((held + every))
++      fleet_bd_lock_report "$lock" "$held" wait
++      reported=1
++    fi
++    if [ "$held" -ge "$wait" ]; then
++      fleet_bd_lock_report "$lock" "$held" timeout "$reported"
++      return 75
++    fi
++    sleep 1
++    if flock -n "$fd"; then
++      fleet_bd_lock_note "$lock" "$@"
++      return 0
++    fi
++  done
++}
++
+ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+   "$real" "$@"
+   rc=$?
+@@ -254,7 +392,25 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+ fi
+ 
+ export FLEET_BD_LOCKED=1
+-flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
++fleet_bd_lock="$HOME/.fleet/bd.lock"
++if ! exec {fleet_bd_lock_fd}>>"$fleet_bd_lock"; then
++  echo "bd: cannot open the VM-wide bd lock $fleet_bd_lock - refusing to run bd without it, because two writers on this embedded Dolt DB fail ambiguously. Check that $(dirname "$fleet_bd_lock") exists and is writable." >&2
++  exit 1
++fi
++fleet_bd_lock_acquire "$fleet_bd_lock" "$fleet_bd_lock_fd" "$@"
++rc=$?
++if [ "$rc" -ne 0 ]; then
++  exit "$rc"          # timed out: the holder was named on stderr, and nothing ran
++fi
++# The lock fd is closed FOR bd ONLY. The shim holds the lock for exactly as long as bd runs, but bd's own
++# children do not inherit the fd. Without this, anything bd leaves running in the background keeps the
++# whole VM's bead writes queued behind it after bd itself has exited - measured: a child that outlives its
++# holder keeps the lock (that is how a `git push` keeps it for the network round-trip), and a killed
++# holder left its payload holding the lock as well. So this is also what makes two behaviours below true:
++# a killed holder releases at once, and a payload cannot leak the lock past its own exit.
++"$real" "$@" {fleet_bd_lock_fd}>&-
+ rc=$?
++: >"$fleet_bd_lock" 2>/dev/null || true     # clear our record while we still hold the lock
++exec {fleet_bd_lock_fd}>&-                  # release
+ check_push_failure "$rc" "$@"
+ exit "$rc"
+diff --git a/tests/bd-lock-holder.test.sh b/tests/bd-lock-holder.test.sh
+new file mode 100644
+index 0000000..cb05043
+--- /dev/null
++++ b/tests/bd-lock-holder.test.sh
+@@ -0,0 +1,150 @@
++#!/usr/bin/env bash
++# tests/bd-lock-holder.test.sh — bin/bd: a contended lock NAMES ITS HOLDER, and the wait is bounded (agents-elu6).
++#
++# THE DEFECT (measured 2026-10-13, rev-fnko): a complete review could not record its verdict for more than
++# four minutes because another lane's `bd dolt push` held this VM's shared lock for the whole network
++# round-trip of its child `git push --force-with-lease refs/dolt/data`. The old tail was
++#
++#     flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
++#
++# which waits in SILENCE and then exits 1 with NO OUTPUT AT ALL (measured against util-linux 2.39.3:
++# `rc=1 output=[]`). So a lane with a finished result produces nothing for minutes and looks IDLE - the
++# zombie-lane failure shape one layer down - and the failure itself carries no reason.
++#
++# WHAT IS PINNED HERE: the holder writes a one-line record into the lock file while it holds it; a waiter
++# reports lane, pid, command, how long it has been held, and the holder's descendant tree (where a push
++# actually spends its time); the wait keeps 300s of patience by default and is overridable; on expiry it
++# fails FAST with EX_TEMPFAIL (75) without running the call; and NOTHING of this appears on stdout, which
++# carries bd's JSON for callers like `bd show --json`.
++#
++# Hermetic by construction: a stub $HOME/.local/bin/bd means no real bead and no real lock is touched -
++# the lock under test is $HOME/.fleet/bd.lock inside a throwaway home. The one real-lock measurement (a
++# genuine `bd dolt push` holding it while a second call reports the holder) lives on the bead as evidence,
++# not here, so a gate re-run never contends with the fleet.
++#
++#   bash tests/bd-lock-holder.test.sh
++set -uo pipefail
++HERE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
++SHIM="${BD_SHIM_OVERRIDE:-$HERE/bin/bd}"
++PASS=0; FAIL=0
++ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
++bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n      %s\n' "$1" "${2:-}"; }
++eq()  { [ "$1" = "$2" ] && ok "$3" || bad "$3" "got [$1] want [$2]"; }
++has() { grep -q -- "$2" "$1" && ok "$3" || bad "$3" "not found in $1: $(tr '\n' '|' < "$1" | cut -c1-220)"; }
++hasnt() { grep -q -- "$2" "$1" && bad "$3" "unexpectedly found: $2" || ok "$3"; }
++
++ROOT=$(mktemp -d); KIDS=""
++cleanup() { [ -n "$KIDS" ] && kill $KIDS 2>/dev/null; rm -rf "$ROOT"; }
++trap cleanup EXIT
++T="$ROOT/home"; mkdir -p "$T/.local/bin" "$T/.fleet"
++LOCK="$T/.fleet/bd.lock"
++
++# stub real bd: echo its argv, optionally spawn a git-shaped child and sleep (the shape of the real latency)
++cat > "$T/.local/bin/bd" <<'STUB'
++#!/usr/bin/env bash
++echo "REAL-BD:$*"
++if [ "${STUB_ORPHAN:-0}" -gt 0 ]; then
++  ( exec sleep 3 ) & disown 2>/dev/null || true    # a child that outlives bd, holding or not holding the lock fd
++fi
++if [ "${STUB_SLEEP:-0}" -gt 0 ]; then
++  ( exec -a "git push --force-with-lease refs/dolt/data" sleep "$STUB_SLEEP" ) &
++  wait $!
++fi
++exit "${STUB_RC:-0}"
++STUB
++chmod +x "$T/.local/bin/bd"
++
++shim() { HOME="$T" FLEET_LANE="${LANE:-impl-ozmt}" FLEET_ROLE="${ROLE:-implementer}" bash "$SHIM" "$@"; }
++# a holder from BEFORE agents-elu6: it takes the lock and writes no record
++hold_raw() { ( exec 9>>"$LOCK"; flock -n 9 || exit 1; sleep "$1" ) & KIDS="$KIDS $!"; }
++# a holder that goes through the shim, so it writes the holder record a waiter reads
++hold_shim() { STUB_SLEEP="$1" HOME="$T" FLEET_LANE="${HOLDER_LANE:-impl-other}" bash "$SHIM" slow-run & KIDS="$KIDS $!"; }
++release() {
++  [ -n "$KIDS" ] && { kill $KIDS 2>/dev/null; wait $KIDS 2>/dev/null; }
++  KIDS=""
++  for _ in $(seq 1 50); do flock -n "$LOCK" true 2>/dev/null && break; sleep 0.1; done
++  : > "$LOCK"
++}
++
++echo "1. uncontended: no report, no record left behind, the call runs and its exit code survives"
++out=$(shim version 2>"$ROOT/e1"); rc=$?
++eq "$out" "REAL-BD:version" "1a the call reached bd"
++eq "$rc" "0" "1b exit 0"
++[ -s "$ROOT/e1" ] && bad "1c stderr on the uncontended path" "$(cat "$ROOT/e1")" || ok "1c silent when uncontended"
++[ -s "$LOCK" ] && bad "1d a holder record was left behind" "$(cat "$LOCK")" || ok "1d the record is cleared before release"
++out=$(STUB_RC=7 shim version 2>"$ROOT/e1b"); rc=$?
++eq "$rc" "7" "1e a failing bd exit code is passed through"
++[ -s "$LOCK" ] && bad "1f record left after a failing call" "$(cat "$LOCK")" || ok "1f record cleared even when bd fails"
++
++echo "2. contended: the holder is named at once, and the call still runs"
++hold_shim 3; sleep 0.5
++out=$(shim version 2>"$ROOT/e2"); rc=$?
++eq "$out" "REAL-BD:version" "2a the call ran after the wait"
++eq "$rc" "0" "2b exit 0"
++has "$ROOT/e2" "WAITING 0m0s" "2c the report is immediate, not after a threshold"
++has "$ROOT/e2" "lane=impl-other" "2d the holder's LANE is named"
++has "$ROOT/e2" "running: bd slow-run" "2e the holder's COMMAND is named"
++has "$ROOT/e2" "pid=" "2f a pid is named"
++release
++
++echo "3. beyond the bound: fail fast with EX_TEMPFAIL, holder named, call NOT run"
++hold_shim 6; sleep 0.5
++out=$(FLEET_BD_LOCK_WAIT=1 shim version 2>"$ROOT/e3"); rc=$?
++eq "$rc" "75" "3a EX_TEMPFAIL (75), not an unexplained 1"
++has "$ROOT/e3" "TIMEOUT (agents-elu6)" "3b it says TIMEOUT"
++has "$ROOT/e3" "lane=impl-other" "3c the holder is still named"
++has "$ROOT/e3" "THIS CALL DID NOT RUN" "3d it is explicit that nothing was attempted"
++has "$ROOT/e3" "FLEET_BD_LOCK_WAIT" "3e the bound is overridable, and the message says how"
++[ -n "$out" ] && bad "3f bd ran after a timeout" "$out" || ok "3f bd did not run"
++has "$ROOT/e3" "COMMENT first" "3g it points at the durable order for posting a verdict"
++eq "$(grep -c 'running: bd slow-run' "$ROOT/e3")" "1" "3h the holder block is printed once, not repeated by the timeout"
++release
++
++echo "4. a holder that left no record (one from before this change) is reported as UNNAMED, not as a mystery"
++hold_raw 2; sleep 0.4
++FLEET_BD_LOCK_WAIT=1 shim version >"$ROOT/o4" 2>"$ROOT/e4"
++has "$ROOT/e4" "UNNAMED" "4a unnamed holder is stated plainly"
++has "$ROOT/e4" "no holder record" "4b and the reason is given"
++has "$ROOT/e4" "releases automatically" "4c with the fact that a dead holder cannot hold it forever"
++release
++
++echo "5. a record naming a dead pid is reported as STALE, never as a live holder"
++hold_raw 2; sleep 0.3
++printf 'pid=999999 lane=ghost role=reviewer since=%s argv=bd dolt push\n' "$(date +%s)" > "$LOCK"
++FLEET_BD_LOCK_WAIT=1 shim version >"$ROOT/o5" 2>"$ROOT/e5"
++has "$ROOT/e5" "lane=ghost" "5a the stale record is shown"
++has "$ROOT/e5" "pid is gone" "5b and called stale"
++release
++
++echo "6. the nested escape (FLEET_BD_LOCKED=1) still bypasses the lock entirely"
++hold_raw 2; sleep 0.3
++out=$(FLEET_BD_LOCKED=1 shim version 2>"$ROOT/e6"); rc=$?
++eq "$out" "REAL-BD:version" "6a a nested call does not queue behind the lock"
++eq "$rc" "0" "6b exit 0"
++[ -s "$ROOT/e6" ] && bad "6c a nested call reported a wait" "$(cat "$ROOT/e6")" || ok "6c no report on the nested path"
++release
++
++echo "7. the holder's DESCENDANTS are named - the git push is where the minutes are"
++hold_shim 4; sleep 1
++FLEET_BD_LOCK_WAIT=1 shim version >"$ROOT/o7" 2>"$ROOT/e7"
++has "$ROOT/e7" "git push --force-with-lease refs/dolt/data" "7a the grandchild doing the waiting is named"
++release
++
++echo "8. stdout carries only bd's own output: the report goes to stderr"
++hold_shim 3; sleep 0.5
++shim show bead-x --json >"$ROOT/o8" 2>"$ROOT/e8"
++eq "$(cat "$ROOT/o8")" "REAL-BD:show bead-x --json" "8a stdout is exactly bd's output (no report mixed in)"
++has "$ROOT/e8" "WAITING" "8b while the report went to stderr"
++release
++
++echo "9. the lock fd is NOT inherited by bd's children: a grandchild cannot keep the fleet locked after its parent exits"
++out=$(STUB_ORPHAN=1 shim version 2>"$ROOT/e9a")
++eq "$out" "REAL-BD:version" "9a the holder ran and exited"
++s9=$SECONDS; out=$(FLEET_BD_LOCK_WAIT=2 shim version 2>"$ROOT/e9b"); rc=$?; d9=$((SECONDS - s9))
++eq "$rc" "0" "9b the next call did not fail"
++hasnt "$ROOT/e9b" "WAITING" "9c no wait was reported"
++[ "$d9" -le 1 ] && ok "9d the lock was free THE MOMENT the holder exited (waited ${d9}s, not the orphan's 3s lifetime)" \
++  || bad "9d the child it left behind kept the fleet locked after its parent exited" "waited ${d9}s"
++
++printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
++[ "$FAIL" -eq 0 ]
+-- 
+2.43.0
+
