@@ -153,6 +153,10 @@ if [ "${1:-}" = "--install" ]; then
 # this host, so --install without FLEET_CHECK_CONF set REPLACES THE ACTIVE GATE COMMAND FOR EVERY REPO HERE.
 LIFE
 )
+    tune_lines=$(cat <<'TUNE'
+# To tune, edit tools/check.conf and re-run: bash tools/check-cmd.sh --install (agents-024z).
+TUNE
+)
   else
     life_lines=$(cat <<LIFE
 # THIS COPY IS A REPO-LOCAL OVERRIDE, at $dest.
@@ -160,6 +164,15 @@ LIFE
 # variable is set at install time. Running --install WITHOUT it set replaces the machine-global
 # ~/.fleet/check.conf for every repo on this host instead, and leaves this file untouched.
 LIFE
+)
+    # agents-mnvd (review finding on the first attempt at agents-0utp): the tune instruction must not be the one
+    # bare command this header just warned about. A header that says "running --install WITHOUT the variable
+    # replaces the host's shared config" and then says "re-run: bash tools/check-cmd.sh --install" hands the
+    # reader the trap two lines after naming it. In this life the variable IS the path, so it is named.
+    tune_lines=$(cat <<TUNE
+# To tune, edit tools/check.conf and re-run WITH THIS FILE SELECTED, so the global config is not written:
+#   FLEET_CHECK_CONF=$dest bash tools/check-cmd.sh --install   (agents-024z, agents-mnvd)
+TUNE
 )
   fi
   {
@@ -169,7 +182,7 @@ LIFE
     printf '%s\n' "# DO NOT HAND-EDIT FOR TUNING: a hand-edit and a stale install are indistinguishable"
     printf '%s\n' "# from the files alone, so --install overwrites the file it is pointed at. No test reads this"
     printf '%s\n' "# file (it is machine state, and fleet-check sources whatever it says): the repair is --install."
-    printf '%s\n' "# To tune, edit tools/check.conf and re-run: bash tools/check-cmd.sh --install (agents-024z)."
+    printf '%s\n' "$tune_lines"
     grep -E '^[A-Z_]+=' "$TRACKED"
   } > "$dest"
   echo "check-cmd: installed the project's gate command into $dest"

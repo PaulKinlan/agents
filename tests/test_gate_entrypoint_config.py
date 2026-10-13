@@ -569,6 +569,9 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         # while --install without the variable replaces the host's shared file instead.
         self.assertIn("THIS COPY IS MACHINE-GLOBAL", installed)
         self.assertIn("BY DEFAULT for any repo invoked", installed)
+        # In the GLOBAL life the bare form is the correct instruction - it rewrites this very file - so the
+        # pair is complete: bare here, variable-selected in the override life (agents-mnvd).
+        self.assertIn("re-run: bash tools/check-cmd.sh --install", installed)
         self.assertIn("--install", installed)
         self.assertNotIn("fails on any divergence", installed,
                          "the emitted header must not promise a guard no test performs "
@@ -604,6 +607,15 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
                          "that says it is tells the reader that --install maintains it (agents-0utp)")
         self.assertIn("WITHOUT it set replaces the machine-global", installed,
                       "the header must name the trap, not just the truth")
+        # agents-mnvd, the review finding on the first attempt: the header warned that a bare --install replaces
+        # the host's shared config and then, four lines later, instructed the reader to run exactly that. The
+        # tune instruction must select THIS file. Both assertions below fail on tip 31582544.
+        tail = installed[installed.index("To tune"):]
+        self.assertIn("FLEET_CHECK_CONF=", tail,
+                      "an override's tune instruction must name the variable, or it hands the reader the bare "
+                      "command the header just warned about (agents-mnvd)")
+        self.assertNotIn("re-run: bash tools/check-cmd.sh --install", tail,
+                         "the override header must not carry the unqualified install command at all")
         self.assertFalse((Path(home) / ".fleet" / "check.conf").exists(),
                          "installing to an override must NOT also write the machine-global path")
 
