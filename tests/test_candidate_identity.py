@@ -120,13 +120,15 @@ class TestThePropertyAgainstTheReconstruction(unittest.TestCase):
         return candidate
 
     def test_the_copy_is_stable_where_the_reconstruction_still_moves(self):
-        """The measured gap this bead closes, on an UNCHANGED file.
+        """The measured gap this bead records, on an UNCHANGED file - and what the delta now says about it.
 
         TWO findings in the same file is the case agents-x9my step 2 deliberately does not fix: its
         location fallback is refused when a run reports more than one finding at a path, because two
         rows sharing a path and a bound label would be handed the same snippet and COLLAPSE. So
-        those rows stay bound to the model's prose - and re-wording moves them, which is the
-        new+fixed pair below. The scanner's own ids do not move, because the file did not change.
+        those rows stay bound to the model's prose - and re-wording moves them. That movement is now
+        DISCLOSED as a possible re-key rather than booked as a clean new+fixed pair (agents-l606), and
+        that is what the assertions below record: the rows still book new+fixed, the pair is COUNTED,
+        and the scanner's own ids do not move, because the file did not change.
         """
         scan_a, scan_b = self._candidate(), self._candidate()
         self.assertEqual(scan_a[CANDIDATE_ID_FIELD], scan_b[CANDIDATE_ID_FIELD])  # the copy: stable
@@ -147,16 +149,24 @@ class TestThePropertyAgainstTheReconstruction(unittest.TestCase):
                     self._finding("innerHTML assignment", 40)]
             run2 = [self._finding("the POST route to /api/auth", 12),
                     self._finding("DOM sink writing user input", 40)]
-            _, s1, _ = store.process_run("vuln-discovery", run1, candidate_index=ci)
+            p1, s1, _ = store.process_run("vuln-discovery", run1, candidate_index=ci)
             processed, s2, fixed2 = store.process_run("vuln-discovery", run2, candidate_index=ci)
             store.close()
 
         # The reconstruction stays on the model's prose (step 2's guard refused the location
         # fallback, because this run reports TWO findings in one file and handing both the same
-        # candidate would collapse them) and therefore books the same unchanged findings as new AND
-        # fixed...
+        # candidate would collapse them), so the same unchanged findings MOVE KEY when re-worded:
         self.assertEqual(s1["new"], 2)
-        self.assertEqual((s2["new"], s2["fixed"]), (2, 2), s2)
+        self.assertNotEqual({f["fingerprint"] for f in p1}, {f["fingerprint"] for f in processed},
+                            "re-wording must still move a prose-bound identity")
+        # AND THE RUN NOW SAYS SO (agents-l606): the delta still books them new, because a location
+        # cannot prove they are the same finding as the two that retired - every attempt to
+        # reclassify them was reproduced as a way to hide work (agents-wcki, agents-hci2) - but it
+        # counts the pair and discloses it, so the new+fixed wave is no longer indistinguishable from
+        # a genuine discovery wave. The scanner's ids for the same unchanged file are byte-identical
+        # across scans (asserted above and again below).
+        self.assertEqual((s2["new"], s2["possible_rekey"], s2["fixed"]), (2, 2, 2), s2)
+        self.assertEqual({f["change"] for f in processed}, {"new"})
         self.assertEqual({f["identity_source"] for f in processed}, {"model-snippet"})
         # ...while the scanner's ids for the same unchanged file are byte-identical across scans.
         self.assertEqual(scan_a[CANDIDATE_ID_FIELD], scan_b[CANDIDATE_ID_FIELD])

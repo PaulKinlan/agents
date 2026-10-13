@@ -51,7 +51,7 @@ _loader.exec_module(factory_cli)
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
                "credential_broker.py", "net_forward.py", "egress_proxy.py",
                "report_schema.py", "containment.py", "sandbox.py", "retention.py",
-               "tool_pins.py", "yaml_mini.py")
+               "tool_pins.py", "yaml_mini.py", "line_numbers.py")
 
 # Every variable that could carry a real model credential on the host (lib/child_env.py
 # plus the broker's secret vars). The fleet has none of them set.

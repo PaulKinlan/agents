@@ -251,7 +251,8 @@ class TestDispatcherSchemaGate(unittest.TestCase):
         shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
         for module in ("findings.py", "redaction.py", "embargo.py",
-                       "tool_pins.py", "net_forward.py", "egress_proxy.py"):
+                       "tool_pins.py", "net_forward.py", "egress_proxy.py",
+                       "line_numbers.py"):
             shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
         shutil.copytree(FACTORY_ROOT / "lib" / "sinks", sandbox / "lib" / "sinks", dirs_exist_ok=True)

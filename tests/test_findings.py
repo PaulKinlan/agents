@@ -896,6 +896,186 @@ class TestIdentityAttribution(unittest.TestCase):
             report = findings._render_delta_report("target", processed, stats, fixed)
             self.assertIn("> **Unanchored disappearances**: 2 of 3 finding(s) that left the active set", report)
 
+    def test_new_unanchored_counter_and_section_both_directions(self):
+        """agents-l606: an unanchored appearance is COUNTED, and a location match is DISCLOSED, not decided.
+
+        `new_unanchored` is a subset counter beside `new`, exactly as `fixed_unanchored` is beside
+        `fixed`. A row that shares its exact line with one this run booked Fixed is reported as a
+        possible re-key: that is what the same finding moving key looks like, and also what a new finding
+        at a recycled line looks like, so the row KEEPS `new` and stays actionable. The counter is
+        information, and nothing is reclassified - demoting on this hid findings (agents-wcki).
+        """
+        agent = "vuln-discovery"
+
+        # Direction 1: an ANCHORED appearance is an ordinary new finding.
+        ci = self._index([{"rule_id": "scanner-rule", "path": "a.py", "line_number": 2,
+                           "snippet": "scanner text"}])
+        with tempfile.TemporaryDirectory() as td:
+            processed, stats, fixed = self._run(td, [self._finding()], ci)
+            self.assertEqual(stats["new"], 1)
+            self.assertEqual(stats["new_unanchored"], 0, "an anchored appearance leaves the counter at 0")
+            self.assertEqual(stats["possible_rekey"], 0)
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("## Action Required: New & Regressed Findings", report)
+            self.assertNotIn("Unanchored appearances", report)
+            self.assertNotIn("Re-keyed", report)
+
+        # Direction 2: an UNANCHORED appearance with NO retiring twin stays new, counted as a subset.
+        # It must ALSO stay under Action Required: newness is unattributed, but the row is not
+        # evidence-coloured as a re-key, and a critical row must not be muted by this bookkeeping.
+        with tempfile.TemporaryDirectory() as td:
+            processed, stats, fixed = self._run(td, [self._finding()], None)
+            self.assertEqual(stats["new"], 1, "new still counts an unattributed appearance")
+            self.assertEqual(stats["new_unanchored"], 1, "unanchored appearance increments the subset")
+            self.assertEqual(stats["possible_rekey"], 0, "no retiring twin means no pair")
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("## Action Required: New & Regressed Findings", report)
+            self.assertIn("> **Unanchored appearances**: 1 of 1 new finding(s) had no stable anchor",
+                          report)
+            self.assertNotIn("Re-keyed", report)
+
+        # Direction 3: THE agents-l606 CASE - one finding re-keyed inside one run. The store holds a
+        # row at a location under the model's old wording; this run reports the SAME location with
+        # reworded prose and no candidate set, so the row MOVES KEY: the old row is booked Fixed and
+        # the reworded row appears. Before this change the run booked that appearance as a NEW
+        # finding beside the Fixed twin of itself.
+        with tempfile.TemporaryDirectory() as td:
+            old_fp = findings.compute_fingerprint(agent=agent, rule_id="unclassified",
+                                                  path="tests/x.py", snippet="old wording")
+            row = {old_fp: {"fingerprint": old_fp, "agent": agent, "rule_id": "unclassified",
+                            "path": "tests/x.py", "line_number": 621, "snippet": "old wording",
+                            "identity_source": "no-candidate-index", "severity": "info",
+                            "title": "Mock credential in a test fixture", "description": "d",
+                            "remediation": "r", "state": "new", "change": "unchanged",
+                            "first_seen": "2026-01-01T00:00:00+00:00",
+                            "last_seen": "2026-01-01T00:00:00+00:00"}}
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": row}), encoding="utf-8")
+            reworded = self._finding(rule_id="unclassified", path="tests/x.py", line_number=621,
+                                     snippet="reworded prose")
+
+            processed, stats, fixed = self._run(td, [reworded], None)
+            self.assertEqual(stats["possible_rekey"], 1,
+                             "the pair is reported as a possible re-key")
+            self.assertEqual(stats["new"], 1,
+                             "but nothing is reclassified: a location cannot prove the two rows are one")
+            self.assertEqual(stats["new_unanchored"], 1, "and the appearance is still unattributed")
+            self.assertEqual(stats["fixed"], 1, "the row that left is booked Fixed")
+            self.assertEqual(stats["fixed_unanchored"], 1, "and is counted as an unanchored loss")
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("## Action Required: New & Regressed Findings", report,
+                          "the row stays actionable - guessing it away has hidden real findings before")
+            self.assertIn("Possibly re-keyed, not reclassified", report,
+                          "and the report says the pair may be one finding that moved key")
+            self.assertIn("## Resolved in this Run (Fixed)", report)
+
+        # Direction 1b (agents-yh0z): an UNKNOWN line is NOT an exact location. The factory's own
+        # unknown marker is the string "?" (lib/line_numbers.UNKNOWN_LINE_MARKER, which the store also
+        # writes when a scanned null line is persisted), and the vuln-triage schema permits a null line,
+        # so two unnamed rows in ONE file compare EQUAL at (path, "?") having no line in common. The
+        # counter says EXACT LOCATION, so unknown-line rows are not paired and the count is a floor.
+        # The rows themselves are untouched: new, actionable and delivered like any other.
+        with tempfile.TemporaryDirectory() as td:
+            old_fp = findings.compute_fingerprint(agent="vuln-discovery", rule_id="unclassified",
+                                                  path="package.json", snippet="old wording")
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": {old_fp: {
+                                "fingerprint": old_fp, "agent": "vuln-discovery",
+                                "rule_id": "unclassified", "path": "package.json",
+                                "line_number": None, "snippet": "old wording",
+                                "identity_source": "no-candidate-index", "severity": "info",
+                                "title": "old row", "description": "d", "remediation": "r",
+                                "state": "new", "change": "unchanged",
+                                "first_seen": "2026-01-01T00:00:00+00:00",
+                                "last_seen": "2026-01-01T00:00:00+00:00"}}}), encoding="utf-8")
+            unnamed = self._finding(rule_id="unclassified", path="package.json",
+                                    line_number="?", snippet="reworded prose")
+            processed, stats, fixed = self._run(td, [unnamed], None)
+            self.assertEqual(stats["possible_rekey"], 0,
+                             "two unnamed rows are not at a shared exact location")
+            self.assertEqual(stats["new"], 1, "so the appearance is an ordinary new finding")
+            self.assertEqual(len(fixed), 1, "and the unnamed row that left is still booked Fixed")
+
+    def test_a_recycled_location_is_reported_and_never_reclassified(self):
+        """Three reproductions of harm turned into three refusals (agents-wcki/l3j1/hci2).
+
+        A location is RECYCLED when one row retires there and something else appears there. A location
+        cannot distinguish a re-key from a new finding, and every reclassification attempted was
+        reproduced as a way to hide work - a critical row dropped out of Action Required, and a
+        fail-closed tracker check was skipped. So the delta COUNTS the pair and changes nothing.
+        """
+        agent = "vuln-discovery"
+
+        def retire_at(td, path, line, snippet="old wording", severity="info",
+                      identity_source="no-candidate-index"):
+            fp = findings.compute_fingerprint(agent=agent, rule_id="unclassified",
+                                              path=path, snippet=snippet)
+            row = {fp: {"fingerprint": fp, "agent": agent, "rule_id": "unclassified",
+                        "path": path, "line_number": line, "snippet": snippet,
+                        "identity_source": identity_source, "severity": severity,
+                        "title": "old row", "description": "d", "remediation": "old fix",
+                        "state": "new", "change": "unchanged",
+                        "first_seen": "2026-01-01T00:00:00+00:00",
+                        "last_seen": "2026-01-01T00:00:00+00:00"}}
+            (Path(td) / "target.json").write_text(
+                json.dumps({"target": "target", "identity_scheme": findings.IDENTITY_SCHEME,
+                            "findings": row}), encoding="utf-8")
+
+        # (a) A NEW CRITICAL at the retired location keeps every thing a reader acts on: it is not
+        # reclassified, it stays under Action Required, and it stays deliverable.
+        with tempfile.TemporaryDirectory() as td:
+            retire_at(td, "src/api.py", 42)
+            critical = self._finding(rule_id="unclassified", path="src/api.py", line_number=42,
+                                     snippet="auth bypass", severity="critical")
+            critical["severity"] = "critical"
+            critical["remediation"] = "patch the auth check"
+            processed, stats, fixed = self._run(td, [critical], None)
+            self.assertEqual(stats["possible_rekey"], 1, "the ambiguity is counted")
+            self.assertEqual(stats["new"], 1, "and nothing is taken out of `new`")
+            self.assertEqual({f["change"] for f in processed}, {"new"})
+            report = findings._render_delta_report("target", processed, stats, fixed)
+            self.assertIn("## Action Required: New & Regressed Findings", report)
+            self.assertIn("Possibly re-keyed, not reclassified", report,
+                          "the report must disclose the pair rather than resolve it")
+            self.assertIn("patch the auth check", report,
+                          "the remediation must never be the thing that disappears")
+            # NOT ASSERTED AS PUBLISHABLE, on purpose: a critical row is withheld from publication by
+            # the EMBARGO, which is a separate and deliberate mechanism, so asserting it here would
+            # pass or fail for a reason unrelated to this bead. What the delta controls is that it
+            # changes NOTHING the publication path reads - which is the sink guard I removed after it
+            # silently skipped a fail-closed tracker check (see
+            # tests/test_sinks.py::test_unavailable_tracker_listing_does_not_emit_false_closed_notice,
+            # whose rc=3 assertion is the end-to-end evidence for this).
+            self.assertEqual({f["state"] for f in processed}, {"new"})
+            self.assertEqual({f["change"] for f in processed}, {"new"},
+                             "a disclosed pair must not be reclassified out of the publication path")
+
+        # (b) TWO appearances at one retired location: counted ONCE, and neither is changed.
+        with tempfile.TemporaryDirectory() as td:
+            retire_at(td, "a.py", 10)
+            two = [self._finding(rule_id="unclassified", path="a.py", line_number=10,
+                                 snippet="reworded one"),
+                   self._finding(rule_id="unclassified", path="a.py", line_number=10,
+                                 snippet="reworded two")]
+            processed, stats, fixed = self._run(td, two, None)
+            self.assertEqual(stats["possible_rekey"], 1,
+                             "one retiring row explains at most one appearance")
+            self.assertEqual(stats["new"], 2, "and both rows stay new and visible")
+            self.assertEqual(len(fixed), 1)
+
+        # (c) AN ANCHORED TWIN IS EVIDENCE, NOT A MATCH (agents-wcki): a row that had a stable anchor
+        # would have been recognised by that key in THIS run, so its disappearance means the scanner
+        # stopped emitting it - not that the next finding at its line is the same one.
+        with tempfile.TemporaryDirectory() as td:
+            retire_at(td, "c.py", 9, identity_source="candidate-exact")
+            fresh = self._finding(rule_id="unclassified", path="c.py", line_number=9,
+                                  snippet="a genuinely new finding")
+            processed, stats, fixed = self._run(td, [fresh], None)
+            self.assertEqual(stats["possible_rekey"], 0, "an anchored twin is not a candidate pair")
+            self.assertEqual(stats["new"], 1)
+
     def _check_process_run_shared_predicate(self, process_run_source: str):
         """Shared verification helper for drift and mutation checks."""
         self.assertIn("is_unanchored_finding(existing)", process_run_source,
