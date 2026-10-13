@@ -18,10 +18,13 @@ list, or a document with one section per item. Two failures follow from that sha
 first is about git.
 
 1. **Scheduling.** N deliveries in flight that all append to one file means N−1 of them must
-   reconcile with the others. Losing the race costs more than a merge: a rebase moves the branch
-   tip, and a verdict is pinned to a tip, so the delivery loses its gate record *and* its review —
-   a re-gate (tens of seconds to minutes) and a re-review (minutes to an hour) for work that did
-   not change.
+   reconcile with the others **at that file** — a hand-resolved conflict in a file nobody meant to
+   change. And reconciling is expensive here in a way an ordinary merge is not: a rebase moves the
+   branch tip, and a verdict is pinned to a tip, so the delivery loses its gate record *and* its
+   review — a re-gate (tens of seconds to minutes) and a re-review (minutes to an hour) for work
+   that did not change. **The rebase is caused by `origin/main` advancing, which no shape of any
+   file can prevent (§6, item 1); what the shared file adds is the conflict, and the second look at
+   a merge nobody intended.** This section's table measures the collision; §6 states the limit.
 2. **Containment.** In a shared markdown document, an unclosed code fence swallows the section
    after it. No text-based merge check sees this: both sides' diffs are individually well-formed,
    and the damage is to the *neighbourhood*. This is not hypothetical for this repository — the
@@ -232,7 +235,13 @@ python3 -c '...'  # ~/.fleet/checks/*.fast.json, grouped by (coverage.changed, c
 ## 9. Consequences
 
 - A delivery that adds an item to a fragmented registry touches **one new file and nothing shared**,
-  so it neither conflicts nor invalidates another delivery's verdict.
+  so it cannot *conflict* with a delivery in flight, and no lane has to hand-resolve and then re-review
+  a merge that two appends to one file produced. **It is NOT immunity from re-gating, and an earlier
+  version of this bullet claimed that it was** (`agents-d8uv`, a review of the first version of this
+  record): `origin/main` advancing moves every in-flight branch whatever changed, and a verdict is
+  pinned to a tip, so a rebase still puts the rebased tip back in front of a reviewer (§6, item 1).
+  What the split removes is exactly the work the shared file itself caused — the conflict, and the
+  second look at a merge nobody meant to change — which is the smaller claim §1's table supports.
 - Every fragmented registry must ship an aggregator and a guard for its own failure modes; the two
   existing adoptions do, and §4's follow-up must.
 - Registries that are *not* fragmented now carry the reason in this document, which is what makes the
