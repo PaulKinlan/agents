@@ -84,12 +84,13 @@ the slot only when that pid is among the processes holding the slot fd**. A live
 set - it takes the flock and holds it for the whole job. A reused pid is alive and holds nothing. The
 `kill -0` liveness test this replaces cannot tell those apart.
 
-The deferral, stated rather than left implicit: a holder that shares THIS script's own process group is
-not reclaimed here. That is deliberate - our own group is the instrument's, and the `$( )` that computes
-the holder list is itself a member. Such a holder is left to the orphan path's own grace and signatures
-rather than being TERMed on a group membership this function cannot attribute. The cost is that a genuine
-stray in our group is reclaimed later rather than sooner; the benefit is that the function never signals
-its own process tree.
+**What this function does NOT do, stated rather than left implicit:** the reclaim has no process-group
+test at all. It decides on two things only - whether the recorded pid is among the fd holders, and, if
+not, whether the orphan signatures and the grace are satisfied. A holder that shares this script's own
+process group is therefore treated exactly like any other holder: it is protected while it holds the
+slot, and it is a candidate for reclamation once it is gone. (The process-group exclusion belongs to the
+job-end SWEEP, which is a different path in the same file and has its own write-up; an earlier draft of
+this section wrongly borrowed that idea, which is agents-qlok.)
 
 ### What is NOT claimed
 
