@@ -32,6 +32,29 @@ The bead's three preferences were: (a) name the holder once the lock has been he
 blocking a tool call for minutes. This patch implements **(a) and (c)**, and points at (b) — which is lane
 discipline, not tooling — in the failure message itself.
 
+### What NOT having this costs, measured on 2026-10-13
+
+The defect is not a nuisance: it is a **lane-visible outage of the fleet's only channel for recording results**.
+All of the following happened in one landing window on `agents-factory`:
+
+- **Four lanes had bead writes time out.** For a lane, a bead write is how a verdict, a finding or a hand-off
+  becomes durable; a refused write is not a slow operation, it is work that does not exist as far as the fleet
+  is concerned.
+- **One finding's sentence had to be recorded by ANOTHER actor to survive** — the lane that wrote it could not
+  get the lock, so the record of it exists only because a second lane took it.
+- **Multiple 300 s waits on the git pre-commit hook** (agents-vqwg): a `git commit` in a beads repo takes the
+  same VM-wide lock, so commits - not just bead writes - queue behind unrelated lanes' pushes.
+- **This lane measured starvation directly**: four consecutive calls refused at a 90 s bound (360 s of waiting,
+  zero acquisitions) while the lock was continuously *served* to others, then one 240 s blocking acquisition that
+  ran five operations nested. The refusal itself is a fairness defect in `flock -w`, which polls rather than
+  queues (agents-nbka); the *silence* around it while work is fine is this patch's subject.
+
+What this patch costs, for symmetry: one extra open file per bd call, one short record line written and cleared,
+**+0.47 ms** on the uncontended path, and the loss of a holder's lane name (see the boundary section - a name
+cannot be proved on a shared-uid VM). What it does not do is shorten any wait, and it does not make the lock
+fair; it makes the wait **visible, nameable, bounded, and survivable**, so a lane can retry instead of
+disappearing.
+
 ### What this patch promises, and where the boundary is (threat model)
 
 This is stated as a BOUNDARY, not left for a reader to infer, because three successive reviews found the same

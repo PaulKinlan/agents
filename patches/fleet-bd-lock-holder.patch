@@ -1,4 +1,4 @@
-From b728bb1f025867d78d769ef8bfc56d26a642cf06 Mon Sep 17 00:00:00 2001
+From 717e5bffd00ae52f376c886cb5b02c5819035e4b Mon Sep 17 00:00:00 2001
 From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
 Date: Tue, 13 Oct 2026 13:29:49 +0000
 Subject: [PATCH] fix(bd): a contended lock names its holder, with visible
@@ -131,6 +131,22 @@ defect is agents-nbka, because a timeout cannot be tuned into a queue).
 DOCS ONLY - no behaviour change. Verified below: the applied bin/bd and tests/bd-lock-holder.test.sh are
 byte-identical to the copies the reviewers saw for 602bec9, so the P1 verdict (lock inheritance) and the
 reader-side revalidation conclusions carry over unchanged; only the write-up differs.
+
+--- DOCS: what the defect COSTS, measured (coord's request) ---
+
+Coord: the lock is now a lane-visible outage rather than a nuisance, and the write-up should say what it costs
+rather than only what it violates. New section "What NOT having this costs, measured on 2026-10-13": four lanes'
+bead writes timing out in one landing window (a refused write is work that does not exist for the fleet); one
+finding's sentence that had to be recorded by ANOTHER actor to survive; multiple 300s waits on the git
+pre-commit hook (agents-vqwg, since a commit takes the same lock); and this lane's direct starvation
+measurement (4 calls refused at 90s = 360s with zero acquisitions while the lock was continuously served, then
+one 240s acquisition running five operations nested). Plus the costs OF the patch for symmetry: one extra open
+fd per call, one short record line, +0.47ms uncontended, and the loss of the holder's lane name - and what it
+does NOT do: shorten a wait or make the lock fair (agents-nbka); it makes the wait visible, nameable, bounded
+and survivable.
+
+DOCS ONLY again, verified: applied bin/bd and tests/bd-lock-holder.test.sh are byte-identical to the copies the
+reviewers saw for 602bec9 (cmp), so every behaviour conclusion carries over and only the write-up differs.
 ---
  bin/bd                       | 288 ++++++++++++++++++++++++++++++++-
  tests/bd-lock-holder.test.sh | 301 +++++++++++++++++++++++++++++++++++
