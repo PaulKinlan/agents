@@ -64,16 +64,26 @@ else
     echo "↻ Updating existing Software Factory checkout in $FACTORY_DIR..."
     # agents-yow5: A FAILED UPDATE MUST NOT LOOK LIKE A SUCCESSFUL INSTALL. This was
     # `|| true`, so a VM whose pull failed installed skills from a checkout of unknown age,
-    # printed its success lines and EXITED 0 - and the caller (remote/provision.sh:970) runs
-    # this installer with ALL OUTPUT SUPPRESSED, so the exit code is the only signal that
-    # survives it. The factory tracks main deliberately (no pin), which is precisely why the
-    # update failing has to be visible: otherwise the nightly runs against a station set of
-    # unknown age while every health check still passes.
+    # printed its success lines and EXITED 0. The factory tracks main deliberately (no pin),
+    # which is precisely why the update failing has to be visible: otherwise the nightly runs
+    # against a station set of unknown age while every health check still passes.
     #
-    # agents-a1ko: AND IT MUST NAME THE CLASS OF FAILURE, because that same suppression means the
-    # exit code is all an operator gets: a transient NETWORK outage and a DIVERGED checkout both
-    # arrived as `exit 1`, and they want OPPOSITE responses (retry later versus investigate the
-    # checkout on the host). The class is read from git's own error text, which is MEASURED rather
+    # WHERE THIS BRANCH IS ACTUALLY REACHED (corrected by agents-rn78 - the original comment here
+    # claimed the caller runs the installer with all output suppressed, and that is no longer true:
+    # fleet-24zj made provision.sh print, and provision.log is where that output lands). This pull
+    # runs for the DOCUMENTED one-liner when the target directory already exists and the script is
+    # not itself inside a checkout. IT DOES NOT RUN FOR PROVISIONING: remote/provision.sh:988 pulls
+    # ~/agents itself and :995 then invokes this installer from INSIDE the checkout, where the
+    # shortcut above takes FACTORY_DIR=$SCRIPT_DIR and no pull happens at all. A reviewer measured
+    # exactly that on a clone whose bare origin had been deleted: outside the checkout rc=1 with a
+    # class, the way provisioning invokes it rc=0 with none. Provisioning's own pull failure is
+    # classified by agents_pull_failure_class in remote/provision.sh.
+    #   patches/provision-failed-pull-names-its-class.patch (agents-rn78).
+    #
+    # agents-a1ko: AND IT MUST NAME THE CLASS OF FAILURE, because a bare exit code forces the
+    # operator to guess between a transient NETWORK outage and a DIVERGED checkout, and those want
+    # OPPOSITE responses (retry later versus investigate the checkout on the host). The class is read
+    # from git's own error text, which is MEASURED rather
     # than assumed - all three shapes are driven against real git in
     # tests/test_gate_entrypoint_config.py - and THE THIRD CLASS EXISTS SO AN UNRECOGNISED FAILURE
     # IS REPORTED AS UNRECOGNISED rather than guessed into one of the other two. That matters here
