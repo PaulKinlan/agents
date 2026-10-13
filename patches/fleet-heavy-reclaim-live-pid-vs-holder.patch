@@ -1,6 +1,6 @@
---- /home/exedev/fleet/bin/fleet-heavy	2026-10-12 21:10:28.000000000 +0000
-+++ /tmp/fleet-heavy-l95	2026-10-13 01:22:12.125131322 +0000
-@@ -92,7 +92,19 @@
+--- base	2026-10-13 02:01:03.822700762 +0000
++++ x	2026-10-13 02:01:03.858700912 +0000
+@@ -92,7 +92,27 @@
    # A LIVE WRAPPER IS NEVER TOUCHED. fleet-heavy stays alive for the whole job (it waits on `nice` then exits),
    # so a live recorded pid means the job is running - however slow - and a slow gate is what this queue exists
    # to protect.
@@ -15,7 +15,15 @@
 +  # A reused pid holds nothing. So membership in $holders is the test, not liveness, and it is a field
 +  # the kernel maintains rather than a heuristic.
 +  if [ -n "$hp" ]; then
-+    case " $holders " in *" $hp "*) return 1 ;; esac   # a live WRAPPER: the honest slow job
++    # agents-7saq: slot_fd_holders emits ONE PID PER LINE (printf '%s\n'), so a space-delimited
++    # match can only ever fire for a SOLE holder - every other pid sits between newlines and the
++    # pattern " $hp " never matches it. The reclaim then concludes the recorded wrapper is not a
++    # holder, falls through, and TERMs an honest gate that really does hold the slot, which is the
++    # worst direction this function can fail in. Exact-line boundaries, and no new subshell: a $( )
++    # here would inherit the slot fd and become a holder itself.
++    case "$holders" in
++      "$hp"|"$hp"$'\n'*|*$'\n'"$hp"|*$'\n'"$hp"$'\n'*) return 1 ;;   # a live WRAPPER: honest slow job
++    esac
 +    echo "fleet-heavy: slot$i label names pid $hp, alive but holding no fd - not our wrapper (agents-5n28)" >&2
 +  fi
    # Two orphan signatures, both exact:

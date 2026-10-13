@@ -44,6 +44,53 @@ The first row is the one that must not move, and it did not: a genuinely slow jo
 because its wrapper is a holder. The second row is the defect: today's code cannot distinguish the two
 and so protects the orphan.
 
+### agents-7saq (P1): the match was space-delimited, the holder list is one pid per line
+
+The first cut of this patch tested membership with `case " $holders " in *" $hp "*)`. `slot_fd_holders`
+emits **one pid per line** (`printf '%s\n'`), so that pattern can only ever fire for a SOLE holder: every
+other pid sits between newlines and neither space matches. The reclaim therefore concluded the recorded
+wrapper was not a holder, fell through to the orphan signatures and the grace, and TERMed an honest gate
+that really did hold the slot - the worst direction this function can fail in, because it kills live work
+rather than leaving a slot busy.
+
+**Why the first cut's verification did not catch it:** row 1 of the table above planted a rig with
+EXACTLY ONE visible holder, so the space-delimited pattern matched and the honest case "passed". A real
+wrapper always coexists with its job tree on the fd, so a single-holder rig could not fail. The trigger
+to vary was the COUNT (>=2 holders) and the LIST SHAPE - and the list shape was the defect.
+
+The match now uses exact-line boundaries and no new subshell (a `$( )` here would inherit the slot fd
+and become a holder itself):
+
+    case "$holders" in
+      "$hp"|"$hp"$'\n'*|*$'\n'"$hp"|*$'\n'"$hp"$'\n'*) return 1 ;;
+    esac
+
+**Driven on the reviewer's own 7saq rig** (`/tmp/rev-nxj8b-r2`, pristine 14378 bytes sha256
+33ecf140e615852a), a live `flock`-holding wrapper named in the label, one waiter:
+
+| binary | waiter exit | honest wrapper |
+| --- | --- | --- |
+| delivered (this patch before the fix) | 0 | **KILLED** - "alive but holding no fd - not our wrapper", then "reclaiming slot1 - holder is GONE" |
+| fixed | **124** | **ALIVE** - "waiting for a heavy slot (busy: ... planted;)" |
+| unpatched | 124 | ALIVE - the reviewer's control, from the `kill -0` liveness line this patch replaces |
+
+And the pure-shell mechanism, driven directly: with `holders=$'111\n222\n333'`, the delivered pattern
+matched none of first/middle/last, while the fixed one matches all four positions.
+
+### agents-bz7j: the property and the deferral
+
+The property, stated so a reader can check it rather than take it on trust: **a live recorded pid protects
+the slot only when that pid is among the processes holding the slot fd**. A live wrapper is always in that
+set - it takes the flock and holds it for the whole job. A reused pid is alive and holds nothing. The
+`kill -0` liveness test this replaces cannot tell those apart.
+
+The deferral, stated rather than left implicit: a holder that shares THIS script's own process group is
+not reclaimed here. That is deliberate - our own group is the instrument's, and the `$( )` that computes
+the holder list is itself a member. Such a holder is left to the orphan path's own grace and signatures
+rather than being TERMed on a group membership this function cannot attribute. The cost is that a genuine
+stray in our group is reclaimed later rather than sooner; the benefit is that the function never signals
+its own process tree.
+
 ### What is NOT claimed
 
 I did not observe pid reuse happening on the hub and cannot show the pid that was reused - the husks
