@@ -16,7 +16,10 @@ Validates:
 """
 
 import ast
+import fnmatch
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -24,6 +27,37 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FAST_GATE = ROOT / "tools" / "fast-gate.sh"
+# The arm registry is a DIRECTORY of fragments since agents-hr6q (ADR 0002): the mapping used to be one
+# `case` table inside tools/fast-gate.sh, and it was the file every delivery that needed a mapping had to
+# edit. Anything that wants to read the arms - including the pins below that ask whether a module has an
+# arm of its own - must read the registry, not the script.
+ARMS_DIR = ROOT / "tools" / "fast-gate-arms.d"
+# THE ONE DEAD ARM, NAMED RATHER THAN TOLERATED (agents-v8xv's obligation is that a dead arm is REPORTED).
+# `findings/*.md` matches no tracked file today: it covers a class that must be ignored the moment one is
+# committed, so it is kept deliberately and listed here with its reason. Anything else that stops matching
+# a tracked path is a real defect and fails the pin below.
+DEAD_ARM_EXCEPTIONS = {"findings/*.md"}
+
+
+def arm_registry_text() -> str:
+    """Every arm fragment, concatenated - the table the script used to hold."""
+    fragments = sorted(ARMS_DIR.glob("*.sh"))
+    assert fragments, f"no arm fragments in {ARMS_DIR}: the registry cannot be empty"
+    return "\n".join(path.read_text(encoding="utf-8") for path in fragments)
+
+
+def arm_patterns() -> list[str]:
+    """The patterns the registry declares, scanned the way tools/fast-gate.sh scans them: at exactly four
+    spaces of indent, both the `<pattern>)` and the `<pattern>) body ;;` shapes, and never the loader's
+    no-match fallback (which carries its own marker comment, because `*)` is also a real arm here)."""
+    patterns = []
+    for line in arm_registry_text().split("\n"):
+        if "no arm in this fragment matched" in line:
+            continue
+        match = re.match(r"^    ([^ #)][^)]*)\)(\s.*)?$", line)
+        if match:
+            patterns.append(match.group(1))
+    return patterns
 # The FLEET COVERAGE ORACLE. It lives in the fleet bundle, not in this repo (the repo's own contract
 # suite reaches it the same way - tests/test_coverage_contract.py, agents-1kzf), so the pin below asks
 # THE ORACLE what a changed file's consumers are rather than defining a second notion that could
@@ -579,14 +613,21 @@ class TestFastGateMapping(unittest.TestCase):
         """agents-ows4, agents-dtj6, agents-iwm5: a new/unmatched gate or provisioning config path must fail loudly,
         identifying the path, explaining that it is gate/provisioning config, pointing directly
         to tools/fast-gate.sh, and recommending relevant test suites so the fix is an immediate edit.
-        The cited ignore-list section marker must actually exist as a heading in tools/fast-gate.sh (agents-iwm5)."""
-        fast_gate_content = FAST_GATE.read_text(encoding="utf-8")
+        The cited ignore-list section marker must actually exist as a heading in the arm registry (agents-iwm5,
+        agents-hr6q: the heading moved with the arms into tools/fast-gate-arms.d/)."""
+        # agents-hr6q: the cited ignore-list heading moved into the registry with the arms, so that is
+        # where it has to be found - asserting against tools/fast-gate.sh alone would now fail on a
+        # correct tree, and (worse) a heading asserted only in the script could not be cited from a
+        # fragment that actually holds the arm.
+        fast_gate_content = arm_registry_text()
         for path in ("tools/new_gate.conf", "tools/custom-gate.sh"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0, f"{path} must fail loudly")
                 self.assertIn(path, res.stderr, f"{path} must be named in the error")
                 self.assertIn("gate/provisioning config", res.stderr)
+                self.assertIn("tools/fast-gate-arms.d/", res.stderr,
+                              "the fix must name the registry the arm belongs in, not only the script")
                 self.assertIn("tools/fast-gate.sh", res.stderr)
                 self.assertIn("tests/test_check_conf_consistency.py", res.stderr)
                 self.assertIn("--- Ignore list (agents-9nir) ---", res.stderr)
@@ -602,7 +643,8 @@ class TestFastGateMapping(unittest.TestCase):
                 # End-anchor required so comments like '# --- Ignore list (agents-9nir) --- is the old name' cannot match (agents-iwm5)
                 heading_pattern = re.compile(rf"^\s*#\s*-+\s*{re.escape(core_header)}\s*-+\s*$", re.MULTILINE)
                 self.assertTrue(heading_pattern.search(fast_gate_content),
-                                f"the cited section {cited_header!r} must actually exist as an anchored heading line in tools/fast-gate.sh")
+                                f"the cited section {cited_header!r} must actually exist as an anchored "
+                                "heading line in the arm registry")
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
@@ -916,6 +958,235 @@ class TestReplacedGenericArmsKeepTheirNamesake(unittest.TestCase):
                     f"{path}: the arm no longer selects {missing} - a replaced arm must keep the "
                     "namesake and every consumer it was added for (agents-iqyz)",
                 )
+
+class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
+    """agents-hr6q (ADR 0002 sections 2 and 4): the arm table is tools/fast-gate-arms.d/, one fragment per
+    contiguous run of arms, and these are the properties the shape has to keep.
+
+    WHY THE SHAPE WAS CHANGED AT ALL: the table was the most-collided artefact in the repository (144
+    landings touched tools/fast-gate.sh, 40 both-sided, 84 of those changes appending one arm), so a
+    delivery that only added a mapping still had to edit the gate every lane depends on. The acceptance
+    recorded on agents-hr6q is an EQUIVALENCE PROOF (FAST_GATE_DRY_RUN=1 gives an identical suite set
+    before and after for a representative path of every arm); what is pinned HERE is the part of the shape
+    a future delivery can break silently - a second home for one pattern, a fragment that is sourced and
+    never called, a dead arm, and a new arm that would need a second file edited.
+    """
+
+    def _run_gate_in_copy(self, changed: str, fragment: str | None = None) -> subprocess.CompletedProcess:
+        """Run the REAL script from a COPY of itself plus its registry, so a probe fragment can be added
+        without writing into the registry this repository ships. Returns the completed process."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "tools").mkdir()
+            shutil.copy2(FAST_GATE, tmp / "tools" / "fast-gate.sh")
+            shutil.copytree(ARMS_DIR, tmp / "tools" / "fast-gate-arms.d")
+            if fragment is not None:
+                (tmp / "tools" / "fast-gate-arms.d" / "999-zz-probe.sh").write_text(fragment, encoding="utf-8")
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = changed
+            env["FAST_GATE_DRY_RUN"] = "1"
+            return subprocess.run(
+                ["bash", str(tmp / "tools" / "fast-gate.sh")], cwd=str(tmp), env=env,
+                capture_output=True, text=True,
+            )
+
+    @staticmethod
+    def _probe(pattern: str, suite: str) -> str:
+        """A fragment with one arm, in the shape the registry documents, so a probe differs from a real
+        fragment only in what it computes."""
+        return (
+            "probe_arms() {\n"
+            '  case "$1" in\n'
+            f"    {pattern})\n"
+            f'      mapped="$mapped {suite}"\n'
+            "      ;;\n"
+            "    *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn\n"
+            "  esac\n"
+            "  return 0\n"
+            "}\n"
+            'FAST_GATE_ARM_STAGES="$FAST_GATE_ARM_STAGES probe_arms"\n'
+        )
+
+    def test_the_arms_are_not_in_the_script_any_more(self):
+        """The move is complete: the script no longer carries the table, it loads the registry. A
+        half-move (arms in both places) is the state where a delivery cannot tell which file to edit."""
+        script = FAST_GATE.read_text(encoding="utf-8")
+        self.assertNotIn('case "$f" in', script,
+                         "the arm table must not come back into tools/fast-gate.sh - it belongs in "
+                         "tools/fast-gate-arms.d/ (ADR 0002)")
+        self.assertIn("fast_gate_arms_load", script, "the script must load the registry")
+        self.assertIn("fast-gate-arms.d", script)
+        self.assertGreaterEqual(len(list(ARMS_DIR.glob("*.sh"))), 20,
+                                "the registry split the table into per-run fragments; a handful of files "
+                                "would mean arms were merged back into a shared file")
+
+    def test_a_new_arm_is_one_new_file_and_needs_nothing_else(self):
+        """THE PROPERTY THE SPLIT EXISTS FOR (agents-hr6q acceptance, clause 3): a delivery that only adds
+        a mapping adds ONE file. The probe declares its own stage and the loader picks it up with no edit
+        to tools/fast-gate.sh and no edit to any fragment that already exists."""
+        res = self._run_gate_in_copy("the-new-module.py", self._probe("the-new-module.py", "tests/test_the_new_module.py"))
+        self.assertEqual(res.returncode, 0, f"a new fragment must be loaded: {res.stderr}")
+        self.assertIn("tests/test_the_new_module.py", res.stdout.split())
+
+    def test_a_changed_fragment_is_mapped_by_the_registrys_own_arm(self):
+        """THE FAILURE MEASURED ON THIS CHANGE'S FIRST GATE RUN, pinned so it cannot come back: the
+        registry's own files had no arm, so the gate refused all 29 fragments as unmapped - the loud
+        failure doing its job, and a shape that would have been UNUSABLE, because every delivery that adds
+        a mapping adds one of these files. A registry cannot cover the files that hold its arms unless the
+        arm is there, so this drives the gate rather than reading for a string."""
+        suites = resolve_fast_gate(["tools/fast-gate-arms.d/999-anything.sh"])
+        self.assertIn("tests/test_fast_gate_mapping.py", suites,
+                      "a changed arm fragment must select the suite that owns the mapping contract and the "
+                      "fragment guards")
+        for consumer in ("tests/test_fast_gate_consumer_coverage.py",
+                         "tests/test_fast_gate_importer_boundaries.py",
+                         "tests/test_coverage_contract.py"):
+            self.assertIn(consumer, suites,
+                          f"{consumer} reads the registry, so a changed fragment is a change to its subject")
+        self.assertIn("tests/test_docs_drift.py", resolve_fast_gate(["tools/fast-gate-arms.d/README.md"]),
+                      "the registry's README is committed markdown: docs_drift walks it, so it is mapped "
+                      "rather than left to fail loudly")
+
+    def test_an_unmatched_file_is_named_once_not_once_per_pass(self):
+        """agents-ywb5: THE O(N^2) SHAPE HAS AN OBSERVABLE SIGNATURE, and this drives it rather than reading
+        for it. The change that moved the arms into a fragment directory left the old loop header above the
+        new loop, so the loader was redefined and re-run per changed path, the mapping loop re-read all N
+        paths N times, and every unmatched file was named N times. MEASURED on the nested version: three
+        unmatched paths printed each path THREE times, and a 40-path delta took 6.76s against 0.16s for one
+        pass. A duplicate in the output is the cheap detector for the whole class, so it is pinned here -
+        the reading-for-a-string half is the structural test below."""
+        dupes = ["unmatched_alpha.xyz", "unmatched_beta.xyz", "unmatched_gamma.xyz"]
+        res = run_fast_gate(dupes)
+        self.assertNotEqual(res.returncode, 0, "three unmapped files must still fail the gate loudly")
+        for path in dupes:
+            self.assertEqual(res.stderr.count(path), 1,
+                             f"{path} must be named exactly once: a count of N means the mapping loop ran N "
+                             f"times over the same changed-file list (agents-ywb5)\n{res.stderr}")
+
+    def test_the_registry_is_loaded_once_and_mapped_in_one_pass(self):
+        """The structural half of agents-ywb5, because the duplicate-output signature above only fires for
+        an UNMATCHED path. The shape itself is what matters: one loop over the delta, one loader call. Two
+        `done <<< "$changed"` terminators is how the nested version announced itself."""
+        script = FAST_GATE.read_text(encoding="utf-8")
+        self.assertEqual(script.count('done <<< "$changed"'), 1,
+                         "exactly one loop may consume the changed-file list (agents-ywb5)")
+        self.assertEqual(script.count("while IFS= read -r f; do"), 1,
+                         "the mapping loop must not be nested inside another read loop")
+        self.assertEqual(script.count("fast_gate_arms_load || exit 1"), 1,
+                         "the fragments must be loaded once per run, not once per changed path")
+
+    def test_every_suite_named_in_the_registry_exists(self):
+        """Fragment consistency (agents-t12i): a fragment naming a suite that does not exist would select
+        nothing when its path changes, and the failure would appear only on that path's next change. The
+        registry is read as text so a typo is caught by the mapping suite instead."""
+        # COMMENTS ARE EXCLUDED, for the same reason the pattern scan excludes them: an arm's rationale
+        # quotes example paths (one cites a deliberately nonexistent suite from a contract test), and a
+        # prose quotation is not a reference the gate will try to run.
+        code_lines = [line for line in arm_registry_text().split("\n") if not line.lstrip().startswith("#")]
+        named = sorted(set(re.findall(r"(tests/[A-Za-z0-9_]+\.py)", "\n".join(code_lines))))
+        self.assertGreaterEqual(len(named), 30, "the registry names far fewer suites than it should - scan broken?")
+        missing = [suite for suite in named if not (ROOT / suite).is_file()]
+        self.assertEqual(missing, [], f"the registry names suites that do not exist: {missing}")
+
+    def test_a_duplicate_pattern_fails_rather_than_being_resolved_by_position(self):
+        """agents-v8xv's obligation. Precedence is now carried by filenames, so an arm declared twice
+        would be resolved silently by position - which is the accident this shape must not have. BOTH arm
+        shapes are probed, because the guard scans the fragments' text: the loader's own no-match fallback
+        is excluded by its marker comment (otherwise `*)`, a real arm in the ignore list, would collide
+        with it and the guard would fail on a correct registry)."""
+        shapes = {
+            "pattern on its own line": (
+                "    lib/sandbox.py)\n"
+                '      mapped="$mapped tests/test_x.py"\n'
+                "      ;;\n"
+            ),
+            "single-line arm": '    lib/sandbox.py) mapped="$mapped tests/test_x.py" ;;\n',
+        }
+        for label, arm_text in shapes.items():
+            with self.subTest(arm_shape=label):
+                fragment = (
+                    "probe_arms() {\n"
+                    '  case "$1" in\n'
+                    f"{arm_text}"
+                    "    *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn\n"
+                    "  esac\n"
+                    "  return 0\n"
+                    "}\n"
+                    'FAST_GATE_ARM_STAGES="$FAST_GATE_ARM_STAGES probe_arms"\n'
+                )
+                res = self._run_gate_in_copy("lib/sandbox.py", fragment)
+                self.assertNotEqual(res.returncode, 0, "a duplicate pattern must fail, not be resolved by position")
+                self.assertIn("duplicate arm pattern 'lib/sandbox.py'", res.stderr)
+                self.assertIn("one pattern, one home", res.stderr)
+
+    def test_a_fragment_that_registers_no_stage_or_a_bogus_one_fails(self):
+        """A fragment that is sourced and never called is the failure mode the arm guard exists for: it
+        looks present in the tree and is absent from the gate. Both halves are probed - no registration,
+        and a registration naming a function the fragment does not define."""
+        cases = {
+            "no registration": (
+                "probe_arms() {\n"
+                '  case "$1" in\n'
+                "    *) return 1 ;;   # no arm in this fragment matched\n"
+                "  esac\n"
+                "  return 0\n"
+                "}\n",
+                "registers no stage",
+            ),
+            "registration with no function": (
+                'FAST_GATE_ARM_STAGES="$FAST_GATE_ARM_STAGES probe_arms_missing"\n',
+                "probe_arms_missing",
+            ),
+        }
+        for label, (fragment, expected) in cases.items():
+            with self.subTest(case=label):
+                res = self._run_gate_in_copy("lib/sandbox.py", fragment)
+                self.assertNotEqual(res.returncode, 0, f"{label}: the registry must refuse to load")
+                self.assertIn("999-zz-probe.sh", res.stderr, f"{label}: the failure must name the fragment")
+                self.assertIn(expected, res.stderr, f"{label}: the failure must name what is wrong")
+
+    def test_a_missing_registry_is_an_error_not_an_empty_suite_list(self):
+        """The asymmetry that matters: an empty suite list reads as 'nothing to run' and would be green,
+        while an absent registry means the mapping is UNKNOWN. It must fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "tools").mkdir()
+            shutil.copy2(FAST_GATE, tmp / "tools" / "fast-gate.sh")
+            env = os.environ.copy()
+            env["GIT_CHANGED"] = "lib/sandbox.py"
+            env["FAST_GATE_DRY_RUN"] = "1"
+            res = subprocess.run(["bash", str(tmp / "tools" / "fast-gate.sh")], cwd=str(tmp),
+                                 env=env, capture_output=True, text=True)
+        self.assertNotEqual(res.returncode, 0, "a gate with no arm registry must not report success")
+        self.assertIn("no arm stages were registered", res.stderr)
+
+    def test_every_pattern_has_exactly_one_home(self):
+        """The static counterpart of the loader's duplicate guard, so a duplicate is caught by reading the
+        registry rather than only by running a gate with a probe fragment in it."""
+        patterns = arm_patterns()
+        self.assertTrue(patterns, "the registry declares no patterns - the scan or the registry is broken")
+        duplicates = sorted({p for p in patterns if patterns.count(p) > 1})
+        self.assertEqual(duplicates, [], f"these patterns are declared in more than one fragment: {duplicates}")
+
+    def test_no_arm_pattern_is_dead(self):
+        """agents-v8xv's third obligation: an arm matching no tracked path is REPORTED. Measured when the
+        table moved: every pattern matched at least one tracked file except the ignore arm for
+        findings/*.md - a class that must be ignored the moment such a file is committed, so it is kept and
+        NAMED here with its reason rather than left silently dead."""
+        tracked = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True,
+        ).stdout.split()
+        self.assertTrue(tracked, "git ls-files returned nothing - the pin would pass vacuously")
+        # A pattern line can carry alternatives (`README.md|AGENTS.md|...`), which `case` reads as
+        # alternation - so a line is alive if ANY alternative matches a tracked path.
+        dead = [
+            p for p in arm_patterns()
+            if not any(fnmatch.fnmatchcase(path, alt) for alt in p.split("|") for path in tracked)
+        ]
+        self.assertEqual(sorted(set(dead) - DEAD_ARM_EXCEPTIONS), [],
+                         "these arm patterns match no tracked path, so they map nothing: either fix the "
+                         "pattern or name it in DEAD_ARM_EXCEPTIONS with its reason")
+
 
 if __name__ == "__main__":
     unittest.main()

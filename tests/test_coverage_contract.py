@@ -31,6 +31,17 @@ CONTRACT_PATH = ROOT / "tests" / "coverage-contract.json"
 ORACLE_SCRIPT = Path("/home/exedev/fleet/remote/check-coverage.py")
 
 
+def _copy_gate_registry(dest: Path) -> None:
+    """agents-hr6q: the gate's arm registry is a DIRECTORY now (tools/fast-gate-arms.d/), and the script
+    refuses to run without it, so a copy of tools/fast-gate.sh alone is not a runnable gate. These tests
+    copy the gate into a temp tree to mutate its inputs; they must copy its registry the same way, or they
+    would be testing the refusal instead of the behaviour they name.
+    """
+    import shutil
+
+    shutil.copytree(ROOT / "tools" / "fast-gate-arms.d", dest / "tools" / "fast-gate-arms.d")
+
+
 class TestCoverageContract(unittest.TestCase):
 
     def test_coverage_contract_file_exists_and_is_valid(self):
@@ -162,6 +173,7 @@ class TestCoverageContract(unittest.TestCase):
             (tmproot / "tools").mkdir()
             (tmproot / "tests").mkdir()
             shutil.copy2(fast_gate, tmproot / "tools" / "fast-gate.sh")
+            _copy_gate_registry(tmproot)
             (tmproot / "tests" / "coverage-contract.json").write_text("not valid json", encoding="utf-8")
             res = subprocess.run(
                 ["bash", str(tmproot / "tools" / "fast-gate.sh")],
@@ -194,6 +206,7 @@ class TestCoverageContract(unittest.TestCase):
                     (tmproot / "lib").mkdir()
                     (tmproot / "lib" / "child_env.py").touch()
                     shutil.copy2(fast_gate, tmproot / "tools" / "fast-gate.sh")
+                    _copy_gate_registry(tmproot)
                     (tmproot / "tests" / "coverage-contract.json").write_text(bad_contract, encoding="utf-8")
                     res = subprocess.run(
                         ["bash", str(tmproot / "tools" / "fast-gate.sh")],
@@ -210,6 +223,7 @@ class TestCoverageContract(unittest.TestCase):
             (tmproot / "tests").mkdir()
             (tmproot / "tests" / "coverage-contract.json").mkdir()
             shutil.copy2(fast_gate, tmproot / "tools" / "fast-gate.sh")
+            _copy_gate_registry(tmproot)
             res = subprocess.run(
                 ["bash", str(tmproot / "tools" / "fast-gate.sh")],
                 cwd=str(tmproot), capture_output=True, text=True,

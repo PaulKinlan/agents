@@ -70,11 +70,16 @@ class TestImporterShapedBoundaries(unittest.TestCase):
             f"{HARNESS} is one of the import-shaped consumers of {MODULE} - which is exactly why it "
             f"is tempting to add to that arm, and why the exclusion needs saying out loud",
         )
-        gate = (ROOT / "tools" / "fast-gate.sh").read_text(encoding="utf-8")
+        # The arms live in tools/fast-gate-arms.d/ since agents-hr6q (ADR 0002), so the registry is what
+        # has to carry this arm now - reading only the script would let the arm be deleted unseen.
+        gate = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / "tools" / "fast-gate-arms.d").glob("*.sh"))
+        )
         self.assertIn(
             f"{HARNESS})",
             gate,
-            f"{HARNESS} must keep its OWN arm in tools/fast-gate.sh: a shared fixture is covered by "
+            f"{HARNESS} must keep its OWN arm in tools/fast-gate-arms.d/: a shared fixture is covered by "
             f"changes TO it, not by every module whose arm might be tempted to include it "
             f"(agents-6vev)",
         )

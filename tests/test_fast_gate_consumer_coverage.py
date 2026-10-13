@@ -187,10 +187,24 @@ def _arm_pattern(module):
     and the selection printed beside it is measured. A reason naming a stale line is the same defect as a
     reason naming the wrong arm, one commit later. Read once per FAILING run, never on a green one.
     """
-    text = (ROOT / "tools" / "fast-gate.sh").read_text(encoding="utf-8")
+    text = _arm_registry_text()
     if re.search(rf"^\s+lib/{re.escape(module)}\.py\)", text, re.MULTILINE):
         return f"lib/{module}.py)"
     return "lib/*.py)"
+
+def _arm_registry_text() -> str:
+    """The fast-gate arm registry, reassembled from its fragments (agents-hr6q, ADR 0002).
+
+    The arms used to be one `case` table inside tools/fast-gate.sh; they are now one file per contiguous
+    run of arms under tools/fast-gate-arms.d/, and this helper is the reader that reconstitutes them for
+    the one question this module asks of the source ("does this module have an arm of its own?"). Reading
+    the script alone would answer "no" for every module and quietly change what the reasons below say.
+    """
+    arms_dir = ROOT / "tools" / "fast-gate-arms.d"
+    fragments = sorted(arms_dir.glob("*.sh"))
+    assert fragments, f"no arm fragments in {arms_dir}: the registry cannot be read"
+    return "\n".join(path.read_text(encoding="utf-8") for path in fragments)
+
 
 def _why_omitted(module, suite):
     """Why `suite` imports lib/<module>.py and the gate still does not run it for a change to that file.
