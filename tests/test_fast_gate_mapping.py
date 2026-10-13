@@ -53,27 +53,48 @@ def arm_registry_figures(tracked_paths: list[str] | None = None) -> dict:
     WHAT EACH FIGURE MEANS: patterns (the registry's arms), live (arms with a representative TRACKED path),
     dead (arms with none - each must be named in DEAD_ARM_EXCEPTIONS with its reason), and representative
     (the self-derived path set an equivalence proof can use, one tracked path per live arm, instead of a
-    list written by hand). The "N identical" figure belongs to the before/after procedure and is not
+    list written by hand). A representative must REACH its arm under the loader's first-match precedence
+    (agents-1j3z): an arm whose matching paths are all claimed by an earlier arm is reported as shadowed.. The "N identical" figure belongs to the before/after procedure and is not
     derivable here; what is derivable - and what was wrong before - is the denominator it divides by.
     """
     if tracked_paths is None:
         tracked_paths = subprocess.run(["git", "-C", str(ROOT), "ls-files"],
                                        capture_output=True, text=True, check=True).stdout.split()
     patterns = arm_patterns()
-    representative, dead = {}, []
+
+    def first_match_arm(path: str) -> str | None:
+        """The arm that ANSWERS this path, which is the first one that matches it (the loader's rule)."""
+        for pattern in patterns:
+            # A pattern line can carry alternatives (`README.md|AGENTS.md|...`), which `case` reads as
+            # alternation, so a line matches if ANY alternative does.
+            if any(fnmatch.fnmatchcase(path, alt) for alt in pattern.split("|")):
+                return pattern
+        return None
+
+    def matches_any_PATH(pattern: str) -> bool:
+        return any(any(fnmatch.fnmatchcase(path, alt) for alt in pattern.split("|"))
+                   for path in tracked_paths)
+
+    representative, dead, shadowed = {}, [], []
     for pattern in patterns:
-        # A pattern line can carry alternatives (`README.md|AGENTS.md|...`), which `case` reads as
-        # alternation, so a line is live if ANY alternative matches a tracked path.
-        hit = next((path for alt in pattern.split("|") for path in tracked_paths
-                    if fnmatch.fnmatchcase(path, alt)), None)
+        # agents-1j3z: "a path that matches this pattern" is NOT "a path that reaches this arm". The gate
+        # resolves a path through the FIRST arm that matches it, so a representative is only a
+        # representative if that arm answers it - otherwise the proof exercises the earlier arm and the
+        # count of distinct paths falls short of the count of arms (measured: 79 distinct for 81 live arms,
+        # with lib/*.py answered by lib/bench/*.py). An arm whose every matching path is claimed earlier is
+        # SHADOWED: reported as its own class rather than counted as proven or written off as dead.
+        hit = next((path for path in tracked_paths if first_match_arm(path) == pattern), None)
         if hit:
             representative[pattern] = hit
+        elif matches_any_PATH(pattern):
+            shadowed.append(pattern)
         else:
             dead.append(pattern)
     return {
         "patterns": len(patterns),
         "live": len(representative),
         "dead": sorted(dead),
+        "shadowed": sorted(shadowed),
         "declared_dead": sorted(DEAD_ARM_EXCEPTIONS),
         "representative": representative,
         "tracked_paths": len(tracked_paths),
@@ -1217,9 +1238,30 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
         the registry and the arithmetic cannot drift from it."""
         figures = arm_registry_figures()
         self.assertGreater(figures["patterns"], 50, f"the registry scan found almost no arms: {figures}")
-        self.assertEqual(figures["patterns"], figures["live"] + len(figures["dead"]),
-                         f"every arm is either live or dead: {figures['patterns']} patterns, "
-                         f"{figures['live']} live, {len(figures['dead'])} dead")
+        self.assertEqual(figures["patterns"],
+                         figures["live"] + len(figures["dead"]) + len(figures["shadowed"]),
+                         f"every arm is live, dead or shadowed: {figures['patterns']} patterns, "
+                         f"{figures['live']} live, {len(figures['dead'])} dead, "
+                         f"{len(figures['shadowed'])} shadowed")
+        # agents-1j3z: a representative that an EARLIER arm answers is not a representative at all - the
+        # proof would exercise the earlier arm and report the arm it meant to cover as covered. This is the
+        # invariant the naive selection broke for two arms.
+        patterns = arm_patterns()
+
+        def first_match_arm(path: str):
+            for pattern in patterns:
+                if any(fnmatch.fnmatchcase(path, alt) for alt in pattern.split("|")):
+                    return pattern
+            return None
+
+        misrouted = {arm: path for arm, path in figures["representative"].items()
+                     if first_match_arm(path) != arm}
+        self.assertEqual({}, misrouted,
+                         "a representative must be answered by the arm it stands for, because the loader "
+                         f"takes the FIRST match: {misrouted}")
+        self.assertEqual(len(figures["representative"]), len(set(figures["representative"].values())),
+                         "two arms sharing one path means one of them is not represented: "
+                         f"{sorted(figures['representative'].values())}")
         self.assertEqual(figures["dead"], figures["declared_dead"],
                          "the arms matching no tracked path must be exactly the ones NAMED in "
                          f"DEAD_ARM_EXCEPTIONS with their reason (not a superset, not a subset): {figures}")
