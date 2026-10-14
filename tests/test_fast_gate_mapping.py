@@ -449,7 +449,11 @@ class TestFastGateMapping(unittest.TestCase):
         selected = resolve_fast_gate(["lib/containment.py"])
         coverage = oracle_coverage_for(["lib/containment.py"], selected)
         if coverage is not None:
-            unmapped = sorted(coverage.get("unmapped", []))
+            # agents-8b05: each unmapped entry carries its own provenance now ({"path": ..., "source": ...}),
+            # and older records still carry plain strings. sorted() of dicts raises TypeError, which would
+            # REPLACE the diagnostic this test exists to print - "the coverage contract REPORTS rather than
+            # FAILS" - so the paths are taken either way.
+            unmapped = sorted(e["path"] if isinstance(e, dict) else e for e in coverage.get("unmapped", []))
             omitted = sorted(coverage.get("omitted", []))
             self.assertEqual((unmapped, omitted), ([], []), (
                 "the lib/containment.py arm in tools/fast-gate.sh does not cover the module's consumers. "
