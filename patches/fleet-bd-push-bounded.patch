@@ -1,0 +1,157 @@
+diff --git a/bin/bd b/bin/bd
+index 723856f..673fb39 100755
+--- a/bin/bd
++++ b/bin/bd
+@@ -246,7 +246,65 @@ guard_worktree_beads_decoy() {
+ 
+ guard_worktree_beads_decoy "$@"
+ 
++# ------------------------------------------------ fleet-etvw ------------------------------------------------
++# A HUNG NETWORK PUSH MUST NOT HOLD A VM-WIDE LOCK INDEFINITELY, AND BOUNDING IT IS NOT ENOUGH ON ITS OWN.
++#
++# The incident (2026-10-14, measured): ONE `bd dolt push` whose `git push --force-with-lease` was stuck in
++# send-pack held $HOME/.fleet/bd.lock - the lock EVERY lane on this VM serialises on - for about 16 minutes.
++# Every other lane's bd call then queued behind `flock -w 300`, so bead comments, labels, verdicts and
++# clearances were delayed or lost, and the merger's bounded command hit its 900s ceiling with its bead writes
++# unrun. The lock was held because NOTHING BOUNDED THE HOLDER: `flock -w 300` bounds how long a WAITER waits
++# and says nothing about how long a holder holds, and the holder here is a network operation.
++#
++# TWO THINGS HAD TO CHANGE, AND FIXING ONLY THE FIRST WOULD NOT HAVE RELEASED THE LOCK:
++#   1. THE HOLDER IS NOW BOUNDED. The subcommands that reach the network run under `timeout -k <grace>
++#      <bound>`; a purely local ledger write keeps its unbounded path, because a local write cannot stall on a
++#      remote and adding a bound there would invent a new way for a legitimate write to fail.
++#   2. FLOCK'S PAYLOAD INHERITS THE LOCK'S FILE DESCRIPTOR, so the `git` grandchild held the lock as well -
++#      that is precisely what flock's -o exists for. Killing the middle process alone would have left the lock
++#      held by the thing that was actually stuck. Both paths therefore pass -o, so only the flock process holds
++#      it and no descendant can extend the hold beyond the bound. Measured on this VM: without -o a payload
++#      that detaches a child leaves the lock HELD after the payload exits; with -o it is free.
++#
++# ON TIMEOUT THE COMMAND FAILS LOUDLY. The symptom being fixed is a SILENT non-write: `bd update <id> --claim`
++# can print "Updated issue" while the write is lost, which reads exactly like success until someone reads the
++# bead back. Timeout's own codes are kept rather than mapped - 124/137/143 already mean "the bound killed it:
++# unknown, not a pass" in this fleet - and the remote-advice path is skipped, because advice about the remote
++# is not the diagnosis when the remote is merely slow.
++#
++# THE OPERATIONAL RULE IS PRINTED WITH THE FAILURE, not only written down: contention means BACK OFF AND
++# RETRY, KILL NOTHING. That rule is what kept tonight's incident at ~16 minutes instead of an orphaned lock
++# holder, and it is delivered here because this is where an operator meets it. It is deliberately NOT a new
++# section in roles/lessons.md: that file is 18 bytes below its own 180KB test ceiling, so a new section fails
++# tests/lessons.test.sh (measured on agents-etvw) - a lesson needs a compress pass first.
++net_bound="${FLEET_BD_PUSH_TIMEOUT:-180}"    # seconds a network push/pull may hold the VM-wide lock
++net_grace="${FLEET_BD_PUSH_GRACE:-15}"       # seconds between SIGTERM and SIGKILL for that payload
++
++bd_reaches_network() {   # <argv...> - the subcommands that can block on a remote
++  case "${1:-}" in
++    dolt) case "${2:-}" in push|pull|fetch) return 0 ;; esac ;;
++    sync) return 0 ;;
++  esac
++  return 1
++}
++
++bd_bound_killed_it() { case "${1:-}" in 124|137|143) return 0 ;; esac; return 1; }
++
++bd_timeout_report() {   # <rc> <argv...>
++  local rc="$1"; shift
++  {
++    printf 'bd: TIMED OUT (fleet-etvw): `bd %s` did not finish within %ss and was killed (rc=%s).\n' "$*" "$net_bound" "$rc"
++    printf 'bd: THE WRITE DID NOT LAND. A local Dolt commit may exist; the REMOTE push definitely did not.\n'
++    printf 'bd: The VM-wide lock is RELEASED - every other lane on this machine can write again.\n'
++    printf 'bd: BACK OFF AND RETRY, KILL NOTHING. Never kill another lane\x27s push: a retry after the remote\n'
++    printf 'bd: unblocks costs seconds, while an orphaned lock holder costs every lane on this VM minutes.\n'
++    printf 'bd: Nothing was retried automatically, and this is not a pass - 124 means the bound killed it.\n'
++  } >&2
++}
++
+ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
++  # Nested call (bd -> git hook -> bd) under a lock its parent already holds: no lock is taken here, so there
++  # is no hold to bound. Bounding this path would only make a legitimate nested write failable.
+   "$real" "$@"
+   rc=$?
+   check_push_failure "$rc" "$@"
+@@ -254,7 +312,16 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+ fi
+ 
+ export FLEET_BD_LOCKED=1
+-flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
+-rc=$?
++if bd_reaches_network "$@"; then
++  flock -o -w 300 "$HOME/.fleet/bd.lock" timeout -k "$net_grace" "$net_bound" "$real" "$@"
++  rc=$?
++  if bd_bound_killed_it "$rc"; then
++    bd_timeout_report "$rc" "$@"
++    exit "$rc"
++  fi
++else
++  flock -o -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
++  rc=$?
++fi
+ check_push_failure "$rc" "$@"
+ exit "$rc"
+diff --git a/tests/bd-shim.test.sh b/tests/bd-shim.test.sh
+index da473cd..bb826a1 100755
+--- a/tests/bd-shim.test.sh
++++ b/tests/bd-shim.test.sh
+@@ -85,6 +85,63 @@ L=$(cat "$BD_LOCKLOG")
+ FLEET_BD_LOCKED=1 HOME="$T" bash "$SHIM" comment bd-test --stdin <<< "bypass body"
+ grep -q '^ARG:comment' "$BD_LOG" && ok "5b FLEET_BD_LOCKED nesting escape still reaches bd" || bad "5b bypass path broken" ""
+ 
++echo "6. a network push is BOUNDED, fails LOUDLY, and releases the VM-wide lock (fleet-etvw)"
++# THE WEDGE, IN ONE FIXTURE: the stub's `dolt push` hangs, and the question is what a SECOND lane sees while it
++# hangs. Both shims are driven by the same fixture, so the only variable is the bound.
++cat > "$T/.local/bin/bd" <<'STUB6'
++#!/usr/bin/env bash
++if [ "${1:-}" = dolt ] && [ "${2:-}" = push ]; then echo "push start" >> "$BD_LOCKLOG"; sleep "${STUB_SLEEP:-8}"; echo "push end" >> "$BD_LOCKLOG"; exit 0; fi
++echo "local ok: $*" >> "$BD_LOCKLOG"
++STUB6
++chmod +x "$T/.local/bin/bd"
++# RED-FIRST CONTROL, built the way this suite already builds one (bd-guard.test.sh's $MUT): the bound is removed
++# by making the network predicate false, so the unbounded path is taken with no other change.
++MUT="$ROOT/bd-unbounded"; sed 's/^if bd_reaches_network "$@"; then$/if false; then/' "$SHIM" > "$MUT"; chmod +x "$MUT"
++case_probe() {   # <shim> <bound-seconds> -> '<push rc> <second-lane rc> <said-not-landed>' in $ROOT/out
++  : > "$BD_LOCKLOG"; rm -f "$T/.fleet/bd.lock"
++  STUB_SLEEP=8 FLEET_BD_PUSH_TIMEOUT="$2" FLEET_BD_PUSH_GRACE=1 HOME="$T" timeout 6 bash "$1" dolt push > "$ROOT/out" 2>&1 &
++  local hp=$!
++  sleep 0.4                                    # let the holder take the lock before asking about it
++  HOME="$T" timeout 5 bash "$1" list >/dev/null 2>&1; local second=$?
++  wait $hp 2>/dev/null; local first=$?
++  printf '%s %s %s' "$first" "$second" "$(grep -qi 'WRITE DID NOT LAND' "$ROOT/out" && echo yes || echo no)"
++}
++R=$(case_probe "$SHIM" 1); set -- $R
++# The bound is 1s and the stub hangs 8s, so an UNBOUNDED shim cannot pass these: measured below, not assumed.
++eq "$1" "124" "6a a bounded network push exits 124 (the bound killed it - unknown, not a pass)"
++eq "$2" "0" "6b another lane's local write still succeeds: the VM-wide lock was RELEASED"
++eq "$3" "yes" "6c the failure says the write DID NOT LAND (a silent non-write is the thing being fixed)"
++grep -q 'BACK OFF AND RETRY, KILL NOTHING' "$ROOT/out" \
++  && ok "6d the message carries the operational rule where an operator meets it" \
++  || bad "6d the operational rule is not in the failure message" "$(head -3 "$ROOT/out")"
++R=$(case_probe "$MUT" 30); set -- $R
++eq "$2" "124" "6e RED-FIRST: with the bound removed the SAME fixture BLOCKS another lane's local write"
++eq "$3" "no" "6f RED-FIRST: and says nothing about the write not landing - the silent wedge"
++: > "$BD_LOCKLOG"
++HOME="$T" timeout 5 bash "$SHIM" list > "$ROOT/out.local" 2>&1 \
++  && ok "6g a LOCAL subcommand is not bounded and is not made failable by this change" \
++  || bad "6g a local subcommand failed" "$(head -3 "$ROOT/out.local")"
++grep -q 'TIMED OUT' "$ROOT/out.local" && bad "6h a local call printed the timeout report" "" || ok "6h no timeout report on the local path"
++
++echo "7. the lock fd is not inherited, so a surviving descendant cannot extend the hold (fleet-etvw)"
++# WHY THIS IS A SEPARATE ASSERTION: bounding the payload alone still leaves the lock held if a descendant
++# inherited its fd - the stuck `git send-pack` was exactly such a descendant, and killing only the middle
++# process would have released nothing. Measured here in both directions.
++cat > "$T/.local/bin/bd" <<'STUB7'
++#!/usr/bin/env bash
++if [ "${1:-}" = dolt ] && [ "${2:-}" = push ]; then setsid sleep "${STUB_SLEEP:-8}" >/dev/null 2>&1 & exit 0; fi
++exit 0
++STUB7
++chmod +x "$T/.local/bin/bd"
++MUT2="$ROOT/bd-inherit"; sed 's/flock -o -w 300/flock -w 300/g' "$SHIM" > "$MUT2"; chmod +x "$MUT2"
++lock_after_detached_child() {   # <shim> -> FREE|HELD
++  rm -f "$T/.fleet/bd.lock"
++  STUB_SLEEP=8 HOME="$T" timeout 6 bash "$1" dolt push >/dev/null 2>&1
++  if flock -n "$T/.fleet/bd.lock" true 2>/dev/null; then echo FREE; else echo HELD; fi
++}
++eq "$(lock_after_detached_child "$SHIM")" "FREE" "7a the payload's descendants do not hold the lock once it exits"
++eq "$(lock_after_detached_child "$MUT2")" "HELD" "7b RED-FIRST: without -o the detached child keeps the VM-wide lock held"
++
+ if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
