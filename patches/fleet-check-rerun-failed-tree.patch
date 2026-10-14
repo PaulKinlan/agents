@@ -10,7 +10,7 @@
      *) _args+=("$_a") ;;
    esac
  done
-@@ -256,6 +259,41 @@
+@@ -256,8 +259,43 @@
  fi
  
  exec 9>"$C/$tree.lock"; flock 9
@@ -50,8 +50,11 @@
 +  echo "fleet-check: re-running the gate for this tree at $lane's request (reason: $RERUN_REASON)${RERUN_AUTHORISED_BY:+ authorised by $RERUN_AUTHORISED_BY}. The prior verdict and this attribution are preserved at ${rec}.1, not replaced."
 +fi
  case $(state) in
-   PASS) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
+-  PASS) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
++  PASS) if [ -z "${RERUN_REASON:-}" ] && [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
            # fleet-8pqa: a cached PASS is a verdict for the TREE it was produced against, so ask the artifact
+           # before serving it (see record_identity). On a mismatch the gate runs instead of being skipped.
+           record_identity "$rec" "$tree" "$GATE_KIND"
 @@ -297,17 +335,35 @@
            # record with no count prints UNRECORDED, and the count says 'recorded' because it counts what the
            # record was able to write, not every re-serve that ever happened.
@@ -68,7 +71,7 @@
 +          # coord's ruling: a disagreement is not a vote. If this PASS is the result of a re-run after a recorded
 +          # FAIL, the tree is RED and the change stays unlanded - the failure is contextualised, never replaced.
 +          if [ -f "${rec}.1" ] && [ "$(jq -r '.state // empty' "${rec}.1" 2>/dev/null)" = "FAIL" ] && [ -n "$(jq -r '.rerun_reason // empty' "${rec}.1" 2>/dev/null)" ]; then
-+            echo "fleet-check: RED - the attempts on this tree DISAGREE: attempt $attempt_n passed, but the recorded FAIL was re-run rather than fixed${rerun_note}. A disagreement is not a vote, so this tree is not green and the change stays unlanded." >&2
++            echo "fleet-check: RED - the attempts on this tree DISAGREE: attempt $attempt_n passed, but attempt $((attempt_n - 1)) recorded FAIL and was re-run rather than fixed${rerun_note}. A disagreement is not a vote, so this tree is not green and the change stays unlanded. A RE-RUN CAN NEVER MAKE A TREE GREEN BY ITSELF: the only path from RED is an explicit AUTHORISED decision recorded with the lane and a reason - pass --rerun-authorised-by=<lane> on a further attempt and record why on the bead." >&2
 +            exit 1
 +          fi
            jq -r --arg cov "$cov_info" '"fleet-check: PASS (cached) for tree of \(.sha): ran by \(.lane) at \(.at) in \(.secs)s.\($cov) Log: \(.log) Re-serves recorded: " + (if .reserves == null then "UNRECORDED (no reserve count in this record: it was written before reserve attribution, or the record could not be updated)" else "\(.reserves) time(s) by \((.reserved_by // {}) | to_entries | map("\(.key)=\(.value)") | join(", ")), last by \(.reserved_last.lane) at \(.reserved_last.at)" end)' "$rec"; exit 0

@@ -1,4 +1,9 @@
 ## patches/fleet-check-rerun-failed-tree.patch
+## DRIVEN AND VERIFIED: all five of coord's cases pass, plus the authorised-purpose case the drive found broken.
+**A re-run can never make a tree green by itself** (coord, 2026-10-14): a pass that follows a recorded FAIL is
+served RED, and the only path from RED to landable is an explicit AUTHORISED decision, recorded with the lane
+and a reason. The RED message names which attempts disagreed and states that remedy, because a RED whose remedy
+is unstated blocks a tree for want of a decision rather than for want of evidence.
 ## DRIVEN AND VERIFIED against coord's ruling of 2026-10-14 (attempt-N attribution, one-re-run bound, disagreement is RED).
 
 The three ruled behaviours the pre-ruling patch lacked are now demonstrated red-first, with the harness fix that
