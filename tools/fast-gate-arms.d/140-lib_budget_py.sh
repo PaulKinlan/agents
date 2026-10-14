@@ -48,7 +48,13 @@ fast_gate_arms_140_lib_budget_py() {
       # DROPPING the module's own suite. Shape: agents-bwbe's (other families' consumers), not
       # agents-mo75's (a split family whose thin namesake ran).
       # Measured with the coverage oracle - before: 4 omitted consumer(s); after: 0.
-      mapped="$mapped tests/test_embargo.py tests/test_factory_truth.py tests/test_model_rule_id.py tests/test_report_schema.py tests/test_threat_model_prepass.py"
+      # agents-f8dj: tests/test_station_candidate_accounting.py JOINS THIS ARM, and the reason is the
+      # claim it makes - it parses the dismissal shape out of the three station contracts and feeds it to
+      # lib.embargo.is_false_positive()/reported_severity(). Listing it here is what makes that claim true
+      # in CI: a rename or tightening in this module now RUNS the suite and fails it, instead of letting a
+      # contract tell the model to emit a flag nobody reads. The gate's own consumer oracle asked for it
+      # (it reported the import as an unselected consumer); measured cost 0.004s.
+      mapped="$mapped tests/test_embargo.py tests/test_factory_truth.py tests/test_model_rule_id.py tests/test_report_schema.py tests/test_station_candidate_accounting.py tests/test_threat_model_prepass.py"
       ;;
     lib/redaction.py)
       # agents-iqyz: this arm REPLACES the generic `lib/*.py` arm further down for this path, and must

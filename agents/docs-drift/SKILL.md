@@ -14,10 +14,37 @@ You will be given:
 1. The target repository path and file tree.
 2. A JSON list of candidate matches extracted by the deterministic scanner (`scripts/check_docs.py`).
 
+## Candidate Accounting
+
+The deterministic pre-pass hands you a candidate list, and the factory checks that the report accounts for all
+of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in
+`findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates
+you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that
+triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj; the shape is the one
+`agents/secret-scan/SKILL.md` uses for its test-fixture keys). Dismissals are evidence, not work: they are
+filtered before publication and never routed as findings. `drift_count` counts CONFIRMED drift only; a dismissal must not inflate it
+
+
+The shape of one dismissal:
+
+```json
+{
+  "rule_id": "candidate-evaluated-and-rejected",
+  "path": "path/to/file",
+  "line_number": 42,
+  "snippet": "the exact snippet the pre-pass matched",
+  "severity": "info",
+  "false_positive": true,
+  "title": "Dismissed: <the reason in a few words>",
+  "description": "Why this candidate was evaluated and rejected (the same reason you would have written in a filter log).",
+  "remediation": "No action required."
+}
+```
+
 ## Triage Instructions
 
 1. **Evaluate Context & Filter False Positives**:
-   - **External Target Descriptions**: Documents describing external repos (e.g. `chrome-agent-platform`, `fauxmium`) or mentioning their internal harnesses (such as `a11y-audit.ts`, `beads`, `refs/dolt/data`) are discussing external targets, not files expected in this repo. Downgrade or filter these unless they claim the file lives locally.
+   - **External Target Descriptions**: Documents describing external repos (e.g. `chrome-agent-platform`, `fauxmium`) or mentioning their internal harnesses (such as `a11y-audit.ts`, `beads`, `refs/dolt/data`) are discussing external targets, not files expected in this repo. Record these as dismissals (`false_positive: true`) unless they claim the file lives locally.
    - **Example & Template Patterns**: Triage rules mentioning standard test directories (`test/`, `tests/`, `fixtures/`, `dist/`) or wildcard patterns (`scripts/*journey*.ts`) are guidance for scanners, not missing codebase files.
    - **Historical Architecture vs Active Reality**: In design plans (e.g. `docs/PLAN.md`), architectural layout diagrams that name a path which does not exist on disk are genuine specification drift when the document presents them as the repo layout without noting their planned status.
 
@@ -49,6 +76,17 @@ You will be given:
          "title": "Specification Drift: Missing Adapter",
          "description": "docs/PLAN.md presents lib/adapters/<new-engine>.sh as part of the repo layout, but no such script exists on disk.",
          "remediation": "Implement the adapter or annotate the layout entry in docs/PLAN.md as planned for a future phase."
+       },
+       {
+         "rule_id": "doc-external-target-description",
+         "path": "docs/PLAN.md",
+         "line_number": 118,
+         "snippet": "Uses the external chrome-agent-platform harness.",
+         "severity": "info",
+         "false_positive": true,
+         "title": "Dismissed: External Target Description",
+         "description": "Discusses an external repository's harness, not a file expected in this repo. Evaluated and rejected - recorded so the triage accounts for every candidate it was shown.",
+         "remediation": "No action required."
        }
      ]
    }

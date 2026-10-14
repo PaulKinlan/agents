@@ -50,6 +50,10 @@
             "type": "string",
             "description": "Detailed explanation of what drifted between spec and codebase."
           },
+          "false_positive": {
+            "type": "boolean",
+            "description": "True when this candidate was evaluated and REJECTED (a dismissal recorded as evidence, not work). Every candidate the pre-pass supplied must appear in findings, either as a confirmed issue or as a dismissal (agents-f8dj)."
+          },
           "remediation": {
             "type": "string",
             "description": "Actionable instructions to resolve the drift."
