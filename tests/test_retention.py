@@ -1124,6 +1124,11 @@ _SH_DELETION_PATTERNS = ("rm -rf", "rm -fr")
 
 _DELETION_INVENTORY = (
     # (relpath, line substring, expected count, disposition, reason)
+    ("tools/docs-text-floor.sh", 'trap \'rm -rf "$work"\' EXIT', 1, "NAMED",
+     "the docs-text-floor sweep's scratch COPY of the docs, made with mktemp -d and injected with the "
+     "measuring payload before the pass (agents-ssyq): created and removed inside one invocation, never a "
+     "run root, never operator data and never citation-bearing evidence - the copy is a duplicate of the "
+     "tree being read, and every verdict names the page it came from."),
     ("factory", "tmp_file.unlink(missing_ok=True)", 2, "NAMED",
      "session.patch.tmp, the atomic-replace sibling of the run's own session.patch in the "
      "keep-edit flow (agents-nei): a transient write artifact created and removed within one "
