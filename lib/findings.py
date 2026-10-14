@@ -1466,11 +1466,21 @@ def station_is_incomplete(station: Any) -> bool:
 def station_has_verdict(station: Any) -> bool:
     """Whether the station produced a verdict at all. Completeness is a SEPARATE fact, not folded in.
 
+    A verdict needs BOTH a completed status AND actual counts: `None` is unknown, not zero, so a station
+    whose status is PASS but whose counts are missing must not read as a clean scan (agents-ekwm). The
+    isinstance guard is agents-xx9t's, so a malformed row cannot raise.
+
     An ALERT whose triage was partial still has a verdict - the alarm is the outcome and must not be
-    softened - and it is separately flagged as incomplete. A station whose status is INCOMPLETE has no
-    verdict by construction, because INCOMPLETE is not in VERDICT_STATUSES.
+    softened - and it is separately flagged as incomplete via station_is_incomplete(). A station whose
+    status is INCOMPLETE has no verdict by construction, because INCOMPLETE is not in VERDICT_STATUSES.
+
+    This is the UNION of the two independently-reviewed definitions: agents-ekwm's count checks combined
+    with agents-xx9t's isinstance guard. Neither side alone was sufficient.
     """
-    return bool(isinstance(station, dict) and station.get("status") in VERDICT_STATUSES)
+    return bool(isinstance(station, dict)
+                and station.get("status") in VERDICT_STATUSES
+                and station.get("findings_count") is not None
+                and station.get("criticals") is not None)
 
 
 def read_candidate_count(run_dir: Any) -> Optional[int]:
@@ -1559,10 +1569,10 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
         "target": target_name,
         "line": line_name,
         "generated": datetime.now(timezone.utc).isoformat(),
-        # A station that did not account for the candidates it was shown is not a verdict either
-        # (agents-xx9t): the line is not complete on the strength of a partial triage. A station that never
-        # computed coverage has no key, and defaults to complete, so older callers are unaffected.
-        "complete": all(s.get("status") in VERDICT_STATUSES and s.get("complete", True) is not False
+        # complete requires every station to BOTH produce a verdict and not be flagged
+        # incomplete: agents-ekwm's count checks (via station_has_verdict) plus agents-xx9t's
+        # incompleteness fact, which stay two separate predicates.
+        "complete": all(station_has_verdict(s) and not station_is_incomplete(s)
                         for s in stations),
         "stats": stats,
         "sinks": sinks,
@@ -1739,7 +1749,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"Line: `{line_name or '?'}` — {len(stations)} station(s), "
                      f"{has_verdict_count} with a verdict.")
         lines.append("")
-    if env_failure or env_failed:
+    if env_failure or env_failed or no_verdict:
         lines += [
             f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
             f"|:---:|:---:|:---:|:---:|:---:|:---:|",

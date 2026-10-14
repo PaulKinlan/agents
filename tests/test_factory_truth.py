@@ -188,6 +188,8 @@ class TestLineDeltaReport(SandboxCase):
         delta = self.box.findings("target-delta.md")
         self.assertNotIn("Clean Delta", delta)
         self.assertIn("INCOMPLETE", delta)
+        self.assertIn("| — | — | — | — | — | — |", delta,
+                      "the top delta table must not turn an ERROR with no verdict into six zeroes")
         self.assertIn("`garbled` | ERROR | — | —", delta)
         self.assertFalse(json.loads(self.box.findings("target-line.json"))["complete"])
 
