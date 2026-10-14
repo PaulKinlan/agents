@@ -1,0 +1,91 @@
+# patches/fleet-lanes-status-no-recency.patch
+# remote/lanes.sh: the lane status decision reads no recency field at all (agents-oi0x).
+# Base (MEASURED on this VM's deployed fleet copy):
+#   remote/lanes.sh         40537 bytes sha256 7f0be21489db73e4d18821c58e6e669d22ec54f5192bc00bf158b5b9d422e4aa
+#   tests/lanes.test.sh     64678 bytes sha256 bbe6c9339457e2144d63b59a612c7adb15443c84480b14919e7788f4abfa00d5
+# Apply from the fleet repo root: patch -p1 < patches/fleet-lanes-status-no-recency.patch
+
+--- a/remote/lanes.sh
++++ b/remote/lanes.sh
+@@ -181,9 +181,15 @@
+   win_exists "$lane" || { echo "stopped"; return 0; }
+   local st="$LD/$lane.state.json"
+   [ -f "$st" ] || { echo "running"; return 0; }
+-  local busy ev turn_start
++  local busy turn_start
++  # RECENCY IS NOT READ HERE, DELIBERATELY (fleet-ehyo, agents-oi0x). last_event_at used to feed a zombie
++  # classification that a later change removed on the grounds that age alone cannot prove a dead session;
++  # the assignment survived with no reader, so the function read as if a clock still decided liveness while
++  # its idle branch consulted nothing at all. A live per-lane socket and a live pid ARE the proof (win_exists),
++  # and an idle session can legitimately have no events for hours. tests/lanes.test.sh pins both directions -
++  # a dead pid with an event two minutes old still reads stopped, a live lane with an old or absent event
++  # reads idle - and pins the absence of this read, because a behaviour test cannot see dead code.
+   busy=$(jq -r 'if has("busy") then .busy else empty end' "$st" 2>/dev/null)
+-  ev=$(jq -r '.last_event_at // empty' "$st" 2>/dev/null)
+   turn_start=$(jq -r '.turn_start_at // empty' "$st" 2>/dev/null)
+   local now_s
+   now_s=$(date +%s)
+--- a/tests/lanes.test.sh
++++ b/tests/lanes.test.sh
+@@ -1062,6 +1062,61 @@
+ lanes retire imp-live-rot >/dev/null 2>&1 || true
+ echo '{}' > "$HOME/.fleet/model-cooldown.json"
+ 
++echo "30. liveness has no clock: recency neither kills a live lane nor resurrects a dead one (agents-oi0x, fleet-ehyo)"
++# THE DEFECT THIS SECTION PINS: lane_status() read last_event_at into a variable it never used again, while
++# inbox/status.mjs consumes max(session mtime, last_event_at) for the watchdog. A computed fact with no reader
++# reads as "a clock decides this", so the next reader either trusts a field this branch ignores or wires a clock
++# back into a decision that was deliberately taken without one. The decided semantics (fleet-ehyo): a live
++# per-lane socket and a live pid are the PROOF of life; recency is reported, never classified. Both directions
++# are driven - an alive lane whose only timestamp is ancient or absent must read ALIVE, and a dead pid must read
++# DEAD even with a live socket and an event seconds old - because a fix that makes everything look alive is
++# worse than the bug it fixes.
++echo rpc > "$HOME/.fleet/lane-mode"
++set_ev() {  # <lane> <json value for last_event_at> - ONLY the timestamp varies between calls
++  printf '{"lane":"%s","pid":%s,"host_pid":%s,"host":"rpc","busy":false,"turns":1,"last_event_at":%s}\n' \
++    "$1" "$$" "$$" "$2" > "$HOME/.fleet/lanes/$1.state.json"
++}
++
++# 30a-30c: INVARIANCE - mutating only the timestamp cannot change the classification or the list row
++mkconf des-quiet designer bead-quiet
++set_ev des-quiet "\"$(date -d '2 minutes ago' -u +%Y-%m-%dT%H:%M:%SZ)\""
++recent=$(lanes status des-quiet); recent_row=$(lanes list | grep des-quiet)
++set_ev des-quiet "\"$(date -d '90 minutes ago' -u +%Y-%m-%dT%H:%M:%SZ)\""
++stale=$(lanes status des-quiet); stale_row=$(lanes list | grep des-quiet)
++set_ev des-quiet null
++absent=$(lanes status des-quiet); absent_row=$(lanes list | grep des-quiet)
++[ "$recent" = "idle" ] && ok "30a a live idle lane reads idle when its last event is 2 minutes old" || bad "30a recent idle lane" "got [$recent]"
++[ "$recent" = "$stale" ] && [ "$stale" = "$absent" ] && ok "30b last_event_at cannot change the status (2min = 90min = absent = $absent)" || bad "30b status must not depend on recency" "recent=[$recent] stale=[$stale] absent=[$absent]"
++[ -n "$recent_row" ] && [ "$recent_row" = "$stale_row" ] && [ "$stale_row" = "$absent_row" ] && ok "30c ...nor the lanes list row" || bad "30c list row must not depend on recency" "recent=[$recent_row] stale=[$stale_row] absent=[$absent_row]"
++
++# 30d/30e: ALIVE WITH NO STRUCTURAL FIELD - a lane that has written no busy/turns/timestamp is alive
++mkconf des-bare designer bead-bare
++printf '{"lane":"des-bare","pid":%s,"host_pid":%s,"host":"rpc"}\n' "$$" "$$" > "$HOME/.fleet/lanes/des-bare.state.json"
++[ "$(lanes status des-bare)" = "running" ] && ok "30d a live lane that has written no structural field reads alive (running), not idle-by-default" || bad "30d alive without structural fields" "got $(lanes status des-bare)"
++has "$(lanes start des-bare)" "des-bare already running" "30e ...and start does not restart it"
++
++# 30f/30g: DEAD STAYS DEAD - a live socket and a seconds-old event cannot resurrect a dead pid
++sleep 0.2 & DEAD_PID=$!; wait $DEAD_PID 2>/dev/null || true
++echo sdk > "$HOME/.fleet/lane-mode"
++mkconf des-dead designer bead-dead
++printf '{"lane":"des-dead","pid":%s,"host_pid":%s,"host":"sdk","busy":false,"turns":1,"last_event_at":"%s"}\n' \
++  "$DEAD_PID" "$DEAD_PID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME/.fleet/lanes/des-dead.state.json"
++[ "$(lanes status des-dead)" = "stopped" ] && ok "30f a dead pid reads stopped even with a live socket and an event seconds old" || bad "30f dead pid must read stopped" "got $(lanes status des-dead)"
++echo rpc > "$HOME/.fleet/lane-mode"
++mkconf des-nosock designer bead-nosock
++rm -f "$HOME/.fleet/lanes/des-nosock.sock"
++printf '{"lane":"des-nosock","pid":%s,"host_pid":%s,"host":"rpc","busy":false,"turns":1,"last_event_at":"%s"}\n' \
++  "$$" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME/.fleet/lanes/des-nosock.state.json"
++[ "$(lanes status des-nosock)" = "stopped" ] && ok "30g in rpc mode a lane whose live socket is gone reads stopped, not idle" || bad "30g dead socket must read stopped" "got $(lanes status des-nosock)"
++
++# 30h: THE STRUCTURAL PIN. A behaviour test cannot see dead code - that is precisely how this defect survived:
++# the field was computed and never used, so every observation was identical whether it was there or not. The
++# suite therefore pins the ABSENCE of the read. If a clock is ever wanted in this decision, delete this test
++# deliberately and argue the semantics change in the commit - do not quietly re-add the field.
++lane_status_body=$(awk '/^lane_status\(\) \{/,/^\}$/' "$LANES")
++hasnt "$lane_status_body" ".last_event_at" "30h lane_status() does not read last_event_at at all (structural pin)"
++echo rpc > "$HOME/.fleet/lane-mode"
++
+ echo
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
