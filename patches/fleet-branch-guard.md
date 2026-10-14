@@ -35,6 +35,13 @@ deliberately with `FLEET_ALLOW_BRANCH_MISMATCH=1`, so the escape hatch is a deci
   function, records that identical mistake: *"I introduced that by wiring the check to a variable this script
   never defines."* It now derives the directory from `$0`, the idiom used elsewhere in the file.
 
+### The refusal leads with one line naming both
+
+Coord's requirement when approving this: a machine check beats a discipline that has already failed three
+times, and it should name BOTH the branch and the worktree in one line rather than make a human read a block.
+So the first line is now `fleet-branch-guard: REFUSING this commit - worktree '<dir>' on branch '<branch>' -
+those name different beads.`, with the full paths and the one-line repair beneath it for when they are needed.
+
 ### Evidence
 
 - Fixture: **9 of 9** - the three real mismatches refused, six legitimate shapes silent, the override allowed.

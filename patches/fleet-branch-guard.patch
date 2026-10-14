@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/remote/fleet-branch-guard.sh
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,59 @@
 +#!/usr/bin/env bash
 +# fleet-branch-guard.sh - refuse a commit that is about to land on ANOTHER BEAD'S BRANCH (agents-zwbk).
 +#
@@ -47,7 +47,10 @@
 +fi
 +
 +cat >&2 <<MSG
-+fleet-branch-guard: REFUSING this commit - the branch does not match the worktree.
++fleet-branch-guard: REFUSING this commit - worktree '$(basename "$WT")' on branch '$BR' - those name different beads.
++For the record, in full:
++  worktree: $WT
++  branch:   $BR
 +  worktree: $WT
 +  branch:   $BR
 +You are about to commit '$wt_last' work on the branch for '$br_last'. That is how a bead's work lands on
