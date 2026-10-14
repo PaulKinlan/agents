@@ -27,7 +27,7 @@
 # than silence), and a placeholder substitution also matched the marker text it was printing. If an edit makes
 # every page print NO RESULT, suspect the injected JS first - that is the tool telling you it is broken.
 # Each verdict reports counted=N, the number of text-bearing leaf elements measured ON THAT PAGE, and the run
-# ends with FLOOR_SUMMARY pages=N verdicts=V below_total=B status=OK|INCOMPLETE. counted is PER PAGE and is
+# ends with FLOOR_SUMMARY pages=N verdicts=V below_total=B viewport=W,H complete=yes|no. counted is PER PAGE and is
 # never a total, because a total can be read as coverage by someone who does not notice that a page produced
 # no verdict at all. A page with no usable verdict (payload did not run, no count reported, or counted=0) is
 # UNMEASURED: it fails the run and turns the status INCOMPLETE, so an incomplete sweep can never read as a
@@ -137,11 +137,14 @@ done
 # WHAT counted MEANS, stated where it is read. `counted` is PER PAGE - the number of text-bearing leaf elements
 # measured on that page, leaves and containers alike - and it is never a total: a total can be read as coverage by a reader who never notices
 # that a page produced no verdict at all. So the run ends with how many pages there were, how many produced a
-# usable verdict, and a STATUS that says INCOMPLETE the moment they differ. A page with no verdict (payload did
+# usable verdict, and a COMPLETENESS field that says no the moment they differ. It is named for the fact it carries:
+# complete=yes means every page reached a verdict, NOT that the sweep was clean (agents-w7t2, coord - a field called
+# status=OK printed beside below_total=1 read as CLEAN to anyone scanning for a word). The OUTCOME is below_total
+# and the exit code; nothing on this line claims quality. A page with no verdict (payload did
 # not run, no count reported, counted=0) fails the run and makes every count in it unusable as coverage
 # (coord, agents-ssyq rework: a count that is TRUE but misleading is the same defect as no count).
-status=OK
-[ "$verdicts" -eq "$pages" ] || status=INCOMPLETE
-echo "FLOOR_SUMMARY pages=$pages verdicts=$verdicts below_total=$below_total viewport=$viewport status=$status"
-[ "$status" = OK ] || fail=1
+complete=yes
+[ "$verdicts" -eq "$pages" ] || complete=no
+echo "FLOOR_SUMMARY pages=$pages verdicts=$verdicts below_total=$below_total viewport=$viewport complete=$complete"
+[ "$complete" = yes ] || fail=1
 exit $fail
