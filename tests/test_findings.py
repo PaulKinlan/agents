@@ -1464,6 +1464,79 @@ class TestIdentityAttribution(unittest.TestCase):
         self.assertEqual(observed, set(findings.IDENTITY_SOURCES), observed)
 
 
+class TestLineDeltaVerdictCounts(unittest.TestCase):
+    """agents-ekwm: a missing station verdict is unknown, not a zero-count scan."""
+
+    DASH_ROW = "| — | — | — | — | — | — |"
+    ZERO_ROW = "| **0** | **0** | **0** | 0 | 0 | 0 |"
+
+    def report(self, stations, stats=None):
+        return findings._render_delta_report(
+            "target", [], stats or {key: 0 for key in findings.DELTA_KEYS}, [],
+            stations=stations, line_name="project-audit",
+        )
+
+    def top_row(self, report):
+        rows = report.splitlines()
+        header = "| New | Regressed | Fixed | Unchanged | Suppressed | False positive |"
+        return rows[rows.index(header) + 2]
+
+    def test_timeout_error_and_skipped_are_unknown_but_completed_zero_is_real(self):
+        for status in ("TIMEOUT", "ERROR", "SKIPPED"):
+            with self.subTest(status=status):
+                station = {"station": "triage", "status": status,
+                           "findings_count": None, "criticals": None}
+                report = self.report([station])
+                self.assertEqual(self.top_row(report), self.DASH_ROW,
+                                 f"{status} without a verdict rendered as zero findings")
+                self.assertIn(f"| `triage` | {status} | — | — |", report)
+                self.assertIn("INCOMPLETE", report)
+                self.assertNotIn("Clean Delta", report)
+        completed = {"station": "quiet", "status": "PASS", "findings_count": 0, "criticals": 0}
+        report = self.report([completed])
+        self.assertEqual(self.top_row(report), self.ZERO_ROW,
+                         "a completed zero-findings station must keep a real zero")
+        self.assertIn("| `quiet` | PASS | 0 | 0 |", report)
+        self.assertIn("Clean Delta", report)
+
+    def test_partial_verdict_keeps_its_counts_but_aggregate_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fragment = root / "completed-fragment.json"
+            fragment.write_text(json.dumps({"stats": {"new": 2}}), encoding="utf-8")
+            stations = [
+                {"station": "completed", "status": "ALERT", "findings_count": 2,
+                 "criticals": 0, "fragment": str(fragment)},
+                {"station": "triage", "status": "TIMEOUT", "findings_count": None,
+                 "criticals": None},
+            ]
+            path = findings.write_line_report("target", "project-audit", stations, findings_dir=root)
+            report = path.read_text(encoding="utf-8")
+            machine = json.loads((root / "target-line.json").read_text(encoding="utf-8"))
+        self.assertEqual(self.top_row(report), self.DASH_ROW,
+                         "a partial verdict cannot make the aggregate look complete")
+        self.assertIn("| `completed` | ALERT | 2 | 0 |", report)
+        self.assertEqual(machine["stats"]["new"], 2, "retain actual partial findings in the machine record")
+        self.assertFalse(machine["complete"])
+
+    def test_error_status_cannot_promote_stale_counts_to_a_verdict(self):
+        station = {"station": "failed", "status": "ERROR", "findings_count": 3,
+                   "criticals": 1}
+        report = self.report([station])
+        self.assertEqual(self.top_row(report), self.DASH_ROW,
+                         "a failed station's stale count is not a completed verdict")
+        self.assertIn("| `failed` | ERROR | — | — |", report)
+        self.assertIn("INCOMPLETE", report)
+
+    def test_pass_without_count_is_not_a_clean_zero(self):
+        station = {"station": "missing", "status": "PASS", "findings_count": None,
+                   "criticals": None}
+        report = self.report([station])
+        self.assertEqual(self.top_row(report), self.DASH_ROW,
+                         "PASS with missing counts is not evidence of a zero-findings scan")
+        self.assertIn("INCOMPLETE", report)
+
+
 if __name__ == "__main__":
     unittest.main()
 

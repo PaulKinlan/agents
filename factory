@@ -76,6 +76,9 @@ except ImportError:
                                VERIFIED_PINS_ENV, allowlisted_path, configure_host_pins,
                                prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 
+# Import after the path-repair fallback so both invocation modes share the same verdict predicate.
+from lib.findings import station_has_verdict
+
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
 # engine's *_BASE_URL and the pre-pass's HTTP(S)_PROXY point at. A fresh --unshare-net
@@ -2551,7 +2554,7 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         # The failure names what it cost, not just the failing station (fleet-9wyi).
         print(f"\n⏭️  Halt at '{halted_at}' SKIPPED {len(skipped)} station(s): {', '.join(skipped)}")
 
-    errored = [sc for sc in scorecard if sc["status"] not in VERDICT_STATUSES]
+    errored = [sc for sc in scorecard if not station_has_verdict(sc)]
     print("\n" + "=" * 70)
     state = "HALTED" if line_halted else ("INCOMPLETE" if errored else "COMPLETE")
     print(f"🏁 FACTORY LINE SCORECARD: {line_name.upper()} ({state})")
@@ -2559,9 +2562,10 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
     print(f"{'STATION':<25} {'STATUS':<12} {'FINDINGS':<10} {'CRITICALS'}")
     print("-" * 70)
     for sc in scorecard:
-        # A station with no verdict has unknown counts: print "-", never a reassuring 0.
-        count = sc.get("findings_count")
-        crit = sc.get("criticals")
+        # A station without a verdict has unknown counts, even if stale numbers survive.
+        has_verdict = station_has_verdict(sc)
+        count = sc.get("findings_count") if has_verdict else None
+        crit = sc.get("criticals") if has_verdict else None
         print(f"{sc['station']:<25} {sc['status']:<12} {'-' if count is None else count:<10} "
               f"{'-' if crit is None else crit}")
     print("=" * 70 + "\n")

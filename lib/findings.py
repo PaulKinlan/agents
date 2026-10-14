@@ -1440,6 +1440,17 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
 VERDICT_STATUSES = frozenset({"PASS", "ALERT"})
 
 
+def station_has_verdict(station: Dict[str, Any]) -> bool:
+    """A completed status with actual counts is a verdict; None is unknown, not zero.
+
+    Both the console scorecard and the delta report use this predicate so a
+    failed station cannot claim a result, nor can a missing count look clean.
+    """
+    return (station.get("status") in VERDICT_STATUSES
+            and station.get("findings_count") is not None
+            and station.get("criticals") is not None)
+
+
 def write_line_report(target_name: str, line_name: str, stations: List[Dict[str, Any]],
                       findings_dir: Optional[Path] = None) -> Path:
     """Write the run's delta report from every station of one factory line (fleet-810).
@@ -1476,7 +1487,7 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
         "target": target_name,
         "line": line_name,
         "generated": datetime.now(timezone.utc).isoformat(),
-        "complete": all(s.get("status") in VERDICT_STATUSES for s in stations),
+        "complete": all(station_has_verdict(s) for s in stations),
         "stats": stats,
         "sinks": sinks,
         "stations": [{k: v for k, v in s.items() if k != "fragment"} for s in stations],
@@ -1634,7 +1645,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     suppressed = [f for f in live if f["state"] == "wontfix"]
     withheld = [f for f in findings if reduced(f)]
     env_failed = [s for s in (stations or []) if s.get("status") == "ENV_FAILURE"]
-    no_verdict = [s for s in (stations or []) if s.get("status") not in VERDICT_STATUSES and s.get("status") != "ENV_FAILURE"]
+    no_verdict = [s for s in (stations or []) if not station_has_verdict(s)
+                  and s.get("status") != "ENV_FAILURE"]
 
     lines = [
         f"# Software Factory Delta Report: {target_name}",
@@ -1646,7 +1658,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"Line: `{line_name or '?'}` — {len(stations)} station(s), "
                      f"{has_verdict_count} with a verdict.")
         lines.append("")
-    if env_failure or env_failed:
+    if env_failure or env_failed or no_verdict:
         lines += [
             f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
             f"|:---:|:---:|:---:|:---:|:---:|:---:|",
@@ -1691,7 +1703,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append("| Station | Status | Findings | Criticals | Note |")
         lines.append("|:---|:---:|:---:|:---:|:---|")
         for s in stations:
-            has_verdict = s.get("status") in VERDICT_STATUSES
+            has_verdict = station_has_verdict(s)
             count = s.get("findings_count") if has_verdict else "—"
             crit = s.get("criticals") if has_verdict else "—"
             note = str(s.get("error") or "").replace("|", "/").replace("\n", " ")[:200]
