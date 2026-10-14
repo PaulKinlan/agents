@@ -1,0 +1,119 @@
+--- a/remote/impl-model.sh
++++ b/remote/impl-model.sh
+@@ -32,9 +32,13 @@
+   for dir in "" "${FLEET_REPO_DIR:-}" "$HOME/${FLEET_PROJECT:-}" "$HOME/fleet"; do
+     [ -n "$dir" ] && [ ! -d "$dir" ] && continue
+     if [ -n "$dir" ]; then
+-      who=$(timeout 10 bd -C "$dir" show "$bead" 2>/dev/null | grep -oE 'Assignee: [a-z0-9][a-z0-9-]*' | head -1 | sed 's/^Assignee: //')
++      # agents-shua: the ASSIGNEE FIELD, not rendered text. `bd show` prints no Assignee line at all for an
++      # unassigned bead (measured: agents-ttxh), so a description that merely MENTIONS "Assignee: other-lane"
++      # used to be read as this bead's assignee - and because the candidate loop breaks on the first non-empty
++      # match, that false positive also stopped the search before the checkout that actually owns the bead.
++      who=$(timeout 10 bd -C "$dir" show "$bead" --json 2>/dev/null | jq -r '.[0].assignee // empty' 2>/dev/null)
+     else
+-      who=$(timeout 10 bd show "$bead" 2>/dev/null | grep -oE 'Assignee: [a-z0-9][a-z0-9-]*' | head -1 | sed 's/^Assignee: //')
++      who=$(timeout 10 bd show "$bead" --json 2>/dev/null | jq -r '.[0].assignee // empty' 2>/dev/null)
+     fi
+     [ -n "$who" ] && break
+   done
+--- a/tests/pick-model-crossfamily.test.sh
++++ b/tests/pick-model-crossfamily.test.sh
+@@ -12,6 +12,9 @@
+ set -uo pipefail
+ HERE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+ PICK="${PICK_OVERRIDE:-$HERE/remote/pick-model.sh}"
++# agents-shua: the same before/after seam for the resolver, so the case below runs against an older
++# revision too: IMPL_OVERRIDE=<path> bash tests/pick-model-crossfamily.test.sh
++IMPL="${IMPL_OVERRIDE:-$HERE/remote/impl-model.sh}"
+ PASS=0; FAIL=0
+ ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
+ bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n      %s\n' "$1" "${2:-}"; }
+@@ -77,26 +80,38 @@
+ echo "6. impl-model resolver: assignee lane first, spawner second, nothing third"
+ cat > "$HOME/bin-bd" <<'S'
+ #!/usr/bin/env bash
+-case "$1" in show) echo "title"; echo "Assignee: test-vm-imp-x · Type: bug";; *) echo '[]' ;; esac
++# a FAITHFUL fake bd (agents-shua): rendered text for a plain `show`, the assignee FIELD for `show --json`.
++# Modelling only the rendered form is what let the old grep-based read look correct in this suite.
++case " $* " in
++  *" show "*" --json "*) echo '[{"id":"tk-9","assignee":"test-vm-imp-x"}]'; exit 0 ;;
++  *" show "*)            echo "title"; echo "Assignee: test-vm-imp-x · Type: bug"; exit 0 ;;
++  *)                     echo '[]' ;;
++esac
+ S
+ chmod +x "$HOME/bin-bd"
+ mkdir -p "$HOME/bin"; cp "$HOME/bin-bd" "$HOME/bin/bd"
+ printf 'zai/glm-5.3\n' > "$HOME/.fleet/lanes/imp-x.model"
+ export FLEET_LANE=coord-lane
+ printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/coord-lane.model"
+-m=$(cd "$ROOT" && PATH="$HOME/bin:$PATH" bash "$HERE/remote/impl-model.sh" tk-9)
++m=$(cd "$ROOT" && PATH="$HOME/bin:$PATH" bash "$IMPL" tk-9)
+ eq "$m" "zai/glm-5.3" "6a assignee lane model wins"
+ # 6a2 (review round-1 P1): bd's DB follows the working directory, and lanes run from ~/journal - so the
+ # resolver must walk the candidate checkouts until one knows the bead, not give up on the first miss
+ cat > "$HOME/bin/bd" <<'S'
+ #!/usr/bin/env bash
+ # knows the bead ONLY under -C $HOME/proj (simulates the project checkout owning the DB)
+-if [ "$1" = "-C" ] && [ "$2" = "$BD_PROJ_DIR" ]; then echo "t"; echo "Assignee: test-vm-imp-x · Type: bug"; exit 0; fi
++if [ "$1" = "-C" ] && [ "$2" = "$BD_PROJ_DIR" ]; then
++  case " $* " in
++    *" --json "*) echo '[{"id":"tk-9","assignee":"test-vm-imp-x"}]' ;;
++    *)            echo "t"; echo "Assignee: test-vm-imp-x · Type: bug" ;;
++  esac
++  exit 0
++fi
+ exit 1
+ S
+ chmod +x "$HOME/bin/bd"
+ BD_PROJ_DIR="$HOME/proj" mkdir -p "$HOME/proj"
+-m=$(cd "$ROOT" && BD_PROJ_DIR="$HOME/proj" PATH="$HOME/bin:$PATH" FLEET_REPO_DIR="$HOME/proj" bash "$HERE/remote/impl-model.sh" tk-9)
++m=$(cd "$ROOT" && BD_PROJ_DIR="$HOME/proj" PATH="$HOME/bin:$PATH" FLEET_REPO_DIR="$HOME/proj" bash "$IMPL" tk-9)
+ eq "$m" "zai/glm-5.3" "6a2 assignee resolved via a -C candidate when the caller's directory does not know the bead"
+ cat > "$HOME/bin-bd" <<'S2'
+ #!/usr/bin/env bash
+@@ -104,14 +119,42 @@
+ S2
+ chmod +x "$HOME/bin-bd"
+ rm -f "$HOME/.fleet/lanes/imp-x.model"
+-m=$(PATH="$HOME/bin:$PATH" bash "$HERE/remote/impl-model.sh" tk-9)
++m=$(PATH="$HOME/bin:$PATH" bash "$IMPL" tk-9)
+ eq "$m" "deepseek/deepseek-flash" "6b spawner lane model is the fallback"
+-m=$(PATH="$HOME/bin:$PATH" bash "$HERE/remote/impl-model.sh" "")
++m=$(PATH="$HOME/bin:$PATH" bash "$IMPL" "")
+ eq "$m" "deepseek/deepseek-flash" "6c empty bead -> spawner fallback (no assignee to consult)"
+ rm -f "$HOME/.fleet/lanes/coord-lane.model"
+-m=$(PATH="$HOME/bin:$PATH" bash "$HERE/remote/impl-model.sh" tk-9)
++m=$(PATH="$HOME/bin:$PATH" bash "$IMPL" tk-9)
+ eq "$m" "" "6d nothing determinable -> empty (caller proceeds unguarded)"
+ 
++echo "7. impl-model resolver reads the ASSIGNEE FIELD, not rendered text (agents-shua)"
++# MEASURED on this VM: `bd show` prints NO Assignee line at all for an unassigned bead (agents-ttxh has
++# assignee None), so the old grep found whatever "Assignee: ..." a DESCRIPTION happened to mention. The hub
++# creates beads unassigned on purpose, which is what makes this the common case and not a curiosity.
++# 6b and 6d REMOVED both model files, so restore them: without the files this case would measure the
++# fixture's leftover state rather than the resolver (measured: it read as an empty model on BOTH revisions).
++printf 'zai/glm-5.3\n' > "$HOME/.fleet/lanes/imp-x.model"
++printf 'deepseek/deepseek-flash\n' > "$HOME/.fleet/lanes/coord-lane.model"
++cat > "$HOME/bin/bd" <<'S'
++#!/usr/bin/env bash
++# the resolver calls `bd -C <dir> show`, so match on the ARGUMENTS, not $1 (that blind spot is why the
++# deployed 6a/6a2/6b/6c are red on a VM where the $HOME/ candidate directory exists)
++case " $* " in
++*" show "*)
++  echo "○ tk-8 · P2: a bead with no assignee"
++  echo "Created by: agents-factory-coord · Type: task"
++  echo
++  echo "DESCRIPTION"
++  echo
++  echo "  Handover note: Assignee: test-vm-imp-x asked for this, so hand it back to them."
++  exit 0 ;;
++esac
++echo '[]'
++S
++chmod +x "$HOME/bin/bd"
++m=$(cd "$ROOT" && PATH="$HOME/bin:$PATH" bash "$IMPL" tk-8)
++eq "$m" "deepseek/deepseek-flash" "7a an unassigned bead falls through to the spawner, not to a lane MENTIONED in its description"
++
+ if [ "$FAIL" -gt 0 ]; then
+   echo "Failed tests: $FAIL"
+ fi
