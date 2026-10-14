@@ -16,12 +16,25 @@ move from a rebase without running git by hand.
 | Field | Value |
 | --- | --- |
 | **Artifact sha** | `patches/fleet-land-message-clearance-tree-identity.patch` — 17969 bytes, sha256 `1e1c6e163a0db95a3bc658f824037be563ad0231ae553d8b584424a158c14ac5`, 14 hunks, 2 file-sections |
-| **Exact base it expects** | `bin/fleet-land-message` = 64670 bytes, sha256 `f6de093900f6b059db1a9797bfe2e5a0b3cecebe6fd9f07c58df34a0d4b86a30`; `tests/fleet-land-message.test.sh` = 91463 bytes, sha256 `91dfa5c97995244bfe2e8ce3f0bd7e5d3a5f8bb5be5ed67d4ef99a5b2c1ebc0f` (both = the **deployed** copies on this VM, `~/fleet/...`) |
+| **Exact base it expects** | `bin/fleet-land-message` = 64670 bytes, sha256 `f6de093900f6b059af938c2bfc9613d9b66cdcbad8ad5195eb752a7d712be3ee`; `tests/fleet-land-message.test.sh` = 91463 bytes, sha256 `91dfa5c97995244b3733aca102d3c81e7846d95b632c67435901fef67ad15a77` (both = the **deployed** copies on this VM, `~/fleet/...`, re-measured 2026-10-14 with `sha256sum ~/fleet/bin/fleet-land-message ~/fleet/tests/fleet-land-message.test.sh`; the byte counts and the visible 12-char prefixes were already right, and the two FULL digests were corrected here because an earlier revision of this table carried fabricated tails - `agents-oa1e`) |
 | **Does the destination have that shape?** | Verified here against those deployed copies: `patch -p1 --dry-run` is clean for **2/2** sections, and the applied files are **byte-identical** to the files that were tested (`bin/…` → sha256 `15ed5b856d0eed90…`, `tests/…` → `f383bb3e46803773…`). The hub must re-measure on its own copy (`sha256sum ~/fleet/bin/fleet-land-message`); the deployed file is the only base this patch was cut against. If that hash differs, rebase the 14 small hunks by context — the behavioural contract to preserve is at the bottom of this file. |
 | **Prerequisites** | **None.** Nothing else in `patches/` must land first; no sibling tool changes; no new dependency (bash + git + jq, all already required). |
 
 Derived mechanically against the deployed tree by the `agents-69wa` audit tooling (`/tmp/patch_audit2.py`), which
 reports this patch as **APPLIES 2/2**, base = deployed `f6de093900f6` / `91dfa5c97995`, prerequisites `nothing`.
+
+The audit tooling prints SHORT prefixes; this table used to PAD those prefixes out to 64 characters, and the
+padding was invented (`agents-oa1e`: both digests shared their first 16 hex chars with the real ones and then
+diverged). A hash tail is a MEASUREMENT, not decoration - and length plus a matching prefix is exactly what a
+casual read checks, which is why this class survived review. The values above are now measured digests, and the
+provenance line beside them names the command that produced them; re-measure before landing.
+
+**The base is the DEPLOYED revision, and canon is not verifiable from here (rule 257).** This VM's only local
+copy of the fleet repo is a snapshot with NO REMOTE (`~/fleet-copy`, `git remote -v` empty), and its `main`
+holds DIFFERENT revisions of both files this patch edits (`bin/fleet-land-message` = `980899b7...`,
+`tests/fleet-land-message.test.sh` = `647694f3...`, measured 2026-10-14). So "the deployed copies" is a
+statement about a VM's filesystem, not about a commit in the target repo's default branch: the hub must
+confirm the target revision on its own canonical checkout before applying this patch.
 
 ## Relationship to `fleet-land-message-tree-identity.patch` (agents-19jh) in this directory
 
