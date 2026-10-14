@@ -36,6 +36,12 @@ from tests import has_git_index, tracked_paths
 
 from tests import has_git_index, tracked_paths
 
+# The ONE definition of "the tracked arm fragments" (agents-ncue), shared with the loader in
+# tools/fast-gate.sh so a reader and the gate cannot disagree about what the registry contains. Imported
+# as a submodule rather than as `from tests import ...`: this module already owns its package-initialiser
+# import above, and re-importing the package buys nothing (agents-ncue measured the same on its reader).
+from tests.test_fast_gate_mapping import tracked_arm_fragments
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # The independent oracle the mirror mirrors (agents-5z4e). It lives in the fleet tree, so it is NOT
@@ -234,17 +240,24 @@ def _arm_pattern(module):
         return f"lib/{module}.py)"
     return "lib/*.py)"
 
-def _arm_registry_text() -> str:
+def _arm_registry_text(root=None) -> str:
     """The fast-gate arm registry, reassembled from its fragments (agents-hr6q, ADR 0002).
 
     The arms used to be one `case` table inside tools/fast-gate.sh; they are now one file per contiguous
     run of arms under tools/fast-gate-arms.d/, and this helper is the reader that reconstitutes them for
     the one question this module asks of the source ("does this module have an arm of its own?"). Reading
     the script alone would answer "no" for every module and quietly change what the reasons below say.
+
+    ENUMERATED FROM GIT'S INDEX, not the filesystem (agents-jwn9). This was the FOURTH and last glob of
+    this directory in the tree - agents-ncue fixed the other three - so it was the last place where an
+    untracked fragment could enter the registry text, and a stray whose body merely CONTAINS a matching
+    pattern answers "does this module have an arm of its own?" with a green. The enumeration is delegated
+    to tracked_arm_fragments so there is one definition of the registry rather than a fourth copy of it.
     """
-    arms_dir = ROOT / "tools" / "fast-gate-arms.d"
-    fragments = sorted(arms_dir.glob("*.sh"))
-    assert fragments, f"no arm fragments in {arms_dir}: the registry cannot be read"
+    fragments = tracked_arm_fragments(root)
+    assert fragments, (
+        f"no arm fragments in {(root or ROOT) / 'tools' / 'fast-gate-arms.d'}: the registry cannot be read"
+    )
     return "\n".join(path.read_text(encoding="utf-8") for path in fragments)
 
 
@@ -535,6 +548,38 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
         finally:
             probe.unlink(missing_ok=True)
             _importing_suites.cache_clear()
+
+    def test_untracked_debris_is_not_absorbed_by_the_arm_registry_reader(self):
+        """The arms half of the check above (agents-jwn9, found while fixing agents-ncue).
+
+        _arm_registry_text answers "does this module have an arm of its own?" for the allowlist reasons,
+        and it answered by globbing the registry directory. An untracked fragment whose body contains a
+        matching pattern therefore answers that question with a green - and tools/fast-gate.sh SOURCES
+        every *.sh it finds (agents-es0y), so a stray is code the gate would execute.
+
+        The probe is built in a SYNTHETIC, git-initialised root. A fixture that wrote a stray *.sh into
+        the live registry would itself be the hazard it is testing for.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arms = root / "tools" / "fast-gate-arms.d"
+            arms.mkdir(parents=True)
+            (arms / "010-tracked.sh").write_text("case TRACKED_FRAGMENT in\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", "tools/fast-gate-arms.d/010-tracked.sh"], check=True
+            )
+            self.assertIn(
+                "TRACKED_FRAGMENT", _arm_registry_text(root),
+                "a fragment git's index sees must be read: without this, the assertion below could pass "
+                "for a reader that enumerates nothing at all",
+            )
+            (arms / "999-stray.sh").write_text("case STRAY_FRAGMENT in\n", encoding="utf-8")
+            self.assertNotIn(
+                "STRAY_FRAGMENT", _arm_registry_text(root),
+                "an UNTRACKED fragment must not enter the registry text: it answers this reader's question "
+                "with a green while the gate treats every *.sh it finds as code (agents-jwn9, agents-es0y)",
+            )
 
     def test_a_consumer_the_gate_does_not_select_must_be_allowlisted(self):
         failures = []
