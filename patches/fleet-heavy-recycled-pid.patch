@@ -206,7 +206,29 @@
  # RECLAIM A SLOT ABANDONED BY A DEAD WRAPPER (measured 2026-10-12 on the hub: the single heavy slot was held
  # 34 minutes by two gate workers from /tmp/tmp.I6i63vUAqR - a TEST FIXTURE HOME that no longer existed. Their
  # wrapper was gone, they had been reparented to init, and they held the inherited fd, so flock said "held"
-@@ -197,11 +396,11 @@
+@@ -112,12 +311,15 @@
+   else
+     echo "fleet-heavy: reclaiming slot$i - held ${oldest}s with NO label (the holder died without releasing it): $(printf '%s ' $holders)" >&2
+   fi
+-  # TERM the holders only: the fd lives in the PROCESS, so killing the holders releases the flock. Unlinking
+-  # the slot file would not (the lock is on the inode) and would break detection for everyone else.
+-  kill -TERM $holders 2>/dev/null
+-  sleep 2
+-  local still; still=$(slot_fd_holders "$i")
+-  [ -n "$still" ] && { echo "fleet-heavy: slot$i holders ignored SIGTERM; sending SIGKILL" >&2; kill -KILL $still 2>/dev/null; sleep 1; }
++  # SIGNAL THE VERIFIED HOLDERS THE SAME WAY THE JOB-END SWEEP DOES (agents-nyb1). A raw
++  # `kill -TERM $holders` here was the SAME scan-to-signal race ONE FUNCTION OVER: `$holders` is a list of
++  # remembered pid NUMBERS, so its TERM is a claim about the past, and the re-scanned `$still` KILL was a
++  # SECOND one - a number can be recycled between the scan and either signal. signal_leaked_holders
++  # re-observes the slot fd IN THE SAME PASS as the identity, binds each pid with a pidfd and signals the
++  # bound PROCESS OBJECT, so a recycled number is named and refused rather than shot. `holders` above is
++  # still read to compute the GRACE and to name the candidates in the log; it is no longer the list that is
++  # signalled, so there is no raw kill of a scanned pid anywhere in this function.
++  signal_leaked_holders "$i"
+   rm -f "$dir/slot$i.who"
+   return 0
+ }
+@@ -197,11 +399,11 @@
          # minutes, blocking every gate on the VM, their wrapper long gone.
          # So before releasing, sweep anything that is holding the slot and is not us. This is the source fix;
          # reclaim_abandoned_slot() is the safety net for holders that pre-date it.
