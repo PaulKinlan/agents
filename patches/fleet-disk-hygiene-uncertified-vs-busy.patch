@@ -1,0 +1,318 @@
+--- a/bin/fleet-path-idle.py
++++ b/bin/fleet-path-idle.py
+@@ -1,5 +1,19 @@
+ #!/usr/bin/env python3
+-"""Exit 0 only if no process has a cwd or open FD within a candidate tree.
++"""Answer whether a candidate tree may be touched, in THREE states - never two (agents-a0zr).
++
++  0  idle         nothing readable holds the path, and nothing on this VM is uninspectable.
++  1  busy         a NAMED, readable process holds it (printed: 'busy pid=... ref=... path=...').
++                  A busy answer outranks uncertified: it is a PROOF, and it is what the caller
++                  most needs, so the scan continues past unreadable processes to find it.
++  2  uncertified  a same-uid process exists whose /proc/PID/fd cannot be read (a non-dumpable
++                  session helper), so no holder can be RULED OUT even though none was found.
++                  Not busy, and NOT a licence: a caller may keep a non-destructive copy of
++                  such a path, but must not remove it on this answer.
++  64 usage        bad invocation or a target of '/', so 2 means exactly one thing.
++
++The distinction matters because collapsing 1 and 2 into 'not idle' made a disk-hygiene sweep
++that archived nothing report 'done' (agents-a0zr): the two states are different facts and the
++retention decision is different for each.
+ 
+ Fail closed when /proc cannot be inspected; a process may disappear while scanning.
+ """
+@@ -8,11 +22,12 @@
+ import time
+ 
+ if len(sys.argv) != 2 or not os.path.lexists(sys.argv[1]):
+-    sys.exit(2)
++    sys.exit(64)
+ target = os.path.realpath(sys.argv[1])
+ if target == "/":
+-    sys.exit(2)
++    sys.exit(64)
+ prefix = target + os.sep
++uninspectable = []
+ for pid in os.listdir('/proc'):
+     if not pid.isdigit():
+         continue
+@@ -36,8 +51,11 @@
+                     except (FileNotFoundError, ProcessLookupError):
+                         continue
+                     except PermissionError:
+-                        print(f'uninspectable pid={pid} state={state}', file=sys.stderr)
+-                        sys.exit(2)
++                        # Record it and KEEP SCANNING: a readable holder later in /proc is a
++                        # stronger answer than this one, and exiting here masked live holders
++                        # (measured: a sleep with its cwd in the tree answered rc 2, not 1).
++                        uninspectable.append((pid, state))
++                        continue
+                     # The retried descriptors are checked by the common loop below.
+                     for ref in refs:
+                         try:
+@@ -58,4 +76,9 @@
+                 sys.exit(1)
+         except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+             continue
++if uninspectable:
++    pid, state = uninspectable[0]
++    more = f' (+{len(uninspectable) - 1} more)' if len(uninspectable) > 1 else ''
++    print(f'uncertified pid={pid} state={state} reason=uninspectable{more}', file=sys.stderr)
++    sys.exit(2)
+ sys.exit(0)
+--- a/bin/fleet-disk-hygiene
++++ b/bin/fleet-disk-hygiene
+@@ -30,6 +30,10 @@
+ #    subject per month, in ~/.fleet/evidence-archive, keeps the trail at a fraction of the bytes. Only the
+ #    ARCHIVES are ever pruned, and on a much longer bound, so the policy is still bounded but is now
+ #    "keep it, smaller" rather than "lose it".
++#    agents-a0zr: the liveness answer has THREE states and the retention decision differs for each, so
++#    they are never collapsed: idle = removable; busy (a named live holder) = retry next run; uncertified
++#    (a same-uid process whose /proc/PID/fd cannot be read, so no holder can be ruled out) = snapshot it,
++#    never remove it; a checker error = preserve and name it. A sweep that archives nothing must SAY so.
+ # 5. NEVER TOUCHES: beads/Dolt data, the journal, a repo with git running, uncommitted work, live lane state,
+ #    or a check record. Same never-touch discipline as fleet-tmp-clean, and the reason this is safe on a timer.
+ # 6. REPORTS what it reclaimed (before/after per subject) and logs to ~/.fleet/disk-hygiene.log, bounded.
+@@ -54,18 +58,53 @@
+ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; }
+ # Test fixtures and relocated installations may have no ~/fleet checkout.
+ PATH_IDLE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fleet-path-idle.py"
+-idle() { python3 "$PATH_IDLE" "$1"; }
++# agents-a0zr: the checker answers in THREE states and this tool used to collapse them into yes/no, so a
++# sweep that archived nothing reported "done". They are different facts and the decision differs:
++#   idle        (0) nothing holds it and nothing here is uninspectable -> safe to remove
++#   busy        (1) a NAMED, readable process holds it -> routine, retry next run
++#   uncertified (2) a same-uid process's /proc/PID/fd cannot be read, so no holder can be RULED OUT.
++#                   Not busy, and NOT a licence: snapshot it, never remove it.
++#   error           the checker could not answer at all -> preserve it and name it
++# `out=$(...)` then `rc=$?` reads the COMMAND's status here: there is no pipe, so no head/tail trap.
++BUSY=0
++UNCERTIFIED=0
++idle_state() { # <path>; sets IDLE_STATE and IDLE_DETAIL
++  local out rc
++  out=$(python3 "$PATH_IDLE" "$1" 2>&1); rc=$?
++  case "$rc" in
++    0) IDLE_STATE=idle;        IDLE_DETAIL="" ;;
++    1) IDLE_STATE=busy;        IDLE_DETAIL="$out" ;;
++    2) IDLE_STATE=uncertified; IDLE_DETAIL="$out" ;;
++    *) IDLE_STATE=error;       IDLE_DETAIL="rc=$rc $out" ;;
++  esac
++}
+ # Log the liveness check *before* a destructive operation, so even an interrupted run is auditable.
+ safe_remove() { # <file or tree>
+   local target=$1
+-  if idle "$target"; then
+-    log "idle=yes action=remove path=$target"
+-    rm -rf -- "$target"
+-  else
+-    log "idle=no action=skip path=$target"
+-    say "    busy or uninspectable: preserved $target"
+-    return 1
+-  fi
++  idle_state "$target"
++  case "$IDLE_STATE" in
++    idle)
++      log "idle=yes action=remove path=$target"
++      rm -rf -- "$target"
++      ;;
++    busy)
++      BUSY=$((BUSY + 1))
++      log "idle=no state=busy action=skip path=$target detail=$IDLE_DETAIL"
++      say "    busy (live holder): preserved $target"
++      return 1
++      ;;
++    uncertified)
++      UNCERTIFIED=$((UNCERTIFIED + 1))
++      log "idle=no state=uncertified action=skip path=$target detail=$IDLE_DETAIL"
++      say "    uncertified (NOT busy - no holder could be ruled out): preserved $target"
++      return 1
++      ;;
++    *)
++      log "idle=no state=error action=skip path=$target detail=$IDLE_DETAIL"
++      say "    liveness check could not answer: preserved $target"
++      return 1
++      ;;
++  esac
+ }
+ 
+ # Thresholds. Loose-object counts are the leading indicator: a healthy repo sits in the hundreds (measured
+@@ -126,9 +165,10 @@
+   if [ "$cnt" -lt "$LOOSE_MIN" ]; then
+     return 0
+   fi
+-  if git_in_use "$r" || ! idle "$r/.git/objects"; then
+-    say "  $name: $cnt loose objects ($size) but git/objects is in use or uninspectable - skipped this pass"
+-    log "idle=no action=skip_gc repo=$r"
++  idle_state "$r/.git/objects"
++  if git_in_use "$r" || [ "$IDLE_STATE" != idle ]; then
++    say "  $name: $cnt loose objects ($size) but git/objects is $IDLE_STATE - skipped this pass"
++    log "idle=no state=$IDLE_STATE action=skip_gc repo=$r detail=$IDLE_DETAIL"
+     return 0
+   fi
+   say "  $name: $cnt loose objects ($size) - collecting"
+@@ -228,47 +268,93 @@
+ say "4. evidence (compress + archive older than ${EVIDENCE_KEEP_DAYS}d, keep archives ${EVIDENCE_ARCHIVE_KEEP_DAYS}d)"
+ mkdir -p "$EVIDENCE_DIR"
+ arch_total=0
++seen_subjects=""
+ for d in "$HOME"/*evidence "$HOME"/*-evidence; do
+   [ -d "$d" ] || continue
++  subject=$(basename "$d")
++  # agents-a0zr: `*evidence` and `*-evidence` match the SAME directory, so every subject used to be
++  # processed - and logged, and archived - twice per run. One subject, one pass.
++  case "$seen_subjects" in *"|$subject|"*) continue ;; esac
++  seen_subjects="${seen_subjects}|${subject}|"
+   n=$(find "$d" -maxdepth 1 -mindepth 1 -mtime +"$EVIDENCE_KEEP_DAYS" 2>/dev/null | wc -l)
+   [ "$n" -gt 0 ] || continue
+-  subject=$(basename "$d")
+   stamp=$(date -u +%Y-%m)
+   # Each run gets its own archive: replacing a previous monthly archive would lose earlier evidence.
+   archive="$EVIDENCE_DIR/${subject}-${stamp}-$(date -u +%Y%m%dT%H%M%S)-$$.tar.gz"
+   before=$(du -sk "$d" 2>/dev/null | cut -f1); before=${before:-0}
+   if [ "$DRY_RUN" = 1 ]; then
+-    say "    $subject: would archive $n entr(y|ies) -> $(basename "$archive")"
++    # agents-a0zr: the dry run used to promise "would archive N" WITHOUT asking the checker the real run
++    # consults, so it reported an intention the run could not fulfil. Ask, and say what would really happen.
++    d_idle=0; d_unc=0; d_busy=0; d_err=0
++    while IFS= read -r -d '' entry; do
++      idle_state "$entry"
++      case "$IDLE_STATE" in
++        idle) d_idle=$((d_idle + 1)) ;;
++        uncertified) d_unc=$((d_unc + 1)) ;;
++        busy) d_busy=$((d_busy + 1)) ;;
++        *) d_err=$((d_err + 1)) ;;
++      esac
++    done < <(find "$d" -maxdepth 1 -mindepth 1 -mtime +"$EVIDENCE_KEEP_DAYS" -print0 2>/dev/null)
++    say "    $subject: would archive $((d_idle + d_unc)) entr(y|ies) -> $(basename "$archive")"
++    say "      $d_idle certified (removable), $d_unc uncertified (snapshot only, originals preserved), $d_busy busy, $d_err checker error"
+     continue
+   fi
+   # tar the old entries out, and only REMOVE THEM IF THE ARCHIVE SUCCEEDS. An archive step that deletes its
+   # input on failure is a deletion step, which is the thing this replaced.
+   # Snapshot only idle entries. Never re-run find after archiving: new/changed entries were not archived.
+   list=$(mktemp) || continue
++  removable=$(mktemp) || { rm -f "$list"; continue; }
++  uncertified_here=0; busy_here=0; error_here=0
+   mapfile -d '' -t old_evidence < <(find "$d" -maxdepth 1 -mindepth 1 -mtime +"$EVIDENCE_KEEP_DAYS" -print0 2>/dev/null)
+   for entry in "${old_evidence[@]}"; do
+-    if idle "$entry"; then
+-      printf './%s\0' "${entry#"$d"/}" >> "$list"
+-      log "idle=yes action=archive path=$entry"
+-    else
+-      log "idle=no action=skip path=$entry"
+-    fi
++    idle_state "$entry"
++    case "$IDLE_STATE" in
++      idle)
++        printf './%s\0' "${entry#"$d"/}" >> "$list"
++        printf './%s\0' "${entry#"$d"/}" >> "$removable"
++        log "idle=yes action=archive path=$entry"
++        ;;
++      uncertified)
++        # A COPY IS NOT A DELETION. Snapshot it so the run still compresses what it was asked to
++        # compress, and withhold the removal: the original stays, so a torn snapshot loses nothing.
++        printf './%s\0' "${entry#"$d"/}" >> "$list"
++        uncertified_here=$((uncertified_here + 1))
++        UNCERTIFIED=$((UNCERTIFIED + 1))
++        log "idle=no state=uncertified action=archive_only path=$entry detail=$IDLE_DETAIL"
++        ;;
++      busy)
++        busy_here=$((busy_here + 1))
++        BUSY=$((BUSY + 1))
++        log "idle=no state=busy action=skip path=$entry detail=$IDLE_DETAIL"
++        ;;
++      *)
++        error_here=$((error_here + 1))
++        log "idle=no state=error action=skip path=$entry detail=$IDLE_DETAIL"
++        ;;
++    esac
+   done
+-  if [ ! -s "$list" ]; then rm -f "$list"; continue; fi
++  if [ ! -s "$list" ]; then
++    # agents-a0zr: this used to `continue` in silence, which is how a blocked sweep came to look clean.
++    say "    $subject: 0 of $n entr(y|ies) archivable - $busy_here busy, $uncertified_here uncertified, $error_here checker error; nothing archived, nothing removed"
++    log "evidence_archive_skipped subject=$subject candidates=$n busy=$busy_here uncertified=$uncertified_here error=$error_here"
++    rm -f "$list" "$removable"
++    continue
++  fi
+   if tar czf "${archive}.tmp" -C "$d" --null -T "$list" 2>/dev/null; then
+     mv "${archive}.tmp" "$archive"
+     while IFS= read -r -d '' entry; do
+       # Recheck just before removal; another process may have opened it during compression.
++      # ONLY certified entries are in this list: an uncertified one was snapshotted and left alone.
+       safe_remove "$d/$entry" || true
+-    done < "$list"
+-    rm -f "$list"
++    done < "$removable"
++    rm -f "$list" "$removable"
+     after=$(du -sk "$d" 2>/dev/null | cut -f1); after=${after:-0}
+     asz=$(du -sk "$archive" 2>/dev/null | cut -f1); asz=${asz:-0}
+     arch_total=$((arch_total + before - after))
+-    say "    $subject: archived $n entr(y|ies) -> $(basename "$archive") ($(human "$asz")); reclaimed $(human $(( before - after )))"
+-    log "evidence_archived subject=$subject entries=$n archive=$(basename "$archive") archive_k=$asz reclaimed_k=$(( before - after ))"
++    say "    $subject: archived $(( ${#old_evidence[@]} - busy_here - error_here )) entr(y|ies) -> $(basename "$archive") ($(human "$asz")); reclaimed $(human $(( before - after )))$([ "$uncertified_here" -gt 0 ] && echo ", $uncertified_here uncertified: snapshot only, originals preserved")"
++    log "evidence_archived subject=$subject entries=$((${#old_evidence[@]} - busy_here - error_here)) certified=$(( ${#old_evidence[@]} - busy_here - error_here - uncertified_here )) uncertified=$uncertified_here archive=$(basename "$archive") archive_k=$asz reclaimed_k=$(( before - after ))"
+   else
+-    rm -f "${archive}.tmp" "$list"
++    rm -f "${archive}.tmp" "$list" "$removable"
+     say "    $subject: ARCHIVE FAILED - leaving the evidence in place rather than deleting it"
+     log "evidence_archive_failed subject=$subject"
+   fi
+@@ -295,6 +381,13 @@
+ say "done: disk $(df_pct) used, $(human "$FREE_AFTER") free (was $(human "$FREE_BEFORE"))"
+ RECLAIMED=$(( FREE_AFTER - FREE_BEFORE ))
+ [ "$RECLAIMED" -gt 0 ] && say "     reclaimed $(human "$RECLAIMED")"
++# agents-a0zr: "done" must never stand in for "nothing was archived". A run that could not certify paths
++# says so, with the counts, because a quiet skip is exactly what made this invisible for as long as it was.
++if [ "$UNCERTIFIED" -gt 0 ] || [ "$BUSY" -gt 0 ]; then
++  say "     NOT EVERYTHING DONE: $UNCERTIFIED uncertified and $BUSY busy path(s) were PRESERVED, not removed"
++  say "     uncertified = a same-uid process's /proc/PID/fd could not be read, so no holder could be ruled out"
++fi
++log "done uncertified=$UNCERTIFIED busy=$BUSY reclaimed_k=$RECLAIMED"
+ [ "$DRY_RUN" = 0 ] && log "disk_free_k_before=$FREE_BEFORE disk_free_k_after=$FREE_AFTER reclaimed_k=$RECLAIMED pct=$(df_pct)"
+ 
+ # bounded log, same discipline as fleet-tmp-clean
+--- a/tests/disk-hygiene-health.test.sh
++++ b/tests/disk-hygiene-health.test.sh
+@@ -14,17 +14,37 @@
+ done
+ printf '#!/bin/bash\nexit 0\n' > "$T/home/fleet/bin/fleet-disk-hygiene"
+ chmod +x "$T/home/fleet/bin/fleet-disk-hygiene"
+-"$HERE/bin/fleet-path-idle.py" "$T/tree"
++# agents-a0zr: an idle tree must not be answered BUSY. On a VM with a same-uid process whose
++# /proc/PID/fd cannot be read, the checker answers 2 (uncertified) for every path - which is correct,
++# and collapsing 1 and 2 into "not idle" is what let a sweep that archived nothing report done. So 0
++# is fine here, 2 must SAY WHY, and only 1 (a named live holder) is a failure. A bare call under
++# `set -e` used to turn the uncertified answer into a failed health check for the whole VM.
++idle_answer() { # <path> -> sets IDLE_RC and IDLE_OUT
++  set +e
++  IDLE_OUT=$("$HERE/bin/fleet-path-idle.py" "$1" 2>&1)
++  IDLE_RC=$?
++  set -e
++}
++idle_answer "$T/tree"
++case "$IDLE_RC" in
++  0) : ;;
++  2) printf '%s' "$IDLE_OUT" | grep -q 'uncertified' \
++       || { echo "FAIL: rc 2 without saying uncertified: $IDLE_OUT"; exit 1; }
++     printf '%s' "$IDLE_OUT" | grep -q 'reason=uninspectable' \
++       || { echo "FAIL: rc 2 without the reason: $IDLE_OUT"; exit 1; } ;;
++  *) echo "FAIL: an idle empty tree answered rc=$IDLE_RC ($IDLE_OUT)"; exit 1 ;;
++esac
+ ( cd "$T/tree"; exec sleep 20 ) & LIVE=$!
+ sleep 0.1
+-if "$HERE/bin/fleet-path-idle.py" "$T/tree" >/dev/null 2>&1; then echo 'FAIL: live cwd was not detected'; exit 1; fi
++idle_answer "$T/tree"
++[ "$IDLE_RC" = 1 ] || { echo "FAIL: a live cwd must be reported busy (rc 1), got rc=$IDLE_RC ($IDLE_OUT)"; kill "$LIVE" 2>/dev/null; exit 1; }
+ kill "$LIVE"; wait "$LIVE" 2>/dev/null || true
+ printf 'payload' > "$T/tree/file"
+ ( exec 9<"$T/tree/file"; exec sleep 20 ) & FD=$!
+ sleep 0.1
+-if "$HERE/bin/fleet-path-idle.py" "$T/tree" >/dev/null 2>&1; then echo 'FAIL: open fd was not detected'; exit 1; fi
++idle_answer "$T/tree"
++[ "$IDLE_RC" = 1 ] || { echo "FAIL: an open fd must be reported busy (rc 1), got rc=$IDLE_RC ($IDLE_OUT)"; kill "$FD" 2>/dev/null; exit 1; }
+ kill "$FD"; wait "$FD" 2>/dev/null || true
+-"$HERE/bin/fleet-path-idle.py" "$T/tree"
+ cat > "$T/bin/systemctl" <<'EOF'
+ #!/usr/bin/env bash
+ case "$1" in
