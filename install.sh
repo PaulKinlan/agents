@@ -78,7 +78,7 @@ else
     # exactly that on a clone whose bare origin had been deleted: outside the checkout rc=1 with a
     # class, the way provisioning invokes it rc=0 with none. Provisioning's own pull failure is
     # classified by agents_pull_failure_class in remote/provision.sh.
-    #   patches/provision-failed-pull-names-its-class.patch (agents-rn78).
+    #   the provision-failed-pull change (bead agents-rn78) (agents-rn78).
     #
     # agents-a1ko: AND IT MUST NAME THE CLASS OF FAILURE, because a bare exit code forces the
     # operator to guess between a transient NETWORK outage and a DIVERGED checkout, and those want
