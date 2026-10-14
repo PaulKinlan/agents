@@ -459,17 +459,69 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         # `MODULES = BASE + ('embargo.py',)` stayed unresolved and the loop iterating it was skipped in
         # silence - the same defect as the inline concatenation, one level up. It is now built in source
         # order through the same resolver the loop header uses, so one name may be built from an earlier
-        # name, and a name REBOUND to something this rule cannot read is dropped rather than left holding
-        # its stale literal.
+        # name.
+        #
+        # A LATER BINDING REPLACES AN EARLIER ONE, and a name this rule cannot read must never be read as
+        # its stale value (agents-g7b7, found by review of e3c81f23 and reproduced there): handling only
+        # plain `Assign` left `MODULES += ("extra.py",)` holding the OLD list, so the guard reported a module
+        # MISSING while the staged tree copies it. A false FAILURE is worse than the silent skip it
+        # replaced, so every module-level binding is accounted for and an unreadable one DROPS the name -
+        # the loop header then treats it exactly like any other unreadable iterable.
+        def module_scope_store_names(statement: ast.stmt) -> set[str]:
+            """Names STORED anywhere inside a module-level statement, excluding nested function/class bodies.
+
+            Their locals are not module names, but `for MODULES in ...:`, `with open(...) as MODULES:`,
+            `import MODULES`, and their `if`/`try` spellings all bind at module scope. This is how a binding
+            this rule does not model is found and dropped instead of being left to be read as its old value.
+            """
+            found: set[str] = set()
+
+            def walk(current: ast.AST) -> None:
+                for child in ast.iter_child_nodes(current):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                        continue
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                        found.add(child.id)
+                    elif isinstance(child, ast.alias):
+                        found.add((child.asname or child.name).split(".")[0])
+                    walk(child)
+
+            walk(statement)
+            return found
+
+        def module_scope_bindings(statement: ast.stmt) -> dict[str, list[str] | None]:
+            """Every module-level Name this statement BINDS, mapped to the list it holds - or None for unreadable.
+
+            The three assignment forms resolve through the same resolver the loop header uses, and
+            AugAssign(Add) concatenates onto the value the name already holds; every other module-level binding
+            maps to None so the name is DROPPED. Over-invalidation is deliberate and safe: an unreadable name
+            takes the same path as any other unreadable iterable (loud where the loop stages lib modules,
+            quiet where it is provably exhaustive), while a stale name quietly checks the WRONG list.
+            """
+            if isinstance(statement, ast.Assign):
+                bindings = {target.id: literal_list(statement.value, consts)
+                            for target in statement.targets if isinstance(target, ast.Name)}
+                for other in (target for target in statement.targets if not isinstance(target, ast.Name)):
+                    for name in module_scope_store_names(other):
+                        bindings[name] = None
+                return bindings
+            if isinstance(statement, ast.AnnAssign):
+                if not isinstance(statement.target, ast.Name):
+                    return {}
+                readable = None if statement.value is None else literal_list(statement.value, consts)
+                return {statement.target.id: readable}
+            if isinstance(statement, ast.AugAssign):
+                if not isinstance(statement.target, ast.Name):
+                    return {}
+                current = consts.get(statement.target.id)
+                added = literal_list(statement.value, consts) if isinstance(statement.op, ast.Add) else None
+                concatenated = current + added if current is not None and added is not None else None
+                return {statement.target.id: concatenated}
+            return {name: None for name in module_scope_store_names(statement)}
+
         consts: dict[str, list[str]] = {}
         for statement in tree.body:
-            if not isinstance(statement, ast.Assign):
-                continue
-            bound = [target.id for target in statement.targets if isinstance(target, ast.Name)]
-            if not bound:
-                continue
-            resolved = literal_list(statement.value, consts)
-            for name in bound:
+            for name, resolved in module_scope_bindings(statement).items():
                 if resolved is None:
                     consts.pop(name, None)
                 else:
@@ -586,6 +638,44 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
             suite('BASE + ("embargo.py", "extra.py")'), encoding="utf-8")
         self.assertEqual(staged_runtime_missing_modules(complete), [],
                          "resolution is not refusal: a complete module-level concatenation stays green")
+
+    def test_a_later_binding_replaces_the_earlier_one_instead_of_going_stale(self):
+        """agents-g7b7, found by the independent review of e3c81f23 (P2): a later binding replaces an early one.
+
+        Resolving only plain assignment left the consts map holding the OLD list when a suite re-bound the
+        name, so the guard reported a module MISSING while the staged tree copies it - a false failure, which
+        is worse than the silent skip it replaced. Measured on e3c81f23 before this rule: an AugAssign that
+        COMPLETES the list still reported extra.py missing. The four cases below are the resolution, the
+        incomplete read, the annotated literal, and the honest unreadable re-binding.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(statements: str) -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    'BASE = ("findings.py",)\n'
+                    f"{statements}"
+                    "def build(root):\n    for module in MODULES:\n"
+                    '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(statements: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(suite(statements), encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        self.assertEqual(reported('MODULES = BASE + ("embargo.py",)\nMODULES += ("extra.py",)\n'), "",
+                         "a later `+=` replaces the earlier binding, so the complete list must report nothing")
+
+        incomplete = reported('MODULES = BASE\nMODULES += ("embargo.py",)\n')
+        self.assertIn("extra.py", incomplete, "the one module that is missing must still be named")
+        self.assertNotIn("embargo.py", incomplete,
+                         "the += value is part of the list, so it is not missing")
+
+        self.assertEqual(reported('MODULES: tuple = BASE + ("embargo.py", "extra.py")\n'), "",
+                         "an annotated literal is a binding like any other and must be READ, not refused")
+
+        rebound = reported('MODULES = BASE + ("embargo.py",)\nMODULES = runtime_modules()\n')
+        self.assertIn("RUNTIME", rebound,
+                      "a re-binding this rule cannot read is reported, not silently checked as its old value")
 
     def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
         """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
