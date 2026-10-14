@@ -37,7 +37,9 @@ STUB_CHROME = """#!/usr/bin/env bash
 file=""
 for arg in "$@"; do case "$arg" in file://*) file="${arg#file://}";; esac; done
 page="$(basename "$file")"
-if grep -q '__fifth_site' "$file" 2>/dev/null; then below=1; list=' [p.__fifth_site=11.00px]'; else below=0; list=''; fi
+cls="$(grep -o 'class="[^"]*"' "$file" 2>/dev/null | head -1 | sed 's/class="//; s/"$//')"
+[ -n "$cls" ] || cls="-"
+if grep -q '__fifth_site' "$file" 2>/dev/null; then below=1; list=' [p.'"$cls"'=11.00px]'; else below=0; list=''; fi
 if grep -q 'FIXTURE_MARKER' "$file" 2>/dev/null; then marker=1; else marker=0; fi
 [ -n "$STUB_CHROME_LOG" ] && printf '%s=%s\\n' "$marker" "$page" >> "$STUB_CHROME_LOG"
 # Two shapes the tool must refuse: a page whose payload counted nothing, and a verdict that does not say how many
@@ -46,9 +48,9 @@ counted=3
 grep -q 'ZERO_COUNT' "$file" 2>/dev/null && counted=0
 grep -q 'NO_COUNT_FIELD' "$file" 2>/dev/null && counted=
 if [ -z "$counted" ]; then
-  echo '<div id="__floor_result">FLOOR_RESULT page='"$page"' floor=12px below='"$below"'</div>'
+  echo '<div id="__floor_result">FLOOR_RESULT floor=12px below='"$below"' page='"$page"'</div>'
 else
-  echo '<div id="__floor_result">FLOOR_RESULT page='"$page"' floor=12px counted='"$counted"' below='"$below""$list"'</div>'
+  echo '<div id="__floor_result">FLOOR_RESULT floor=12px counted='"$counted"' below='"$below"' page='"$page""$list"'</div>'
 fi
 exit 0
 """
@@ -198,6 +200,54 @@ class TestTheSummarySaysWhetherTheSweepWasComplete(DocsTextFloorBase):
         red = self.run_tool()
         self.assertIn(f"below_total={len(PAGES)}", red.stdout, "each page's below-count must reach the summary")
         self.assertEqual(red.returncode, 1)
+
+
+class TestTheVerdictIsParsedFromTheFieldsNotFromTheRenderedLine(DocsTextFloorBase):
+    """agents-kzfj (rev-sweep): the reader tested the rendered verdict line for the SUBSTRING "below=0", so a page
+    whose class name or filename contained that text cleared the exit code while the tool reported a violation. That
+    is the tool own output satisfying the tool own check, and every case here is a real way to reach it - the fix is
+    to read the fields the tool emits, by position, and compare them as numbers. The stub stands in for the browser
+    (it decides below=1 from a marker in the page, and names the page's class the way the payload does)."""
+
+    def _violating_page(self, cls="x", name="index.html"):
+        (self.docs / name).write_text(
+            f'<!doctype html><body><p class="__fifth_site {cls}">text</p></body>\n', encoding="utf-8")
+        if name != "index.html":
+            (self.docs / "index.html").unlink()
+
+    def test_a_class_named_below_zero_cannot_clear_a_violation(self):
+        self._violating_page(cls="below=0")
+        done = self.run_tool()
+        self.assertIn("below=1", done.stdout)
+        self.assertEqual(done.returncode, 1, "a violation must not be cleared by text inside a class name")
+
+    def test_a_filename_containing_below_zero_cannot_clear_a_violation(self):
+        self._violating_page(cls="x", name="below=0.html")
+        done = self.run_tool()
+        self.assertIn("below=1", done.stdout)
+        self.assertEqual(done.returncode, 1, "a violation must not be cleared by the page's own filename")
+
+    def test_a_class_named_status_ok_cannot_clear_a_violation(self):
+        self._violating_page(cls="status=OK")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 1)
+
+    def test_a_class_named_below_one_does_not_invent_a_violation(self):
+        """The other direction: clean text whose class merely CONTAINS below=1 must not be read as below=1."""
+        (self.docs / "index.html").write_text(
+            '<!doctype html><body><p class="below=1">text at the normal size</p></body>\n', encoding="utf-8")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("below=0", done.stdout)
+
+    def test_a_verdict_with_the_fields_in_the_wrong_order_is_a_no_result(self):
+        """Anchoring is by position, so a line that does not carry the four emitted fields is refused rather than
+        judged - that is what keeps the free text (page name, class list) from impersonating a field."""
+        (self.docs / "index.html").write_text(
+            "<!doctype html><body><!-- NO_COUNT_FIELD --><p>text</p></body>\n", encoding="utf-8")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("did not report how many elements it counted", done.stdout + done.stderr)
 
 
 class TestTheSweepReadsTheDocsItResolved(DocsTextFloorBase):

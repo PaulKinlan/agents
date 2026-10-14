@@ -94,7 +94,7 @@ PY
 fi
 # The measuring script runs INSIDE each page and writes its verdict into the DOM, which --dump-dom then prints,
 # so this needs no CDP client and no library - only a browser.
-payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], n=0;/* THE OWN TEXT OF THE ELEMENT, not just leaf text. A leaf-only sweep misses text a container carries directly, which is the same blind spot as measuring the wrong object and feeling fine: measured on these six docs pages, 38 elements carry text that no leaf carries (a <p> with a nested <code>, an <li> with nested markup, a <summary>), so a floor set on one of those direct text runs would have gone unseen. That own text inherits the computed font-size of its element, which is what is judged. */var seen=document.body.innerText; document.querySelectorAll("*").forEach(function(el){ var own=""; for(var k=el.firstChild;k;k=k.nextSibling){ if(k.nodeType===3) own+=k.textContent; } var txt=own.trim(); if(!txt) return; if(!el.checkVisibility({checkOpacity:true, checkVisibilityCSS:true})) return; if(el.getClientRects().length<=0 && seen.indexOf(txt)<0) return; n++; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+(el.children.length?"[own]":"")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result"; d.textContent="FLOOR_RESULT page="+location.pathname.split("/").pop()+" floor="+f+"px counted="+n+" below="+out.length+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
+payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], n=0;/* THE OWN TEXT OF THE ELEMENT, not just leaf text ... (unchanged rationale, see the header) */var seen=document.body.innerText; document.querySelectorAll("*").forEach(function(el){ var own=""; for(var k=el.firstChild;k;k=k.nextSibling){ if(k.nodeType===3) own+=k.textContent; } var txt=own.trim(); if(!txt) return; if(!el.checkVisibility({checkOpacity:true, checkVisibilityCSS:true})) return; if(el.getClientRects().length<=0 && seen.indexOf(txt)<0) return; n++; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+(el.children.length?"[own]":"")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result";/* THE FOUR FIELDS FIRST, FREE TEXT LAST: the reader parses them by position, so a class name or a page name containing below=0 cannot be mistaken for the verdict (agents-kzfj). */ d.textContent="FLOOR_RESULT floor="+f+"px counted="+n+" below="+out.length+" page="+location.pathname.split("/").pop()+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
 python3 - "$work" "$floor" "$payload" <<'PY'
 import sys, pathlib
 work, floor, payload = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -112,26 +112,30 @@ for page in "$work"/*.html; do
   # Match the ELEMENT, not the script source that also contains the literal (the id prefix makes it unique),
   # and keep `set -e` from killing the script when a page produces no result at all.
   line="$(printf '%s' "$dom" | grep -o '__floor_result">[^<]*' | tail -1 | sed 's/.*>//' || true)"
-  [ -n "$line" ] || { echo "  $page: NO RESULT (page did not run the measuring script)" >&2; fail=1; continue; }
-  # A verdict must say HOW MANY elements it counted, and a floor over nothing is not a pass. Without this, a page
-  # whose injected payload silently counted no element reported below=0 and read as a clean sweep - the one failure
-  # the tool's three falsifications could not catch, named by the reviewer before it ran (rev-sweep, agents-sz8q).
-  case "$line" in
-    *counted=*) ;;
-    *) echo "  $page: NO RESULT (the verdict did not report how many elements it counted)" >&2; fail=1; continue;;
-  esac
-  case "$line" in
-    *counted=0*) echo "  $line"
-      echo "  $page: NO RESULT (counted=0: no text-bearing element was found, so this page proves nothing)" >&2
-      fail=1; continue;;
-  esac
+  [ -n "$line" ] || { echo "  $page: NO RESULT (page did not run the measuring script)" ; fail=1; continue; }
+  # THE FIELDS WE EMITTED, READ POSITIONALLY AND COMPARED AS NUMBERS (agents-kzfj, rev-sweep). The previous reader
+  # tested the rendered line for the substring "below=0", so a page whose CLASS or FILENAME contained that text
+  # cleared the exit code while the tool reported a violation - the tool own output satisfying the tool own check.
+  # Free text can only begin after the fourth word, so the fields parsed here cannot be forged by a class name or
+  # page name, and anything malformed is a NO RESULT rather than a pass.
+  set -- $line
+  [ "$1" = "FLOOR_RESULT" ] || { echo "  $page: NO RESULT (unrecognised verdict line)" ; fail=1; continue; }
+  case "${2:-}" in floor=*px) ;; *) echo "  $page: NO RESULT (verdict carries no floor field)"; fail=1; continue;; esac
+  case "${3:-}" in counted=*) counted_seen="${3#counted=}" ;; *)
+    echo "  $page: NO RESULT (the verdict did not report how many elements it counted)"; fail=1; continue;; esac
+  case "${4:-}" in below=*) below_seen="${4#below=}" ;; *) echo "  $page: NO RESULT (verdict carries no below field)"; fail=1; continue;; esac
+  case "$counted_seen$below_seen" in ''|*[!0-9]*) echo "  $page: NO RESULT (count or below is not a number)"; fail=1; continue;; esac
+  if [ "$counted_seen" -eq 0 ]; then
+    echo "  $page: NO RESULT (counted=0: no text-bearing element was found, so this page proves nothing)"
+    fail=1; continue
+  fi
   echo "  $line"
   verdicts=$((verdicts + 1))
-  below_total=$((below_total + $(printf '%s' "$line" | grep -o 'below=[0-9]*' | head -1 | cut -d= -f2)))
-  case "$line" in *"below=0"*) ;; *) fail=1;; esac
+  below_total=$((below_total + below_seen))
+  [ "$below_seen" -eq 0 ] || fail=1
 done
 # WHAT counted MEANS, stated where it is read. `counted` is PER PAGE - the number of text-bearing leaf elements
-# measured on that page - and it is never a total: a total can be read as coverage by a reader who never notices
+# measured on that page, leaves and containers alike - and it is never a total: a total can be read as coverage by a reader who never notices
 # that a page produced no verdict at all. So the run ends with how many pages there were, how many produced a
 # usable verdict, and a STATUS that says INCOMPLETE the moment they differ. A page with no verdict (payload did
 # not run, no count reported, counted=0) fails the run and makes every count in it unusable as coverage
