@@ -242,6 +242,17 @@ class TestVulnTriageClustering(unittest.TestCase):
             self.assertEqual(payload["total_active_findings"], 3)
             self.assertEqual(payload["cluster_count"], 2)
             self.assertEqual(len(payload["clusters"]), 2)
+            self.assertEqual(payload["candidate_id_scheme"], 1)
+            self.assertEqual(len(payload["candidates"]), 2)
+            self.assertEqual(payload["context"]["cluster_count"], 2)
+            self.assertEqual(payload["context"]["total_active_findings"], 3)
+            self.assertEqual(len(payload["context"]["clusters"]), 2)
+            self.assertIn("Target Threat Model", payload["context"]["threat_model_summary"])
+            self.assertEqual(payload["context"]["threat_model_file"],
+                             str((target_dir / "THREAT_MODEL.md").resolve()))
+            self.assertEqual([set(c) for c in payload["candidates"]],
+                             [{"candidate_id", "rule_id", "path", "line_number"}] * 2)
+            self.assertEqual(len(payload["candidates"][0]["candidate_id"]), 16)
 
     def test_end_to_end_does_not_reingest_its_own_findings(self):
         """agents-3o86: triage's stored output cannot feed its next pre-pass."""
@@ -280,13 +291,119 @@ class TestVulnTriageClustering(unittest.TestCase):
                                      "--output", str(output)], capture_output=True, text=True, check=True,
                                     timeout=15)
             payload = json.loads(output.read_text(encoding="utf-8"))
-            items = [item for cluster in payload["clusters"] for item in cluster["items"]]
+            items = [item for cluster in payload["context"]["clusters"] for item in cluster["items"]]
             self.assertFalse(any(item.get("agent") == "vuln-triage" for item in items),
                              "self-origin vuln-triage records re-entered the candidate pre-pass")
             self.assertEqual({item["rule_id"] for item in items},
                              {"discovery", "verified", "legacy-null", "legacy-absent"})
             self.assertEqual(payload["total_active_findings"], 4)
+            self.assertEqual(payload["context"]["total_active_findings"], 4)
+            self.assertEqual(payload["context"]["clusters"], payload["clusters"])
             self.assertIn("4 findings grouped into", result.stdout)
+
+
+class TestAnchoredClusterCandidates(unittest.TestCase):
+    """agents-69k9: clusters get a persisted, monotone primary identity."""
+
+    def finding(self, line, when, fingerprint, **extra):
+        return {"path": "lib/sandbox.py", "line_number": line,
+                "rule_id": "same-rule", "fingerprint": fingerprint,
+                "first_seen": when, "title": fingerprint, "snippet": "[withheld]",
+                "severity": "medium", **extra}
+
+    def test_oldest_active_member_wins_even_if_a_new_member_sorts_first(self):
+        older = self.finding(72, "2026-10-01T10:00:00+00:00", "old", candidate_id="upstream-old")
+        new = self.finding(60, "2026-10-14T10:00:00+00:00", "new", candidate_id="upstream-new")
+        clusters = triage.cluster_deterministic([new, older])
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(triage.cluster_candidates(clusters), [
+            {"candidate_id": "upstream-old", "rule_id": "same-rule",
+             "path": "lib/sandbox.py", "line_number": 72}])
+
+    def test_joining_does_not_rekey_an_anchor_but_removing_it_does(self):
+        anchor = self.finding(72, "2026-09-01T00:00:00Z", "stable")
+        joining = self.finding(60, "2026-10-01T00:00:00Z", "later")
+        before = triage.cluster_candidates(triage.cluster_deterministic([anchor]))[0]
+        together = triage.cluster_candidates(triage.cluster_deterministic([anchor, joining]))[0]
+        after = triage.cluster_candidates(triage.cluster_deterministic([joining]))[0]
+        self.assertEqual(before, together)
+        self.assertEqual(len(before["candidate_id"]), 16)
+        self.assertNotEqual(after["candidate_id"], before["candidate_id"])
+
+    def test_undated_members_sort_after_dated_and_ties_are_deterministic(self):
+        dated = self.finding(72, "2026-10-01", "dated")
+        undated = self.finding(60, None, "undated", candidate_id="not-anchor")
+        same_date = self.finding(70, "2026-10-01T00:00:00Z", "tie", candidate_id="upstream-tie")
+        # A tie in first_seen chooses the lower line, then rule_id/fingerprint/title.
+        original = triage.cluster_candidates(triage.cluster_deterministic([undated, dated, same_date]))
+        shuffled = triage.cluster_candidates(triage.cluster_deterministic([same_date, dated, undated]))
+        self.assertEqual(original, shuffled)
+        self.assertEqual(original[0]["line_number"], 70)
+        self.assertEqual(original[0]["candidate_id"], "upstream-tie")
+
+    def test_anchor_line_is_normalized_to_report_schema_location(self):
+        numeric = self.finding("42", "2026-10-01", "number")
+        unknown = {**self.finding("?", "2026-10-02", "unknown"), "path": "THREAT_MODEL.md"}
+        emitted = triage.cluster_candidates(triage.cluster_deterministic([numeric, unknown]))
+        self.assertEqual({candidate["path"]: candidate["line_number"] for candidate in emitted},
+                         {"lib/sandbox.py": 42, "THREAT_MODEL.md": None})
+        for candidate in emitted:
+            self.assertNotIn("snippet", candidate)
+            self.assertNotIn("severity", candidate)
+
+    def test_distinct_clusters_cannot_emit_a_duplicate_candidate_id(self):
+        a = self.finding(20, "2026-10-01", "a", candidate_id="shared")
+        b = self.finding(80, "2026-10-01", "b", candidate_id="shared")
+        with self.assertRaisesRegex(ValueError, "duplicate candidate_id"):
+            triage.cluster_candidates(triage.cluster_deterministic([a, b]))
+
+    def test_context_keeps_more_clusters_than_the_shown_candidate_slice(self):
+        source = [{**self.finding(1, "2026-10-01", f"fp-{i}"), "path": f"p{i:02}.py"}
+                  for i in range(52)]
+        clusters = triage.cluster_deterministic(source)
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual((len(clusters), len(emitted)), (52, 52))
+        self.assertEqual(len({c["candidate_id"] for c in emitted}), 52)
+        self.assertNotIn(emitted[50]["candidate_id"],
+                         {c["candidate_id"] for c in emitted[:50]},
+                         "the unsliced context must not make the 51st candidate a shown ID")
+
+    def test_station_declaration_and_report_fields_are_explicit(self):
+        station = ROOT / "agents" / "vuln-triage"
+        manifest = (station / "agent.yaml").read_text(encoding="utf-8")
+        self.assertIn("candidate_accounting: aggregate-claimed\n", manifest)
+        self.assertIn("output:\n  schema: report.schema.json\n", manifest)
+        schema = json.loads((station / "report.schema.json").read_text(encoding="utf-8"))
+        items = schema["properties"]["findings"]["items"]
+        cover = items["properties"]["covered_candidate_ids"]
+        self.assertEqual(cover["type"], "array")
+        self.assertEqual(cover["items"], {"type": "string", "minLength": 1})
+        self.assertEqual(items["properties"]["anchor_candidate_id"]["type"], "string")
+        self.assertEqual(items["properties"]["false_positive"]["type"], "boolean")
+        # Omission is line-level INCOMPLETE, whereas a malformed declared field
+        # is a schema-invalid NO VERDICT. Unsupported schema keywords would be
+        # refused by tests.test_report_schema, not used as fake validators.
+        self.assertNotIn("covered_candidate_ids", items.get("required", []))
+        self.assertNotIn("anchor_candidate_id", items.get("required", []))
+        self.assertNotIn("minItems", cover)
+        self.assertNotIn("uniqueItems", cover)
+        skill = (station / "SKILL.md").read_text(encoding="utf-8")
+        for required in ("covered_candidate_ids", "anchor_candidate_id", "false_positive",
+                         "first 50", "PRIMARY IDENTITY",
+                         "An anchor by itself never covers a candidate"):
+            self.assertIn(required, skill)
+
+    def test_colocated_input_anchor_locations_are_carried_by_candidates(self):
+        source = [
+            {"candidate_id": "source-sandbox", "rule_id": "source-sandbox", "fingerprint": "sfp",
+             "path": "lib/sandbox.py", "line_number": 72, "first_seen": "2026-10-01T00:00:00Z"},
+            {"candidate_id": "source-threat", "rule_id": "source-threat", "fingerprint": "tfp",
+             "path": "THREAT_MODEL.md", "line_number": 1, "first_seen": "2026-10-01T00:00:00Z"},
+        ]
+        candidates = triage.cluster_candidates(triage.cluster_deterministic(source))
+        self.assertEqual({(c["candidate_id"], c["path"], c["line_number"]) for c in candidates},
+                         {("source-sandbox", "lib/sandbox.py", 72),
+                          ("source-threat", "THREAT_MODEL.md", 1)})
 
 
 class TestThreatModelContextSummary(unittest.TestCase):
@@ -311,10 +428,13 @@ class TestThreatModelContextSummary(unittest.TestCase):
             ], capture_output=True, text=True, check=True)
 
             payload = json.loads(out_file.read_text(encoding="utf-8"))
-            summary = payload["threat_model_summary"]
+            self.assertEqual(payload["candidates"], [])
+            self.assertEqual(payload["context"]["clusters"], [])
+            summary = payload["context"]["threat_model_summary"]
             self.assertIn("[THREAT_MODEL.md summarised: showing first 3000 of 5015 bytes", summary)
             self.assertIn("TRUNCATED", summary)
-            self.assertEqual(payload["threat_model_file"], str((target_dir / "THREAT_MODEL.md").resolve()))
+            self.assertEqual(payload["context"]["threat_model_file"],
+                             str((target_dir / "THREAT_MODEL.md").resolve()))
 
     def test_findings_store_threat_model_copied_to_output_dir(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

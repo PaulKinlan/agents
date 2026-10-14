@@ -22,6 +22,12 @@
           "title": { "type": "string" },
           "description": { "type": "string" },
           "remediation": { "type": "string" },
+          "false_positive": { "type": "boolean" },
+          "covered_candidate_ids": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "anchor_candidate_id": { "type": "string", "minLength": 1 },
           "affected_locations": {
             "type": "array",
             "items": { "type": "string" }
