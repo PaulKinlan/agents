@@ -7,7 +7,39 @@
   tail is captured, so the note lands in the record's tail and in the `[check]` message exactly once.
 - **Baseline file hash (the live bytes this patch was generated against and applies to):**
   `455e3b05d2dc172c2d2149dd47b33ac4d77266b57d45765506d2e2b362c10498  bin/fleet-check`
-  (767 lines; patched result `93e270dc63f5889d6548ed726e0fe7f31082f99d421dd519bcded896a662a844`)
+  (baseline 767 lines; patched result `0e31c8f2b7538f6544ce4b29b6dd7744799349fbbb9b795a2679a8ac48e63135`,
+  which is 869 lines - both counts measured with `wc -l` on the two files, not carried over from an
+  earlier revision)
+- **Revision (agents-e3aw, third round): THE PRINTED PATH IS ALSO QUOTED, because the printed command is
+  consumed by a SHELL - and RESOLVING a path is not the same as QUOTING it.** Driven, not reasoned: with the
+  reader under "/tmp/e3aw space" and a foreign stamped config, the note printed
+  `bash /tmp/e3aw space/tools/check-cmd.sh --install` UNQUOTED; running exactly that from a foreign cwd failed
+  by word splitting, the reader's own `--install` failure line printed the same unquoted form and failed
+  identically, and `bash "/tmp/e3aw space/tools/check-cmd.sh" --install` RAN. The destination is the same
+  argument one over: on the FLEET_CHECK_CONF form a config at `.../dir with space/team conf.conf` failed as
+  well, so the assignment prefix is quoted too. Both copies now print `%q`, which covers metacharacters
+  generally rather than special-casing a space. **The test that would have caught it did not exist because every
+  fixture path was a temp path with no spaces - the same lesson as the round below, one attribute further: the
+  property is over PATHS, not only over directories.** The new test RUNS the printed repair from a foreign cwd
+  with a space in the reader's path and again with a space in the destination, and with `%s` restored it is the
+  ONE test that fails while the other 47 pass.
+  **THE GENERALISATION, which is the finding rather than this instance: each of the three revisions so far fixed
+  one ATTRIBUTE of the printed command and left the next one, because the test asserted the attribute that had
+  just been fixed.** Round one fixed WHICH command is offered and left WHERE it runs; round two resolved the path
+  and left how it is QUOTED; this round quotes it. The property therefore has to be stated over the whole
+  command - THE PRINTED COMMAND RUNS AS PRINTED, FOR ANY PATH - and the test has to vary the path's CONTENT as
+  well as the directory it runs from, because a test that varies one attribute while holding another fixed can
+  pass on every value it tries (which is exactly how a fixture with no spaces in it let an unquoted form pass a
+  runnability assertion). Stated over the whole command, the next attribute has nowhere to hide.
+  **Asked by coord to state the general form, and it is the same sentence that was already true of the two
+  rounds below: a property stated over the whole command is what stops a fourth round.**
+  **Severity ordering, stated so the contrast is on the record:** this defect fails LOUDLY and requires a space
+  in a path; the vacuous assertion repaired in the round below failed SILENTLY and required nothing. Silent
+  beats loud as a severity ordering, which is why the vacuous one was worth recording even though it never
+  misled an operator. The same sweep found one further INSTRUCTION - the note that tells a lane it sets
+  `FLEET_CHECK_CONF=<dest>` to point the gate at the repo-local file - now quoted for the same reason, while the
+  line beside it that merely REPORTS which config is active is deliberately left as prose: quoting a report for a
+  shell that will never consume it would be symmetry rather than a fix.
 - **Revision (agents-e3aw, second round): the repair must RUN FROM WHERE IT IS READ, so its path is resolved.**
   The revision below offered `bash tools/check-cmd.sh --install` when the reader is present - and that is a
   RELATIVE path, which runs only from the repo root while the reader of the message is standing anywhere. Driven

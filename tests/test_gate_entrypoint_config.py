@@ -1393,6 +1393,61 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
                          "following the printed repair must REMOVE the drift it reported - on the tip before "
                          f"agents-p8lh this fails, because the command wrote a different file: {second.stderr[:300]}")
 
+    def test_the_printed_repair_survives_paths_containing_spaces(self):
+        """agents-e3aw: RESOLVING the path is not enough. The printed command is consumed by a SHELL, so a path
+        that needs quoting must be PRINTED quoted - and driven on the unquoted form it was not: with the reader
+        at "/tmp/e3aw space/tools/check-cmd.sh" and a destination under ".../dir with space/", the printed
+        commands died by word splitting while the quoted form ran. Every other test in this class uses temp
+        paths with NO spaces, which is exactly why their runnability assertion passed on an unquoted form: the
+        property is over PATHS, not only over directories. (Found by driving one of the reviewer's variant
+        paths - a path containing a space - rather than by reasoning about the code.)"""
+        spaced_repo = Path(_registered_tmp_home(self, "e3aw space-")) / "repo copy"
+        (spaced_repo / "tools").mkdir(parents=True, exist_ok=True)
+        for name in ("check-cmd.sh", "check.conf"):
+            shutil.copy(ROOT / "tools" / name, spaced_repo / "tools" / name)
+        reader = spaced_repo / "tools" / "check-cmd.sh"
+        elsewhere = Path(_registered_tmp_home(self, "e3aw-elsewhere-")) / "not-the-repo"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+
+        def check(env):
+            return subprocess.run(["bash", str(reader), "--check"], capture_output=True, text=True,
+                                  timeout=60, env=env, cwd="/tmp")
+
+        # (a) the reader's own path contains a space: the bare form is printed to a reader standing elsewhere,
+        # so the path in it must survive being pasted into a shell.
+        home = Path(_registered_tmp_home(self, "e3aw home-"))
+        # --check reports on OVERRIDE, which with no FLEET_CHECK_CONF is the host-wide $HOME/.fleet/check.conf
+        # (the repo-local name is the --install DESTINATION, not the file --check reads) - so this is where the
+        # drift belongs for the bare/--global form.
+        self._write_drifting(home / ".fleet" / "check.conf")
+        env = self._env(home)
+        first = check(env)
+        self.assertEqual(first.returncode, 1, f"expected drift: {first.stderr[:300]}")
+        repair = self._printed_repair(first.stderr)
+        self.assertTrue(repair, f"no printed repair: {first.stderr[:300]}")
+        ran = subprocess.run(["bash", "-c", repair], capture_output=True, text=True, timeout=60,
+                             env=env, cwd=str(elsewhere))
+        self.assertEqual(ran.returncode, 0,
+                         f"the printed repair must run with a space in the path; printed: {repair!r}; "
+                         f"stderr: {ran.stderr[:300]}")
+        self.assertEqual(check(env).returncode, 0, "following the printed repair must remove the drift")
+
+        # (b) the DESTINATION contains a space, through the FLEET_CHECK_CONF form: the assignment prefix is part
+        # of the printed command, so it needs quoting too - the same defect one argument over.
+        dest = Path(_registered_tmp_home(self, "e3aw dest-")) / "dir with space" / "team conf.conf"
+        self._write_drifting(dest)
+        env2 = self._env(home, {"FLEET_CHECK_CONF": str(dest)})
+        second = check(env2)
+        self.assertEqual(second.returncode, 1, f"expected drift on the override: {second.stderr[:300]}")
+        repair2 = self._printed_repair(second.stderr)
+        self.assertTrue(repair2, f"no printed repair for the override: {second.stderr[:300]}")
+        ran2 = subprocess.run(["bash", "-c", repair2], capture_output=True, text=True, timeout=60,
+                              env=env2, cwd=str(elsewhere))
+        self.assertEqual(ran2.returncode, 0,
+                         f"the printed repair must run with a space in the DESTINATION; printed: {repair2!r}; "
+                         f"stderr: {ran2.stderr[:300]}")
+        self.assertEqual(check(env2).returncode, 0, "following the repair must remove the override drift")
+
     def test_the_repair_for_the_host_wide_file_writes_the_host_wide_file(self):
         home = _registered_tmp_home(self, "p8lh-global-")
         self._write_drifting(Path(home) / ".fleet" / "check.conf")

@@ -74,8 +74,8 @@ if [ -f "$CHECK_CMD_SH" ]; then
     # agents-e3aw (generalisation): the fallback names a command too, so it names the RESOLVED reader - this file
     # already resolved it above as CHECK_CMD_SH, and a relative path here would repeat, in the fallback, the
     # defect the resolved path exists to remove.
-    [ -n "$drift_repair" ] || drift_repair="bash $CHECK_CMD_SH --install"
-    echo "fast-gate:   detail: bash $CHECK_CMD_SH --check - repair: $drift_repair - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
+    [ -n "$drift_repair" ] || drift_repair="$(printf 'bash %q --install' "$CHECK_CMD_SH")"
+    echo "fast-gate:   detail: bash $(printf '%q' "$CHECK_CMD_SH") --check - repair: $drift_repair - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
   fi
 fi
 

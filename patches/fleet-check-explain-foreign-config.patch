@@ -1,8 +1,8 @@
 diff --git a/bin/fleet-check b/bin/fleet-check
-index 6c72b58..c646f4d 100755
+index 6c72b58..e102d29 100755
 --- a/bin/fleet-check
 +++ b/bin/fleet-check
-@@ -380,6 +380,94 @@ log_after_marker_empty() {
+@@ -380,6 +380,96 @@ log_after_marker_empty() {
    ! awk "/^=== fleet-check gate started/ { active=1; found=0; next } active && /[^[:space:]]/ { found=1 } END { exit (found ? 0 : 1) }" "$log" 2>/dev/null
  }
  
@@ -78,7 +78,9 @@ index 6c72b58..c646f4d 100755
 +      # A relative `tools/check-cmd.sh` is guidance for a lane that is not standing in this repo - the same defect
 +      # one line over, found by driving the note from a subdirectory and from outside the repo, where the printed
 +      # command failed with "No such file or directory".
-+      printf '  Repair: this repo carries tools/check-cmd.sh, so `bash %s --install` gives it its own config, and FLEET_CHECK_CONF=<that file> points the gate at it.\n' \
++      # %q, not %s: the printed command is consumed by a SHELL, so a path that needs quoting must be printed
++      # quoted - driven with a repo under "/tmp/e3aw space", where the unquoted form died by word splitting.
++      printf '  Repair: this repo carries tools/check-cmd.sh, so `bash %q --install` gives it its own config, and FLEET_CHECK_CONF=<that file> points the gate at it.\n' \
 +        "${top:-.}/tools/check-cmd.sh"
 +    else
 +      printf '  Repair: this repo carries NO tools/check-cmd.sh, so there is no installer to run here - it needs the host-wide config corrected or a config named by FLEET_CHECK_CONF.\n'
@@ -97,7 +99,7 @@ index 6c72b58..c646f4d 100755
  finish() {
    [ "${finished:-0}" -eq 1 ] && return 0
    [ "${in_finish:-0}" -eq 1 ] && return 0
-@@ -483,6 +571,18 @@ finish() {
+@@ -483,6 +573,18 @@ finish() {
      cov_err=$(printf "%s" "$cov_err" | tail -c 400 | tr "\n" " ")
    fi
  

@@ -110,11 +110,11 @@ INSTALL_GLOBAL=0
 # precedence: the host-wide file, the repo-local default, an explicitly named path.
 install_cmd_for() {
   case "${1:-}" in
-    "")            printf 'bash %s --install' "$SELF" ;;   # no HOME and no FLEET_CHECK_CONF: the bare form is
+    "")            printf 'bash %q --install' "$SELF" ;;   # no HOME and no FLEET_CHECK_CONF: the bare form is
                                                           # the only one that can be meant
-    "$GLOBAL_CONF") printf 'bash %s --install --global' "$SELF" ;;
-    "$REPO_CONF")   printf 'bash %s --install' "$SELF" ;;
-    *)              printf 'FLEET_CHECK_CONF=%s bash %s --install' "$1" "$SELF" ;;
+    "$GLOBAL_CONF") printf 'bash %q --install --global' "$SELF" ;;
+    "$REPO_CONF")   printf 'bash %q --install' "$SELF" ;;
+    *)              printf 'FLEET_CHECK_CONF=%q bash %q --install' "$1" "$SELF" ;;
   esac
 }
 
@@ -410,7 +410,7 @@ if [ "${1:-}" = "--install" ]; then
     # The three-cwd drive that found the first one found this one - a reader with no HOME is told to run a bare
     # `bash tools/check-cmd.sh --install`, which again only works from the repo root, and this message is printed
     # precisely when the environment is unusual, so the cwd is the LAST thing that should be assumed.
-    echo "  Fix: export HOME, or pass a destination explicitly: FLEET_CHECK_CONF=<path> bash $SELF --install" >&2
+    printf '  Fix: export HOME, or pass a destination explicitly: FLEET_CHECK_CONF=<path> bash %q --install\n' "$SELF" >&2
     exit 2
   fi
   # agents-0utp: THREE LIVES, NOT TWO, AND THE HEADER IS GENERATED FROM THIS SAME CLASSIFICATION. The first
@@ -494,7 +494,12 @@ LIFE
     global)
       echo "check-cmd: NOTE - $dest is MACHINE-GLOBAL: this replaces the active gate command for every repo on this host." >&2;;
     repo-default)
-      echo "check-cmd: NOTE - repo-local by default: a lane that wants it sets FLEET_CHECK_CONF=$dest; --global writes the host-wide $GLOBAL_CONF instead." >&2;;
+      # agents-e3aw (quoting sweep): "a lane that wants it sets FLEET_CHECK_CONF=$dest" is an INSTRUCTION, not
+      # a report - it is the fragment a lane pastes to point the gate at the repo-local file - so the path in it
+      # is quoted like every other printed path. The line above it names the ACTIVE config rather than telling
+      # anyone to set it, and is left as prose: quoting a report for a shell that will never consume it would be
+      # symmetry, not a fix (the same distinction I drew between commands and prose references to paths).
+      printf 'check-cmd: NOTE - repo-local by default: a lane that wants it sets FLEET_CHECK_CONF=%q; --global writes the host-wide %s instead.\n' "$dest" "$GLOBAL_CONF" >&2;;
     *)
       echo "check-cmd: NOTE - explicit override: it is read only when FLEET_CHECK_CONF names it; nothing else was written." >&2;;
   esac
