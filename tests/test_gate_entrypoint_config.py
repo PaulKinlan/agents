@@ -808,7 +808,11 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
         r = self._run("--check", home=home)
         self.assertEqual(r.returncode, 1, r.stderr[:300])
         self.assertIn("DRIFT keys: CHECK_TIMEOUT", r.stderr)
-        self.assertIn("repair with: bash tools/check-cmd.sh --install", r.stderr)
+        # agents-p8lh: this assertion used to pin the BARE install command, and that is exactly what was wrong -
+        # this class drifts the HOST-WIDE file (FLEET_CHECK_CONF is pointed at ~/.fleet/check.conf), and since
+        # agents-0utp the bare form writes the repo-local default instead. The next class runs the printed
+        # command and proves it repairs the file it names; here the shape is pinned for this destination.
+        self.assertIn("repair with: bash tools/check-cmd.sh --install --global", r.stderr)
 
 
 class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
@@ -1313,6 +1317,109 @@ class TestTheDefaultInstallDestinationIsRepoLocal(unittest.TestCase):
         global_conf = Path(home) / ".fleet" / "check.conf"
         self.assertTrue(global_conf.exists(), "--global must still reach the host-wide path")
         self.assertIn("THIS COPY IS MACHINE-GLOBAL", global_conf.read_text(encoding="utf-8"))
+
+
+class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
+    """agents-p8lh (review finding on agents-0utp @ 4bcb1b48): --check's repair line named a command that
+    writes a DIFFERENT file than the one it had just reported drift in, so a reader who followed the
+    instruction kept the stale gate command running while believing it had repaired it. That is agents-d081's
+    failure mode - a repair that cannot reach the copy that runs - and it is the fleet's most repeated defect
+    shape: THE INSTRUCTION IS THE DEFECT.
+
+    These tests assert the PROPERTY, not the wording: read the command the tool printed, RUN IT, ASK AGAIN,
+    and the drift must be gone. That is what makes them the control coord asked for - a grep would have passed
+    on the broken tip, because the broken tip printed a perfectly well-formed command that simply wrote a
+    different file. Every destination --check can report on is covered, because the three cases answer with
+    three different commands (--install --global / the bare form / FLEET_CHECK_CONF=<dest>).
+    """
+
+    def _write_drifting(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('# Project: agents-factory (/somewhere/else)\n'
+                        'CHECK_CMD="bash tools/full-gate.sh"\n'
+                        'CHECK_FAST_CMD="bash tools/fast-gate.sh"\n'
+                        'CHECK_TIMEOUT=1\nCHECK_FAST_TIMEOUT=2\n', encoding="utf-8")
+
+    def _env(self, home, extra=None):
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        if extra:
+            env.update(extra)
+        return env
+
+    def _check(self, env):
+        return subprocess.run(["bash", str(RESOLVER), "--check"], capture_output=True, text=True,
+                              timeout=60, env=env, cwd=str(ROOT))
+
+    @staticmethod
+    def _printed_repair(stderr):
+        for line in stderr.splitlines():
+            if "repair with:" in line:
+                return line.split("repair with:", 1)[1].split("   (rewrites", 1)[0].strip()
+        return ""
+
+    def _assert_repair_reaches(self, home, extra, dest, expect_in_command):
+        env = self._env(home, extra)
+        first = self._check(env)
+        self.assertEqual(first.returncode, 1, f"expected drift to be reported: {first.stderr[:300]}")
+        self.assertIn(str(dest), first.stderr,
+                      "the report must name the file it is about, or a reader cannot tell what is stale")
+        repair = self._printed_repair(first.stderr)
+        self.assertTrue(repair, f"--check must print the repair: {first.stderr[:300]}")
+        self.assertIn(expect_in_command, repair,
+                      f"the repair for {dest} must be the command that writes IT; got: {repair}")
+
+        # THE PROPERTY: run exactly what it printed, then ask again. Through a shell, because that is what a
+        # reader does with a printed command line - and because the FLEET_CHECK_CONF form is a shell assignment
+        # prefix, not a program name.
+        ran = subprocess.run(["bash", "-c", repair], capture_output=True, text=True, timeout=60,
+                             env=env, cwd=str(ROOT))
+        self.assertEqual(ran.returncode, 0, f"the printed repair must succeed: {ran.stderr[:300]}")
+        second = self._check(env)
+        self.assertEqual(second.returncode, 0,
+                         "following the printed repair must REMOVE the drift it reported - on the tip before "
+                         f"agents-p8lh this fails, because the command wrote a different file: {second.stderr[:300]}")
+
+    def test_the_repair_for_the_host_wide_file_writes_the_host_wide_file(self):
+        home = _registered_tmp_home(self, "p8lh-global-")
+        self._write_drifting(Path(home) / ".fleet" / "check.conf")
+        self._assert_repair_reaches(home, None, Path(home) / ".fleet" / "check.conf", "--install --global")
+
+    def test_the_repair_for_an_explicit_override_writes_that_override(self):
+        home = _registered_tmp_home(self, "p8lh-explicit-")
+        dest = Path(home) / "elsewhere" / "team.conf"
+        self._write_drifting(dest)
+        self._assert_repair_reaches(home, {"FLEET_CHECK_CONF": str(dest)}, dest,
+                                    f"FLEET_CHECK_CONF={dest}")
+
+    def test_the_repair_for_the_repo_local_default_is_the_bare_form(self):
+        home = _registered_tmp_home(self, "p8lh-repo-default-")
+        dest = Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
+        self._write_drifting(dest)
+        # A lane reaches the repo-local default exactly this way - the install NOTE tells it to set the variable
+        # to the path it just wrote - and for THIS destination the bare form is the correct repair.
+        self._assert_repair_reaches(home, {"FLEET_CHECK_CONF": str(dest)}, dest,
+                                    "bash tools/check-cmd.sh --install")
+        self.assertNotIn("--global", self._printed_repair(self._check(self._env(home, {"FLEET_CHECK_CONF": str(dest)})).stderr),
+                         "the bare form writes this file; naming --global would write the host-wide one instead")
+
+    def test_the_point_of_use_warning_names_the_same_repair(self):
+        """tools/fast-gate.sh warns about drift on every gate, and it used to carry its own copy of the repair
+        command - which is how it went on naming the pre-move one. It now asks the tool that owns the rule, so
+        the warning and --check cannot disagree."""
+        home = _registered_tmp_home(self, "p8lh-point-of-use-")
+        self._write_drifting(Path(home) / ".fleet" / "check.conf")
+        env = self._env(home)
+        env["GIT_CHANGED"] = ".beads/metadata.json"
+        env["FAST_GATE_DRY_RUN"] = "1"
+        r = subprocess.run(["bash", str(ROOT / "tools" / "fast-gate.sh")], capture_output=True, text=True,
+                           timeout=120, env=env, cwd=str(ROOT))
+        self.assertIn("WARNING (agents-d081)", r.stderr)
+        self.assertIn("repair: bash tools/check-cmd.sh --install --global", r.stderr,
+                      "the point-of-use warning must name the command that writes the drifting file")
+        self.assertNotIn("repair: bash tools/check-cmd.sh --install - ", r.stderr,
+                         "and must not offer the form that writes a different file")
 
 
 if __name__ == "__main__":

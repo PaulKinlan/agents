@@ -65,7 +65,14 @@ if [ -f "$CHECK_CMD_SH" ]; then
   if [ "$drift_rc" -eq 1 ]; then
     drift_line="${drift_line#check-cmd: DRIFT keys: }"
     echo "fast-gate: WARNING (agents-d081): this host's per-VM gate config differs from the tracked tools/check.conf - differing keys: $drift_line" >&2
-    echo "fast-gate:   detail: bash tools/check-cmd.sh --check - repair: bash tools/check-cmd.sh --install --global (or set FLEET_CHECK_CONF to the file you mean) - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
+    # agents-p8lh: THE REPAIR IS ASKED FOR, NOT RESTATED. This line used to carry its own copy of the install
+    # command, so when agents-0utp moved the default destination it went on naming a command that writes a
+    # DIFFERENT file than the one drifting - the instruction was the defect. --repair-hint resolves the same
+    # destination --check just reported on and prints the command that writes it, so this warning cannot drift
+    # from the tool it is warning about (a missing hint degrades to the tracked command name, not to silence).
+    drift_repair="$(bash "$CHECK_CMD_SH" --repair-hint 2>/dev/null)" || drift_repair=""
+    [ -n "$drift_repair" ] || drift_repair="bash tools/check-cmd.sh --install"
+    echo "fast-gate:   detail: bash tools/check-cmd.sh --check - repair: $drift_repair - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
   fi
 fi
 

@@ -2,13 +2,17 @@
 # Resolve the gate's command configuration: TRACKED default first, per-VM override second.
 #
 # agents-ia3p: the tracked file is what a fresh VM gets and what a reviewer can read in a
-# PR; tools/check-cmd.sh --install writes its values into ~/.fleet/check.conf (or
-# $FLEET_CHECK_CONF when set) where the deployed gate reads them. To update or tune
-# configuration, edit tools/check.conf and re-run --install.
+# PR. agents-0utp moved where --install writes by default: a bare `--install` now writes the
+# REPO-LOCAL file ($HOME/.fleet/<repo>-check.conf), the host-wide ~/.fleet/check.conf that the
+# deployed gate reads BY DEFAULT is written only with an explicit --global (install.sh asks for
+# it), and FLEET_CHECK_CONF=<path> --install writes that path. To update or tune configuration,
+# edit tools/check.conf and re-run the install command that writes the file you mean.
 #
 # Usage:  tools/check-cmd.sh [CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT]
 # With no argument it prints the whole resolved set. Values from the override win.
-#         tools/check-cmd.sh --install   writes the tracked values into the per-VM file.
+#         tools/check-cmd.sh --install [--global]   writes the tracked values into the per-VM file.
+#                                        No flag: the repo-local default. --global: the host-wide
+#                                        file every repo on this machine reads by default.
 #         tools/check-cmd.sh --check     compares the per-VM file with the tracked one and names every
 #                                        key that differs (agents-d081). Exits 0 in sync, 1 on drift,
 #                                        3 when nothing is installed, 2 on a usage/tracked error.
@@ -42,6 +46,26 @@ GLOBAL_CONF="${HOME:+$HOME/.fleet/check.conf}"
 REPO_CONF="${HOME:+$HOME/.fleet/$(basename "$ROOT")-check.conf}"
 OVERRIDE="${FLEET_CHECK_CONF:-$GLOBAL_CONF}"
 INSTALL_GLOBAL=0
+
+# agents-p8lh / agents-0utp: THE ONE PLACE THAT KNOWS WHICH COMMAND WRITES A GIVEN DESTINATION, so every
+# message that names a repair can be built from it instead of restating the rule. The defect class this
+# closes is the fleet's most repeated one, in the words the reviewer used: the instruction IS the defect.
+# Before this function the generated header, --check's repair line, the no-project-stamp note and the
+# usage text each carried their own copy of the rule - so when agents-0utp moved the default destination,
+# some were updated and some were not, and --check went on telling its reader to run a command that writes
+# a DIFFERENT file (a repair that cannot reach the file it names: agents-d081's failure mode). Callers pass
+# the destination they are about to talk about; the answer is the command that writes THAT file.
+# The three cases are the same three the --install decision below computes, in the same order of
+# precedence: the host-wide file, the repo-local default, an explicitly named path.
+install_cmd_for() {
+  case "${1:-}" in
+    "")            printf 'bash tools/check-cmd.sh --install' ;;   # no HOME and no FLEET_CHECK_CONF: the bare
+                                                                 # form is the only one that can be meant
+    "$GLOBAL_CONF") printf 'bash tools/check-cmd.sh --install --global' ;;
+    "$REPO_CONF")   printf 'bash tools/check-cmd.sh --install' ;;
+    *)              printf 'FLEET_CHECK_CONF=%s bash tools/check-cmd.sh --install' "$1" ;;
+  esac
+}
 
 if [ ! -r "$TRACKED" ]; then
   echo "check-cmd: the TRACKED gate config is missing: $TRACKED" >&2
@@ -81,7 +105,13 @@ if [ "${1:-}" = "--check" ]; then
   if [ "${2:-}" = "--quiet" ]; then quiet=1; fi
   dest="${OVERRIDE}"
   if [ ! -e "$dest" ]; then
-    echo "check-cmd: no per-VM config at $dest - nothing is installed on this VM (a fresh install would create it from $TRACKED)" >&2
+    if [ -n "$dest" ]; then
+      echo "check-cmd: no per-VM config at $dest - nothing is installed on this VM (a fresh install would create it from $TRACKED: $(install_cmd_for "$dest"))" >&2
+    else
+      # agents-p8lh, same class as the repair lines: an empty path in a message reads as a bug in the tool.
+      # With neither HOME nor FLEET_CHECK_CONF there is no path to report - so name the missing input instead.
+      echo "check-cmd: no per-VM config to check: neither FLEET_CHECK_CONF nor HOME is set, so there is no path to read (set one of them, or run --install --global to deploy the host-wide file)" >&2
+    fi
     exit 3
   fi
   drift=0
@@ -94,7 +124,7 @@ if [ "${1:-}" = "--check" ]; then
   # copy on the agents-factory VM was this second case.
   if ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
     if [ "$quiet" -eq 0 ]; then
-      echo "check-cmd: DRIFT: $dest carries no 'Project: agents-factory' stamp - it was written by another project on a shared-HOME host, or by an --install from before that stamp existed; re-running --install stamps it either way" >&2
+      echo "check-cmd: DRIFT: $dest carries no 'Project: agents-factory' stamp - it was written by another project on a shared-HOME host, or by an --install from before that stamp existed; $(install_cmd_for "$dest") stamps it either way" >&2
     fi
     note "no-project-stamp"
   fi
@@ -129,8 +159,8 @@ if [ "${1:-}" = "--check" ]; then
     if [ "$quiet" -eq 1 ]; then
       printf 'check-cmd: DRIFT keys: %s\n' "$drift_keys" >&2
     else
-      printf 'check-cmd: DRIFT keys: %s\n  repair with: bash tools/check-cmd.sh --install   (rewrites %s from %s)\n' \
-        "$drift_keys" "$dest" "$TRACKED" >&2
+      printf 'check-cmd: DRIFT keys: %s\n  repair with: %s   (rewrites %s from %s)\n' \
+        "$drift_keys" "$(install_cmd_for "$dest")" "$dest" "$TRACKED" >&2
     fi
     exit 1
   fi
@@ -143,9 +173,12 @@ fi
 # mechanism it already uses. fleet-check sources ${FLEET_CHECK_CONF:-$HOME/.fleet/check.conf},
 # auto-detects deno.json or package.json and NOTHING ELSE (:155-159), and exits 2 when it
 # finds neither (:161) - so a Python project has NO PATH through the deployed gate on a
-# fresh VM. The tracked file is the source of truth a PR can review; this writes the copy
-# the deployed gate reads. (A) - fleet-check gaining a project-local lookup - remains the
-# correct end state and would make this step redundant; it needs the fleet-bundle repo.
+# fresh VM. The tracked file is the source of truth a PR can review. WHERE THIS WRITES IS A
+# DECISION, NOT A CONSTANT: agents-0utp made the default a repo-local file, so this no longer
+# writes "the copy the deployed gate reads" - the host-wide file the deployed gate reads by
+# default is written only under --global, and the install_cmd_for() helper above is the single
+# place that says which command writes which file. (A) - fleet-check gaining a project-local lookup -
+# remains the correct end state and would make this step redundant; it needs the fleet-bundle repo.
 #
 # agents-r1o7: DO NOT SOURCE THE OVERRIDE BEFORE --install. If an existing per-VM file is
 # malformed, corrupted, or has syntax errors, an installer whose job is to replace it
@@ -216,10 +249,7 @@ if [ "${1:-}" = "--install" ]; then
 # repairs THIS file is the one named under "To tune" below (agents-0utp).
 LIFE
 )
-      tune_lines=$(cat <<'TUNE'
-# To tune, edit tools/check.conf and re-run INTO THIS FILE: bash tools/check-cmd.sh --install --global (agents-024z, agents-0utp).
-TUNE
-)
+      tune_lines=$(printf '# To tune, edit tools/check.conf and re-run INTO THIS FILE: %s (agents-024z, agents-0utp).\n' "$(install_cmd_for "$dest")")
       ;;
     repo-default)
       life_lines=$(cat <<LIFE
@@ -229,11 +259,7 @@ TUNE
 # machine is $GLOBAL_CONF, and only --install --global writes THAT (agents-0utp).
 LIFE
 )
-      tune_lines=$(cat <<'TUNE'
-# To tune, edit tools/check.conf and re-run (a bare --install rewrites this file):
-#   bash tools/check-cmd.sh --install   (agents-024z)
-TUNE
-)
+      tune_lines=$(printf '# To tune, edit tools/check.conf and re-run (this file is the bare form\x27s destination):\n#   %s   (agents-024z)\n' "$(install_cmd_for "$dest")")
       ;;
     *)
       # agents-mnvd (review finding on the first attempt at agents-0utp), restated for the life that actually
@@ -247,11 +273,7 @@ TUNE
 # leave this one and $GLOBAL_CONF untouched (agents-0utp).
 LIFE
 )
-      tune_lines=$(cat <<TUNE
-# To tune, edit tools/check.conf and re-run WITH THIS FILE SELECTED, so a different file is not written:
-#   FLEET_CHECK_CONF=$dest bash tools/check-cmd.sh --install   (agents-024z, agents-mnvd, agents-0utp)
-TUNE
-)
+      tune_lines=$(printf '# To tune, edit tools/check.conf and re-run WITH THIS FILE SELECTED, so a different file is not written:\n#   %s   (agents-024z, agents-mnvd, agents-0utp)\n' "$(install_cmd_for "$dest")")
       ;;
   esac
   {
@@ -291,5 +313,11 @@ case "$want" in
         "${CHECK_CMD}" "${CHECK_FAST_CMD:-}" "${CHECK_TIMEOUT:-}" "${CHECK_FAST_TIMEOUT:-}" ;;
   CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT)
         printf '%s\n' "${!want}" ;;
+  --repair-hint)
+        # agents-p8lh: ONE SOURCE OF TRUTH FOR THE REPAIR, for callers that must name it without knowing the
+        # destination - tools/fast-gate.sh warns about drift at the point of use and used to carry its own
+        # copy of this command. It prints the command that writes the file --check would report on for the
+        # SAME environment, so a caller cannot name a repair for a file it is not complaining about.
+        printf '%s\n' "$(install_cmd_for "$OVERRIDE")" ;;
   *) echo "check-cmd: unknown field '$want'" >&2; exit 2 ;;
 esac
