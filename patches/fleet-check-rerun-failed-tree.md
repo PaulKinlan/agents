@@ -1,3 +1,4 @@
+## patches/fleet-check-rerun-failed-tree.patch
 ## DRIVEN AND VERIFIED against coord's ruling of 2026-10-14 (attempt-N attribution, one-re-run bound, disagreement is RED).
 
 The three ruled behaviours the pre-ruling patch lacked are now demonstrated red-first, with the harness fix that
@@ -18,7 +19,6 @@ request's reason in that record (the attempt RECORDS are all retained, each with
 carries only the most recent re-run attribution). Retaining a per-attempt attribution list would need a new
 array key - an ADDITION, not a field-type change - so it is a decision for coord, not something to smuggle in.
 
-## patches/fleet-check-rerun-failed-tree.patch
 
 **agents-5q0w (second half): a deliberate, recorded re-run of a FAILED tree.**
 
