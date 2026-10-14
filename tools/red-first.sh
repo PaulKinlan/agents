@@ -6,9 +6,19 @@
 #   2. RED: construct a tree at the MERGE-BASE implementation (merge-base vs the base ref, default origin/main)
 #      WITH THE CHANGE'S TEST FILES APPLIED, and run the same changed tests there.
 #      VERIFY THE CONSTRUCTED TREE BY CONTENT BEFORE TRUSTING ITS NUMBER, in BOTH directions:
-#      a string that exists ONLY in the new implementation must be ABSENT (expect 0) and
+#      a marker the delta added to an allow-listed implementation-source path must be ABSENT (expect 0) and
 #      a label that exists ONLY in the new tests must be PRESENT (expect > 0).
 #      "A partially applied patch looks exactly like a passing pin."
+#
+#      BOUND, NOT EVIDENCE (agents-twue): the absent-marker half is PATH-ORIGIN EVIDENCE about WHERE the marker came
+#      from, and it does not prove that the implementation changed. "Allow-listed implementation-source path" means a
+#      source extension (.py .sh .bash .js .ts .mjs .cjs .jsx .tsx .c .cc .cpp .cxx .h .hpp .rs .go) outside tests/,
+#      docs/ and reports/ - so a committed data/memo.py holding only a marker comment that no code imports satisfies
+#      the bound and is accepted. THAT IS THE ACCEPTED LIMITATION rather than an open hole: no narrower path rule buys
+#      the stronger claim (it only moves where the next counter-example lives, and deriving the marker's owner from a
+#      test import is semantics read off a path again), so the tool REPORTS the marker as a delta-touched
+#      implementation-source path and never as proof that the implementation changed. The load-bearing claim stays the
+#      DISCRIMINATOR set measured at tooth 3. The boundary is pinned by test_data_memo_marker_is_a_disclosed_bound.
 #   3. REPORT: green count, red count, the DISCRIMINATOR set (cases that fail on red and pass on green)
 #      and the GUARD set (cases that pass on both revisions). An assertion in NEITHER set did not run —
 #      printed explicitly.
@@ -406,7 +416,9 @@ fi
 # Content verification in BOTH directions
 echo "--- Content verification of constructed red tree ---"
 
-# Implementation source path allow-list: source code extensions only, excluding tests, docs, reports
+# Implementation-source path allow-list: source code extensions only, excluding tests, docs, reports.
+# BOUND (agents-twue): this is a BOUND on where an absent marker may come from, NOT evidence that the implementation
+# changed - see the tooth-2 header above and test_data_memo_marker_is_a_disclosed_bound.
 IMPL_SRC_PATTERNS=(
   '*.py' '*.sh' '*.bash'
   '*.js' '*.ts' '*.mjs' '*.cjs' '*.jsx' '*.tsx'
@@ -423,9 +435,10 @@ if [ "${#TEST_FILES[@]}" -gt 0 ]; then
   IMPL_PATH_FILTERS+=("${TEST_FILES[@]/#/:(exclude)}")
 fi
 
-# Direction 1: a string that exists ONLY in the new implementation must be ABSENT (expect 0)
+# Direction 1: a marker carried by a delta-touched implementation-source path must be ABSENT (expect 0);
+# the ABOVE bound applies - this is path-origin evidence and does not prove the implementation changed.
 if [ -z "$EXPECT_ABSENT" ]; then
-  # Auto-derive candidate from git diff of implementation source files
+  # Auto-derive candidate from git diff of delta-touched implementation-source paths
   diff_additions="$(git diff "$PRE_FIX_SHA...HEAD" -- "${IMPL_PATH_FILTERS[@]}" | sed -n 's/^+[^+[:space:]].*/&/p' || true)"
   if [ -n "$diff_additions" ]; then
     # Pick a non-trivial line or distinctive token
@@ -462,15 +475,27 @@ fi
 # 3. Direction 2: present marker must be ABSENT from the pre-fix test tree (count == 0)
 precondition_failed=0
 
-# Delta justification checks for caller-supplied markers
+# Delta justification checks for caller-supplied markers.
+# BOUND (agents-twue): PATH-ORIGIN evidence, not implementation evidence - it reports WHICH delta-touched
+# implementation-source path carries the marker. An allow-listed source-extension file that no code imports (a committed
+# data/memo.py holding only a marker comment) satisfies the bound; that accepted limitation is pinned by
+# test_data_memo_marker_is_a_disclosed_bound. This is never a claim that the implementation changed.
+MARKER_IMPL_PATH=""
 if [ "$EXPECT_ABSENT_SUPPLIED" -eq 1 ] && [ -n "$EXPECT_ABSENT" ]; then
-  delta_non_test_additions="$(git diff -U0 "$PRE_FIX_SHA...HEAD" -- "${IMPL_PATH_FILTERS[@]}" 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
-  if ! grep -Fq "$EXPECT_ABSENT" <<< "$delta_non_test_additions"; then
-    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' is not justified by delta (not found in added lines of implementation source paths)" >&2
-    echo "red-first:   Marker path must be an implementation source (.py, .sh, etc., not tests/docs/reports/notes); path check does not prove implementation" >&2
+  while IFS= read -r cand; do
+    [ -z "$cand" ] && continue
+    if git diff -U0 "$PRE_FIX_SHA...HEAD" -- "$cand" 2>/dev/null | grep '^+' | grep -v '^+++' | grep -Fq "$EXPECT_ABSENT"; then
+      MARKER_IMPL_PATH="$cand"
+      break
+    fi
+  done < <(git diff --name-only "$PRE_FIX_SHA...HEAD" -- "${IMPL_PATH_FILTERS[@]}" 2>/dev/null || true)
+  if [ -z "$MARKER_IMPL_PATH" ]; then
+    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' is not justified by delta (not found in added lines of any delta-touched implementation-source path)" >&2
+    echo "red-first:   bound: the marker must come from an allow-listed source-extension path outside tests/docs/reports; path-origin evidence does not prove implementation" >&2
     precondition_failed=1
   else
-    echo "red-first: delta-justification: absent marker '$EXPECT_ABSENT' verified in delta implementation source path (marker path is an implementation source, does not prove implementation)"
+    echo "red-first: delta-justification: absent marker '$EXPECT_ABSENT' is in delta-touched implementation-source path '$MARKER_IMPL_PATH'"
+    echo "red-first:   bound: path-origin evidence only - a path-based check cannot prove implementation"
   fi
 fi
 
@@ -489,10 +514,10 @@ if [ -n "$EXPECT_ABSENT" ]; then
   if [ -n "$green_absent_output" ]; then
     green_absent_matches="$(printf '%s\n' "$green_absent_output" | wc -l)"
   fi
-  echo "red-first: content-verification precondition (expect > 0 in green): checking '$EXPECT_ABSENT' in green tree implementation source paths -> count: $green_absent_matches"
-  echo "red-first:   note: marker path is an implementation source (path-based check, does not prove implementation)"
+  echo "red-first: content-verification precondition (expect > 0 in green): checking '$EXPECT_ABSENT' in green tree at delta-touched implementation-source paths -> count: $green_absent_matches"
+  echo "red-first:   bound: path-origin evidence only - a path-based check cannot prove implementation"
   if [ "$green_absent_matches" -eq 0 ]; then
-    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' was NOT found in green tree implementation source paths (expected > 0 in green implementation source paths, got 0)" >&2
+    echo "red-first: FAIL: content verification precondition failed: absent marker '$EXPECT_ABSENT' was NOT found in the green tree at any delta-touched implementation-source path (expected > 0, got 0)" >&2
     echo "red-first:   A marker that does not exist anywhere trivially satisfies absence; exclusivity precondition is unverified" >&2
     precondition_failed=1
   fi
@@ -520,22 +545,22 @@ if [ "$precondition_failed" -ne 0 ]; then
   exit 1
 fi
 
-# Direction 1 check in red implementation tree (expect 0)
+# Direction 1 check in red tree at delta-touched implementation-source paths (expect 0)
 if [ -n "$EXPECT_ABSENT" ]; then
   absent_matches=0
   absent_output="$(grep -rn -F "$EXPECT_ABSENT" "$RED_DIR" --exclude-dir=tests --exclude-dir=docs --exclude-dir=reports --exclude-dir=.git 2>/dev/null || true)"
   if [ -n "$absent_output" ]; then
     absent_matches="$(printf '%s\n' "$absent_output" | wc -l)"
   fi
-  echo "red-first: content-verification (expect 0): grep -rnF '$EXPECT_ABSENT' '$RED_DIR' (implementation source paths) -> count: $absent_matches"
-  echo "red-first:   note: marker path is an implementation source (path-based check, does not prove implementation)"
+  echo "red-first: content-verification (expect 0): grep -rnF '$EXPECT_ABSENT' '$RED_DIR' (delta-touched implementation-source paths) -> count: $absent_matches"
+  echo "red-first:   bound: path-origin evidence only - a path-based check cannot prove implementation"
   if [ "$absent_matches" -ne 0 ]; then
     echo "red-first: FAIL: content verification failed: string '$EXPECT_ABSENT' exists in red implementation tree (expected 0, got $absent_matches)" >&2
-    echo "red-first:   A partially applied patch looks exactly like a passing pin: new implementation leaked into red tree" >&2
+    echo "red-first:   A partially applied patch looks exactly like a passing pin: the marker is present in the red tree" >&2
     exit 1
   fi
 else
-  echo "red-first: content-verification (expect 0): no implementation changes to verify (pure test addition)"
+  echo "red-first: content-verification (expect 0): no allow-listed implementation-source delta to verify (pure test addition)"
 fi
 
 # Direction 2 check in red test tree (expect > 0)

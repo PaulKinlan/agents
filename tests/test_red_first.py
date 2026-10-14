@@ -5,7 +5,10 @@ Validates the four teeth of the red-first gate:
 1. GREEN: executes changed tests at tip, reports pass/fail count and tree.
 2. RED: constructs tree at merge-base with test files applied, and enforces
    CONTENT VERIFICATION in both directions:
-   - expect 0: implementation string absent from red tree (rejects leaks);
+   - expect 0: the marker carried by a delta-touched implementation-source path
+     is absent from the red tree (rejects leaks) - a BOUND on where the marker
+     came from, not proof the implementation changed (the accepted limitation is
+     pinned by test_data_memo_marker_is_a_disclosed_bound);
    - expect > 0: test label present in red tree (rejects missing tests).
 3. REPORT: reports DISCRIMINATOR set, GUARD set, and NEITHER set.
    Loudly rejects the three vacuous forms:
@@ -238,6 +241,38 @@ class TestRedFirst(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("neither-direction-verified", res.stderr)
         self.assertIn("absent marker 'NEW_NOTE_UNRELATED_TO_IMPL_6611' is not justified by delta", res.stderr)
+
+    def test_data_memo_marker_is_a_disclosed_bound(self):
+        """Tooth 2 bound (agents-twue): a committed data/memo.py holding ONLY a marker comment, imported by nothing
+        but carrying an allow-listed source extension, is ACCEPTED by the path rule - that is the accepted limitation
+        of the bound. So this case asserts the intended behaviour rather than a refusal: rc0, the marker reported as
+        a delta-touched implementation-source path, the limit disclosed, and NO claim that the implementation changed.
+        The load-bearing claim stays the measured DISCRIMINATOR set, which the same run still reports."""
+        (self.repo_dir / "data").mkdir()
+        (self.repo_dir / "data" / "memo.py").write_text(
+            "# DATA_MEMO_ONLY_29485 - not imported by any code\n", encoding="utf-8"
+        )
+        self._run_cmd(["git", "-C", str(self.repo_dir), "add", "."])
+        self._run_cmd(["git", "-C", str(self.repo_dir), "commit", "-m", "add inert data memo"])
+
+        # Prove the fixture, not the claim: nothing imports the memo.
+        self.assertNotIn("memo", (self.repo_dir / "lib" / "calc.py").read_text(encoding="utf-8"))
+        self.assertNotIn("data", (self.repo_dir / "tests" / "test_calc.py").read_text(encoding="utf-8"))
+
+        res = self._run_red_first([
+            "--base", self.base_commit,
+            "--expect-absent", "DATA_MEMO_ONLY_29485",
+            "--expect-present", "test_multiply_discriminator",
+            "tests/test_calc.py",
+        ])
+        # The accepted limitation: the bound admits data/memo.py, so the run reaches the discriminator proof.
+        self.assertEqual(res.returncode, 0, f"boundary case behaved unexpectedly:\n{res.stdout}\n{res.stderr}")
+        self.assertIn("delta-touched implementation-source path 'data/memo.py'", res.stdout)
+        self.assertIn("a path-based check cannot prove implementation", res.stdout)
+        # The tool must not carry the semantic claim the path cannot support.
+        self.assertNotIn("the implementation changed", res.stdout)
+        self.assertIn("DISCRIMINATOR set (1 cases):", res.stdout)
+        self.assertIn("VERDICT: PASS", res.stdout)
 
     def test_untracked_file_cannot_certify_green_tree(self):
         """Tooth 2: an untracked file cannot certify the green tree (empty match refuses, never falls back)."""
