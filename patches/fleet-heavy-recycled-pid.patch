@@ -1,0 +1,102 @@
+--- a/fleet-heavy
++++ b/fleet-heavy
+@@ -69,6 +69,82 @@
+   done 2>/dev/null
+ }
+ 
++# THE IDENTITY OF EACH HOLDER, AS CLAIMED AT THE MOMENT OF THE SCAN (agents-7vbo). slot_fd_holders
++# answers WHO holds the slot; this records WHICH PROCESS each pid named, so a later signal can tell
++# whether the pid still names the same process. A pid is a reusable number; the process is the fact.
++# Prints "<pid>:<pgrp>:<starttime>" per line - process group (field 5) and start time (field 22) of
++# /proc/<pid>/stat, the two fields this file already reads by number. A holder whose stat cannot be
++# read is emitted with empty fields, so the sweep can still NAME it and refuse it rather than forget it.
++slot_fd_holder_ids() {  # <i> -> "<pid>:<pgrp>:<starttime>" per line
++  local i=$1 p pg st
++  for p in $(slot_fd_holders "$i"); do
++    [ "$p" = "$$" ] && continue
++    pg=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null)
++    st=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null)
++    printf '%s:%s:%s\n' "$p" "$pg" "$st"
++  done
++}
++
++# RELEASE A SLOT A FINISHED JOB LEFT TO ITS DESCENDANTS, WITHOUT SIGNALLING A PID THAT NO LONGER
++# NAMES THE PROCESS THE SWEEP FOUND (agents-7vbo).
++#
++# slot_fd_holders scans /proc, and the scan's own pipeline INHERITS the slot fd, so its forks are in
++# the list. Those forks are gone by the time this runs - measured on this VM: every gate, including
++# gates that leaked nothing, reported already-dead pids (the scan's own `grep`/`tr`/subshell). So the
++# old `kill -TERM $leaked` was aimed at numbers that no longer existed, and between the scan and the
++# signal the kernel may RECYCLE one: the line meant to recover a slot then TERMs an unrelated process,
++# and its symptom (a mysteriously killed gate, a lane dying at SIGTERM) appears in some other lane's
++# job, so every diagnostic starts from a false location. A remembered pid is a claim about the past.
++#
++# So re-read the identity NOW and signal ONLY a pid whose /proc/<pid>/stat still reports the process
++# group AND start time recorded at the scan. A pid with no /proc entry is skipped (it is gone); a pid
++# whose identity changed is REFUSED and NAMED, so a recycled pid is observable rather than silent.
++# This is the standard the preemption path sets with `ps -o pgid= -p ...` and `kill -0 -"$pg"`: the
++# test is a fact read from the live process, not liveness of a remembered number.
++#
++# START TIME IS THE DISCRIMINATOR, process group is corroboration. Measured on this VM: a genuine
++# leaked descendant is often setsid-detached with its OWN process group (the reclaim test leaks
++# exactly such a holder), so keying on the JOB's pgid would REFUSE a real leak; the scan's own forks
++# share OUR group, so that same key would ACCEPT the phantom. Field 22 cannot change for a live
++# process, so it is the identity, and field 5 is checked alongside it as the file's other field.
++#
++# Only the verified PIDS are signalled, never a process group: a group derived from a verified pid is
++# still a group, and widening one accused pid to its whole group takes bystanders the fd test never
++# accused. TERM -> KILL is a second window to recycle, so identity is re-checked before the KILL.
++signal_leaked_holders() {  # <i> -> 0 if it signalled a live descendant
++  local i=$1 ids v p pg st np ng verified="" kill_list=""
++  ids=$(slot_fd_holder_ids "$i")
++  [ -n "$ids" ] || return 1
++  while IFS=: read -r p pg st; do
++    [ -n "$p" ] || continue
++    np=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null)
++    ng=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null)
++    if [ -z "$ng" ]; then
++      echo "fleet-heavy: slot$i: pid $p held the slot when swept but no longer names a process - gone, not signalling it" >&2
++      continue
++    fi
++    if [ -z "$st" ] || [ "$st" != "$ng" ] || [ "$pg" != "$np" ]; then
++      echo "fleet-heavy: slot$i: REFUSING pid $p - not the process the sweep found (pgrp/starttime was $pg/$st, now $np/$ng): a recycled or replaced pid" >&2
++      continue
++    fi
++    verified="$verified $p:$ng"
++  done <<<"$ids"
++  [ -n "${verified// /}" ] || return 1
++  for v in $verified; do kill_list="$kill_list ${v%%:*}"; done
++  kill_list=${kill_list# }
++  echo "fleet-heavy: warning - descendants still held slot$i after the job finished ($kill_list); killing them so the slot is released" >&2
++  kill -TERM $kill_list 2>/dev/null
++  sleep 1
++  kill_list=""
++  for v in $verified; do
++    p=${v%%:*}; st=${v#*:}
++    ng=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null)
++    [ "$ng" = "$st" ] && kill_list="$kill_list $p"
++  done
++  [ -n "${kill_list// /}" ] && kill -KILL $kill_list 2>/dev/null
++  return 0
++}
++
+ # RECLAIM A SLOT ABANDONED BY A DEAD WRAPPER (measured 2026-10-12 on the hub: the single heavy slot was held
+ # 34 minutes by two gate workers from /tmp/tmp.I6i63vUAqR - a TEST FIXTURE HOME that no longer existed. Their
+ # wrapper was gone, they had been reparented to init, and they held the inherited fd, so flock said "held"
+@@ -197,11 +273,11 @@
+         # minutes, blocking every gate on the VM, their wrapper long gone.
+         # So before releasing, sweep anything that is holding the slot and is not us. This is the source fix;
+         # reclaim_abandoned_slot() is the safety net for holders that pre-date it.
+-        leaked=$(slot_fd_holders "$i" | grep -v "^$$\$" | tr '\n' ' ')
+-        if [ -n "${leaked// /}" ]; then
+-          echo "fleet-heavy: warning - descendants still held slot$i after the job finished ($leaked); killing them so the slot is released" >&2
+-          kill -TERM $leaked 2>/dev/null; sleep 1; kill -KILL $leaked 2>/dev/null
+-        fi
++        # agents-7vbo: A PID REMEMBERED FROM A SCAN IS A CLAIM ABOUT THE PAST - re-derive identity at
++        # the moment of use and signal only what still matches. A dead pid is skipped; a recycled one is
++        # refused and named. See signal_leaked_holders for why the start time is the field that can tell
++        # them apart, and why the sweep must not claim a recovery it did not perform.
++        signal_leaked_holders "$i"
+         rm -f "$dir/slot$i.who"; exit $rc
+       fi
+       exec {fd}>&-   # an older-ticket waiter is ahead of us: give the slot back
