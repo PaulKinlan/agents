@@ -36,7 +36,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
-    from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
+                               validate_agent_report)
     from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
@@ -62,7 +63,8 @@ except ImportError:
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
-    from lib.report_schema import declared_schema, normalize_agent_report, validate_agent_report
+    from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
+                               validate_agent_report)
     from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
@@ -1696,11 +1698,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         except (FileNotFoundError, ValueError):
             output_schema = None
         if output_schema:
-            prompt += (
-                "\nYour final answer MUST be one JSON object that validates against this JSON "
-                "Schema. Use these exact property names (e.g. `rule_id`, not `id`):\n"
-                f"{json.dumps(output_schema, indent=2)}\n"
-            )
+            # The schema alone states which fields exist and marks some required in a nested array;
+            # a model that omits one loses the whole report with it (agents-sz8q: 35 violations for
+            # 35 candidates). The fragment spells out the required sets in words too.
+            prompt += output_contract_prompt(output_schema)
         if repair_hint:
             # agents-noo: a repair-retry tells the model exactly what was rejected, so the second
             # attempt has a real chance of producing a valid report instead of the same garbage.

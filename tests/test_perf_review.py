@@ -14,6 +14,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -950,6 +951,59 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         normalize_report(raw_report)
         violations_after = validate_agent_report(perf_dir, perf_cfg, raw_report)
         self.assertEqual(violations_after, [])
+
+
+class TestTheOutputContractAsksForWhatTheSchemaRequires(unittest.TestCase):
+    """agents-sz8q: the schema required `snippet` on every finding while this SKILL asked for the other six, so a
+    finding written from the SKILL alone was rejected - measured on the gendn run as exactly 35 violations for 35
+    candidates, one per candidate, which is what makes the count structural rather than noise. It is reproduced here
+    in miniature (35 skill-shaped findings -> 35 violations). NOTE, because the distinction decides what the fix is:
+    the factory ALREADY puts the whole schema in the prompt (factory:1698), so this SKILL was never the only thing a
+    model was told, and the omission cannot be attributed to it alone. The mechanism this test guards is the
+    contract being inconsistent between the two places a maintainer reads it; the mechanism that makes a model
+    actually emit the field is `required_fields_note`, asserted in tests/test_report_schema.py.
+
+    The property this asserts is that a field the schema REQUIRES is asked for in the SKILL's PROSE - not merely
+    shown inside a fenced example. `snippet` was present in the file all along, which is why a word-presence check
+    or a careful human read passes while the station rejects everything: it appeared only in the illustrative JSON.
+    A required field that is only illustrated is not requested.
+    """
+
+    AGENT = ROOT / "agents" / "perf-review"
+
+    def _required_finding_fields(self):
+        schema = json.loads((self.AGENT / "report.schema.json").read_text(encoding="utf-8"))
+        items = schema["properties"]["findings"]["items"]
+        return list(items.get("required", []))
+
+    @staticmethod
+    def _prose(text):
+        # Fenced blocks are examples, not instructions; the defect this guards against lived inside one.
+        return re.sub(r"```.*?```", "", text, flags=re.S)
+
+    def test_every_required_field_is_asked_for_in_prose(self):
+        prose = self._prose((self.AGENT / "SKILL.md").read_text(encoding="utf-8"))
+        missing = [f for f in self._required_finding_fields() if f not in prose]
+        self.assertEqual(
+            missing, [],
+            f"the schema requires fields the SKILL never asks for: {missing} - a model that follows the SKILL "
+            "produces a report this station rejects, which is how it became unusable by construction")
+
+    def test_the_required_field_set_is_read_from_the_schema_not_typed_here(self):
+        # If this list were hardcoded the test would keep passing after the schema grew a required field.
+        self.assertIn("snippet", self._required_finding_fields())
+
+    def test_the_check_can_fail_on_the_skill_as_it_was(self):
+        """The control, using the REAL defect rather than a synthetic one: strip the prose sentence that asks for
+        the required fields (leaving the example JSON, which is what the file looked like before this change) and
+        the check above must have something to say. Nothing else in this test depends on that sentence."""
+        text = (self.AGENT / "SKILL.md").read_text(encoding="utf-8")
+        without = re.sub(r"Every finding MUST carry the fields the schema requires[\s\S]*?withhold it for "
+                         r"concurrency recommendations\.\n", "", text, count=1)
+        self.assertNotEqual(without, text, "the prose sentence this control removes must exist in the SKILL")
+        self.assertIn("snippet", text, "snippet is present in the file as a whole...")
+        self.assertNotIn("snippet", self._prose(without), "...but not once the prose sentence is removed, which is "
+                                                        "exactly the state that rejected 35 of 35 candidates")
 
 
 class TestFactorySamplingParams(unittest.TestCase):

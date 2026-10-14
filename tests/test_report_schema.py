@@ -33,6 +33,8 @@ from lib.embargo import VALID_SEVERITIES
 from lib.report_schema import (  # noqa: E402
     declared_schema,
     normalize_report,
+    output_contract_prompt,
+    required_fields_note,
     unlocatable_verdicts,
     validate,
     validate_agent_report,
@@ -627,6 +629,69 @@ class TestThreatModelSchemaBound(unittest.TestCase):
         self.assertIsNotNone(errors)
         self.assertTrue(any("$.threat_model_markdown: length 16385 exceeds maxLength 16384" in e for e in errors),
                         errors)
+
+
+class TestThePromptSpellsOutTheRequiredFields(unittest.TestCase):
+    """agents-sz8q: the station's report was rejected 35 times for 35 candidates - one violation per
+    candidate - and the prompt was already carrying the full JSON Schema. What it never stated was, in
+    words, which fields a report MUST carry: a nested `required` array is easy to miss, and the prompt's
+    only prose on the subject was about property NAMES ("use `rule_id`, not `id`"). The note below is
+    therefore derived from the schema that will judge the answer, so it cannot fall behind it.
+    """
+
+    @staticmethod
+    def _schema(required=("summary", "findings"), finding_required=("rule_id", "snippet")):
+        return {
+            "required": list(required),
+            "properties": {"findings": {"items": {"required": list(finding_required)}}},
+        }
+
+    def test_note_names_every_required_field(self):
+        note = required_fields_note(self._schema())
+        for field in ("summary", "findings", "rule_id", "snippet"):
+            self.assertIn(f"`{field}`", note, f"{field} is required by the schema and must be spelled out")
+
+    def test_the_note_distinguishes_top_level_from_findings(self):
+        note = required_fields_note(self._schema())
+        self.assertIn("Required top-level fields: `summary`, `findings`", note)
+        self.assertIn("Each entry in `findings` MUST include: `rule_id`, `snippet`", note)
+
+    def test_the_note_is_derived_from_the_schema_not_typed_beside_it(self):
+        """The control. If the list were hardcoded here, a schema that grows a required field would keep
+        producing a note that omits it - the exact drift this helper exists to prevent."""
+        base = required_fields_note(self._schema())
+        self.assertNotIn("`title`", base)
+        grown = required_fields_note(self._schema(finding_required=("rule_id", "snippet", "title")))
+        self.assertIn("`title`", grown, "a field added to the schema must appear in the note with no other edit")
+
+    def test_a_schema_with_nothing_required_produces_no_note(self):
+        # Silence, not a stray heading, so the prompt is unchanged for a schema that requires nothing.
+        self.assertEqual(required_fields_note({"properties": {}}), "")
+
+    def test_the_perf_review_contract_is_covered(self):
+        """The station this was filed against: every required finding field in its own schema must be
+        named in the note, read from the schema rather than from this test."""
+        agent_dir = Path(__file__).resolve().parent.parent / "agents" / "perf-review"
+        schema = json.loads((agent_dir / "report.schema.json").read_text(encoding="utf-8"))
+        note = required_fields_note(schema)
+        for field in schema["properties"]["findings"]["items"]["required"]:
+            self.assertIn(f"`{field}`", note)
+
+    def test_the_prompt_fragment_carries_both_the_schema_and_the_required_sets(self):
+        """The wiring, asserted on the text the model is given rather than by reading the dispatcher."""
+        fragment = output_contract_prompt(self._schema())
+        self.assertIn('"required"', fragment, "the schema itself must still be carried verbatim")
+        self.assertIn("Each entry in `findings` MUST include: `rule_id`, `snippet`", fragment)
+
+    def test_the_fragment_asks_the_model_for_the_field_that_was_being_omitted(self):
+        """The end of the chain that started this bead: perf-review's own schema, through the fragment the
+        dispatcher appends, has to name `snippet`."""
+        agent_dir = Path(__file__).resolve().parent.parent / "agents" / "perf-review"
+        schema = json.loads((agent_dir / "report.schema.json").read_text(encoding="utf-8"))
+        self.assertIn("`snippet`", output_contract_prompt(schema))
+
+    def test_no_schema_means_no_fragment(self):
+        self.assertEqual(output_contract_prompt(None), "")
 
 
 if __name__ == "__main__":
