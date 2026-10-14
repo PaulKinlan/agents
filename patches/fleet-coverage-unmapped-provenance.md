@@ -1,94 +1,95 @@
-## Fleet coverage provenance - `fleet-coverage-unmapped-provenance.patch` (agents-tpw5)
-Patch: `patches/fleet-coverage-unmapped-provenance.patch` (5 files, 7 hunks, 11.8 KB).
-Target: the hub's coverage reporter and every consumer of its state, which is why the rule and the
-reader re-pins land together rather than as a rider on the false-positive fix.
+## Every published coverage entry says where it came from, inside the entry - `fleet-coverage-unmapped-provenance.patch` (agents-tpw5)
 
-### What changes, and what deliberately does not
+Hub-side artifact: `remote/check-coverage.py` writes the record, and both `bin/fleet-check` readers are
+re-pinned in the same patch. Five files, 23 hunks. Apply at the fleet repo root with `patch -p1 --fuzz=0`.
 
-`remote/check-coverage.py` already states the principle it half-implements. At the fleet-agch guard it says
-*"publishing the changed files as 'unmapped' then asserts something the log never said"* - and it enforces
-that only when there is NO suite evidence at all. There is no per-path equivalent, so when the reporter's
-own PLACEMENT logic cannot place a path the gate DID run a suite for, the path is published in `.unmapped`
-with `coverage: PARTIAL`: a fact about coverage, asserted from a fact about the reporter's own inference.
+### The problem
 
-This patch records the **provenance** of each published entry - `unmapped_source` maps every path in
-`.unmapped` to `"gate"` (the gate's own `fast-gate: unmapped:` marker: evidence) or `"inference"` (appended
-by this script because it could not place the path: inference). **The state machine is untouched**: an
-inferred omission still lands in `.unmapped`, still makes the record `PARTIAL`, and still fails loud. The
-reader merely gains the ability to tell evidence from inference, which is the same distinction the rest of
-the fleet has been enforcing as unreadable-vs-empty.
+When the fast gate reports a changed path as `unmapped`, the record does not say whether the gate's own
+`fast-gate: unmapped:` marker named that path - EVIDENCE - or whether the reporter appended it because it
+could not PLACE it - the reporter's own inference. Both appear in one voice, so the negative result is not
+evidence: it cannot distinguish "no test covers this" from "coverage could not be computed".
 
-Two details worth a reviewer's attention. The map is derived from the list that is **actually published**, so
-its keys cannot drift from `.unmapped`. And the `UNKNOWN` branch, which clears the list because an absence of
-evidence must never be reported as a zero, now clears the map with it - a record naming sources for entries it
-does not publish is the same "claim not derived from the object" defect that branch exists to prevent.
+Two reproductions were measured against the installed reporter:
 
-### Measured reproduction (installed reporter, before this patch)
+| changed paths | result |
+|---|---|
+| `tools/docs-text-floor.sh` + `tests/test_docs_text_floor.py` | `PARTIAL`, `unmapped: [tools/docs-text-floor.sh]` |
+| `tools/deploy-thing.sh` + `tests/test_ops_contract.py` | `PARTIAL`, `partial_reason "1 changed path(s) were not placed by any executed suite"` |
 
-Synthetic repo (a `main` branch plus a change branch, so the reporter's merge-base..sha delta resolves), a
-log with a running/passed pair and deliberately **no** `fast-gate: unmapped:` marker:
+The second is not reachable by a naming fix: the file is placed by an arm, and there is no import or stem
+relation to the suite that ran. The reader's own header states the stake: *a warning that always fires is a
+warning everyone learns to ignore, and this one exists to catch a genuinely uncovered change.*
 
-| delta | log says | reporter published |
+### The shape - the hub's refinement, and why it is the load-bearing part
+
+Provenance lives **inside each entry of the published list**, not in a field beside it:
+
+```json
+"unmapped": [{"path": "tools/deploy-thing.sh", "source": "inference"}]
+```
+
+- `source` is `"gate"` when the gate's `fast-gate: unmapped:` marker named the path, `"inference"` when the
+  reporter appended it because it could not place it.
+- **There is no parallel field.** A field beside the list can be ABSENT, and then a reader cannot tell a gate
+  marker from a record that predates the field - the `cleared:<tip>` label problem rebuilt inside `.unmapped`.
+- **An entry always says where it came from.** For a record written before this patch, the entries are plain
+  strings; both readers normalise that to **`UNRECORDED`** and SAY it, rather than staying silent. Measured,
+  with the clause lifted from the patch rather than retyped:
+
+  | record | reader clause |
+  |---|---|
+  | post-fix, one gate entry and one inference | `(1 unplaced by the reporter, not named by the gate marker)` |
+  | **pre-fix, plain strings** | `(1 UNRECORDED - the record has no source for this entry, so this is not evidence of a gate marker)` |
+
+- De-duplication is on the PATH, and the gate marker beats an inference for the same path: evidence outranks
+  a guess. Sorting keeps the published order stable.
+- **The state machine is deliberately untouched.** An orphan still lands in `.unmapped`, still makes the
+  record `PARTIAL`, and still fails loud; the only change is that the record now says which kind of claim it
+  is making. `unmapped` is cleared exactly as before when the run is `UNKNOWN`.
+
+### The readers (both re-pinned here)
+
+Both `bin/fleet-check` readers (the cached record and the fresh object) read the source FROM THE ENTRY, so
+the provenance travels with the list that is copied - no nested lookup to drift. The existing message strings
+are unchanged for a record that has entries (`COVERAGE WARNING: <paths> unmapped`, `Coverage warning: <path>
+unmapped`, the `unplaced by the reporter` clause), so the assertions other beads own keep reading the same
+way; the only added clause is the `UNRECORDED` one above, which fires only for a record that predates the
+field. Both reader expressions are asserted to be one shared clause, not two that can drift apart.
+
+### Tests
+
+`tests/check-coverage.test.sh` 22 -> **27 passed, 0 failed**. New: `8e` asserts the invariant that every
+published entry carries its own source AND that no parallel `unmapped_source` field exists; `8d` asserts
+`UNKNOWN` publishes no entries at all. `tests/fleet-gate-check.test.sh` gains `14v`/`14w`, which rewrite the
+record for a tree to the PRE-FIX shape and drive the real cached-record reader, asserting that the warning
+says `UNRECORDED` and still names the path - the fail-loud half is unchanged.
+`tests/project-template.test.sh` `D17b` is now that same invariant rather than "the parallel map covers the
+list".
+
+Fourteen existing assertions in `tests/check-coverage.test.sh` asked whether a path was unmapped by matching
+a SUBSTRING of the serialized array (`case " $u " in *" path "*`). Because the entry is now an object, that
+query is answered from the entry list by a helper, `unmapped_paths`, which is tolerant of both shapes. The
+assertions themselves are unchanged - only how the path list is derived - and the helper is verified against
+an object list, a pre-fix string list and an empty list.
+
+### Evidence
+
+- `patch -p1 --fuzz=0 --dry-run` clean for all five files, applied from the deployed pre-fix state, and all
+  five results byte-identical to the copies verified here.
+- The reporter suite, run against the copy the PATCH FILE produced: **27 passed, 0 failed**.
+- `python3 -m py_compile remote/check-coverage.py` and `bash -n bin/fleet-check`.
+
+### Ordering and provenance of the base
+
+Apply AFTER `agents-0xm2` and `agents-a3p9` (the first touches the same readers, the second the
+placement/stem logic this builds on). Strict preimages, hashed on this VM immediately before the patch was
+cut, so the reviewer can confirm the base rather than trust it:
+
+| file | SHA256 (first 16) | bytes |
 |---|---|---|
-| `tools/docs-text-floor.sh` | `tests/test_docs_text_floor.py` ran | `PARTIAL`, `unmapped: [tools/docs-text-floor.sh]` |
-| `tools/deploy-thing.sh` | `tests/test_ops_contract.py` ran | `PARTIAL`, `unmapped: [tools/deploy-thing.sh]` |
-
-The second row is the one that makes this general: `tools/*.sh` is placed by an **arm** in the gate's registry,
-so there is no import relation and no stem relation for the reporter to derive, however stems are normalised.
-The first row is the shape `agents-a3p9`'s stem fix would reach; **nothing in `a3p9` and no stem fix can ever
-reach the second**. With the patch, both rows report `unmapped_source: {path: "inference"}`, the gate's own
-marker reports `"gate"`, and a no-evidence run reports `UNKNOWN` with `unmapped: []` and `unmapped_source: {}`.
-
-### Consumers whose meaning changes (all re-pinned here, deliberately)
-
-- `bin/fleet-check`, the **cached-record** reader (`~:284`): the PASS line's coverage note now says
-  `" (N unplaced by the reporter, not named by the gate)"` when any entry is inference. In the RECORD the
-  field is nested (`.coverage.unmapped_source`, per fleet-265v); the existing `Coverage warning: <files>
-  unmapped` text is unchanged, so 14n's assertion still holds.
-- `bin/fleet-check`, the **fresh-object** reader (`~:535`): the same note, byte-identical wording, reading the
-  top-level field (`fleet-265v` keeps one string across two paths). `COVERAGE WARNING: N unmapped` is
-  unchanged, so 14k's assertion still holds.
-- **The rule and the reader are pinned by tests in the same patch**: `tests/check-coverage.test.sh` gains
-  section 8 (both directions plus the UNKNOWN-clears-the-map invariant); `tests/fleet-gate-check.test.sh` gains
-  14q2 (the gate marker records evidence), 14s (an unplaced path is still published and still fails loud),
-  14t (it is recorded as inference) and 14u (the reader's cached output says so); `tests/project-template.test.sh`
-  gains D17b, asserted as the invariant *the map covers exactly the published list* rather than as a value,
-  because whether that fixture's orphan is gate-marked or reporter-inferred depends on the template's arms -
-  while "the map describes the list and nothing else" must hold either way.
-
-### Verification performed here, and what the hub must run
-
-Run: `patch -p1 --fuzz=0 --dry-run` over all five files, no fuzz (rule 256). `python3 -m py_compile` on the
-reporter and `bash -n` on the other four. `tests/check-coverage.test.sh` **executed against the patched
-reporter**: 22 passed / 0 failed with the ORIGINAL file (no regression) and 26 passed / 0 failed with the
-patched file, the four extra being section 8. The patched reader expression was executed against records in
-both directions, and the substrings 14n and 14k assert were confirmed intact.
-
-Not run here, and they are the hub's to run on install: the new cases in `tests/fleet-gate-check.test.sh`
-(14q2/14s/14t/14u) and D17b, because they need the hub's own test harness and a project fixture. Everything
-they assert was measured against the patched tool by hand, so a failure there means an environment
-difference, not an unmeasured claim.
-
-### Ordering
-
-Apply **after** `agents-0xm2`'s oracle-candidate patch and **after** `agents-a3p9`'s fix, both of which
-rewrite nearby lines in the same reporter. This patch's hunks are in the unmapped assembly, the result
-object, the two readers and the tests, so it does not restate their work - only the sequencing matters.
-
-### The alternative, for the hub's ratification
-
-Coord is sending a distinct-`UNKNOWN`-for-placement-failure variant to the hub in parallel. If the hub prefers
-that, only the spelling changes: the reporter's state machine gains a value, and the two readers and the tests
-above must be re-decided for it. The reproduction above is the evidence either way.
-
-### Strict preimages
-
-SHA256 of the hub files this patch was cut against, so a reviewer can confirm the base rather than trust it:
-
-```
-remote/check-coverage.py           295a1ce47c4ff942
-bin/fleet-check                    455e3b05d2dc172c
-tests/check-coverage.test.sh       99406d19cf19f5b5
-tests/fleet-gate-check.test.sh     f3919068e04d9127
-tests/project-template.test.sh     0c82517f50aaa7fc
-```
+| `remote/check-coverage.py` | `295a1ce47c4ff942` | 33195 |
+| `bin/fleet-check` | `455e3b05d2dc172c` | 30765 |
+| `tests/check-coverage.test.sh` | `99406d19cf19f5b5` | 11574 |
+| `tests/fleet-gate-check.test.sh` | `f3919068e04d9127` | 181092 |
+| `tests/project-template.test.sh` | `0c82517f50aaa7fc` | 47800 |
