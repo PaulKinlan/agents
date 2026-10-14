@@ -1535,7 +1535,7 @@ class TestArmSourceSignal(unittest.TestCase):
     """fleet-6sgf: the gate reports which arm source it used, in the one machine-readable form a receipt can
     carry, so fleet-check can stop claiming the same thing about untracked files in both states.
 
-    WHY THIS EXISTS: agents-6sgf found the deployed check tool setting a STATIC .witnessed with every terminal state.
+    WHY THIS EXISTS: an earlier gate investigation found the deployed check tool setting a STATIC .witnessed with every terminal state.
     In the filesystem fallback every *.sh in the registry is sourced, so UNTRACKED arm files are read - and a
     receipt said "NOT witnessed: untracked files" anyway. The consumer half cannot tell the states apart from
     a log, so the producer half names the state here. Two properties matter beyond the happy path, and both are
