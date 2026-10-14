@@ -29,6 +29,23 @@
 #                                        broke working gates (`./` miss, then an output redirection, `deno
 #                                        test` and `timeout -k 30 60s` all falsely refused), because each was
 #                                        a narrower parse of a shell command line.
+#         tools/check-cmd.sh [CHECK_CMD|CHECK_FAST_CMD]  also WARNS when the command ends with a tail that
+#                                        DISCARDS the failure of what precedes it - || true, ; true, || :,
+#                                        || /bin/true, || exit 0, ; exit 0, ; echo ... - because such a gate can
+#                                        be recorded PASS with NOTHING left for a runner to observe (agents-xxgk;
+#                                        measured: a config naming a script that does not exist recorded PASS
+#                                        rc=0 with no note). The warning goes to STDERR beside the value, refuses
+#                                        nothing, changes no value and exits 0: it is a reader's notice, not a
+#                                        verdict. The rule is the repo's own - tools/fast-gate.sh records that its
+#                                        `git diff ... || true` "was the hole" and cites the agents-c1z0 review for
+#                                        the same error-masking shape at the point of use.
+#
+# THE BOUND OF THAT WARNING, stated rather than implied: it is TEXTUAL and matches KNOWN tails at the END of the
+# command, so a command that swallows its failure another way - a wrapper that exits 0, a swallow hidden inside a
+# quoted subcommand - stays invisible, and a command that swallows AND prints output can still be recorded PASS
+# with no diagnostic, because by then there is no exit status left to observe. It cannot make a broken config
+# fail, and it must not: refusing here would turn a broken config into an un-runnable gate, which is the trap the
+# agents-0r1c ruling deliberately kept open around --install.
 #
 # IT FAILS LOUD. This file is sourced, so a syntax error in either config is fatal under
 # `set -e`, and a missing CHECK_CMD is an error rather than an empty string. A gate that
@@ -145,6 +162,51 @@ field_in() {
   local want="$1" f
   for f in $2; do [ "$f" = "$want" ] && return 0; done
   return 1
+}
+
+# agents-xxgk: A GATE COMMAND THAT DISCARDS ITS OWN FAILURE IS A CONFIG DEFECT, AND IT IS VISIBLE IN THE TEXT.
+# Found while answering coord's challenge to the post-hoc diagnostic shape: CHECK_CMD="echo gate-started; bash
+# tools/fast-gate.sh || true" is recorded PASS rc=0 with NO note even when the script does not exist, because
+# there is no failure left for a runner to observe. The silent-only variant (2>/dev/null || true) is already
+# caught - fleet-opl3 turns a PASS with nothing after the marker into UNKNOWN - so the residual needs swallowing
+# AND output. THIS IS A TEXTUAL STATEMENT ABOUT THE COMMAND, NOT A CLAIM ABOUT WHAT CAN RUN: it says the command
+# discards the failure of what precedes it, which is checkable by reading it. That distinction is what keeps it
+# out of the parser class that four review rounds killed (a parse that guesses which token is a path is a
+# prediction, and a false refusal breaks a WORKING gate).
+#
+# The repo already holds this rule at the point of use, which is why this is a rule and not a preference:
+# tools/fast-gate.sh records that its own `GIT_CHANGED:-$(git diff ... || true)` "was the hole" because a failed
+# diff prints a plausible empty list and succeeds, and the agents-c1z0 review note in that file says of a second
+# site "NO || true HERE EITHER ... this is the same error-masking shape". This is that defect one level up: in the
+# CONFIG that names the gate command.
+#
+# Nothing here refuses anything - the flag is information, and a verdict is never changed by it. Refusing would
+# turn a broken config into an un-runnable gate, which is the trap agents-0r1c deliberately kept open.
+# Prints the swallowing TAIL, or nothing.
+swallowing_tail() {
+  local cmd="${1:-}" tail first rest
+  [ -n "$cmd" ] || return 0
+  cmd="${cmd%"${cmd##*[![:space:]]}"}"        # trailing whitespace would hide the tail
+  tail="$cmd"
+  case "$tail" in *'|| '*) tail="${tail##*|| }" ;; esac     # ## is greedy: the LAST separator wins
+  case "$tail" in *'; '*)  rest="${tail##*; }"; [ -n "$rest" ] && tail="$rest" ;; esac
+  first="${tail%% *}"; rest="${tail#"$first"}"; rest="${rest# }"
+  case "$first" in
+    true|:|/bin/true) printf '%s' "$tail" ;;                       # discards the status, says nothing
+    exit)            [ "${rest% }" = "0" ] && printf '%s' "$tail" ;;  # exit 0 discards it explicitly
+    echo|printf)     printf '%s' "$tail" ;;                        # prints a plausible line AND succeeds
+  esac
+}
+
+# Says it once, on stderr, next to the command it is about - values stay on stdout so a caller that reads the
+# value gets the value and nothing else.
+warn_swallowing() {
+  local field="$1" cmd="${2:-}" tail
+  tail="$(swallowing_tail "$cmd")" || return 0
+  [ -n "$tail" ] || return 0
+  echo "check-cmd: WARNING (agents-xxgk): $field ends with '$tail', which DISCARDS the failure of what precedes it." >&2
+  echo "check-cmd:   A gate that swallows its own failure can be recorded PASS with nothing left to observe - see the agents-c1z0 note in tools/fast-gate.sh for the same shape at the point of use." >&2
+  echo "check-cmd:   This is information, not a verdict: nothing is refused here, and the reported value above is unchanged." >&2
 }
 
 # THE POST-FAILURE DIAGNOSTIC. $1 = the exit code the runner OBSERVED, $2 = the field (default CHECK_CMD).
@@ -456,11 +518,15 @@ want="${1:-}"
 case "$want" in
   "")
         # The whole set. Reported, not vetted: a command that cannot run here is still REPORTED, and the
-        # runner that observes its 127 is the thing that explains it (explain_failure).
+        # runner that observes its 127 is the thing that explains it (explain_failure). agents-xxgk adds the
+        # swallowing notice beside it, on stderr, so this stays a report - the four values above are unchanged.
         printf 'CHECK_CMD=%s\nCHECK_FAST_CMD=%s\nCHECK_TIMEOUT=%s\nCHECK_FAST_TIMEOUT=%s\n' \
-        "${CHECK_CMD}" "${CHECK_FAST_CMD:-}" "${CHECK_TIMEOUT:-}" "${CHECK_FAST_TIMEOUT:-}" ;;
+        "${CHECK_CMD}" "${CHECK_FAST_CMD:-}" "${CHECK_TIMEOUT:-}" "${CHECK_FAST_TIMEOUT:-}"
+        warn_swallowing CHECK_CMD "$CHECK_CMD"
+        warn_swallowing CHECK_FAST_CMD "${CHECK_FAST_CMD:-}" ;;
   CHECK_CMD|CHECK_FAST_CMD)
-        printf '%s\n' "${!want}" ;;
+        printf '%s\n' "${!want}"
+        warn_swallowing "$want" "${!want}" ;;
   CHECK_TIMEOUT|CHECK_FAST_TIMEOUT)
         printf '%s\n' "${!want}" ;;
   --explain-failure)
