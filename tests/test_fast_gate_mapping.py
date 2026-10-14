@@ -515,6 +515,58 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertIn("tests/test_sandbox.py", mapped, f"{path} must map to test_sandbox.py")
                 self.assertIn("tests/test_tool_pins.py", mapped, f"{path} must map to test_tool_pins.py")
 
+    def test_package_init_arm_covers_the_consumer_the_oracle_reported_omitted(self):
+        """agents-96um: the sibling of the lib/containment.py pin above, for the other refactored shared
+        helper. `tests/__init__.py` exports `tracked_test_paths`, and its 030 arm ran three consumers
+        (test_hermetic_env, test_sandbox, test_tool_pins) while the fourth, tests/test_containment_shape.py,
+        was never named - so a change to the helper could break its second consumer and the gate stayed
+        GREEN, because the coverage contract REPORTS rather than FAILS.
+
+        FOUND IN THE WILD, not hypothesised: a real gate run reported coverage=PARTIAL with
+        unmapped=[tests/__init__.py] and omitted=[tests/test_containment_shape.py] WHILE THE ARM ITSELF HAD
+        FIRED - an arm with an incomplete list, not a dead arm. The discriminator was measured on that log
+        rather than argued: adding the missing suite to the executed line and re-running the extractor
+        gives coverage=KNOWN with both fields empty, which proves the reader credits a mapped path once
+        its consumers have run, so the defect is in what the gate RAN and the one-line arm edit is the
+        whole fix. That is why this pin asks the ORACLE what the consumers are instead of defining a
+        second notion that could disagree with the gate; the ast scan is the labelled fallback.
+        """
+        selected = resolve_fast_gate(["tests/__init__.py"])
+        coverage = oracle_coverage_for(["tests/__init__.py"], selected)
+        if coverage is not None:
+            omitted = sorted(coverage.get("omitted", []))
+            self.assertIn("tests/test_containment_shape.py", selected, (
+                "the tests/__init__.py arm (tools/fast-gate-arms.d/030-tests_init_py.sh) does not run "
+                "tests/test_containment_shape.py, a consumer of the shared helper it maps. FIX: add it to "
+                "that arm's mapped= list beside tests/test_hermetic_env.py; it costs 3 tests / 0.07s, "
+                "which is the whole price of the fragment. This pin exists because the coverage contract "
+                "REPORTS rather than FAILS: the run exits 0 whether that consumer ran or not."))
+            self.assertNotIn("tests/test_containment_shape.py", omitted, (
+                "the fleet coverage oracle still reports tests/test_containment_shape.py as an OMITTED "
+                "consumer of tests/__init__.py (agents-96um) - the changed file is mapped, so an entry in "
+                f"`omitted` means the arm ran without it. Per the oracle: {omitted}"))
+            # Deliberately NOT asserted here: the oracle also names test_ci_action, test_containment_adapters,
+            # test_coverage_contract and test_direct_run_completeness for this path, which the real gate run
+            # did not report because other changed paths selected them. Widening this arm to all five is a
+            # different change from this bead (which names one consumer) and is recorded on agents-96um.
+            return
+        importers = suites_importing("tests")
+        # ONE vacuity guard for the FALLBACK, and it is the only one that is TRUE: it pins the scanner's
+        # reach rather than a count, because a scan that saw nothing would "pass" this pin by finding
+        # nothing. The arm's OTHER suites deliberately get no guard here - measured, tests/test_hermetic_env.py
+        # does not import `tests` at all (os, subprocess, sys, tempfile, unittest, pathlib, lib.tool_pins),
+        # so asserting it would fail on every runner without the fleet coverage oracle, for a reason that
+        # has nothing to do with any lane's change. That was a review finding on this test (agents-96um).
+        self.assertIn("tests/test_containment_shape.py", importers,
+                      "the import scan must see `from tests import tracked_test_paths`, which is how the "
+                      "consumer agents-96um found omitted reaches the helper")
+        missing = sorted(importers - set(selected))
+        self.assertNotIn("tests/test_containment_shape.py", missing, (
+            "the tests/__init__.py arm (030-tests_init_py.sh) does not run tests/test_containment_shape.py, "
+            "a consumer of the shared helper it maps. Missing (per the ast import scan, the fleet coverage "
+            f"oracle is not installed here): {missing}. FIX: add it to the arm's mapped= list beside "
+            "tests/test_hermetic_env.py."))
+
     def test_candidate_identity_maps_to_prepass_emission(self):
         """lib/candidate_identity.py must run property tests and prepass emission assertions."""
         mapped = resolve_fast_gate(["lib/candidate_identity.py"])
