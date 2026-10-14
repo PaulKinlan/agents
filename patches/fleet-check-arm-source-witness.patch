@@ -1,0 +1,41 @@
+diff --git a/bin/fleet-check b/bin/fleet-check
+index 6c72b58..4ffb298 100755
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -583,7 +583,24 @@ $last_tail"
+   # not yet published, and report a failure about the machine's speed rather than about the tree. A record must
+   # not be readable in a terminal state that does not yet describe the run it names. .done stays after the POST
+   # because .done is the NOTIFICATION marker (fleet-wq10, fleet-nrrt) while .witnessed describes the RUN.
++  # fleet-6sgf: .witnessed must be a claim THIS RUN can support, and the two arm-registry states mean
++  # different things for untracked files. Read from the INDEX, only tracked content was read. From the
++  # FILESYSTEM fallback, every *.sh in the registry is sourced, so untracked arm files WERE read - and
++  # bin/fleet-check cannot tell those apart from a log, which is why the gate reports the state it took into
++  # $FLEET_GATE_SIGNAL_FILE (tools/fast-gate.sh writes it; the spelling is fleet-gate-signal/1). The ABSENCE
++  # or unreadability of that signal is reported as NO CLAIM - never a silent "witnessed", and never a claim
++  # that untracked files were NOT read either, which the record cannot know (fleet-6sgf, coord condition 2).
++  # kind=full is deliberately untouched: the arm registry does not arise in a full-gate command.
+   local witnessed="commit tree; tracked file content; and tracked files' identity INCLUDING SYMLINK TARGETS (size + nsec ctime). NOT witnessed: untracked files, or anything the gate's own command touches outside the repository."
++  if [ -n "${FAST:-}" ]; then
++    local arms_source="" arms_reason=""
++    IFS=$'\t' read -r arms_source arms_reason < <(jq -r 'if (.schema=="fleet-gate-signal/1") then [(.arms_source//""),(.arms_reason//"")]|@tsv else "\t" end' "${rec%.json}.signal.json" 2>/dev/null)
++    case "${arms_source:-}" in
++      index) : ;;   # every clause of the default sentence is true in this state
++      fallback) witnessed="commit tree; tracked file content; and tracked files' identity INCLUDING SYMLINK TARGETS (size + nsec ctime). BUT the fast gate's arm registry took the FILESYSTEM FALLBACK (${arms_reason:-reason not given}), so every *.sh in that registry WAS READ FROM DISK AND SOURCED: UNTRACKED ARM FILES WERE WITNESSED in this run, unlike a run that read its arms from the index." ;;
++      *) witnessed="NOT RECORDED: the fast gate's arm-source signal could not be read for this run, so this record makes NO CLAIM about untracked files - neither that they were witnessed nor that they were not (fleet-6sgf)." ;;
++    esac
++  fi
+   # Persist final verdict state BEFORE POST so any lane woken immediately sees the final verdict, not RUNNING (fleet-5bzu review P1)
+   if [ "$cov_ok" = 1 ]; then
+     jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson rc "$rc" --argjson s "$secs" --slurpfile cov "$cov_out" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
+@@ -760,6 +777,11 @@ trap - TERM
+ finish "$rc"
+ WORKER_EOF
+ 
++# fleet-6sgf: where the gate reports the arm source it used. Removed first, because a signal left over from an
++# earlier run on this same record must never be able to vouch for THIS one - absence has to mean no claim.
++export FLEET_GATE_SIGNAL_FILE="${rec%.json}.signal.json"
++rm -f "$FLEET_GATE_SIGNAL_FILE"
++
+ chmod +x "$worker_script"
+ setsid nohup bash "$worker_script" "$rec" "$log" "$top" "$CHECK_TIMEOUT" "$CHECK_CMD" "$tree" "$sha" "${FAST:-}" "$cov_script" "$worker_script" >/dev/null 2>&1 < /dev/null 9>&- &
+ worker_pid=$!
