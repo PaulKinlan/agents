@@ -50,7 +50,11 @@ hazards and only one of them is a bug in the tool:
    without amending or pushing on a refusal; the merge step gets the same shape (and `git merge -F "$msg"`
    instead of reusing the file). The tool's own *printed* guidance for the no-cached-verdict case teaches the
    same block, because a printed instruction is a behaviour of the tool.
-4. **`tests/fleet-land-message.test.sh`: 10 new assertions**, including the one thing that was not covered -
+4. **`tests/fleet-land-message.test.sh`: 18 new assertions** (10 here in round 1, plus the 8 in Round 2
+   below, which the round-1 wording used to imply was the patch's total). The count is CHECKABLE rather
+   than asserted, because the harness prints a pass total and the artifacts only add assertions: 295 before
+   this patch, 305 after round 1, 313 after round 2, against 301/307 for the same harnesses on the
+   unpatched tool. It includes the one thing that was not covered -
    the SEQUENCE's durability - and a negative control that makes it a measurement:
 
    - `10d1`/`10d2`: the printed guidance does NOT teach the refusal-hiding process substitution, and DOES
