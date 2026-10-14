@@ -80,7 +80,14 @@ of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never d
 `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates
 you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that
 triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj; the shape is the one
-`agents/secret-scan/SKILL.md` uses for its test-fixture keys). Dismissals are evidence, not work: they are
+`agents/secret-scan/SKILL.md` uses for its test-fixture keys).
+
+**Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the
+`candidate_id`, copied verbatim from the pre-pass candidate it answers. The factory compares the ids your report
+cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented
+rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting
+rows and is reported as count-only.
+ Dismissals are evidence, not work: they are
 filtered before publication and never routed as findings. An excluded candidate must not be routed as a vulnerability: the dismissal flag is what keeps it evidence
 
 

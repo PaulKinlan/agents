@@ -43,6 +43,13 @@ fast_gate_arms_050_lib_sinks_py() {
       # The lock is only observable from OUTSIDE a single process, so this suite is the only one
       # that can see a regression to the unbounded wait (agents-4sij).
       mapped="$mapped tests/test_store_lock_timeout.py"
+      # agents-w9ni: tests/test_station_candidate_accounting.py now IMPORTS this module - candidate_coverage,
+      # read_presented_candidate_ids and write_line_report - to pin the identity-vs-count bound and to pin
+      # that count-only is MARKED wherever the count is shown. An imported consumer the arm does not select
+      # is a suite CI would skip the moment this module changes, which is exactly the omission the coverage
+      # oracle reports. Its embargo-side claim (the dismissal vocabulary) stays mapped in
+      # 140-lib_budget_py.sh, where agents-f8dj put it; one suite can belong to two arms.
+      mapped="$mapped tests/test_station_candidate_accounting.py"
       ;;
     lib/candidate_identity.py)
       # Candidate identity generator (agents-rdyb) and pre-pass emission assertion (agents-vt7w).

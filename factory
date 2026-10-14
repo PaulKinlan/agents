@@ -36,7 +36,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count, station_is_incomplete,
+                             candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                             station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
@@ -65,7 +66,8 @@ except ImportError:
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count, station_is_incomplete,
+                             candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                             station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
@@ -2474,8 +2476,13 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
             reported = [f for f in report.get("findings", []) if isinstance(f, dict)]
             findings = [f for f in reported if not is_false_positive(f)]
             criticals = count_criticals(findings)
-            coverage = candidate_coverage(read_candidate_count(res.get("run_dir") if res else None),
-                                          len(reported))
+            run_dir = res.get("run_dir") if res else None
+            # Identity when the pre-pass supplies it, count when it does not - and the station records WHICH
+            # of the two it was, because a count-only check that reads like an identity check is the blind
+            # spot agents-w9ni measured: five invented rows with no candidate_id read as "accounted 5 of 5".
+            coverage = candidate_coverage(read_candidate_count(run_dir), len(reported),
+                                          presented_ids=read_presented_candidate_ids(run_dir),
+                                          cited_ids=[f.get("candidate_id") for f in reported])
 
             # Outcome and validity are two facts (agents-xx9t). The alarm still wins the status, but a run
             # that cannot show it triaged what it was given never reads as PASS: it is INCOMPLETE, which is
@@ -2494,6 +2501,7 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                 "candidates_in": coverage["candidates_in"],
                 "candidates_presented": coverage["candidates_presented"],
                 "candidates_accounted": coverage["candidates_accounted"],
+                "candidate_identity": coverage["identity"],
                 "complete": coverage["complete"],
                 "note": coverage["reason"],
                 "fragment": res.get("fragment") if res else None,
@@ -2608,7 +2616,8 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         if partial:
             print(f"🚧 {len(partial)} station(s) did not account for the candidates they were shown: "
                   + ", ".join(f"'{sc['station']}' ({sc.get('candidates_accounted')} of "
-                              f"{sc.get('candidates_presented')})" for sc in partial)
+                              f"{sc.get('candidates_presented')}, "
+                              f"{sc.get('candidate_identity') or 'count-only'})" for sc in partial)
                   + ". A partial triage is not a clean result.\n")
         timeouts = [sc for sc in scorecard if sc["status"] == "TIMEOUT"]
         if timeouts:
