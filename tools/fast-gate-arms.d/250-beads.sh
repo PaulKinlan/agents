@@ -5,10 +5,11 @@
 fast_gate_arms_250_beads() {
   case "$1" in
     .beads/hooks/*)
-      # agents-kxbv: a git hook is CODE that runs on every commit in this repo, so unlike the rest of
-      # .beads/ it is not "the scanner never sees it" material - it has a suite that fails on its
-      # content (the fail-open policy and the bound). This arm must sit BEFORE the `.beads/*` ignore
-      # below, because PRECEDENCE IS FIRST MATCH WINS.
+      # agents-kxbv/3ryx: hook code is not inert scanner metadata. The selected suite executes the
+      # pre-commit fail-open contract AND checks the tracked executable hook NAME inventory, failing on
+      # a newly tracked hook before that path can inherit a green receipt. It does not execute a new
+      # hook or validate the contents of the other four existing hooks. A DRY RUN only selects the suite,
+      # not its coverage. This arm sits BEFORE the named .beads/ ignore: first match wins.
       mapped="$mapped tests/test_beads_hook_fail_open.py"
       ;;
     # --- Ignore list (agents-9nir) -----------------------------------------------------
@@ -42,11 +43,14 @@ fast_gate_arms_250_beads() {
       # it holds five executable git hooks (.beads/hooks/*), so the glob was a permanent exemption for
       # exactly the class of file the unmatched-path protection exists to catch. Reproduced with the glob:
       # FAST_GATE_DRY_RUN=1 GIT_CHANGED=.beads/unexpected.sh bash tools/fast-gate.sh -> rc 0 and an empty
-      # suite list. The exemption is now the ten TRACKED paths, listed from
-      # `git ls-tree -r --name-only origin/main .beads/`, so a new file in that directory resolves to
-      # nothing and the gate refuses loudly and names it. A new tracked file under .beads/ must be added
-      # here deliberately, with its own recorded search - and tests/test_fast_gate_mapping.py asserts both
-      # halves of that (every tracked path exempt, every other path in the directory refused by name).
+      # suite list. This ignore arm names the ten TRACKED paths listed from
+      # `git ls-tree -r --name-only origin/main .beads/`, but `.beads/hooks/*` matches the EARLIER
+      # hook mapping arm, even for a new hook. That arm selects the hook suite; selection does NOT prove
+      # content coverage. When run, the suite's tracked-index inventory guard FAILS on a new tracked
+      # hook name (agents-3ryx); FAST_GATE_DRY_RUN never runs the guard. A new NON-HOOK path in .beads/
+      # with no mapping instead refuses loudly and names itself. Adding a named exemption requires a
+      # deliberate search. tests/test_fast_gate_mapping.py pins selection, exemption and unmatched
+      # outcomes, not the content behaviour of the selected suite.
       ;;
     # --- Ignored agent configuration (agents-l80j) --------------------------------------
     # Six paths that no arm claimed, so a lane editing one of them could not get a green fast gate
