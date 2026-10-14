@@ -13,8 +13,8 @@ plus a deletion-inventory row; agents-5jjf needed an arm for `lib/sinks/github.p
 test file importing `lib/embargo.py` needed the embargo arm. The guard that catches it is doing its job
 correctly - the cost is the TIMING of the paperwork, which lands on the author at the worst moment.
 
-ARTIFACT: `fleet-implementer-new-file-consumers.patch`, 1265 bytes, 1 hunk, file-section:
-`roles/implementer.md`. sha256 `ff1cc4e589ad786cfced11f3f5f209a46bd01645f8c5c67daaf5948da66d6695`.
+ARTIFACT: `fleet-implementer-new-file-consumers.patch`, 1610 bytes, 1 hunk, file-section:
+`roles/implementer.md`. sha256 `d2fa5edd827b0606406a7b09699859f07028924d39086f11c24598b11985eab5`.
 
 EXPECTED BASE: `roles/implementer.md` sha256
 `8c08378ae39bad82f4c4b351f201fb0fe0293107a0fa50b8213d6f9eefefb4f6`, 3515 bytes - it applies to the
@@ -22,9 +22,19 @@ step 3 paragraph beginning "Before handing off: rebase on the latest main ...".
 
 DESTINATION SHAPE: measured present. `~/fleet/roles/implementer.md` (the deployed synced copy) and
 `~/fleet-copy/roles/implementer.md` (the git clone) both carry that exact base sha as of 2026-10-14, and
-applying the patch yields `e0256ba55a38fd6367a14c853e9b6f1215314a700e6e51a9357dccb6a0cd28f9`, 4150 bytes
-(+635). Verified with `patch -p1` in a scratch copy: dry run clean, real run clean, and the inserted
-sentence is present exactly once.
+applying the patch yields `2fa48684ad855cdfa4d61683e250d7adce2fd2e5683c7eaa799835873460f333`, 4150 bytes
+(+635).
+
+THIS PATCH DELETES NOTHING - that is its shape, and it is checked rather than asserted: the artifact
+contains ZERO lines beginning with `-` (the only `-` line is the `---` file header), its single hunk is
+anchored in the Loop section (`@@ -11,6 +11,12 @@`) rather than at the top of the file, and applying it
+to the deployed base produces a file BYTE-IDENTICAL to the reference built by inserting those six lines
+after step 3. The check exists because this artifact was first cut WRONG: an edit that rebuilt the file as
+`new_text + tail` instead of substituting in place produced a patch that deleted the role header and
+spliced a fragment of it - a reviewer caught it (agents-e1jz), and the weaker check that missed it was
+"the inserted sentence is present and the byte count matches", which is satisfied by a corrupted document
+too. For an insertion, the byte count matching is NOT evidence; deleting nothing and matching a reference
+byte for byte is.
 
 PREREQUISITES: none. Checked for collisions BY PATH before cutting, per the fleet rule that a name is an
 identifier a second deliverer can collide with: no artifact in `patches/` has `roles/implementer.md` as
