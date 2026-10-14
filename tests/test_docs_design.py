@@ -46,6 +46,38 @@ def parse(path):
     return parser
 
 
+def code_vertical_align_rules(css):
+    """Find declarations on pre's code descendants, including rules nested in at-rules.
+
+    This is a narrow structural guard, not a general CSS cascade implementation: a
+    competing declaration must be reviewed with the browser layout before acceptance.
+    """
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    stack = []
+    rules = []
+    cursor = 0
+    for brace in re.finditer(r"[{}]", css):
+        if brace.group() == "{":
+            stack.append((css[cursor:brace.start()].strip(), brace.end()))
+        else:
+            if not stack:
+                raise ValueError("unbalanced CSS closing brace")
+            selector, start = stack.pop()
+            body = css[start:brace.start()]
+            # A leaf is a style rule; an enclosing @layer/@media/@supports body
+            # contains nested braces and is not a declaration block itself.
+            if "{" not in body and re.search(r"(?<![\w-])pre(?:\s*>\s*|\s+)code\b", selector):
+                contexts = tuple(name for name, _ in stack if name.startswith("@"))
+                for declaration in body.split(";"):
+                    property_name, separator, value = declaration.partition(":")
+                    if separator and property_name.strip().lower() == "vertical-align":
+                        rules.append((selector, value.strip(), contexts))
+        cursor = brace.end()
+    if stack:
+        raise ValueError("unbalanced CSS opening brace")
+    return rules
+
+
 class DocsDesignTest(unittest.TestCase):
     def test_pages_have_landmarks_and_working_local_links(self):
         for filename in PAGES:
@@ -95,6 +127,28 @@ class DocsDesignTest(unittest.TestCase):
                          "the historical cause was not established by the browser measurement")
         self.assertNotIn("a scroller cannot query its own scroll state", css,
                          "the scroller's pseudo-elements can match even though the element itself cannot")
+
+    def assert_code_scroll_alignment(self, css):
+        # A later unlayered or more-specific rule can beat the inline-grid rule
+        # while the old substring assertion still passes. Pin the ONE declaration
+        # and its wide-screen feature context; a new competing rule needs review.
+        self.assertEqual(code_vertical_align_rules(css), [
+            ("pre > code", "top", ("@layer components", "@supports (container-type: scroll-state)",
+                                   "@media (min-width: 48.001rem)")),
+        ], "competing vertical-align declaration affecting pre code")
+
+    def test_code_scroll_alignment_has_no_competing_declaration(self):
+        css = (DOCS / "css" / "factory.css").read_text(encoding="utf-8")
+        self.assert_code_scroll_alignment(css)
+
+    def test_code_scroll_alignment_guard_rejects_higher_priority_mutant(self):
+        css = (DOCS / "css" / "factory.css").read_text(encoding="utf-8")
+        # Unlayered and later: this beats the @layer components declaration at
+        # 900px and recreates the measured 6.0625px descender gap.
+        mutant = css + "\n@media (min-width: 48.001rem) { html pre > code { vertical-align: baseline; } }\n"
+        self.assertIn("pre > code { display: inline-grid; vertical-align: top;", mutant)
+        with self.assertRaisesRegex(AssertionError, "competing vertical-align declaration affecting pre code"):
+            self.assert_code_scroll_alignment(mutant)
 
     def test_pages_have_valid_speculation_rules(self):
         """All public documentation pages must carry moderate-eagerness speculation rules (agents-74qx et al)."""
