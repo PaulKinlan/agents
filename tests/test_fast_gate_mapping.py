@@ -477,6 +477,33 @@ class TestFastGateMapping(unittest.TestCase):
                       "(agents-oj5s)")
         self._assert_arm_covers(sorted(importers - set(selected)),
                                "the ast import scan (the fleet coverage oracle is not installed here)")
+    def test_two_unplaceable_paths_reach_the_two_or_more_entries_branch(self):
+        """agents-3gk3: the assertion above runs its `sorted()` over `unmapped` ONLY when the oracle reports
+        entries, and the containment fixture reports NONE - so the shape that `sorted()` over dicts raises on
+        was protected by nothing but the tolerant expression itself, and a regression there would have gone
+        green here. This drives it in-tree: two changed paths that no executed suite can place.
+
+        It is asserted as a PROPERTY rather than a value, because the record's element type depends on which
+        reporter is installed - the tolerant lookup in the sibling assertion is what makes both readable.
+        """
+        changed = ["tools/unplaceable-one.sh", "tools/unplaceable-two.sh"]
+        coverage = oracle_coverage_for(changed, ["tests/test_ops_contract.py"])
+        if coverage is None:
+            self.skipTest("fleet check-coverage.py not available in environment")
+        entries = coverage.get("unmapped", [])
+        # TWO OR MORE is the point: sorted() over a SINGLE dict never compares, so one entry does not reach
+        # the branch. This length is what makes the sibling assertion's sorted() meaningful.
+        self.assertGreaterEqual(
+            len(entries), 2,
+            f"the containment-style fixture must produce two or more unmapped entries, not {entries!r}")
+        paths = sorted(e["path"] if isinstance(e, dict) else e for e in entries)
+        self.assertEqual(paths, sorted(changed),
+                         f"both unplaceable paths must be reported; got {entries!r}")
+        for entry in entries:
+            if isinstance(entry, dict):
+                self.assertTrue(entry.get("source"),
+                                f"an entry that carries provenance must say where it came from: {entry!r}")
+
 
     def test_hermetic_env_and_package_init_map_to_hermetic_suite(self):
         """tests/__init__.py and tests/hermetic_env.py must map to test_hermetic_env.py and pin suites."""
