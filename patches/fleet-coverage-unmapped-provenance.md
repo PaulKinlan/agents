@@ -88,8 +88,8 @@ cut, so the reviewer can confirm the base rather than trust it:
 
 | file | SHA256 (first 16) | bytes |
 |---|---|---|
-| `remote/check-coverage.py` | `295a1ce47c4ff942` | 33195 |
-| `bin/fleet-check` | `455e3b05d2dc172c` | 30765 |
-| `tests/check-coverage.test.sh` | `99406d19cf19f5b5` | 11574 |
+| `remote/check-coverage.py` | `295a1ce47c4ff942` | 41946 |
+| `bin/fleet-check` | `455e3b05d2dc172c` | 51977 |
+| `tests/check-coverage.test.sh` | `99406d19cf19f5b5` | 15994 |
 | `tests/fleet-gate-check.test.sh` | `f3919068e04d9127` | 181092 |
-| `tests/project-template.test.sh` | `0c82517f50aaa7fc` | 47800 |
+| `tests/project-template.test.sh` | `0c82517f50aaa7fc` | 29804 |
