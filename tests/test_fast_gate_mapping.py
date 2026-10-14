@@ -1685,5 +1685,81 @@ class TestTheArmRegistryReaderIgnoresUntrackedFragments(unittest.TestCase):
             )
 
 
+class TestIgnoredArmFragmentsAreAnnouncedOnTheUnmappedFailure(unittest.TestCase):
+    """agents-kfe8 (found by agents-factory-rev-es0y while reviewing agents-es0y): when a changed file maps to
+    no arm and the gate refuses, the lane has usually just ADDED an arm fragment - so the exit that most needs
+    to say 'your fragment was not even read' was the one exit that did not.
+
+    The shape being pinned: FAST_GATE_IGNORED_ARMS is populated by the loader, so every exit AFTER the load
+    can name the fragments it declined to source. The unmapped failure is the case that matters, because it is
+    the exit a lane reads while debugging a new arm - and it is the last line, because a receipt shows a tail.
+
+    WHY THE PROBE IS A GIT-INITIALISED COPY AND NOT THE LIVE REGISTRY: an untracked fragment is only IGNORED
+    (and therefore only warned about) when the index is the witness. In a copy with no work tree the gate takes
+    the filesystem fallback and SOURCES the stray - a different case, and a different bead (agents-wzmj).
+    Writing into the live registry would make this test the hazard it exists to check for.
+    """
+
+    UNMAPPED = "zz-kfe8-unmapped-probe.py"
+    WARNING = "WARNING: ignoring UNTRACKED arm fragment"
+
+    def _gate_in_tracked_copy(self, stray: str | None) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tools").mkdir(parents=True)
+            shutil.copy2(ROOT / "tools" / "fast-gate.sh", root / "tools" / "fast-gate.sh")
+            shutil.copytree(ARMS_DIR, root / "tools" / "fast-gate-arms.d")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "tools"], check=True)
+            if stray is not None:
+                (root / "tools" / "fast-gate-arms.d" / "999-kfe8-probe.sh").write_text(stray, encoding="utf-8")
+            return subprocess.run(
+                ["bash", "tools/fast-gate.sh"], cwd=root, capture_output=True, text=True, timeout=120,
+                env={**os.environ, "GIT_CHANGED": self.UNMAPPED, "FAST_GATE_DRY_RUN": "1"},
+            )
+
+    def test_the_unmapped_failure_names_the_untracked_fragment_it_ignored(self):
+        stray = (
+            "# a fragment its author believes maps the path below\n"
+            "fast_gate_kfe8_probe() {\n"
+            "  case \"$1\" in\n"
+            f"    {self.UNMAPPED}) echo \"tests/test_tree_guards.py\" ;;\n"
+            "    *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn\n"
+            "  esac\n"
+            "  return 0\n"
+            "}\n"
+            "FAST_GATE_ARM_STAGES=\"$FAST_GATE_ARM_STAGES fast_gate_kfe8_probe\"\n"
+        )
+        refused = self._gate_in_tracked_copy(stray)
+        self.assertEqual(
+            refused.returncode, 1,
+            "the unmapped path must still be REFUSED (agents-9nir): naming the ignored fragment is an "
+            "explanation for the author, never an amnesty for the file",
+        )
+        lines = [ln for ln in refused.stderr.splitlines() if ln.strip()]
+        self.assertIn(
+            self.WARNING, refused.stderr,
+            "the unmapped failure must name the untracked fragment it declined to source: this is the exit a "
+            "lane reads immediately after adding an arm, so a silent skip here is the defect itself (agents-kfe8)",
+        )
+        self.assertIn("999-kfe8-probe.sh", refused.stderr, "and it must name the FILE, not merely that some stray exists")
+        # The run's final line is the gate's own abort notice (the EXIT trap), so 'last line of the run' is not
+        # the property a fix can hold. The property is: nothing DIAGNOSTIC follows it - the warning is the last
+        # thing a lane reads about its own change, immediately before the gate announces the exit.
+        diagnostic = [ln for ln in lines if not ln.startswith("fast-gate: aborted:")]
+        self.assertIn(
+            self.WARNING, diagnostic[-1],
+            "the warning must be the LAST diagnostic line, with only the gate's own abort notice after it: a "
+            "receipt shows a tail, and a lane debugging a new arm reads the end of the failure first",
+        )
+        clean = self._gate_in_tracked_copy(None)
+        self.assertEqual(clean.returncode, 1)
+        self.assertNotIn(
+            self.WARNING, clean.stderr,
+            "the pairing that stops the first assertion being a tautology: an unmapped failure with NOTHING "
+            "ignored must stay silent, because a warning that always fires is noise a lane learns to ignore",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -532,6 +532,15 @@ if [ -n "$unmatched" ]; then
     echo "fast-gate:   (A path MAY legally contain spaces, so this is named and never split.)" >&2
   fi
   echo "fast-gate: To fix, add an arm fragment under tools/fast-gate-arms.d/ - the registry tools/fast-gate.sh loads, whose README.md states the precedence and the guards - mapping the path to its test suite, or an ignore arm under '--- Ignore list (agents-9nir) ---' with documented search evidence (agents-9nir, agents-ows4, agents-dtj6)." >&2
+  # agents-kfe8 (found by agents-factory-rev-es0y while reviewing agents-es0y): the lane reading THIS failure
+  # has usually just ADDED an arm fragment, and an ignored UNTRACKED fragment is exactly why its arm did not
+  # take effect - so the explanation is named here, in the same run that tells them to add one. This is the
+  # last thing a reader sees about the change itself; the EXIT trap's abort notice follows it, which is why
+  # the warning belongs at the end of the diagnostic block rather than last-in-the-stream.
+  # Silent when nothing is ignored: FAST_GATE_IGNORED_ARMS is populated by the loader above (which reports
+  # untracked fragments rather than sourcing them, agents-es0y) and the reporter prints nothing for an empty
+  # list - so a clean tree's unmapped failure is byte-identical to before this line existed.
+  fast_gate_report_ignored_arms
   exit 1
 fi
 
