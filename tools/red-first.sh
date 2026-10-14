@@ -730,6 +730,9 @@ else
 fi
 
 echo "======================================================================"
-echo "red-first: VERDICT: PASS (all four teeth satisfied)"
+# The bound is repeated ON the verdict line, not only beside the evidence (agents-0kcp): the verdict line is
+# the single line most likely to be read, quoted and acted on, and a bound a reader can miss is the defect
+# wearing a label. Five disclosures beside the evidence do not help a reader who reads only this line.
+echo "red-first: VERDICT: PASS (all four teeth satisfied) [tooth 2 is path-origin evidence only]"
 echo "======================================================================"
 exit 0
