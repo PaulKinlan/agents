@@ -286,7 +286,7 @@
  [ "$FAIL" = 0 ]
 --- a/tests/fleet-gate-check.test.sh
 +++ b/tests/fleet-gate-check.test.sh
-@@ -784,6 +784,53 @@
+@@ -784,6 +784,56 @@
  wait_check "$app_rec"
  has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/vitest.test.ts" "14t vitest checkmark output captured in suites"
  has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/test_cls.py" "14u class-qualified pytest output captured in suites"
@@ -330,12 +330,15 @@
 +has "$pre_out" "UNRECORDED" "14v-rp a pre-fix record (plain strings) is read as UNRECORDED, not as absent"
 +has "$pre_out" "lib/pre-fix.py" "14w-rp ... and the path is still named, so the fail-loud half is unchanged"
 +
-+# agents-tpw5: keep the repo where the surrounding blocks expect it. This block COMMITS a file, which
++# agents-tpw5 / agents-7pba: keep the repo where the surrounding blocks expect it. This block COMMITS a file, which
 +# moves $COV_REPO s HEAD, and every record lookup in this suite is keyed on the TREE (app_rec is
-+# $HOME/.fleet/checks/$app_tree.fast.json, computed before that commit). A test block that commits in the
-+# fixture repo therefore re-keys every lookup keyed on the tree: without this restore, the blocks after it
-+# read a STALE record (14s2's hasnt saw tests/auth.test.ts from 14q/14r's own record and 14t/14u read a
-+# record the fake conf never wrote to), and the full-gate wait below blocks on the OLD tree s json forever.
++# $HOME/.fleet/checks/$app_tree.fast.json, computed before that commit) - so a test block that commits in the fixture
++# repo re-keys every lookup keyed on the tree. THE ORDER HERE IS LOAD-BEARING IN BOTH DIRECTIONS: this restore must
++# come AFTER the probe block s own reads above (14v-rp/14w-rp rewrite \$probe_rec and read it back through the
++# cached-PASS path, which resolves checks/<HEAD tree>.fast.json and serves it only while HEAD is still $probe_tree -
++# reset before them and fleet-check resolves $app_rec, hits a .cmd mismatch, re-runs, and neither UNRECORDED nor
++# lib/pre-fix.py appears), and BEFORE the next $app_rec reader (14s, which needs HEAD back at $app_tree: otherwise it
++# reads the stale 14q/14r record and its hasnt fails). Both directions were measured; see the write-up.
 +git -C "$COV_REPO" reset --hard -q "$pre_probe_sha"
  wait_curl "[check] FAST gate for"
  
