@@ -14,7 +14,6 @@ import importlib.util
 import json
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
-import shutil
 import socket
 import stat
 import subprocess
@@ -68,19 +67,27 @@ def manifest(**overrides):
 from tests import containment_harness as harness
 
 
-def _tracked_agent_yamls():
+def _tracked_agent_yamls(root: Path = ROOT, *, require_nonempty: bool = True):
+    """The tracked agent manifests under `root`, read from git's index rather than the filesystem.
+
+    `root` is a parameter for the same reason as its sibling in tests/test_report_schema.py (agents-fxg2):
+    a debris probe that writes directly under agents/ moves that directory's ctime, which the tracked
+    symlink `skills -> agents` turns into a witness change, and a gate running this suite then records
+    STALE for a tree nobody touched - while the assertion itself is unchanged, because a
+    filesystem-based implementation asked about the same root would still find the decoy.
+    """
     out = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "agents/*/agent.yaml"],
+        ["git", "-C", str(root), "ls-files", "agents/*/agent.yaml"],
         capture_output=True, text=True, check=True
     ).stdout.splitlines()
-    yamls = sorted(ROOT / p for p in out)
-    if not yamls:
+    yamls = sorted(root / p for p in out)
+    if require_nonempty and not yamls:
         raise RuntimeError("no tracked agent manifests found")
     return yamls
 
 
-def _tracked_agent_dirs():
-    return sorted(p.parent for p in _tracked_agent_yamls())
+def _tracked_agent_dirs(root: Path = ROOT, *, require_nonempty: bool = True):
+    return sorted(p.parent for p in _tracked_agent_yamls(root, require_nonempty=require_nonempty))
 
 
 class TestShippedManifests(unittest.TestCase):
@@ -89,18 +96,21 @@ class TestShippedManifests(unittest.TestCase):
 
         Untracked debris under agents/ must not be absorbed as shipped manifests.
         """
-        debris = ROOT / "agents" / "zz_debris_probe_tmp"
-        debris.mkdir(parents=True, exist_ok=True)
-        (debris / "agent.yaml").write_text("name: zz_debris\n", encoding="utf-8")
-        try:
-            agent_dirs = _tracked_agent_dirs()
+        # Same relocation as the sibling probe in tests/test_report_schema.py (agents-fxg2): the decoy
+        # lives in a temp directory at the repo root, never directly under the tracked agents/ directory.
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            probe = Path(tmp)
+            debris = probe / "agents" / "zz_debris_probe_tmp"
+            debris.mkdir(parents=True, exist_ok=True)
+            (debris / "agent.yaml").write_text("name: zz_debris\n", encoding="utf-8")
+            agent_dirs = _tracked_agent_dirs(probe, require_nonempty=False)
             self.assertNotIn(debris, agent_dirs)
-            self.assertIn(ROOT / "agents" / "pr-fixer", agent_dirs)
-            yamls = _tracked_agent_yamls()
+            self.assertEqual(agent_dirs, [], "the probe root has no tracked manifests; only the decoy is on disk")
+            yamls = _tracked_agent_yamls(probe, require_nonempty=False)
             self.assertNotIn(debris / "agent.yaml", yamls)
-            self.assertIn(ROOT / "agents" / "pr-fixer" / "agent.yaml", yamls)
-        finally:
-            shutil.rmtree(debris, ignore_errors=True)
+        # And the real checkout is still read correctly.
+        self.assertIn(ROOT / "agents" / "pr-fixer", _tracked_agent_dirs())
+        self.assertIn(ROOT / "agents" / "pr-fixer" / "agent.yaml", _tracked_agent_yamls())
 
     def test_every_shipped_agent_validates_and_gets_a_grantable_policy(self):
         agents = _tracked_agent_dirs()
