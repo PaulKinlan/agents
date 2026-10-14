@@ -1,0 +1,43 @@
+--- base	2026-10-13 02:01:03.822700762 +0000
++++ x	2026-10-13 02:41:47.888834865 +0000
+@@ -92,7 +92,27 @@
+   # A LIVE WRAPPER IS NEVER TOUCHED. fleet-heavy stays alive for the whole job (it waits on `nice` then exits),
+   # so a live recorded pid means the job is running - however slow - and a slow gate is what this queue exists
+   # to protect.
+-  [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null && return 1
++  # agents-5n28: A LIVE PID IS NOT THE SAME AS A LIVE WRAPPER. kill -0 tested the pid the label records,
++  # and $hp is a PID - so after the wrapper died and its pid was REUSED, kill -0 succeeded, this function
++  # concluded that an honest slow gate held the slot, and returned. Every waiter then politely declined,
++  # and the slot stayed held by orphans until somebody killed them by hand (measured on the hub: 6743s,
++  # released immediately once the husks were killed).
++  # THE DISCRIMINATOR IS ALREADY COMPUTED ABOVE: $holders is the set of processes actually holding the
++  # slot fd. A live wrapper is ALWAYS one of them - it takes the flock and holds it for the whole job.
++  # A reused pid holds nothing. So membership in $holders is the test, not liveness, and it is a field
++  # the kernel maintains rather than a heuristic.
++  if [ -n "$hp" ]; then
++    # agents-7saq: slot_fd_holders emits ONE PID PER LINE (printf '%s\n'), so a space-delimited
++    # match can only ever fire for a SOLE holder - every other pid sits between newlines and the
++    # pattern " $hp " never matches it. The reclaim then concludes the recorded wrapper is not a
++    # holder, falls through, and TERMs an honest gate that really does hold the slot, which is the
++    # worst direction this function can fail in. Exact-line boundaries, and no new subshell: a $( )
++    # here would inherit the slot fd and become a holder itself.
++    case "$holders" in
++      "$hp"|"$hp"$'\n'*|*$'\n'"$hp"|*$'\n'"$hp"$'\n'*) return 1 ;;   # a live WRAPPER: honest slow job
++    esac
++    echo "fleet-heavy: slot$i label names pid $hp, alive but holding no fd - not our wrapper (agents-5n28)" >&2
++  fi
+   # Two orphan signatures, both exact:
+   #   (a) the label names a pid that is GONE while the fd is still held - a killed wrapper and its descendants;
+   #   (b) there is NO label at all while the fd is held - the holder died before/without writing one (the
+@@ -108,7 +128,10 @@
+   done
+   [ "$oldest" -ge "${FLEET_HEAVY_ORPHAN_GRACE:-60}" ] || return 1
+   if [ -n "$hp" ]; then
+-    echo "fleet-heavy: reclaiming slot$i - holder $hp is GONE but $(printf '%s\n' "$holders" | wc -l | tr -d ' ') process(es) have held it ${oldest}s: $(printf '%s ' $holders)" >&2
++    # agents-a9t9: "GONE" was only ever true of one of the two ways this line is reached. With the
++    # membership test above, it is also reached when the recorded pid is ALIVE but holds no slot fd -
++    # the pid-reuse case - so the message told the reader something false about a live process.
++    echo "fleet-heavy: reclaiming slot$i - holder $hp does not hold the slot (gone, or alive having never held it) but $(printf '%s\n' "$holders" | wc -l | tr -d ' ') process(es) have held it ${oldest}s: $(printf '%s ' $holders)" >&2
+   else
+     echo "fleet-heavy: reclaiming slot$i - held ${oldest}s with NO label (the holder died without releasing it): $(printf '%s ' $holders)" >&2
+   fi
