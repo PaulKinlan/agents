@@ -23,9 +23,16 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+# The tracked-file instrument (tests/__init__.py): the allowlist loader reads the fragment set from git's
+# index, because a fragment is CONFIGURATION and an uncommitted file must not be able to change it
+# (agents-2it3; the same instrument agents-nder/zf2p use for their walkers).
+from tests import has_git_index, tracked_paths
 
 from tests import has_git_index, tracked_paths
 
@@ -107,6 +114,31 @@ _ALLOWLIST_DIR = ROOT / "tests" / "fast_gate_allowlists.d"
 # carries no reasons by design (agents-02s9); the pointer keeps the ADR findable from here.
 
 
+def _allowlist_fragments():
+    """The allowlist fragment FILES to merge, from GIT'S INDEX where there is one (agents-2it3).
+
+    THIS IS UNTRUSTED INPUT REACHING A PARSER, WHICH IS WHY IT IS NOT JUST A COVERAGE COUNT (agents-2it3's
+    distinction from the other filesystem-walker findings): the loader below parses what it finds and merges
+    it into the gate's exemptions, so a file that was never COMMITTED could add an exemption - silencing the
+    omission check this directory exists to explain - or, if it does not parse, raise at IMPORT and fail this
+    whole module. Both were measured on the glob this replaces, with an untracked file in the directory:
+      * a VALID untracked fragment took the loaded set from 3 to 4 (it was configuration);
+      * a MALFORMED untracked fragment raised from the module's import:
+        "AssertionError: zz_bad_tmp.json: not valid JSON (Expecting property name ...)".
+    git's index is the set the gate witnesses, so an uncommitted file cannot reach the parser at all.
+
+    A NON-GIT ROOT still falls back to the filesystem, because there is then no index to ask and no
+    tracked/untracked distinction to be had; that case cannot arise in a gate run, which is a work tree. Same
+    fallback, same argument, as tests/test_ci_action.py's action_files.
+    """
+    if has_git_index(ROOT):
+        # tracked_paths takes a git PATHSPEC: ask for the directory (a pathspec's `*` crosses `/`, so asking
+        # for `*.json` would reach into subdirectories) and filter the direct-child .json files here.
+        return sorted(p for p in tracked_paths("tests/fast_gate_allowlists.d", root=ROOT)
+                      if p.parent == _ALLOWLIST_DIR and p.suffix == ".json")
+    return sorted(_ALLOWLIST_DIR.glob("*.json"))
+
+
 def _load_allowlist_fragments():
     """Merge every fragment; return (consumer_coverage, non_suite, provenance).
 
@@ -114,7 +146,8 @@ def _load_allowlist_fragments():
     the file a reader must edit rather than a directory they must search (agents-nerv).
     """
     coverage, non_suite, provenance = {}, {}, {}
-    fragments = sorted(_ALLOWLIST_DIR.glob("*.json"))
+    # THE FRAGMENT SET IS READ FROM THE TREE, NOT THE MACHINE (agents-2it3): see _allowlist_fragments.
+    fragments = _allowlist_fragments()
     if not fragments:
         raise AssertionError(f"no allowlist fragments in {_ALLOWLIST_DIR}: the merged allowlist would be empty")
     for path in fragments:
@@ -327,6 +360,90 @@ def _lib_modules(root=None):
     # A SYNTHETIC root built by a fixture is not inside a work tree, so there is no index to ask, and the
     # filesystem is then the WHOLE tree rather than a second, wider notion of it (see has_git_index).
     return sorted(p.stem for p in (root / "lib").glob("*.py") if p.stem != "__init__")
+
+
+class TestAllowlistFragmentsAreConfigurationFromTheTree(unittest.TestCase):
+    """agents-2it3: the fragment set is CONFIGURATION, so it is read from git's index, not the filesystem.
+
+    THE PAIR IS THE POINT, and coord asked for it explicitly: 'the untracked fragment was not loaded' is also
+    what a loader that loaded NOTHING would report, so the negative direction here is asserted TOGETHER with
+    the direction that proves the reader still loads what it should. Both directions are measured against a
+    direct 'git ls-files' read of the same directory, which is an independent instrument rather than the one
+    under test.
+
+    THE OTHER HALF OF THE DEFECT, which the count alone does not capture: this loader deliberately fails
+    LOUDLY on a fragment that does not parse (agents-nerv - silently skipping one is how an omission stops
+    being guarded). With a filesystem walker that made an uncommitted, malformed file able to fail the whole
+    module AT IMPORT; measured, it raised 'AssertionError: zz_bad_tmp.json: not valid JSON (...)'.
+    """
+
+    VALID = '{"kind": "consumer_coverage", "modules": {"zz_probe": ["tests/test_probe.py"]}}'
+
+    def _tracked_fragment_names(self):
+        """The tracked .json fragments, read independently of the loader (a direct git call)."""
+        listed = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "tests/fast_gate_allowlists.d"],
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        return sorted(Path(name).name for name in listed if name.endswith(".json"))
+
+    def test_an_untracked_fragment_is_not_configuration_and_the_tracked_ones_still_are(self):
+        probe = _ALLOWLIST_DIR / "zz_untracked_probe_tmp.json"
+        self.assertFalse(probe.exists(), f"{probe} already exists; refusing to clobber it")
+        probe.write_text(self.VALID + "\n", encoding="utf-8")
+        try:
+            loaded = [p.name for p in _allowlist_fragments()]
+            self.assertNotIn(
+                "zz_untracked_probe_tmp.json", loaded,
+                "an UNCOMMITTED file in the allowlist directory was read as configuration, so a file nobody "
+                "reviewed can add an exemption (agents-2it3)",
+            )
+            expected = self._tracked_fragment_names()
+            self.assertTrue(expected, "the tracked fragment set cannot be empty - the merge would be empty")
+            self.assertEqual(
+                loaded, expected,
+                "the fragment set must be exactly the TRACKED .json files: this is the direction that proves "
+                "the reader still loads what it should, rather than loading nothing",
+            )
+        finally:
+            probe.unlink(missing_ok=True)
+
+    def test_an_untracked_malformed_fragment_cannot_fail_the_loader_at_import(self):
+        probe = _ALLOWLIST_DIR / "zz_untracked_bad_tmp.json"
+        self.assertFalse(probe.exists(), f"{probe} already exists; refusing to clobber it")
+        probe.write_text("{ this is not json\n", encoding="utf-8")
+        try:
+            with self.assertRaises(json.JSONDecodeError):
+                json.loads(probe.read_text(encoding="utf-8"))
+            loaded = [p.name for p in _allowlist_fragments()]
+            self.assertNotIn("zz_untracked_bad_tmp.json", loaded,
+                             "an uncommitted malformed fragment must not be read at all")
+        finally:
+            probe.unlink(missing_ok=True)
+
+    def test_a_malformed_TRACKED_fragment_still_fails_loudly(self):
+        """The teeth agents-nerv added must survive: a fragment that IS configuration and does not parse
+        must name itself and stop the merge, rather than being skipped into a quietly smaller allowlist.
+
+        The malformed file lives in a temp dir and is handed to the merge through the same seam the loader
+        uses, so this asserts the BEHAVIOUR without staging a file in the repository's index.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "zz_bad_fragment.json"
+            bad.write_text("{ this is not json\n", encoding="utf-8")
+            with mock.patch.object(sys.modules[__name__], "_allowlist_fragments", return_value=[bad]):
+                with self.assertRaises(AssertionError) as ctx:
+                    _load_allowlist_fragments()
+        self.assertIn(bad.name, str(ctx.exception),
+                      "the failure must name the fragment a reader has to fix")
+
+    def test_the_allowlist_still_merges_real_content(self):
+        """The cheapest positive control of all: the merged allowlist this module gates on is not empty, so
+        the fragment reader is demonstrably parsing configuration that carries entries."""
+        self.assertTrue(CONSUMER_COVERAGE_ALLOWLIST or NON_SUITE_CONSUMERS,
+                        "the merged allowlist is empty: the fragment reader is not reading configuration")
+        self.assertTrue(set(_ALLOWLIST_PROVENANCE.values()) <= set(self._tracked_fragment_names()),
+                        "every provenance entry must name a TRACKED fragment")
 
 
 class TestTheAllowlistPointsAtItsDocumentedReasons(unittest.TestCase):
