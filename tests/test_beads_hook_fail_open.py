@@ -176,8 +176,11 @@ class TestTrackedHookInventory(unittest.TestCase):
 
 # agents-new1: these FOUR sibling hooks are NOT executed by the pre-commit policy tests.
 # A Git-index blob is deterministic source-tree evidence, not the host's installed hook or
-# a mutable working-tree file. A newly staged/regenerated body needs an intentional pin
-# update and review. Equality is a drift detector, NOT proof that these bodies are safe.
+# a mutable working-tree file. Provenance: review bead agents-new1, 2026-10-14;
+# these four blobs come from frozen agents-3ryx tip 64ba53c0 (independent review
+# of THIS pin change is pending). A future staged/regenerated body must be read and
+# reviewed FIRST, then deliberately re-pinned with its own bead/date provenance.
+# Equality detects drift; it does NOT prove that the pinned bodies are safe.
 REVIEWED_SIBLING_BLOBS = {
     "post-checkout": "c56039649f39395f9d926dd6bb2afbef8071b40a",
     "post-merge": "496f1750803643f4613043371b872921100ce8d6",
@@ -205,8 +208,10 @@ class TestReviewedSiblingHookBodies(unittest.TestCase):
         for name, reviewed_blob in REVIEWED_SIBLING_BLOBS.items():
             path = f".beads/hooks/{name}"
             self.assertEqual(entries.get(path), reviewed_blob,
-                             f"{path}: staged hook body drifted from reviewed Git blob; "
-                             "review it and deliberately update its pin")
+                             f"{path}: staged hook body drifted from its pinned Git blob "
+                             "(review bead agents-new1, 2026-10-14); review THIS hook's new "
+                             "body first, then deliberately re-pin its Git blob with a new "
+                             "bead/date provenance and independent review")
 
     def test_existing_sibling_hook_blobs_match_the_reviewed_tree(self):
         self.assert_sibling_blobs(ROOT)
