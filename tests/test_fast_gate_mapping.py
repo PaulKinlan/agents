@@ -294,6 +294,19 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_sink_adapters.py", mapped, "sink adapters omitted (agents-vt7w)")
         self.assertIn("tests/test_sinks.py", mapped)
 
+    def test_github_sink_maps_promote_store_lock_without_taxing_other_sinks(self):
+        """agents-5jjf: github's promote lock is tested outside the generic sink suite."""
+        github = resolve_fast_gate(["lib/sinks/github.py"])
+        generic = resolve_fast_gate(["lib/sinks/base.py"])
+        self.assertTrue(set(generic).issubset(github), "github must retain the generic sink contracts")
+        self.assertIn("tests/test_store_lock_timeout.py", github,
+                      "github's promote/store-lock consumer is missing from the fast gate")
+        for name in ("base.py", "beads.py", "command.py", "file.py", "github_issues.py"):
+            with self.subTest(sink=name):
+                mapped = resolve_fast_gate([f"lib/sinks/{name}"])
+                self.assertNotIn("tests/test_store_lock_timeout.py", mapped,
+                                 "the 19s store-lock suite must not tax other sink edits")
+
     def test_sandbox_py_maps_to_bwrap_guard(self):
         """lib/sandbox.py must run bwrap live tests and the no-bwrap refusal guard."""
         mapped = resolve_fast_gate(["lib/sandbox.py"])
