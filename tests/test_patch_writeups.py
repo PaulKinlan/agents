@@ -23,7 +23,14 @@ ARTIFACT = re.compile(r"([a-z0-9][a-z0-9-]*\.patch)")
 
 #: A write-up may cover more than one artifact when they were delivered as one change (the join is
 #: what makes that expressible in a filename), so this is a row count, not a floor on coverage.
-EXPECTED_MINIMUM_WRITEUPS = 5
+#:
+#: It was 5 while this directory also carried the fleet's delivery artifacts, which have since been
+#: removed (agents-gp7y): they were never product changes and could not apply here at all. The
+#: number is now the directory's REAL content - the one product artifact - because the property this
+#: guards is that the directory is not trivially empty, and a floor left above the real content would
+#: have been a claim about a repo state that no longer exists. It should rise as the product adds
+#: artifacts; the per-artifact checks below are what catch a specific file going missing.
+EXPECTED_MINIMUM_WRITEUPS = 1
 
 
 def _writeups() -> list[Path]:
