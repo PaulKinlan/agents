@@ -664,6 +664,46 @@ class TestThePromptSpellsOutTheRequiredFields(unittest.TestCase):
         grown = required_fields_note(self._schema(finding_required=("rule_id", "snippet", "title")))
         self.assertIn("`title`", grown, "a field added to the schema must appear in the note with no other edit")
 
+    def test_every_shipped_station_schema_derives_its_note_and_is_byte_unchanged(self):
+        """agents-2hm5 (rev-sz8q's recorded gap): the control above builds its schema IN CODE, so nothing pinned
+        the note against the schemas the stations actually ship. This one starts from the SHIPPED BYTES: appending
+        a field to a schema's own required array must move the note, and the file must be byte-unchanged
+        afterwards - so a future author cannot satisfy this test by editing the schema instead of the derivation,
+        which would be the opposite of the fix. Every station's schema is checked, so a new station cannot be
+        typed by hand either."""
+        probe = "mutation_probe_field"
+        schemas = sorted((FACTORY_ROOT / "agents").glob("*/report.schema.json"))
+        self.assertGreaterEqual(len(schemas), 20, f"expected the station schema set, found {len(schemas)}")
+        checked_lists = 0
+        for path in schemas:
+            with self.subTest(schema=path.parent.name):
+                shipped = path.read_bytes()
+                schema = json.loads(shipped)
+                self.assertNotIn(probe, required_fields_note(schema), "nothing may have typed this field")
+                self.assertNotIn(probe, output_contract_prompt(schema))
+                # The two lists the note is DERIVED from: the schema's own required array, and the findings item's.
+                top = schema.get("required")
+                if isinstance(top, list) and top:
+                    mutated = json.loads(shipped)
+                    mutated["required"] = list(top) + [probe]
+                    self.assertIn(probe, required_fields_note(mutated),
+                                  "a field appended to the schema's required array must move the note")
+                    self.assertIn(probe, output_contract_prompt(mutated), "...and the prompt must carry the note")
+                    checked_lists += 1
+                items = schema.get("properties", {}).get("findings", {}).get("items", {})
+                required = items.get("required") if isinstance(items, dict) else None
+                if isinstance(required, list) and required:
+                    mutated = json.loads(shipped)
+                    mutated["properties"]["findings"]["items"]["required"] = list(required) + [probe]
+                    self.assertIn(probe, required_fields_note(mutated),
+                                  "a field appended to the findings item's required array must move the note")
+                    self.assertIn(probe, output_contract_prompt(mutated), "...and the prompt must carry the note")
+                    checked_lists += 1
+                self.assertEqual(path.read_bytes(), shipped,
+                                 "the shipped schema must be byte-unchanged by this test")
+        self.assertGreater(checked_lists, 0,
+                           "no schema's required arrays were exercised, so the test proved nothing")
+
     def test_a_schema_with_nothing_required_produces_no_note(self):
         # Silence, not a stray heading, so the prompt is unchanged for a schema that requires nothing.
         self.assertEqual(required_fields_note({"properties": {}}), "")
