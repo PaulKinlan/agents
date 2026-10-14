@@ -1,0 +1,37 @@
+## `fleet-status-sdk-liveness.patch` — an SDK lane is not its shared host process (agents-hs4i)
+
+**Hub-only, unapplied:** target `PaulKinlan/fleet`; nothing under this VM's read-only `~/fleet` has been edited or installed. This artifact corrects the `/status` lane-session predicate; it does **not** claim that every independent liveness consumer, especially `remote/reaper.mjs`, has been corrected.
+
+| Hub-delivery field | Exact value |
+| --- | --- |
+| **Artifact** | `patches/fleet-status-sdk-liveness.patch`, **7,668 bytes**, SHA-256 `bce205cf6923c867d8c036264b848b328208d7730b9a4574e671059766f7d3b6`; two file sections, `inbox/status.mjs` and a NEW `tests/status-sdk-liveness.test.sh`. |
+| **Exact base** | Deployed `inbox/status.mjs`: **17,150 bytes / 228 lines**, SHA-256 `87b28d4c133d033179a31572892c26f7f0aa978f4cce76e57bdf1a30e3bdb6f2`. The new test file is absent in the deployed hub. The separately consumed deployed `remote/lanes.sh`: **40,537 bytes / 637 lines**, SHA-256 `7f0be21489db73e4d18821c58e6e669d22ec54f5192bc00bf158b5b9d422e4aa`; it is read by the test but not changed. |
+| **Destination shape** | `git apply --check` on an isolated exact-base copy succeeds; applying the artifact yields `inbox/status.mjs` **18,535 bytes / 254 lines**, SHA-256 `97ceeeadff7d2e60336f4681d300870f22134a3b43f3beebf42c05e546cbcc83`, and new test **4,121 bytes / 63 lines**, SHA-256 `9151842db14f0ef6b9b50062f48bee503cb40400966bca47d17253ccec80d0e9`. Reverse apply check, Node syntax, shell syntax, and source diff whitespace check succeed. |
+| **Prerequisite / ordering** | No prerequisite for these exact deployed files. `fleet-lanes-status-no-recency.patch` (agents-oi0x) touches `remote/lanes.sh` and appends to `tests/lanes.test.sh`; `fleet-watchdog-idle-holder-declaration.patch` (agents-dbxo) touches `watchdog/watchdog.mjs` and `tests/watchdog-smoke.test.sh`. Neither overlaps these two paths; no main branch or hub integration claim follows from that. Do not append this regression to `tests/lanes.test.sh` because oi0x already appends there. |
+
+### Which fact was false, and which decision depends on it
+
+One measured fake HOME/state file, a real live shared `host_pid`, a fresh `last_event_at`, and **no per-lane socket** gives opposite answers: `lanes.sh status des-x` says `stopped` (rc 0); `inbox/status.mjs status({vm})` says `running:true, pi_alive:true, intercom:"idle", last_event_min:0` (rc 0). The whole-value comparison fails in `/tmp/agents-f6du-hs4i-red-first.log`. `lanes.sh:106–124` tests SDK `host_pid > 1`, process liveness, and a **connectable lane socket**; `status.mjs:65–66` tested only the shared host PID and `:117` hardcoded `pi_alive=true` for SDK. The latter is a false positive for **this lane's session**, not a more timely reading.
+
+The SDK producer sets `host_pid=process.pid` for every lane (`sdk-host/host.mjs:85`), listens on that lane's socket only after building its session (`:118–126`, `:251–270`), and unlinks that socket **before** clearing/saving `host_pid` on stop (`:273–309`). Restart/fresh need not set the parked `.stop` marker, so a live host with stale per-lane state is a real transition, not a fabricated clock edge. `last_event_min` is a separate *progress/recency* fact: it must not decide session presence, as the deployed `tests/lanes.test.sh` section 11 already pins for quiet live lanes.
+
+`status.mjs` feeds the watchdog's `down`→`startLanes` rule (`watchdog.mjs:209–210`) and `running`/`pi_alive` gates for health, stuck detection and orphan dispatch (`:220–251`, `:582–585`), plus the dashboard's dot (`dashboard/app.js:154,173`). With the old false positive, the watchdog can miss a missing lane while the dashboard shows it healthy. Autopilot reads `lanes.sh list` instead (`remote/autopilot.sh:11`), so it can decline to dispatch on precisely the lane that the watchdog calls running.
+
+This patch changes only the SDK `hostState` read: a valid shared PID **and** a real connectable per-lane Unix listener are required before `running`, `pi_alive`, `busy` or `intercom` can be inferred from its state file. The Node socket probe treats a full-backlog/timeout listener as live, matching `lanes.sh sock_live`'s rc 124 rule; missing/refused/stale socket paths are not live. It does not invoke another liveness CLI, modify RPC-mode handling, or read the activity clock into liveness. An unreadable state file retains the pre-existing `hostState` null fallback (`running:false`); this patch makes no new claim about unknown-state policy. A quiet SDK lane with a live listener remains running. An explicit 1-second deadline (including a connect that never settles) is the saturated-listener upper bound **per SDK lane** in the status reader; ordinary Unix-local connects return immediately. This ceiling must be considered if many lane listeners saturate simultaneously; no general throughput claim is made from a clean fake-HOME test.
+
+### Red first / green after, same behavioral test
+
+The new 63-line test drives **both deployed readers** using the same fully isolated fake HOME/state, not a hand-built watchdog payload. On the deployed `status.mjs`, it is **RED: 3 passed / 3 failed** (`/tmp/agents-f6du-hs4i-red-suite.log`). The failing cases are (1) host live, no lane socket, (5) a stale socket *pathname* with no listening process, and (6) parked with no listener; in each, `lanes.sh` says stopped/parked while status says `running:true, pi_alive:true`. Positive rails (2) live host+listener, (3) quiet live listener with a two-hour-old event, and (4) dead host PID despite a live listener already pass. On the exact-base applied scratch files, **GREEN: 6 passed / 0 failed** (`/tmp/agents-f6du-hs4i-applied-suite.log`). The initial scratch copy omitted an unchanged relative import (`inbox/lifecycle.mjs`) and therefore failed to load; it was copied from the deployed hub before claiming any green result. The final `git apply` image is byte-identical to the code exercised by the green suite.
+
+### Explicit residual: the reaper is a THIRD reader
+
+`remote/reaper.mjs:117` independently calls every lane with a live `state.host_pid` *live*, even in SDK mode where that PID is shared. At `:180` this flips a detached job's `orphan` to false; orphan-browser and CPU/runtime rules subsequently change. That is not fixed by changing `status.mjs`. A deterministic **dry-run only** probe with a synthetic 12-minute orphan-browser process-table row for a real inert PID tagged `FLEET_LANE=des-x`, and a stale SDK state with live host PID/no socket, reports **0 would be killed**. Removing only that stale state reports **1 would be killed: orphaned browser (12 min)** (`/tmp/agents-f6du-hs4i-reaper-probe.log`, script alongside it). No real browser, kill or message delivery occurred. This is a separate destructive consumer/action contract, tracked as **agents-j8f4** (assigned but not started while agents-hs4i is in progress). It needs its own orphan/reap test and independent review before anyone claims fleet-wide liveness convergence. Do not weaken `lanes.sh` to agree with these host-only readers; that would turn a false dashboard positive into a false specialist-slot/autopilot positive too.
+
+**Hub-owner application only, after comparing the installed exact base:**
+```bash
+cd /path/to/writable/fleet
+git apply --check /path/to/patches/fleet-status-sdk-liveness.patch
+git apply /path/to/patches/fleet-status-sdk-liveness.patch
+bash tests/status-sdk-liveness.test.sh
+# Run the hub's integration gate on the installed UNION tree; this project lane has not done so.
+```
