@@ -165,7 +165,12 @@ class TestCoverageContract(unittest.TestCase):
             with patch.object(oracle_mod.subprocess, "check_output", side_effect=mock_check_output):
                 cov = oracle_mod.extract_coverage(log.name, str(ROOT), "HEAD", "bash tools/fast-gate.sh")
 
-            self.assertIn("lib/child_env.py", cov.get("unmapped", []),
+            # agents-8b05: the record publishes each unmapped entry as {"path": ..., "source": ...} so the
+            # provenance travels with the entry; older records (and older reporters) publish plain strings.
+            # Ask for the PATH either way, so this pins the BEHAVIOUR rather than the encoding, and stays
+            # correct against both shapes.
+            unmapped_paths = [e["path"] if isinstance(e, dict) else e for e in cov.get("unmapped", [])]
+            self.assertIn("lib/child_env.py", unmapped_paths,
                           "changed file with omitted contract suite must be flagged in unmapped")
             self.assertIn("tests/test_promotion.py", cov.get("omitted", []),
                           "contract-declared suite must be named in omitted suites when not executed (agents-1kzf)")
