@@ -1,7 +1,7 @@
 ## Every published coverage entry says where it came from, inside the entry - `fleet-coverage-unmapped-provenance.patch` (agents-tpw5)
 
 Hub-side artifact: `remote/check-coverage.py` writes the record, and both `bin/fleet-check` readers are
-re-pinned in the same patch. Five files, 23 hunks. Apply at the fleet repo root with `patch -p1 --fuzz=0`.
+re-pinned in the same patch. Five files, 22 hunks. Apply at the fleet repo root with `patch -p1 --fuzz=0`.
 
 ### The problem
 
@@ -176,3 +176,35 @@ Against a simulated post-`1v7aq` base the artifact applies **23 of 23 hunks with
 zero rejects**. One of the two hunks that rejected against canon is identified by this divergence;
 the other is not identifiable from the implementer's tree, and guessing at canon's text is worse than
 asking for it.
+
+## Re-cut against the post-`1v7aq` canon: three hunks, context only
+
+The section above records the base's identity: the pre-`1v7aq` tree, where every hunk applied at its exact
+original line number with zero offsets. The deployed file then grew the `fleet-q8uhn` certifiable block, and
+the artifact no longer applied to it. Measured on the real deployed bytes (`remote/check-coverage.py` sha256
+`1d7fc9e24721e2b1acc763da6324a05ff97ce971e9c1428127cee4a934eec2`, `tests/check-coverage.test.sh` sha256
+`e9141649fced06d63d640eeaefef67079f4ee506828988e9b853f7ce983af40b`), `patch -p1 --fuzz=0` failed exactly
+three hunks, by position: `remote/check-coverage.py` #5 at 809, `tests/check-coverage.test.sh` #12 at 226 and
+#13 at 234. Every other `.py`/`.sh` hunk applied, the `.py`'s first four at offset +52.
+
+The cause is the same in both files and is not drift of a kind an offset can reveal: canon inserted or rewrote
+lines BETWEEN a hunk's changed line and its trailing context. In the `.py` that insertion is the certifiable
+block; in the `.sh` it is the `7a` case line, which now sits above the `7c` line these hunks cite.
+
+The re-cut therefore extends the trailing context over those lines and changes nothing else. `remote/check-coverage.py`
+#5 becomes one hunk `@@ -838,23 +838,23 @@` with the block carried as context, and the `.sh`'s #12 and #13
+become ONE hunk `@@ -213,31 +213,75 @@`. The artifact is 23 hunks to 22, and every other hunk is
+byte-identical to what it was.
+
+Two coordinate systems now coexist by necessity and the reader should know it: the re-cut hunks carry the
+deployed file's line numbers, while the hunks left untouched still carry the pre-`1v7aq` base's and apply at
+offset +52. `patch` applies the file in one pass with no failures, which is the property that matters, but
+this artifact is not uniform in that respect.
+
+What was driven rather than asserted: applying the re-cut at `--fuzz=0` against the deployed bytes gives zero
+failures, zero 'previously applied' and the expected offsets; and each re-cut hunk's CONTRIBUTION was measured
+by patching with it and without it - `#5` changes exactly the one intended line and nothing else, and the
+merged `.sh` hunk's added and removed line multisets are EQUAL to the two original hunks', so it is the same
+change re-expressed rather than a different one. The three files without deployed bytes on this VM
+(`bin/fleet-check`, `tests/fleet-gate-check.test.sh`, `tests/project-template.test.sh`) carry five hunks that
+are unchanged and untested here.
