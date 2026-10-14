@@ -140,3 +140,39 @@ the full-gate block; every preimage id survives and no id gains a second asserti
 byte-identical to the previous version. NOT driven here: the end-to-end `tests/fleet-gate-check.test.sh` run, which needs
 canon - this host has no copy at the pinned preimages for `bin/fleet-check` or `remote/check-coverage.py`. The hub should
 expect all four green.
+
+## Where each entry's source is recorded, and what that costs - measured bounds
+
+The provenance is recorded **inside each entry of the top-level `unmapped` list**, and nowhere else.
+There is deliberately no parallel field, so a reader looking for the source under some other key in
+the record finds nothing and cannot tell "the gate's marker named it" from "this record predates the
+field". That distinction was measured rather than assumed: driving the patched oracle over a fixture
+whose gate log carries its own `fast-gate: unmapped:` marker produces
+`"unmapped": [{"path": "lib/extra.py", "source": "gate"}]`, while `coverage` in the same record is a
+STATE STRING (`coverage: coverage_state`), so `coverage.unmapped[]` is a path that has never existed.
+An assertion in the reader suite read that path and failed on a `jq` error for exactly that reason;
+it now reads `.unmapped[]` and passes.
+
+**Bounds.** The end-to-end reader-suite run against a hub install is the HUB's measurement, not this
+artifact's: the hub tree is on the hub VM and is not reachable from the implementer worktree. What is
+verified locally is (a) the driven fixture above, with the real oracle, and (b) the hunk arithmetic
+against this artifact's own base, below. Nothing here should be read as a claim about the hub's
+387/1 run.
+
+## Rebase onto the same-region landing: moved hunks versus rewritten context
+
+This artifact's base is the pre-`1v7aq` tree. On it every one of the artifact's hunks applies at its
+**exact original line number**, with zero offsets - that is the evidence for the base's identity, not
+an assumption about it. The hub's landing `1v7aq` edits the same two files in the same region, and
+canon rewrote one line that this artifact uses as CONTEXT:
+
+- `bad "7a the ran test file is still reported unmapped"` in the base,
+- `ok "7c a changed test file the gate did NOT run is still flagged"` in canon.
+
+The hunk that carries that line fails **at its own original line, not at an offset** - the tell that
+separates a rewritten context line from ordinary drift, since offsets alone cannot reveal it. That
+context line has been re-cut to canon's text; the artifact's other file sections are byte-identical.
+Against a simulated post-`1v7aq` base the artifact applies **23 of 23 hunks with zero offsets and
+zero rejects**. One of the two hunks that rejected against canon is identified by this divergence;
+the other is not identifiable from the implementer's tree, and guessing at canon's text is worse than
+asking for it.
