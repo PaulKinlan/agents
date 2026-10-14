@@ -14,7 +14,8 @@ suite born green.
 Pre-commit behaviour is hermetic: a stub ``bd`` on PATH, no lock or network. The separate
 agents-3ryx inventory guard reads the repository's Git INDEX (the gate's witnessed path set),
 never executes a new hook, and exercises its rejection in a disposable staged Git root. That
-inventory does not validate the bodies of the four other existing hooks.
+inventory itself checks names/modes, not bytes; agents-new1 separately pins the Git-index
+blob IDs of the four other existing hooks so staged body changes require explicit review.
 """
 
 from __future__ import annotations
@@ -115,7 +116,7 @@ class TestPreCommitHookFailsOpen(unittest.TestCase):
 # agents-3ryx: the gate maps EVERY .beads/hooks/* path to this suite, whereas the
 # behavioural tests above execute only pre-commit. Pin the NAMES of all currently tracked
 # executable hooks so a NEW hook cannot inherit a green receipt without deliberate review.
-# This is an inventory guard, NOT a claim to validate the bodies of the other four hooks.
+# Name/mode inventory is separate from the sibling hook BODY pins below (agents-new1).
 REVIEWED_HOOKS = frozenset({
     "post-checkout", "post-merge", "pre-commit", "pre-push", "prepare-commit-msg",
 })
@@ -171,6 +172,66 @@ class TestTrackedHookInventory(unittest.TestCase):
             subprocess.run(["git", "-C", str(root), "add", "--", ".beads/hooks/new-hook.sh"], check=True)
             with self.assertRaisesRegex(AssertionError, r"unreviewed tracked .beads/hooks/ paths: .*new-hook.sh"):
                 self.assert_reviewed_hooks(root)
+
+
+# agents-new1: these FOUR sibling hooks are NOT executed by the pre-commit policy tests.
+# A Git-index blob is deterministic source-tree evidence, not the host's installed hook or
+# a mutable working-tree file. A newly staged/regenerated body needs an intentional pin
+# update and review. Equality is a drift detector, NOT proof that these bodies are safe.
+REVIEWED_SIBLING_BLOBS = {
+    "post-checkout": "c56039649f39395f9d926dd6bb2afbef8071b40a",
+    "post-merge": "496f1750803643f4613043371b872921100ce8d6",
+    "pre-push": "1d4c4cc226f0853fbd6446ececa4c6b547a67282",
+    "prepare-commit-msg": "63a92261d701d9be1ed459e2f3aaea760dc62dd6",
+}
+
+
+class TestReviewedSiblingHookBodies(unittest.TestCase):
+    """Detect staged body drift without executing pre-push or any other sibling hook."""
+
+    def assert_sibling_blobs(self, root: Path):
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--stage", "-z", "--", ".beads/hooks"],
+            capture_output=True, check=True,
+        ).stdout
+        entries = {}
+        for entry in listing.split(b"\0"):
+            if not entry:
+                continue
+            header, path = entry.decode().split("\t", 1)
+            _mode, object_id, stage = header.split()
+            self.assertEqual(stage, "0", f"{path}: unresolved hook index stages are not reviewed")
+            entries[path] = object_id
+        for name, reviewed_blob in REVIEWED_SIBLING_BLOBS.items():
+            path = f".beads/hooks/{name}"
+            self.assertEqual(entries.get(path), reviewed_blob,
+                             f"{path}: staged hook body drifted from reviewed Git blob; "
+                             "review it and deliberately update its pin")
+
+    def test_existing_sibling_hook_blobs_match_the_reviewed_tree(self):
+        self.assert_sibling_blobs(ROOT)
+
+    def test_staged_pre_push_exit_99_body_drift_is_detected_without_execution(self):
+        with tempfile.TemporaryDirectory(prefix="new1-hook-body-") as directory:
+            root = Path(directory)
+            hooks = root / ".beads" / "hooks"
+            hooks.mkdir(parents=True)
+            subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+            for name, reviewed_blob in REVIEWED_SIBLING_BLOBS.items():
+                # Read the PINNED Git object, not the caller's mutable working file: a scratch
+                # mutation of pre-push must not poison this test's own positive control.
+                body = subprocess.run(["git", "-C", str(ROOT), "cat-file", "blob", reviewed_blob],
+                                      capture_output=True, check=True).stdout
+                path = hooks / name
+                path.write_bytes(body)
+                path.chmod(0o755)
+            subprocess.run(["git", "-C", str(root), "add", "--", ".beads/hooks"], check=True)
+            self.assert_sibling_blobs(root)  # the exact reviewed baseline is accepted
+            with (hooks / "pre-push").open("ab") as stream:
+                stream.write(b"\nexit 99\n")
+            subprocess.run(["git", "-C", str(root), "add", "--", ".beads/hooks/pre-push"], check=True)
+            with self.assertRaisesRegex(AssertionError, r"pre-push.*staged hook body drifted"):
+                self.assert_sibling_blobs(root)
 
 
 if __name__ == "__main__":
