@@ -268,14 +268,30 @@ class TestExpressionInjectionGuard(unittest.TestCase):
         relative to it), never .github/actions/ itself, so no tracked directory's identity moves and a gate
         running this probe cannot record STALE (agents-fxg2).
         """
-        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        # (agents-ug3a) The probe root is a scratch git repository in /tmp rather than a temp dir at the
+        # checkout root: a root temp dir cannot run its cleanup if the runner SIGKILLs the process or times
+        # out, and `tmp*/` has no root ignore rule, so the stray it writes was committable debris for a later
+        # `git add -A` to capture. A scratch repo still answers exactly the question this test asks - git
+        # answers for it, relative to it - and the decoy is still written and still on disk, so the assertion
+        # keeps its teeth instead of passing on emptiness.
+        with tempfile.TemporaryDirectory() as tmp:
             probe = Path(tmp)
+            git = ["git", "-C", str(probe), "-c", "user.email=t@t", "-c", "user.name=t",
+                   "-c", "commit.gpgsign=false"]
+            subprocess.run(["git", "init", "-q", str(probe)], check=True, capture_output=True)
+            tracked = probe / ".github" / "actions" / "zreal_probe" / "action.yml"
+            tracked.parent.mkdir(parents=True)
+            tracked.write_text("name: zreal_probe\nruns:\n  using: composite\n  steps: []\n", encoding="utf-8")
+            subprocess.run(git + ["add", "."], check=True, capture_output=True)
+            subprocess.run(git + ["commit", "-qm", "seed"], check=True, capture_output=True)
             stray = probe / ".github" / "actions" / "zz_probe_tmp" / "action.yml"
             stray.parent.mkdir(parents=True)
             stray.write_text("name: probe\nruns:\n  using: composite\n  steps: []\n", encoding="utf-8")
-            self.assertEqual(action_files(probe), [],
-                             "a tracked-tree reader must not absorb a file git does not track")
+            self.assertEqual(action_files(probe), [tracked],
+                             "a tracked-tree reader must return the tracked action and absorb nothing else")
             self.assertNotIn(stray, action_files(probe))
+            self.assertTrue(stray.is_file(),
+                            "the stray is on disk, so a filesystem-based reader would still have found it")
 
     def test_a_synthetic_root_without_an_index_is_read_from_the_filesystem(self):
         """The other half of the same rule, and the reason the fallback exists (agents-nder).

@@ -1166,10 +1166,21 @@ class TestFastGateMapping(unittest.TestCase):
         tokens are not paths either - guessing a list from the presence of whitespace alone would fire
         on any typo and teach readers to ignore the note.
         """
-        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        # (agents-ug3a) This probe cannot move to a scratch repo in /tmp like its siblings: the path has to
+        # EXIST from the gate's point of view and stay repo-RELATIVE, because that is the shape a changed-file
+        # list really has, and moving it would test a different input. It lives under a path .gitignore
+        # already covers instead - at the checkout root a killed run left a committable temp directory, and
+        # there is no `tmp*/` root ignore rule. The check-ignore assertion below is the property that makes
+        # the relocation a fix rather than a relocation.
+        scratch = ROOT / ".agent-state"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as tmp:
             spaced = Path(tmp) / "a path with spaces.xyz"
             spaced.write_text("", encoding="utf-8")
             rel = str(spaced.relative_to(ROOT))
+            self.assertEqual(
+                subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", rel]).returncode, 0,
+                "an interrupted probe must not leave COMMITTABLE debris under the checkout")
             exists = run_fast_gate([rel])
             self.assertEqual(exists.returncode, 1, "an unmatched path is still fail-closed")
             self.assertNotIn("NOTE (agents-dtml)", exists.stderr, "a single path that exists is not a list")

@@ -366,9 +366,20 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
         """
         import subprocess
         factory_root = mine_history.FACTORY_ROOT
-        with tempfile.TemporaryDirectory(dir=str(factory_root)) as tmp:
+        # (agents-ug3a) The scratch repo must stay INSIDE FACTORY_ROOT, because that containment is the
+        # premise the assertion rests on - a scratch root in /tmp would make it trivially true and test
+        # nothing. It lives under a path .gitignore already covers instead: at the checkout root an
+        # interrupted run left a committable temp directory holding a whole nested repo, and there is no
+        # `tmp*/` root ignore rule. The check-ignore assertion is what makes that a fix.
+        scratch = factory_root / ".agent-state"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=str(scratch)) as tmp:
             nested_repo = Path(tmp)
             subprocess.run(["git", "init", "-q", str(nested_repo)], check=True)
+            self.assertEqual(
+                subprocess.run(["git", "-C", str(factory_root), "check-ignore", "-q",
+                                str(nested_repo.relative_to(factory_root))]).returncode, 0,
+                "an interrupted probe must not leave COMMITTABLE debris under the checkout")
 
             src_dir = nested_repo / "src" / "deep"
             src_dir.mkdir(parents=True)
