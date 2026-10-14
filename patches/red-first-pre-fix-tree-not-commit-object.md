@@ -57,22 +57,30 @@ its verdict.
 | syntax | `bash -n` on the patched file: clean |
 | driven | patched predicate: **mutant arm now ACCEPTED** (was wrongly rejected), **control arm unchanged** |
 
-## Why the discriminating test is NOT here yet, in detail
+## The discriminating test IS included, and it was driven three ways
 
-The acceptance criterion is a test that **fails before and passes after**. My first attempt passed on **both** the
-patched and the unpatched tool, so I reverted it rather than shipping a test that reads as coverage while proving
-nothing. Diagnosing that produced a fact worth recording, because it decides what such a fixture must contain:
+It lives in `tests/test_red_first.py`, in the suite that is the tool's only one and whose fast-gate arm records a
+measured **2.5s** - so it costs no heavy slot. The fixture is the point, and the candidate set is narrower than it
+looks: the derivation filters added lines with
 
     tools/red-first.sh:442   sed -n 's/^+[^+[:space:]].*/&/p'
 
-The candidate filter **admits only NON-INDENTED added lines** - the added top-level `def`s - and **excludes indented
-bodies**. So the marker a fixture must arrange to be "mentioned by the pre-fix message" is the added **`def` line**
-(`+def multiply(a, b):`), not the indented body line. Both my python test and my second shell fixture nominated the
-indented line, which is why neither reproduced the defect: the sole real candidate was still absent from the commit
-object and the tool behaved correctly.
+which admits **ONLY NON-INDENTED added lines** - the added top-level `def`s - and **excludes indented bodies**. So the
+marker the pre-fix MESSAGE must mention is the added **`def` line**, not the indented body line. Both my first python
+test and my second shell fixture nominated the indented line, which is exactly why neither reproduced the defect: the
+sole real candidate stayed absent from the commit object and the tool behaved correctly.
 
-The next step is therefore narrow and known: build the fixture whose pre-fix message mentions the added **`def`**
-line, run the real tool with **no `--expect-absent`**, and assert on the tool's **observed stdout** that
-"pure test addition" does not appear - then confirm it fails against `origin/main`'s tool. That belongs in
-`tests/test_red_first.py`, whose fixture already copies the real tool into a temporary repo and whose fast-gate arm
-records a measured 2.5s cost for the suite.
+**Driven three ways, all on the same fixture (identical file contents; only the pre-fix commit message differs):**
+
+| drive | tool | result |
+|---|---|---|
+| 1 | **patched** | **OK** - no "pure test addition", marker derived from the tree, verdict PASS |
+| 2 | **`origin/main`'s tool** | **FAILED** - and it printed `VERDICT: PASS (all four teeth satisfied)` while the assertion failed |
+| 3 | **patched, whole suite** | **OK** - the pre-existing cases stay green, so the fix is not bought with a regression |
+
+Drive 2 is the one that matters: the failing run shows the tool asserting a **PASS** for a change whose implementation
+source it never checked - the false statement about what was checked, in the same run as the false verdict.
+
+The fixture carries its own defensive assertion that it is testing what it claims: exactly **one** non-indented added
+implementation line, and it is `def multiply(a, b):`. A test whose fixture cannot be shown to contain the candidate is
+a test about nothing, so the fixture proves itself before the behaviour is asserted.

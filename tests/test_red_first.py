@@ -242,6 +242,60 @@ class TestRedFirst(unittest.TestCase):
         self.assertIn("neither-direction-verified", res.stderr)
         self.assertIn("absent marker 'NEW_NOTE_UNRELATED_TO_IMPL_6611' is not justified by delta", res.stderr)
 
+    def test_pre_fix_commit_MESSAGE_must_not_suppress_marker_derivation(self):
+        """agents-erft: the EXPECT_ABSENT auto-derivation used `git show $PRE_FIX_SHA | grep -Fq`, which searches
+        the PRE-FIX COMMIT MESSAGE AND DIFF rather than the PRE-FIX SOURCE TREE that tooth 2 claims to check. A
+        pre-fix message that mentions a line the delta adds LATER makes that valid marker look present pre-fix;
+        when every candidate is rejected that way EXPECT_ABSENT stays empty and the tool prints 'pure test
+        addition' for a change that really does alter the implementation source - a false statement about what
+        was checked, printed alongside a PASS verdict.
+
+        THE FIXTURE IS THE POINT, and the candidate set is narrower than it looks: the derivation filters added
+        lines with `sed -n 's/^+[^+[:space:]].*/&/p'`, which admits ONLY NON-INDENTED added lines - the added
+        top-level defs - and excludes indented bodies. The feature commit here adds exactly one such line,
+        `def multiply(a, b):`, so the pre-fix MESSAGE must mention THAT line for the defect to appear. File
+        contents are otherwise identical to the ordinary case, so this cannot pass by the change being absent."""
+        git = ["git", "-C", str(self.repo_dir)]
+        self._run_cmd(git + ["checkout", "-q", "feature"])
+        base_tree = self._run_cmd(git + ["rev-parse", "HEAD~1^{tree}"]).stdout.strip()
+        # The defensive half of the fixture: the candidate set really is the added def, and nothing else.
+        added = self._run_cmd(git + ["diff", "--unified=0", self.base_commit, "feature", "--", "lib"]).stdout
+        candidates = [l for l in added.splitlines() if l.startswith("+") and len(l) > 1 and not l[1].isspace() and not l.startswith("+++")]
+        self.assertEqual(candidates, ["+def multiply(a, b):"],
+                         f"the fixture must have exactly one non-indented added impl line, got {candidates}")
+        # Amend the BASE commit so its MESSAGE mentions that line; the feature commit is rebased onto it. The
+        # TREES are untouched - only messages differ - which is what makes this a wrong-revision-object test.
+        self._run_cmd(git + ["checkout", "-q", "main"])
+        self._run_cmd(git + [
+            "commit", "--amend", "-q", "-m",
+            "initial commit: the follow-up will add `def multiply(a, b):` to lib/calc.py",
+        ])
+        new_base = self._get_commit_sha("HEAD")
+        self._run_cmd(git + ["checkout", "-q", "feature"])
+        self._run_cmd(git + ["rebase", "-q", "--onto", new_base, self.base_commit, "feature"])
+        # PROVE THE FIXTURE, NOT THE CLAIM: same TREE, different MESSAGE, and the source really is pre-fix.
+        self.assertEqual(self._run_cmd(git + ["rev-parse", "HEAD~1^{tree}"]).stdout.strip(), base_tree,
+                         "the base TREE must be identical between the arms; only its message may differ")
+        self.assertIn("def multiply(a, b):", self._run_cmd(git + ["log", "-1", "--format=%B", new_base]).stdout,
+                      "the pre-fix MESSAGE must mention the added def line - that is the mutant")
+        self.assertNotIn("def multiply", self._run_cmd(git + ["show", f"{new_base}:lib/calc.py"]).stdout,
+                         "the pre-fix SOURCE TREE must NOT contain the added def")
+
+        # NO --expect-absent: the AUTO-DERIVATION path is the whole subject.
+        res = self._run_red_first([
+            "--base", new_base,
+            "--expect-present", "test_multiply_discriminator",
+            "tests/test_calc.py",
+        ])
+        self.assertNotIn(
+            "pure test addition", res.stdout,
+            f"the pre-fix commit MESSAGE suppressed marker derivation on a real source delta:\n{res.stdout}\n{res.stderr}")
+        self.assertNotIn(
+            "no allow-listed implementation-source delta to verify", res.stdout,
+            f"a real implementation delta was reported as absent:\n{res.stdout}\n{res.stderr}")
+        self.assertEqual(res.returncode, 0, f"the honest pre-fix run should still pass:\n{res.stdout}\n{res.stderr}")
+        self.assertIn("VERDICT: PASS", res.stdout)
+
     def test_data_memo_marker_is_a_disclosed_bound(self):
         """Tooth 2 bound (agents-twue): a committed data/memo.py holding ONLY a marker comment, imported by nothing
         but carrying an allow-listed source extension, is ACCEPTED by the path rule - that is the accepted limitation
