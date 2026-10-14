@@ -7,9 +7,10 @@ fast_gate_arms_250_beads() {
     .beads/hooks/*)
       # agents-kxbv/3ryx: hook code is not inert scanner metadata. The selected suite executes the
       # pre-commit fail-open contract AND checks the tracked executable hook NAME inventory, failing on
-      # a newly tracked hook before that path can inherit a green receipt. It does not execute a new
-      # hook or validate the contents of the other four existing hooks. A DRY RUN only selects the suite,
-      # not its coverage. This arm sits BEFORE the named .beads/ ignore: first match wins.
+      # a newly tracked hook before that path can inherit a green receipt. agents-new1 also pins the
+      # four existing sibling hook Git-index BODY blobs, so staged body drift requires review, without
+      # executing any unknown hook or claiming the pinned bodies are safe. A DRY RUN only selects the
+      # suite, not its coverage. This arm sits BEFORE the named .beads/ ignore: first match wins.
       mapped="$mapped tests/test_beads_hook_fail_open.py"
       ;;
     # --- Ignore list (agents-9nir) -----------------------------------------------------
