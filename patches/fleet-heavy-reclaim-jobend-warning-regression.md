@@ -31,7 +31,7 @@ Driven in a **complete tree** (real `bin/` and `tests/`, sibling directories sym
 `bin/fleet-heavy` swapped between the two generations:
 
 | tool generation | 8a | 8b | 8c | 8d | 8e | 8f | suite |
-| base `bin/fleet-heavy` 14378 B sha256 `33ecf140e615852a` (the fix ABSENT) | ok | **FAIL** | ok | ok | ok | ok | 17 passed, 3 failed |
+| scratch `bin/fleet-heavy` made from the **uninstalled alternate** 14,378 B base, SHA-256 `33ecf140e615852a9d374b27b6e4b956365b80f3e942f25a6a5d897db0617e58` (the fix ABSENT) | ok | **FAIL** | ok | ok | ok | ok | 17 passed, 3 failed |
 | integrated tip, **322 lines** sha256 `9e30db1f62c2ac4f` | ok | ok | ok | ok | ok | ok | 18 passed, 2 failed |
 
 The RED→GREEN delta is **exactly one assertion, 8b**. On the base the failure names three instrument pids —
@@ -60,8 +60,16 @@ reproduced by applying the thing that produces it is stronger than the same hash
 
 ## Boundary
 
-This is a patch **delivery artifact** in `patches/`, not installed `~/fleet` code: it was cut against the
-deployed file's exact bytes and verified in /tmp copies only. Nothing was installed under `~/fleet`, and this
-artifact must land **with** the reclaim family it guards (agents-zwtx: the family's base is the VM's 14378-byte
-generation, which canon does not have), because the tool generations it distinguishes are supplied by that same
-delivery.
+This is a patch **delivery artifact** in `patches/`, not installed `~/fleet` code: the **test file**
+was cut against deployed `~/fleet/tests/fleet-heavy-reclaim.test.sh` (6,858 bytes, SHA-256
+`a65b35600ad2b56dbac42c507a1c7eace18aaff720d5919983058333d104514a`). Its RED/GREEN
+binaries were built in disposable scratch `bin/` directories. The LIVE executable on this VM is
+`~/fleet/bin/fleet-heavy` (154 lines, 7,850 bytes, SHA-256
+`0f95ccd3c392b9736362713ce006f0b21f02f80e49951eda3da5ae1cf9863a91`), NOT the
+alternate 14,378-byte generation at top-level `~/fleet/fleet-heavy` (SHA-256
+`33ecf140e615852a9d374b27b6e4b956365b80f3e942f25a6a5d897db0617e58`). Section 8
+must land **with** a hub-approved integration of that alternate reclaim/job-end family into the
+live `bin/` path: a negative warning assertion alone would pass vacuously against the current
+154-line binary, which has no job-end sweep. Do not confuse a successful test-only patch against
+the deployed test file with installation of its required executable. Nothing was installed
+under `~/fleet` by this artifact.
