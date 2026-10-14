@@ -313,6 +313,66 @@ def _importing_suites(stem, root=None):
     return found
 
 
+def _parse_resolutions(stdout, rc):
+    """The resolve-mode contract as {path: suites}, or {} when the gate did NOT answer it.
+
+    {} MEANS "ASK PER PATH", NOT "NOTHING IS SELECTED": a batch that refused (an unmatched path fails
+    loudly, exactly as it does for the union run) has printed some per-path lines but no ':always' line,
+    and answering from it would hand back sets MISSING the tier pins - a wrong answer that looks like a
+    right one. So an absent ':always' line is treated as no answer at all, and the caller pays the slow
+    path instead.
+    """
+    if rc != 0:
+        return {}
+    always = None
+    mapping = {}
+    for line in stdout.splitlines():
+        if line.startswith(":always\t"):
+            always = {s for s in line.split("\t", 1)[1].split() if s}
+        elif line.startswith("!"):
+            mapping[line[1:].strip()] = set()
+        elif "\t" in line:
+            path, suites = line.split("\t", 1)
+            mapping[path.strip()] = {s for s in suites.split() if s}
+    if always is None:
+        return {}
+    return {path: suites | always for path, suites in mapping.items()}
+
+
+@functools.lru_cache(maxsize=None)
+def _batch_resolutions(root=None):
+    """THE MAPPING OF EVERY lib/ MODULE, FROM ONE GATE INVOCATION (agents-wzmj, F1).
+
+    The same question _selected_suites asks per path, asked once for the whole module set. The gate's
+    per-path resolve mode answers it from the single pass that already resolves every path, so the 21
+    startups the module walk used to pay (0.194s each, 4.07s) become one.
+
+    DELIBERATELY NOT SILENT WHEN THE GATE DOES NOT ANSWER: the caller falls back to the per-path dry
+    run, which is correct but slow, so an inert mode would cost the saving without anybody noticing -
+    test_the_resolve_mode_answers_every_module_from_one_invocation pins the ANSWER, not just the call.
+
+    FAST_GATE_DRY_RUN IS SET AS WELL, and that is a safety property and not redundant: the resolve mode
+    is checked before the dry run, so a gate that HAS the mode answers per path, while a gate that does
+    not falls through to the dry-run exit instead of the RUNNER. Measured: without it, the batch call on
+    an unpatched gate ran the suites and hit the 60s timeout - the recursion the dry run exists to
+    prevent, since this module is one of the suites it would have selected.
+    """
+    root = root or ROOT
+    paths = [f"lib/{module}.py" for module in _lib_modules(root)]
+    if not paths:
+        return {}
+    proc = subprocess.run(
+        ["bash", "tools/fast-gate.sh"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_CHANGED": "\n".join(paths), "FAST_GATE_RESOLVE_PATHS": "1",
+             "FAST_GATE_DRY_RUN": "1"},
+        timeout=60,
+    )
+    return _parse_resolutions(proc.stdout, proc.returncode)
+
+
 @functools.lru_cache(maxsize=None)
 def _selected_suites(module_path, root=None):
     """What the fast gate would actually run for a change to `module_path`.
@@ -326,6 +386,9 @@ def _selected_suites(module_path, root=None):
     a corrected figure for an unchanged shape would.
     """
     root = root or ROOT
+    batch = _batch_resolutions(root)
+    if module_path in batch:
+        return batch[module_path]
     proc = subprocess.run(
         ["bash", "tools/fast-gate.sh"],
         cwd=root,
@@ -576,6 +639,48 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
 # gaining a helper consumer, or a new helper appearing, fails here rather than quietly widening the claim.
 # NON_SUITE_CONSUMERS is loaded from tests/fast_gate_allowlists.d/ together with the allowlist
 # above, so a lane widening the mirror drops its own fragment instead of editing this file.
+
+
+class TestTheResolveModeAnswersManyPathsInOneInvocation(unittest.TestCase):
+    """agents-wzmj (F1): one startup answers the mapping for every path, instead of one per path.
+
+    The saving is real only if the ANSWER is real, so what is pinned here is not that the mode was asked
+    for but that it replied - a mode that is silently inert costs the saving without anybody noticing,
+    because the per-path fallback keeps every other test green.
+    """
+
+    def test_the_batch_answer_equals_the_per_path_dry_run(self):
+        """THE EQUIVALENCE, on the real module set: the batch says exactly what the union dry run says for
+        each path alone. Without this the mode could return a plausible set and be wrong."""
+        batch = _batch_resolutions()
+        modules = sorted(_lib_modules())
+        self.assertTrue(modules, "no lib/ modules: the equivalence below would pass vacuously")
+        self.assertEqual(sorted(batch), [f"lib/{module}.py" for module in modules],
+                         "every module must be ANSWERED by the one invocation; an unanswered module means "
+                         "the mode is inert and the caller is silently on the slow path again")
+        for module in modules[:5]:
+            path = f"lib/{module}.py"
+            proc = subprocess.run(
+                ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
+                env={**os.environ, "GIT_CHANGED": path, "FAST_GATE_DRY_RUN": "1"}, timeout=60,
+            )
+            union = {ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
+                     if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
+            self.assertEqual(union, batch[path],
+                             f"the batch answer for {path} must be what the union dry run selects")
+
+    def test_a_batch_that_did_not_answer_is_not_trusted(self):
+        """The pairing that makes the test above a measurement: a refused run and a run that printed
+        per-path lines but no ':always' line must BOTH mean 'ask per path', because answering from either
+        would return sets missing the tier pins - a wrong answer shaped exactly like a right one."""
+        self.assertEqual(_parse_resolutions("lib/a.py\ttests/test_b.py\n", 1), {},
+                         "a refused batch must not be answered from")
+        self.assertEqual(_parse_resolutions("lib/a.py\ttests/test_b.py\n", 0), {},
+                         "per-path lines without the ':always' line are not an answer")
+        parsed = _parse_resolutions("lib/a.py\ttests/test_b.py\n:always\ttests/test_tree_guards.py \n", 0)
+        self.assertEqual(parsed, {"lib/a.py": {"tests/test_b.py", "tests/test_tree_guards.py"}},
+                         "and a complete answer IS parsed, so the two refusals above are not a parser "
+                         "that returns nothing for everything")
 
 
 def _load_oracle():

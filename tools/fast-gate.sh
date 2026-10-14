@@ -32,6 +32,15 @@ set -euo pipefail
 # exit path (including FAST_GATE_DRY_RUN), because a green fast gate is evidence about the
 # arrangement it ran in - and after agents-u4k7 that arrangement is the CALLER's environment,
 # with hermeticity supplied by the test package's declaration rather than by a shell scrub.
+#
+# agents-wzmj (F1): FAST_GATE_RESOLVE_PATHS=1 is the SECOND contract on that channel, and it is additive:
+# one line per input path ('<path>\t<suites>', or '!<path>' when no arm matched) plus one ':always\t
+# <suites>' line for the path-independent tier pins, so a caller needing N answers pays ONE startup
+# instead of N. With it unset, stdout is exactly what it was - the union dry run's suite list.
+#
+# agents-wzmj: the arm registry's FILESYSTEM fallback (no index for this tree, or an index that names
+# fragments this tree does not have) prints a WARNING to stderr, because in that state an untracked *.sh
+# in the registry IS sourced and the run otherwise looks like a protected one.
 echo "fast-gate: environment: the caller's, unmodified (no env scrub); hermeticity is declared" \
      "by tests/__init__.py -> tests/hermetic_env.isolate_operator_config() (agents-v1a2)" >&2
 
@@ -469,6 +478,10 @@ inventory=""
 
 while IFS= read -r f; do
   [ -z "$f" ] && continue
+  # agents-wzmj (F1): per-path resolve mode reports THIS path's contribution rather than the running
+  # union, so what the accumulators held before this path is remembered here.
+  _fast_gate_mapped_before="$mapped"
+  _fast_gate_inventory_before="$inventory"
   # First match wins, across fragments in their pinned order - the semantics the single `case` had.
   #
   # THE UNMATCHED FALLBACK IS HERE, NOT A `*)` ARM IN THE REGISTRY, and that is a correctness requirement
@@ -520,6 +533,18 @@ while IFS= read -r f; do
   done
   if [ "${f##*.}" = "$inventory_script_suffix" ] && [ "${f#tests/}" = "$f" ]; then
     inventory="tests/test_retention.py"
+  fi
+  # agents-wzmj (F1): the per-path line, printed only in resolve mode - so the union run's stdout is
+  # byte-identical without it, which is the property tests/test_fast_gate_mapping.py asserts for the dry
+  # run. A path no arm matched prints with a leading '!' and no suite list, because silence would be the
+  # same signal a mode that resolves nothing produces.
+  if [ -n "${FAST_GATE_RESOLVE_PATHS:-}" ]; then
+    if [ -z "$_fast_gate_matched" ]; then
+      printf '!%s\n' "$f"
+    else
+      _fast_gate_own="$(printf '%s\n' ${mapped#"$_fast_gate_mapped_before"} ${inventory#"$_fast_gate_inventory_before"} | awk 'NF && !seen[$0]++' | sort | tr '\n' ' ')"
+      printf '%s\t%s\n' "$f" "${_fast_gate_own% }"
+    fi
   fi
 done <<< "$changed"
 
@@ -587,6 +612,26 @@ if ! files="$(printf '%s\n' $run $mapped $tree_guards $consumer_coverage $invent
   echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
   echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
   exit 1
+fi
+
+# agents-wzmj (F1): PER-PATH RESOLVE MODE, and it is checked BEFORE the union dry run so it takes
+# precedence when a caller sets both (it IS a dry run - one that answers per path instead of as a union).
+#
+# The union dry run answers 'what would this change set run'. A caller that needs that answer for twenty
+# paths separately had to start the gate twenty times - each startup paying the whole preamble, including
+# sourcing every arm fragment (measured: 0.194s each, so 4.07s for the 21 module paths the consumer-
+# coverage mirror asks about). This mode answers each path from the SAME pass that already resolves them.
+#
+# The contract is additive and per-path EXACT: a path's set here is the set the union run computes when
+# that path is the whole change set - its own line above plus the path-independent tier pins on the
+# ':always' line. Refusals are not softened: an unmatched path still fails loudly above, exactly as it does
+# for the union run, which is why a caller that sees no ':always' line must treat the batch as unanswered
+# rather than as an empty selection.
+if [ -n "${FAST_GATE_RESOLVE_PATHS:-}" ]; then
+  FAST_GATE_TERMINATED=1
+  fast_gate_report_ignored_arms
+  printf ':always\t%s\n' "$(printf '%s\n' $run $tree_guards $consumer_coverage | awk 'NF && !seen[$0]++' | sort | tr '\n' ' ')"
+  exit 0
 fi
 
 # Dry-run support for testing mapping resolution without invoking unittest.
