@@ -11,10 +11,17 @@
   | file | baseline sha256 | patched result |
   |---|---|---|
   | `bin/fleet-check` | `455e3b05d2dc172c2d2149dd47b33ac4d77266b57d45765506d2e2b362c10498` | `04acfaae1a9c3cf0d1625e2f68003b585a6ba6bf066da07ff527d79656d1a14f` |
-  | `tests/fleet-check-tree-stability.test.sh` | `8cc667daef33635fddcb648415df99defa329cc64f84dc4f860fdc4710b57067` | `4f42610ae4d5a1d13d7a9db002d0401aa402a5d141cc56e9d0ade3dd905b0dc4` |
+  | `tests/fleet-check-tree-stability.test.sh` | `8cc667daef33635fddcb648415df99defa329cc64f84dc4f860fdc4710b57067` | `01963652b07bb4e8aa42cccbf7513bc2847e9168b8cfbf5f59b691cb3e8152af` |
 
-- **Revision:** first revision of this artifact. Nothing has been applied anywhere — the live `~/fleet`
-  was never written to.
+- **Revision:** SECOND revision. The first FAILED cross-family review on **agents-vl8c**: its premise
+  fix read the gate's log (correct) but kept the launcher's output as a **fallback**, so a log that was
+  readable and did *not* carry the marker fell through to text that contains the command — absence of
+  evidence read as evidence found elsewhere, the same defect class one branch over. The fallback is gone
+  and the two states are now explicit; **all evidence produced before this revision is void** (the test
+  file's bytes changed, and this time the change is in the acceptance instrument itself).
+- **Baseline hashes are unchanged** (`bin/fleet-check` still `455e3b05…`): this revision touches only the
+  test file, so the gate half of the patch is byte-identical to the revision reviewed against the same
+  baseline. Nothing has been applied anywhere — the live `~/fleet` was never written to.
 - **Disposition:** DELIVERY ONLY, and unlike the agents-0r1c patch there is **no ordering hazard**: this
   changes how the gate *witnesses* a tree, not whether it refuses anything, so it can be applied in any
   order. It does change behaviour a reader may rely on, so the bound it introduces is stated in the
@@ -106,10 +113,10 @@ by construction — one `git` process per path — and is not on any normal path
 - **The hub test is the instrument, and it has a `CHECK_OVERRIDE` hook, so the SAME suite was run
   against both gates** (`CHECK_OVERRIDE=<fleet-check>`), each in its own heavy queue (2 private slots, so
   it can never queue behind the merger):
-  - **patched test + patched gate → 24 passed, 0 failed** (8 arms × 3 assertions), including
-    `same-bytes-rewrite: verdict recorded PASS` — the acceptance — and
+  - **patched test + patched gate → 27 passed, 0 failed** (8 arms × 3 assertions + the 3 premise-rule
+    cases), **no SKIPs**, including `same-bytes-rewrite: verdict recorded PASS` — the acceptance — and
     `symlink-target-rewrite: verdict recorded STALE` still being met by content.
-  - **patched test + UNPATCHED gate → 13 passed, 11 failed**, and the failures are exactly this change:
+  - **patched test + UNPATCHED gate → 16 passed, 11 failed**, and the failures are exactly this change:
     `same-bytes-rewrite: expected PASS, state=STALE` (the defect, reproduced red-first),
     `round-trip`/`short-round-trip: expected PASS, state=STALE` (the old `ctime` detection), and the
     bound assertion failing because the old scope does not state it.
@@ -119,13 +126,25 @@ by construction — one `git` process per path — and is not on any normal path
   that target changes; a batch containing a broken and a directory symlink exercises the fallback and is
   stable across two readings; adding/removing such a path moves it; and an `assume-unchanged` rewrite
   moves it while `git diff HEAD` reports nothing.
-- **A pre-existing flaw in the test file is fixed here**, found while adding the new arm: the premise
-  check (`"the worktree never changed"`) grepped the **launcher's** output, which is the
-  `started the FAST gate for <sha> (`<command>` …)` line — i.e. it contains the **command text** — so any
-  arm whose marker appears literally in its own command satisfied its premise without the command having
-  produced that output. Measured: an arm whose marker came from `$(cat input)` had to SKIP, while arms
-  with literal markers verified nothing at all. The premise now reads the log the record names
-  (`.log`), with the old path as a fallback, so every arm proves its own premise for real.
+- **Two flaws in the test file's premise check are fixed here** (the second one found by REVIEW, after
+  the first fix — which is why this revision exists). Both are the same class: a check that fails to find
+  something being reinterpreted as finding it somewhere else.
+  1. The premise (`"the worktree never changed"`) grepped the **launcher's** output, which is the
+     `started the FAST gate for <sha> (`<command>` …)` line — it contains the **command text** — so any
+     arm whose marker appears literally in its own command satisfied its premise without the command
+     having produced that output. Measured: an arm whose marker came from `$(cat input)` had to SKIP,
+     while arms with literal markers verified nothing at all.
+  2. **agents-vl8c (review finding, fixed here):** the fix for (1) kept `$T/out` as a *fallback*, so when
+     the log **was** readable and simply did **not** carry the marker, the expression fell through to the
+     launcher text and reported the premise as met. The reviewer drove it: log = `fast-gate: passed`,
+     launcher = `started gate (exit 0; echo rewrote-identical-bytes)`, marker = `rewrote-identical-bytes`
+     → the premise expression answered "found" with no marker in the log at all, so the same-bytes arm
+     could certify a premise its command never met.
+     The rule is now a function with **three distinct answers** — the log is readable and carries the
+     marker (0), the log is readable and does **not** (1, premise not met, **no fallback**), the log cannot
+     be read at all (2, its own answer, also with no fallback, because the only other text available is
+     the command) — and the arm loop SKIPs loudly in both 1 and 2 with different reasons. Three unit cases
+     assert the rule itself before any arm uses it, including the reviewer's exact scenario.
 
 ### Hub Application
 
