@@ -105,6 +105,8 @@ class LineSandbox:
             adapter = self.root / "lib" / "adapters" / f"{engine}.sh"
             shutil.copyfile(ROOT / "lib" / "adapters" / f"{engine}.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+        # Contract (agents-v52t): the dispatcher runtime, staged by name; lib/sinks as a package tree.
+        STAGED_RUNTIME = ("dispatcher", "named", ("sinks",))
         for module in LIB_MODULES:
             shutil.copyfile(ROOT / "lib" / module, self.root / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.

@@ -276,6 +276,8 @@ class TestDispatcherSchemaGate(unittest.TestCase):
         adapter = sandbox / "lib" / "adapters" / "pi.sh"
         shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+        # Contract (agents-v52t): the engine runtime, staged by name; lib/sinks as a package tree.
+        STAGED_RUNTIME = ("engine", "named", ("sinks",))
         for module in ("findings.py", "redaction.py", "embargo.py",
                        "tool_pins.py", "net_forward.py", "egress_proxy.py",
                        "line_numbers.py"):

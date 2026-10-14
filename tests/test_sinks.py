@@ -81,6 +81,8 @@ class SinkFixture:
         # the lib/findings.py CLI directly, so the copy set is that CLI's runtime (plus the
         # lib/sinks package directory it delegates to), which the station-script builder in
         # tests/sandbox_fixtures.py does not derive. Different case; not routed through it.
+        # Contract (agents-v52t): the engine runtime, staged by name; lib/sinks as a package tree.
+        STAGED_RUNTIME = ("engine", "named", ("sinks",))
         for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "line_numbers.py"):
             shutil.copyfile(ROOT / "lib" / module, self.factory / "lib" / module)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
