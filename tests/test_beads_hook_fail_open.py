@@ -11,7 +11,10 @@ Measured, not asserted: against the pre-change hook, the ``exit 75`` and ``exit 
 return 75 and 1 from the hook; a stash-the-fix run is what makes this a discriminator rather than a
 suite born green.
 
-Hermetic: a stub ``bd`` on PATH, no git repository, no lock, no network, no repository state.
+Pre-commit behaviour is hermetic: a stub ``bd`` on PATH, no lock or network. The separate
+agents-3ryx inventory guard reads the repository's Git INDEX (the gate's witnessed path set),
+never executes a new hook, and exercises its rejection in a disposable staged Git root. That
+inventory does not validate the bodies of the four other existing hooks.
 """
 
 from __future__ import annotations
@@ -107,6 +110,67 @@ class TestPreCommitHookFailsOpen(unittest.TestCase):
         text = HOOK.read_text()
         self.assertNotIn('if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi', text,
                          "the abort-on-non-zero tail is what made a bounded shim break commits")
+
+
+# agents-3ryx: the gate maps EVERY .beads/hooks/* path to this suite, whereas the
+# behavioural tests above execute only pre-commit. Pin the NAMES of all currently tracked
+# executable hooks so a NEW hook cannot inherit a green receipt without deliberate review.
+# This is an inventory guard, NOT a claim to validate the bodies of the other four hooks.
+REVIEWED_HOOKS = frozenset({
+    "post-checkout", "post-merge", "pre-commit", "pre-push", "prepare-commit-msg",
+})
+
+
+class TestTrackedHookInventory(unittest.TestCase):
+    """Reject new Git-index hook paths without executing their untrusted contents."""
+
+    def assert_reviewed_hooks(self, root: Path):
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--stage", "-z", "--", ".beads/hooks"],
+            capture_output=True, check=True,
+        ).stdout
+        entries = {}
+        for entry in listing.split(b"\0"):
+            if not entry:
+                continue
+            header, path = entry.decode().split("\t", 1)
+            mode, _object_id, stage = header.split()
+            self.assertEqual(stage, "0", f"{path}: unresolved index stages cannot be reviewed")
+            entries[path] = mode
+        expected = {f".beads/hooks/{name}" for name in REVIEWED_HOOKS}
+        self.assertEqual(set(entries), expected,
+                         f"unreviewed tracked .beads/hooks/ paths: {sorted(set(entries) - expected)}; "
+                         f"missing reviewed paths: {sorted(expected - set(entries))}. "
+                         "Review new hook code and deliberately update this pinned inventory before clearing.")
+        for name in REVIEWED_HOOKS:
+            path = root / ".beads" / "hooks" / name
+            self.assertEqual(entries[f".beads/hooks/{name}"], "100755",
+                             f"{path}: reviewed hook must remain a regular executable index entry")
+            self.assertFalse(path.is_symlink(), f"{path}: a symlink is not the reviewed hook file")
+            self.assertTrue(path.is_file(), f"{path}: tracked hook must exist in the witnessed tree")
+            self.assertTrue(path.stat().st_mode & 0o111, f"{path}: reviewed hook lost its executable bit")
+
+    def test_tracked_hook_names_and_executable_modes_are_reviewed(self):
+        self.assert_reviewed_hooks(ROOT)
+
+    def test_a_new_staged_executable_hook_is_refused_without_running_it(self):
+        with tempfile.TemporaryDirectory(prefix="3ryx-new-hook-") as directory:
+            root = Path(directory)
+            hooks = root / ".beads" / "hooks"
+            hooks.mkdir(parents=True)
+            subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+            for name in REVIEWED_HOOKS:
+                path = hooks / name
+                path.write_text("#!/bin/sh\nexit 0\n")  # inert control; content is not this guard's contract
+                path.chmod(0o755)
+            subprocess.run(["git", "-C", str(root), "add", "--", ".beads/hooks"], check=True)
+            self.assert_reviewed_hooks(root)  # control: the five original names pass
+            new_hook = hooks / "new-hook.sh"
+            new_hook.write_text("#!/bin/sh\nexit 99\n")
+            new_hook.chmod(0o755)
+            subprocess.run(["git", "-C", str(root), "add", "--", ".beads/hooks/new-hook.sh"], check=True)
+            with self.assertRaisesRegex(AssertionError, r"unreviewed tracked .beads/hooks/ paths: .*new-hook.sh"):
+                self.assert_reviewed_hooks(root)
 
 
 if __name__ == "__main__":
