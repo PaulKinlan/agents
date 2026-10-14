@@ -2,7 +2,7 @@
 
 - **Target repository:** `PaulKinlan/fleet`
 - **Target files:**
-  - `watchdog/watchdog.mjs` (the EXCUSED predicate and the four consumers of `in_flight` that act on an idle lane)
+  - `watchdog/watchdog.mjs` (the EXCUSED predicate and the five consumers of `in_flight` that act on an idle lane)
   - `tests/watchdog-smoke.test.sh` (new section 14; four arms, three of them red against the pristine watchdog)
 - **Baseline file hashes:**
   `5a7ef7289b438ced8711104f1efa516b08ad45ae82b0cb48055fc8e00b3b5735  watchdog/watchdog.mjs`
@@ -25,7 +25,7 @@ symptom but the **position of the fault**:
 |---|---|---|---|
 | 1 | two clocks for lane liveness | **one predicate, two instruments**: the predicate "is this lane working?" is assigned twice, from two different records, and each reader sees only its own | `remote/lanes.sh` `lane_status()` **and** `inbox/status.mjs` `last_event_min` |
 | 2 | `bd comment` does not bump `updated_at` | **a writer moves nothing**: the bead record's recency field is not written by the command that changes the bead | the `bd comment` writer (`bd`, outside `PaulKinlan/fleet`), read at `inbox/status.mjs:161` |
-| 3 | the watchdog does not read `waiting` | **a consumer ignores a fact its own record carries**: two sibling consumers read the lane's declared label and two do not | `watchdog/watchdog.mjs` (the poll) |
+| 3 | the watchdog does not read `waiting` | **a consumer ignores a fact its own record carries**: two sibling consumers of `in_flight` read the lane's declared label and three do not | `watchdog/watchdog.mjs` (the poll) |
 
 Written as one sentence, the axis is:
 
@@ -46,7 +46,7 @@ The exact assignment sites:
 - `remote/lanes.sh:178` `lane_status()` assigns the lane's state. The **current** code (`~/fleet`, mtime
   2026-10-13 21:16) reads `state.last_event_at` at `:186` into a variable that is then **never read** - the only
   occurrences of `ev` in the whole file are the declaration at `:184` and this assignment at `:186`. The
-  `busy == false` branch is `remote/lanes.sh:220-223`, and it returns `idle` on the ground that `win_exists`
+  `busy == false` branch is `remote/lanes.sh:219-224` and it returns `idle` at `:223` on the ground that `win_exists`
   (`:181`) found a live unit and a connectable socket, with the comment *"age alone cannot prove a dead session.
   Do not label it zombie or free its specialist slot based on a quiet work queue (fleet-ehyo)."*
 - `inbox/status.mjs:76` `lastEvent = session-file mtimeMs`; `:89` `hostEv = state.last_event_at`;
@@ -55,11 +55,14 @@ The exact assignment sites:
 
 So the two readers use **different instruments for the same predicate**: `lanes.sh` asks *is there a live
 session object?* (unit + socket), and `status.mjs` asks *how long since anything happened?* (max of session mtime
-and RPC event). Bead-time they disagreed in the sharpest possible form: the snapshot at `fleet-copy` (2026-10-13
-05:05) has the assignment *"state.last_event_at older than 3600s ⇒ `echo "zombie"`"* at
-`remote/lanes.sh:214-220`, while the watchdog's `last_event_min` is `max(session mtime, RPC event)` - so a lane
-whose session jsonl is fresh but whose RPC `last_event_at` is an hour old is `zombie` to one and `2 min` idle to
-the other. That is the bead's measurement, and it is real.
+and RPC event). Bead-time they disagreed in the sharpest possible form. A pre-change snapshot of the tree on this
+VM (`~/fleet-copy`, file mtime 2026-10-13 05:05:09) assigns the verdict from `state.last_event_at` in the branch
+at `remote/lanes.sh:215-221`: `ev_s=$(date -d "$ev" ...)` at `:218`, the `> 3600` test at `:219`, and
+`echo "zombie"; return 0` at `:220` - while the watchdog's `last_event_min` is `max(session mtime, RPC event)`.
+So a lane whose session jsonl is fresh but whose RPC `last_event_at` is an hour old is `zombie` to one and
+`2 min` idle to the other. That is the bead's measurement (the bead's own scout at 2026-10-13 17:40 cites the
+same code as *"remote/lanes.sh:216-225 prints zombie when its state.last_event_at is older than 3600s"*), and
+it is real.
 
 **But it is no longer the code.** `fleet-ehyo` removed the `zombie` label from `lane_status()` (the change is
 pinned by `tests/lanes.test.sh:310`, *"idle liveness: stale activity is not a zombie or a free specialist slot
@@ -107,12 +110,13 @@ lane's declared label through `EXCUSED` (`:218`):
 - `:237` `heldWork` - `!(b.labels||[]).some(x => EXCUSED.test(x))`
 - `:255` `held` - same predicate
 
-Four did not:
+Three did not:
 
 - `:273` `laneWork` (the big-context fresh session) - `assignee === ...` with no label test
 - `:377` `mine` (the "YOU ARE IDLE WITH WORK CLAIMED" beam list) - `i.assignee === id` with no label test
-- `:382` (the message) reads `i.updated_min` - face 2, above
 - `:393` `stillHolds` (the escalation cleanup) - `i.assignee === klane` with no label test
+
+and the same message reads `i.updated_min` at `:382` - that is face 2's field, not a label.
 
 Running the new arm 14a against the pristine watchdog reproduces the harm exactly: a lane whose only in-flight
 bead carries `waiting` is nudged *"YOU ARE IDLE WITH WORK CLAIMED"*, and arm 14c shows the escalation then
@@ -127,9 +131,9 @@ and it did not read the declaration it requested, so its own remedy could not co
 gains `claimsWork(b, assignee)` beside `EXCUSED` (`:218`), and the five sites above use it. The two sites that
 already read the label keep their behaviour byte for byte; `:273`, `:377` and `:393` change behaviour, because
 a lane that has declared itself parked is not *holding work* for any consumer - the same statement the
-siblings already make, and the same statement the big-context rule's own comment makes (*"refreshing the
-context of a lane that is idle BY INSTRUCTION ... is churn with nothing to gain"* - a declared-waiting lane is
-idle by declaration).
+siblings already make, and the same statement the big-context rule's own comment makes at `:265` (*"refreshing
+the context of a lane that is idle BY INSTRUCTION ... is churn with nothing to gain"* - a declared-waiting lane
+is idle by declaration).
 
 **One second line, in the same block, because the first is incomplete without it.** The escalation's cleanup at
 `:394` deleted `state.alerts[\`idlehold:${k}\`]`, i.e. the key `idlehold:<vm>|<vm>-<lane>` - while `alert()` at
@@ -151,7 +155,9 @@ patched one in both runs):
 - The pre-existing suites are unchanged on the patched tree: `tests/watchdog-drivers.test.sh` **6/6**.
 
 Command: `bash tests/watchdog-smoke.test.sh` from the fleet checkout root (the new section 14 is the arms to
-read; the harness is hermetic - a mock inbox on an ephemeral loopback port and a `status.json` fixture per arm).
+read; each of its arms serves a `status.json` fixture to a mock inbox on an ephemeral loopback port, so 14a-14d
+take no network - the earlier sections of that suite include a real `--dry-run` sweep, which is why the fleet
+checkout must be used rather than this repo).
 
 **Round trip:** `git apply --check` passes against pristine copies of both files, and applying the patch
 reproduces both patched files byte-for-byte (hashes above).
