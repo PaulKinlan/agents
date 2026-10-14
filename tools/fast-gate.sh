@@ -293,23 +293,34 @@ FAST_GATE_STAGE="mapping changed files"
 # synthetic fixture trees two suites build with copytree - has no index to ask, so there the filesystem IS
 # the whole tree and the glob stays, the same rule tests/__init__.py states for has_git_index.
 fast_gate_arm_fragments() {
-  local _rel _rest _stray
-  if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    printf '%s\n' "$ROOT"/tools/fast-gate-arms.d/*.sh
-    return 0
+  local _rel _rest _frag _stray _tracked=$'\n' _found=0
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    while IFS= read -r -d '' _rel; do
+      _rest="${_rel#tools/fast-gate-arms.d/}"
+      [ "$_rest" = "$_rel" ] && continue        # not under the arm registry
+      case "$_rest" in */*) continue ;; esac     # a nested path is not a fragment
+      case "$_rest" in *.sh) ;; *) continue ;; esac
+      _tracked="$_tracked$_rel"$'\n'
+      _frag="$ROOT/$_rel"
+      [ -f "$_frag" ] || continue                # the index answered about ANOTHER tree
+      _found=$((_found + 1))
+      printf '%s\n' "$_frag"
+    done < <(git -C "$ROOT" ls-files -z -- 'tools/fast-gate-arms.d')
+    # ONE read of the index, then pure-bash membership (agents-es0y, imp-dflt): a git process per stray
+    # fragment on the gate's critical path is a cost the critical path should not pay.
+    for _stray in "$ROOT"/tools/fast-gate-arms.d/*.sh; do
+      [ -f "$_stray" ] || continue
+      _rel="${_stray#"$ROOT"/}"
+      case "$_tracked" in *$'\n'"$_rel"$'\n'*) ;; *)
+        echo "fast-gate: WARNING: ignoring UNTRACKED arm fragment (not sourced): $_rel" >&2 ;;
+      esac
+    done
+    [ "$_found" -gt 0 ] && return 0
+    # The index named fragments and NOT ONE exists under this ROOT: the index answered about a different
+    # tree - a copy of tools/ placed inside some other work tree. There is no index for THIS tree, so the
+    # filesystem is the whole tree here, exactly as it is when there is no index at all.
   fi
-  while IFS= read -r -d '' _rel; do
-    _rest="${_rel#tools/fast-gate-arms.d/}"
-    [ "$_rest" = "$_rel" ] && continue        # not under the arm registry
-    case "$_rest" in */*) continue ;; esac     # a nested path is not a fragment
-    case "$_rest" in *.sh) printf '%s\n' "$ROOT/$_rel" ;; esac
-  done < <(git -C "$ROOT" ls-files -z -- 'tools/fast-gate-arms.d')
-  for _stray in "$ROOT"/tools/fast-gate-arms.d/*.sh; do
-    [ -f "$_stray" ] || continue
-    _rel="${_stray#"$ROOT"/}"
-    [ -n "$(git -C "$ROOT" ls-files -- "$_rel")" ] || \
-      echo "fast-gate: WARNING: ignoring UNTRACKED arm fragment (not sourced): $_rel" >&2
-  done
+  printf '%s\n' "$ROOT"/tools/fast-gate-arms.d/*.sh
 }
 
 fast_gate_arms_load() {
