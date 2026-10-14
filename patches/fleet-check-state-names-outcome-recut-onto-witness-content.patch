@@ -1,0 +1,342 @@
+diff -urN a/bin/fleet-check b/bin/fleet-check
+--- a/bin/fleet-check	2026-10-14 06:17:13.625698875 +0000
++++ b/bin/fleet-check	2026-10-14 06:17:48.217798757 +0000
+@@ -263,6 +263,12 @@
+           record_identity "$rec" "$tree" "$GATE_KIND"
+           if [ -n "$rec_state" ]; then
+             echo "fleet-check: NOT serving the cached PASS: $rec_reason - running the gate instead"
++          elif [ "$(jq -r 'if has("settled") then (.settled|tostring) else "true" end' "$rec" 2>/dev/null || echo true)" = "false" ]; then
++            # agents-lgdv: THE SAME QUESTION AS record_identity, ONE FIELD FURTHER. A PASS whose run was not
++            # settled describes a run the worktree moved under, so it is not a verdict FOR THIS TREE and must
++            # never be served as a cached PASS. Without this the fix would trade a mislabelled FAIL for a false
++            # GREEN - a lane reading "PASS (cached)" for a tree its suites did not read.
++            echo "fleet-check: NOT serving the cached PASS: $(jq -r '.state_reason // "the worktree was not settled during the run"' "$rec" 2>/dev/null) - running the gate instead"
+           else
+           cov_info=""
+           if [ -n "$FAST" ]; then
+@@ -296,7 +302,12 @@
+         else
+           echo "fleet-check: cached PASS was for a different command; re-running gate"
+         fi ;;
+-  FAIL) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
++  FAIL) # agents-lgdv: an UNSETTLED FAIL is not a cached verdict either, and the line it used to print
++        # ("Re-running cannot change a deterministic failure: fix and commit") would be a false claim about a
++        # run whose own reason says re-run on a settled tree. It falls through to a re-run; the previous
++        # attempt is named (with its qualifier) by prev_attempt_msg below.
++        if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ] \
++           && [ "$(jq -r 'if has("settled") then (.settled|tostring) else "true" end' "$rec" 2>/dev/null || echo true)" != "false" ]; then
+           jq -r '"fleet-check: FAIL (cached, exit \(.rc)) for this exact tree: ran by \(.lane) at \(.at). Log: \(.log). Re-running cannot change a deterministic failure: fix and commit. (Flaky? delete " + input_filename + " and re-run.)"' "$rec"; exit 1
+         fi ;;
+   RUNNING) if kill -0 "$(jq -r .pid "$rec")" 2>/dev/null; then
+@@ -314,8 +325,15 @@
+   prev_st=$(jq -r '.state // empty' "$rec" 2>/dev/null || true)
+   prev_at=$(jq -r '.at // empty' "$rec" 2>/dev/null || true)
+   prev_rc=$(jq -r '.rc // empty' "$rec" 2>/dev/null || true)
++  # agents-lgdv: THE PREVIOUS ATTEMPT'S OUTCOME MUST BE READ WITH ITS QUALIFIER. `state` now carries the
++  # outcome of that run, so a preceding unsettled attempt reads FAIL or PASS - and this line is the one a lane
++  # sees when the gate is re-run, so the qualifier has to travel with it or the re-run looks unexplained.
++  prev_settled=$(jq -r 'if has("settled") then (.settled|tostring) else "true" end' "$rec" 2>/dev/null || echo true)
++  prev_reason=$(jq -r '.state_reason // empty' "$rec" 2>/dev/null || true)
++  prev_note=""
++  [ "$prev_settled" = false ] && prev_note=" - NOT A VERDICT FOR THIS TREE${prev_reason:+: $prev_reason}"
+   if [ -n "$prev_st" ]; then
+-    prev_attempt_msg="previous attempt on this tree: $prev_st${prev_rc:+ (exit $prev_rc)}${prev_at:+ at $prev_at}"
++    prev_attempt_msg="previous attempt on this tree: $prev_st$prev_note${prev_rc:+ (exit $prev_rc)}${prev_at:+ at $prev_at}"
+   fi
+ fi
+ 
+@@ -559,18 +577,32 @@
+   # Measured on a real gate (0c15c7f, tree d233b957): the five-branch union was rebuilt in the very worktree
+   # the gate ran in - checkout 07:06:25, merges 07:06:27/29/31/34/37, the gate's own 'at' 07:06:37 - and a
+   # suite that derives its root from BASH_SOURCE read the half-merged checkout and logged FAIL for a check
+-  # that PASSES on the recorded tree. Recorded as STALE rather than PASS or FAIL: the cure is to re-run
+-  # against a settled tree, and reporting a wrong failure as a failure is how a wrong failure recruits work.
+-  local tree_after digest_end
++  # that PASSES on the recorded tree. The cure is to re-run against a settled tree.
++  #
++  # agents-lgdv: THE OUTCOME KEEPS THE PRIMARY POSITION AND THE QUALIFIER RIDES BESIDE IT. This branch used to
++  # assign `st=STALE`, which put the qualifier into the field that carries the OUTCOME and deleted the outcome
++  # word from it. The witness fires in BOTH directions, so one line produced both faces a reader saw: a FAILING
++  # run (rc=1, two real suite failures) whose record read STALE, and a PASSING run whose record read STALE. The
++  # measurement was never wrong - `rc` carried the outcome in each case - what was wrong is that `state`, the
++  # field a reader triages on, said nothing about it, so quoting the one word said "not a verdict" about a red
++  # gate and "failed" about a green one. So: state = the outcome, always; .settled and state_reason say whether
++  # that outcome is a verdict for the tree this record names. Every consumer that could serve the outcome has to
++  # consult .settled - the three in this repo are the cache-hit dispatcher below, the previous-attempt line, and
++  # the gate section of bin/fleet-land-message.
++  local tree_after digest_end unsettled=0
+   tree_after=$(git -C "$dir" rev-parse 'HEAD^{tree}' 2>/dev/null || echo "")
+   digest_end=$(cd "$dir" 2>/dev/null && worktree_digest 2>/dev/null || echo "")
+   if [ -n "$tree_after" ] && [ "$tree_after" != "$tree" ]; then
+-    st=STALE
++    unsettled=1
+     state_reason="the worktree's tree changed DURING the run (expected ${tree}, now ${tree_after}), so the suites did not exercise the tree this record names; re-run against a settled tree"
+   elif [ -n "${digest_end:-}" ] && [ -n "${digest_start:-}" ] && [ "$digest_end" != "$digest_start" ]; then
+-    st=STALE
++    unsettled=1
+     state_reason="the worktree's CONTENT changed during the run without a commit (HEAD^{tree} is still ${tree}), so the suites read bytes that tree does not describe; re-run on a settled worktree"
+   fi
++  # agents-lgdv: AN UNSETTLED RUN IS NOT A VERDICT FOR THE TREE, and that is a separate fact from the outcome -
++  # so it is stated BESIDE the outcome ($st) rather than in the outcome's place. Built here, after the witness
++  # decides, because $note is the one string the wake prints; the record carries the same fact as .settled.
++  [ "$unsettled" -eq 1 ] && note=" - NOT A VERDICT FOR THIS TREE: ${state_reason:-the worktree was not settled for the whole run}"
+ 
+   # fleet-sohq: A GATE THAT SAYS 'PASS' WHEN IT MEANS 'UNCHANGED IN THESE RESPECTS' IS THE FALSE-GREEN
+   # GENERATOR THIS BRANCH EXISTS TO REMOVE. This is carried into the record and the brief, so a consumer cannot
+@@ -588,16 +620,21 @@
+   # start and end readings agree whenever the bytes are identical, so a write fully reverted inside the run is
+   # outside this witness - a reader that needs that must not read PASS as "nothing was ever written".
+   local witnessed="commit tree; the CONTENT of every tracked path in the working tree, read through symlinks so a target outside the repo is witnessed; git diff HEAD (index-mediated, so the content pass is what sees an assume-unchanged path). NOT witnessed: untracked files, anything the gate's own command touches outside the repository, or a write that is FULLY REVERTED before the run stops (start and end content being identical is the whole test, so a round trip inside the run cannot be seen - continuous observation would be needed, not a digest)."
++  # agents-lgdv: .settled IS PUBLISHED WITH THE TERMINAL STATE, in the same atomic write as .witnessed, and it
++  # is the machine-readable half of what that field describes: `.witnessed` names WHAT is watched, `.settled`
++  # says whether it held still. A record whose outcome is a verdict for `tree` has .settled=true; a record whose
++  # outcome describes a run the worktree moved under has .settled=false and a state_reason that says why.
++  local settled_json=true; [ "$unsettled" -eq 1 ] && settled_json=false
+   # Persist final verdict state BEFORE POST so any lane woken immediately sees the final verdict, not RUNNING (fleet-5bzu review P1)
+   if [ "$cov_ok" = 1 ]; then
+-    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson rc "$rc" --argjson s "$secs" --slurpfile cov "$cov_out" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
++    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson settled "$settled_json" --argjson rc "$rc" --argjson s "$secs" --slurpfile cov "$cov_out" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
+       --argjson covatt "$cov_attempted" --argjson covrc "$cov_rc" --argjson covbytes "$cov_bytes" --arg coverr "$cov_err" \
+-      '.state=$st | .witnessed=$witnessed | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .coverage_verified=($cov[0].indeterminate != true) | .coverage=$cov[0] | .suites=$cov[0].suites | .unmapped=$cov[0].unmapped | .omitted=$cov[0].omitted | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
++      '.state=$st | .settled=$settled | .witnessed=$witnessed | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .coverage_verified=($cov[0].indeterminate != true) | .coverage=$cov[0] | .suites=$cov[0].suites | .unmapped=$cov[0].unmapped | .omitted=$cov[0].omitted | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
+       "$rec" > "$rec.finish.$$.tmp" 2>/dev/null && mv -f "$rec.finish.$$.tmp" "$rec"
+   else
+-    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson rc "$rc" --argjson s "$secs" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
++    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson settled "$settled_json" --argjson rc "$rc" --argjson s "$secs" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
+       --argjson covatt "$cov_attempted" --argjson covrc "$cov_rc" --argjson covbytes "$cov_bytes" --arg coverr "$cov_err" \
+-      '.state=$st | .witnessed=$witnessed | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
++      '.state=$st | .settled=$settled | .witnessed=$witnessed | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
+       "$rec" > "$rec.finish.$$.tmp" 2>/dev/null && mv -f "$rec.finish.$$.tmp" "$rec"
+   fi
+   rm -f "$cov_out"
+@@ -622,7 +659,13 @@
+       local all_ok=1
+       for w in $waiters; do
+         local body
+-        body=$(jq -nc --arg to "$w" --arg cid "$client_id" --arg t "[check] $([ -n "$fast" ] && echo fast || echo full) gate for $notif_sha (asked by $asking_lane, job $job_id) : $st (exit $rc, $timing)$prev_log_note$note$cov_note. Log: $log. Tail:
++        # agents-lgdv: TWO SURFACES IN ONE LINE. (1) THE OUTCOME COMES FIRST, THE QUALIFIER BESIDE IT: the wake is
++        # what most lanes read first and often the only thing they see, and it printed the qualifier ("STALE") in
++        # the position where the outcome belongs. (2) THE CACHE KEY IS NAMED AS THE CACHE KEY: this wake named the
++        # tip as a 7-character sha and the tree as an unlabelled "job", so a reader holding only the wake could not
++        # match it to the record the cache keys on (~/.fleet/checks/<tree>.fast.json) without a lookup. The tree IS
++        # that key, so it is labelled as the tree.
++      body=$(jq -nc --arg to "$w" --arg cid "$client_id" --arg t "[check] $([ -n "$fast" ] && echo fast || echo full) gate for $notif_sha (asked by $asking_lane, tree $job_id) : $st (exit $rc, $timing)$prev_log_note$note$cov_note. Log: $log. Tail:
+ $tail
+ witnessed: $witnessed" '{to:$to,from_lane:"gate",text:$t,client_id:$cid}')
+         curl -s -f -m 20 -X POST -H "content-type: application/json" --data-binary "$body" "http://localhost:${FLEET_INBOX_PORT:-7777}/msg" >/dev/null 2>&1 || all_ok=0
+diff -urN a/bin/fleet-land-message b/bin/fleet-land-message
+--- a/bin/fleet-land-message	2026-10-13 21:16:15.000000000 +0000
++++ b/bin/fleet-land-message	2026-10-14 06:20:04.654187293 +0000
+@@ -918,7 +918,16 @@
+   cov_verified=$(jq -r 'if has("coverage_verified") then (.coverage_verified|tostring) else "absent" end' <<<"$j" 2>/dev/null || echo absent)
+   cov_indet=$(jq -r '.coverage.indeterminate // false' <<<"$j" 2>/dev/null || echo false)
+   cov_word=$(jq -r '.coverage.coverage // empty' <<<"$j" 2>/dev/null || true)
+-  if [ "$st" = PASS ] && { [ "$cov_verified" = "false" ] || [ "$cov_indet" = "true" ] || [ "$cov_word" = "UNKNOWN" ]; }; then
++  # agents-lgdv: .settled IS A THIRD VALIDITY FACT OF THE SAME KIND as the coverage ones above, consulted for the
++  # same reason. The record's `state` names the OUTCOME (PASS/FAIL) and .settled says whether that outcome is a
++  # verdict for the tree it names, so reading state alone would let this helper put a bare green - "PASS (fast
++  # gate)" - into a landing message for a run the worktree moved under. That is the false-green the STALE state
++  # used to prevent, so the qualifier has to be attached HERE, where it would otherwise travel clean (fleet-596p
++  # made the same argument for coverage). Absent on records written before the field existed.
++  rec_settled=$(jq -r 'if has("settled") then (.settled|tostring) else "absent" end' <<<"$j" 2>/dev/null || echo absent)
++  if [ "$st" = PASS ] && [ "$rec_settled" = "false" ]; then
++    gatestate="$st ($kind gate, NOT A VERDICT FOR THIS TREE - the worktree was not settled during the run; re-run)"
++  elif [ "$st" = PASS ] && { [ "$cov_verified" = "false" ] || [ "$cov_indet" = "true" ] || [ "$cov_word" = "UNKNOWN" ]; }; then
+     gatestate="$st ($kind gate, COVERAGE UNKNOWN - nothing demonstrated to run)"
+   else
+     gatestate="$st ($kind gate)"
+diff -urN a/tests/fleet-check-tree-stability.test.sh b/tests/fleet-check-tree-stability.test.sh
+--- a/tests/fleet-check-tree-stability.test.sh	2026-10-14 06:17:13.625698875 +0000
++++ b/tests/fleet-check-tree-stability.test.sh	2026-10-14 06:19:28.738085794 +0000
+@@ -58,15 +58,26 @@
+ # a busy machine. With FLEET_CHECK_TEST_HOLD set the POST blocks until this fixture releases it, so the window
+ # is open for exactly as long as the assertion needs and no longer. Unset, the stub forwards to the real curl,
+ # so every other arm behaves exactly as before.
++#
++# agents-lgdv: AND IT CAPTURES THE WAKE, because the wake is the surface most lanes see first. A TEST MUST NOT
++# DELIVER RESULTS (fleet-94j9): with FLEET_CHECK_TEST_CAPTURE set the stub writes the POST body to that file
++# and stops, so the wake text can be asserted on without a synthetic [check] message reaching a real lane.
+ mkdir -p "$ROOT/bin"
+ cat > "$ROOT/bin/curl" <<'STUB'
+ #!/usr/bin/env bash
++if [ -n "${FLEET_CHECK_TEST_CAPTURE:-}" ]; then
++  while [ $# -gt 0 ]; do
++    if [ "$1" = "--data-binary" ]; then shift; printf '%s\n' "${1:-}" >> "$FLEET_CHECK_TEST_CAPTURE"; break; fi
++    shift
++  done
++fi
+ if [ -n "${FLEET_CHECK_TEST_HOLD:-}" ]; then
+   i=0
+   # Bounded (20s, 0.1s steps) so a fixture that dies cannot wedge a detached worker forever.
+   while [ ! -f "$FLEET_CHECK_TEST_HOLD" ] && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i+1)); done
+   exit 0
+ fi
++[ -n "${FLEET_CHECK_TEST_CAPTURE:-}" ] && exit 0
+ [ -x /usr/bin/curl ] && exec /usr/bin/curl "$@"
+ exit 0
+ STUB
+@@ -83,14 +94,18 @@
+   return 1
+ }
+ 
+-# run_arm NAME EXPECTED_STATE CHECK_FAST_CMD MARKER [EXTERNAL_TARGET] [HOLD_FILE]
++# run_arm NAME EXPECTED_OUTCOME EXPECT_SETTLED CHECK_FAST_CMD MARKER [EXTERNAL_TARGET] [HOLD_FILE]
+ # Builds a clean repo, runs a fast gate whose command does something to the tree, and prints the verdict.
+-# HOLD_FILE, when given, freezes the gate's notification POST until this function releases it (fleet-c050).
++# EXPECTED_OUTCOME is the OUTCOME the command earned (PASS/FAIL) and EXPECT_SETTLED is whether that outcome is
++# a verdict for the recorded tree (true/false) - TWO assertions, because agents-lgdv's defect was one field
++# asked to carry both. HOLD_FILE, when given, freezes the gate's notification POST until this function releases
++# it (fleet-c050).
+ run_arm() {
+-  local name="$1" expected="$2" cmd="$3" marker="$4" external_target="${5:-}" hold="${6:-}"
++  local name="$1" expected="$2" expect_settled="$3" cmd="$4" marker="$5" external_target="${6:-}" hold="${7:-}"
+   if [ -n "$hold" ]; then export FLEET_CHECK_TEST_HOLD="$hold"; else unset FLEET_CHECK_TEST_HOLD; fi
+   local T R rec state tree_before tree_after
+   T=$(mktemp -d "$ROOT/arm.XXXXXX"); R="$T/repo"
++  export FLEET_CHECK_TEST_CAPTURE="$T/wake"
+   git init -q -b main "$R"
+   git -C "$R" config user.email test@example.com
+   git -C "$R" config user.name "tree stability test"
+@@ -195,10 +210,58 @@
+     fail "$name: the witnessed scope does not state the round-trip bound" "witnessed=[$witnessed]"
+   fi
+ 
++  # agents-lgdv: THE OUTCOME AND THE VALIDITY ARE TWO FACTS, SO THEY ARE ASSERTED SEPARATELY. The defect was one
++  # field asked to carry both: the witness fired and wrote STALE into .state, so the record of a FAILING run
++  # read STALE and the record of a PASSING run read STALE - quoting the one word said "not a verdict" about a
++  # red gate and "failed" about a green one. So: .state names the OUTCOME; .settled says whether that outcome
++  # is a verdict for the recorded tree; an unsettled record must carry the reason beside it.
++  local settled wake_line
++  settled=$(jq -r 'if has("settled") then (.settled|tostring) else "absent" end' "$rec" 2>/dev/null || echo absent)
+   if [ "$state" = "$expected" ]; then
+-    pass "$name: verdict recorded $expected (tree=${recorded_tree:0:8} status=[${status_line% }])"
++    pass "$name: the record names the OUTCOME $expected (tree=${recorded_tree:0:8} status=[${status_line% }])"
++  else
++    fail "$name: expected the outcome $expected, not a qualifier" "state=$state tree=${recorded_tree:0:8} actual=${tree_after:0:8} status=[${status_line% }] reason=$reason"
++  fi
++  if [ "$settled" = "$expect_settled" ]; then
++    pass "$name: .settled=$expect_settled (the outcome is$([ "$expect_settled" = true ] && echo " " || echo " NOT ")a verdict for this tree)"
+   else
+-    fail "$name: expected $expected" "state=$state tree=${recorded_tree:0:8} actual=${tree_after:0:8} status=[${status_line% }] reason=$reason"
++    fail "$name: expected .settled=$expect_settled" "settled=$settled state=$state reason=$reason"
++  fi
++  if [ "$expect_settled" = false ] && [ -z "$reason" ]; then
++    fail "$name: an unsettled record must carry the reason" "state_reason is empty"
++  fi
++
++  # THE WAKE IS THE OTHER SURFACE, AND THE ONE MOST LANES READ FIRST. Three assertions, each of them the bead's
++  # own words: the outcome is in the state position; the CACHE KEY is named as the tree (~/.fleet/checks/<tree>.json);
++  # and the qualifier rides BESIDE the outcome rather than in its place.
++  wake_line=""
++  [ -f "$T/wake" ] && wake_line=$(jq -r '.text // empty' "$T/wake" 2>/dev/null | head -1)
++  if [ -z "$wake_line" ]; then
++    fail "$name: the wake was not captured" "no POST body at $T/wake"
++  else
++    if grep -q " : $expected (exit " <<<"$wake_line"; then
++      pass "$name: the wake names the outcome in the state position"
++    else
++      fail "$name: the wake must name the outcome, not a qualifier" "wake=${wake_line:0:200}"
++    fi
++    if grep -q "tree $recorded_tree" <<<"$wake_line"; then
++      pass "$name: the wake names the cache key as the tree"
++    else
++      fail "$name: the wake must name the tree the cache keys on" "wake=${wake_line:0:200}"
++    fi
++    if [ "$expect_settled" = false ]; then
++      if grep -q "NOT A VERDICT FOR THIS TREE" <<<"$wake_line"; then
++        pass "$name: the wake carries the qualifier beside the outcome"
++      else
++        fail "$name: an unsettled run's wake must say so" "wake=${wake_line:0:200}"
++      fi
++    else
++      if grep -q "NOT A VERDICT FOR THIS TREE" <<<"$wake_line"; then
++        fail "$name: a settled run's wake must not carry the qualifier" "wake=${wake_line:0:200}"
++      else
++        pass "$name: a settled run's wake carries no qualifier"
++      fi
++    fi
+   fi
+ 
+   # fleet-c050: release a held POST so the detached worker can finish (and write .done) instead of being left
+@@ -232,24 +295,24 @@
+ fi
+ 
+ # Arm 1: the ORIGINAL defect - another actor COMMITS while the gate runs.
+-run_arm commit-mid-run STALE 'echo work; echo two >> input; git commit -q -am mid-run-commit' work
++run_arm commit-mid-run PASS false 'echo work; echo two >> input; git commit -q -am mid-run-commit' work
+ # Arm 2: fleet-b5yb - a WORKING-TREE mutation with NO commit. HEAD^{tree} cannot see this; the content
+ # fingerprint does. The reviewer's recipe, verbatim.
+-run_arm mutate-no-commit STALE 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt
++run_arm mutate-no-commit PASS false 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt
+ # Arm 3: fleet-b5yb - a ROUND TRIP A->B->A. THIS ARM CHANGED ITS EXPECTATION WITH agents-bp6m and the change is
+ # the point: it asserted STALE while the fingerprint carried nsec ctime, because ctime advanced on the write. With
+ # the fingerprint limited to CONTENT the two readings are equal by construction, so the round trip is NOT
+ # witnessed - PASS is now the honest expected state, and the assertion that keeps it honest is the BOUND check
+ # above, which requires the record's own scope to say so. The arm is kept rather than deleted because deleting it
+ # would hide a narrowing of the guarantee instead of recording it.
+-run_arm round-trip PASS 'printf corrupt > input; sleep 7; printf original > input; echo gate-ran' gate-ran
++run_arm round-trip PASS true 'printf corrupt > input; sleep 7; printf original > input; echo gate-ran' gate-ran
+ # Arm 5: fleet-iajo - THE REVIEWER'S REPRO, and the one arm whose expectation genuinely had to move with
+ # agents-bp6m. A round trip that completes inside one interval; it was caught by ctime and by nothing else, because
+ # the two content readings are equal by construction. Under the content witness it reads PASS, and the bound check
+ # above is what keeps that from being a silent false green: the record must SAY that a fully reverted write is
+ # outside what it witnessed. The rest of the arm is unchanged (the restore uses cp, so the bytes are identical
+ # whatever the fixture committed, making this a genuine round trip rather than a truncation).
+-run_arm short-round-trip PASS 'cp input /tmp/iajo-orig.$$; printf corrupt > input; echo gate-observed-$(cat input); cp /tmp/iajo-orig.$$ input; rm -f /tmp/iajo-orig.$$; echo flip-finished' flip-finished
++run_arm short-round-trip PASS true 'cp input /tmp/iajo-orig.$$; printf corrupt > input; echo gate-observed-$(cat input); cp /tmp/iajo-orig.$$ input; rm -f /tmp/iajo-orig.$$; echo flip-finished' flip-finished
+ # Arm 6: fleet-sohq - THE REVIEWER'S CASE, and agents-bp6m had to keep it alive rather than merely keep it
+ # passing. This arm used to rewrite the target and RESTORE it, so it passed because ctime moved - the same
+ # mechanism the content witness removes, which would have left the arm green while the defence it stands for was
+@@ -257,7 +320,7 @@
+ # whose target lives outside the repo changes CONTENT, git status stays empty because the link itself is
+ # unchanged, and the gate must not record a clean verdict for it. `git hash-object` follows the link, so the
+ # target's bytes are what settles it.
+-run_arm symlink-target-rewrite STALE 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt "$ROOT/arm6-external-input"
++run_arm symlink-target-rewrite PASS false 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt "$ROOT/arm6-external-input"
+ # Arm 7 (fleet-c050): THE PUBLICATION ORDER. bin/fleet-check publishes the terminal verdict BEFORE the
+ # notification POST and wrote .witnessed only AFTER it, so the reader below - which stops polling as soon as
+ # `state != RUNNING`, exactly as a lane waiting on a gate does - could read a final state whose .witnessed was
+@@ -265,7 +328,13 @@
+ # witnessed'): the defect is in the record's publication order, not in a special reader. The held POST keeps
+ # the window open until the reader has looked, so this arm is RED on the old order and GREEN once .witnessed is
+ # published WITH the terminal state - deterministically, whatever the machine is doing.
+-run_arm delayed-post STALE 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt "" "$ROOT/post-hold"
++run_arm delayed-post PASS false 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt "" "$ROOT/post-hold"
++# Arm 8 (agents-lgdv): THE DEFECT'S OWN SHAPE - A RUN THAT FAILED AND WAS UNSETTLED. rc=1 with two real suite
++# failures is the case that cost a lane a wrong hand-off line: the record read STALE, so a red gate was quoted
++# as "not a verdict". The outcome is FAIL and the qualifier rides beside it; both are asserted above, in the
++# record and in the wake. The command exits 3 (an ordinary failure) rather than 124/137/143 (a kill), so the
++# outcome under test is a FAIL and not a KILLED.
++run_arm mutate-and-fail FAIL false 'printf corrupt > input; echo gate-observed-$(cat input); exit 3' gate-observed-corrupt
+ # Arm 8 (agents-bp6m): THE DEFECT, AS A REWRITE THAT PRODUCES IDENTICAL BYTES. A gate whose suite regenerates a
+ # tracked file - a formatter, a fixture writer, a test that re-serialises its input - moved nsec ctime without
+ # changing one byte of content, and the metadata fingerprint called that a mutation, so a run that read the tree
+@@ -273,10 +342,10 @@
+ # and it is the acceptance coord set for this bead: a clean run on a tree whose suites touched tracked files reads
+ # a genuine verdict rather than STALE. The premise comes from the command's own marker in the log, because a
+ # same-bytes rewrite leaves the tree and the porcelain identical by design.
+-run_arm same-bytes-rewrite PASS 'cp input /tmp/bp6m-keep.$$; cp /tmp/bp6m-keep.$$ input; rm -f /tmp/bp6m-keep.$$; echo rewrote-identical-bytes' rewrote-identical-bytes
++run_arm same-bytes-rewrite PASS true 'cp input /tmp/bp6m-keep.$$; cp /tmp/bp6m-keep.$$ input; rm -f /tmp/bp6m-keep.$$; echo rewrote-identical-bytes' rewrote-identical-bytes
+ 
+ # Arm 4 (CONTROL): nothing touches the tree - must stay PASS, or the guard fires on healthy runs.
+-run_arm clean-run PASS 'echo gate work done' 'gate work done'
++run_arm clean-run PASS true 'echo gate work done' 'gate work done'
+ 
+ echo ""
+ echo "$PASS passed, $FAIL failed"
+diff -urN a/tests/fleet-gate-check.test.sh b/tests/fleet-gate-check.test.sh
+--- a/tests/fleet-gate-check.test.sh	2026-10-13 20:30:55.000000000 +0000
++++ b/tests/fleet-gate-check.test.sh	2026-10-14 06:20:04.654187293 +0000
+@@ -2379,7 +2379,11 @@
+ [ -n "$(jq -r '.notified // empty' "$rec20" 2>/dev/null)" ] && ok "20b rec records .notified timestamp (fleet-wq10)" || bad "20b .notified timestamp missing in rec" ""
+ has "$(cat "$CURL_LOG" 2>/dev/null)" "[check] full gate for $(git -C "$REPO20" rev-parse --short HEAD)" "20c inbox notification was delivered"
+ has "$(cat "$CURL_LOG" 2>/dev/null)" "asked by $CHECK_FORCED_LANE" "20c2 inbox notification names the EFFECTIVE asking lane (the harness forces $CHECK_FORCED_LANE; asserting \$LANE_TAG here is the stale expectation the folded union's gate caught)"
+-has "$(cat "$CURL_LOG" 2>/dev/null)" "job $tree20" "20c3 inbox notification names job tree"
++# agents-lgdv: THE WAKE NAMES THE IDENTIFIER THE CACHE KEYS ON. It used to print the tip as a 7-character
++# short sha and the tree as an unlabelled "job", so a reader holding only the wake could not match it to
++# ~/.fleet/checks/<tree>.json without a lookup - the shape in which a misread state got attached to a real
++# FAIL. The tree IS that key, so it is labelled as the tree.
++has "$(cat "$CURL_LOG" 2>/dev/null)" "tree $tree20" "20c3 inbox notification names the tree the cache keys on"
+ # assert temp worker script is cleaned up without race (fleet-gbct)
+ wpid20=$(jq -r '.pid // empty' "$rec20" 2>/dev/null || true)
+ if [ -n "$wpid20" ]; then
