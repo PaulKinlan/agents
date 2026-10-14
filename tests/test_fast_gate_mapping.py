@@ -1201,6 +1201,119 @@ race rather than weakening what is checked, and if the stage line never arrives 
             probe.unlink(missing_ok=True)
 
 
+class TestRepoWideInvariantsAreKeyedOnTheChangedPathClass(unittest.TestCase):
+    """agents-wsiv: the retention inventory is a REPO-WIDE invariant, and a per-path arm cannot add a suite to a
+    path another arm already claims, because arms are first-match-wins - the measured case is agents-ssyq's tool,
+    which HAD its own exact-path arm at 300 and never ran the inventory (an unenumerated rm -rf in it passed the
+    fast gate on two tips and was caught only by the full gate at merge). Claiming tools/*.sh in the registry
+    instead is worse, because it silences the loud unmatched failure for that directory - which is why the
+    dispatch keys this on the changed path's CLASS. Every selection below is MEASURED from a dry run.
+    """
+
+    SELECTED = (
+        "tools/red-first.sh",             # the class the measured failure came from
+        "install.sh",                     # a shell script outside tests/, which no arm's path can reach
+    )
+    NOT_SELECTED = (
+        "docs/css/factory.css",           # mapped and outside every scanned class
+        "tests/some_runner.sh",           # a shell script INSIDE tests/, which the inventory does not scan
+        "lib/egress_proxy.py",            # a lib/ change the inventory's own suite does NOT import (agents-6vev)
+        "README.md",
+    )
+
+    def _selected(self, path: str) -> set:
+        proc = run_fast_gate([path])
+        out = proc.stdout + proc.stderr
+        return {ln.strip() for ln in out.splitlines()
+                if ln.strip().startswith("tests/") and ln.strip().endswith(".py")}
+
+    def test_a_changed_path_in_a_scanned_class_selects_the_inventory(self):
+        for path in self.SELECTED:
+            with self.subTest(path=path):
+                self.assertIn(
+                    "tests/test_retention.py", self._selected(path),
+                    f"{path} is in a class the inventory scans, so the inventory must run for it (agents-wsiv)",
+                )
+
+    def test_a_changed_path_outside_those_classes_does_not_pay_for_the_check(self):
+        for path in self.NOT_SELECTED:
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "tests/test_retention.py", self._selected(path),
+                    f"{path} cannot violate the inventory, so its ~0.50s must not be paid on every change: "
+                    "an always-on version of this check is a permanent tax on the fast gate for a rare class "
+                    "of change",
+                )
+
+    def test_an_unclaimed_tools_script_still_fails_loudly(self):
+        """The class key ADDS a suite; it does not CLAIM a path. A tools script the registry has no arm for must
+        still fail closed with the actionable prompt, because that prompt is what tells the next author to write
+        an arm - the property a blanket `tools/*.sh` registry arm would have destroyed, and the reason this fix
+        keys on the class in the dispatch instead."""
+        proc = run_fast_gate(["tools/any-new-script.sh"])
+        self.assertNotEqual(
+            proc.returncode, 0,
+            "an unclaimed tools script must fail closed, not go green against the inventory alone",
+        )
+        self.assertIn(
+            "tools/any-new-script.sh", proc.stderr + proc.stdout,
+            "the loud failure must name the unmatched path",
+        )
+
+    def _declared(self, name: str) -> set:
+        """Read a declared fact OUT OF tools/fast-gate.sh, so the two-fact split is declared in exactly ONE place
+        and this suite cannot drift from it by restating it here."""
+        script = (ROOT / "tools" / "fast-gate.sh").read_text(encoding="utf-8")
+        m = re.search(rf'^{name}="([^"]+)"', script, re.M)
+        self.assertIsNotNone(m, f"{name} is not declared in tools/fast-gate.sh - the facts must live there")
+        return set(m.group(1).split())
+
+    def test_the_coverage_fact_is_complete_against_the_inventorys_own_scanner(self):
+        """(a) THE PINNED COVERAGE PROPERTY, RESTORED IN FULL. The coverage set says which paths COULD violate
+        the invariant, so it must cover everything lib/retention.py actually scans. A first version of this
+        change pointed the guard at the narrow selection set instead, which bought the gate by weakening this
+        property - the trade coord's option (c) refuses, and the reason coverage and selection are now separate
+        constants rather than one."""
+        from tests.test_retention import _scanned_sources
+        covered = self._declared("inventory_scanned_classes")
+        undeclared = []
+        for rel, _path in _scanned_sources(ROOT):
+            top = rel.split("/", 1)[0] if "/" in rel else rel
+            if top in covered:
+                continue
+            if rel.endswith(".sh") and not rel.startswith("tests/"):
+                continue      # the script rule the dispatch applies to both sets
+            undeclared.append(rel)
+        self.assertEqual(
+            undeclared, [],
+            f"the inventory scans these paths and the COVERAGE set does not declare them: {undeclared}",
+        )
+
+    def test_the_selection_fact_is_a_subset_of_the_coverage_fact(self):
+        """(b) The relationship between the two facts, asserted so it cannot be inverted again: SELECTION may
+        narrow COVERAGE, never widen it. Widening would mean claiming a suite for paths the inventory does not
+        even scan; collapsing them is the defect this split exists to remove."""
+        selection = self._declared("inventory_selected_classes")
+        coverage = self._declared("inventory_scanned_classes")
+        self.assertTrue(
+            selection <= coverage,
+            f"selection {sorted(selection)} is not a subset of coverage {sorted(coverage)}",
+        )
+
+    def test_a_lib_change_is_covered_but_not_selected(self):
+        """(c) The distinction as BEHAVIOUR, which is the whole point of the split: lib/egress_proxy.py is
+        COVERED (the inventory scans lib/, so a change there could violate it) and NOT SELECTED (nothing imports
+        it, so adding the suite would spend full-gate time on the fast path), while the shell scripts outside
+        tests/ are BOTH."""
+        coverage = self._declared("inventory_scanned_classes")
+        selection = self._declared("inventory_selected_classes")
+        self.assertIn("lib", coverage, "the inventory scans lib/, so lib/ must appear in the coverage set")
+        self.assertNotIn("lib", selection, "lib/ is covered but must NOT be selected (agents-6vev)")
+        self.assertIn("tools", selection, "tools/ is the measured case and must stay selected")
+        self.assertNotIn("tests/test_retention.py", self._selected("lib/egress_proxy.py"))
+        self.assertIn("tests/test_retention.py", self._selected("tools/red-first.sh"))
+
+
 class TestReplacedGenericArmsKeepTheirNamesake(unittest.TestCase):
     """agents-iqyz: an arm that REPLACES the generic lib/*.py arm can pass while DROPPING the module's
     own suite - that is the silent failure direction of this change, because the replacement still maps
