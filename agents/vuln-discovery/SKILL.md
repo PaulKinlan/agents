@@ -73,6 +73,33 @@ Document this chain clearly in the `exploit_chain` field. If the vulnerability i
 
 ---
 
+## Candidate Accounting
+
+The deterministic pre-pass hands you a candidate list, and the factory checks that the report accounts for all
+of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in
+`findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates
+you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that
+triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj; the shape is the one
+`agents/secret-scan/SKILL.md` uses for its test-fixture keys). Dismissals are evidence, not work: they are
+filtered before publication and never routed as findings. An excluded candidate must not be routed as a vulnerability: the dismissal flag is what keeps it evidence
+
+
+The shape of one dismissal:
+
+```json
+{
+  "rule_id": "candidate-evaluated-and-rejected",
+  "path": "path/to/file",
+  "line_number": 42,
+  "snippet": "the exact snippet the pre-pass matched",
+  "severity": "info",
+  "false_positive": true,
+  "title": "Dismissed: <the reason in a few words>",
+  "description": "Why this candidate was evaluated and rejected (the same reason you would have written in a filter log).",
+  "remediation": "No action required."
+}
+```
+
 ## Output Contract
 
 You must output a single, valid JSON object conforming to `report.schema.json`:
@@ -93,6 +120,17 @@ You must output a single, valid JSON object conforming to `report.schema.json`:
       "description": "Technical analysis of the vulnerability, reachability, and root cause.",
       "remediation": "Actionable, precise guidance on how to fix the issue.",
       "exploit_chain": "Step 1 -> Step 2 -> Step 3: Detailed exploit narrative or impact path."
+    },
+    {
+      "rule_id": "candidate-evaluated-and-rejected",
+      "path": "relative/path/to/file.js",
+      "line_number": 456,
+      "snippet": "const trusted = trustedTable.lookup(host);",
+      "severity": "info",
+      "false_positive": true,
+      "title": "Dismissed: Candidate Not Exploitable",
+      "description": "The candidate is excluded by the threat model's explicit trust (or the taint path is unreachable). Evaluated and rejected - recorded so the triage accounts for every candidate it was shown.",
+      "remediation": "No action required."
     }
   ]
 }
