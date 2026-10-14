@@ -415,8 +415,10 @@ fast_gate_arms_load || exit 1
 # test_unmatched_gate_config_path_refuses_loudly_with_actionable_guidance (agents-ows4/dtj6/iwm5) caught that,
 # correctly, which is why the classes are DECLARED ONCE AND READ here instead of claimed as paths.
 #
-# The suite is added only when a changed path is in a class the inventory scans, so the check is paid at the
+# The suite is added only when SELECTION fires - not when a path is merely COVERED - so the check is paid at the
 # moment it can be wrong rather than on every gate (a permanent 0.50s tax on every fast gate is a design smell).
+# A COVERED-but-unselected path CAN still violate the invariant, which is exactly why it is covered; it is simply
+# not THIS dispatch's job to pay for it (agents-3ixk: the earlier wording said the opposite).
 #
 # TWO FACTS, DECLARED TOGETHER AND READ SEPARATELY (agents-wsiv, coord's option (c)). COVERAGE and SELECTION are
 # not the same question, and collapsing them is what made the first version of this change wrong:
@@ -446,7 +448,14 @@ fast_gate_arms_load || exit 1
 # scanner, (b) selection is a SUBSET of coverage, and (c) the fail-closed guard above still fires for an
 # unmatched path.
 inventory_scanned_classes="factory lib agents tools .github"   # COVERAGE: what lib/retention.py scans
-inventory_selected_classes="tools"                             # SELECTION: what nothing else can reach
+# SELECTION (agents-oskn): PER-CLASS SUFFIX RULES - the paths no arm and no importer can reach. tools/ any file;
+# agents/ only *.py (an agent Python file can call os.unlink); .github/ only *.yml|*.yaml (a workflow can add
+# rm -rf). The exclusions fall out of the SHAPE rather than needing special cases: agents/**/*.md is prose and is
+# simply not .py, and lib/ is not in the selector at all, because selection is import-driven (agents-6vev) and
+# the unconditional full gate is the backstop for everything the fast tier declines to spend on.
+inventory_selected_any="tools"                                 # every file under these classes
+inventory_selected_py="agents"                                 # only *.py under these classes
+inventory_selected_yaml=".github"                              # only *.yml|*.yaml under these classes
 inventory_script_suffix="sh"                                   # *.sh outside tests/ - true of BOTH sets
 inventory=""
 
@@ -493,15 +502,28 @@ while IFS= read -r f; do
       fi
     fi
   fi
-  # CLASS KEY (agents-wsiv): does this changed path fall in a class the repo-wide inventory scans? The classes
-  # are declared once, above this loop, and read here. No `case` over the changed path: the registry owns
-  # path->suite pairs and tests/test_fast_gate_mapping.py refuses that shape in this file.
-  for _fast_gate_class in $inventory_selected_classes; do
-    if [ "${f%%/*}" = "$_fast_gate_class" ]; then
+  # SELECTION (agents-oskn): per-class suffix rules, declared once above and read here. No `case` over the changed
+  # path: the registry owns path->suite pairs and tests/test_fast_gate_mapping.py refuses that shape in this file.
+  _fast_gate_top="${f%%/*}"
+  _fast_gate_ext="${f##*.}"
+  for _fast_gate_class in $inventory_selected_any; do
+    if [ "$_fast_gate_top" = "$_fast_gate_class" ]; then
       inventory="tests/test_retention.py"
     fi
   done
-  if [ "${f##*.}" = "$inventory_script_suffix" ] && [ "${f#tests/}" = "$f" ]; then
+  for _fast_gate_class in $inventory_selected_py; do
+    if [ "$_fast_gate_top" = "$_fast_gate_class" ] && [ "$_fast_gate_ext" = "py" ]; then
+      inventory="tests/test_retention.py"
+    fi
+  done
+  for _fast_gate_class in $inventory_selected_yaml; do
+    if [ "$_fast_gate_top" = "$_fast_gate_class" ]; then
+      if [ "$_fast_gate_ext" = "yml" ] || [ "$_fast_gate_ext" = "yaml" ]; then
+        inventory="tests/test_retention.py"
+      fi
+    fi
+  done
+  if [ "$_fast_gate_ext" = "$inventory_script_suffix" ] && [ "${f#tests/}" = "$f" ]; then
     inventory="tests/test_retention.py"
   fi
 done <<< "$changed"
