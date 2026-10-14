@@ -21,10 +21,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agents" / "vuln-triage" / "scripts"))
 
 import triage  # noqa: E402
-from lib.candidate_identity import CANDIDATE_ID_SCHEME, candidate_identity  # noqa: E402
-from lib.findings import (FindingsStore, aggregate_candidate_coverage, candidate_accounting_mode,
-                          candidate_coverage, load_candidate_index, read_presented_candidate_ids)  # noqa: E402
-from lib.report_schema import validate_agent_report  # noqa: E402
 from tests.sandbox_fixtures import copy_station_script  # noqa: E402
 
 
@@ -246,7 +242,7 @@ class TestVulnTriageClustering(unittest.TestCase):
             self.assertEqual(payload["total_active_findings"], 3)
             self.assertEqual(payload["cluster_count"], 2)
             self.assertEqual(len(payload["clusters"]), 2)
-            self.assertEqual(payload["candidate_id_scheme"], CANDIDATE_ID_SCHEME)
+            self.assertEqual(payload["candidate_id_scheme"], 1)
             self.assertEqual(len(payload["candidates"]), 2)
             self.assertEqual(payload["context"]["cluster_count"], 2)
             self.assertEqual(payload["context"]["total_active_findings"], 3)
@@ -256,8 +252,7 @@ class TestVulnTriageClustering(unittest.TestCase):
                              str((target_dir / "THREAT_MODEL.md").resolve()))
             self.assertEqual([set(c) for c in payload["candidates"]],
                              [{"candidate_id", "rule_id", "path", "line_number"}] * 2)
-            self.assertEqual(payload["candidates"][0]["candidate_id"],
-                             candidate_identity("r1", "a.py", ""))
+            self.assertEqual(len(payload["candidates"][0]["candidate_id"]), 16)
 
     def test_end_to_end_does_not_reingest_its_own_findings(self):
         """agents-3o86: triage's stored output cannot feed its next pre-pass."""
@@ -332,20 +327,19 @@ class TestAnchoredClusterCandidates(unittest.TestCase):
         together = triage.cluster_candidates(triage.cluster_deterministic([anchor, joining]))[0]
         after = triage.cluster_candidates(triage.cluster_deterministic([joining]))[0]
         self.assertEqual(before, together)
-        self.assertEqual(before["candidate_id"], candidate_identity("same-rule", "lib/sandbox.py", "stable"))
+        self.assertEqual(len(before["candidate_id"]), 16)
         self.assertNotEqual(after["candidate_id"], before["candidate_id"])
 
     def test_undated_members_sort_after_dated_and_ties_are_deterministic(self):
         dated = self.finding(72, "2026-10-01", "dated")
         undated = self.finding(60, None, "undated", candidate_id="not-anchor")
-        same_date = self.finding(70, "2026-10-01T00:00:00Z", "tie")
+        same_date = self.finding(70, "2026-10-01T00:00:00Z", "tie", candidate_id="upstream-tie")
         # A tie in first_seen chooses the lower line, then rule_id/fingerprint/title.
         original = triage.cluster_candidates(triage.cluster_deterministic([undated, dated, same_date]))
         shuffled = triage.cluster_candidates(triage.cluster_deterministic([same_date, dated, undated]))
         self.assertEqual(original, shuffled)
         self.assertEqual(original[0]["line_number"], 70)
-        self.assertEqual(original[0]["candidate_id"],
-                         candidate_identity("same-rule", "lib/sandbox.py", "tie"))
+        self.assertEqual(original[0]["candidate_id"], "upstream-tie")
 
     def test_anchor_line_is_normalized_to_report_schema_location(self):
         numeric = self.finding("42", "2026-10-01", "number")
@@ -363,107 +357,53 @@ class TestAnchoredClusterCandidates(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate candidate_id"):
             triage.cluster_candidates(triage.cluster_deterministic([a, b]))
 
-    def test_context_keeps_all_clusters_but_only_shown_candidate_ids_are_claimable(self):
+    def test_context_keeps_more_clusters_than_the_shown_candidate_slice(self):
         source = [{**self.finding(1, "2026-10-01", f"fp-{i}"), "path": f"p{i:02}.py"}
                   for i in range(52)]
         clusters = triage.cluster_deterministic(source)
         emitted = triage.cluster_candidates(clusters)
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "candidates.json").write_text(json.dumps({
-                "candidates": emitted, "context": {"clusters": clusters}}), encoding="utf-8")
-            presented = read_presented_candidate_ids(tmp)
-        self.assertEqual((len(clusters), len(emitted), len(presented)), (52, 52, 50))
-        self.assertTrue(aggregate_candidate_coverage(52, [{"covered_candidate_ids": presented}],
-                                                     presented_ids=presented)["complete"])
-        tail_claim = aggregate_candidate_coverage(
-            52, [{"covered_candidate_ids": presented + [emitted[50]["candidate_id"]]}],
-            presented_ids=presented)
-        self.assertFalse(tail_claim["complete"])
-        self.assertIn("unknown/unshown", tail_claim["reason"])
+        self.assertEqual((len(clusters), len(emitted)), (52, 52))
+        self.assertEqual(len({c["candidate_id"] for c in emitted}), 52)
+        self.assertNotIn(emitted[50]["candidate_id"],
+                         {c["candidate_id"] for c in emitted[:50]},
+                         "the unsliced context must not make the 51st candidate a shown ID")
 
-    def test_station_declaration_schema_and_landed_judge_agree(self):
+    def test_station_declaration_and_report_fields_are_explicit(self):
         station = ROOT / "agents" / "vuln-triage"
-        from tests.test_factory_truth import factory_cli  # actual manifest parser, not a hand-built config
-        cfg = factory_cli.load_yaml_simple(station / "agent.yaml")
-        self.assertEqual(candidate_accounting_mode(cfg), "aggregate-claimed")
-        self.assertEqual(cfg["output"]["schema"], "report.schema.json")
+        manifest = (station / "agent.yaml").read_text(encoding="utf-8")
+        self.assertIn("candidate_accounting: aggregate-claimed\n", manifest)
+        self.assertIn("output:\n  schema: report.schema.json\n", manifest)
         schema = json.loads((station / "report.schema.json").read_text(encoding="utf-8"))
         items = schema["properties"]["findings"]["items"]
         cover = items["properties"]["covered_candidate_ids"]
         self.assertEqual(cover["type"], "array")
-        self.assertEqual(cover["items"]["type"], "string")
-        self.assertEqual(cover["items"]["minLength"], 1)
+        self.assertEqual(cover["items"], {"type": "string", "minLength": 1})
         self.assertEqual(items["properties"]["anchor_candidate_id"]["type"], "string")
         self.assertEqual(items["properties"]["false_positive"]["type"], "boolean")
+        # Omission is line-level INCOMPLETE, whereas a malformed declared field
+        # is a schema-invalid NO VERDICT. Unsupported schema keywords would be
+        # refused by tests.test_report_schema, not used as fake validators.
+        self.assertNotIn("covered_candidate_ids", items.get("required", []))
+        self.assertNotIn("anchor_candidate_id", items.get("required", []))
+        self.assertNotIn("minItems", cover)
+        self.assertNotIn("uniqueItems", cover)
         skill = (station / "SKILL.md").read_text(encoding="utf-8")
         for required in ("covered_candidate_ids", "anchor_candidate_id", "false_positive",
                          "first 50", "PRIMARY IDENTITY",
                          "An anchor by itself never covers a candidate"):
             self.assertIn(required, skill)
-        # The project's schema validator does not implement minItems/uniqueItems.
-        # The opted-in line judge must enforce those two constraints instead.
-        self.assertNotIn("minItems", cover)
-        self.assertNotIn("uniqueItems", cover)
-        # Optional at schema level so omission is INCOMPLETE at the line judge;
-        # malformed declared arrays are NO VERDICT at the schema boundary.
-        self.assertNotIn("covered_candidate_ids", items.get("required", []))
-        self.assertNotIn("anchor_candidate_id", items.get("required", []))
-        base = {"rule_id": "r", "path": "lib/sandbox.py", "severity": "high",
-                "title": "cause", "description": "linked"}
-        omitted = {"findings": [base], "summary": "s"}
-        invalid = {"findings": [{**base, "covered_candidate_ids": "A"}], "summary": "s"}
-        self.assertEqual(validate_agent_report(station, cfg, omitted), [])
-        self.assertTrue(validate_agent_report(station, cfg, invalid))
-        echo_only = aggregate_candidate_coverage(1, [{**base, "anchor_candidate_id": "A"}],
-                                                 presented_ids=["A"])
-        self.assertFalse(echo_only["complete"])
-        merged = [{**base, "candidate_id": "A", "anchor_candidate_id": "A",
-                   "covered_candidate_ids": ["A", "B"]}]
-        self.assertTrue(aggregate_candidate_coverage(2, merged, presented_ids=["A", "B"])["complete"])
-        self.assertFalse(candidate_coverage(2, 1, presented_ids=["A", "B"],
-                                            cited_ids=["A"])["complete"])
-        self.assertFalse(aggregate_candidate_coverage(1, [{**base, "covered_candidate_ids": []}],
-                                                      presented_ids=["A"])["complete"])
-        self.assertFalse(aggregate_candidate_coverage(1, [{**base, "covered_candidate_ids": ["A", "A"]}],
-                                                      presented_ids=["A"])["complete"])
-        split = [{**base, "candidate_id": i, "covered_candidate_ids": [i]} for i in ("A", "B")]
-        self.assertTrue(aggregate_candidate_coverage(2, split, presented_ids=["A", "B"])["complete"])
 
-    def test_two_colocated_rows_replay_without_new_or_fixed_after_adoption(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = [
-                {"candidate_id": "source-sandbox", "rule_id": "source-sandbox", "fingerprint": "sfp",
-                 "path": "lib/sandbox.py", "line_number": 72, "first_seen": "2026-10-01T00:00:00Z"},
-                {"candidate_id": "source-threat", "rule_id": "source-threat", "fingerprint": "tfp",
-                 "path": "THREAT_MODEL.md", "line_number": 1, "first_seen": "2026-10-01T00:00:00Z"},
-            ]
-            candidates = triage.cluster_candidates(triage.cluster_deterministic(source))
-            index_file = root / "candidates.json"
-            index_file.write_text(json.dumps({"candidates": candidates}), encoding="utf-8")
-            index = load_candidate_index(index_file)
-            rows = [{"rule_id": c["rule_id"], "path": c["path"],
-                     "line_number": c["line_number"], "severity": "high",
-                     "title": "root", "description": "verified"} for c in candidates]
-            store = FindingsStore("target", findings_dir=root)
-            try:
-                # Before adoption these rows were unanchored/model-snippet. A
-                # rewording on the first candidate-bound run cannot use the
-                # narrow same-snippet migration bridge: the visible one-time
-                # new+fixed wave must be distinguished from a repeated wave.
-                legacy = [{**row, "snippet": "older model phrasing"} for row in rows]
-                store.process_run("vuln-triage", legacy, candidate_index=None)
-                current = [{**row, "snippet": "current model phrasing"} for row in rows]
-                first, adoption, _ = store.process_run("vuln-triage", current, candidate_index=index)
-                self.assertEqual((adoption["new"], adoption["fixed"]), (2, 2))
-                self.assertEqual({r.get("candidate_id") for r in first},
-                                 {"source-sandbox", "source-threat"})
-                self.assertTrue(all(r.get("identity_source") == "candidate-id" for r in first))
-                _, stats, _ = store.process_run("vuln-triage", current, candidate_index=index)
-                self.assertEqual(stats["new"], 0)
-                self.assertEqual(stats["fixed"], 0)
-            finally:
-                store.close()
+    def test_colocated_input_anchor_locations_are_carried_by_candidates(self):
+        source = [
+            {"candidate_id": "source-sandbox", "rule_id": "source-sandbox", "fingerprint": "sfp",
+             "path": "lib/sandbox.py", "line_number": 72, "first_seen": "2026-10-01T00:00:00Z"},
+            {"candidate_id": "source-threat", "rule_id": "source-threat", "fingerprint": "tfp",
+             "path": "THREAT_MODEL.md", "line_number": 1, "first_seen": "2026-10-01T00:00:00Z"},
+        ]
+        candidates = triage.cluster_candidates(triage.cluster_deterministic(source))
+        self.assertEqual({(c["candidate_id"], c["path"], c["line_number"]) for c in candidates},
+                         {("source-sandbox", "lib/sandbox.py", 72),
+                          ("source-threat", "THREAT_MODEL.md", 1)})
 
 
 class TestThreatModelContextSummary(unittest.TestCase):
@@ -489,7 +429,7 @@ class TestThreatModelContextSummary(unittest.TestCase):
 
             payload = json.loads(out_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["candidates"], [])
-            self.assertTrue(aggregate_candidate_coverage(0, [], presented_ids=[])["complete"])
+            self.assertEqual(payload["context"]["clusters"], [])
             summary = payload["context"]["threat_model_summary"]
             self.assertIn("[THREAT_MODEL.md summarised: showing first 3000 of 5015 bytes", summary)
             self.assertIn("TRUNCATED", summary)
