@@ -14,7 +14,7 @@
   | `bin/fleet-check` (this patch applied) | 56,262 | `65a32220caed322e9aeaa1ed815def2eb522d0e3cdf74115e28588c43bcc32e5` |
   | `tests/fleet-check-tree-stability.test.sh` (deployed, for the lineage) | 12,295 | `8cc667daef33635fddcb648415df99defa329cc64f84dc4f860fdc4710b57067` |
   | `tests/fleet-check-tree-stability.test.sh` (THE BASE: bp6m applied) | 19,510 | `01963652b07bb4e8aa42cccbf7513bc2847e9168b8cfbf5f59b691cb3e8152af` |
-  | `tests/fleet-check-tree-stability.test.sh` (this patch applied) | 22,113 | `82d43486bdaa90b44a0006f93f9ebcde1cc7fa511012fff5b7ec9ba12701e7d2` |
+  | `tests/fleet-check-tree-stability.test.sh` (this patch applied) | 23,032 | `2afee4019dec28f061f0f9d5cd5be78ea2c11043b84bcd9e9d844b616a379d32` |
 
   The two base hashes were reproduced here by applying `patches/fleet-check-witness-content.patch` to the
   deployed files with `git apply` and hashing the result; they match the values that patch and the
@@ -25,7 +25,7 @@
   that do not touch these two files*. It is NOT order-free relative to
   `patches/fleet-check-state-names-outcome-recut-onto-witness-content.patch`, which is cut against the same two
   base hashes and rewrites the same test file (see SEQUENCING below).
-- **Patch artifact hash:** `f11f13baa58e474e9680168afd383a4d456d5fdb331317cc282db8c93832130c` (119 lines).
+- **Patch artifact hash:** `d47708b1db8231b6e69dcd4160f2aa979d3abe6de2cc5fc97ceac2b4664bae55` (142 lines).
 
 ### Problem Statement
 
@@ -91,11 +91,16 @@ What was missing was not a witness fix — it was the **pin** and the **cost**, 
    a path that IS a file but unreadable (a permission, a race), where `-f` is true and the batch can still
    abort. Cost after the filter: **61–66 ms**, i.e. ~1.7s saved per gate run on this repo.
 2. **`tests/fleet-check-tree-stability.test.sh`: arm 9 — `directory-symlink-churn` — plus the fixture knob it
-   needs.** `run_arm` gains a 7th optional argument, `TARGET_KIND` (`file` default, `directory`), so an arm can
-   point the tracked symlink at a directory containing a file. Arm 9 creates AND removes an entry inside that
-   followed directory during the run and expects **PASS** under the content witness: a directory's inode ctime
-   is not content. It is **RED on the deployed gate** (see VERIFICATION), which is the point — this is the
+   needs.** `run_arm` gains a 7th optional argument, `FIXTURE_KIND` (`file` default; `inrepo-directory` for arm 9),
+   so an arm can build the repo's actual topology: `link -> d` with `d/inner` tracked **beside** the link, exactly
+   as `skills` and `agents/...` are both in this repo's `git ls-files`. Arm 9 creates AND removes an entry inside
+   that followed directory during the run and expects **PASS** under the content witness: a directory's inode
+   ctime is not content. It is **RED on the deployed gate** (see VERIFICATION), which is the point — this is the
    acceptance for the face agents-eea2 measured, and there was none.
+   *Revision note, recorded rather than tidied away:* the first version of this arm aimed the link at a directory
+   **outside** the fixture repo. Cross-family review (P3, below) found that this pins a different topology — no
+   tracked entries beside the link — so the arm did not pin the real case. The fixture is now in-repo, and the
+   external-directory form was not kept: an unused knob is dead code, and the in-repo form is the stronger arm.
 3. **No witness semantics change**, and that is measured rather than asserted (next section).
 
 ### The witness is unchanged — measured, not argued
@@ -122,6 +127,21 @@ are the only two consumers, and the record's cache key is `HEAD^{tree}`), so not
 
 ### Verification
 
+**The topology under test is the repo's own, and it is red-first on its own.** Before the suite drives, the
+IN-REPO shape (`link -> d`, both tracked, one tracked entry `d/inner` beside the link) was digested with each
+form, extracted from its own artifact bytes, around a create-and-remove of `link/probe`:
+
+| form | before | after | reading |
+|---|---|---|---|
+| deployed (metadata) | `f51cca7e509ad137` | `1d645b3502aa9a38` | **moves** → STALE |
+| bp6m (content) | `1a6eca9348499be7` | `1a6eca9348499be7` | stable → PASS |
+| this patch | `79635f7fcae34324` | `79635f7fcae34324` | stable → PASS |
+
+(The first drive of this case by the author was **vacuous** — it wrote to the wrong working directory, so nothing
+was created and "no movement" proved nothing. It was caught by the review round below and re-run; the numbers in
+the table are from the corrected drive. Recorded because a probe that silently does nothing is the same defect
+class this bead is about.)
+
 The hub's own suite is the instrument and it takes `CHECK_OVERRIDE`, so all four drives below are runs of that
 suite; each got its own directory, its own gate binary and its own private heavy queue (2 slots), so none
 queued behind the merger or behind another. Gate and suite hashes are named per run because a verdict is a
@@ -129,21 +149,25 @@ claim about a tree.
 
 | run | gate | suite | result |
 |---|---|---|---|
-| 1 | this patch (`65a32220`) | this patch (`82d43486`) | **30 passed, 0 failed** |
-| 2 | bp6m only (`04acfaae`) | this patch (`82d43486`) | **30 passed, 0 failed** |
-| 3 | deployed (`455e3b05`) | this patch (`82d43486`) | 17 passed, 13 failed — **RED, as designed** |
+| 1 | this patch (`65a32220`) | this patch (`2afee401`) | **30 passed, 0 failed** |
+| 2 | bp6m only (`04acfaae`) | this patch (`2afee401`) | **30 passed, 0 failed** |
+| 3 | deployed (`455e3b05`) | this patch (`2afee401`) | 17 passed, 13 failed — **RED, as designed** |
 | 4 | deployed (`455e3b05`) | deployed (`8cc667da`) | 14 passed, 0 failed (control) |
 
 - **Arm 9 is green with the content witness (run 1):** `ok directory-symlink-churn: verdict recorded PASS
-  (tree=88cba735 status=[])`.
+  (tree=43cdd128 status=[])`.
 - **Arm 9 is RED on the deployed gate (run 3):** `FAIL directory-symlink-churn: expected PASS: state=STALE
-  tree=189c57d1 actual=189c57d1 status=[] reason=the worktree's CONTENT changed during the run without a commit
-  (HEAD^{tree} is still 189c57d1fb862c7e65b6abc364291f1dbbb73a63), so the suites read bytes that tree does not
+  tree=43cdd128 actual=43cdd128 status=[] reason=the worktree's CONTENT changed during the run without a commit
+  (HEAD^{tree} is still 43cdd128e59c6aaade010c9baea04229affd2b22), so the suites read bytes that tree does not
   describe`. That sentence — a tree whose `HEAD^{tree}` never moved, recorded as a content change — is the
   defect agents-eea2 measured, reproduced deliberately against a settled tree.
+- **The arm's fixture tree is IDENTICAL in runs 1, 2 and 3 (`43cdd128`), so the gate is the only variable.**
+  The same fixture, the same suite, three gates: PASS, PASS, STALE. That is a sharper discrimination than a
+  differing fixture would give, and it is why the fixture is built inside the repo rather than pointed at a
+  directory outside it.
 - **The `bin` half is cost-only, and run 2 is how that is known rather than claimed:** the same suite against
-  bp6m's own gate is 30 passed / 0 failed, with `ok directory-symlink-churn: verdict recorded PASS
-  (tree=f5fbadba)`. A change that altered the verdict for any arm would show up as an arm disagreeing between
+  bp6m's own gate is 30 passed / 0 failed, with the same `directory-symlink-churn: verdict recorded PASS
+  (tree=43cdd128)`. A change that altered the verdict for any arm would show up as an arm disagreeing between
   run 1 and run 2, and none does.
 - **The control (run 4) is 14 passed / 0 failed**, which is the number bp6m recorded for the deployed pair — the
   instrument has not moved under either artifact.
@@ -162,6 +186,28 @@ clock, on the worktree at 493 tracked paths. The batch-abort control is the lite
 because no such comparison exists in the tool; and the 1.7s saving is a property of THIS repo's path count and
 ONE directory link, not a general claim about other repos.
 
+### Review history (who formed each verdict, and what it covered)
+
+- **Cross-family READ-ONLY assessment** (`openai-codex/gpt-6-sol` subagent; it cannot comment on a bead, so the
+author lane is transcribing and naming itself as the transcriber; the review covered the artifact at suite hash
+`82d43486`, BEFORE the arm-9 fixture fix below): `VERDICT: PASS`, explicitly *"not executable clearance"*,
+because that agent's own policy forbids shell commands. It confirmed the marker-path claim from the source and
+the four-run log by inspection, found **no inconsistency between the write-up's table and the log**, and marked
+the cost and line-set-equality claims UNVERIFIABLE **for lack of execution, not as disagreements**. Its one
+finding was P3: arm 9's fixture aimed the link at a directory OUTSIDE the fixture repo, which pins a different
+topology from the repo's own `skills -> agents` (inside, with tracked entries beside it), so the arm did not pin
+the real case.
+- **That P3 is FIXED in this revision, not noted away.** Arm 9 now builds the in-repo topology with
+`FIXTURE_KIND=inrepo-directory`, the runs above were repeated on it, and fixing it also caught a defect in the
+author's own probe for the case (a write to the wrong working directory made the first in-repo drive vacuous —
+recorded in VERIFICATION rather than quietly re-run). Because the fixture changed, the suite hash moved from
+`82d43486` to `2afee401`, and the assessment above is a claim about the earlier hash only.
+- **The executable reproduction is with a reviewer lane** (`rev-eea2`, spawned for a cross-family model):
+base-hash reproduction, fuzz-free `git apply --check`, the batch-abort control, the edge-case repos (unreadable
+file, broken link, space/newline paths), the in-repo vs external directory link, and the digest-consumer audit are
+its job, and its verdict is posted as its own comment on the bead. **This artifact is not queued as cleared on the
+read-only assessment alone.**
+
 ### SEQUENCING — stated plainly, because this is the w43q collision family
 
 `patches/fleet-check-state-names-outcome-recut-onto-witness-content.patch` is cut against **the same two base
@@ -172,7 +218,7 @@ hashes** as this patch and rewrites the **same** test file (its hunks are in `ru
   `tests/fleet-check-tree-stability.test.sh` in the same regions, and this one additionally rewrites the digest
   function the re-cut leaves alone.
 - **The cheap resolution is a re-cut of whichever lands second, and it is mechanical:** apply bp6m, do not apply
-  the other change, and hash. If `bin/fleet-check` is `65a32220` / the test file is `82d43486`, this patch is in
+  the other change, and hash. If `bin/fleet-check` is `65a32220` / the test file is `2afee401`, this patch is in
   and the re-cut must be re-expressed on top of it; if they are `04acfaae` / `01963652`, bp6m alone is in.
 - **This patch is the smaller of the two conflicts to resolve by hand**: it touches one function and one arm,
   while the re-cut is already an intent-merge of test-file assertions.

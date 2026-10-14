@@ -55,43 +55,63 @@ index 68605d8..31f5e8f 100755
  }
  # fleet-arx8: the fingerprint of what the suites could read when the run began, compared against the same
 diff --git a/tests/fleet-check-tree-stability.test.sh b/tests/fleet-check-tree-stability.test.sh
-index 92f71db..e98f7a8 100755
+index 92f71db..2dc2df0 100755
 --- a/tests/fleet-check-tree-stability.test.sh
 +++ b/tests/fleet-check-tree-stability.test.sh
-@@ -83,11 +83,12 @@ marker_state() {
+@@ -83,26 +83,43 @@ marker_state() {
    return 1
  }
  
 -# run_arm NAME EXPECTED_STATE CHECK_FAST_CMD MARKER [EXTERNAL_TARGET] [HOLD_FILE]
-+# run_arm NAME EXPECTED_STATE CHECK_FAST_CMD MARKER [EXTERNAL_TARGET] [HOLD_FILE] [TARGET_KIND]
++# run_arm NAME EXPECTED_STATE CHECK_FAST_CMD MARKER [EXTERNAL_TARGET] [HOLD_FILE] [FIXTURE_KIND]
  # Builds a clean repo, runs a fast gate whose command does something to the tree, and prints the verdict.
  # HOLD_FILE, when given, freezes the gate's notification POST until this function releases it (fleet-c050).
-+# TARGET_KIND names how EXTERNAL_TARGET is created: `file` (the default, arm 6's case) or `directory` (arm 9).
++# FIXTURE_KIND names how the tracked symlink `input` is built: `file` (the default: arm 6's link to a file, or a
++# plain file) or `inrepo-directory` (arm 9: a link to a DIRECTORY inside the repo, whose entry is tracked too).
  run_arm() {
 -  local name="$1" expected="$2" cmd="$3" marker="$4" external_target="${5:-}" hold="${6:-}"
 +  local name="$1" expected="$2" cmd="$3" marker="$4" external_target="${5:-}" hold="${6:-}" kind="${7:-file}"
    if [ -n "$hold" ]; then export FLEET_CHECK_TEST_HOLD="$hold"; else unset FLEET_CHECK_TEST_HOLD; fi
    local T R rec state tree_before tree_after
    T=$(mktemp -d "$ROOT/arm.XXXXXX"); R="$T/repo"
-@@ -97,7 +98,16 @@ run_arm() {
-   if [ -n "$external_target" ]; then
-     # fleet-sohq: a TRACKED SYMLINK whose target lives OUTSIDE the repo. The link's own metadata does not move
-     # when the target's content does, so witnessing the link alone is blind to it.
+   git init -q -b main "$R"
+   git -C "$R" config user.email test@example.com
+   git -C "$R" config user.name "tree stability test"
+-  if [ -n "$external_target" ]; then
+-    # fleet-sohq: a TRACKED SYMLINK whose target lives OUTSIDE the repo. The link's own metadata does not move
+-    # when the target's content does, so witnessing the link alone is blind to it.
 -    printf 'original' > "$external_target"
-+    # agents-eea2: TARGET_KIND=directory makes that target a DIRECTORY, which is a DIFFERENT witness problem
-+    # from the file case above and the one this repo actually has (`skills -> agents`, tracked, the only
-+    # directory link in the tree). The target is a directory that CONTAINS a file, so the arm can tell "an entry
-+    # inside a followed directory moved" apart from "the directory itself is missing".
-+    if [ "$kind" = directory ]; then
-+      mkdir -p "$external_target/entries"
-+      printf 'inner' > "$external_target/entries/inner"
-+    else
-+      printf 'original' > "$external_target"
-+    fi
-     ln -s "$external_target" "$R/input"
+-    ln -s "$external_target" "$R/input"
++  if [ "$kind" = inrepo-directory ]; then
++    # agents-eea2: THE TOPOLOGY THIS REPO ACTUALLY HAS. `skills -> agents` points at a directory INSIDE the
++    # repo whose own entries are tracked beside it, so `git ls-files` lists the link AND the directory's
++    # contents. This is the shape of the defect: a suite that writes an entry inside the followed directory
++    # moves that DIRECTORY INODE's ctime, and a gate that witnesses the link with `stat -L` reads that as a
++    # content change. The target holds a TRACKED file, so the arm can tell "an entry inside a followed
++    # directory moved" apart from "the directory itself is missing", and no other fixture path can move with it.
++    # (The first version of this arm pointed the link at a directory OUTSIDE the repo. agents-eea2 review P3:
++    # that pins a different topology - no tracked entries beside the link - so the arm did not pin the real case.)
++    mkdir -p "$R/d"
++    printf 'inner' > "$R/d/inner"
++    ln -s d "$R/input"
++    git -C "$R" add input d
    else
-     printf 'original' > "$R/input"
-@@ -278,6 +288,25 @@ run_arm same-bytes-rewrite PASS 'cp input /tmp/bp6m-keep.$$; cp /tmp/bp6m-keep.$
+-    printf 'original' > "$R/input"
++    if [ -n "$external_target" ]; then
++      # fleet-sohq: a TRACKED SYMLINK whose target lives OUTSIDE the repo. The link's own metadata does not move
++      # when the target's content does, so witnessing the link alone is blind to it.
++      printf 'original' > "$external_target"
++      ln -s "$external_target" "$R/input"
++    else
++      printf 'original' > "$R/input"
++    fi
++    git -C "$R" add input
+   fi
+-  git -C "$R" add input
+   git -C "$R" commit -q -m init
+   tree_before=$(git -C "$R" rev-parse 'HEAD^{tree}')
+ 
+@@ -278,6 +295,28 @@ run_arm same-bytes-rewrite PASS 'cp input /tmp/bp6m-keep.$$; cp /tmp/bp6m-keep.$
  # Arm 4 (CONTROL): nothing touches the tree - must stay PASS, or the guard fires on healthy runs.
  run_arm clean-run PASS 'echo gate work done' 'gate work done'
  
@@ -112,7 +132,10 @@ index 92f71db..e98f7a8 100755
 +# (metadata) gate and it reports 'expected PASS, state=STALE' - which is the defect, reproduced deliberately.
 +# The debris is created and removed entirely (entry create + entry remove), because a directory inode's ctime
 +# advances on both and cannot be restored from userland; the tracked link's OWN metadata does not move either way.
-+run_arm directory-symlink-churn PASS 'printf probe > input/probe; rm -f input/probe; echo dir-churn-done' dir-churn-done "$ROOT/arm9-followed-directory" "" directory
++# FIXTURE_KIND=inrepo-directory reproduces the repo's topology exactly: the link and the directory's tracked entry
++# are BOTH in the fixture's `git ls-files`, as `skills` and `agents/...` are in this repo's. An earlier version of
++# this arm aimed the link at a directory outside the repo, which pins a different topology (agents-eea2 review P3).
++run_arm directory-symlink-churn PASS 'printf probe > input/probe; rm -f input/probe; echo dir-churn-done' dir-churn-done "" "" inrepo-directory
 +
  echo ""
  echo "$PASS passed, $FAIL failed"
