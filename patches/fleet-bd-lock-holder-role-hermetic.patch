@@ -1,0 +1,15 @@
+--- a/tests/bd-lock-holder.test.sh
++++ b/tests/bd-lock-holder.test.sh
+@@ -27,6 +27,12 @@
+ #
+ #   bash tests/bd-lock-holder.test.sh
+ set -uo pipefail
++# This suite's holders do not all pass FLEET_ROLE explicitly. Pin the default for the
++# entire process tree, not just shim()'s waiter: a reviewer/coord shell otherwise makes
++# the holder a reviewer and refuses work/freeform commands before writing any record.
++# Explicit adversarial per-call roles below still override this test default.
++unset FLEET_BD_LOCKED ROLE
++export FLEET_ROLE=implementer
+ HERE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+ SHIM="${BD_SHIM_OVERRIDE:-$HERE/bin/bd}"
+ PASS=0; FAIL=0
