@@ -486,7 +486,7 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                 for child in ast.iter_child_nodes(current):
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
                         continue
-                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
                         found.add(child.id)
                     elif isinstance(child, ast.alias):
                         found.add((child.asname or child.name).split(".")[0])
@@ -517,6 +517,13 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                 added = literal_list(statement.value, scopes)
                 concatenated = current + added if current is not None and added is not None else None
                 return {statement.target.id: concatenated}
+            if isinstance(statement, ast.Delete):
+                # A DELETION is a binding shape too: a name deleted before the loop cannot be read there, and
+                # keeping an earlier value in place would resolve it and read the wrong list - the one shape in
+                # a ten-case stress test of the snapshot position that reported GREEN, found by attacking the
+                # position before review rather than by a fifth round. The invariant it belongs to is agents-n5e0's:
+                # a name bound by a shape this resolver cannot read is UNRESOLVABLE, not earlier and not shadowed.
+                return {node.id: None for node in statement.targets if isinstance(node, ast.Name)}
             return {}
 
         def function_parameters(node: ast.AST) -> set[str]:
@@ -796,6 +803,37 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
                               + '    MODULES = ("findings.py", "embargo.py")\n')
         self.assertIn("cannot read at this point", later_only,
                       "a binding that has not been reached yet is reported, not read from a later position")
+
+    def test_a_deleted_name_is_unreadable_at_the_loop_the_way_python_says_it_is(self):
+        """agents-n5e0's invariant, found by stress-testing the snapshot position: a DELETION binds too.
+
+        `del MODULES` anywhere in a function makes the name LOCAL for the whole function, so a loop that runs
+        BEFORE the deletion raises UnboundLocalError - measured with python3 on both orders, not assumed:
+        "loop before a later del" and "loop after a del" both raise it. The guard used to read the module-level
+        list at the loop and could report green for a list that cannot be read at runtime, so a name the scope
+        deletes is registered as UNRESOLVABLE wherever the loop sits: a name bound by a shape this resolver
+        cannot read is refused, never read from an enclosing value.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        before = reported("def build(root):\n" + copy_loop + "    del MODULES\n")
+        after = reported("def build(root):\n    del MODULES\n" + copy_loop)
+        for order, problems in (("before", before), ("after", after)):
+            self.assertIn("cannot read at this point", problems,
+                          f"a deleted name is unreadable at the loop ({order} the del): python raises "
+                          "UnboundLocalError for both orders, so reading a value here would invent one")
+        self.assertNotIn("extra.py", before,
+                         "no module list is read at that loop, so none may be claimed missing from it")
 
     def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
         """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
