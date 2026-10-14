@@ -25,6 +25,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import has_git_index, tracked_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 FAST_GATE = ROOT / "tools" / "fast-gate.sh"
 # The arm registry is a DIRECTORY of fragments since agents-hr6q (ADR 0002): the mapping used to be one
@@ -101,9 +103,30 @@ def arm_registry_figures(tracked_paths: list[str] | None = None) -> dict:
     }
 
 
+def tracked_arm_fragments(root=None):
+    """The TRACKED *.sh fragments of the fast-gate arm registry, in filename order.
+
+    agents-ncue: the registry directory is not a frozen set during a run. The readers here globbed it, so
+    an untracked fragment widened what they describe - measured, the arm count went 33 -> 34 - and that is
+    worse than a cosmetic difference, because tools/fast-gate.sh SOURCES every *.sh it finds (agents-es0y),
+    so an untracked fragment is code the gate executes. Enumerating git's index is the same set the gate
+    witnesses, so a reader and the loader can no longer disagree about what the registry contains.
+    """
+    root = root or ROOT
+    if has_git_index(root):
+        arms_dir = root / "tools" / "fast-gate-arms.d"
+        # tracked_paths takes a GIT PATHSPEC, in which `*` crosses `/`, so ask for the directory and keep
+        # direct children: a nested path must not be mistaken for a fragment (measured in agents-37rj).
+        return sorted(p for p in tracked_paths("tools/fast-gate-arms.d", root=root)
+                      if p.suffix == ".sh" and len(p.relative_to(arms_dir).parts) == 1)
+    # A SYNTHETIC root built by a fixture is not inside a work tree, so there is no index to ask and the
+    # filesystem is then the WHOLE tree rather than a second, wider notion of it (see has_git_index).
+    return sorted((root / "tools" / "fast-gate-arms.d").glob("*.sh"))
+
+
 def arm_registry_text() -> str:
     """Every arm fragment, concatenated - the table the script used to hold."""
-    fragments = sorted(ARMS_DIR.glob("*.sh"))
+    fragments = tracked_arm_fragments()
     assert fragments, f"no arm fragments in {ARMS_DIR}: the registry cannot be empty"
     return "\n".join(path.read_text(encoding="utf-8") for path in fragments)
 
@@ -1419,7 +1442,7 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
                          "tools/fast-gate-arms.d/ (ADR 0002)")
         self.assertIn("fast_gate_arms_load", script, "the script must load the registry")
         self.assertIn("fast-gate-arms.d", script)
-        self.assertGreaterEqual(len(list(ARMS_DIR.glob("*.sh"))), 20,
+        self.assertGreaterEqual(len(tracked_arm_fragments()), 20,
                                 "the registry split the table into per-run fragments; a handful of files "
                                 "would mean arms were merged back into a shared file")
 
@@ -1628,6 +1651,38 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
         self.assertEqual(sorted(set(dead) - DEAD_ARM_EXCEPTIONS), [],
                          "these arm patterns match no tracked path, so they map nothing: either fix the "
                          "pattern or name it in DEAD_ARM_EXCEPTIONS with its reason")
+
+
+class TestTheArmRegistryReaderIgnoresUntrackedFragments(unittest.TestCase):
+    """agents-ncue: the arm registry reader must enumerate what the gate TRACKS, not what is on disk.
+
+    The untracked-debris shape already has a sibling for the test tree
+    (test_untracked_debris_is_not_absorbed_by_consumer_coverage, agents-jn73); this is the arms half, and it
+    matters more than a count, because tools/fast-gate.sh SOURCES every *.sh it finds in this directory
+    (agents-es0y) - a fragment the reader is willing to describe is code the gate is willing to run.
+
+    The probe is built in a SYNTHETIC root that is git-initialised, so nothing is ever written into the
+    live registry: a test that left a stray *.sh there would itself be the hazard it is testing for.
+    """
+
+    def test_untracked_debris_is_not_absorbed_by_the_arm_registry_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arms_dir = root / "tools" / "fast-gate-arms.d"
+            arms_dir.mkdir(parents=True)
+            (arms_dir / "010-tracked.sh").write_text("# a TRACKED fragment\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "tools/fast-gate-arms.d/010-tracked.sh"],
+                           check=True)
+            # The pairing that makes this a check rather than a tautology: a fragment the index sees IS read,
+            # so a green here cannot be satisfied by a reader that enumerates nothing at all.
+            self.assertEqual([p.name for p in tracked_arm_fragments(root)], ["010-tracked.sh"])
+            (arms_dir / "999-untracked.sh").write_text("# debris from an interrupted run\n", encoding="utf-8")
+            self.assertEqual(
+                [p.name for p in tracked_arm_fragments(root)], ["010-tracked.sh"],
+                "an untracked fragment must not be enumerated: tools/fast-gate.sh SOURCES every *.sh it "
+                "finds (agents-es0y), so a reader that names one names code the gate would execute",
+            )
 
 
 if __name__ == "__main__":
