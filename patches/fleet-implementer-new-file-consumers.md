@@ -1,0 +1,88 @@
+## `fleet-implementer-new-file-consumers.patch` — an added file's lib imports are checked before the heavy gate (agents-j00v)
+
+WHAT: one paragraph added to the implementer preflight (`roles/implementer.md`, step 3). When the
+delta ADDS a file, list the `lib/*` modules it imports and confirm each is mapped to it in the repo's
+fast-gate map (`tools/fast-gate-arms.d/`, or `tests/fast_gate_allowlists.d/` for a measured exemption),
+then run the repo's consumer-coverage suite (`tests/test_fast_gate_consumer_coverage.py`) in the
+foreground before asking for the gate.
+
+WHY: the map is a contract about who tests whom, so adding a consumer is adding a promise - and the
+promise is currently discovered at the END of the work, after a heavy gate slot, instead of in one
+local command. Three lanes hit this class in a single hour on 2026-10-14: the sweep's tool needed an arm
+plus a deletion-inventory row; agents-5jjf needed an arm for `lib/sinks/github.py`; an implementer's new
+test file importing `lib/embargo.py` needed the embargo arm. The guard that catches it is doing its job
+correctly - the cost is the TIMING of the paperwork, which lands on the author at the worst moment.
+
+ARTIFACT: `fleet-implementer-new-file-consumers.patch`, 1610 bytes, 1 hunk, file-section:
+`roles/implementer.md`. sha256 `d2fa5edd827b0606406a7b09699859f07028924d39086f11c24598b11985eab5`.
+
+EXPECTED BASE: `roles/implementer.md` sha256
+`8c08378ae39bad82f4c4b351f201fb0fe0293107a0fa50b8213d6f9eefefb4f6`, 3515 bytes - it applies to the
+step 3 paragraph beginning "Before handing off: rebase on the latest main ...".
+
+DESTINATION SHAPE: measured present. `~/fleet/roles/implementer.md` (the deployed synced copy) and
+`~/fleet-copy/roles/implementer.md` (the git clone) both carry that exact base sha as of 2026-10-14, and
+applying the patch yields `2fa48684ad855cdfa4d61683e250d7adce2fd2e5683c7eaa799835873460f333`, 4150 bytes
+(+635).
+
+THIS PATCH DELETES NOTHING - that is its shape, and it is checked rather than asserted: the artifact
+contains ZERO lines beginning with `-` (the only `-` line is the `---` file header), its single hunk is
+anchored in the Loop section (`@@ -11,6 +11,12 @@`) rather than at the top of the file, and applying it
+to the deployed base produces a file BYTE-IDENTICAL to the reference built by inserting those six lines
+after step 3. The check exists because this artifact was first cut WRONG: an edit that rebuilt the file as
+`new_text + tail` instead of substituting in place produced a patch that deleted the role header and
+spliced a fragment of it - a reviewer caught it (agents-e1jz), and the weaker check that missed it was
+"the inserted sentence is present and the byte count matches", which is satisfied by a corrupted document
+too. For an insertion, the byte count matching is NOT evidence; deleting nothing and matching a reference
+byte for byte is.
+
+PREREQUISITES: none. Checked for collisions BY PATH before cutting, per the fleet rule that a name is an
+identifier a second deliverer can collide with: no artifact in `patches/` has `roles/implementer.md` as
+a file-section. `fleet-merger-refusal-stops-script.patch` mentions that path, but only in prose inside
+its `roles/merger.md` hunk, so the two artifacts are independent and either order applies.
+
+APPLICATION TEST - THIS IS THE ACCEPTANCE FOR THIS ARTIFACT, NOT THE HASH (coord, 2026-10-14: a
+`patches/*` artifact can pass every suite in the receiving repository while destroying the file it
+targets, because that file lives in ANOTHER repository that the receiving repository's tests never
+open, so a shape test is not a substitute for an application test):
+
+    mkdir -p /tmp/apptest/roles && cp ~/fleet/roles/implementer.md /tmp/apptest/roles/
+    cd /tmp/apptest
+    patch -p1 --dry-run < this.patch            # exit 0, "checking file roles/implementer.md"
+    patch -p1 -s < this.patch                   # applies
+    grep -c '^## Your role: IMPLEMENTER lane' roles/implementer.md   # 1  (header INTACT)
+    grep -c '^### On boot' roles/implementer.md                      # 1
+    grep -c '^### Loop'    roles/implementer.md                      # 1
+    sed -n '13p' roles/implementer.md | cmp - <(sed -n '13p' ~/fleet/roles/implementer.md)  # step 3 UNCHANGED
+    sed -n '14,19p' roles/implementer.md                        # the new paragraph FOLLOWS step 3
+    grep -c '^-[^-]' this.patch                # 0  (an insertion deletes nothing; the file header
+                                               #    "---" is excluded by the [^-] class)
+    sha256sum roles/implementer.md             # 2fa48684ad855cdfa4d61683e250d7adce2fd2e5683c7eaa799835873460f333
+                                               # - SUPPORTING FACT ONLY, never the test
+
+WHY THE HASH IS NOT THE TEST, AND ONE CHECK NOT TO USE: reproducing a hash proves the patch is
+DETERMINISTIC, not that its output is a valid document - the first cut of this artifact reproduced its
+own hash exactly while deleting the role header and welding a fragment of it onto the inserted
+paragraph. And "grep for the fragment `hat's empty`" does NOT discriminate: that string is a SUBSTRING
+of the legitimate header text `(if that's empty, ask coord).`, so it counts 1 in a correct document
+(line 4, intact) and 1 in the corrupted one (line 7, welded). Use the greps and the `cmp` above, which
+are zero-vs-nonzero on the defects they name.
+
+HOW TO APPLY: `cd <fleet repo> && patch -p1 < fleet-implementer-new-file-consumers.patch` (or `git
+apply`). Then confirm `grep -c 'consumer-coverage suite in the foreground' roles/implementer.md` is 1 and
+the file sha256 is the applied result above. This artifact is a HUB DELIVERY: nothing in the
+agents-factory checkout applies it, and the deployed `~/fleet` on the hub is hard-reset every few
+minutes, which is why the change travels as a patch rather than as an edit.
+
+WHY A LINE AND NOT A TOOL (the ruling, and the counterargument that won): the consumer oracle already
+runs inside the fast gate, so nothing is silently missed today - what is missing is WHEN the author
+learns it. Engineering a new checker to save heavy-gate cycles is only right when the engineering costs
+less than the cycles it saves; here one sentence moves the discovery from after a heavy gate to the
+author's own preflight, at zero tooling cost. This bead stays open only until that sentence exists.
+
+MEASURED INSTANCE, so the line is specific rather than generic advice: a new file
+`tests/test_station_candidate_accounting.py` imported `lib/embargo.py` while the `lib/embargo.py)` arm
+did not select it, so `tests/test_fast_gate_consumer_coverage.py` failed with rc=1 on the tip that had
+just been handed for review - and that tip's fast gate had recorded STALE (the `agents/` ctime mechanism
+of agents-fxg2), which MASKED the real rc=1 rather than merely lagging it. One foreground run of that
+suite finds it in about 13 seconds.
