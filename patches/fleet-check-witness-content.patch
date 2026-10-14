@@ -1,0 +1,226 @@
+diff --git a/bin/fleet-check b/bin/fleet-check
+index 6c72b58..68605d8 100755
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -583,7 +583,11 @@ $last_tail"
+   # not yet published, and report a failure about the machine's speed rather than about the tree. A record must
+   # not be readable in a terminal state that does not yet describe the run it names. .done stays after the POST
+   # because .done is the NOTIFICATION marker (fleet-wq10, fleet-nrrt) while .witnessed describes the RUN.
+-  local witnessed="commit tree; tracked file content; and tracked files' identity INCLUDING SYMLINK TARGETS (size + nsec ctime). NOT witnessed: untracked files, or anything the gate's own command touches outside the repository."
++  # agents-bp6m: THE SCOPE NAMES THE BOUND, because a PASS whose scope is silent about a known floor is the
++  # false-green shape this file already guards elsewhere. The last clause is the price of witnessing CONTENT: the
++  # start and end readings agree whenever the bytes are identical, so a write fully reverted inside the run is
++  # outside this witness - a reader that needs that must not read PASS as "nothing was ever written".
++  local witnessed="commit tree; the CONTENT of every tracked path in the working tree, read through symlinks so a target outside the repo is witnessed; git diff HEAD (index-mediated, so the content pass is what sees an assume-unchanged path). NOT witnessed: untracked files, anything the gate's own command touches outside the repository, or a write that is FULLY REVERTED before the run stops (start and end content being identical is the whole test, so a round trip inside the run cannot be seen - continuous observation would be needed, not a digest)."
+   # Persist final verdict state BEFORE POST so any lane woken immediately sees the final verdict, not RUNNING (fleet-5bzu review P1)
+   if [ "$cov_ok" = 1 ]; then
+     jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson rc "$rc" --argjson s "$secs" --slurpfile cov "$cov_out" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
+@@ -683,34 +687,66 @@ worktree_digest() {
+     # content is what decides whether the tree moved.
+     git status --porcelain --untracked-files=no 2>/dev/null
+     git diff HEAD 2>/dev/null | sha256sum
+-    # fleet-iajo: THE COMPONENTS ABOVE ARE CONTENT-ADDRESSED, SO A WRITE THAT IS REVERTED INSIDE ONE SAMPLING
+-    # INTERVAL IS INVISIBLE TO ALL OF THEM. Measured with the reviewer's repro: a sub-second flip leaves
+-    # HEAD^{tree}, the porcelain and 'git diff HEAD' byte-identical, and a 5s sampler cannot see it by
+-    # construction. A write is not invisible to the kernel, though: ctime advances on EVERY write and cannot
+-    # be restored from userland, while mtime can (touch -d). Measured: a sub-second round trip moved %z from
+-    # .065670170 to .069670191, and three consecutive writes gave three distinct values. So this is a
+-    # RECORDED FACT at nanosecond resolution rather than a POLL, which is why there is no interval to hide in
+-    # - the start and end readings agree by construction, not by luck of timing.
+-    git ls-files -z 2>/dev/null | xargs -0 -r stat -c '%n %s %z' 2>/dev/null | sha256sum
+-    # fleet-sohq: THE STAT ABOVE FOLLOWS NOTHING, SO A TRACKED SYMLINK IS WITNESSED BY ITS OWN METADATA ALONE -
+-    # its ctime and its size (the length of the target path) do not move when the TARGET's content does. Measured
+-    # on the reviewed tip: the un-followed stat was byte-identical before and after an outside-repo target was
+-    # rewritten, git status was empty, and the gate recorded PASS while its own log read 'observed-corrupt'.
+-    # This line follows the link, so the target's size and nsec ctime are witnessed too, while the line above
+-    # keeps the link's own identity. Both, not either: neither alone covers a symlink.
+-    git ls-files -z 2>/dev/null | xargs -0 -r stat -L -c '%n %s %z' 2>/dev/null | sha256sum
++    # agents-bp6m: THE COMPONENTS ABOVE ARE CONTENT-ADDRESSED BUT NOT CONTENT-COMPLETE, AND THE OLD LAST TWO WERE
++    # NOT CONTENT AT ALL - they hashed size and nsec ctime, so ANY write to a tracked file moved the digest even
++    # when the bytes were identical. Measured on a clean worktree: a suite that rewrote a tracked file with the
++    # SAME bytes turned a genuine verdict into STALE (the reviewer's recipe: cp f tmp && mv tmp f). ctime cannot
++    # distinguish "rewritten identically" from "changed", so the witness was reporting a write where the thing it
++    # exists to report is a CONTENT change - and a repo whose suites rewrite a tracked file got STALE (no verdict
++    # at all) on every such run. THIS IS INTERMITTENT BY NATURE, which is why the acceptance is "a clean run on a
++    # tree whose suites touched tracked files reads a genuine verdict", not "every run reads clean": it fires when
++    # a selected suite touches a tracked file inside the run window.
++    #
++    # THE WITNESS IS NOW THE CONTENT OF EVERY TRACKED PATH IN THE WORKING TREE (agents-bp6m). It is a stronger
++    # witness than the components above it in one measured respect, not merely a different one: `git diff HEAD`
++    # consults the INDEX, so a tracked file marked assume-unchanged or skip-worktree can be rewritten under it and
++    # the diff stays EMPTY (measured: diff --name-only printed nothing while the file's bytes had changed), while
++    # a direct read of the path sees the new bytes. Reading the bytes is the point, so no index state can hide a
++    # change from this line.
++    worktree_content_digest | sha256sum
+   } | sha256sum | cut -c1-16
+ }
++
++# agents-bp6m: the CONTENT of every tracked path in the working tree, as one hash - the working-tree half of the
++# fingerprint. No mtime, no ctime, no size: bytes only, so a rewrite that produces identical bytes is not a
++# change. `git hash-object` FOLLOWS a symlink, so a link to a file outside the repo contributes its TARGET's
++# content and a target rewrite is witnessed through the link (fleet-sohq) - with no second pass to pay for.
++worktree_content_digest() {
++  local hashes f
++  if hashes=$(git ls-files -z 2>/dev/null | xargs -0 -r git hash-object --no-filters -- 2>/dev/null); then
++    # THE HAPPY PATH IS ALSO THE FAST PATH: one git process for the whole list, measured at 0.030s for 381
++    # tracked files against 0.020s for the metadata form it replaces, and 0.027s against 0.023s for 2280 files.
++    printf '%s\n' "$hashes"
++  else
++    # GIT ABORTS THE WHOLE BATCH ON A PATH IT CANNOT READ, and a truncated list would silently weaken the
++    # witness instead of failing it: measured, one broken symlink in a six-path repo yielded TWO hashes and
++    # exit 123, with no indication in the output that four paths were skipped. So the status is checked, and
++    # on failure every path is read on its own with a MARKER for the ones that have no content to hash (a
++    # broken symlink, a link to a directory, a submodule). A marker is a witness of the path's identity, not
++    # of content that does not exist, and it keeps the digest complete and stable across the two readings.
++    while IFS= read -r -d '' f; do
++      if [ -f "$f" ]; then
++        git hash-object --no-filters -- "$f" 2>/dev/null || printf 'unhashable %s\n' "$f"
++      else
++        printf 'unreadable-as-content %s\n' "$f"
++      fi
++    done < <(git ls-files -z 2>/dev/null)
++  fi
++}
+ # fleet-arx8: the fingerprint of what the suites could read when the run began, compared against the same
+-# reading after it stops. fleet-iajo replaced the 5s mid-run sampler with this: a sampler is a POLL and a
+-# round trip that completes inside one interval is invisible to it (measured: state=PASS while the record
+-# read corrupt bytes). The current fingerprint includes nsec ctime, which advances on EVERY write and cannot
+-# be restored from userland, so the two readings agree BY CONSTRUCTION rather than by luck of timing.
++# reading after it stops. It is a RECORDED FACT rather than a poll: the start and end readings are taken around
++# the run, so there is no sampling interval to hide in. agents-bp6m made it a CONTENT witness (tree hash,
++# porcelain, diff, and the bytes of every tracked path); it was previously keyed on nsec ctime, which reported a
++# write where a content change is what matters, so a suite that rewrote a tracked file with identical bytes
++# turned a genuine verdict into STALE.
++#
++# THE FLOOR OF THIS WITNESS, STATED RATHER THAN IMPLIED: because it compares CONTENT at the two ends of the run,
++# a write that is FULLY REVERTED before the run stops leaves both readings identical and is not witnessed (it was
++# visible to the old ctime form, which is the one thing that form bought). So the guarantee is "the tree the
++# suites READ had the content recorded at the END of the run", not "no byte ever changed mid-run", and the record
++# says exactly that in .witnessed. Closing the gap would need continuous observation of writes (an inotify-style
++# watcher, a new long-lived process beside the gate) rather than a digest function, and it is not attempted here.
+ digest_start=$(worktree_digest)
+-# The sample file lives OUTSIDE the repo on purpose: writing it in $dir would itself dirty the worktree and
+-# trip the check this exists to make honest. 5s resolution is stated, not implied - a change made and fully
+-# reverted inside one interval is below this witness's floor, and the end-digest comparison is what covers the
+-# case where it is still changed when the run stops.
+ fleet-deps > "$log" 2>&1 &
+ job_pid=$!
+ wait "$job_pid" 2>/dev/null || true
+diff --git a/tests/fleet-check-tree-stability.test.sh b/tests/fleet-check-tree-stability.test.sh
+index d0ad977..c0982c0 100755
+--- a/tests/fleet-check-tree-stability.test.sh
++++ b/tests/fleet-check-tree-stability.test.sh
+@@ -20,6 +20,14 @@
+ # the path the fix handled - IT WAS BUILT TO THE FIX RATHER THAN TO THE DEFECT. Hence three arms below, each
+ # phrased as the defect: commit mid-run, mutate mid-run without committing, and mutate-then-revert.
+ #
++# A THIRD DEFECT SHARES THIS FILE BECAUSE IT IS THE SAME ASSERTION READ BACKWARDS (agents-bp6m): the fingerprint
++# used to include size and nsec CTIME, so ANY write to a tracked file moved it - including a rewrite that produced
++# IDENTICAL BYTES. A suite that regenerates a tracked file therefore turned a genuine verdict into STALE, which is
++# a gate reporting "I cannot tell" about a tree it read correctly, and it is INTERMITTENT by nature: it fires when
++# a selected suite touches a tracked file inside the run window. The witness is now the CONTENT of every tracked
++# path (arm 8 below is the red-first arm for it, and arms 3/5/6 record what that gives up: the two ends of the run
++# being content-equal is the WHOLE test, so a write fully reverted inside the run is no longer witnessed).
++#
+ # SELF-CONTAINED: needs no part of the fleet suite, and uses its own heavy queue with 2 slots so it can never
+ # queue behind the merger's landing. A gate that queues forever is not a test, so the wait is bounded and a
+ # premise that cannot be met SKIPS LOUDLY rather than silently waiting.
+@@ -129,8 +137,20 @@ run_arm() {
+   # tree AND the status IDENTICAL - so for that arm the only evidence that the premise was met is the
+   # command's own marker in the log, and an earlier version of this file skipped exactly the arm it exists to
+   # prove. A premise assertion that cannot see its own arm is worse than none: it reads as coverage.
++  # agents-bp6m: THE PREMISE IS READ FROM THE GATE'S LOG, NOT FROM THE LAUNCHER'S OUTPUT. The launcher's stdout
++  # is the 'started the FAST gate for <sha> (`<command>`, bound Ns)' line, so it contains the COMMAND TEXT - and a
++  # marker that appears in the command therefore matched $T/out for every arm whose command echoed its marker
++  # literally, satisfying the premise without the command ever having run. Measured while adding arm 8: a
++  # persistent-symlink arm whose marker was produced by command substitution (echo gate-observed-$(cat input)) had
++  # to SKIP, while arms whose marker was a literal word in the command never verified anything. The record names the
++  # log ($log is in the record), which is where the command's own output actually goes; $T/out stays as a fallback
++  # so an arm whose log is unavailable behaves as it did before.
++  local prem_log; prem_log=$(jq -r '.log // ""' "$rec" 2>/dev/null)
++  local prem_seen=""
++  { [ -n "$prem_log" ] && [ -f "$prem_log" ] && grep -q "$marker" "$prem_log" 2>/dev/null && prem_seen=1; } \
++    || { grep -q "$marker" "$T/out" 2>/dev/null && prem_seen=1; }
+   if [ "$name" != "clean-run" ] && [ "$tree_before" = "$tree_after" ] && [ -z "$status_line" ] \
+-     && ! grep -q "$marker" "$T/out" 2>/dev/null; then
++     && [ -z "$prem_seen" ]; then
+     skip "$name" "PREMISE NOT MET: the worktree never changed, so the verdict is not evidence either way"
+     if [ -n "$hold" ]; then : > "$hold"; fi
+     return 0
+@@ -144,6 +164,15 @@ run_arm() {
+   else
+     fail "$name: the record carries no witnessed scope" "state=$state"
+   fi
++  # agents-bp6m: THE BOUND IS ASSERTED, NOT MERELY DOCUMENTED. Witnessing CONTENT means a write fully reverted
++  # inside the run is outside the witness, and a reader must not be able to read PASS as "no byte ever changed".
++  # A scope that silently lost that clause would be the false-green shape this file exists to catch, so it is
++  # checked here for EVERY arm (the scope is global) rather than in one test of its own.
++  if grep -qi "fully reverted\|round trip inside the run" <<<"$witnessed"; then
++    pass "$name: the witnessed scope states the content witness's bound"
++  else
++    fail "$name: the witnessed scope does not state the round-trip bound" "witnessed=[$witnessed]"
++  fi
+ 
+   if [ "$state" = "$expected" ]; then
+     pass "$name: verdict recorded $expected (tree=${recorded_tree:0:8} status=[${status_line% }])"
+@@ -161,22 +190,28 @@ run_arm commit-mid-run STALE 'echo work; echo two >> input; git commit -q -am mi
+ # Arm 2: fleet-b5yb - a WORKING-TREE mutation with NO commit. HEAD^{tree} cannot see this; the content
+ # fingerprint does. The reviewer's recipe, verbatim.
+ run_arm mutate-no-commit STALE 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt
+-# Arm 3: fleet-b5yb - a ROUND TRIP A->B->A, held longer than one sample so the sampler can see it. The end
+-# state is IDENTICAL to the start, so only the mid-run witness can catch this one.
+-run_arm round-trip STALE 'printf corrupt > input; sleep 7; printf original > input; echo gate-ran' gate-ran
+-# Arm 5: fleet-iajo - THE REVIEWER'S REPRO. A round trip that COMPLETES INSIDE ONE SAMPLING INTERVAL, so the
+-# 5s sampler cannot see it by construction. It must still be caught, because the tree fingerprint is a
+-# RECORDED FACT rather than a poll: a write that is perfectly reverted still advances ctime at nanosecond
+-# resolution, and mtime can be restored from userland while ctime cannot. Measured on the reviewed tip
+-# (dcb2974) with this exact command: state=PASS while the record's own tail read 'observed-corrupt' - a false
+-# PASS. The restore uses cp so the bytes are identical whatever the fixture committed, making this a genuine
+-# round trip rather than a truncation.
+-run_arm short-round-trip STALE 'cp input /tmp/iajo-orig.$$; printf corrupt > input; echo gate-observed-$(cat input); cp /tmp/iajo-orig.$$ input; rm -f /tmp/iajo-orig.$$; echo flip-finished' flip-finished
+-# Arm 6: fleet-sohq - THE REVIEWER'S CASE. A tracked symlink whose target is rewritten and restored mid-run.
+-# Measured on the reviewed tip (2701e7a): the un-followed stat was byte-identical before and after, git status
+-# was empty because the target is outside the repo, and the gate recorded PASS while its own log read
+-# 'observed-corrupt'. The fix follows the link, so the target's size and nsec ctime are witnessed as well.
+-run_arm symlink-target-rewrite STALE 'printf corrupt > input; echo gate-observed-$(cat input); printf original > input; echo flip-finished' flip-finished "$ROOT/arm6-external-input"
++# Arm 3: fleet-b5yb - a ROUND TRIP A->B->A. THIS ARM CHANGED ITS EXPECTATION WITH agents-bp6m and the change is
++# the point: it asserted STALE while the fingerprint carried nsec ctime, because ctime advanced on the write. With
++# the fingerprint limited to CONTENT the two readings are equal by construction, so the round trip is NOT
++# witnessed - PASS is now the honest expected state, and the assertion that keeps it honest is the BOUND check
++# above, which requires the record's own scope to say so. The arm is kept rather than deleted because deleting it
++# would hide a narrowing of the guarantee instead of recording it.
++run_arm round-trip PASS 'printf corrupt > input; sleep 7; printf original > input; echo gate-ran' gate-ran
++# Arm 5: fleet-iajo - THE REVIEWER'S REPRO, and the one arm whose expectation genuinely had to move with
++# agents-bp6m. A round trip that completes inside one interval; it was caught by ctime and by nothing else, because
++# the two content readings are equal by construction. Under the content witness it reads PASS, and the bound check
++# above is what keeps that from being a silent false green: the record must SAY that a fully reverted write is
++# outside what it witnessed. The rest of the arm is unchanged (the restore uses cp, so the bytes are identical
++# whatever the fixture committed, making this a genuine round trip rather than a truncation).
++run_arm short-round-trip PASS 'cp input /tmp/iajo-orig.$$; printf corrupt > input; echo gate-observed-$(cat input); cp /tmp/iajo-orig.$$ input; rm -f /tmp/iajo-orig.$$; echo flip-finished' flip-finished
++# Arm 6: fleet-sohq - THE REVIEWER'S CASE, and agents-bp6m had to keep it alive rather than merely keep it
++# passing. This arm used to rewrite the target and RESTORE it, so it passed because ctime moved - the same
++# mechanism the content witness removes, which would have left the arm green while the defence it stands for was
++# gone. The corruption is now PERSISTENT, so the arm tests what fleet-sohq is actually about: a tracked symlink
++# whose target lives outside the repo changes CONTENT, git status stays empty because the link itself is
++# unchanged, and the gate must not record a clean verdict for it. `git hash-object` follows the link, so the
++# target's bytes are what settles it.
++run_arm symlink-target-rewrite STALE 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt "$ROOT/arm6-external-input"
+ # Arm 7 (fleet-c050): THE PUBLICATION ORDER. bin/fleet-check publishes the terminal verdict BEFORE the
+ # notification POST and wrote .witnessed only AFTER it, so the reader below - which stops polling as soon as
+ # `state != RUNNING`, exactly as a lane waiting on a gate does - could read a final state whose .witnessed was
+@@ -185,6 +220,15 @@ run_arm symlink-target-rewrite STALE 'printf corrupt > input; echo gate-observed
+ # the window open until the reader has looked, so this arm is RED on the old order and GREEN once .witnessed is
+ # published WITH the terminal state - deterministically, whatever the machine is doing.
+ run_arm delayed-post STALE 'printf corrupt > input; echo gate-observed-$(cat input)' gate-observed-corrupt "" "$ROOT/post-hold"
++# Arm 8 (agents-bp6m): THE DEFECT, AS A REWRITE THAT PRODUCES IDENTICAL BYTES. A gate whose suite regenerates a
++# tracked file - a formatter, a fixture writer, a test that re-serialises its input - moved nsec ctime without
++# changing one byte of content, and the metadata fingerprint called that a mutation, so a run that read the tree
++# perfectly recorded STALE and NO VERDICT. This arm is RED on the reviewed tip and GREEN with the content witness,
++# and it is the acceptance coord set for this bead: a clean run on a tree whose suites touched tracked files reads
++# a genuine verdict rather than STALE. The premise comes from the command's own marker in the log, because a
++# same-bytes rewrite leaves the tree and the porcelain identical by design.
++run_arm same-bytes-rewrite PASS 'cp input /tmp/bp6m-keep.$$; cp /tmp/bp6m-keep.$$ input; rm -f /tmp/bp6m-keep.$$; echo rewrote-identical-bytes' rewrote-identical-bytes
++
+ # Arm 4 (CONTROL): nothing touches the tree - must stay PASS, or the guard fires on healthy runs.
+ run_arm clean-run PASS 'echo gate work done' 'gate work done'
+ 
