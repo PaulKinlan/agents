@@ -170,7 +170,8 @@ class TestTheSummarySaysWhetherTheSweepWasComplete(DocsTextFloorBase):
     def test_the_summary_reports_pages_verdicts_and_status(self):
         done = self.run_tool()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn(f"FLOOR_SUMMARY pages={len(PAGES)} verdicts={len(PAGES)} below_total=0 status=OK", done.stdout)
+        self.assertIn(f"FLOOR_SUMMARY pages={len(PAGES)} verdicts={len(PAGES)} below_total=0 viewport=1280,900 status=OK",
+                      done.stdout, "the summary must state the viewport its counts are true for")
 
     def test_a_page_without_a_verdict_makes_the_run_incomplete(self):
         """One page reports no count, so the counts of the other five must not be readable as coverage of six."""

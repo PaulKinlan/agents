@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 # docs-text-floor.sh - measure the RENDERED font size of every text-bearing leaf element on every docs page,
+# 'Text-bearing leaf' means: no element children, non-empty text, and VISIBLE by Element.checkVisibility()
+# (with a safe fallback that counts). Visibility took three attempts, each wrong in a different direction,
+# and the measurements are in the payload beside the rule: a tag blacklist hid a display:block <script>
+# whose text renders; a layout box dropped two VISIBLE inline spans on the real docs (zero rects, text on
+# the page); and innerText membership MISSED REAL DEFECTS because innerText returns transformed text, so
+# .kicker came back uppercased and a genuine 11.52px site disappeared. The rule that survived is the
+# platform's own visibility API plus a precision clause, and its failure direction is the safe one:
+# disagreement counts the element, because over-counting is visible and a missed floor is not.
 # and report any element below a floor (default 12px). agents-e3aw.
 #
 # WHY THIS EXISTS: the ui-ux-audit rule that found four sub-12px labels reads DECLARATIONS, so it can miss a size
@@ -29,6 +37,12 @@ set -euo pipefail
 # tools/ sits one level under the repo root, so the default docs dir is resolved from the script's parent.
 docs="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/docs"
 floor=12
+# The window size is FIXED rather than left to the browser default: the measurement is of what RENDERS, and a
+# responsive page renders different text at different widths (measured: two spans of the site menu have no box
+# at Chrome's default 800x600 and do have one at 1280x900, so the count moved 2 per page with nothing else
+# changing). A measurement that depends on the window the browser happened to open is machine state, so the
+# size is set here and reported in the summary with every verdict.
+viewport=1280,900
 inject=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,7 +92,7 @@ PY
 fi
 # The measuring script runs INSIDE each page and writes its verdict into the DOM, which --dump-dom then prints,
 # so this needs no CDP client and no library - only a browser.
-payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], n=0, SKIP={SCRIPT:1,STYLE:1,TITLE:1,META:1,LINK:1,HEAD:1,BASE:1,NOSCRIPT:1,TEMPLATE:1}; document.querySelectorAll("*").forEach(function(el){ if(SKIP[el.tagName]) return; if(el.children.length) return; if(!el.textContent.trim()) return; n++; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result"; d.textContent="FLOOR_RESULT page="+location.pathname.split("/").pop()+" floor="+f+"px counted="+n+" below="+out.length+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
+payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], n=0; var seen=document.body.innerText; document.querySelectorAll("*").forEach(function(el){ if(el.children.length) return; var txt=el.textContent.trim(); if(!txt) return; /* Visibility, and WHY this test. Three proxies were tried and each was wrong in a different direction: (1) a tag blacklist hid a display:block <script>, whose text really is rendered; (2) a layout box (getClientRects) dropped two VISIBLE inline spans on the real docs - a site-menu item and a separator - which report zero rects while their text is on the page; (3) innerText membership MISSED REAL DEFECTS, because innerText returns RENDERED text and text-transform rewrites it, so .kicker came back uppercased and a genuine 11.52px site vanished from the report. checkVisibility() is the platform answer: no geometry, no text comparison. The clause after it is precision bought with a measurement - a display:block <style> passes checkVisibility while rendering NO text (measured: 0 rects and absent from innerText) - and its failure direction is the safe one: if the clauses disagree the element is COUNTED, because over-counting can be seen and corrected while a missed floor cannot. checkVisibility is BASELINE WIDELY AVAILABLE (since 2026-09-05: Chrome 105, Firefox 106, Safari 17.4), so there is no fallback and no polyfill to retire - and that is deliberate, because an older browser makes this throw, the page produces NO RESULT, and the run fails loudly instead of silently counting everything. */ if(!el.checkVisibility({checkOpacity:true, checkVisibilityCSS:true})) return; if(el.getClientRects().length<=0 && seen.indexOf(txt)<0) return; n++; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result"; d.textContent="FLOOR_RESULT page="+location.pathname.split("/").pop()+" floor="+f+"px counted="+n+" below="+out.length+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
 python3 - "$work" "$floor" "$payload" <<'PY'
 import sys, pathlib
 work, floor, payload = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -92,7 +106,7 @@ verdicts=0
 below_total=0
 for page in "$work"/*.html; do
   pages=$((pages + 1))
-  dom="$("$chrome" --headless=new --disable-gpu --no-sandbox --virtual-time-budget=4000 --dump-dom "file://$page" 2>/dev/null || true)"
+  dom="$("$chrome" --headless=new --disable-gpu --no-sandbox --window-size="$viewport" --virtual-time-budget=4000 --dump-dom "file://$page" 2>/dev/null || true)"
   # Match the ELEMENT, not the script source that also contains the literal (the id prefix makes it unique),
   # and keep `set -e` from killing the script when a page produces no result at all.
   line="$(printf '%s' "$dom" | grep -o '__floor_result">[^<]*' | tail -1 | sed 's/.*>//' || true)"
@@ -122,6 +136,6 @@ done
 # (coord, agents-ssyq rework: a count that is TRUE but misleading is the same defect as no count).
 status=OK
 [ "$verdicts" -eq "$pages" ] || status=INCOMPLETE
-echo "FLOOR_SUMMARY pages=$pages verdicts=$verdicts below_total=$below_total status=$status"
+echo "FLOOR_SUMMARY pages=$pages verdicts=$verdicts below_total=$below_total viewport=$viewport status=$status"
 [ "$status" = OK ] || fail=1
 exit $fail
