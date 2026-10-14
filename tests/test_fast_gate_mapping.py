@@ -1034,9 +1034,34 @@ class TestFastGateMapping(unittest.TestCase):
             probe_a.unlink(missing_ok=True)
             probe_b.unlink(missing_ok=True)
 
+    @staticmethod
+    def _dispatched_modules(gate_output: str) -> list[str]:
+        """The modules THIS run dispatched, read from the summary header tools/fast-gate.sh writes.
+
+        The header is written before the runner starts (`cwd=<dir> modules=<space-separated>`), so it is the
+        run's own record of what it meant to execute rather than a second copy of the marker under test.
+        """
+        m = re.search(r"fast-gate: runner output -> (\S+)", gate_output)
+        if not m:
+            return []
+        header = Path(m.group(1)).read_text(encoding="utf-8", errors="replace").splitlines()
+        for line in header:
+            if line.startswith("cwd=") and " modules=" in line:
+                return line.split(" modules=", 1)[1].split()
+        return []
+
     def test_fast_gate_execution_reports_failed_terminal_signal_even_with_no_test_output(self):
         """P2 fix (agents-ltgl): tools/fast-gate.sh must leave a terminal signal naming the failure and exit code
-        even when tests exit with no output at all (e.g. os._exit)."""
+        even when tests exit with no output at all (e.g. os._exit).
+
+        agents-lgdv: AND THE SIGNAL'S PAYLOAD MUST BE THE SUITES IT NAMES. The coverage reader takes every
+        whitespace token after `fast-gate: failed:` as a suite name - that is the vocabulary in fleet's
+        remote/check-coverage.py, pinned on its own side by tests/check-coverage.test.sh:161
+        (`fast-gate: failed: tests/thing_test.ts`). The old payload `exit $rc (modules: ...)` therefore
+        published `exit`, `1` and `modules:` as three phantom suites ahead of the real module names: a fast
+        gate record held 13 entries for a 10-module run. The assertion below is against the run's OWN
+        dispatch set, so it pins the contract rather than the current string.
+        """
         probe = ROOT / "tests" / "test_abort_probe_tmp.py"
         try:
             probe.write_text("import os\nos._exit(1)\n", encoding="utf-8")
@@ -1044,7 +1069,22 @@ class TestFastGateMapping(unittest.TestCase):
             env["GIT_CHANGED"] = "tests/test_abort_probe_tmp.py"
             res = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertEqual(res.returncode, 1, f"expected rc 1, got {res.returncode}")
-            self.assertIn("fast-gate: failed: exit 1 (modules: tests.test_abort_probe_tmp tests.test_coverage_contract tests.test_direct_run_completeness tests.test_fast_gate_consumer_coverage tests.test_tree_guards)", res.stderr)
+            failed_lines = [l for l in res.stderr.splitlines() if l.startswith("fast-gate: failed:")]
+            self.assertEqual(len(failed_lines), 1, f"expected exactly one failed marker, got: {failed_lines}")
+            payload = failed_lines[0].replace("fast-gate: failed:", "").split()
+            dispatched = self._dispatched_modules(res.stderr)
+            self.assertTrue(dispatched,
+                            "could not read the dispatch set from this run's own summary header "
+                            "(`cwd=... modules=...`), so the payload assertion below cannot be made")
+            self.assertEqual(sorted(payload), sorted(dispatched),
+                             f"the failed marker must name exactly the modules that ran: {failed_lines[0]}")
+            # The three phantoms the bead measured, named so the regression is legible.
+            for phantom in ("exit", "modules:", "1"):
+                self.assertNotIn(phantom, payload,
+                                 f"a marker payload is the suite list; {phantom!r} is prose that the "
+                                 f"coverage reader counts as a suite")
+            # The exit code is a real fact and is published - just not inside the list position (agents-lgdv).
+            self.assertIn("fast-gate: exit 1", res.stderr)
         finally:
             probe.unlink(missing_ok=True)
 

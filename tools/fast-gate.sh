@@ -510,6 +510,14 @@ if [ "$rc" -eq 0 ]; then
   echo "fast-gate: passed: $passed_files"
   exit 0
 else
-  echo "fast-gate: failed: exit $rc (modules: $modules)" >&2
+  # A MARKER'S PAYLOAD IS THE THING IT NAMES (agents-lgdv). The coverage reader matches this marker at
+  # line start and takes EVERY whitespace token after it as a suite name - that is the vocabulary fleet's
+  # remote/check-coverage.py parses, pinned by its own tests/check-coverage.test.sh:161
+  # (`fast-gate: failed: tests/thing_test.ts`). The old payload `exit $rc (modules: $modules)` therefore
+  # published three phantom "suites" - `exit`, `1` and `modules:` - ahead of the real module names: a fast
+  # gate record held 13 entries for a 10-module run, and a reader counting suites counted the prose. The
+  # exit code is a real fact and stays, on a line that is not a marker, so this field can only hold names.
+  echo "fast-gate: failed: $modules" >&2
+  echo "fast-gate: exit $rc" >&2
   exit "$rc"
 fi
