@@ -53,6 +53,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# agents-e3aw: THE READER NAMES ITSELF BY RESOLVED PATH, NOT BY A RELATIVE ONE. install_cmd_for prints a command
+# for a human or a runner to RUN, and a relative `tools/check-cmd.sh` runs only from the repo root - while this
+# reader is invoked from wherever its caller stands. Driven: the note printed the IDENTICAL relative repair when
+# the reader was invoked from the repo root, from a subdirectory, and by absolute path from outside the repo -
+# and the command then ran in the first case and failed with "No such file or directory" in the other two. The
+# reader is designed to be called by a RUNNER, whose cwd is not guaranteed to be the repo root, and this repo's
+# own installer already calls it by absolute path (install.sh). SELF comes from the same BASH_SOURCE that ROOT is
+# derived from, so the printed path cannot disagree with the path this reader actually resolved.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 TRACKED="$ROOT/tools/check.conf"
 # agents-bf1f: THE READER'S FIELDS ARE NAMED IN ONE PLACE. The diagnostic below accepts a FIELD argument, and a
 # typed copy of the list in its error message would be a repair instruction that names the wrong thing the day a
@@ -101,11 +110,11 @@ INSTALL_GLOBAL=0
 # precedence: the host-wide file, the repo-local default, an explicitly named path.
 install_cmd_for() {
   case "${1:-}" in
-    "")            printf 'bash tools/check-cmd.sh --install' ;;   # no HOME and no FLEET_CHECK_CONF: the bare
-                                                                 # form is the only one that can be meant
-    "$GLOBAL_CONF") printf 'bash tools/check-cmd.sh --install --global' ;;
-    "$REPO_CONF")   printf 'bash tools/check-cmd.sh --install' ;;
-    *)              printf 'FLEET_CHECK_CONF=%s bash tools/check-cmd.sh --install' "$1" ;;
+    "")            printf 'bash %s --install' "$SELF" ;;   # no HOME and no FLEET_CHECK_CONF: the bare form is
+                                                          # the only one that can be meant
+    "$GLOBAL_CONF") printf 'bash %s --install --global' "$SELF" ;;
+    "$REPO_CONF")   printf 'bash %s --install' "$SELF" ;;
+    *)              printf 'FLEET_CHECK_CONF=%s bash %s --install' "$1" "$SELF" ;;
   esac
 }
 
@@ -397,7 +406,11 @@ if [ "${1:-}" = "--install" ]; then
   fi
   if [ -z "$OVERRIDE" ]; then
     echo "check-cmd: cannot --install: HOME is unset, so the repo-local default (\$HOME/.fleet/$(basename "$ROOT")-check.conf) has no location, and no FLEET_CHECK_CONF was given to name one." >&2
-    echo "  Fix: export HOME, or pass a destination explicitly: FLEET_CHECK_CONF=<path> bash tools/check-cmd.sh --install" >&2
+    # agents-e3aw (generalisation): this is the SECOND printed command in this file, and it was relative too.
+    # The three-cwd drive that found the first one found this one - a reader with no HOME is told to run a bare
+    # `bash tools/check-cmd.sh --install`, which again only works from the repo root, and this message is printed
+    # precisely when the environment is unusual, so the cwd is the LAST thing that should be assumed.
+    echo "  Fix: export HOME, or pass a destination explicitly: FLEET_CHECK_CONF=<path> bash $SELF --install" >&2
     exit 2
   fi
   # agents-0utp: THREE LIVES, NOT TWO, AND THE HEADER IS GENERATED FROM THIS SAME CLASSIFICATION. The first

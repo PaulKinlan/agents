@@ -71,8 +71,11 @@ if [ -f "$CHECK_CMD_SH" ]; then
     # destination --check just reported on and prints the command that writes it, so this warning cannot drift
     # from the tool it is warning about (a missing hint degrades to the tracked command name, not to silence).
     drift_repair="$(bash "$CHECK_CMD_SH" --repair-hint 2>/dev/null)" || drift_repair=""
-    [ -n "$drift_repair" ] || drift_repair="bash tools/check-cmd.sh --install"
-    echo "fast-gate:   detail: bash tools/check-cmd.sh --check - repair: $drift_repair - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
+    # agents-e3aw (generalisation): the fallback names a command too, so it names the RESOLVED reader - this file
+    # already resolved it above as CHECK_CMD_SH, and a relative path here would repeat, in the fallback, the
+    # defect the resolved path exists to remove.
+    [ -n "$drift_repair" ] || drift_repair="bash $CHECK_CMD_SH --install"
+    echo "fast-gate:   detail: bash $CHECK_CMD_SH --check - repair: $drift_repair - expected if THIS branch changes tools/check.conf, otherwise the host is running a gate command nobody chose" >&2
   fi
 fi
 

@@ -7,8 +7,23 @@
   tail is captured, so the note lands in the record's tail and in the `[check]` message exactly once.
 - **Baseline file hash (the live bytes this patch was generated against and applies to):**
   `455e3b05d2dc172c2d2149dd47b33ac4d77266b57d45765506d2e2b362c10498  bin/fleet-check`
-  (767 lines; patched result `43e15d9a714d091da61e04201f8425e01782b129a94ef2eb771daba319db26c3`)
-- **Revision (agents-e3aw):** the repair line now names only what the reader can see. The first revision of
+  (767 lines; patched result `93e270dc63f5889d6548ed726e0fe7f31082f99d421dd519bcded896a662a844`)
+- **Revision (agents-e3aw, second round): the repair must RUN FROM WHERE IT IS READ, so its path is resolved.**
+  The revision below offered `bash tools/check-cmd.sh --install` when the reader is present - and that is a
+  RELATIVE path, which runs only from the repo root while the reader of the message is standing anywhere. Driven
+  on the bytes of the first round: invoked from the repo root, from a subdirectory, and by absolute path from
+  outside the repo, the note printed the IDENTICAL command, and running it then succeeded in the first case and
+  failed with `No such file or directory` in the other two. The reader is designed to be called by a RUNNER and a
+  runner's cwd is not guaranteed to be the repo root - the repo's own installer already calls it by absolute path
+  (`install.sh`). The artifact now prints the path it JUST TESTED (`[ -f "$top/tools/check-cmd.sh" ]`), so the
+  command cannot name a file that was not there, and the in-repo half of the same fix prints the reader's own
+  resolved path from `BASH_SOURCE` - the same source `ROOT` is derived from. **THE TEST IS THE LESSON: the
+  existing test asserted the printed STRING and ran it from the repo root, which is why four rounds of this family
+  kept passing while the guidance was unrunnable. A test that runs a printed command in the one directory where it
+  happens to work asserts the string rather than the property the string exists to deliver** - that test now runs
+  the printed command from a directory that is NOT the repo (agents-e3aw), and with the relative form restored it
+  goes red (measured: six failures), including every destination variant.
+- **Revision (agents-e3aw, first round):** the repair line now names only what the reader can see. The first revision of
   this artifact printed *"Repair: give this repo its own config (bash tools/check-cmd.sh --install writes
   $HOME/.fleet/<repo>-check.conf) and point the gate at it with FLEET_CHECK_CONF, or re-install the host-wide
   file from the repo that should own it"* — which tells the reader to run an installer **in the repo the gate
@@ -114,7 +129,14 @@ the log and carried in the message.
     by itself, and the lane's message carries `NOTE (agents-0r1c) … was installed by agents-factory
     (/some/other/checkout) — it names [tools/fast-gate.sh], which do not resolve in <repo>` — **exactly
     once**, `refusals=0`, followed by the repair lines below;
-  - **agents-e3aw (this revision), driven in three situations against the SAME extracted diagnostic, old
+  - **agents-e3aw (second round), the printed command RUN FROM A FOREIGN CWD**: the repaired note prints
+    `bash <repo>/tools/check-cmd.sh --install`, and that command runs from the repo root, from the repo's own
+    `tools/` directory, and from `/tmp` - whereas the first round's relative form ran only in the first case and
+    failed with `No such file or directory` in the other two. The in-repo reader was fixed the same way and its
+    suite now runs every printed repair from a directory that is not the repo: with the relative form restored,
+    six tests fail (the three destination variants, the point-of-use warning, the repo-local case and the install
+    header), and all 47 pass with the resolved path;
+  - **agents-e3aw (first round), driven in three situations against the SAME extracted diagnostic, old
     revision beside new**: (1) repo HAS `tools/check-cmd.sh` + stamped config → new text offers
     `bash tools/check-cmd.sh --install`; (2) repo does NOT have it + stamped config → new text says there
     is no installer to run here, and names the stamped repo (`agents-factory (/some/other/checkout)`) as
