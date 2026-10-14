@@ -1247,11 +1247,14 @@ class TestRepoWideInvariantsAreKeyedOnTheChangedPathClass(unittest.TestCase):
     SELECTED = (
         "tools/red-first.sh",             # the class the measured failure came from
         "install.sh",                     # a shell script outside tests/, which no arm's path can reach
+        "agents/accessibility/scripts/audit_a11y.py",   # an agent Python file CAN call os.unlink (agents-oskn)
+        ".github/workflows/ci.yml",       # a workflow YAML CAN add rm -rf (agents-oskn)
     )
     NOT_SELECTED = (
-        "docs/css/factory.css",           # mapped and outside every scanned class
+        "docs/css/factory.css",           # mapped, and not in any scanned class
         "tests/some_runner.sh",           # a shell script INSIDE tests/, which the inventory does not scan
-        "lib/egress_proxy.py",            # a lib/ change the inventory's own suite does NOT import (agents-6vev)
+        "lib/egress_proxy.py",            # COVERED, but not selected: selection is import-driven (agents-6vev)
+        "agents/vuln-verify/SKILL.md",    # COVERED, but not selected: prose is not Python (agents-oskn)
         "README.md",
     )
 
@@ -1266,17 +1269,21 @@ class TestRepoWideInvariantsAreKeyedOnTheChangedPathClass(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn(
                     "tests/test_retention.py", self._selected(path),
-                    f"{path} is in a class the inventory scans, so the inventory must run for it (agents-wsiv)",
+                    f"{path} is in a class this dispatch SELECTS, so the inventory must run for it (agents-wsiv)",
                 )
 
-    def test_a_changed_path_outside_those_classes_does_not_pay_for_the_check(self):
+    def test_a_covered_but_unselected_path_does_not_pay_for_the_check(self):
+        """COVERED BUT NOT SELECTED, stated accurately (agents-3ixk): a lib/ or prose path IS covered - the
+        inventory scans it, so a deletion primitive there CAN violate the invariant - and it is still not
+        selected here, because selection is import-driven (agents-6vev) and the unconditional full gate is the
+        backstop. The earlier wording said these paths 'cannot violate' the inventory, which conflated the two
+        facts; the reason is cost and reachability, not impossibility."""
         for path in self.NOT_SELECTED:
             with self.subTest(path=path):
                 self.assertNotIn(
                     "tests/test_retention.py", self._selected(path),
-                    f"{path} cannot violate the inventory, so its ~0.50s must not be paid on every change: "
-                    "an always-on version of this check is a permanent tax on the fast gate for a rare class "
-                    "of change",
+                    f"{path} is covered but not SELECTED by this dispatch, so its ~0.40s must not be paid on every "
+                    "change: it is reached another way (an importer arm) or by the unconditional full gate",
                 )
 
     def test_an_unclaimed_tools_script_still_fails_loudly(self):
@@ -1302,16 +1309,32 @@ class TestRepoWideInvariantsAreKeyedOnTheChangedPathClass(unittest.TestCase):
         self.assertIsNotNone(m, f"{name} is not declared in tools/fast-gate.sh - the facts must live there")
         return set(m.group(1).split())
 
-    def test_the_coverage_fact_is_complete_against_the_inventorys_own_scanner(self):
-        """(a) THE PINNED COVERAGE PROPERTY, RESTORED IN FULL. The coverage set says which paths COULD violate
-        the invariant, so it must cover everything lib/retention.py actually scans. A first version of this
-        change pointed the guard at the narrow selection set instead, which bought the gate by weakening this
-        property - the trade coord's option (c) refuses, and the reason coverage and selection are now separate
-        constants rather than one."""
+    def _selection_classes(self) -> set:
+        """SELECTION is per-class suffix rules since agents-oskn, so the classes it names are the union of the
+        three rules. Read from the file, for the same reason as _declared."""
+        return (self._declared("inventory_selected_any")
+                | self._declared("inventory_selected_py")
+                | self._declared("inventory_selected_yaml"))
+
+    def test_the_coverage_fact_is_exact_in_BOTH_directions(self):
+        """(a) THE PINNED COVERAGE PROPERTY, asserted both ways (agents-m0dx).
+
+        FORWARD: everything the inventory scans must be declared, so a scanner that starts covering a new
+        directory fails here instead of being silently uncovered.
+        REVERSE: every declared class must contribute at least one path the scanner ACTUALLY returns, so a
+        phantom class cannot claim coverage it does not have - and, more importantly, so a scanner SHRINK cannot
+        leave this guard VACUOUSLY green. That second case is why one direction is not enough: if
+        _scanned_sources stops walking agents/, the forward assertion still passes (nothing scraped is
+        undeclared) while agents/ has quietly stopped being scanned, and a deletion primitive added there would
+        be inventoried by neither tier.
+        """
         from tests.test_retention import _scanned_sources
         covered = self._declared("inventory_scanned_classes")
+        scanned = [rel for rel, _path in _scanned_sources(ROOT)]
+        self.assertTrue(scanned, "the inventory returned no sources at all - this test would be vacuous")
+
         undeclared = []
-        for rel, _path in _scanned_sources(ROOT):
+        for rel in scanned:
             top = rel.split("/", 1)[0] if "/" in rel else rel
             if top in covered:
                 continue
@@ -1323,11 +1346,23 @@ class TestRepoWideInvariantsAreKeyedOnTheChangedPathClass(unittest.TestCase):
             f"the inventory scans these paths and the COVERAGE set does not declare them: {undeclared}",
         )
 
+        representable = set()
+        for rel in scanned:
+            representable.add(rel.split("/", 1)[0] if "/" in rel else rel)
+        if any(rel.endswith(".sh") and not rel.startswith("tests/") for rel in scanned):
+            representable.add("*.sh outside tests/")
+        phantom = sorted(covered - representable)
+        self.assertEqual(
+            phantom, [],
+            f"declared as COVERAGE but the inventory scans nothing there: {phantom} - a declared class that no "
+            "scanned source represents is a claim of coverage the list does not have (agents-m0dx)",
+        )
+
     def test_the_selection_fact_is_a_subset_of_the_coverage_fact(self):
         """(b) The relationship between the two facts, asserted so it cannot be inverted again: SELECTION may
         narrow COVERAGE, never widen it. Widening would mean claiming a suite for paths the inventory does not
         even scan; collapsing them is the defect this split exists to remove."""
-        selection = self._declared("inventory_selected_classes")
+        selection = self._selection_classes()
         coverage = self._declared("inventory_scanned_classes")
         self.assertTrue(
             selection <= coverage,
@@ -1336,14 +1371,15 @@ class TestRepoWideInvariantsAreKeyedOnTheChangedPathClass(unittest.TestCase):
 
     def test_a_lib_change_is_covered_but_not_selected(self):
         """(c) The distinction as BEHAVIOUR, which is the whole point of the split: lib/egress_proxy.py is
-        COVERED (the inventory scans lib/, so a change there could violate it) and NOT SELECTED (nothing imports
-        it, so adding the suite would spend full-gate time on the fast path), while the shell scripts outside
-        tests/ are BOTH."""
+        COVERED (the inventory scans lib/, so a change there could violate it) and NOT SELECTED (selection is
+        import-driven, agents-6vev), while the shell scripts outside tests/ are BOTH."""
         coverage = self._declared("inventory_scanned_classes")
-        selection = self._declared("inventory_selected_classes")
+        selection = self._selection_classes()
         self.assertIn("lib", coverage, "the inventory scans lib/, so lib/ must appear in the coverage set")
         self.assertNotIn("lib", selection, "lib/ is covered but must NOT be selected (agents-6vev)")
         self.assertIn("tools", selection, "tools/ is the measured case and must stay selected")
+        self.assertIn("agents", selection, "agents/ *.py are text-scanned and can carry os.unlink (agents-oskn)")
+        self.assertIn(".github", selection, ".github/ *.yml|*.yaml are text-scanned (agents-oskn)")
         self.assertNotIn("tests/test_retention.py", self._selected("lib/egress_proxy.py"))
         self.assertIn("tests/test_retention.py", self._selected("tools/red-first.sh"))
 

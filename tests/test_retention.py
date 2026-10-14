@@ -1282,9 +1282,19 @@ class TestRunRootDeletionInventory(unittest.TestCase):
     """Coord's third-deleter test (agents-dm8n round 2): the fix must survive a
     deleter we have NOT found. The recording choke point cannot be bypassed
     silently because this inventory enumerates every deletion primitive in the
-    shipped source; a new one fails the gate and is named, in the full gate
-    always and in the fast gate for any factory or lib change (the factory arm
-    maps here - see tools/fast-gate.sh).
+    shipped source; a new one fails the gate and is named.
+
+    WHICH TIER SEES IT (agents-3ixk - the earlier text said 'any factory or lib
+    change', which states COVERAGE where the dispatch implements SELECTION): the
+    FULL gate always, because it discovers every test module unconditionally and
+    has no changed-path selection at all. The FAST gate only for the paths it
+    SELECTS - tools/ any file, agents/ *.py, .github/ *.yml|*.yaml, and *.sh
+    outside tests - plus whatever an arm in tools/fast-gate-arms.d maps here.
+    Everything else the inventory scans (lib/*.py, factory/*, prose) is COVERED
+    BUT NOT SELECTED: a change there CAN violate the invariant, and it is
+    reached by its importer arm or by the full gate instead of by this dispatch.
+    See the COVERAGE/SELECTION block in tools/fast-gate.sh, which is the single
+    place those two facts are declared.
     """
 
     def test_every_deletion_primitive_in_the_shipped_source_is_enumerated(self):
