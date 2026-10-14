@@ -10,6 +10,34 @@
   (baseline 767 lines; patched result `0e31c8f2b7538f6544ce4b29b6dd7744799349fbbb9b795a2679a8ac48e63135`,
   which is 869 lines - both counts measured with `wc -l` on the two files, not carried over from an
   earlier revision)
+- **Revision (agents-e3aw, fourth round): a LITERAL ASSERTION REMOVED FROM THE PROPERTY HELPER, because it was a
+  false-negative generator, and two byte-level assertions I first added were then dropped for the same reason
+  measured in the other direction.** The helper ran the printed repair from a foreign cwd and ALSO asserted that
+  the resolved reader path appears in the string; driven with the reader under `.../repo with space`, the
+  CORRECT `%q` repair contains the ESCAPED path and not the literal one, so the assertion goes FALSE on a correct
+  fix while the run beside it passes - latent only because the fixture's `ROOT` has no space. The property it was
+  reaching for, THE REPAIR REACHES THE FILE THE REPORT NAMED, is carried by the behavioural chain that was
+  already there: `--check` reads exactly the file it reported on, so a clean re-check means the repair rewrote
+  THAT file. Driving it settled the design - with the historical p8lh defect reintroduced (a repair naming the
+  right command but writing elsewhere) the failure surfaces at that chain, so a separate byte-level assertion
+  could only ever agree with it, and a stamp-based one would carry the same latent false-negative risk.
+  **THREE LEVELS OF ONE DEFECT, WHICH IS WHY THIS BEAD IS AS MUCH ABOUT TESTS AS ABOUT PATHS.** Level one: an
+  assertion that compares a STRING the tool printed, so it passes while the guidance the string describes is
+  unrunnable - the repair was judged by its spelling and the spelling was fine. Level two: an assertion satisfied
+  by an EMPTY string, so a green suite covered a property it never exercised (`assertNotIn("--global", "")` after
+  the drift had already been repaired out from under it). Level three, this round: an assertion that cannot FAIL
+  INDEPENDENTLY of the behavioural run beside it. I added byte-level checks for "the repair reached the file the
+  report named", drove the historical p8lh defect back in, and the failure surfaced at the existing `--check`
+  chain and never at the new lines - so they were removed rather than kept as belt and braces. An assertion that
+  can only agree with the run beside it is ILLUSORY COVERAGE, and a stamp-based one would have carried the same
+  latent false-negative risk this round removes (a future installer that preserves an existing stamp would fail
+  it on a correct fix). **The next person writing an assertion beside a behavioural check should recognise the
+  third shape, because it looks like care.**
+  **And a slip of my own, recorded because it is the same lesson one layer out:** the paragraphs above first went
+  into this file through a Python string that escaped its backticks, leaving eight stray backslashes - in a
+  document whose subject is SHELL QUOTING, silently escaping the punctuation the document is about. It was caught
+  by grepping the file for the escape rather than by proofreading it: use the cheap mechanical check, not the
+  attentive eye, exactly as the fast-gate diff earlier was settled by a named range rather than by memory.
 - **Revision (agents-e3aw, third round): THE PRINTED PATH IS ALSO QUOTED, because the printed command is
   consumed by a SHELL - and RESOLVING a path is not the same as QUOTING it.** Driven, not reasoned: with the
   reader under "/tmp/e3aw space" and a foreign stamped config, the note printed

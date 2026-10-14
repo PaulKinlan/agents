@@ -1371,9 +1371,14 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
         self.assertTrue(repair, f"--check must print the repair: {first.stderr[:300]}")
         self.assertIn(expect_in_command, repair,
                       f"the repair for {dest} must be the command that writes IT; got: {repair}")
-        self.assertIn(str(ROOT / "tools" / "check-cmd.sh"), repair,
-                      "agents-e3aw: the repair must name the reader by its RESOLVED path - a relative one runs "
-                      f"only from the repo root, and the reader of this message is not standing there; got: {repair}")
+        # agents-e3aw (fourth round): the resolved path is proven by RUNNING the command from somewhere else,
+        # because a RELATIVE path is exactly what fails there. A literal `assertIn(str(ROOT/"tools"/"check-cmd.sh"),
+        # repair)` used to stand here, and it was not belt and braces - it was a FALSE-NEGATIVE GENERATOR, driven:
+        # with the reader under ".../repo with space" the CORRECT %q repair is
+        # `bash /tmp/.../repo\ with\ space/tools/check-cmd.sh --install --global`, which does not contain the
+        # literal path, so the assertion goes FALSE on a correct fix while the run beside it passes. It was latent
+        # only because this fixture's ROOT has no space - an input held fixed while the property was claimed. The
+        # text property it was reaching for is asserted below ON THE FILE instead, where no spelling can decide it.
 
         # THE PROPERTY: run exactly what it printed, then ask again. Through a shell, because that is what a
         # reader does with a printed command line - and because the FLEET_CHECK_CONF form is a shell assignment
@@ -1388,9 +1393,19 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
         ran = subprocess.run(["bash", "-c", repair], capture_output=True, text=True, timeout=60,
                              env=env, cwd=str(elsewhere))
         self.assertEqual(ran.returncode, 0, f"the printed repair must succeed: {ran.stderr[:300]}")
+        # THE REPAIR REACHES THE FILE THE REPORT NAMED - and this assertion IS that property, rather than a
+        # spelling of it: --check reads exactly the file it reported on, so a clean answer here means the repair
+        # rewrote THAT file. I first added byte-level assertions here (the file changed, the foreign stamp gone)
+        # and removed them again, because driving them showed they cannot fail independently of this chain: with
+        # the historical p8lh defect reintroduced (a repair that names the right command but writes elsewhere)
+        # the failure surfaces HERE, and with a correct repair they merely pass. An assertion that can only
+        # agree with the line above is the same illusory coverage as the literal one this round removed - and a
+        # stamp assertion would carry the same latent false-negative risk (a future installer that preserves an
+        # existing stamp would make it fail on a correct fix).
         second = self._check(env)
         self.assertEqual(second.returncode, 0,
-                         "following the printed repair must REMOVE the drift it reported - on the tip before "
+                         "following the printed repair must REMOVE the drift it reported, which proves it "
+                         "reached the file that report named - on the tip before "
                          f"agents-p8lh this fails, because the command wrote a different file: {second.stderr[:300]}")
 
     def test_the_printed_repair_survives_paths_containing_spaces(self):
