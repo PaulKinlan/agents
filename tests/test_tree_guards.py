@@ -289,6 +289,26 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         the exhaustive lib-glob, eight are not staging loops by that test, none is left, so the report is
         silent on today's tree and fires only on a list genuinely built at runtime.
 
+    THE TWO AXES OF WRONG, so the next edit knows which way it can break this guard (five review rounds and three
+    self-attacks produced findings on exactly these two and nothing else). They are keyed to the fix as well as to
+    the failure, so a change can be judged by which axis it touches:
+      - INVENTED ANSWER (the worse one): a binding shape the resolver does not model is read as SOME OTHER
+        SCOPE's value, so the guard reports a complete list when the loop does not read it. Every instance has been
+        a name the AST carries UNUSUALLY - a string rather than a Name(Store): `except X as name`, a match capture,
+        a PEP 695 type parameter - or a store shape that is not an assignment: `del`, a tuple/augmented/chained
+        target, an import alias. The remedy is always "register the name as bound and unreadable in the scope that
+        binds it" (store_names / definition_bindings), never a new heuristic.
+      - FALSE REFUSAL (the safe direction, and still a cost): a binding that belongs to an INNER scope leaks
+        outward, or a list is readable by a human but not resolvable here (a branch/try/with binding, a walrus,
+        `global` assigned later), and the guard refuses a tree that is fine. Measured instances: a nested def or
+        class body whose locals leaked (fixed), and the four conservative refusals listed on agents-e340, which
+        are the ruled behaviour rather than bugs.
+    THE STANDING RULE, ruled after round 4 and measured after round 5: resolve a list where it IS readable AT THE
+    LOOP'S POSITION, refuse the rest LOUDLY, and name the position (and the way it was unreadable) in the refusal.
+    A pure refusal is worse on both axes - it cannot name the missing module an author needs, and it turns the ten
+    declared runtime-copy loops loud - so "refuse" is the fallback, not the policy. If a SIXTH round finds another
+    instance on either axis, the decision is to PARK the guard with this model recorded rather than add a shape.
+
     Returns a list of 'path:line: stages [...]; missing [...]' strings, or [] when every list is
     complete.
     """
@@ -550,6 +570,21 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                     names.add(variadic.arg)
             return names
 
+        def definition_bindings(node: ast.AST) -> set[str]:
+            """Names the DEFINITION itself binds in the scope it opens: parameters, and PEP 695 type parameters.
+
+            A type parameter is carried as a STRING on its TypeVar node - the same shape as `except ... as name`
+            and a match capture, and just as invisible to a sweep for stored Names. Measured on 3.12: a type
+            parameter IS visible in the function body and in a method of a generic class, holding a TypeVar, so a
+            loop iterating it is not a module list and reading the global there would INVENT an answer.
+            Registering it in the DEFINITION's scope rather than in the enclosing one is what keeps an outer loop
+            over the real module list green: a type parameter does not leak outward, and neither do parameters.
+            """
+            names = function_parameters(node) if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else set()
+            names.update(type_parameter.name for type_parameter in getattr(node, "type_params", None) or [])
+            return names
+
         def walk_statements(statements: list[ast.stmt], scopes: list[dict[str, list[str] | None]],
                             found: list[tuple[ast.For, list[dict[str, list[str] | None]]]]) -> None:
             """Walk ONE statement list IN ORDER, recording each loop with the bindings IN EFFECT AT ITS POSITION.
@@ -576,11 +611,12 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                 if isinstance(statement, ast.For):
                     found.append((statement, here))
                 if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    parameters = {name: None for name in function_parameters(statement)}
-                    walk_statements(statement.body, here + [parameters], found)
+                    scope: dict[str, list[str] | None] = {name: None for name in definition_bindings(statement)}
+                    walk_statements(statement.body, here + [scope], found)
                     continue
                 if isinstance(statement, ast.ClassDef):
-                    walk_statements(statement.body, here, found)
+                    walk_statements(statement.body,
+                                    here + [{name: None for name in definition_bindings(statement)}], found)
                     continue
                 for field in ("body", "orelse", "finalbody"):
                     block = getattr(statement, field, None)
@@ -917,6 +953,44 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         capture = reported('def build(root):\n    match 1:\n        case MODULES:\n            pass\n' + copy_loop)
         self.assertIn("cannot read at this point", capture,
                       "a match capture holds the captured object, not the module list")
+
+    def test_a_definitions_own_names_bind_in_its_scope_and_do_not_leak_outward(self):
+        """PEP 695 type parameters AND parameters bind in the DEFINITION's scope; neither leaks outward.
+
+        A type parameter is carried as a STRING on its TypeVar node - the same shape as `except ... as name` and a
+        match capture - so a sweep for stored Names misses it. Measured on the python3.12 this gate runs, not
+        assumed: `def build[MODULES](root): return MODULES` returns the TypeVar, and a method of a generic class
+        sees it too, so a loop iterating it is not a module list and reading the global there INVENTED an answer.
+        The other half is the register-in-the-DEFINITION's-scope choice: a generic def elsewhere in the file must
+        not make a module-level loop refuse, and that case is the control below.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        generic_function = reported("def build[MODULES](root):\n" + copy_loop)
+        self.assertIn("cannot read at this point", generic_function,
+                      "a type parameter holds a TypeVar in the body, so the global must not be read there")
+
+        generic_class = reported('class Builder[MODULES]:\n    def build(self, root):\n'
+                                 '        for module in MODULES:\n'
+                                 '            shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+        self.assertIn("cannot read at this point", generic_class,
+                      "a method of a generic class sees the type parameter too")
+
+        no_leak = reported("def build[MODULES](root):\n    return MODULES\n"
+                           "for module in MODULES:\n"
+                           "    shutil.copyfile(ROOT / \"lib\" / module, root / \"lib\" / module)\n")
+        self.assertEqual(no_leak, "",
+                         "a type parameter does not leak outward, so a module-level loop stays green")
 
     def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
         """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
