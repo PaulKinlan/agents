@@ -1,6 +1,6 @@
 --- a/bin/fleet-land-message
 +++ b/bin/fleet-land-message
-@@ -759,8 +759,37 @@
+@@ -759,8 +759,36 @@
      already_landed=1
    fi
  
@@ -15,19 +15,18 @@
 +  # turn a spent clearance back into an invalidated one:
 +  #   YES  -> spent: keep merge-queue and every cleared: label, report SPENT.
 +  #   NO   -> NOT proof that it did not land, so the p1c2 path proceeds - but loudly, naming the assumption.
-+  #   REF ABSENT (no refs/remotes/origin/<default>) -> REFUSE: an unfresh ref must never license a strip.
++  #   REF ABSENT (no refs/remotes/origin/<default>) -> the p1c2 path, with the same loud NOTE: a missing
++  #     remote-tracking ref is evidence absent, not adverse, and must never be a hard stop for landing.
    if [ "$rev_state" = "STALE" ] || [ "$rev_state" = "DIVERGED" ]; then
 -    if [ "$already_landed" = 1 ]; then
 +  DFLT=$(cat "$HOME/.fleet/default-branch" 2>/dev/null || echo main)
 +  if [ "$already_landed" = 0 ] && [ -n "$rev_sha" ] && git rev-parse -q --verify "$rev_sha^{commit}" >/dev/null 2>&1; then
 +    if ! git rev-parse -q --verify "refs/remotes/origin/$DFLT" >/dev/null 2>&1; then
 +      echo "fleet-land-message: NOTE: could not answer: has $rev_sha landed on origin/$DFLT? - that ref does not exist here, so ancestry cannot be established; following the p1c2 path (the bead's merged label still governs whether the clearance was spent), not refusing." >&2
-+      true  # evidence absent, not adverse: the label still governs, so proceed as p1c2 does
-+    fi
-+    if git merge-base --is-ancestor "$rev_sha" "refs/remotes/origin/$DFLT" 2>/dev/null; then
++    elif git merge-base --is-ancestor "$rev_sha" "refs/remotes/origin/$DFLT" 2>/dev/null; then
 +      already_landed=2
 +    else
-+      echo "fleet-land-message: NOTE: could not answer whether $rev_sha has landed on of refs/remotes/origin/$DFLT as this checkout currently sees it; proceeding on the p1c2 path. If that ref is stale the clearance may in fact be spent." >&2
++      echo "fleet-land-message: NOTE: could not answer whether $rev_sha has landed on refs/remotes/origin/$DFLT as this checkout currently sees it; proceeding on the p1c2 path. If that ref is stale the clearance may in fact be spent." >&2
 +    fi
 +  fi
 +    if [ "$already_landed" != 0 ]; then
