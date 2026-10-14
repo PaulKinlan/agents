@@ -1,0 +1,102 @@
+diff --git a/bin/verify-patch-apply b/bin/verify-patch-apply
+new file mode 100755
+index 0000000..573533d
+--- /dev/null
++++ b/bin/verify-patch-apply
+@@ -0,0 +1,96 @@
++#!/usr/bin/env bash
++# verify-patch-apply - assert that applying an artifact DID something, rather than trusting rc 0.
++#
++# WHY THIS EXISTS: an "apply succeeded" verdict taken from an exit status is not evidence.
++# MEASURED, on a zero-byte artifact in a real repo:
++#   plain `git apply`            -> rc 128, "No valid patches in input (allow with --allow-empty)"
++#                                   (it ALREADY rejects an empty artifact - this tool is then a
++#                                    clearer message plus the two assertions rc cannot make)
++#   `git apply --allow-empty`    -> rc 0 and the file is UNCHANGED (the flag git's own error suggests)
++#   `patch -p1 --fuzz=0`         -> rc 0, nothing done, no output  <-- the form our own
++#                                   hub-delivery discipline uses, so the hole is LIVE here
++# So the assertions must be about EFFECT, not status:
++#   (1) the artifact is NON-EMPTY;
++#   (2) each target it names CHANGED BY HASH (or was created, for a new-file artifact);
++#   (3) each marker it claims to introduce is ABSENT BEFORE and PRESENT AFTER.
++# (3) is the one that makes the difference between a real check and a decorative one: a marker that
++# already exists in the baseline passes a naive "is it present" test while proving nothing. This
++# tool checks the BEFORE state for exactly that reason.
++#
++# usage: verify-patch-apply [--marker <str>]... [--self-test] <artifact> <tree>
++set -uo pipefail
++
++die() { printf 'verify-patch-apply: REJECT: %s\n' "$1" >&2; exit 1; }
++say() { printf 'verify-patch-apply: %s\n' "$1"; }
++
++targets_of() {  # the paths an artifact claims, from its +++ headers
++  sed -n 's|^+++ b/||p' "$1" | sed '/^\/dev\/null$/d' | sort -u
++}
++
++check() {  # <artifact> <tree> [marker...]
++  local art=$1 tree=$2; shift 2
++  [ -f "$art" ] || die "artifact does not exist: $art"
++  [ -d "$tree" ] || die "tree does not exist: $tree"
++  # (1) NON-EMPTY. The whole point: this is the state that rc 0 cannot distinguish.
++  [ -s "$art" ] || die "the artifact is EMPTY (0 bytes): '$art' names no change. A zero-byte artifact reaches this point as rc 0 under 'patch -p1 --fuzz=0' and under 'git apply --allow-empty', which is how an extraction that failed upstream can be installed as nothing at all."
++  local targets; targets=$(targets_of "$art")
++  [ -n "$targets" ] || die "the artifact names no target: no '+++ b/<path>' header, so it cannot be shown to affect anything"
++  # (2)+(3) BEFORE state. (3) needs the BEFORE state or it is decorative.
++  local before after t
++  before=$(cd "$tree" && for t in $targets; do [ -e "$t" ] && sha256sum "$t"; done | sha256sum)
++  for m in "$@"; do
++    if [ -d "$tree" ] && grep -rqF --exclude="$(basename "$art")" -- "$m" "$tree" 2>/dev/null; then
++      die "marker '$m' is ALREADY PRESENT in the tree BEFORE the apply: asserting its presence afterwards would prove nothing. Choose a string the artifact itself introduces."
++    fi
++  done
++  # APPLY. --forward so an already-applied artifact is a failure rather than a silent skip.
++  if ! ( cd "$tree" && patch -p1 --fuzz=0 --forward < "$art" ); then
++    die "applying '$art' to '$tree' FAILED (this is the one case rc already caught)"
++  fi
++  # (2) each target CHANGED (or, for a new-file artifact, now EXISTS where it did not).
++  local changed=0
++  for t in $targets; do
++    if [ -e "$tree/$t" ]; then changed=$((changed+1)); else die "the artifact names '$t' but it does not exist after the apply"; fi
++  done
++  after=$(cd "$tree" && for t in $targets; do [ -e "$t" ] && sha256sum "$t"; done | sha256sum)
++  [ "$before" != "$after" ] || die "the apply reported success but NOTHING CHANGED: every target has the same content hash before and after ($changed path(s) present). This is the status-is-not-effect case."
++  # (3) each marker ABSENT BEFORE (checked above) and PRESENT AFTER.
++  for m in "$@"; do
++    grep -rqF --exclude="$(basename "$art")" -- "$m" "$tree" 2>/dev/null || die "marker '$m' is absent AFTER the apply: the artifact did not introduce it, so the effect it claims was not produced"
++  done
++  say "OK: $art applied to $tree; $changed target(s) changed by hash; $(($#)) marker(s) absent before and present after"
++}
++
++self_test() {  # 5 cases; 4 must REJECT, and every case is bound to its REASON, not just its rc.
++  # WHY REASONS: my first two versions of this self-test "passed" for the wrong reason twice - once
++  # because the generated patch was empty (git diff cannot see an untracked file), once because the
++  # artifact did not exist at all. A case that asserts only the exit code cannot tell those apart
++  # from the behaviour it claims to test, which is the decorative-control failure in miniature.
++  local tmp; tmp=$(mktemp -d); local fails=0
++  mk() { rm -rf "$tmp/r" "$tmp/p"; mkdir -p "$tmp/r" && ( cd "$tmp/r" && git init -q . && printf 'BASELINE-MARKER\n' > target.txt && git add -A && git commit -qm init >/dev/null ); }
++  gen() { printf 'BASELINE-MARKER\nINTRODUCED-BY-THIS-ARTIFACT\n' > "$tmp/r/target.txt"; ( cd "$tmp/r" && git diff > "$tmp/p" ); git -C "$tmp/r" checkout -- target.txt 2>/dev/null; [ -s "$tmp/p" ] || { echo "case SETUP BROKEN: 0-byte artifact"; fails=$((fails+1)); return 1; }; return 0; }
++  expect() {  # expect <case> <want-rc> <reason-substring> -- args...
++    local name=$1 want_rc=$2 want_msg=$3; shift 3; [ "$1" = "--" ] && shift
++    local out rc; out=$("$0" "$@" 2>&1); rc=$?
++    if [ "$want_rc" = 0 ] && [ $rc -ne 0 ]; then echo "self-test $name FAILED (rc=$rc, wanted success): $out"; fails=$((fails+1)); return; fi
++    if [ "$want_rc" != 0 ] && [ $rc -eq 0 ]; then echo "self-test $name FAILED - ACCEPTED a case that must be rejected"; fails=$((fails+1)); return; fi
++    case "$out" in *"$want_msg"*) say "self-test $name ok (matched its reason)";; *) echo "self-test $name FAILED - rejected for the WRONG REASON: wanted '$want_msg', got: $out"; fails=$((fails+1));; esac
++  }
++  mk; gen && expect "0 genuine artifact" 0 "OK:" -- --marker INTRODUCED-BY-THIS-ARTIFACT "$tmp/p" "$tmp/r"
++  mk; : > "$tmp/empty.patch"
++  expect "1 empty artifact" 1 "EMPTY" -- "$tmp/empty.patch" "$tmp/r"
++  mk; gen && { printf 'PRE-EXISTING-ELSEWHERE\n' > "$tmp/r/other.txt"; expect "2 pre-existing marker" 1 "ALREADY PRESENT" -- --marker PRE-EXISTING-ELSEWHERE "$tmp/p" "$tmp/r"; }
++  mk; printf -- '--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-BASELINE-MARKER\n+BASELINE-MARKER\n' > "$tmp/noop.patch"
++  expect "3 applies but changes nothing" 1 "NOTHING CHANGED" -- "$tmp/noop.patch" "$tmp/r"
++  mk; printf -- 'a file with no diff headers at all\n' > "$tmp/nohdr.patch"
++  expect "4 names no target" 1 "names no target" -- "$tmp/nohdr.patch" "$tmp/r"
++  rm -rf "$tmp"
++  [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) failed"; return 1; }
++  say "self-test: all 5 cases behaved, each bound to its reason"; return 0
++}
++
++[ "${1:-}" = "--self-test" ] && { shift; self_test "$@"; exit $?; }
++markers=()
++while [ "${1:-}" = "--marker" ]; do markers+=("$2"); shift 2; done
++[ $# -eq 2 ] || { echo "usage: verify-patch-apply [--marker <str>]... [--self-test] <artifact> <tree>" >&2; exit 2; }
++check "$1" "$2" ${markers+"${markers[@]}"}
