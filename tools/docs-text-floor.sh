@@ -49,7 +49,7 @@ PY
 fi
 # The measuring script runs INSIDE each page and writes its verdict into the DOM, which --dump-dom then prints,
 # so this needs no CDP client and no library - only a browser.
-payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], else_=0; document.querySelectorAll("*").forEach(function(el){ if(el.children.length) return; if(!el.textContent.trim()) return; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result"; d.textContent="FLOOR_RESULT page="+location.pathname.split("/").pop()+" floor="+f+"px below="+out.length+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
+payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], else_=0, SKIP={SCRIPT:1,STYLE:1,TITLE:1,META:1,LINK:1,HEAD:1,BASE:1,NOSCRIPT:1,TEMPLATE:1}; document.querySelectorAll("*").forEach(function(el){ if(SKIP[el.tagName]) return; if(el.children.length) return; if(!el.textContent.trim()) return; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result"; d.textContent="FLOOR_RESULT page="+location.pathname.split("/").pop()+" floor="+f+"px below="+out.length+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
 python3 - "$work" "$floor" "$payload" <<'PY'
 import sys, pathlib
 work, floor, payload = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
