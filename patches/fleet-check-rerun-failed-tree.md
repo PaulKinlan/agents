@@ -100,7 +100,26 @@ count in the cache as evidence, and a re-run that passes cannot erase that the t
 
 - Applies to `bin/fleet-check` with **`patches/fleet-check-reserve-attribution.patch` (agents-dbit) already
   applied**: `patch -p1 --fuzz=0`, rc 0, no rejects, result byte-identical to the tree this was driven on.
-- Base (dbit-applied): 53752 bytes, sha256 `db61bbaa6bf58c24`; patched: 55740 bytes, sha256 `65d67b0a7622fcd9`.
+- Base (dbit-applied): 53752 bytes, sha256 `db61bbaa6bf58c24`; patched: 59719 bytes, sha256 `25b8599df7e7219a352aedaed2c5be417fc0d0de0f5286c5b4409f0a132cf436`.
+
+### The composition, measured
+
+These numbers are the chain **measured on the deploying VM**, by applying the patches in order and reading the hash back after each
+step - they are not recalled from the edit that produced the patch:
+
+| step | bytes | sha256 (first 16) | rejects |
+|---|---|---|---|
+| the deployed `bin/fleet-check` as found | 51977 | `455e3b05d2dc172c` | - |
+| `patches/fleet-check-reserve-attribution.patch` (`agents-dbit`) applied | 53752 | `db61bbaa6bf58c24` | 0 |
+| this patch applied on top | 59719 | `25b8599df7e7219a` | 0 |
+
+**This patch must be installed AFTER `agents-dbit`.** Against the raw preimage it fails: `rc 1`, one reject,
+`Hunk #3 FAILED at 345`. On the `db61bbaa6bf58c24` base it applies `rc 0` with zero rejects.
+
+**An earlier revision of this write-up recorded a patched result of `65d67b0a7622fcd9`. That number does not reproduce from the
+composition above** - it is the one number in this file that came from elsewhere and it is corrected here. Verify the install by the
+chain you observe: read the hash after each step and compare it with the step before it, rather than against a number stored in a
+document. A wrong stored number makes a good patch look corrupt, and this file is read by an installer.
 - **It REJECTS against today's deployed `bin/fleet-check`** (dry-run rc 1). That is deliberate: dbit's hunk
   covers base lines 291..303 and this patch edits the same cached-FAIL message line, so the only legal order is
   **dbit first, then this**, and a wrong-order application is refused rather than half-applied.
