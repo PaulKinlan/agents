@@ -249,13 +249,26 @@ def main():
     # COPY it rather than reconstruct identity from the model's label and prose.
     assign_candidate_ids(candidates)
 
-    payload = {
-        **artefact_scheme_fields(),
-        "target": target_dir.name,
+    # agents-ufl3: the three inputs this SKILL declares reach the model on the landed context channel
+    # (ADR agents-3f4b) and, until now, did not reach it at all: the pre-pass gathered them and the
+    # dispatcher only ever appended `candidates` to the prompt, so a station that names
+    # recent_commits / recently_changed_files / recent_diff_excerpt was asking for evidence nothing
+    # delivered. They stay at the TOP LEVEL as well, because that is this station's recorded result -
+    # what a human reads from --output - and the nested copy is safe on the stdout channel BY
+    # CONSTRUCTION rather than by a name list: lib.redaction.stdout_safe_report is an allowlist that
+    # drops any key no reader consumes, nested dicts included.
+    declared_context = {
         "recent_commits": git_ctx["recent_commits"],
         "recently_changed_files": git_ctx["changed_files"],
         "recent_diff_excerpt": git_ctx["diff_excerpt"],
-        "candidates": candidates
+    }
+
+    payload = {
+        **artefact_scheme_fields(),
+        "target": target_dir.name,
+        **declared_context,
+        "context": declared_context,
+        "candidates": candidates,
     }
 
     emit_station_result(payload, args.output)
