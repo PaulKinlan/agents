@@ -242,6 +242,141 @@ class TestRedFirst(unittest.TestCase):
         self.assertIn("neither-direction-verified", res.stderr)
         self.assertIn("absent marker 'NEW_NOTE_UNRELATED_TO_IMPL_6611' is not justified by delta", res.stderr)
 
+    def test_pre_fix_commit_MESSAGE_must_not_suppress_marker_derivation(self):
+        """agents-erft: the EXPECT_ABSENT auto-derivation used `git show $PRE_FIX_SHA | grep -Fq`, which searches
+        the PRE-FIX COMMIT MESSAGE AND DIFF rather than the PRE-FIX SOURCE TREE that tooth 2 claims to check. A
+        pre-fix message that mentions a line the delta adds LATER makes that valid marker look present pre-fix;
+        when every candidate is rejected that way EXPECT_ABSENT stays empty and the tool prints 'pure test
+        addition' for a change that really does alter the implementation source - a false statement about what
+        was checked, printed alongside a PASS verdict.
+
+        THE FIXTURE IS THE POINT, and the candidate set is narrower than it looks: the derivation filters added
+        lines with `sed -n 's/^+[^+[:space:]].*/&/p'`, which admits ONLY NON-INDENTED added lines - the added
+        top-level defs - and excludes indented bodies. The feature commit here adds exactly one such line,
+        `def multiply(a, b):`, so the pre-fix MESSAGE must mention THAT line for the defect to appear. File
+        contents are otherwise identical to the ordinary case, so this cannot pass by the change being absent."""
+        git = ["git", "-C", str(self.repo_dir)]
+        self._run_cmd(git + ["checkout", "-q", "feature"])
+        base_tree = self._run_cmd(git + ["rev-parse", "HEAD~1^{tree}"]).stdout.strip()
+        # The defensive half of the fixture: the candidate set really is the added def, and nothing else.
+        added = self._run_cmd(git + ["diff", "--unified=0", self.base_commit, "feature", "--", "lib"]).stdout
+        candidates = [l for l in added.splitlines() if l.startswith("+") and len(l) > 1 and not l[1].isspace() and not l.startswith("+++")]
+        self.assertEqual(candidates, ["+def multiply(a, b):"],
+                         f"the fixture must have exactly one non-indented added impl line, got {candidates}")
+        # Amend the BASE commit so its MESSAGE mentions that line; the feature commit is rebased onto it. The
+        # TREES are untouched - only messages differ - which is what makes this a wrong-revision-object test.
+        self._run_cmd(git + ["checkout", "-q", "main"])
+        self._run_cmd(git + [
+            "commit", "--amend", "-q", "-m",
+            "initial commit: the follow-up will add `def multiply(a, b):` to lib/calc.py",
+        ])
+        new_base = self._get_commit_sha("HEAD")
+        self._run_cmd(git + ["checkout", "-q", "feature"])
+        self._run_cmd(git + ["rebase", "-q", "--onto", new_base, self.base_commit, "feature"])
+        # PROVE THE FIXTURE, NOT THE CLAIM: same TREE, different MESSAGE, and the source really is pre-fix.
+        self.assertEqual(self._run_cmd(git + ["rev-parse", "HEAD~1^{tree}"]).stdout.strip(), base_tree,
+                         "the base TREE must be identical between the arms; only its message may differ")
+        self.assertIn("def multiply(a, b):", self._run_cmd(git + ["log", "-1", "--format=%B", new_base]).stdout,
+                      "the pre-fix MESSAGE must mention the added def line - that is the mutant")
+        self.assertNotIn("def multiply", self._run_cmd(git + ["show", f"{new_base}:lib/calc.py"]).stdout,
+                         "the pre-fix SOURCE TREE must NOT contain the added def")
+
+        # NO --expect-absent: the AUTO-DERIVATION path is the whole subject.
+        res = self._run_red_first([
+            "--base", new_base,
+            "--expect-present", "test_multiply_discriminator",
+            "tests/test_calc.py",
+        ])
+        self.assertNotIn(
+            "pure test addition", res.stdout,
+            f"the pre-fix commit MESSAGE suppressed marker derivation on a real source delta:\n{res.stdout}\n{res.stderr}")
+        self.assertNotIn(
+            "no allow-listed implementation-source delta to verify", res.stdout,
+            f"a real implementation delta was reported as absent:\n{res.stdout}\n{res.stderr}")
+        self.assertEqual(res.returncode, 0, f"the honest pre-fix run should still pass:\n{res.stdout}\n{res.stderr}")
+        self.assertIn("VERDICT: PASS", res.stdout)
+
+    def test_derivation_failure_fails_loudly_instead_of_claiming_a_pure_test_addition(self):
+        """The SAFETY half of agents-erft: the positive control, which a green suite does not prove.
+
+        That branch exists so "pure test addition" - a claim about the CHANGE - can only be printed when there was
+        genuinely no allow-listed implementation-source delta to derive a marker from. It fires when diff_additions
+        is NON-EMPTY while EXPECT_ABSENT is still EMPTY, and the tool must then FAIL rather than print a false
+        statement about what it checked.
+
+        REACHING THE BRANCH IS THE HARD PART, and three constructions failed before this one. The filter at :442
+        admits only NON-INDENTED added lines, and in an implementation file those are the top-level defs - so the
+        fixture needs a pre-fix tree holding TWO defs and a change that MOVES one, so that git grep finds every
+        candidate in the pre-fix tree. But tooth 1 runs FIRST and demands a GREEN tip, so the change must ALSO
+        discriminate - which a pure reorder cannot do. Hence both: the defs are swapped (giving candidates that are
+        all present pre-fix) AND one body changes (giving a test that fails on the red tree and passes at the tip).
+        """
+        git = ["git", "-C", str(self.repo_dir)]
+        base_src = "def add(a, b):\n    return a + b\n\n\ndef zeta(a, b):\n    return a - b\n"
+        # The guard (`add`) is untouched so it passes at the tip; the DISCRIMINATOR lives on zeta, whose body
+        # changes - a behavioural delta in an INDENTED line, so it is invisible to the candidate filter.
+        tip_src = "def zeta(a, b):\n    return a - b + 1\n\n\ndef add(a, b):\n    return a + b\n"
+        tests = (
+            "import unittest\n"
+            "from lib.calc import add, zeta\n\n"
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_add_guard(self):\n"
+            "        self.assertEqual(add(2, 3), 5)\n\n"
+            "    def test_zeta_plus_one_discriminator(self):\n"
+            "        self.assertEqual(zeta(5, 2), 4)\n"
+        )
+        # 1. the base gets BOTH defs
+        self._run_cmd(git + ["checkout", "-q", "main"])
+        (self.repo_dir / "lib" / "calc.py").write_text(base_src, encoding="utf-8")
+        (self.repo_dir / "tests" / "test_calc.py").write_text(
+            "import unittest\nfrom lib.calc import add\n\nclass TestCalc(unittest.TestCase):\n"
+            "    def test_add_guard(self):\n        self.assertEqual(add(2, 3), 5)\n",
+            encoding="utf-8",
+        )
+        self._run_cmd(git + ["add", "lib/calc.py", "tests/test_calc.py"])
+        self._run_cmd(git + ["commit", "-q", "--amend", "-m", "base: add and zeta both present"])
+        new_base = self._get_commit_sha("HEAD")
+        # 2. REPARENT the feature commit onto new_base while keeping its own content. `reset --soft` moves HEAD
+        #    without touching the index or the worktree, so the next commit is parented on new_base - no rebase.
+        self._run_cmd(git + ["checkout", "-q", "feature"])
+        (self.repo_dir / "lib" / "calc.py").write_text(tip_src, encoding="utf-8")
+        (self.repo_dir / "tests" / "test_calc.py").write_text(tests, encoding="utf-8")
+        self._run_cmd(git + ["add", "lib/calc.py", "tests/test_calc.py"])
+        self._run_cmd(git + ["reset", "-q", "--soft", new_base])
+        self._run_cmd(git + ["commit", "-q", "-m", "feature: swap the defs and adjust one body"])
+        self.assertEqual(self._get_commit_sha("HEAD^"), new_base, "the feature commit must be parented on the new base")
+        # 3. PROVE THE FIXTURE ENTERS THE BRANCH before asserting any behaviour.
+        added = [
+            l[1:]
+            for l in self._run_cmd(git + ["diff", new_base, "HEAD", "--", "lib"]).stdout.splitlines()
+            if l.startswith("+") and len(l) > 1 and not l[1].isspace() and not l.startswith("+++")
+        ]
+        self.assertTrue(added, "the fixture must produce candidates, or the control branch is unreachable")
+        # The COUNT is git's diff heuristic and is not asserted - only the property that makes the branch
+        # reachable: at least one candidate, and EVERY candidate already present in the pre-fix tree.
+        for text in added:
+            self.assertFalse(text.startswith(" "), f"a candidate must be a non-indented addition: {text!r}")
+        for text in added:
+            rc = subprocess.run(
+                git + ["grep", "-q", "-F", text, new_base, "--", "lib"], capture_output=True, text=True
+            ).returncode
+            self.assertEqual(
+                rc, 0,
+                f"every candidate must already exist in the pre-fix tree, else a marker IS derivable and the "
+                f"control branch is never reached: {text!r}",
+            )
+        # 4. behaviour: fail LOUDLY, with the OBSERVED message - not merely any non-zero exit.
+        res = self._run_red_first(
+            ["--base", new_base, "--expect-present", "test_zeta_plus_one_discriminator", "--timeout", "30",
+             "tests/test_calc.py"]
+        )
+        self.assertEqual(res.returncode, 1, f"a derivation failure must fail loudly:\n{res.stdout}\n{res.stderr}")
+        self.assertIn(
+            "the pre-fix absence check cannot be made", res.stderr,
+            f"the loud-fail reason must be the one emitted, not some other failure:\n{res.stdout}\n{res.stderr}",
+        )
+        self.assertNotIn("pure test addition", res.stdout, f"the false phrase must not be printed:\n{res.stdout}")
+
     def test_data_memo_marker_is_a_disclosed_bound(self):
         """Tooth 2 bound (agents-twue): a committed data/memo.py holding ONLY a marker comment, imported by nothing
         but carrying an allow-listed source extension, is ACCEPTED by the path rule - that is the accepted limitation
