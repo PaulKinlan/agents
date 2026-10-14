@@ -271,10 +271,43 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         module they never import. The package is staged as a tree by copytree and its internal imports
         are not the tree's entry points, so a module reachable ONLY through a package is out of scope
         for this rule - a known, measured false negative rather than a guessed fix;
-      - fail loudly on any staging loop whose module list this guard cannot read: the detector fires on
-        two healthy loops on the current tree, one of which iterates `(ROOT / 'lib').glob('*.py')` and
-        is EXHAUSTIVE BY CONSTRUCTION, so it cannot be missing anything. A dynamic list that adds a
-        module by name is still a hole (agents-n5e0) and needs a discriminator this rule does not have.
+      - fail loudly on any staging loop whose module list this guard cannot read, AS A BLANKET: rejected by
+        measurement, because the detector fired on healthy loops whose bodies merely mention lib (seven of
+        them) and still on four when it required the body to copy something - no text search can exclude this
+        guard's own source, which contains `findings` and `budget` throughout. The hole it aimed at was real
+        (agents-n5e0: a concatenated list resolved to nothing, was skipped in silence, and reported the same
+        green as a list that was read and checked), so what replaced it is a three-way classification whose
+        middle class is derived from THIS rule's own construction rather than from a search of the text:
+        (1) RESOLVE MORE FIRST - a name bound to an earlier list, `BASE + ('embargo.py',)` and
+        `[*BASE, 'embargo.py']` are read by name, because where a case can be checked, checking beats
+        refusing; (2) EXHAUSTIVE BY CONSTRUCTION - an iterable that enumerates every lib/*.py covers the
+        whole requirement space, so green for it is justified rather than unchecked; (3) EVERYTHING ELSE
+        THAT STAGES LIB MODULES is reported LOUDLY as an unreadable list. Class 3 needs one further fact to
+        stay green on a healthy tree - the loop must COPY a lib file whose SOURCE path is built from its own
+        loop variable, which is what makes that variable a module name rather than an incidental counter -
+        and it was measured over all nine loops under tests/ whose iterable this rule cannot read: one is
+        the exhaustive lib-glob, eight are not staging loops by that test, none is left, so the report is
+        silent on today's tree and fires only on a list genuinely built at runtime.
+
+    THE TWO AXES OF WRONG, so the next edit knows which way it can break this guard (five review rounds and three
+    self-attacks produced findings on exactly these two and nothing else). They are keyed to the fix as well as to
+    the failure, so a change can be judged by which axis it touches:
+      - INVENTED ANSWER (the worse one): a binding shape the resolver does not model is read as SOME OTHER
+        SCOPE's value, so the guard reports a complete list when the loop does not read it. Every instance has been
+        a name the AST carries UNUSUALLY - a string rather than a Name(Store): `except X as name`, a match capture,
+        a PEP 695 type parameter - or a store shape that is not an assignment: `del`, a tuple/augmented/chained
+        target, an import alias. The remedy is always "register the name as bound and unreadable in the scope that
+        binds it" (store_names / definition_bindings), never a new heuristic.
+      - FALSE REFUSAL (the safe direction, and still a cost): a binding that belongs to an INNER scope leaks
+        outward, or a list is readable by a human but not resolvable here (a branch/try/with binding, a walrus,
+        `global` assigned later), and the guard refuses a tree that is fine. Measured instances: a nested def or
+        class body whose locals leaked (fixed), and the four conservative refusals listed on agents-e340, which
+        are the ruled behaviour rather than bugs.
+    THE STANDING RULE, ruled after round 4 and measured after round 5: resolve a list where it IS readable AT THE
+    LOOP'S POSITION, refuse the rest LOUDLY, and name the position (and the way it was unreadable) in the refusal.
+    A pure refusal is worse on both axes - it cannot name the missing module an author needs, and it turns the ten
+    declared runtime-copy loops loud - so "refuse" is the fallback, not the policy. If a SIXTH round finds another
+    instance on either axis, the decision is to PARK the guard with this model recorded rather than add a shape.
 
     Returns a list of 'path:line: stages [...]; missing [...]' strings, or [] when every list is
     complete.
@@ -355,17 +388,94 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
     # the discriminator is the dispatcher's own dependency set, verified against all ten sites.
     dispatcher_markers = {"budget", "child_env"}
 
-    def literal_list(node: ast.AST, consts: dict[str, list[str]]) -> list[str] | None:
-        if isinstance(node, ast.Name) and node.id in consts:
-            return consts[node.id]
+    def literal_list(node: ast.AST, scopes: list[dict[str, list[str] | None]]) -> list[str] | None:
+        """Read a staging list, or None when this rule genuinely cannot.
+
+        RESOLVE MORE FIRST, because where a case can be checked, checking beats refusing (agents-n5e0,
+        agents-1p9g). A name bound to an earlier list, a concatenation of resolvable halves
+        (`BASE + ('embargo.py',)`) and a spread of a resolvable one (`[*BASE, 'embargo.py']`) are all read
+        by NAME, so an incomplete list built any of those ways is reported with the missing module rather
+        than skipped. None means UNREADABLE, and the caller now acts on that difference instead of
+        conflating it with an empty list - `if not names: continue` treated both as nothing to do.
+
+        A NAME IS LOOKED UP IN THE SCOPE CHAIN, INNERMOST FIRST (agents-zsum): a function-local
+        `MODULES = (...)` SHADOWS a complete module-level one, and reading the module-level value there
+        returned green while the staged tree was missing a module. The innermost scope that BINDS a name
+        wins even when it binds it to something unreadable - falling through to a shadowed outer value is
+        exactly the false green this lookup exists to remove.
+        """
+        if isinstance(node, ast.Name):
+            for scope in reversed(scopes):
+                if node.id in scope:
+                    return scope[node.id]
+            return None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = literal_list(node.left, scopes)
+            right = literal_list(node.right, scopes)
+            if left is None or right is None:
+                return None
+            return left + right
         if not isinstance(node, (ast.Tuple, ast.List)):
             return None
-        names = []
+        names: list[str] = []
         for element in node.elts:
+            if isinstance(element, ast.Starred):
+                inner = literal_list(element.value, scopes)
+                if inner is None:
+                    return None
+                names.extend(inner)
+                continue
             if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
                 return None
             names.append(element.value)
         return names
+
+    def stages_every_lib_py(node: ast.AST) -> bool:
+        """An iterable that enumerates EVERY lib/*.py satisfies every requirement this rule can produce, so green
+        for it is JUSTIFIED rather than unchecked. The proof is this rule's own construction above: a requirement
+        is `root/'lib'/f'{module}.py'` and only non-directory modules under lib/ are ever returned, so a list
+        holding all of lib/*.py cannot be missing anything. This is the class a blanket "fail loudly on any
+        unreadable list" turned RED (tests/test_adapter_auth_failure.py:250), and the reason the rule is a
+        three-way classification rather than a refusal.
+        """
+        while (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id in {"sorted", "list", "tuple", "set"} and node.args):
+            node = node.args[0]
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            return False
+        method = node.func.attr
+        receiver = ast.unparse(node.func.value)
+        if method == "iterdir":
+            return "lib" in receiver
+        if method in {"glob", "rglob"} and node.args and isinstance(node.args[0], ast.Constant):
+            pattern = str(node.args[0].value)
+            return pattern.endswith(".py") and "*" in pattern and ("lib" in receiver or "lib" in pattern)
+        return False
+
+    def stages_lib_modules_by_variable(node: ast.For) -> bool:
+        """Whether a loop whose iterable this rule cannot read is ACTUALLY a staging loop: it copies a lib file
+        whose SOURCE path is built from its own loop variable, which is what makes that variable a module NAME
+        rather than an incidental counter.
+
+        This is the discriminator the file used to say it did not have (agents-n5e0), and it is a shape test on
+        the copy call rather than a search of the source text, because a text search cannot exclude this guard's
+        own loops: "the body mentions lib" fired on seven healthy loops and "the body copies something" still on
+        four (see the docstring above). Measured over the nine loops under tests/ whose iterable is unreadable:
+        this test is false for eight of them and the ninth is the exhaustive lib-glob, so the report below stays
+        silent on today's tree.
+        """
+        loop_variables = {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call) or not call.args:
+                continue
+            func = call.func
+            name = func.attr if isinstance(func, ast.Attribute) else (
+                func.id if isinstance(func, ast.Name) else "")
+            if name not in {"copyfile", "copy", "copy2", "copytree", "move"}:
+                continue
+            if {n.id for n in ast.walk(call.args[0]) if isinstance(n, ast.Name)} & loop_variables:
+                return True
+        return False
 
     problems: list[str] = []
     for path in sorted((root / "tests").glob("*.py")):
@@ -373,21 +483,175 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:
             continue
-        consts = {
-            node.targets[0].id: [e.value for e in node.value.elts]
-            for node in tree.body
-            if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Tuple, ast.List))
-            and isinstance(node.targets[0], ast.Name)
-            and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.value.elts)
-        }
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.For):
-                continue
-            names = literal_list(node.iter, consts)
-            if not names:
-                continue
+        # A BINDING IS A BINDING IN THE SCOPE IT IS WRITTEN IN, and a LATER ONE REPLACES AN EARLIER ONE
+        # (agents-1p9g, agents-g7b7, agents-zsum). The resolver is applied PER SCOPE with the innermost
+        # binding winning, so a function-local list SHADOWS a complete module-level one instead of being read
+        # from the outer value; the assignment forms resolve in source order (AugAssign(Add) concatenates onto
+        # the value the name already holds); and a name bound by a shape this resolver cannot read is left
+        # UNRESOLVABLE - neither stale nor shadowed - which the loop header then treats as a case to report.
+        # The alternative was chased three times and it is a losing game: enumerate binding shapes (inline,
+        # then module-level, then shadowing) and each fix leaves the next shape, so the closure is NOT "know
+        # every shape" but "a name you cannot resolve is never read as some other scope's value".
+        def store_names(statement: ast.stmt) -> set[str]:
+            """Names this statement BINDS in the scope it is written in - the single source of that answer.
+
+            Three kinds of binding shape have to be found here, and each one was a measured miss before it was:
+            a Store/Del target (`x = ...`, `del x`, `for x in`, `with ... as x`, an import alias); a def or
+            class, which binds its own NAME here while the bindings inside its body belong to the scope
+            walk_statements opens for it (collecting them here made a NESTED helper that assigns or deletes
+            the same name refuse the OUTER loop - three measured false refusals); and the shapes the AST
+            carries as STRINGS rather than nodes - `except X as name`, which binds name in this scope and
+            deletes it at the end of the handler, and a match capture (`case name`). Both of those were read as
+            the module-level list at a later loop until this pass: measured, the first raises UnboundLocalError
+            and the second iterates the captured object, so a green there was an invented answer.
+            """
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                return {statement.name}
+            found: set[str] = set()
+
+            def walk(current: ast.AST) -> None:
+                for child in ast.iter_child_nodes(current):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                        continue
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
+                        found.add(child.id)
+                    elif isinstance(child, ast.alias):
+                        found.add((child.asname or child.name).split(".")[0])
+                    elif isinstance(child, ast.ExceptHandler):
+                        if child.name:
+                            found.add(child.name)
+                    elif isinstance(child, (ast.MatchAs, ast.MatchStar)):
+                        if child.name:
+                            found.add(child.name)
+                    elif isinstance(child, ast.MatchMapping):
+                        if child.rest:
+                            found.add(child.rest)
+                    walk(child)
+
+            walk(statement)
+            return found
+
+        def binding_values(statement: ast.stmt,
+                           scopes: list[dict[str, list[str] | None]]) -> dict[str, list[str] | None]:
+            """What each name this statement binds HOLDS in this scope, or None when it cannot be read.
+
+            Only the three assignment forms carry a readable value; every other binding shape is already
+            recorded as a bound-but-unreadable name by `store_names`.
+            """
+            if isinstance(statement, ast.Assign):
+                readable = literal_list(statement.value, scopes)
+                return {target.id: readable for target in statement.targets if isinstance(target, ast.Name)}
+            if isinstance(statement, ast.AnnAssign):
+                if not isinstance(statement.target, ast.Name):
+                    return {}
+                readable = None if statement.value is None else literal_list(statement.value, scopes)
+                return {statement.target.id: readable}
+            if isinstance(statement, ast.AugAssign):
+                if not isinstance(statement.target, ast.Name) or not isinstance(statement.op, ast.Add):
+                    return {}
+                current = scopes[-1].get(statement.target.id)
+                added = literal_list(statement.value, scopes)
+                concatenated = current + added if current is not None and added is not None else None
+                return {statement.target.id: concatenated}
+            if isinstance(statement, ast.Delete):
+                # A DELETION is a binding shape too: a name deleted before the loop cannot be read there, and
+                # keeping an earlier value in place would resolve it and read the wrong list - the one shape in
+                # a ten-case stress test of the snapshot position that reported GREEN, found by attacking the
+                # position before review rather than by a fifth round. The invariant it belongs to is agents-n5e0's:
+                # a name bound by a shape this resolver cannot read is UNRESOLVABLE, not earlier and not shadowed.
+                return {node.id: None for node in statement.targets if isinstance(node, ast.Name)}
+            return {}
+
+        def function_parameters(node: ast.AST) -> set[str]:
+            args = node.args
+            names = {argument.arg for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+            for variadic in (args.vararg, args.kwarg):
+                if variadic is not None:
+                    names.add(variadic.arg)
+            return names
+
+        def definition_bindings(node: ast.AST) -> set[str]:
+            """Names the DEFINITION itself binds in the scope it opens: parameters, and PEP 695 type parameters.
+
+            A type parameter is carried as a STRING on its TypeVar node - the same shape as `except ... as name`
+            and a match capture, and just as invisible to a sweep for stored Names. Measured on 3.12: a type
+            parameter IS visible in the function body and in a method of a generic class, holding a TypeVar, so a
+            loop iterating it is not a module list and reading the global there would INVENT an answer.
+            Registering it in the DEFINITION's scope rather than in the enclosing one is what keeps an outer loop
+            over the real module list green: a type parameter does not leak outward, and neither do parameters.
+            """
+            names = function_parameters(node) if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else set()
+            names.update(type_parameter.name for type_parameter in getattr(node, "type_params", None) or [])
+            return names
+
+        def walk_statements(statements: list[ast.stmt], scopes: list[dict[str, list[str] | None]],
+                            found: list[tuple[ast.For, list[dict[str, list[str] | None]]]]) -> None:
+            """Walk ONE statement list IN ORDER, recording each loop with the bindings IN EFFECT AT ITS POSITION.
+
+            THE AXIS IS POSITION, NOT SCOPE (agents-e340, round 4 of review). The previous version built a
+            scope's binding map over the whole statement list and then handed every loop in it the SAME final
+            value, so a function that re-bound the name AFTER the loop had its later, complete list read at the
+            earlier loop - and a missing module reported as covered. Recording a SNAPSHOT per position is what
+            makes "readable WHERE IT SITS" mean something; a name the scope binds but has not yet reached is
+            unresolvable at that point, which the loop header then reports rather than silently resolving.
+
+            Every name the statement list binds is pre-registered as unresolvable, so a binding that appears
+            LATER in the same scope still shadows an outer value at an earlier loop instead of falling through
+            to it; an assignment is applied when its statement is reached, and each statement's nested blocks
+            (bodies, orelse/finalbody, except handlers, match cases) are walked with the snapshot after it.
+            """
+            local: dict[str, list[str] | None] = {}
+            for statement in statements:
+                for name in store_names(statement):
+                    local.setdefault(name, None)
+            for statement in statements:
+                local.update(binding_values(statement, scopes + [local]))
+                here = scopes + [dict(local)]
+                if isinstance(statement, ast.For):
+                    found.append((statement, here))
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scope: dict[str, list[str] | None] = {name: None for name in definition_bindings(statement)}
+                    walk_statements(statement.body, here + [scope], found)
+                    continue
+                if isinstance(statement, ast.ClassDef):
+                    walk_statements(statement.body,
+                                    here + [{name: None for name in definition_bindings(statement)}], found)
+                    continue
+                for field in ("body", "orelse", "finalbody"):
+                    block = getattr(statement, field, None)
+                    if isinstance(block, list) and block:
+                        walk_statements(block, here, found)
+                for handler in getattr(statement, "handlers", None) or []:
+                    walk_statements(handler.body, here, found)
+                for case in getattr(statement, "cases", None) or []:
+                    walk_statements(case.body, here, found)
+
+        loops: list[tuple[ast.For, list[dict[str, list[str] | None]]]] = []
+        walk_statements(tree.body, [], loops)
+        for node, scopes in loops:
+            names = literal_list(node.iter, scopes)
             body = ast.unparse(node)
             if '"lib"' not in body and "'lib'" not in body:
+                continue
+            if names is None:
+                # THE GUARD MUST SAY WHAT IT COULD NOT SEE (agents-n5e0). `if not names: continue` swallowed
+                # this case silently - and an EMPTY literal list with it - so a staging list that could not be
+                # read AT THIS POINT reported the same green as one that was READ AND CHECKED. The two classes
+                # above are handled first: an exhaustive lib-glob cannot be missing a module, so green is
+                # justified; anything else that stages lib modules by name is reported so the author can make it
+                # checkable. Since agents-e340 the wording names the POSITION rather than only "built at
+                # runtime", because a name bound later in the same scope, a shadowing local, a parameter and a
+                # genuinely dynamic expression all arrive here.
+                if stages_every_lib_py(node.iter) or not stages_lib_modules_by_variable(node):
+                    continue
+                problems.append(
+                    f"{path.name}:{node.lineno}: this loop stages lib modules named by a list this guard "
+                    f"cannot read at this point (it is dynamic, re-bound, shadowed, or not yet bound here), so "
+                    f"no requirement can be checked against it and a missing module would pass unnoticed; make "
+                    f"it a literal or a constant bound before the loop, or stage every lib/*.py with a glob, so "
+                    f"the modules the runtime imports can be checked"
+                )
                 continue
             staged = {n[:-3] if n.endswith(".py") else n for n in names}
             if "findings" not in staged and "budget" not in staged:
@@ -440,6 +704,342 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
     def test_every_staging_list_carries_its_runtime_imports(self):
         problems = staged_runtime_missing_modules(ROOT)
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_a_module_level_concatenated_staging_list_is_checked_by_name(self):
+        """agents-1p9g, the reviewer's repro against the first attempt: a binding is a binding.
+
+        The first fix resolved an INLINE concatenation while the consts map still accepted only literal
+        tuple/list assignments, so `MODULES = BASE + ('embargo.py',)` stayed unresolved and the loop
+        iterating it was skipped in silence - the same silent skip, one level up, and the reviewer's repro
+        was exactly that edit to the synthetic suite. So this pin drives the MODULE-LEVEL spelling (and the
+        starred one, which is the third shape the original finding named): findings.py imports lib/extra.py
+        at module scope and neither list stages it.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(modules_expression: str) -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    'BASE = ("findings.py",)\n'
+                    f"MODULES = {modules_expression}\n"
+                    "def build(root):\n    for module in MODULES:\n"
+                    '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        concatenated = staged_tree(findings_source)
+        (concatenated / "tests" / "test_staged.py").write_text(
+            suite('BASE + ("embargo.py",)'), encoding="utf-8")
+        found = "\n".join(staged_runtime_missing_modules(concatenated))
+        self.assertIn("extra.py", found,
+                      "a MODULE-LEVEL concatenation must be checked, not skipped: `MODULES = BASE + (...)` "
+                      "is the reviewer's repro and extra.py is imported at module scope")
+
+        starred = staged_tree(findings_source)
+        (starred / "tests" / "test_staged.py").write_text(
+            suite('[*BASE, "embargo.py"]'), encoding="utf-8")
+        self.assertIn("extra.py", "\n".join(staged_runtime_missing_modules(starred)),
+                      "a spread of a resolvable list is the same binding and is read the same way")
+
+        complete = staged_tree(findings_source)
+        (complete / "tests" / "test_staged.py").write_text(
+            suite('BASE + ("embargo.py", "extra.py")'), encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(complete), [],
+                         "resolution is not refusal: a complete module-level concatenation stays green")
+
+    def test_a_later_binding_replaces_the_earlier_one_instead_of_going_stale(self):
+        """agents-g7b7, found by the independent review of e3c81f23 (P2): a later binding replaces an early one.
+
+        Resolving only plain assignment left the consts map holding the OLD list when a suite re-bound the
+        name, so the guard reported a module MISSING while the staged tree copies it - a false failure, which
+        is worse than the silent skip it replaced. Measured on e3c81f23 before this rule: an AugAssign that
+        COMPLETES the list still reported extra.py missing. The four cases below are the resolution, the
+        incomplete read, the annotated literal, and the honest unreadable re-binding.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(statements: str) -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    'BASE = ("findings.py",)\n'
+                    f"{statements}"
+                    "def build(root):\n    for module in MODULES:\n"
+                    '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(statements: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(suite(statements), encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        self.assertEqual(reported('MODULES = BASE + ("embargo.py",)\nMODULES += ("extra.py",)\n'), "",
+                         "a later `+=` replaces the earlier binding, so the complete list must report nothing")
+
+        incomplete = reported('MODULES = BASE\nMODULES += ("embargo.py",)\n')
+        self.assertIn("extra.py", incomplete, "the one module that is missing must still be named")
+        self.assertNotIn("embargo.py", incomplete,
+                         "the += value is part of the list, so it is not missing")
+
+        self.assertEqual(reported('MODULES: tuple = BASE + ("embargo.py", "extra.py")\n'), "",
+                         "an annotated literal is a binding like any other and must be READ, not refused")
+
+        rebound = reported('MODULES = BASE + ("embargo.py",)\nMODULES = runtime_modules()\n')
+        self.assertIn("cannot read at this point", rebound,
+                      "a re-binding this rule cannot read is reported, not silently checked as its old value")
+
+    def test_a_shadowing_binding_is_read_in_its_own_scope_not_the_outer_one(self):
+        """agents-zsum, round 3 of review: a function-local list SHADOWS a complete module-level one.
+
+        A resolver that collects module-level names and then applies them to EVERY loop in the file reports
+        green when a function re-binds that name: the global list is complete, the LOCAL list the loop
+        actually iterates is not, and extra.py is missing at runtime with nothing said. This was the third
+        binding shape review found in three rounds (inline, module-level, shadowing), so the rule is no longer
+        "know every shape" but "a name is read in the scope that binds it, and a name this rule cannot read
+        there is never read as some other scope's value". Acceptance, run against the reviewed sha e3c81f23
+        rather than asserted: the shadowing case returned [] there (the false green) and names extra.py here;
+        the unshadowed control stays green and a PARAMETER of the same name is reported as unreadable.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+
+        def reported(definition: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + definition, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        shadowed = reported('def build(root):\n    MODULES = ("findings.py", "embargo.py")\n' + copy_loop)
+        self.assertIn("extra.py", shadowed,
+                      "the LOCAL list is the one the loop iterates, so the missing module must be named")
+        self.assertNotIn("cannot read", shadowed,
+                         "the local list is readable, so this is a missing module and not an unreadable list")
+
+        self.assertEqual(reported("def build(root):\n" + copy_loop), "",
+                         "with no local binding the module-level list applies, and it is complete")
+
+        parameter = reported('def build(root, MODULES=("findings.py", "embargo.py")):\n' + copy_loop)
+        self.assertIn("cannot read at this point", parameter,
+                      "a parameter shadows too and its value is unreadable here: report it, do not resolve it")
+
+    def test_the_binding_read_is_the_one_in_effect_at_the_loop_not_the_scope_final_value(self):
+        """agents-e340, round 4 of review: the scope chain read the scope's FINAL binding at every loop.
+
+        A function that re-bound the name AFTER the loop had its later, COMPLETE list read at the earlier loop,
+        so the guard returned [] while findings.py imports lib/extra.py at module scope and the loop staged
+        neither - the false green again, through the wrong axis. A scope map built over the whole statement
+        list and then handed to every loop in it cannot see position at all.
+
+        Acceptance, run against the reviewed sha 9d44125e rather than asserted: [] there (the false green) and
+        extra.py here; the mirror case - the name first bound only AFTER the loop - is reported as unreadable at
+        that point rather than resolved from a binding that has not happened yet.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        module_prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + module_prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        reassigned = reported('def build(root):\n    MODULES = ("findings.py", "embargo.py")\n'
+                              + copy_loop + '    MODULES = ("findings.py", "embargo.py", "extra.py")\n')
+        self.assertIn("extra.py", reassigned,
+                      "the loop reads the binding in effect at ITS position, not the scope's final value")
+        self.assertNotIn("cannot read", reassigned,
+                         "the list at that point is readable, so the missing module is named rather than refused")
+
+        later_only = reported("def build(root):\n" + copy_loop
+                              + '    MODULES = ("findings.py", "embargo.py")\n')
+        self.assertIn("cannot read at this point", later_only,
+                      "a binding that has not been reached yet is reported, not read from a later position")
+
+    def test_a_deleted_name_is_unreadable_at_the_loop_the_way_python_says_it_is(self):
+        """agents-n5e0's invariant, found by stress-testing the snapshot position: a DELETION binds too.
+
+        `del MODULES` anywhere in a function makes the name LOCAL for the whole function, so a loop that runs
+        BEFORE the deletion raises UnboundLocalError - measured with python3 on both orders, not assumed:
+        "loop before a later del" and "loop after a del" both raise it. The guard used to read the module-level
+        list at the loop and could report green for a list that cannot be read at runtime, so a name the scope
+        deletes is registered as UNRESOLVABLE wherever the loop sits: a name bound by a shape this resolver
+        cannot read is refused, never read from an enclosing value.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        before = reported("def build(root):\n" + copy_loop + "    del MODULES\n")
+        after = reported("def build(root):\n    del MODULES\n" + copy_loop)
+        for order, problems in (("before", before), ("after", after)):
+            self.assertIn("cannot read at this point", problems,
+                          f"a deleted name is unreadable at the loop ({order} the del): python raises "
+                          "UnboundLocalError for both orders, so reading a value here would invent one")
+        self.assertNotIn("extra.py", before,
+                         "no module list is read at that loop, so none may be claimed missing from it")
+
+    def test_a_binding_inside_a_nested_scope_does_not_reach_the_outer_loop(self):
+        """A def or class binds its own NAME in this scope; the bindings inside its body belong to the inner one.
+
+        Collecting a nested body's bindings into the enclosing scope made an OUTER loop refuse when a helper
+        merely assigned or deleted the same name - three measured false refusals (nested assignment, nested
+        `del`, nested class body). A refusal sends a reader looking for a problem that does not exist, so the
+        controls below must stay GREEN: in every one of them the outer loop really does read the module-level
+        list at runtime.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        nested_assign = reported('def build(root):\n    def helper():\n        MODULES = ("findings.py",)\n'
+                                 '        return MODULES\n' + copy_loop)
+        self.assertEqual(nested_assign, "",
+                         "a nested function's own binding must not make the OUTER loop refuse")
+
+        nested_del = reported('def build(root):\n    def helper():\n        del MODULES\n' + copy_loop)
+        self.assertEqual(nested_del, "", "the same for a deletion inside the nested function")
+
+        nested_class = reported('def build(root):\n    class Inner:\n        MODULES = ("findings.py",)\n'
+                                + copy_loop)
+        self.assertEqual(nested_class, "", "the same for a nested class body")
+
+        lambda_default = reported('def build(root):\n    fn = lambda M=MODULES: M\n' + copy_loop)
+        self.assertEqual(lambda_default, "", "and a lambda default reads the outer name without binding it")
+
+    def test_the_binding_shapes_the_ast_carries_as_strings_are_bound_too(self):
+        """`except X as name` and a match capture bind the name - measured, neither is the module list.
+
+        The AST carries both names as STRINGS rather than Name(Store) nodes, so a sweep for stored Names missed
+        them and a loop after the construct read the module-level list and reported GREEN. Measured with
+        python3 rather than assumed: after `except ValueError as MODULES:` (raised or not) the name is local to
+        the function and deleted at the end of the handler, so the loop raises UnboundLocalError; and
+        `match 1: case MODULES:` leaves the name holding the captured object, so iterating it raises TypeError.
+        Both are now unresolvable at that loop, which is the guard refusing instead of inventing a value.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        handler = reported('def build(root):\n    try:\n        raise ValueError()\n'
+                           '    except ValueError as MODULES:\n        pass\n' + copy_loop)
+        self.assertIn("cannot read at this point", handler,
+                      "an `except ... as` name is deleted before the loop and must not be read")
+
+        capture = reported('def build(root):\n    match 1:\n        case MODULES:\n            pass\n' + copy_loop)
+        self.assertIn("cannot read at this point", capture,
+                      "a match capture holds the captured object, not the module list")
+
+    def test_a_definitions_own_names_bind_in_its_scope_and_do_not_leak_outward(self):
+        """PEP 695 type parameters AND parameters bind in the DEFINITION's scope; neither leaks outward.
+
+        A type parameter is carried as a STRING on its TypeVar node - the same shape as `except ... as name` and a
+        match capture - so a sweep for stored Names misses it. Measured on the python3.12 this gate runs, not
+        assumed: `def build[MODULES](root): return MODULES` returns the TypeVar, and a method of a generic class
+        sees it too, so a loop iterating it is not a module list and reading the global there INVENTED an answer.
+        The other half is the register-in-the-DEFINITION's-scope choice: a generic def elsewhere in the file must
+        not make a module-level loop refuse, and that case is the control below.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        generic_function = reported("def build[MODULES](root):\n" + copy_loop)
+        self.assertIn("cannot read at this point", generic_function,
+                      "a type parameter holds a TypeVar in the body, so the global must not be read there")
+
+        generic_class = reported('class Builder[MODULES]:\n    def build(self, root):\n'
+                                 '        for module in MODULES:\n'
+                                 '            shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+        self.assertIn("cannot read at this point", generic_class,
+                      "a method of a generic class sees the type parameter too")
+
+        no_leak = reported("def build[MODULES](root):\n    return MODULES\n"
+                           "for module in MODULES:\n"
+                           "    shutil.copyfile(ROOT / \"lib\" / module, root / \"lib\" / module)\n")
+        self.assertEqual(no_leak, "",
+                         "a type parameter does not leak outward, so a module-level loop stays green")
+
+    def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
+        """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
+
+        `if not names: continue` gave the same green to a list this guard READ AND CHECKED and to one it
+        could not read at all, so a helper returning module names - the third shape the original finding
+        named - was invisible; a missing module would have passed unnoticed and reported as clean. The
+        discriminator is the copy call rather than the text of the loop: a loop that copies a lib file whose
+        SOURCE path is built from its own loop variable is a staging loop, and that one is now REPORTED.
+        THE CONTROLS ARE THE POINT, because the blanket version of this check was measured red on healthy
+        loops of this very tree: a loop over an exhaustive `(ROOT/'lib').glob('*.py')` cannot be missing a
+        module (class 2), and a loop over a case table whose copy sources are literals is not a staging loop.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(body: str) -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    "def listed_modules():\n    return (\"findings.py\", \"embargo.py\")\n"
+                    "def build(root):\n" + body)
+
+        runtime_built = staged_tree(findings_source)
+        (runtime_built / "tests" / "test_staged.py").write_text(
+            suite('    for module in listed_modules():\n'
+                  '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n'),
+            encoding="utf-8")
+        problems = staged_runtime_missing_modules(runtime_built)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("test_staged.py", problems[0])
+        self.assertIn("cannot read at this point", problems[0],
+                      "an unreadable staging list must SAY SO rather than report the same green as a "
+                      "list that was checked")
+
+        exhaustive = staged_tree(findings_source)
+        (exhaustive / "tests" / "test_staged.py").write_text(
+            suite('    for source in sorted((ROOT / "lib").glob("*.py")):\n'
+                  '        shutil.copyfile(source, root / "lib" / source.name)\n'),
+            encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(exhaustive), [],
+                         "a list holding every lib/*.py cannot be missing a module, so green is justified "
+                         "rather than a false refusal")
+
+        case_table = staged_tree(findings_source)
+        (case_table / "tests" / "test_staged.py").write_text(
+            suite('    for case, expected in (("a", "b"), ("c", "d")):\n'
+                  '        shutil.copyfile(ROOT / "lib" / "findings.py", root / "lib" / case)\n'),
+            encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(case_table), [],
+                         "the loop variable is an incidental counter, not a module name, so a loop with "
+                         "literal copy sources is not a staging list")
 
     def test_the_guard_names_the_site_and_the_missing_module(self):
         """The case the guard must REJECT, so a green result means something.
