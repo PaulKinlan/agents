@@ -1659,8 +1659,20 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
 
     def test_the_arms_are_not_in_the_script_any_more(self):
         """The move is complete: the script no longer carries the table, it loads the registry. A
-        half-move (arms in both places) is the state where a delivery cannot tell which file to edit."""
-        script = FAST_GATE.read_text(encoding="utf-8")
+        half-move (arms in both places) is the state where a delivery cannot tell which file to edit.
+
+        agents-cup9: COUNT CODE, NOT PROSE - here the blindness runs BOTH ways, which is why this
+        test reads the source with comments filtered rather than raw. Driven before the fix, on
+        tools/fast-gate.sh: a line of prose quoting the old `case "$f" in` header FAILED the
+        assertNotIn below, and deleting every code occurrence of fast_gate_arms_load while leaving
+        a comment that names it PASSED the assertIn below - so a comment could invent a failure and
+        also hide a removal, the second being the worse direction (agents-undf's shape). The filter
+        is the one the registry scan further down already uses, for the same reason: an arm's
+        rationale quotes example paths and calls, and prose is neither a reference nor a call."""
+        script = "\n".join(
+            line for line in FAST_GATE.read_text(encoding="utf-8").split("\n")
+            if not line.lstrip().startswith("#")
+        )
         self.assertNotIn('case "$f" in', script,
                          "the arm table must not come back into tools/fast-gate.sh - it belongs in "
                          "tools/fast-gate-arms.d/ (ADR 0002)")
