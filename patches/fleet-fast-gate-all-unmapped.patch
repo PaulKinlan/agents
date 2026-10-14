@@ -1,0 +1,36 @@
+--- a/remote/fast-gate.sh
++++ b/remote/fast-gate.sh
+@@ -61,6 +61,9 @@
+ if [ -f remote/check-map.tsv ]; then MAP=$PWD/remote/check-map.tsv; else MAP=$HERE/remote/check-map.tsv; fi
+ 
+ suites=()      # basenames (no .test.sh)
++unmapped=()    # agents-u1hd: declared HERE, not inside the delta branch. `--all` and explicit-suite runs
++               # skip that branch, so the check at the tail read an undeclared array and printed
++               # `unmapped: unbound variable` on every such run - while still reporting PASS.
+ add() { for x in "$@"; do [ -n "$x" ] || continue; case " ${suites[*]-} " in *" $x "*) ;; *) suites+=("$x");; esac; done }
+ 
+ if [ ${#EXPLICIT[@]} -gt 0 ]; then
+@@ -81,7 +84,6 @@
+   )
+   if [ -z "$changed" ]; then echo "fast-gate: no changed files (base ${BASE:0:8}) - nothing to run"; exit 0; fi
+ 
+-  unmapped=()
+   while IFS= read -r f; do
+     [ -n "$f" ] || continue
+     # A changed SUITE runs itself: it is the file under test.
+--- a/tests/fast-gate-nongit.test.sh
++++ b/tests/fast-gate-nongit.test.sh
+@@ -31,5 +31,13 @@
+ # a first version grepped for 'test' and found nothing because a basename has no .test.sh in it.
+ L=$(cd "$T" && "$GATE" --list 2>/dev/null | grep -c .)
+ [ "${L:-0}" -ge 2 ] && ok "1d the selection offers the in-scope suites" || bad "1d expected two named suites, got ${L:-0}"
++# agents-u1hd: an ALL=1 run left `unmapped=()` undeclared (it lived in the delta branch this mode skips), so
++# every such run printed `line 152: unmapped: unbound variable` to stderr WHILE reporting PASS. A scary line on
++# stderr next to a PASS is worse than either alone: a lane either distrusts a good gate or learns to ignore the
++# message. The fixture captured stderr all along and simply never looked, which is why this shipped.
++case "$out" in
++  *"unbound variable"*) bad "1e the run must not print an unbound-variable error";;
++  *) ok "1e no unbound-variable error on an ALL=1 run";;
++esac
+ [ "$FAIL" = 0 ] || echo "FAILED $FAIL"
+ [ "$FAIL" = 0 ]
