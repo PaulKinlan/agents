@@ -1214,7 +1214,8 @@ class TestReplacedGenericArmsKeepTheirNamesake(unittest.TestCase):
     CASES = {
         "lib/embargo.py": {
             "namesake": "tests/test_embargo.py",
-            "expected": ['tests/test_embargo.py', 'tests/test_factory_truth.py', 'tests/test_model_rule_id.py', 'tests/test_report_schema.py', 'tests/test_threat_model_prepass.py', 'tests/test_tree_guards.py'],
+            "expected": ['tests/test_embargo.py', 'tests/test_factory_truth.py', 'tests/test_model_rule_id.py', 'tests/test_report_schema.py', 'tests/test_threat_model_prepass.py', 'tests/test_station_candidate_accounting.py',
+                                'tests/test_tree_guards.py'],
         },
         "lib/redaction.py": {
             "namesake": "tests/test_redaction.py",
