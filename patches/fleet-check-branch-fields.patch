@@ -1,0 +1,102 @@
+diff --git a/bin/fleet-check b/bin/fleet-check
+index 6c72b58..14284fd 100755
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -113,7 +113,7 @@ if [ "${1:-}" = --status ]; then   # fleet-efk: resolve the GIVEN sha's tree, ne
+   fi
+ 
+   top=$("${git_cmd[@]}" rev-parse --show-toplevel 2>/dev/null || echo "")
+-  branch=$("${git_cmd[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
++  caller_branch=$("${git_cmd[@]}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+ 
+   tree_unverified=""
+   t=$("${git_cmd[@]}" rev-parse "${target}^{tree}" 2>/dev/null) || {
+@@ -170,12 +170,21 @@ if [ "${1:-}" = --status ]; then   # fleet-efk: resolve the GIVEN sha's tree, ne
+     fi
+     # fleet-8pqa: keep the record's OWN claim about where it ran. `repo` is where the question was asked (the
+     # caller's checkout); `produced_in` is where the suite actually ran, which the old line silently overwrote.
+-    jq -c --arg s "$target" --arg r "$top" --arg b "$branch" \
+-      '. + {asked:$s} + (if $r != "" then (if (.repo // "") != "" and (.repo != $r) then {repo:$r,produced_in:.repo} else {repo:$r} end) else {} end) + (if $b != "" then {branch:$b} else {} end)' "$f"
++    # fleet-npyn (RE-CUT, coord 12:06): there is NO field named `branch` anywhere in this output, and that is
++    # the point. A field called `branch` living in a RECORD while it holds the READER's branch is the original
++    # defect in slower motion: a verdict record is read by many actors, and each would see its own branch in the
++    # same field. Two fields, one meaning each instead:
++    #   produced_branch - the branch the suite actually ran on, a property of the RECORD. It flows through the
++    #                     merge below untouched, so it is present whenever the record knows it (even when it
++    #                     equals the caller's) and ABSENT when it does not, with no guess in either direction.
++    #   caller_branch   - the branch of the checkout ASKING, a property of the READ and not of the record.
++    # A record written before this re-cut has no produced_branch, so it reads caller_branch and nothing else.
++    jq -c --arg s "$target" --arg r "$top" --arg b "$caller_branch" \
++      '. + {asked:$s} + (if $r != "" then (if (.repo // "") != "" and (.repo != $r) then {repo:$r,produced_in:.repo} else {repo:$r} end) else {} end) + (if $b != "" then {caller_branch:$b} else {} end)' "$f"
+   else
+     jq -nc --arg k "$([ -n "$FAST" ] && echo fast || echo full)" --arg t "$t" --arg s "$target" \
+-      --arg r "$top" --arg b "$branch" --arg unv "$tree_unverified" '
+-      {state:"NONE",kind:$k,tree:$t,asked:$s,repo:$r,branch:$b}
++      --arg r "$top" --arg b "$caller_branch" --arg unv "$tree_unverified" '
++      {state:"NONE",kind:$k,tree:$t,asked:$s,repo:$r,caller_branch:$b}
+       + (if $unv != "" then {verified:false,
+            note:($t + " is not a tree object in " + (if $r=="" then "this directory" else $r end)
+                  + ": reported as an uncached tree hash, NOT verified here - if this is a commit sha from another repo, pass --repo <dir>")}
+@@ -351,10 +360,14 @@ if [ -f "$log" ] || [ -f "$rec" ]; then
+   fi
+ fi
+ 
++# fleet-npyn: record the branch the suite ran on, beside repo:$top. Without it the branch a reader sees
++# in --status can only ever be the CALLER's (bin/fleet-check:116), and unlike repo there is nothing to
++# disclose in its place - the producing branch was simply not in the record. See the overlay below.
++prod_branch=$(git -C "$top" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+ jq -nc --arg t "$tree" --arg sha "$sha" --arg l "$lane" --arg c "$CHECK_CMD" --arg log "$log" --arg k "$([ -n "$FAST" ] && echo fast || echo full)" --arg top "$top" \
+   --arg prev_log "$([ -f "$log.1" ] && echo "$log.1" || echo "")" \
+   --arg prev_attempt "${prev_attempt_msg:-}" \
+-  '{state:"RUNNING",kind:$k,tree:$t,sha:$sha,lane:$l,waiters:[$l],cmd:$c,log:$log,repo:$top,at:(now|todate)} + (if $prev_log != "" then {prev_log:$prev_log} else {} end) + (if $prev_attempt != "" then {prev_attempt:$prev_attempt} else {} end)' > "$rec"
++  '{state:"RUNNING",kind:$k,tree:$t,sha:$sha,lane:$l,waiters:[$l],cmd:$c,log:$log,repo:$top,produced_branch:$prod_branch,at:(now|todate)} + (if $prev_log != "" then {prev_log:$prev_log} else {} end) + (if $prev_attempt != "" then {prev_attempt:$prev_attempt} else {} end)' > "$rec"
+ 
+ # Write worker script via heredoc to eliminate quoting hazards (fleet-5bzu)
+ worker_script=$(mktemp "${rec%.json}.worker.XXXXXX.sh" 2>/dev/null || mktemp /tmp/fleet-check-worker.XXXXXX.sh)
+diff --git a/tests/fleet-gate-check.test.sh b/tests/fleet-gate-check.test.sh
+index fba7942..caef239 100755
+--- a/tests/fleet-gate-check.test.sh
++++ b/tests/fleet-gate-check.test.sh
+@@ -2591,6 +2591,42 @@ has "$run8_out" "NOT serving the cached PASS" "23o it says the cached verdict wa
+ has "$run8_out" "$ptree2" "23p naming the record's tree"
+ wait_check "$prec"
+ has "$(jq -r '.tree' "$prec" 2>/dev/null)" "$ptree" "23q and the gate that then ran recorded THIS tree"
++# fleet-npyn (RE-CUT, coord 12:06): there is NO field named `branch` anywhere in this output, and that is the
++# point. A field called `branch` living in a RECORD while it holds the READER's branch is the original defect in
++# slower motion: a verdict record is read by many actors, and each would see its own branch in the same field.
++# Two fields, one meaning each instead - produced_branch is a property of the RECORD (the branch the suite ran
++# on; ABSENT when the record does not know it, never guessed), caller_branch is a property of the READ (the
++# checkout asking). 23-npyn-b is the RE-PINNED reversing assertion: it is what stops the definition drifting
++# back, so it must not be deleted when it starts failing.
++NPYN_WT="$ROOT/npyn-wt"; git -C "$S8_REPO" worktree add -q -b fleet/npyn-probe "$NPYN_WT" "$psha2" 2>/dev/null
++npyn_branch=$( git -C "$NPYN_WT" rev-parse --abbrev-ref HEAD )
++npyn_plant() {  # <produced_branch value, or empty to stand in for a record written before this re-cut>
++  if [ -n "$1" ]; then
++    plant "$HOME/.fleet/checks/$ptree2.fast.json" "{\"state\":\"PASS\",\"kind\":\"fast\",\"tree\":\"$ptree2\",\"sha\":\"abc1234\",\"lane\":\"lane-a\",\"cmd\":\"echo gate-ran\",\"log\":\"x.log\",\"repo\":\"/tmp/produced-elsewhere\",\"produced_branch\":\"$1\",\"at\":\"z\"}"
++  else
++    plant "$HOME/.fleet/checks/$ptree2.fast.json" "{\"state\":\"PASS\",\"kind\":\"fast\",\"tree\":\"$ptree2\",\"sha\":\"abc1234\",\"lane\":\"lane-a\",\"cmd\":\"echo gate-ran\",\"log\":\"x.log\",\"repo\":\"/tmp/produced-elsewhere\",\"at\":\"z\"}"
++  fi
++}
++npyn_plant "fleet/produced-here"
++npyn_out=$( cd "$S8_REPO" && check --fast --status "$ptree2" --repo "$NPYN_WT" )
++has "$npyn_out" "\"caller_branch\":\"$npyn_branch\"" "23-npyn-a the asking checkout's branch is reported as caller_branch"
++hasnt "$npyn_out" '"branch":' "23-npyn-b RE-PINNED: there is NO field named branch at all, which is the guard against this definition drifting back"
++has "$npyn_out" '"produced_branch":"fleet/produced-here"' "23-npyn-c the branch the suite ran on is reported as produced_branch, taken from the record"
++hasnt "$npyn_out" '"branch":"fleet/produced-here"' "23-npyn-d and the producing branch never appears under a bare branch field"
++# What decides produced_branch is whether the RECORD knows it, never whether it differs from the caller's:
++# re-pinned from the r1 assertion that claimed the opposite.
++npyn_plant "$npyn_branch"
++npyn_same=$( cd "$S8_REPO" && check --fast --status "$ptree2" --repo "$NPYN_WT" )
++has "$npyn_same" "\"produced_branch\":\"$npyn_branch\"" "23-npyn-e produced_branch is still present when it EQUALS the caller's branch"
++has "$npyn_same" "\"caller_branch\":\"$npyn_branch\"" "23-npyn-f and caller_branch stands beside it, each field with its own meaning"
++# A record written before this re-cut knows nothing about the producing branch: no guess in either direction.
++npyn_plant ""
++npyn_old=$( cd "$S8_REPO" && check --fast --status "$ptree2" --repo "$NPYN_WT" )
++has "$npyn_old" "\"caller_branch\":\"$npyn_branch\"" "23-npyn-g a pre-fix record still reports the asking branch"
++hasnt "$npyn_old" 'produced_branch' "23-npyn-h and invents no producing branch it cannot know (ABSENT, no guess)"
++hasnt "$npyn_old" '"branch":' "23-npyn-i and still no bare branch field anywhere"
++git -C "$S8_REPO" worktree remove --force "$NPYN_WT" 2>/dev/null
++
+ rm -f "$prec" "$HOME/.fleet/checks/$k40.fast.json" "$HOME/.fleet/checks/$ptree2.fast.json" "$prec.1"
+ 
+ # 24. fleet-j7af: an INNER gate must complete while the slot its parent holds is occupied. The failure this
