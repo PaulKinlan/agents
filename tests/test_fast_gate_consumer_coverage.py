@@ -173,8 +173,15 @@ _STRIP = (
 )
 
 
+@functools.lru_cache(maxsize=None)
 def _strip_code(source):
-    """Remove comments and string literals before looking for imports (see above)."""
+    """Remove comments and string literals before looking for imports (see above).
+
+    MEMOISED BY CONTENT (agents-jn73): it is pure, and the consumer scan asks the same 97 files the same
+    question once per lib module - measured at 2,037 strip passes over 97 distinct sources in one run of
+    this module. Keyed on the source string, so two files with identical text share the answer and any
+    change to the text is a different key.
+    """
     for pattern, repl in _STRIP:
         source = pattern.sub(repl, source)
     return source
@@ -223,7 +230,16 @@ def _why_omitted(module, suite):
     )
 
 
+@functools.lru_cache(maxsize=None)
 def _tracked_test_files(root=None):
+    """The tracked .py files under tests/ (agents-nder: from git's index, never a filesystem walk).
+
+    MEMOISED (agents-jn73): this is a pure function of the tree's INDEX, and the module asks it once per
+    lib module (21 times) plus once per caller of _oracle_importers, which measured as 42 git invocations
+    for one answer that cannot change during a run. A caller that ADDS a tracked file under tests/ must
+    clear it (see test_untracked_debris_is_not_absorbed_by_consumer_coverage), because the cache is keyed
+    on the argument and not on the index - the same condition _importing_suites is already cleared under.
+    """
     root = root or ROOT
     out = subprocess.run(
         ["git", "-C", str(root), "ls-files", "tests"],
@@ -363,6 +379,7 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
         probe.write_text("import unittest\nfrom lib import child_env\n", encoding="utf-8")
         try:
             _importing_suites.cache_clear()
+            _tracked_test_files.cache_clear()
             importers = _importing_suites("child_env")
             self.assertNotIn("tests/test_zz_debris_probe_tmp.py", importers)
             self.assertIn("tests/test_containment.py", importers)
@@ -374,6 +391,7 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
         finally:
             probe.unlink(missing_ok=True)
             _importing_suites.cache_clear()
+            _tracked_test_files.cache_clear()
 
     def test_a_consumer_the_gate_does_not_select_must_be_allowlisted(self):
         failures = []
