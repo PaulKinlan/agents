@@ -1,58 +1,181 @@
 --- a/fleet-heavy
 +++ b/fleet-heavy
-@@ -69,6 +69,82 @@
+@@ -69,6 +69,205 @@
    done 2>/dev/null
  }
  
-+# THE IDENTITY OF EACH HOLDER, AS CLAIMED AT THE MOMENT OF THE SCAN (agents-7vbo). slot_fd_holders
-+# answers WHO holds the slot; this records WHICH PROCESS each pid named, so a later signal can tell
-+# whether the pid still names the same process. A pid is a reusable number; the process is the fact.
-+# Prints "<pid>:<pgrp>:<starttime>" per line - process group (field 5) and start time (field 22) of
-+# /proc/<pid>/stat, the two fields this file already reads by number. A holder whose stat cannot be
-+# read is emitted with empty fields, so the sweep can still NAME it and refuse it rather than forget it.
++# WHICH PROCESS EACH CANDIDATE PID IS, CAPTURED WHILE THE SLOT FD IS STILL IN FRONT OF US (agents-7vbo,
++# agents-g966). slot_fd_holders lists WHO MIGHT hold the slot; that list is a claim about the past,
++# because a pid is a reusable number. So this re-observes the slot fd for each candidate and reads the
++# identity of the process holding it IN THE SAME PASS: only a pid that still has the slot open is given
++# an identity, so a number that was recycled between the candidate scan and this pass is REFUSED rather
++# than recorded as the expected process. Prints "<pid>:<pgrp>:<starttime>" - process group (field 5) and
++# start time (field 22) of /proc/<pid>/stat, the two fields this file already reads by number.
 +slot_fd_holder_ids() {  # <i> -> "<pid>:<pgrp>:<starttime>" per line
-+  local i=$1 p pg st
++  local i=$1 p f t pg st slot="${dir:-/nonexistent}/slot$i"
 +  for p in $(slot_fd_holders "$i"); do
++    p=${p%%:*}
++    case "$p" in ''|*[!0-9]*) continue ;; esac
 +    [ "$p" = "$$" ] && continue
-+    pg=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null)
++    t=""
++    for f in "/proc/$p"/fd/*; do
++      t=$(readlink "$f" 2>/dev/null) || { t=""; continue; }
++      [ "$t" = "$slot" ] && break
++      t=""
++    done
++    if [ "$t" != "$slot" ]; then
++      echo "fleet-heavy: slot$i: REFUSING pid $p - it does not hold the slot now, so it is not the holder the scan saw (a stale or recycled pid)" >&2
++      continue
++    fi
++    pg=$(awk '{print $5}'  "/proc/$p/stat" 2>/dev/null)
 +    st=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null)
 +    printf '%s:%s:%s\n' "$p" "$pg" "$st"
 +  done
 +}
 +
-+# RELEASE A SLOT A FINISHED JOB LEFT TO ITS DESCENDANTS, WITHOUT SIGNALLING A PID THAT NO LONGER
-+# NAMES THE PROCESS THE SWEEP FOUND (agents-7vbo).
++# RELEASE A SLOT A FINISHED JOB LEFT TO ITS DESCENDANTS, WITHOUT SIGNALLING A PID THAT NO LONGER NAMES
++# THE PROCESS THE SWEEP FOUND (agents-7vbo, agents-g966).
 +#
-+# slot_fd_holders scans /proc, and the scan's own pipeline INHERITS the slot fd, so its forks are in
-+# the list. Those forks are gone by the time this runs - measured on this VM: every gate, including
-+# gates that leaked nothing, reported already-dead pids (the scan's own `grep`/`tr`/subshell). So the
-+# old `kill -TERM $leaked` was aimed at numbers that no longer existed, and between the scan and the
-+# signal the kernel may RECYCLE one: the line meant to recover a slot then TERMs an unrelated process,
-+# and its symptom (a mysteriously killed gate, a lane dying at SIGTERM) appears in some other lane's
-+# job, so every diagnostic starts from a false location. A remembered pid is a claim about the past.
++# slot_fd_holders scans /proc, and the scan's own pipeline inherits the slot fd, so its list is usually
++# the scan's already-dead forks. The old `kill -TERM $leaked` aimed at those numbers, and the kernel may
++# RECYCLE one in between, so the line meant to recover a slot TERMs an unrelated process. Acting on a
++# remembered number is CHECK-THEN-ACT with TWO windows, and a re-read alone cannot close either:
++#   (a) SCAN-TO-CAPTURE: the pid is collected by the scan, then /proc/<pid>/stat is read separately; if
++#       the scanned process dies and its pid is reused before that read, the UNRELATED new process
++#       becomes the expected identity - exactly the bead agents-g966 reproduction.
++#   (b) CAPTURE-TO-SIGNAL: even a correctly captured identity is checked, then the kill lands; a pid that
++#       passed the check can still be recycled in that gap.
++# Window (a) is closed by capturing identity IN THE SAME PASS as the observation (slot_fd_holder_ids
++# above): a candidate gets an identity only while it still holds the slot fd, so a recycled number -
++# which does not hold the slot - is refused, not captured. Window (b) is closed by SIGNALLING THROUGH A
++# PIDFD: pidfd_open() binds the process OBJECT (not the number) and pidfd_send_signal() delivers to that
++# object, so once the handle is held a recycled pid CANNOT be signalled - the kernel answers ESRCH, it
++# never redirects to the number's new owner. Binding, checking and signalling happen in one pass in the
++# helper below, so the identity check cannot be separated from the signal by a recycle.
 +#
-+# So re-read the identity NOW and signal ONLY a pid whose /proc/<pid>/stat still reports the process
-+# group AND start time recorded at the scan. A pid with no /proc entry is skipped (it is gone); a pid
-+# whose identity changed is REFUSED and NAMED, so a recycled pid is observable rather than silent.
-+# This is the standard the preemption path sets with `ps -o pgid= -p ...` and `kill -0 -"$pg"`: the
-+# test is a fact read from the live process, not liveness of a remembered number.
++# Measured on this VM (python3 3.12.3): os.pidfd_open and signal.pidfd_send_signal are both present, and
++# a pidfd whose process has exited answers ESRCH to signal 0, to SIGTERM and to SIGKILL. On a host
++# without the primitive the helper exits 2 and the re-checked kill below runs instead, which keeps its
++# check-to-signal window.
 +#
-+# START TIME IS THE DISCRIMINATOR, process group is corroboration. Measured on this VM: a genuine
-+# leaked descendant is often setsid-detached with its OWN process group (the reclaim test leaks
-+# exactly such a holder), so keying on the JOB's pgid would REFUSE a real leak; the scan's own forks
-+# share OUR group, so that same key would ACCEPT the phantom. Field 22 cannot change for a live
-+# process, so it is the identity, and field 5 is checked alongside it as the file's other field.
++# START TIME IS THE DISCRIMINATOR, process group is corroboration. Measured on this VM: a genuine leaked
++# descendant is often setsid-detached with its OWN process group (the reclaim test leaks exactly such a
++# holder), so keying on the JOB's pgid would REFUSE a real leak; the scan's own forks share OUR group, so
++# that same key would ACCEPT the phantom. Field 22 cannot change for a live process, so it is the
++# identity, and field 5 is checked alongside it as the file's other field. The pidfd is still validated
++# against BOTH the start time and the fd before use, so a number that recycled between the scan and the
++# bind is refused there too.
 +#
 +# Only the verified PIDS are signalled, never a process group: a group derived from a verified pid is
 +# still a group, and widening one accused pid to its whole group takes bystanders the fd test never
-+# accused. TERM -> KILL is a second window to recycle, so identity is re-checked before the KILL.
++# accused.
 +signal_leaked_holders() {  # <i> -> 0 if it signalled a live descendant
-+  local i=$1 ids v p pg st np ng verified="" kill_list=""
++  local i=$1 ids rc v p pg st np ng verified="" kill_list=""
 +  ids=$(slot_fd_holder_ids "$i")
 +  [ -n "$ids" ] || return 1
++  if command -v python3 >/dev/null 2>&1; then
++    SWEEP_IDS="$ids" SWEEP_SLOT="${dir:-/nonexistent}/slot$i" SWEEP_I="$i" python3 - <<'SWEEP_PIDFD_PY'
++import os, signal, sys, time
++
++slot = os.environ["SWEEP_SLOT"]
++idx = os.environ.get("SWEEP_I", "?")
++if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
++    sys.exit(2)                        # primitive absent: the caller uses its re-checked-kill fallback
++
++def stat_fields(pid):
++    # fields after "comm)": rest[0] is field 3 (state), so field N is rest[N - 3]
++    try:
++        with open("/proc/%d/stat" % pid, "rb") as fh:
++            return fh.read().rsplit(b")", 1)[1].split()
++    except (OSError, IndexError):
++        return None
++
++def ancestors(pid):
++    seen = set()
++    cur = pid
++    while cur and cur not in seen:
++        seen.add(cur)
++        f = stat_fields(cur)
++        if f is None:
++            break
++        try:
++            cur = int(f[1])            # field 4 = ppid
++        except (IndexError, ValueError):
++            break
++    return seen
++
++def holds_slot(pid):
++    try:
++        for fd in os.listdir("/proc/%d/fd" % pid):
++            try:
++                if os.readlink("/proc/%d/fd/%s" % (pid, fd)) == slot:
++                    return True
++            except OSError:
++                pass
++    except OSError:
++        pass
++    return False
++
++me = ancestors(os.getpid())            # never signal ourselves or the shell that spawned us
++live = []
++for rec in os.environ.get("SWEEP_IDS", "").splitlines():
++    rec = rec.strip()
++    if not rec:
++        continue
++    parts = rec.split(":")
++    try:
++        pid = int(parts[0])
++    except ValueError:
++        continue
++    want = parts[2] if len(parts) > 2 else ""
++    if pid in me:
++        continue
++    try:
++        pfd = os.pidfd_open(pid)       # binds the process OBJECT; a dead pid answers OSError/ESRCH
++    except OSError:
++        sys.stderr.write("fleet-heavy: slot%s: pid %d held the slot when swept but no longer names a process - gone, not signalling it\n" % (idx, pid))
++        continue
++    f = stat_fields(pid)
++    now = f[19].decode() if f is not None and len(f) > 19 else ""
++    if not want or now != want or not holds_slot(pid):
++        sys.stderr.write("fleet-heavy: slot%s: REFUSING pid %d - not the process the sweep found or it no longer holds the slot now (start time was %s, now %s): a recycled or replaced pid\n" % (idx, pid, want or "?", now or "gone"))
++        os.close(pfd)
++        continue
++    live.append((pid, pfd))
++if not live:
++    sys.exit(3)                        # nothing left to signal; not an error, and not a kill
++sys.stderr.write("fleet-heavy: warning - descendants still held slot%s after the job finished (%s); killing them so the slot is released\n"
++                 % (idx, " ".join(str(p) for p, _ in live)))
++for _, pfd in live:
++    try:
++        signal.pidfd_send_signal(pfd, signal.SIGTERM)
++    except OSError:
++        pass
++time.sleep(1)
++for _, pfd in live:
++    try:
++        signal.pidfd_send_signal(pfd, signal.SIGKILL)
++    except OSError:
++        pass
++for _, pfd in live:
++    os.close(pfd)
++sys.exit(0)
++SWEEP_PIDFD_PY
++    rc=$?
++    case "$rc" in
++      0) return 0 ;;
++      2) : ;;                          # no pidfd primitive: fall through to the re-checked kill
++      3) return 1 ;;
++      *) : ;;                          # unexpected helper failure: do not leak the slot, fall back
++    esac
++  fi
++  # FALLBACK - only reached when the pidfd primitive is absent or the helper could not run. Identity is
++  # re-read IMMEDIATELY before EACH signal and only a match is killed. This NARROWS but does not close
++  # window (b): between this check and the kill the pid can still be recycled, which is why the pidfd
++  # path above is the one that runs when it is available.
 +  while IFS=: read -r p pg st; do
 +    [ -n "$p" ] || continue
-+    np=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null)
++    np=$(awk '{print $5}'  "/proc/$p/stat" 2>/dev/null)
 +    ng=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null)
 +    if [ -z "$ng" ]; then
 +      echo "fleet-heavy: slot$i: pid $p held the slot when swept but no longer names a process - gone, not signalling it" >&2
@@ -83,7 +206,7 @@
  # RECLAIM A SLOT ABANDONED BY A DEAD WRAPPER (measured 2026-10-12 on the hub: the single heavy slot was held
  # 34 minutes by two gate workers from /tmp/tmp.I6i63vUAqR - a TEST FIXTURE HOME that no longer existed. Their
  # wrapper was gone, they had been reparented to init, and they held the inherited fd, so flock said "held"
-@@ -197,11 +273,11 @@
+@@ -197,11 +396,11 @@
          # minutes, blocking every gate on the VM, their wrapper long gone.
          # So before releasing, sweep anything that is holding the slot and is not us. This is the source fix;
          # reclaim_abandoned_slot() is the safety net for holders that pre-date it.
@@ -92,10 +215,10 @@
 -          echo "fleet-heavy: warning - descendants still held slot$i after the job finished ($leaked); killing them so the slot is released" >&2
 -          kill -TERM $leaked 2>/dev/null; sleep 1; kill -KILL $leaked 2>/dev/null
 -        fi
-+        # agents-7vbo: A PID REMEMBERED FROM A SCAN IS A CLAIM ABOUT THE PAST - re-derive identity at
-+        # the moment of use and signal only what still matches. A dead pid is skipped; a recycled one is
-+        # refused and named. See signal_leaked_holders for why the start time is the field that can tell
-+        # them apart, and why the sweep must not claim a recovery it did not perform.
++        # agents-7vbo, agents-g966: A PID REMEMBERED FROM A SCAN IS A CLAIM ABOUT THE PAST. Capture the
++        # identity while the slot fd is still open, signal the PROCESS (a pidfd), and refuse anything
++        # that no longer matches: a recycled pid is named and skipped rather than TERMed. See
++        # signal_leaked_holders for the two check-then-act windows and how each is closed.
 +        signal_leaked_holders "$i"
          rm -f "$dir/slot$i.who"; exit $rc
        fi
