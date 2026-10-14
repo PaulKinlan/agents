@@ -22,8 +22,9 @@ WHAT IS PINNED HERE. Each case is a way the change could be WRONG rather than me
     and the module is named) rather than which of the two checks fires.
   * a failing module is NAMED, but not in the `fast-gate: failed:` marker: that payload is read token by
     token as SUITE NAMES (agents-lgdv), so the culprit goes on a `fast-gate: FAIL:` diagnostic instead.
-  * the worker count cannot be configured into a wrong value: 0 or unset means the default, and the default
-    is bounded by both this VM's cores and the size of the selection.
+  * the worker count cannot be configured into a wrong value: 0 or unset means the default, the default is
+    bounded by both this VM's cores and the size of the selection, and a run invoked FROM a shard stays
+    serial instead of fanning out again - the outer run already holds the heavy slot.
 
 The fixtures are tiny synthetic unittest packages in their own git repository - the technique
 tests/test_full_gate_sharding.py uses for the full gate - so a case costs milliseconds and nothing here
@@ -68,6 +69,11 @@ class TestFastGateShardsItsSelection(unittest.TestCase):
     def _run(self, dry_run=True, **settings):
         env = dict(os.environ, FLEET_CHECKS_DIR=str(self.root / "checks"), GIT_CHANGED=CHANGED)
         env.pop("FAST_GATE_DRY_RUN", None)
+        # The runner marks its shard children so a nested gate does not fan out again. This test runs
+        # INSIDE a shard when the real gate selects it, so without popping the marker every case below
+        # would assert the serial shape instead of the default one. Same reason, same shape, as
+        # tests/test_full_gate_sharding.py popping FULL_GATE_SHARD_CHILD.
+        env.pop("FAST_GATE_SHARD_CHILD", None)
         if dry_run:
             env["FAST_GATE_DRY_RUN"] = "1"
         env.update({k: str(v) for k, v in settings.items()})
@@ -173,6 +179,28 @@ class TestFastGateShardsItsSelection(unittest.TestCase):
             "the module that ran nothing is named on a diagnostic line rather than only inside the marker",
         )
         self.assertNotIn("fast-gate: passed:", proc.stdout, "nothing may be published as passed")
+
+    def test_a_nested_run_stays_serial_unless_a_width_is_asked_for(self):
+        """A gate invoked from inside a shard defaults to 1 worker, and an explicit width still wins.
+
+        MEASURED MOTIVATION: one own-delta run wrote EIGHT nested summaries into the checks directory,
+        because the mapping and consumer-coverage suites invoke the real gate. Before sharding each of
+        those nested runs was one process; without this bound a sharded outer run could reach four lanes
+        times four nested workers, on a VM whose heavy budget is a single slot.
+        """
+        selection = self._with_stubs()
+        nested = self._run(dry_run=False, FAST_GATE_SHARD_CHILD=1)
+        self.assertEqual(nested.returncode, 0, nested.stderr)
+        self.assertIn(
+            f"{len(selection)} module(s), 1 worker(s)", nested.stderr,
+            "a nested gate run is serial: the outer run has already spent the slot's budget",
+        )
+        explicit = self._run(dry_run=False, FAST_GATE_SHARD_CHILD=1, FAST_GATE_SHARDS=2)
+        expected = min(2, len(selection))
+        self.assertIn(
+            f"{len(selection)} module(s), {expected} worker(s)", explicit.stderr,
+            "an explicit FAST_GATE_SHARDS is the operator's decision and still applies",
+        )
 
     def test_the_default_worker_count_is_bounded_by_this_vm_and_by_the_selection(self):
         selection = self._with_stubs()

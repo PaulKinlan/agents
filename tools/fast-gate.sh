@@ -699,9 +699,19 @@ try:
 except ValueError:
     workers = 0
 if workers < 1:
-    # Shared-VM restraint (coord, agents-8ibx): this VM reports nproc=8 and runs seven lanes, and the
-    # single heavy slot is the budget - so four is the default and FAST_GATE_SHARDS is the override.
-    workers = min(4, os.cpu_count() or 1)
+    if os.environ.get("FAST_GATE_SHARD_CHILD"):
+        # A NESTED gate run: one invoked by a test that a shard is already running (the mapping and
+        # consumer-coverage suites invoke the real gate repeatedly). It defaults to SERIAL, because the
+        # outer run already holds the heavy slot's budget - without this, four lanes x up to four nested
+        # workers is about sixteen processes where the unsharded gate had four, which is the restraint
+        # coord's constraint (d) names. Measured motivation: one own-delta run wrote EIGHT nested summaries
+        # from the mapping tests alone. tools/full-gate.sh marks its shard children (FULL_GATE_SHARD_CHILD)
+        # for the same reason, and its test harness pops that marker for the same reason.
+        workers = 1
+    else:
+        # Shared-VM restraint: this VM reports nproc=8 and runs seven lanes, and the single heavy slot is
+        # the budget - so four is the default and FAST_GATE_SHARDS is the operator's override.
+        workers = min(4, os.cpu_count() or 1)
 workers = max(1, min(workers, len(modules)))
 
 
@@ -732,8 +742,11 @@ live_lock = threading.Lock()
 
 def run_module(module):
     start = time.monotonic()
+    # FAST_GATE_SHARD_CHILD marks this process as a shard of a run that already holds the heavy slot, so a
+    # gate a suite invokes from here stays serial instead of fanning out again (see the worker default).
     proc = subprocess.Popen([sys.executable, "-u", "-m", "unittest", "-v", module],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            env=dict(os.environ, FAST_GATE_SHARD_CHILD="1"))
     with live_lock:
         live[module] = proc
     try:
