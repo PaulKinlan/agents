@@ -1,0 +1,50 @@
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -30,6 +30,8 @@
+   case "$_a" in
+     --fast) FAST=1 ;;
+     --full) FORCE_FULL=1 ;;   # the explicit "yes, I mean the full gate" for a non-merger lane
++    --rerun) RERUN_ASKED=1; RERUN_REASON="" ;;   # agents-5q0w: a deliberate, recorded re-run
++    --rerun=*) RERUN_ASKED=1; RERUN_REASON="${_a#*=}" ;;
+     *) _args+=("$_a") ;;
+   esac
+ done
+@@ -256,6 +258,24 @@
+ fi
+ 
+ exec 9>"$C/$tree.lock"; flock 9
++# agents-5q0w: a re-run is requested deliberately, with a reason, and only for a FAILED tree. The prior
++# verdict is NOT discarded: the fleet-0cxr rotation below already moves the old record and log aside as
++# <rec>.1 before the new run is recorded, so the failure this re-run questions stays in the evidence.
++# A re-run of a cached PASS is refused: it would spend the fleet's scarcest resource to learn nothing.
++if [ -n "${RERUN_ASKED:-}" ] && [ -z "${RERUN_REASON:-}" ]; then
++  echo "fleet-check: refusing --rerun without a reason: give one, e.g. --rerun=\"the broker test lost its socket race under shards\". A re-run that records no reason is indistinguishable from hiding a regression, which is why the reason is required." >&2
++  exit 2
++fi
++if [ -n "${RERUN_REASON:-}" ]; then
++  case $(state) in
++    FAIL)
++      # the attribution goes into the record IN PLACE, in the tool's own idiom, so it survives into ${rec}.1
++      jq --arg r "$RERUN_REASON" --arg b "$lane" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
++        '.rerun_reason = $r | .rerun_by = $b | .rerun_at = $t | .reruns = ((.reruns // 0) + 1)' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
++      echo "fleet-check: re-running the gate for this tree at $lane's request (reason: $RERUN_REASON). The prior FAIL verdict and this attribution are preserved at ${rec}.1, not replaced." ;;
++    PASS) echo "fleet-check: refusing --rerun: this tree has a cached PASS, and re-running a passing tree spends the single heavy slot to learn nothing." >&2; exit 2 ;;
++  esac
++fi
+ case $(state) in
+   PASS) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
+           # fleet-8pqa: a cached PASS is a verdict for the TREE it was produced against, so ask the artifact
+@@ -303,10 +323,12 @@
+           echo "fleet-check: cached PASS was for a different command; re-running gate"
+         fi ;;
+   FAIL) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
++    if [ -n "${RERUN_REASON:-}" ]; then :; else
+           # agents-dbit: recorded here too. A cached FAIL handed to a second lane is the same silent transfer of
+           # one lane's evidence to another as a cached PASS.
+           jq --arg l "$lane" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.reserves = ((.reserves // 0) + 1) | .reserved_by = ((.reserved_by // {}) | .[$l] = ((.[$l] // 0) + 1)) | .reserved_last = {lane:$l, at:$t}' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+-          jq -r '"fleet-check: FAIL (cached, exit \(.rc)) for this exact tree: ran by \(.lane) at \(.at). Log: \(.log). Re-serves recorded: " + (if .reserves == null then "UNRECORDED (no reserve count in this record)" else "\(.reserves) time(s) by \((.reserved_by // {}) | to_entries | map("\(.key)=\(.value)") | join(", "))" end) + ". Re-running cannot change a deterministic failure: fix and commit. (Flaky? delete " + input_filename + " and re-run.)"' "$rec"; exit 1
++          jq -r '"fleet-check: FAIL (cached, exit \(.rc)) for this exact tree: ran by \(.lane) at \(.at). Log: \(.log). Re-serves recorded: " + (if .reserves == null then "UNRECORDED (no reserve count in this record)" else "\(.reserves) time(s) by \((.reserved_by // {}) | to_entries | map("\(.key)=\(.value)") | join(", "))" end) + ". Fix and commit, or, if you are claiming this was transient, re-run it deliberately with --rerun=\"why\" - that runs the gate once more and records your reason, your lane, and the prior verdict preserved at <record>.1. A re-run is not free and cannot change a real regression, so it is yours to justify. (A cached PASS needs none: delete " + input_filename + " and re-run.)"' "$rec"; exit 1
++        fi
+         fi ;;
+   RUNNING) if kill -0 "$(jq -r .pid "$rec")" 2>/dev/null; then
+              jq --arg l "$lane" '.waiters += [$l] | .waiters |= unique' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
