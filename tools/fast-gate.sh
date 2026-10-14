@@ -338,6 +338,51 @@ fast_gate_arms_load() {
 
 fast_gate_arms_load || exit 1
 
+# A REPO-WIDE INVARIANT IS INVISIBLE TO A PER-PATH ARM (agents-wsiv), WHICH IS WHY IT IS KEYED HERE RATHER
+# THAN IN THE REGISTRY. Arms are first-match-wins, so no fragment can express "this path ALSO needs suite X":
+# the measured case is agents-ssyq's tool, which HAD its own exact-path arm at 300 and still never ran the
+# retention inventory - an unenumerated rm -rf inside it passed the fast gate on two tips (be8a9aa2, d43470ab,
+# 147 tests green) and was caught only by the full gate at merge. A blanket `tools/*.sh` arm was written and is
+# strictly worse: it claims every tools path, so the loud unmatched failure above loses its prompt for a whole
+# directory and a new tools script would go green against the inventory alone. The guard
+# test_unmatched_gate_config_path_refuses_loudly_with_actionable_guidance (agents-ows4/dtj6/iwm5) caught that,
+# correctly, which is why the classes are DECLARED ONCE AND READ here instead of claimed as paths.
+#
+# The suite is added only when a changed path is in a class the inventory scans, so the check is paid at the
+# moment it can be wrong rather than on every gate (a permanent 0.50s tax on every fast gate is a design smell).
+#
+# TWO FACTS, DECLARED TOGETHER AND READ SEPARATELY (agents-wsiv, coord's option (c)). COVERAGE and SELECTION are
+# not the same question, and collapsing them is what made the first version of this change wrong:
+#
+#   COVERAGE  - which changed paths COULD violate the invariant - which is also the question the drift guard
+#               asks: is this declared set COMPLETE against lib/retention.py's own scanner? Pointing the guard at
+#               the selection set instead is how the pinned coverage property got weakened once already, and why
+#               the two are separate constants rather than one.
+#   SELECTION - which of those paths must THIS dispatch add the suite for? Only the ones nothing else reaches.
+#
+# THE SELECTION SET IS NARROW ON PURPOSE. Selection in this gate is IMPORT-DRIVEN and the arm table already does
+# that correctly: a change under lib/ that the inventory's own suite imports is selected through its importer
+# (lib/retention.py selects it today), while tests/test_fast_gate_importer_boundaries pins that a change to
+# lib/egress_proxy.py must NEVER select tests/test_retention.py - it holds only a textual inventory entry, it
+# does not import the module, and selecting it for every egress change spends full-gate time on the fast path
+# (agents-6vev). So lib/egress_proxy.py is COVERED BUT NOT SELECTED. What NO arm and NO importer can reach is the
+# shell scripts outside tests/ - exactly the measured failure (agents-ssyq's tool had its own exact-path arm at
+# 300 and the inventory still never ran for it) - and that is what SELECTION adds here.
+#
+# The check is paid only when SELECTION fires, so the invariant is enforced at the moment it can be wrong rather
+# than as a permanent 0.50s tax on every fast gate.
+#
+# THIS IS AN EDIT TO tools/fast-gate.sh, the file ADR 0002 section 4 singles out, deliberately rather than by
+# avoidance: the registry cannot express the rule. It adds no arm, no fragment, and no path->suite pair, and
+# changes no registry semantics. tests/test_fast_gate_mapping.py READS BOTH CONSTANTS OUT OF THIS FILE - so this
+# is the single place the facts are declared - and asserts (a) coverage is COMPLETE against the inventory's own
+# scanner, (b) selection is a SUBSET of coverage, and (c) the fail-closed guard above still fires for an
+# unmatched path.
+inventory_scanned_classes="factory lib agents tools .github"   # COVERAGE: what lib/retention.py scans
+inventory_selected_classes="tools"                             # SELECTION: what nothing else can reach
+inventory_script_suffix="sh"                                   # *.sh outside tests/ - true of BOTH sets
+inventory=""
+
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   # First match wins, across fragments in their pinned order - the semantics the single `case` had.
@@ -380,6 +425,17 @@ while IFS= read -r f; do
         fi
       fi
     fi
+  fi
+  # CLASS KEY (agents-wsiv): does this changed path fall in a class the repo-wide inventory scans? The classes
+  # are declared once, above this loop, and read here. No `case` over the changed path: the registry owns
+  # path->suite pairs and tests/test_fast_gate_mapping.py refuses that shape in this file.
+  for _fast_gate_class in $inventory_selected_classes; do
+    if [ "${f%%/*}" = "$_fast_gate_class" ]; then
+      inventory="tests/test_retention.py"
+    fi
+  done
+  if [ "${f##*.}" = "$inventory_script_suffix" ] && [ "${f#tests/}" = "$f" ]; then
+    inventory="tests/test_retention.py"
   fi
 done <<< "$changed"
 
@@ -442,7 +498,7 @@ if [ -z "$run" ] && [ -z "$mapped" ]; then
   mapped="tests/test_factory_core.py"
 fi
 
-if ! files="$(printf '%s\n' $run $mapped $tree_guards $consumer_coverage | awk 'NF && !seen[$0]++' | sort)"; then
+if ! files="$(printf '%s\n' $run $mapped $tree_guards $consumer_coverage $inventory | awk 'NF && !seen[$0]++' | sort)"; then
   echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
   echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
   exit 1
