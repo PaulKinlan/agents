@@ -659,15 +659,27 @@ class TestAdapters(unittest.TestCase):
         root git can still answer for, relative to it - and never in lib/adapters/ itself, so a gate that
         runs this probe cannot record STALE for a tree nobody touched (agents-fxg2).
         """
-        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        # (agents-ug3a) Same scratch-repo relocation as the sibling probes: a temp dir at the checkout root
+        # cannot clean up if the runner is killed, `tmp*/` has no root ignore rule, and the decoy it writes
+        # was therefore committable. The glob below is still the OLD instrument and must still see the decoy,
+        # so the red half of this test is unchanged; the census must return only what the scratch index
+        # tracks.
+        with tempfile.TemporaryDirectory() as tmp:
             probe = Path(tmp)
+            git = ["git", "-C", str(probe), "-c", "user.email=t@t", "-c", "user.name=t",
+                   "-c", "commit.gpgsign=false"]
+            subprocess.run(["git", "init", "-q", str(probe)], check=True, capture_output=True)
             (probe / "lib" / "adapters").mkdir(parents=True)
+            tracked = probe / "lib" / "adapters" / "zreal_probe.sh"
+            tracked.write_text("#!/bin/sh\n", encoding="utf-8")
+            subprocess.run(git + ["add", "."], check=True, capture_output=True)
+            subprocess.run(git + ["commit", "-qm", "seed"], check=True, capture_output=True)
             (probe / "lib" / "adapters" / "zz_probe_tmp.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             globbed = {p.stem for p in (probe / "lib" / "adapters").glob("*.sh")}
-            self.assertEqual(globbed, {"zz_probe_tmp"},
+            self.assertEqual(globbed, {"zreal_probe", "zz_probe_tmp"},
                              "the filesystem glob this replaces must see the untracked decoy")
-            self.assertEqual(adapter_script_stems(probe), set(),
-                             "the tracked census must not absorb a file git does not track")
+            self.assertEqual(adapter_script_stems(probe), {"zreal_probe"},
+                             "the tracked census must return the tracked script and not what git does not track")
         # ...and on the real checkout it is exactly the shipped set.
         self.assertEqual(adapter_script_stems(), set(ENGINE_TOOL_POLICIES))
 

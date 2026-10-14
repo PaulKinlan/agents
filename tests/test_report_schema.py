@@ -124,24 +124,37 @@ def _tracked_report_schemas(root: Path = FACTORY_ROOT, *, require_nonempty: bool
 
 class TestDeclaredSchema(unittest.TestCase):
     def test_report_schemas_ignores_untracked_debris(self):
-        """A check must read git's objects rather than the filesystem (agents-jcd2).
+        """A check must read git's objects rather than the filesystem (agents-jcd2, agents-ug3a).
 
         Untracked debris matching agents/*/report.schema.json must not be absorbed.
         """
-        # The decoy sits in a temp directory at the REPO ROOT, never directly under agents/: creating a
-        # directory inside a tracked directory (agents/ has the tracked symlink skills pointing at it)
-        # moves its ctime, and a gate that runs this suite then records STALE for an untouched tree
-        # (agents-fxg2). A temp dir at the root is invisible to that witness - only tracked files and
-        # symlink targets are stat'ed - and the assertion keeps its teeth: a filesystem-based
-        # implementation asked about THIS root would still find the decoy and fail.
-        with tempfile.TemporaryDirectory(dir=FACTORY_ROOT) as tmp:
+        # The probe root is a scratch git repository OUTSIDE the checkout (agents-ug3a). The decoy must not be
+        # written under the checkout at all: a TemporaryDirectory(dir=FACTORY_ROOT) cannot run its cleanup if the
+        # process is SIGKILLed or the runner times out, `tmp*/` has no root ignore rule, and an interrupted run
+        # therefore left a committable temp directory for a later `git add -A` to capture. Nothing is written
+        # under the checkout now, so the ctime/STALE witness concern of agents-fxg2 cannot arise either. The
+        # assertion keeps its teeth because the decoy is still written and still on disk - a filesystem-based
+        # implementation asked about this root would find it and fail - while the reader sees only what the
+        # scratch index tracks.
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            git = ["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t",
+                   "-c", "commit.gpgsign=false"]
+            subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+            tracked = root / "agents" / "zreal_probe"
+            tracked.mkdir(parents=True)
+            (tracked / "report.schema.json").write_text("{}", encoding="utf-8")
+            subprocess.run(git + ["add", "."], check=True, capture_output=True)
+            subprocess.run(git + ["commit", "-qm", "seed"], check=True, capture_output=True)
             debris = root / "agents" / "zz_debris_probe_tmp"
-            debris.mkdir(parents=True, exist_ok=True)
+            debris.mkdir(parents=True)
             (debris / "report.schema.json").write_text("{}", encoding="utf-8")
             schemas = _tracked_report_schemas(root, require_nonempty=False)
+            self.assertEqual(schemas, [tracked / "report.schema.json"],
+                             "the reader must return the tracked schema and nothing else")
             self.assertNotIn(debris / "report.schema.json", schemas)
-            self.assertEqual(schemas, [], "the probe root has no tracked schemas; only the decoy is on disk")
+            self.assertTrue((debris / "report.schema.json").is_file(),
+                            "the decoy is on disk, so a filesystem-based reader would have absorbed it")
         # And the real checkout is still read correctly, so the assertion above is not just emptiness.
         self.assertIn(FACTORY_ROOT / "agents" / "secret-scan" / "report.schema.json", _tracked_report_schemas())
 

@@ -94,20 +94,33 @@ class TestShippedManifests(unittest.TestCase):
     def test_tracked_agents_ignores_untracked_debris(self):
         """A check must read git's objects rather than the filesystem (agents-jcd2).
 
-        Untracked debris under agents/ must not be absorbed as shipped manifests.
+        Untracked debris under agents/ must not be absorbed as shipped manifests (agents-jcd2, agents-ug3a).
         """
-        # Same relocation as the sibling probe in tests/test_report_schema.py (agents-fxg2): the decoy
-        # lives in a temp directory at the repo root, never directly under the tracked agents/ directory.
-        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        # Same relocation as the sibling probe in tests/test_report_schema.py, and now the same reason
+        # (agents-ug3a): the decoy lives in a scratch git repository OUTSIDE the checkout - never under the
+        # tracked agents/ directory, and never in a temp directory at the checkout root, where an interrupted
+        # run left a committable tmp*/agents/... directory for a later `git add -A` to capture.
+        with tempfile.TemporaryDirectory() as tmp:
             probe = Path(tmp)
+            git = ["git", "-C", str(probe), "-c", "user.email=t@t", "-c", "user.name=t",
+                   "-c", "commit.gpgsign=false"]
+            subprocess.run(["git", "init", "-q", str(probe)], check=True, capture_output=True)
+            tracked = probe / "agents" / "zreal_probe"
+            tracked.mkdir(parents=True)
+            (tracked / "agent.yaml").write_text("name: zreal_probe\n", encoding="utf-8")
+            subprocess.run(git + ["add", "."], check=True, capture_output=True)
+            subprocess.run(git + ["commit", "-qm", "seed"], check=True, capture_output=True)
             debris = probe / "agents" / "zz_debris_probe_tmp"
-            debris.mkdir(parents=True, exist_ok=True)
+            debris.mkdir(parents=True)
             (debris / "agent.yaml").write_text("name: zz_debris\n", encoding="utf-8")
             agent_dirs = _tracked_agent_dirs(probe, require_nonempty=False)
+            self.assertEqual(agent_dirs, [tracked],
+                             "the reader must return the tracked manifest directory and nothing else")
             self.assertNotIn(debris, agent_dirs)
-            self.assertEqual(agent_dirs, [], "the probe root has no tracked manifests; only the decoy is on disk")
             yamls = _tracked_agent_yamls(probe, require_nonempty=False)
             self.assertNotIn(debris / "agent.yaml", yamls)
+            self.assertTrue((debris / "agent.yaml").is_file(),
+                            "the decoy is on disk, so a filesystem-based reader would have absorbed it")
         # And the real checkout is still read correctly.
         self.assertIn(ROOT / "agents" / "pr-fixer", _tracked_agent_dirs())
         self.assertIn(ROOT / "agents" / "pr-fixer" / "agent.yaml", _tracked_agent_yamls())
