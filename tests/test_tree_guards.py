@@ -11,8 +11,10 @@ lib file is introduced without an explicit budget.py mapping (closing agents-c04
 
 import ast
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -222,6 +224,33 @@ def import_time_truth(test: ast.expr, type_checking: set[str]) -> bool | None:
                 return True
             return False if all(value is False for value in values) else None
     return None
+
+
+def _test_modules(root: Path) -> list[Path]:
+    """The test modules to analyse, taken from GIT'S OBJECTS rather than the filesystem.
+
+    agents-kb0y (a non-deterministic failure that cost a full-gate cycle): this enumeration used to glob
+    root/tests/*.py, and another module (test_fast_gate_consumer_coverage) writes an UNTRACKED probe into
+    tests/ and unlinks it in a finally. Shards run in parallel, so the glob could list the probe and the read
+    that follows could then fail with FileNotFoundError after the unlink. A check that reads the filesystem
+    asserts a property of the MACHINE - what happened to be on disk while it ran - and docs/speed.md names that
+    as the pathology; git's objects are the property of the TREE. The same rule was already adopted next door
+    for consumer coverage (agents-jcd2), which is what the probe's own test asserts.
+
+    A NON-GIT ROOT still falls back to the filesystem, because this function is called with synthetic roots by
+    unit tests. That fallback cannot race in the real repository: there git answers, so untracked debris is
+    never enumerated no matter who writes it.
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "tests"],
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        listed = []
+    if listed:
+        return sorted(root / p for p in listed if p.endswith(".py"))
+    return sorted((root / "tests").glob("*.py"))
 
 
 def staged_runtime_missing_modules(root: Path) -> list[str]:
@@ -719,7 +748,9 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         return modules, packages, destinations, member_copies, unsupported
 
     problems: list[str] = []
-    for path in sorted((root / "tests").glob("*.py")):
+    # GIT'S OBJECTS, NOT THE FILESYSTEM (agents-kb0y): a parallel shard can create and unlink an untracked
+    # probe under tests/, and a glob that lists it before the read fails with FileNotFoundError.
+    for path in _test_modules(root):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:
@@ -1004,8 +1035,54 @@ def staged_tree(findings_source: str) -> Path:
         staged_suite_source(("findings.py", "embargo.py")), encoding="utf-8")
     return directory
 
-
 class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
+
+    def test_untracked_debris_is_not_enumerated_and_the_control_discriminates(self):
+        """agents-kb0y: which test modules this guard reads, and where it gets them from.
+
+        It globbed root/tests/*.py - the FILESYSTEM - while another module (test_fast_gate_consumer_coverage)
+        writes an untracked probe into tests/ and unlinks it in a finally. Shards run in parallel, so the glob
+        could list the probe and the read that followed then failed with FileNotFoundError after the unlink.
+
+        Driven in a THROWAWAY GIT REPO, so this test writes no debris into the real tree - the very thing that
+        caused the failure - and the second assertion is the control: a plain glob of the same directory DOES
+        see the probe, which makes the assertion above it discriminating rather than vacuous."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "tests" / "test_tracked_one.py").write_text("x = 1\n", encoding="utf-8")
+            (root / "tests" / "test_zz_debris_probe_tmp.py").write_text("y = 2\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=t@e", "-c", "user.name=t",
+                            "add", "tests/test_tracked_one.py"], check=True, capture_output=True)
+            self.assertEqual([p.name for p in _test_modules(root)], ["test_tracked_one.py"],
+                             "the untracked probe must not be enumerated")
+            self.assertIn("test_zz_debris_probe_tmp.py",
+                          [p.name for p in sorted((root / "tests").glob("*.py"))],
+                          "CONTROL: the filesystem glob DOES see the probe, so the assertion above is "
+                          "discriminating rather than vacuous")
+            (root / "tests" / "test_zz_debris_probe_tmp.py").unlink()
+            self.assertEqual([p.name for p in _test_modules(root)], ["test_tracked_one.py"],
+                             "and it must not raise when that debris disappears mid-flight")
+
+    def test_the_guard_takes_its_modules_from_the_git_object_enumeration(self):
+        """THE WIRING HALF, AND THE HALF THAT GOES RED FIRST: a git-based helper is not enough - if the guard
+        reverts to globbing tests/, replacing the enumeration changes nothing and the guard silently reads the
+        filesystem again. So the enumeration is replaced with an exploding sentinel and the guard has to go
+        through it. On the old code nothing is raised and this test fails, which is how the control was shown to
+        discriminate rather than to agree with the code beside it. The sentinel is defined HERE rather than at
+        module level because this module's class list is pinned by its own tier guard.
+        """
+        class _SentinelEnumerationUsed(Exception):
+            pass
+
+        def _explode(_root):
+            raise _SentinelEnumerationUsed()
+
+        with mock.patch("tests.test_tree_guards._test_modules", _explode):
+            with self.assertRaises(_SentinelEnumerationUsed):
+                staged_runtime_missing_modules(ROOT)
+
     """agents-o7e2: a staging list must carry the modules its runtime imports at module scope."""
 
     def test_every_staging_list_carries_its_runtime_imports(self):
