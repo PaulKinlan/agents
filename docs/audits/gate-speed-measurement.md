@@ -391,3 +391,29 @@ block is above, in its section, and can be re-run as it stands.
   from both groups;
 * there is no CPU-time history, so the contention component is bounded by the spread of ms/test
   at fixed content — it is not attributed to any process.
+
+## Red-first gate cost measurement (`tools/red-first.sh`)
+
+**Status:** gate cost baseline for red-first verification (`agents-ea8h`).
+**Cost, verbatim:** one extra run of the CHANGED tests only, never the full suite, cached per tree,
+~11s against a ~24s fast gate; and "IF A REPO'S RED RUN COSTS MORE THAN ITS GREEN RUN, THAT IS A
+FINDING ABOUT THE SUITE'S SHAPE RATHER THAN A REASON TO SKIP THE CHECK."
+
+Two measured deliveries demonstrate that red-first discriminator isolation is a process finding rather
+than a property of one delivery:
+* `agents-kq0r` increment 1: 14 added assertions -> 13 DISCRIMINATORS + 1 invariant (`11n`, satisfied
+  by the old tool already). "Fourteen new tests pin this fix" would have overstated by one; the one
+  was named instead.
+* `patches/fleet-land-message-author-identity.patch`: 21 added assertions -> 16 DISCRIMINATORS + 6 GUARDS
+  (`38g`, `38h`, `38j`, `38l`, `38p`, `38q5`). `38q5` asserts the defect's own headline property while
+  passing on BOTH revisions, so the property is covered by real discriminators while that assertion
+  cannot fail alone.
+
+### Measured cost: green vs red run on changed tests
+On a representative delivery changing `tests/test_line_andon.py`:
+* Green run (changed tests at tip): ~17.1s wall time (18 passed, 0 failed).
+* Red run (constructed merge-base tree + changed tests): ~17.0s wall time (17 passed, 1 failed discriminator).
+* Cached re-run (per tree cache in `~/.fleet/checks` / `/tmp/fleet-checks`): ~0.05s.
+The red run executes the same changed module as the green run; construction of the red tree via
+`git read-tree` + `git update-index` + `git commit-tree` takes < 50ms, adding no material overhead.
+
