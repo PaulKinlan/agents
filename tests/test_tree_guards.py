@@ -368,7 +368,7 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
     # the discriminator is the dispatcher's own dependency set, verified against all ten sites.
     dispatcher_markers = {"budget", "child_env"}
 
-    def literal_list(node: ast.AST, consts: dict[str, list[str]]) -> list[str] | None:
+    def literal_list(node: ast.AST, scopes: list[dict[str, list[str] | None]]) -> list[str] | None:
         """Read a staging list, or None when this rule genuinely cannot.
 
         RESOLVE MORE FIRST, because where a case can be checked, checking beats refusing (agents-n5e0,
@@ -377,12 +377,21 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         by NAME, so an incomplete list built any of those ways is reported with the missing module rather
         than skipped. None means UNREADABLE, and the caller now acts on that difference instead of
         conflating it with an empty list - `if not names: continue` treated both as nothing to do.
+
+        A NAME IS LOOKED UP IN THE SCOPE CHAIN, INNERMOST FIRST (agents-zsum): a function-local
+        `MODULES = (...)` SHADOWS a complete module-level one, and reading the module-level value there
+        returned green while the staged tree was missing a module. The innermost scope that BINDS a name
+        wins even when it binds it to something unreadable - falling through to a shadowed outer value is
+        exactly the false green this lookup exists to remove.
         """
         if isinstance(node, ast.Name):
-            return consts.get(node.id)
+            for scope in reversed(scopes):
+                if node.id in scope:
+                    return scope[node.id]
+            return None
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left = literal_list(node.left, consts)
-            right = literal_list(node.right, consts)
+            left = literal_list(node.left, scopes)
+            right = literal_list(node.right, scopes)
             if left is None or right is None:
                 return None
             return left + right
@@ -391,7 +400,7 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         names: list[str] = []
         for element in node.elts:
             if isinstance(element, ast.Starred):
-                inner = literal_list(element.value, consts)
+                inner = literal_list(element.value, scopes)
                 if inner is None:
                     return None
                 names.extend(inner)
@@ -454,25 +463,22 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:
             continue
-        # A binding is a binding whether the expression sits in a loop header or in a module-level name
-        # (agents-1p9g): the consts map used to accept only literal tuple/list assignments, so
-        # `MODULES = BASE + ('embargo.py',)` stayed unresolved and the loop iterating it was skipped in
-        # silence - the same defect as the inline concatenation, one level up. It is now built in source
-        # order through the same resolver the loop header uses, so one name may be built from an earlier
-        # name.
-        #
-        # A LATER BINDING REPLACES AN EARLIER ONE, and a name this rule cannot read must never be read as
-        # its stale value (agents-g7b7, found by review of e3c81f23 and reproduced there): handling only
-        # plain `Assign` left `MODULES += ("extra.py",)` holding the OLD list, so the guard reported a module
-        # MISSING while the staged tree copies it. A false FAILURE is worse than the silent skip it
-        # replaced, so every module-level binding is accounted for and an unreadable one DROPS the name -
-        # the loop header then treats it exactly like any other unreadable iterable.
-        def module_scope_store_names(statement: ast.stmt) -> set[str]:
-            """Names STORED anywhere inside a module-level statement, excluding nested function/class bodies.
+        # A BINDING IS A BINDING IN THE SCOPE IT IS WRITTEN IN, and a LATER ONE REPLACES AN EARLIER ONE
+        # (agents-1p9g, agents-g7b7, agents-zsum). The resolver is applied PER SCOPE with the innermost
+        # binding winning, so a function-local list SHADOWS a complete module-level one instead of being read
+        # from the outer value; the assignment forms resolve in source order (AugAssign(Add) concatenates onto
+        # the value the name already holds); and a name bound by a shape this resolver cannot read is left
+        # UNRESOLVABLE - neither stale nor shadowed - which the loop header then treats as a case to report.
+        # The alternative was chased three times and it is a losing game: enumerate binding shapes (inline,
+        # then module-level, then shadowing) and each fix leaves the next shape, so the closure is NOT "know
+        # every shape" but "a name you cannot resolve is never read as some other scope's value".
+        def store_names(statement: ast.stmt) -> set[str]:
+            """Names STORED anywhere inside a statement, excluding nested function/class bodies.
 
-            Their locals are not module names, but `for MODULES in ...:`, `with open(...) as MODULES:`,
-            `import MODULES`, and their `if`/`try` spellings all bind at module scope. This is how a binding
-            this rule does not model is found and dropped instead of being left to be read as its old value.
+            Their locals are not names in this scope, but an assignment target, a `for`/`with` target, an
+            import alias and a def or class name all are. Asking the AST which names it STORES, instead of
+            listing the statement forms this rule happens to model, is what makes a new binding shape shadow
+            an outer value rather than slipping past it as unbound (agents-zsum).
             """
             found: set[str] = set()
 
@@ -489,47 +495,83 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             walk(statement)
             return found
 
-        def module_scope_bindings(statement: ast.stmt) -> dict[str, list[str] | None]:
-            """Every module-level Name this statement BINDS, mapped to the list it holds - or None for unreadable.
+        def binding_values(statement: ast.stmt,
+                           scopes: list[dict[str, list[str] | None]]) -> dict[str, list[str] | None]:
+            """What each name this statement binds HOLDS in this scope, or None when it cannot be read.
 
-            The three assignment forms resolve through the same resolver the loop header uses, and
-            AugAssign(Add) concatenates onto the value the name already holds; every other module-level binding
-            maps to None so the name is DROPPED. Over-invalidation is deliberate and safe: an unreadable name
-            takes the same path as any other unreadable iterable (loud where the loop stages lib modules,
-            quiet where it is provably exhaustive), while a stale name quietly checks the WRONG list.
+            Only the three assignment forms carry a readable value; every other binding shape is already
+            recorded as a bound-but-unreadable name by `store_names`.
             """
             if isinstance(statement, ast.Assign):
-                bindings = {target.id: literal_list(statement.value, consts)
-                            for target in statement.targets if isinstance(target, ast.Name)}
-                for other in (target for target in statement.targets if not isinstance(target, ast.Name)):
-                    for name in module_scope_store_names(other):
-                        bindings[name] = None
-                return bindings
+                readable = literal_list(statement.value, scopes)
+                return {target.id: readable for target in statement.targets if isinstance(target, ast.Name)}
             if isinstance(statement, ast.AnnAssign):
                 if not isinstance(statement.target, ast.Name):
                     return {}
-                readable = None if statement.value is None else literal_list(statement.value, consts)
+                readable = None if statement.value is None else literal_list(statement.value, scopes)
                 return {statement.target.id: readable}
             if isinstance(statement, ast.AugAssign):
-                if not isinstance(statement.target, ast.Name):
+                if not isinstance(statement.target, ast.Name) or not isinstance(statement.op, ast.Add):
                     return {}
-                current = consts.get(statement.target.id)
-                added = literal_list(statement.value, consts) if isinstance(statement.op, ast.Add) else None
+                current = scopes[-1].get(statement.target.id)
+                added = literal_list(statement.value, scopes)
                 concatenated = current + added if current is not None and added is not None else None
                 return {statement.target.id: concatenated}
-            return {name: None for name in module_scope_store_names(statement)}
+            return {}
 
-        consts: dict[str, list[str]] = {}
-        for statement in tree.body:
-            for name, resolved in module_scope_bindings(statement).items():
-                if resolved is None:
-                    consts.pop(name, None)
-                else:
-                    consts[name] = resolved
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.For):
-                continue
-            names = literal_list(node.iter, consts)
+        def scope_bindings(statements: list[ast.stmt],
+                           outer: list[dict[str, list[str] | None]]) -> dict[str, list[str] | None]:
+            """name -> what it holds in THIS scope, or None for unreadable.
+
+            Every name the scope binds starts UNRESOLVABLE and becomes readable only when the statement that
+            binds it is reached, so a loop that runs BEFORE its own scope's binding is reported as unreadable
+            (when it stages lib modules by shape) instead of being read from an enclosing value - the
+            shadowing false green one step further out.
+            """
+            local: dict[str, list[str] | None] = {}
+            for statement in statements:
+                for name in store_names(statement):
+                    local.setdefault(name, None)
+            for statement in statements:
+                local.update(binding_values(statement, outer + [local]))
+            return local
+
+        def function_parameters(node: ast.AST) -> set[str]:
+            args = node.args
+            names = {argument.arg for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+            for variadic in (args.vararg, args.kwarg):
+                if variadic is not None:
+                    names.add(variadic.arg)
+            return names
+
+        def collect_loops(node: ast.AST, scopes: list[dict[str, list[str] | None]],
+                          found: list[tuple[ast.For, list[dict[str, list[str] | None]]]]) -> None:
+            """Every `for` in this tree, paired with the scope chain IN EFFECT AT ITS POSITION.
+
+            A function or class body opens a scope and its parameters shadow from the first line; a nested
+            loop inherits the chain of the scope it is written in. Without the position, a module-level const
+            is applied to a loop that has a local binding of the same name - agents-zsum.
+            """
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    inner: dict[str, list[str] | None] = {name: None for name in function_parameters(child)}
+                    inner.update(scope_bindings(child.body, scopes + [inner]))
+                    collect_loops(child, scopes + [inner], found)
+                    continue
+                if isinstance(child, ast.Lambda):
+                    collect_loops(child, scopes + [{name: None for name in function_parameters(child)}], found)
+                    continue
+                if isinstance(child, ast.ClassDef):
+                    collect_loops(child, scopes + [scope_bindings(child.body, scopes)], found)
+                    continue
+                if isinstance(child, ast.For):
+                    found.append((child, scopes))
+                collect_loops(child, scopes, found)
+
+        loops: list[tuple[ast.For, list[dict[str, list[str] | None]]]] = []
+        collect_loops(tree, [scope_bindings(tree.body, [])], loops)
+        for node, scopes in loops:
+            names = literal_list(node.iter, scopes)
             body = ast.unparse(node)
             if '"lib"' not in body and "'lib'" not in body:
                 continue
@@ -676,6 +718,44 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         rebound = reported('MODULES = BASE + ("embargo.py",)\nMODULES = runtime_modules()\n')
         self.assertIn("RUNTIME", rebound,
                       "a re-binding this rule cannot read is reported, not silently checked as its old value")
+
+    def test_a_shadowing_binding_is_read_in_its_own_scope_not_the_outer_one(self):
+        """agents-zsum, round 3 of review: a function-local list SHADOWS a complete module-level one.
+
+        A resolver that collects module-level names and then applies them to EVERY loop in the file reports
+        green when a function re-binds that name: the global list is complete, the LOCAL list the loop
+        actually iterates is not, and extra.py is missing at runtime with nothing said. This was the third
+        binding shape review found in three rounds (inline, module-level, shadowing), so the rule is no longer
+        "know every shape" but "a name is read in the scope that binds it, and a name this rule cannot read
+        there is never read as some other scope's value". Acceptance, run against the reviewed sha e3c81f23
+        rather than asserted: the shadowing case returned [] there (the false green) and names extra.py here;
+        the unshadowed control stays green and a PARAMETER of the same name is reported as unreadable.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+
+        def reported(definition: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + definition, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        shadowed = reported('def build(root):\n    MODULES = ("findings.py", "embargo.py")\n' + copy_loop)
+        self.assertIn("extra.py", shadowed,
+                      "the LOCAL list is the one the loop iterates, so the missing module must be named")
+        self.assertNotIn("RUNTIME", shadowed,
+                         "the local list is readable, so this is a missing module and not an unreadable list")
+
+        self.assertEqual(reported("def build(root):\n" + copy_loop), "",
+                         "with no local binding the module-level list applies, and it is complete")
+
+        parameter = reported('def build(root, MODULES=("findings.py", "embargo.py")):\n' + copy_loop)
+        self.assertIn("RUNTIME", parameter,
+                      "a parameter shadows too and its value is unreadable here: report it, do not resolve it")
 
     def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
         """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
