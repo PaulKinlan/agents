@@ -46,7 +46,13 @@ fast_gate_arms_020_tools_fast_gate_sh() {
       # there all along. Cost of naming it, measured: the suite is 17 tests / ~1.2 s and already runs
       # green in the gate environment (it was selected for that same change by the tools/check-cmd.sh
       # arm), so it adds a suite this arm can afford and no new environment sensitivity.
-      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py tests/test_coverage_contract.py tests/test_gate_entrypoint_config.py"
+      # agents-ukk2 (found by agents-factory-rev-8ibx while reviewing agents-8ibx): this arm omitted
+      # tests/test_summary_identity.py, and the cost was measured rather than argued - the change that
+      # replaced the gate's runner command broke that suite's append pin, and NO fast-gate run on that delta
+      # selected it, so the regression was invisible to the lane that caused it and was caught only by the
+      # reviewer's own run. A change to the runner command is exactly the change this suite exists to
+      # police, so the omission is the defect and the suite is the cheap closure: 3 tests, measured 0.006 s.
+      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py tests/test_coverage_contract.py tests/test_gate_entrypoint_config.py tests/test_summary_identity.py"
       ;;
     tools/fast-gate-arms.d/*.sh)
       # agents-hr6q: THE REGISTRY'S OWN FILES NEEDED AN ARM, AND THE GATE SAID SO ITSELF. The first run of
