@@ -16,17 +16,23 @@
 - **Patched file hashes:**
   `b466376eba23a7d29565d7641d9b2816755d011e5b6deb450419037776918a0f  bin/fleet-heavy`
   `9d5defa6faf65a3397a8de94a24d8ef47bd394a6b183ded1e9866079ca176d1d  bin/fleet-check`
-- **WHICH `bin/fleet-heavy` THIS IS BUILT ON — read before applying.** On 2026-10-13 this VM carried two
-  generations of the tool, and they are not the same file: `~/fleet/fleet-heavy` (252 lines, 14378
-  bytes, sha256 `33ecf140…`, with `slot_fd_holders`/`reclaim_abandoned_slot`) and
-  `~/fleet/bin/fleet-heavy` (154 lines, 7850 bytes, sha256 `0f95ccd3…`, **lacking the reclaim**), which
-  is what `command -v fleet-heavy` resolves to here. The patch is built on the **reclaim generation**
-  (`33ecf140…`) because that is what the hub has and the VM's `bin/` run has: this VM's own
-  `tests/fleet-heavy-reclaim.test.sh` pins the reclaim behaviour, and the pending sibling delivery
-  `patches/fleet-heavy-holder-identity.patch` names `bin/fleet-heavy` at 14378 bytes / `33ecf140…` as
-  its base and does not apply to the 154-line copy. Reproduce the base with
-  `sha256sum bin/fleet-heavy`. The fleet-check side has only one generation here, so it is built from
-  `~/fleet/bin/fleet-check` and its hunk is two context lines at one call site.
+- **WHICH `fleet-heavy` GENERATION THIS IS BUILT ON — read before applying.** The LIVE executable
+  on this VM is `~/fleet/bin/fleet-heavy`: 154 lines, 7,850 bytes, SHA-256
+  `0f95ccd3c392b9736362713ce006f0b21f02f80e49951eda3da5ae1cf9863a91`;
+  `command -v fleet-heavy` resolves to this `bin/` file. It lacks `slot_fd_holders` and
+  `reclaim_abandoned_slot`. The patch instead expects the **alternate, NOT INSTALLED** generation
+  at `~/fleet/fleet-heavy` (top level) or `~/fleet-copy/bin/fleet-heavy`: 252 lines, 14,378 bytes,
+  SHA-256 `33ecf140e615852a9d374b27b6e4b956365b80f3e942f25a6a5d897db0617e58`.
+  The sibling `patches/fleet-heavy-holder-identity.patch` also expects this alternate base;
+  that expectation does **not** establish that the live `bin/` executable has it. On a COPY of
+  the actual 7,850-byte executable, the first job-end patch of the reclaim chain fails strict
+  `patch -p1 --fuzz=0 --dry-run` at hunk 197 (rc 1); the three ordered re-cuts on a COPY of
+  the alternate base yield SHA-256
+  `9e30db1f62c2ac4f8143353a6bf76afc2b1bb93eda563c008068fa6c1059310a`.
+  **STOP before installing** this light-class patch: the hub must deliberately establish and
+  verify the selected `bin/` generation, not read `sha256sum bin/fleet-heavy` as proof that the
+  alternate base is already running. The fleet-check side has its separately recorded base;
+  this correction does not establish that a later fleet-check patch stacks with it.
 
 - **Problem statement (agents-v2t9).** An implementer's iteration cost on this fleet is dominated by
   waiting for the heavy slot, not by the suite the gate runs. Across the 724 fast-gate records that
