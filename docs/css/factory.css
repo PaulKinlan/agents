@@ -16,6 +16,11 @@
     --step-title-home: clamp(2.4rem, 1.5rem + 3.6vw, 4.25rem);
     --step-h2: clamp(1.4rem, 1.2rem + .8vw, 1.8rem);
     --step-h3: 1.15rem;
+    /* Micro label step: 12px at a 16px root, the readability FLOOR for this file - nothing that renders text
+       goes below it. Kept here so the floor has ONE home: four rules depend on it (.kicker, the meta/legend
+       chips, .station dt, .line-card h4) and four copies of a floor are four chances to drift below it
+       (agents-dv7q, agents-yjco, agents-kxcq, agents-f7cd). */
+    --step-label: .75rem;
   }
   html { scroll-behavior: smooth; scroll-padding-block-start: 1.5rem; }
   :target { scroll-margin-block-start: 1.5rem; }
@@ -113,7 +118,7 @@
   .card a, .station a, .line-card a { color: var(--accent-2); }
   .card pre { margin-block: var(--space-2) 0; }
   .card:focus-within, .station:focus-within, .line-card:focus-within { border-color: var(--accent); }
-  .kicker { margin: 0; color: var(--accent); text-transform: uppercase; letter-spacing: .1em; font-size: .72rem; font-weight: 800; }
+  .kicker { margin: 0; color: var(--accent); text-transform: uppercase; letter-spacing: .1em; font-size: var(--step-label); font-weight: 800; }
   .side-nav .kicker { color: var(--muted); margin-block-end: var(--space-1); }
   @media (max-width: 48rem) { .side-nav .kicker { margin: 0; flex: none; } }
 
@@ -121,7 +126,7 @@
   .station-legend { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0 0 var(--space-4); padding: 0; font-size: .9rem; }
   .station-legend div { display: flex; align-items: baseline; gap: .5rem; }
   /* One chip box for card chips and legend swatches. */
-  .meta li, .station-legend dt { padding: .1rem .45rem; border: 1px solid var(--doc-line); border-radius: 99rem; font-family: var(--mono); font-size: .72rem; line-height: 1.5; }
+  .meta li, .station-legend dt { padding: .1rem .45rem; border: 1px solid var(--doc-line); border-radius: 99rem; font-family: var(--mono); font-size: var(--step-label); line-height: 1.5; }
   /* Legend swatches share the chip box below and the class-chip weight, border and colours, so they cannot drift. */
   .station-legend dt { font-weight: 700; border-color: currentColor; }
   .station-legend dd { margin: 0; color: var(--muted); }
@@ -144,7 +149,7 @@
   .station[data-class="proposer"] .meta li:first-child { color: var(--accent); background: var(--tint-proposer); }
   .station[data-class="optimizer"] .meta li:first-child { color: var(--accent-3); background: var(--tint-optimizer); }
   .station dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .2rem var(--space-3); margin: auto calc(-1 * var(--space-3)) 0; padding: var(--space-2) var(--space-3); background: var(--surface-raised); border-block-start: 1px solid var(--doc-hairline); font-size: .85rem; overflow-wrap: anywhere; }
-  .station dt { color: var(--muted); font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
+  .station dt { color: var(--muted); font-size: var(--step-label); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
   .station dd { margin: 0; font-family: var(--mono); }
 
   /* Pipeline flow: numbered stages with a drawn connector, collapsing to a vertical list. */
@@ -232,7 +237,7 @@
   /* Lines: itinerary with zero-padded stop numbers, policy in a raised band at the foot. */
   .line-card { display: flex; flex-direction: column; gap: var(--space-2); padding-block-end: 0; overflow: clip; border-block-start: 3px solid var(--accent); }
   .line-card h3 { font-family: var(--mono); font-size: 1.2rem; }
-  .line-card h4 { margin: var(--space-2) 0 0; color: var(--muted); font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .line-card h4 { margin: var(--space-2) 0 0; color: var(--muted); font-size: var(--step-label); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .line-card ol { margin: 0; padding: 0; list-style: none; columns: 2; column-gap: var(--space-4); counter-reset: stop; }
   .line-card li { display: flex; gap: .6rem; align-items: baseline; break-inside: avoid; padding-block: .3rem; border-block-end: 1px solid var(--doc-hairline); counter-increment: stop; font-family: var(--mono); font-size: .9rem; }
   .line-card li::before { content: counter(stop, decimal-leading-zero); color: var(--muted); font-size: .78rem; }
