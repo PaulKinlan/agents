@@ -274,6 +274,14 @@ class TestRedFirst(unittest.TestCase):
         self.assertIn("DISCRIMINATOR set (1 cases):", res.stdout)
         self.assertIn("VERDICT: PASS", res.stdout)
 
+        # The bound must be ON THE VERDICT LINE, not only beside the evidence (agents-0kcp). The verdict line is
+        # the single line most likely to be read, quoted and acted on, so a bound a reader can miss there is the
+        # defect wearing a label - disclosures beside the evidence do not reach a reader who reads only this.
+        verdict_lines = [ln for ln in res.stdout.splitlines() if "VERDICT" in ln]
+        self.assertEqual(len(verdict_lines), 1, f"expected exactly one verdict line:\n{res.stdout}")
+        self.assertIn("path-origin evidence only", verdict_lines[0],
+                      f"the VERDICT line itself must carry tooth 2's bound (agents-0kcp): {verdict_lines[0]!r}")
+
     def test_untracked_file_cannot_certify_green_tree(self):
         """Tooth 2: an untracked file cannot certify the green tree (empty match refuses, never falls back)."""
         (self.repo_dir / "untracked-probe.txt").write_text("UNTRACKED_MARKER_XYZ_90210\n", encoding="utf-8")
