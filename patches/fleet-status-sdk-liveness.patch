@@ -1,5 +1,5 @@
 diff --git a/inbox/status.mjs b/inbox/status.mjs
-index 232fee6..05919c0 100644
+index 232fee6..6b0ec33 100644
 --- a/inbox/status.mjs
 +++ b/inbox/status.mjs
 @@ -2,6 +2,7 @@
@@ -10,7 +10,7 @@ index 232fee6..05919c0 100644
  import { stage, isCoordination } from "./lifecycle.mjs";
  import { homedir, loadavg, totalmem, freemem, cpus } from "node:os";
  
-@@ -63,14 +64,39 @@ export async function status({ vm = "fleet-manager", intercomCli } = {}) {
+@@ -63,14 +64,43 @@ export async function status({ vm = "fleet-manager", intercomCli } = {}) {
    const now = Date.now();
    // Headless lanes: lane-host writes <lane>.state.json {host_pid, pid, busy, ...}; systemd owns liveness.
    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -31,15 +31,19 @@ index 232fee6..05919c0 100644
 +    });
 +  };
 +  const hostState = async (lane) => {
-+    try {
-+      const st = JSON.parse(readFileSync(join(LD, `${lane}.state.json`), "utf8"));
-+      if (st.host === "sdk") {
-+        // host_pid and last_event_at alone cannot prove this SDK lane has a session. Idle age is not liveness.
-+        return Number.isInteger(st.host_pid) && st.host_pid > 1 && alive(st.host_pid) &&
-+          await socketLive(join(LD, `${lane}.sock`)) ? st : null;
-+      }
-+      return st.host_pid && alive(st.host_pid) ? st : null;
-+    } catch { return null; }
++    let st; try { st = JSON.parse(readFileSync(join(LD, `${lane}.state.json`), "utf8")); }
++    catch { return { state: null, present: false }; }
++    if (!st || typeof st !== "object" || Array.isArray(st)) return { state: null, present: false };
++    if (st.host === "sdk") {
++      // A failed start/failover can close its socket before state.json records stuck/model.
++      // Keep diagnostics even when the separate per-LANE session witness is absent.
++      let present = false;
++      try { present = Number.isInteger(st.host_pid) && st.host_pid > 1 && alive(st.host_pid) &&
++        await socketLive(join(LD, `${lane}.sock`)); } catch {}
++      return { state: st, present };
++    }
++    const present = !!(st.host_pid && alive(st.host_pid));
++    return { state: present ? st : null, present }; // non-SDK metadata behavior is unchanged
 +  };
    let roster = [];
    // (no intercom roster: lanes are headless; lane-host state files carry busy/idle)
@@ -48,16 +52,43 @@ index 232fee6..05919c0 100644
      const lane = f.slice(0, -5), conf = readConf(join(LD, f));
      const stopped = existsSync(join(LD, `${lane}.stop`));
 -    const hs = hostState(lane); const pid = hs ? hs.host_pid : null;
-+    const hs = await hostState(lane); const pid = hs ? hs.host_pid : null;
++    const { state: hs, present } = await hostState(lane); const pid = present ? hs.host_pid : null;
      let sid = null; try { sid = readFileSync(join(LD, `${lane}.sid`), "utf8").trim(); } catch {}
      const sf = sid ? sessionFileFor(sid) : null;
      const lastEvent = sf ? statSync(sf).mtimeMs : null;
+@@ -111,10 +141,10 @@ export async function status({ vm = "fleet-manager", intercomCli } = {}) {
+     }
+     const lastTurnMin = lastTurn && Number.isFinite(lastTurn) ? Math.max(0, Math.round((now - lastTurn) / 60000)) : null;
+     const sinceMs = hs?.since ? Date.parse(hs.since) : null;
+-    const sessionMin = sinceMs && Number.isFinite(sinceMs) ? Math.max(0, Math.round((now - sinceMs) / 60000)) : null;
++    const sessionMin = present && sinceMs && Number.isFinite(sinceMs) ? Math.max(0, Math.round((now - sinceMs) / 60000)) : null;
+     const turnStartMs = hs?.turn_start_at ? Date.parse(hs.turn_start_at) : null;
+-    const turnAgeMin = turnStartMs && Number.isFinite(turnStartMs) ? Math.max(0, Math.round((now - turnStartMs) / 60000)) : null;
+-    const piAlive = hs ? (hs.host === "sdk" ? true : (hs.pid ? alive(hs.pid) : false)) : false;
++    const turnAgeMin = present && turnStartMs && Number.isFinite(turnStartMs) ? Math.max(0, Math.round((now - turnStartMs) / 60000)) : null;
++    const piAlive = present ? (hs.host === "sdk" ? true : (hs.pid ? alive(hs.pid) : false)) : false;
+     const isRunning = !!pid;
+     // detached fleet-gate jobs this lane is waiting on (/tmp/<lane>-<name>.pid without .exit, pid alive)
+     let gates = 0;
+@@ -123,10 +153,10 @@ export async function status({ vm = "fleet-manager", intercomCli } = {}) {
+       const gp = +readFileSync(join("/tmp", f), "utf8").trim(); if (gp && alive(gp)) gates++; } } catch {}
+     const curModel = hs?.model || (() => { try { return readFileSync(join(LD, `${lane}.model`), "utf8").trim(); } catch { return null; } })() || conf.MODEL || null;
+     lanes.push({ lane, role: conf.ROLE, model: curModel, bead: conf.BEAD || null, stopped, running: isRunning,
+-      pi_alive: piAlive, intercom: hs ? (hs.busy ? "busy" : "idle") : (r ? r.status : null), context: contextOf(sf),
++      pi_alive: piAlive, intercom: present ? (hs.busy ? "busy" : "idle") : (r ? r.status : null), context: contextOf(sf),
+       last_event_min: act ? Math.round((now - act) / 60000) : null,
+       last_turn_min: lastTurnMin, session_min: sessionMin, turn_age_min: turnAgeMin,
+-      busy: hs ? !!hs.busy : null, gates, model_now: hs?.model || curModel,
++      busy: present ? !!hs.busy : null, gates, model_now: hs?.model || curModel,
+       stuck, children: children.slice(0, 8) });
+   }
+   // pending mail age
 diff --git a/tests/status-sdk-liveness.test.sh b/tests/status-sdk-liveness.test.sh
 new file mode 100644
-index 0000000..d2d3cc8
+index 0000000..8808a02
 --- /dev/null
 +++ b/tests/status-sdk-liveness.test.sh
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,80 @@
 +#!/usr/bin/env bash
 +# SDK lane liveness is per LANE, not per shared host process (agents-hs4i).
 +# Drives both deployed readers on the SAME isolated state file; never touches real ~/.fleet.
@@ -119,5 +150,22 @@ index 0000000..d2d3cc8
 +if observe && [ "$lane_state" = parked ] && jq -e '.stopped == true and .running == false and .pi_alive == false' <<< "$lane_json" >/dev/null; then
 +  ok '6 parked/no-socket lane has no running session'
 +else bad "6 parked lane disagreed (lanes=$lane_state, status=$lane_json)"; fi
++
++# A failed-over SDK lane can lose its socket before anyone reads the diagnostic state file.
++# The absence of a session must not erase stuck/model; nor can stale busy/session ages look live.
++rm -f "$LD/des-x.stop"
++state "$$" "$now"
++jq --arg at "$now" '. + {model:"test/recovery-model",stuck:"failover failed: model exhausted",busy:true,since:$at,turn_start_at:$at}' "$LD/des-x.state.json" > "$T/state.json"
++mv "$T/state.json" "$LD/des-x.state.json"
++if observe && [ "$lane_state" = stopped ] && jq -e '
++    .running == false and .pi_alive == false and .stuck == "failover failed: model exhausted" and
++    .model == "test/recovery-model" and .model_now == "test/recovery-model" and
++    .busy == null and .intercom == null and .session_min == null and .turn_age_min == null and
++    (.last_event_min | type == "number")' <<< "$lane_json" >/dev/null; then
++  ok '7 absent SDK socket: stopped but failover stuck/model and last-event diagnostics survive'
++else bad "7 failover diagnostic lost or liveness leaked (lanes=$lane_state, status=$lane_json)"; fi
++
++printf 'null\n' > "$LD/des-x.state.json"
++checks '8 non-object state cannot crash status or invent an SDK session' stopped false false
 +printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 +[ "$FAIL" -eq 0 ]
