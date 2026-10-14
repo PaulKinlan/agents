@@ -447,7 +447,13 @@ if [ -z "$EXPECT_ABSENT" ]; then
       cleaned="$(echo "$cleaned" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
       if [ ${#cleaned} -ge 8 ] && [[ ! "$cleaned" =~ ^(#|//|/\*|\*) ]]; then
         # Check that this string does not exist in PRE_FIX_SHA
-        if ! git show "$PRE_FIX_SHA" | grep -Fq "$cleaned" 2>/dev/null; then
+        # Query the PRE-FIX TREE, NOT the commit object (agents-erft). `git show <sha>` prints the commit
+        # MESSAGE and the diffstat/diff, so grepping it answers a different question from the one tooth 2 asks:
+        # a pre-fix message that happens to mention a line the delta adds LATER makes that valid marker look
+        # present pre-fix, the marker is rejected, and when every candidate is rejected that way EXPECT_ABSENT
+        # stays empty and the tool reports "pure test addition" for a change that really does alter the
+        # implementation source. Bounded to the same implementation paths the candidates were derived from.
+        if ! git grep -Fq "$cleaned" "$PRE_FIX_SHA" -- "${IMPL_PATH_FILTERS[@]}" 2>/dev/null; then
           EXPECT_ABSENT="$cleaned"
           break
         fi
@@ -560,6 +566,15 @@ if [ -n "$EXPECT_ABSENT" ]; then
     exit 1
   fi
 else
+  # POSITIVE CONTROL (agents-erft): "pure test addition" is a claim about the CHANGE, so it may only be made
+  # when there was no allow-listed implementation-source delta to derive a marker from in the first place.
+  # If the bounded impl-source diff is non-empty and EXPECT_ABSENT is still empty, the DERIVATION failed and
+  # saying "pure test addition" would be a false statement about what was checked - fail instead of printing it.
+  if [ -n "${diff_additions:-}" ]; then
+    echo "red-first: FAIL: the change touches allow-listed implementation source (-${#IMPL_PATH_FILTERS[@]} path filter(s)) but NO marker could be derived that is absent from the pre-fix tree, so the pre-fix absence check cannot be made. This is NOT a pure test addition." >&2
+    echo "red-first:   review the candidate lines at $PRE_FIX_SHA..HEAD on the implementation paths; if the source is genuinely unchanged the path filters are wrong, and if it changed a marker must be derivable." >&2
+    exit 1
+  fi
   echo "red-first: content-verification (expect 0): no allow-listed implementation-source delta to verify (pure test addition)"
 fi
 
