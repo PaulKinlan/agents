@@ -1,0 +1,165 @@
+From e8df15827ac9dbb641fc699c723034d1f6b4b90c Mon Sep 17 00:00:00 2001
+From: agents-factory-hubpatch <agents-factory-hubpatch@exe.xyz>
+Date: Wed, 14 Oct 2026 03:19:08 +0000
+Subject: [PATCH] fix(bd): a piped bd create keeps its id as the whole stdout
+ (agents-94ns)
+
+---
+ bin/bd                            |  20 ++++++
+ tests/bd-create-id-window.test.sh | 113 ++++++++++++++++++++++++++++++
+ 2 files changed, 133 insertions(+)
+ create mode 100755 tests/bd-create-id-window.test.sh
+
+diff --git a/bin/bd b/bin/bd
+index 723856f..efaaa4b 100755
+--- a/bin/bd
++++ b/bin/bd
+@@ -32,6 +32,26 @@ if [ "${1:-}" = "comment" ]; then
+     __i=$((__i+1))
+   done
+ fi
++# ------------------------------------------------ agents-94ns ------------------------------------------------
++# A PIPED `bd create` REPORTS ON THE PIPELINE, NOT ON THE BEAD. `bd create` prints the id on the FIRST of
++# three lines ("Created issue: <id>" first, then "  Priority: ..." and "  Status: ..."), so a lane that
++# consumes it through a window - `bd create ... | tail -2`, the measured shape - receives the two trailing
++# lines and NO id, and then names a bead from expectation (agents-94ns; agents-oe2v had to be found by
++# title instead). The id did not fail to print; the window cut it, and the lane quoted the pipeline. bd
++# already documents `--silent` as "output only the issue ID (for scripting)": when stdout is NOT a terminal
++# the caller is scripting, so run the create with `--silent` and the id is the WHOLE stdout - no window can
++# cut it. A terminal (human) invocation is untouched, and a caller that already asked for a machine format
++# (--silent/--json) or a form with no single id (--file/-f, --graph, --dry-run, --quiet) is left alone. No
++# other subcommand changes.
++if [ "${1:-}" = "create" ] && [ ! -t 1 ]; then
++  __machine=0
++  for __a in "$@"; do
++    case "$__a" in
++      --silent|--json|--dry-run|--quiet|-q|--file|-f|--file=*|--graph|--graph=*) __machine=1 ;;
++    esac
++  done
++  [ "$__machine" = 1 ] || set -- "$@" --silent
++fi
+ 
+ check_push_failure() {
+   local rc=$1
+diff --git a/tests/bd-create-id-window.test.sh b/tests/bd-create-id-window.test.sh
+new file mode 100755
+index 0000000..b0efe1b
+--- /dev/null
++++ b/tests/bd-create-id-window.test.sh
+@@ -0,0 +1,113 @@
++#!/usr/bin/env bash
++# tests/bd-create-id-window.test.sh - guards for bin/bd's `create` output under a pipe (agents-94ns).
++#
++# THE DEFECT: `bd create` prints the id on the FIRST of three lines (measured against real bd 1.3.1, and
++# on the bead: "Created issue: <id>" first, then "  Priority: ..." and "  Status: ..."). A lane that
++# consumes it through a window - `bd create ... | tail -2`, the measured shape - receives the two trailing
++# lines and NO id, and then names a bead from expectation (agents-oe2v, found only by title). The id did
++# not fail to print; the window cut it, and the lane quoted the pipeline instead of the bead.
++#
++# THE FIX (in bin/bd): when stdout is not a terminal the caller is scripting, so the shim adds bd's own
++# documented --silent and the id becomes the WHOLE stdout - no window can cut it. A human (tty) invocation
++# is untouched, and a caller that already asked for a machine format is left alone.
++#
++# Hermetic by construction: a stub $HOME/.local/bin/bd emits bd 1.3.1's REAL create shapes, so no real bead
++# is written and the suite is safe for gates and reviewers.
++#
++#   bash tests/bd-create-id-window.test.sh
++set -uo pipefail
++HERE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
++SHIM="${BD_SHIM_OVERRIDE:-$HERE/bin/bd}"
++PASS=0; FAIL=0
++ok()  { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
++bad() { FAIL=$((FAIL+1)); printf '  FAIL %s\n      %s\n' "$1" "${2:-}"; }
++eq()  { [ "$1" = "$2" ] && ok "$3" || bad "$3" "got [$1] want [$2]"; }
++argn() { grep -c '^ARG:'"$1"'$' "$BD_LOG" 2>/dev/null || true; }
++
++ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
++T="$ROOT/home"; mkdir -p "$T/.local/bin" "$T/.fleet"
++export BD_LOG="$ROOT/argv.log"
++STUB="$T/.local/bin/bd"
++
++# Stub real bd: record argv (one arg per line, delimited), then emit bd 1.3.1's ACTUAL create shapes. The
++# default shape puts the id on the FIRST of three lines; --silent prints the id alone. The sentinel id is
++# named so no assertion can be satisfied by the surrounding prose.
++cat > "$STUB" <<'STUBSH'
++#!/usr/bin/env bash
++{ printf 'ARG:%s\n' "$@"; printf 'END\n'; } >> "$BD_LOG"
++silent=0
++for a in "$@"; do [ "$a" = "--silent" ] && silent=1; done
++if [ "$silent" = 1 ]; then
++  printf 'bd-window-sentinel\n'
++else
++  printf 'Created issue: bd-window-sentinel\n'
++  printf '  Priority: P2\n'
++  printf '  Status: open\n'
++fi
++STUBSH
++chmod +x "$STUB"
++
++echo "1. baseline: the RAW (unshimmed) create, through the measured window, drops the id"
++: > "$BD_LOG"
++raw="$("$STUB" create 'a title' | tail -2)"
++case "$raw" in
++  *bd-window-sentinel*) bad "1a the baseline fixture did NOT reproduce the defect" "$raw" ;;
++  *) ok "1a baseline window drops the id (tail -2 = $(printf '%s' "$raw" | tr '\n' '|'))" ;;
++esac
++eq "$(printf '%s' "$raw" | grep -c 'bd-window-sentinel' || true)" "0" "1b baseline: id absent from the two-line window"
++
++echo "2. the shim makes the id the WHOLE stdout, so the window carries it"
++: > "$BD_LOG"
++out="$(HOME="$T" bash "$SHIM" create 'a title' | tail -2)"
++case "$out" in
++  *bd-window-sentinel*) ok "2a tail -2 carries the id after the shim" ;;
++  *) bad "2a tail -2 still lost the id" "$out" ;;
++esac
++eq "$(argn --silent)" "1" "2b exactly one --silent was appended"
++eq "$(grep -c '^ARG:' "$BD_LOG" || true)" "3" "2c argv is exactly three words"
++eq "$(sed -n '1p' "$BD_LOG")" "ARG:create" "2d the subcommand is still first"
++eq "$(sed -n '2p' "$BD_LOG")" "ARG:a title" "2e the caller's arguments are preserved in order"
++eq "$(sed -n '3p' "$BD_LOG")" "ARG:--silent" "2f --silent is appended last, so every existing argv substring still matches"
++
++echo "3. any window width carries the id"
++: > "$BD_LOG"
++eq "$(HOME="$T" bash "$SHIM" create 'a title' | tail -1)" "bd-window-sentinel" "3a tail -1 is exactly the id"
++eq "$(HOME="$T" bash "$SHIM" create 'a title' | head -1)" "bd-window-sentinel" "3b head -1 is exactly the id"
++
++echo "4. a caller that already asked for a machine format is left alone"
++: > "$BD_LOG"
++: "$(HOME="$T" bash "$SHIM" create 'a title' --silent)"
++eq "$(argn --silent)" "1" "4a --silent was not duplicated"
++: > "$BD_LOG"
++: "$(HOME="$T" bash "$SHIM" create 'a title' --json)"
++eq "$(argn --silent)" "0" "4b --json gets no --silent appended"
++
++echo "5. forms with no single id are left alone"
++for args in "--dry-run" "-f plan.md" "--graph plan.json"; do
++  : > "$BD_LOG"
++  # shellcheck disable=SC2086
++  HOME="$T" bash "$SHIM" create $args >/dev/null 2>&1
++  eq "$(argn --silent)" "0" "5a create $args gets no --silent appended"
++done
++
++echo "6. a human (tty) invocation keeps the decorated output"
++: > "$BD_LOG"
++OUT="$ROOT/tty.out"
++script -qec "HOME='$T' BD_LOG='$BD_LOG' bash '$SHIM' create 'a title'" /dev/null > "$OUT" 2>&1
++eq "$(argn --silent)" "0" "6a a tty create is not rewritten"
++case "$(cat "$OUT")" in
++  *"Created issue"*) ok "6b tty keeps the three-line decorated output" ;;
++  *) bad "6b tty output missing the decorated line" "$(cat "$OUT")" ;;
++esac
++
++echo "7. no other subcommand changes"
++: > "$BD_LOG"
++HOME="$T" bash "$SHIM" list >/dev/null 2>&1
++eq "$(argn --silent)" "0" "7a bd list is untouched"
++: > "$BD_LOG"
++HOME="$T" bash "$SHIM" comment bd-x 'a body' >/dev/null 2>&1
++eq "$(argn --silent)" "0" "7b bd comment is untouched"
++
++if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
++printf '%s passed, %s failed\n' "$PASS" "$FAIL"
++[ "$FAIL" = 0 ]
+-- 
+2.43.0
+
