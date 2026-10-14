@@ -271,10 +271,23 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         module they never import. The package is staged as a tree by copytree and its internal imports
         are not the tree's entry points, so a module reachable ONLY through a package is out of scope
         for this rule - a known, measured false negative rather than a guessed fix;
-      - fail loudly on any staging loop whose module list this guard cannot read: the detector fires on
-        two healthy loops on the current tree, one of which iterates `(ROOT / 'lib').glob('*.py')` and
-        is EXHAUSTIVE BY CONSTRUCTION, so it cannot be missing anything. A dynamic list that adds a
-        module by name is still a hole (agents-n5e0) and needs a discriminator this rule does not have.
+      - fail loudly on any staging loop whose module list this guard cannot read, AS A BLANKET: rejected by
+        measurement, because the detector fired on healthy loops whose bodies merely mention lib (seven of
+        them) and still on four when it required the body to copy something - no text search can exclude this
+        guard's own source, which contains `findings` and `budget` throughout. The hole it aimed at was real
+        (agents-n5e0: a concatenated list resolved to nothing, was skipped in silence, and reported the same
+        green as a list that was read and checked), so what replaced it is a three-way classification whose
+        middle class is derived from THIS rule's own construction rather than from a search of the text:
+        (1) RESOLVE MORE FIRST - a name bound to an earlier list, `BASE + ('embargo.py',)` and
+        `[*BASE, 'embargo.py']` are read by name, because where a case can be checked, checking beats
+        refusing; (2) EXHAUSTIVE BY CONSTRUCTION - an iterable that enumerates every lib/*.py covers the
+        whole requirement space, so green for it is justified rather than unchecked; (3) EVERYTHING ELSE
+        THAT STAGES LIB MODULES is reported LOUDLY as an unreadable list. Class 3 needs one further fact to
+        stay green on a healthy tree - the loop must COPY a lib file whose SOURCE path is built from its own
+        loop variable, which is what makes that variable a module name rather than an incidental counter -
+        and it was measured over all nine loops under tests/ whose iterable this rule cannot read: one is
+        the exhaustive lib-glob, eight are not staging loops by that test, none is left, so the report is
+        silent on today's tree and fires only on a list genuinely built at runtime.
 
     Returns a list of 'path:line: stages [...]; missing [...]' strings, or [] when every list is
     complete.
@@ -356,16 +369,84 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
     dispatcher_markers = {"budget", "child_env"}
 
     def literal_list(node: ast.AST, consts: dict[str, list[str]]) -> list[str] | None:
-        if isinstance(node, ast.Name) and node.id in consts:
-            return consts[node.id]
+        """Read a staging list, or None when this rule genuinely cannot.
+
+        RESOLVE MORE FIRST, because where a case can be checked, checking beats refusing (agents-n5e0,
+        agents-1p9g). A name bound to an earlier list, a concatenation of resolvable halves
+        (`BASE + ('embargo.py',)`) and a spread of a resolvable one (`[*BASE, 'embargo.py']`) are all read
+        by NAME, so an incomplete list built any of those ways is reported with the missing module rather
+        than skipped. None means UNREADABLE, and the caller now acts on that difference instead of
+        conflating it with an empty list - `if not names: continue` treated both as nothing to do.
+        """
+        if isinstance(node, ast.Name):
+            return consts.get(node.id)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = literal_list(node.left, consts)
+            right = literal_list(node.right, consts)
+            if left is None or right is None:
+                return None
+            return left + right
         if not isinstance(node, (ast.Tuple, ast.List)):
             return None
-        names = []
+        names: list[str] = []
         for element in node.elts:
+            if isinstance(element, ast.Starred):
+                inner = literal_list(element.value, consts)
+                if inner is None:
+                    return None
+                names.extend(inner)
+                continue
             if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
                 return None
             names.append(element.value)
         return names
+
+    def stages_every_lib_py(node: ast.AST) -> bool:
+        """An iterable that enumerates EVERY lib/*.py satisfies every requirement this rule can produce, so green
+        for it is JUSTIFIED rather than unchecked. The proof is this rule's own construction above: a requirement
+        is `root/'lib'/f'{module}.py'` and only non-directory modules under lib/ are ever returned, so a list
+        holding all of lib/*.py cannot be missing anything. This is the class a blanket "fail loudly on any
+        unreadable list" turned RED (tests/test_adapter_auth_failure.py:250), and the reason the rule is a
+        three-way classification rather than a refusal.
+        """
+        while (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id in {"sorted", "list", "tuple", "set"} and node.args):
+            node = node.args[0]
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            return False
+        method = node.func.attr
+        receiver = ast.unparse(node.func.value)
+        if method == "iterdir":
+            return "lib" in receiver
+        if method in {"glob", "rglob"} and node.args and isinstance(node.args[0], ast.Constant):
+            pattern = str(node.args[0].value)
+            return pattern.endswith(".py") and "*" in pattern and ("lib" in receiver or "lib" in pattern)
+        return False
+
+    def stages_lib_modules_by_variable(node: ast.For) -> bool:
+        """Whether a loop whose iterable this rule cannot read is ACTUALLY a staging loop: it copies a lib file
+        whose SOURCE path is built from its own loop variable, which is what makes that variable a module NAME
+        rather than an incidental counter.
+
+        This is the discriminator the file used to say it did not have (agents-n5e0), and it is a shape test on
+        the copy call rather than a search of the source text, because a text search cannot exclude this guard's
+        own loops: "the body mentions lib" fired on seven healthy loops and "the body copies something" still on
+        four (see the docstring above). Measured over the nine loops under tests/ whose iterable is unreadable:
+        this test is false for eight of them and the ninth is the exhaustive lib-glob, so the report below stays
+        silent on today's tree.
+        """
+        loop_variables = {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call) or not call.args:
+                continue
+            func = call.func
+            name = func.attr if isinstance(func, ast.Attribute) else (
+                func.id if isinstance(func, ast.Name) else "")
+            if name not in {"copyfile", "copy", "copy2", "copytree", "move"}:
+                continue
+            if {n.id for n in ast.walk(call.args[0]) if isinstance(n, ast.Name)} & loop_variables:
+                return True
+        return False
 
     problems: list[str] = []
     for path in sorted((root / "tests").glob("*.py")):
@@ -373,21 +454,47 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:
             continue
-        consts = {
-            node.targets[0].id: [e.value for e in node.value.elts]
-            for node in tree.body
-            if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Tuple, ast.List))
-            and isinstance(node.targets[0], ast.Name)
-            and all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.value.elts)
-        }
+        # A binding is a binding whether the expression sits in a loop header or in a module-level name
+        # (agents-1p9g): the consts map used to accept only literal tuple/list assignments, so
+        # `MODULES = BASE + ('embargo.py',)` stayed unresolved and the loop iterating it was skipped in
+        # silence - the same defect as the inline concatenation, one level up. It is now built in source
+        # order through the same resolver the loop header uses, so one name may be built from an earlier
+        # name, and a name REBOUND to something this rule cannot read is dropped rather than left holding
+        # its stale literal.
+        consts: dict[str, list[str]] = {}
+        for statement in tree.body:
+            if not isinstance(statement, ast.Assign):
+                continue
+            bound = [target.id for target in statement.targets if isinstance(target, ast.Name)]
+            if not bound:
+                continue
+            resolved = literal_list(statement.value, consts)
+            for name in bound:
+                if resolved is None:
+                    consts.pop(name, None)
+                else:
+                    consts[name] = resolved
         for node in ast.walk(tree):
             if not isinstance(node, ast.For):
                 continue
             names = literal_list(node.iter, consts)
-            if not names:
-                continue
             body = ast.unparse(node)
             if '"lib"' not in body and "'lib'" not in body:
+                continue
+            if names is None:
+                # THE GUARD MUST SAY WHAT IT COULD NOT SEE (agents-n5e0). `if not names: continue` swallowed
+                # this case silently - and an EMPTY literal list with it - so a staging list built at runtime
+                # reported the same green as one that was READ AND CHECKED. The two classes above are handled
+                # first: an exhaustive lib-glob cannot be missing a module, so green is justified; anything
+                # else that stages lib modules by name is reported so the author can make it checkable.
+                if stages_every_lib_py(node.iter) or not stages_lib_modules_by_variable(node):
+                    continue
+                problems.append(
+                    f"{path.name}:{node.lineno}: this loop stages lib modules named by a list built at "
+                    "RUNTIME, so no requirement can be checked against it and a missing module would pass "
+                    "unnoticed; spell the list as a literal or a concatenation of literals, or stage every "
+                    "lib/*.py with a glob, so the modules the runtime imports can be checked"
+                )
                 continue
             staged = {n[:-3] if n.endswith(".py") else n for n in names}
             if "findings" not in staged and "budget" not in staged:
@@ -440,6 +547,94 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
     def test_every_staging_list_carries_its_runtime_imports(self):
         problems = staged_runtime_missing_modules(ROOT)
         self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_a_module_level_concatenated_staging_list_is_checked_by_name(self):
+        """agents-1p9g, the reviewer's repro against the first attempt: a binding is a binding.
+
+        The first fix resolved an INLINE concatenation while the consts map still accepted only literal
+        tuple/list assignments, so `MODULES = BASE + ('embargo.py',)` stayed unresolved and the loop
+        iterating it was skipped in silence - the same silent skip, one level up, and the reviewer's repro
+        was exactly that edit to the synthetic suite. So this pin drives the MODULE-LEVEL spelling (and the
+        starred one, which is the third shape the original finding named): findings.py imports lib/extra.py
+        at module scope and neither list stages it.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(modules_expression: str) -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    'BASE = ("findings.py",)\n'
+                    f"MODULES = {modules_expression}\n"
+                    "def build(root):\n    for module in MODULES:\n"
+                    '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        concatenated = staged_tree(findings_source)
+        (concatenated / "tests" / "test_staged.py").write_text(
+            suite('BASE + ("embargo.py",)'), encoding="utf-8")
+        found = "\n".join(staged_runtime_missing_modules(concatenated))
+        self.assertIn("extra.py", found,
+                      "a MODULE-LEVEL concatenation must be checked, not skipped: `MODULES = BASE + (...)` "
+                      "is the reviewer's repro and extra.py is imported at module scope")
+
+        starred = staged_tree(findings_source)
+        (starred / "tests" / "test_staged.py").write_text(
+            suite('[*BASE, "embargo.py"]'), encoding="utf-8")
+        self.assertIn("extra.py", "\n".join(staged_runtime_missing_modules(starred)),
+                      "a spread of a resolvable list is the same binding and is read the same way")
+
+        complete = staged_tree(findings_source)
+        (complete / "tests" / "test_staged.py").write_text(
+            suite('BASE + ("embargo.py", "extra.py")'), encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(complete), [],
+                         "resolution is not refusal: a complete module-level concatenation stays green")
+
+    def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
+        """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
+
+        `if not names: continue` gave the same green to a list this guard READ AND CHECKED and to one it
+        could not read at all, so a helper returning module names - the third shape the original finding
+        named - was invisible; a missing module would have passed unnoticed and reported as clean. The
+        discriminator is the copy call rather than the text of the loop: a loop that copies a lib file whose
+        SOURCE path is built from its own loop variable is a staging loop, and that one is now REPORTED.
+        THE CONTROLS ARE THE POINT, because the blanket version of this check was measured red on healthy
+        loops of this very tree: a loop over an exhaustive `(ROOT/'lib').glob('*.py')` cannot be missing a
+        module (class 2), and a loop over a case table whose copy sources are literals is not a staging loop.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(body: str) -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    "def listed_modules():\n    return (\"findings.py\", \"embargo.py\")\n"
+                    "def build(root):\n" + body)
+
+        runtime_built = staged_tree(findings_source)
+        (runtime_built / "tests" / "test_staged.py").write_text(
+            suite('    for module in listed_modules():\n'
+                  '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n'),
+            encoding="utf-8")
+        problems = staged_runtime_missing_modules(runtime_built)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("test_staged.py", problems[0])
+        self.assertIn("RUNTIME", problems[0],
+                      "an unreadable staging list must SAY SO rather than report the same green as a "
+                      "list that was checked")
+
+        exhaustive = staged_tree(findings_source)
+        (exhaustive / "tests" / "test_staged.py").write_text(
+            suite('    for source in sorted((ROOT / "lib").glob("*.py")):\n'
+                  '        shutil.copyfile(source, root / "lib" / source.name)\n'),
+            encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(exhaustive), [],
+                         "a list holding every lib/*.py cannot be missing a module, so green is justified "
+                         "rather than a false refusal")
+
+        case_table = staged_tree(findings_source)
+        (case_table / "tests" / "test_staged.py").write_text(
+            suite('    for case, expected in (("a", "b"), ("c", "d")):\n'
+                  '        shutil.copyfile(ROOT / "lib" / "findings.py", root / "lib" / case)\n'),
+            encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(case_table), [],
+                         "the loop variable is an incidental counter, not a module name, so a loop with "
+                         "literal copy sources is not a staging list")
 
     def test_the_guard_names_the_site_and_the_missing_module(self):
         """The case the guard must REJECT, so a green result means something.
