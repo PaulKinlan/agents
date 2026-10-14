@@ -17,8 +17,11 @@ smoke run, so it has exactly the reach the tree-guard tier has - a pin that exis
 is the same as no pin.
 """
 
+import ast
+import contextlib
 import functools
 import importlib.util
+import io
 import json
 import os
 import re
@@ -32,8 +35,6 @@ from unittest import mock
 # The tracked-file instrument (tests/__init__.py): the allowlist loader reads the fragment set from git's
 # index, because a fragment is CONFIGURATION and an uncommitted file must not be able to change it
 # (agents-2it3; the same instrument agents-nder/zf2p use for their walkers).
-from tests import has_git_index, tracked_paths
-
 from tests import has_git_index, tracked_paths
 
 # The ONE definition of "the tracked arm fragments" (agents-ncue), shared with the loader in
@@ -120,7 +121,7 @@ _ALLOWLIST_DIR = ROOT / "tests" / "fast_gate_allowlists.d"
 # carries no reasons by design (agents-02s9); the pointer keeps the ADR findable from here.
 
 
-def _allowlist_fragments():
+def _allowlist_fragments(root=ROOT):
     """The allowlist fragment FILES to merge, from GIT'S INDEX where there is one (agents-2it3).
 
     THIS IS UNTRUSTED INPUT REACHING A PARSER, WHICH IS WHY IT IS NOT JUST A COVERAGE COUNT (agents-2it3's
@@ -137,15 +138,34 @@ def _allowlist_fragments():
     tracked/untracked distinction to be had; that case cannot arise in a gate run, which is a work tree. Same
     fallback, same argument, as tests/test_ci_action.py's action_files.
     """
-    if has_git_index(ROOT):
+    allowlist_dir = root / "tests" / "fast_gate_allowlists.d"
+    if has_git_index(root):
         # tracked_paths takes a git PATHSPEC: ask for the directory (a pathspec's `*` crosses `/`, so asking
         # for `*.json` would reach into subdirectories) and filter the direct-child .json files here.
-        return sorted(p for p in tracked_paths("tests/fast_gate_allowlists.d", root=ROOT)
-                      if p.parent == _ALLOWLIST_DIR and p.suffix == ".json")
-    return sorted(_ALLOWLIST_DIR.glob("*.json"))
+        return sorted(p for p in tracked_paths("tests/fast_gate_allowlists.d", root=root)
+                      if p.parent == allowlist_dir and p.suffix == ".json")
+    return sorted(allowlist_dir.glob("*.json"))
 
 
-def _load_allowlist_fragments():
+def _untracked_allowlist_fragments(root=ROOT, *, tracked=None):
+    """Find guard-weakening JSON skipped by the index reader; a non-Git root has no strays."""
+    if not has_git_index(root):
+        return []
+    if tracked is None:
+        tracked = _allowlist_fragments(root)
+    allowlist_dir = root / "tests" / "fast_gate_allowlists.d"
+    indexed = set(tracked)
+    return sorted(p for p in allowlist_dir.glob("*.json") if p not in indexed)
+
+
+def _report_untracked_allowlist_fragments(paths, root=ROOT):
+    """Keep notices off stdout: it is the fleet oracle's suite-marker channel."""
+    for path in paths:
+        print(f"fast-gate: WARNING: ignoring UNTRACKED allowlist fragment (not loaded): "
+              f"{str(path.relative_to(root))!r}", file=sys.stderr)
+
+
+def _load_allowlist_fragments(*, fragments=None):
     """Merge every fragment; return (consumer_coverage, non_suite, provenance).
 
     provenance maps (kind, module, suite) -> the fragment file that declared it, so a stale entry names
@@ -153,7 +173,8 @@ def _load_allowlist_fragments():
     """
     coverage, non_suite, provenance = {}, {}, {}
     # THE FRAGMENT SET IS READ FROM THE TREE, NOT THE MACHINE (agents-2it3): see _allowlist_fragments.
-    fragments = _allowlist_fragments()
+    if fragments is None:
+        fragments = _allowlist_fragments()
     if not fragments:
         raise AssertionError(f"no allowlist fragments in {_ALLOWLIST_DIR}: the merged allowlist would be empty")
     for path in fragments:
@@ -189,7 +210,14 @@ def _load_allowlist_fragments():
     return coverage, non_suite, provenance
 
 
-CONSUMER_COVERAGE_ALLOWLIST, NON_SUITE_CONSUMERS, _ALLOWLIST_PROVENANCE = _load_allowlist_fragments()
+# A skipped fragment cannot weaken the guard, but a silent skip hides a configuration mistake.
+# Snapshot once at import and report ONCE at module teardown, where the runner receipt's tail shows it.
+# Test-created probes appear only AFTER import: they cannot create routine gate noise, and a test
+# that deliberately calls _load_allowlist_fragments() later cannot overwrite the snapshot.
+_FRAGMENTS_AT_IMPORT = _allowlist_fragments()
+_UNTRACKED_ALLOWLIST_FRAGMENTS_AT_IMPORT = _untracked_allowlist_fragments(tracked=_FRAGMENTS_AT_IMPORT)
+CONSUMER_COVERAGE_ALLOWLIST, NON_SUITE_CONSUMERS, _ALLOWLIST_PROVENANCE = _load_allowlist_fragments(
+    fragments=_FRAGMENTS_AT_IMPORT)
 
 
 def _fragment_declaring(kind, module, suite):
@@ -455,47 +483,114 @@ class TestAllowlistFragmentsAreConfigurationFromTheTree(unittest.TestCase):
 
     VALID = '{"kind": "consumer_coverage", "modules": {"zz_probe": ["tests/test_probe.py"]}}'
 
-    def _tracked_fragment_names(self):
+    def _scratch_fragments(self, root):
+        """Stage one known fragment in an isolated Git index; never plant guard input in ROOT."""
+        fragments = root / "tests" / "fast_gate_allowlists.d"
+        fragments.mkdir(parents=True)
+        tracked = fragments / "consumer_coverage.json"
+        tracked.write_text(self.VALID + "\n", encoding="utf-8")
+        subprocess.run(["git", "-c", "init.defaultBranch=main", "init", "-q", str(root)],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(root), "add", "--",
+                        "tests/fast_gate_allowlists.d/consumer_coverage.json"],
+                       check=True, capture_output=True)
+        return fragments, tracked
+
+    def _tracked_fragment_names(self, root=ROOT):
         """The tracked .json fragments, read independently of the loader (a direct git call)."""
         listed = subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "tests/fast_gate_allowlists.d"],
+            ["git", "-C", str(root), "ls-files", "tests/fast_gate_allowlists.d"],
             capture_output=True, text=True, check=True,
         ).stdout.splitlines()
         return sorted(Path(name).name for name in listed if name.endswith(".json"))
 
     def test_an_untracked_fragment_is_not_configuration_and_the_tracked_ones_still_are(self):
-        probe = _ALLOWLIST_DIR / "zz_untracked_probe_tmp.json"
-        self.assertFalse(probe.exists(), f"{probe} already exists; refusing to clobber it")
-        probe.write_text(self.VALID + "\n", encoding="utf-8")
-        try:
-            loaded = [p.name for p in _allowlist_fragments()]
+        with tempfile.TemporaryDirectory(prefix="allowlist-fragments-") as tmp:
+            root = Path(tmp)
+            fragments, tracked = self._scratch_fragments(root)
+            probe = fragments / "zz_untracked_probe_tmp.json"
+            probe.write_text(self.VALID + "\n", encoding="utf-8")
+            loaded = _allowlist_fragments(root)
             self.assertNotIn(
-                "zz_untracked_probe_tmp.json", loaded,
+                probe, loaded,
                 "an UNCOMMITTED file in the allowlist directory was read as configuration, so a file nobody "
                 "reviewed can add an exemption (agents-2it3)",
             )
-            expected = self._tracked_fragment_names()
-            self.assertTrue(expected, "the tracked fragment set cannot be empty - the merge would be empty")
-            self.assertEqual(
-                loaded, expected,
-                "the fragment set must be exactly the TRACKED .json files: this is the direction that proves "
-                "the reader still loads what it should, rather than loading nothing",
-            )
-        finally:
-            probe.unlink(missing_ok=True)
+            self.assertEqual(loaded, [tracked], "the reader must still load tracked configuration")
+            self.assertEqual([p.name for p in loaded], self._tracked_fragment_names(root))
+            ignored = _untracked_allowlist_fragments(root, tracked=loaded)
+            self.assertEqual(ignored, [probe])
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                _report_untracked_allowlist_fragments(ignored, root)
+            self.assertEqual(out.getvalue(), "", "stdout is the fleet oracle's marker channel")
+            self.assertEqual(err.getvalue().count("zz_untracked_probe_tmp.json"), 1)
+            self.assertIn("not loaded", err.getvalue())
 
     def test_an_untracked_malformed_fragment_cannot_fail_the_loader_at_import(self):
-        probe = _ALLOWLIST_DIR / "zz_untracked_bad_tmp.json"
-        self.assertFalse(probe.exists(), f"{probe} already exists; refusing to clobber it")
-        probe.write_text("{ this is not json\n", encoding="utf-8")
-        try:
+        with tempfile.TemporaryDirectory(prefix="allowlist-fragments-") as tmp:
+            root = Path(tmp)
+            fragments, tracked = self._scratch_fragments(root)
+            probe = fragments / "zz_untracked_bad_tmp.json"
+            probe.write_text("{ this is not json\n", encoding="utf-8")
             with self.assertRaises(json.JSONDecodeError):
                 json.loads(probe.read_text(encoding="utf-8"))
-            loaded = [p.name for p in _allowlist_fragments()]
-            self.assertNotIn("zz_untracked_bad_tmp.json", loaded,
-                             "an uncommitted malformed fragment must not be read at all")
-        finally:
-            probe.unlink(missing_ok=True)
+            self.assertEqual(_allowlist_fragments(root), [tracked],
+                             "an uncommitted malformed fragment must not be parsed")
+            ignored = _untracked_allowlist_fragments(root, tracked=[tracked])
+            self.assertEqual(ignored, [probe])
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                _report_untracked_allowlist_fragments(ignored, root)
+            self.assertEqual(err.getvalue().count("zz_untracked_bad_tmp.json"), 1)
+
+    def test_a_normal_tracked_run_reports_no_untracked_fragment(self):
+        with tempfile.TemporaryDirectory(prefix="allowlist-fragments-") as tmp:
+            root = Path(tmp)
+            _, tracked = self._scratch_fragments(root)
+            self.assertEqual(_allowlist_fragments(root), [tracked])
+            ignored = _untracked_allowlist_fragments(root, tracked=[tracked])
+            self.assertEqual(ignored, [])
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                _report_untracked_allowlist_fragments(ignored, root)
+            self.assertEqual(err.getvalue(), "", "a normal tracked run must be silent")
+
+    def test_a_non_git_root_has_no_untracked_fragment_distinction(self):
+        with tempfile.TemporaryDirectory(prefix="allowlist-no-git-") as tmp:
+            root = Path(tmp)
+            fragments = root / "tests" / "fast_gate_allowlists.d"
+            fragments.mkdir(parents=True)
+            only = fragments / "consumer_coverage.json"
+            only.write_text(self.VALID + "\n", encoding="utf-8")
+            self.assertEqual(_allowlist_fragments(root), [only])
+            self.assertEqual(_untracked_allowlist_fragments(root), [])
+
+    def test_teardown_reports_import_time_stray_once(self):
+        with tempfile.TemporaryDirectory(prefix="allowlist-fragments-") as tmp:
+            root = Path(tmp)
+            fragments, _ = self._scratch_fragments(root)
+            stray = fragments / "zz_untracked_probe_tmp.json"
+            stray.write_text(self.VALID + "\n", encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            module = sys.modules[__name__]
+            with mock.patch.object(module, "_UNTRACKED_ALLOWLIST_FRAGMENTS_AT_IMPORT", [stray]), \
+                    mock.patch.object(module, "ROOT", root), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                tearDownModule()
+            self.assertEqual(out.getvalue(), "", "never write into the stdout marker channel")
+            self.assertEqual(err.getvalue().count("zz_untracked_probe_tmp.json"), 1)
+
+    def test_imports_the_tracked_file_instrument_only_once(self):
+        """agents-bz4m: keep the documented import, not the bare rebase duplicate."""
+        source = Path(__file__).read_text(encoding="utf-8")
+        imports = [node for node in ast.walk(ast.parse(source))
+                   if isinstance(node, ast.ImportFrom) and node.module == "tests"]
+        self.assertEqual(len(imports), 1, "the same names must be imported from tests only once")
+        self.assertEqual({alias.name for alias in imports[0].names}, {"has_git_index", "tracked_paths"})
+        self.assertIn("a fragment is CONFIGURATION",
+                      "\n".join(source.splitlines()[imports[0].lineno - 4:imports[0].lineno - 1]),
+                      "keep the commented import, not the bare duplicate")
 
     def test_a_malformed_TRACKED_fragment_still_fails_loudly(self):
         """The teeth agents-nerv added must survive: a fragment that IS configuration and does not parse
@@ -825,6 +920,15 @@ class TestMirrorAgreesWithFleetOracle(unittest.TestCase):
             "module gained one, that is not automatically wrong - but it widens the mirror's claim, so "
             "record it here deliberately (agents-tuz8).",
         )
+
+
+def tearDownModule():
+    """Publish the import-time discovery once near the receipt tail, never on stdout.
+
+    The gate's arm reporter also puts warnings at the end: warnings only at import
+    would disappear from the tail a lane reads. Normal tracked runs emit nothing.
+    """
+    _report_untracked_allowlist_fragments(_UNTRACKED_ALLOWLIST_FRAGMENTS_AT_IMPORT, root=ROOT)
 
 
 if __name__ == "__main__":
