@@ -1422,28 +1422,10 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
                          "and must not offer the form that writes a different file")
 
 
-class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(unittest.TestCase):
-    """agents-0r1c, THIRD SHAPE (coord ruling, 2026-10-14T00:45Z): A PREDICTION IS NOT EVIDENCE.
-
-    The defect: the live ~/.fleet/check.conf was installed by agents-factory and carries `bash
-    tools/fast-gate.sh` plus a suite command needing tools/ and tests/, which exist only in agents-factory, so a
-    gate in any other repo died with EXIT 127 - a message about a MISSING TOOL when the truth is a FOREIGN
-    CONFIG. The first two attempts to fix it refused the command AT HAND-OUT TIME, on a prediction, and review
-    broke them FOUR times: it missed `bash ./tools/fast-gate.sh`; then it falsely refused an output redirection
-    (`bash tools/fast-gate.sh > logs/result.log`), `deno test` (a subcommand read as a script path) and
-    `timeout -k 30 60s` (a wrapper's own option argument read as a command word). Every round was a narrower
-    parse of a shell command line and every round the parser was wrong, because it was guessing at a property it
-    cannot see. The two error directions are not equal: A FALSE REFUSAL BREAKS A WORKING GATE, a MISS merely
-    fails to explain a 127 that was going to happen anyway.
-
-    So the acceptance coord replaced is the one asserted here. (1) NO COMMAND IS EVER REFUSED - the four
-    repros above are all reported normally, and they are asserted together because they are the fleet's
-    evidence that this shape is right. (2) THE DIAGNOSTIC SPEAKS AFTER AN OBSERVED FAILURE: given a
-    command-not-found exit code it names the conf's Project: stamp, the tokens that do not resolve here and the
-    repair line; given anything else it is silent, so a runner may call it after every run and it can never
-    change a verdict. The controls are the point: a resolvable config produces no diagnostic even on 127, and a
-    successful run produces none at all.
-    """
+class _ReaderHarness(unittest.TestCase):
+    """A repo that carries the reader (a copy of tools/check-cmd.sh + the tracked conf) plus a HOME-level config.
+    Shared by the classes below so neither has to carry its own copy of the fixture - a second copy would drift
+    from this one, and the tests would then disagree about what a config looks like."""
 
     def _repo(self, tag, commands, stamp='# Project: agents-factory (/some/other/checkout)\n', files=()):
         """A second repo that carries the reader (a copy of tools/check-cmd.sh + the tracked conf) and a HOME-level
@@ -1470,6 +1452,119 @@ class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(unittest.TestCa
     def _read(self, repo, env, *args):
         return subprocess.run(["bash", "tools/check-cmd.sh", *args], capture_output=True, text=True,
                               timeout=60, env=env, cwd=str(repo))
+
+class TestASwallowingGateCommandIsFlaggedWhenTheConfigIsRead(_ReaderHarness):
+    """agents-xxgk: A GATE COMMAND THAT DISCARDS ITS OWN FAILURE IS FLAGGED WHEN THE CONFIG IS READ.
+
+    The defect is a FALSE GREEN no post-hoc diagnostic can reach: CHECK_CMD="echo gate-started; bash
+    tools/fast-gate.sh || true" is recorded PASS rc=0 with NO note even when the script does not exist, because
+    there is no failure left to observe. coord's ruling was to address it by FLAGGING A SWALLOWING COMMAND WHEN
+    READING A CONFIG - loud, no path prediction - with the residual documented as a bound in the same commit,
+    and NOT by resurrecting the pre-run parser that four review rounds killed.
+
+    The warning is INFORMATION, and the assertions are built so that cannot drift: the VALUE is unchanged on
+    stdout, the exit code is still 0, nothing is refused, and the warning is the only thing added. The other
+    half is the shapes that must stay SILENT - `&& echo ok` propagates a failure rather than discarding it,
+    `set +e` alone discards nothing, and the repo's OWN tracked config must never be flagged, because a warning
+    that fires on the default is a false accusation. Red-first: removing the warn_swallowing calls makes the
+    first test fail (control run).
+
+    THE BOUND, stated in the same commit as the mechanism: the detector is TEXTUAL and matches KNOWN tails at
+    the END of the command. A command that swallows its failure another way - a wrapper script that exits 0, a
+    swallow hidden inside a quoted subcommand - stays invisible, and a command that swallows AND prints output
+    can still be recorded PASS with no diagnostic, because by then there is no exit status left to observe.
+    This is a reader's notice, not a guard: it cannot make a broken config fail, and it must not, because
+    refusing here would turn a broken config into an un-runnable gate (the trap agents-0r1c kept open).
+    """
+
+    SWALLOWING = (
+        "bash tools/fast-gate.sh || true",
+        "bash tools/fast-gate.sh || :",
+        "bash tools/fast-gate.sh ; true",
+        "bash tools/fast-gate.sh || /bin/true",
+        "bash tools/fast-gate.sh || exit 0",
+        "bash tools/fast-gate.sh ; exit 0",
+        "echo gate-started ; bash tools/fast-gate.sh || true",            # the measured false green
+        "bash tools/fast-gate.sh ; echo 'gate done'",                     # prints a plausible line and succeeds
+        "bash tools/fast-gate.sh 2>/dev/null || true",                    # the redirection-hiding form
+    )
+
+    def test_a_swallowing_tail_is_flagged_and_the_value_is_untouched(self):
+        """Flagged BEFORE the command is ever run, on the text alone, which is the whole point: the failure this
+        closes leaves a runner nothing to observe, so the notice has to come from reading the config."""
+        repo, env = self._repo("xxgk-swallow-", {"CHECK_CMD": "bash tools/full-gate.sh"})
+        for cmd in self.SWALLOWING:
+            with self.subTest(cmd=cmd):
+                conf = Path(env["FLEET_CHECK_CONF"])
+                conf.write_text("# Project: a (/b)\nCHECK_CMD=\"" + cmd + "\"\n", encoding="utf-8")
+                r = self._read(repo, env, "CHECK_CMD")
+                self.assertEqual(r.returncode, 0, "the flag must never fail a caller")
+                self.assertEqual(r.stdout.strip(), cmd, "the reported VALUE is unchanged and nothing else is stdout")
+                self.assertIn("WARNING (agents-xxgk)", r.stderr)
+                self.assertIn("DISCARDS the failure", r.stderr)
+                self.assertNotIn("REFUSING", r.stderr)
+        # The whole-set form warns too, so a lane that prints the config sees it.
+        conf = Path(env["FLEET_CHECK_CONF"])
+        conf.write_text("# Project: a (/b)\nCHECK_CMD=\"bash tools/full-gate.sh || true\"\n", encoding="utf-8")
+        whole = self._read(repo, env)
+        self.assertEqual(whole.returncode, 0)
+        self.assertIn("WARNING (agents-xxgk)", whole.stderr)
+        self.assertIn("CHECK_CMD=", whole.stdout)
+
+    def test_the_shapes_that_do_not_swallow_stay_silent(self):
+        """NON-REFUSAL CUTS BOTH WAYS: a warning on a healthy config is a false accusation, and this repo has
+        spent four review rounds on exactly that error. `&& echo ok` propagates a failure; `set +e` on its own
+        discards nothing (the command's status is still the gate's); a quoted `; true` is not a tail."""
+        repo, env = self._repo("xxgk-clean-", {"CHECK_CMD": "bash tools/full-gate.sh"})
+        for cmd in ("bash tools/fast-gate.sh",
+                    "bash tools/fast-gate.sh && echo ok",
+                    "set +e; bash tools/fast-gate.sh",
+                    "timeout -k 30 60s bash tools/fast-gate.sh",
+                    "bash tools/fast-gate.sh > logs/result.log",
+                    "python3 -m unittest discover -s tests -t .",
+                    "bash -c 'echo only; true'"):
+            with self.subTest(cmd=cmd):
+                Path(env["FLEET_CHECK_CONF"]).write_text(
+                    "# Project: a (/b)\nCHECK_CMD=\"" + cmd + "\"\n", encoding="utf-8")
+                r = self._read(repo, env, "CHECK_CMD")
+                self.assertEqual(r.returncode, 0)
+                self.assertNotIn("WARNING", r.stderr, f"a healthy config must not be flagged: {r.stderr[:200]}")
+
+    def test_the_repos_own_tracked_config_is_never_flagged(self):
+        """The default a fresh VM gets is the one config most likely to be read, and it must be quiet - a warning
+        on the tracked file would teach every lane to ignore the warning."""
+        repo, env = self._repo("xxgk-tracked-", {"CHECK_CMD": "bash tools/full-gate.sh"})
+        env = {k: v for k, v in env.items() if k != "FLEET_CHECK_CONF"}
+        env["HOME"] = str(Path(env["HOME"]))          # no override: the tracked file is what is read
+        for args in (("CHECK_CMD",), ("CHECK_FAST_CMD",), ()):
+            with self.subTest(args=args):
+                r = self._read(repo, env, *args)
+                self.assertEqual(r.returncode, 0)
+                self.assertNotIn("WARNING", r.stderr)
+
+
+class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(_ReaderHarness):
+    """agents-0r1c, THIRD SHAPE (coord ruling, 2026-10-14T00:45Z): A PREDICTION IS NOT EVIDENCE.
+
+    The defect: the live ~/.fleet/check.conf was installed by agents-factory and carries `bash
+    tools/fast-gate.sh` plus a suite command needing tools/ and tests/, which exist only in agents-factory, so a
+    gate in any other repo died with EXIT 127 - a message about a MISSING TOOL when the truth is a FOREIGN
+    CONFIG. The first two attempts to fix it refused the command AT HAND-OUT TIME, on a prediction, and review
+    broke them FOUR times: it missed `bash ./tools/fast-gate.sh`; then it falsely refused an output redirection
+    (`bash tools/fast-gate.sh > logs/result.log`), `deno test` (a subcommand read as a script path) and
+    `timeout -k 30 60s` (a wrapper's own option argument read as a command word). Every round was a narrower
+    parse of a shell command line and every round the parser was wrong, because it was guessing at a property it
+    cannot see. The two error directions are not equal: A FALSE REFUSAL BREAKS A WORKING GATE, a MISS merely
+    fails to explain a 127 that was going to happen anyway.
+
+    So the acceptance coord replaced is the one asserted here. (1) NO COMMAND IS EVER REFUSED - the four
+    repros above are all reported normally, and they are asserted together because they are the fleet's
+    evidence that this shape is right. (2) THE DIAGNOSTIC SPEAKS AFTER AN OBSERVED FAILURE: given a
+    command-not-found exit code it names the conf's Project: stamp, the tokens that do not resolve here and the
+    repair line; given anything else it is silent, so a runner may call it after every run and it can never
+    change a verdict. The controls are the point: a resolvable config produces no diagnostic even on 127, and a
+    successful run produces none at all.
+    """
 
     # ---- (1) NOTHING IS REFUSED. Each of these was a FALSE REFUSAL in one of the two earlier shapes.
 
