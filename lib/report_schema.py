@@ -698,6 +698,52 @@ def _finding_item_schema(schema: Any) -> Dict[str, Any]:
     return items if isinstance(items, dict) else {}
 
 
+def required_fields_note(schema: Any) -> str:
+    """Spell out, in words, which fields a conforming report must carry.
+
+    A JSON Schema handed to a model as nested JSON says which properties EXIST and marks some as
+    required in a sibling `required` array; that was not enough in practice. perf-review's report
+    was rejected 35 times for 35 candidates - one violation per candidate, which is what makes it
+    structural - because every finding was missing the same required field, and the prompt carried
+    the schema without ever stating the required set in words. The lists below are DERIVED from the
+    schema that will judge the answer, never typed out, so a required field added to a schema cannot
+    leave this note behind. Returns "" when the schema declares nothing required.
+    """
+    if not isinstance(schema, dict):
+        return ""
+    lines: List[str] = []
+    top = schema.get("required")
+    if isinstance(top, list) and top:
+        lines.append("Required top-level fields: " + ", ".join(f"`{field}`" for field in top) + ".")
+    finding_required = _finding_item_schema(schema).get("required")
+    if isinstance(finding_required, list) and finding_required:
+        lines.append(
+            "Each entry in `findings` MUST include: "
+            + ", ".join(f"`{field}`" for field in finding_required)
+            + " - a finding that omits one of these is rejected, and with it the whole report."
+        )
+    if not lines:
+        return ""
+    return "\n" + " ".join(lines) + "\n"
+
+
+def output_contract_prompt(schema: Any) -> str:
+    """The prompt fragment that states the report contract: the schema itself, then the required sets in words.
+
+    Both halves are here rather than at the call site so the text a model is actually given can be asserted in a
+    test instead of being verified by reading the dispatcher (agents-sz8q).
+    """
+    if not isinstance(schema, dict):
+        return ""
+    block = (
+        "\nYour final answer MUST be one JSON object that validates against this JSON "
+        "Schema. Use these exact property names (e.g. `rule_id`, not `id`):\n"
+        + json.dumps(schema, indent=2)
+        + "\n"
+    )
+    return block + required_fields_note(schema)
+
+
 def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> List[str]:
     """Map known field-name synonyms in `report["findings"]` onto canonical names, in place.
 

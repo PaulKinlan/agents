@@ -56,6 +56,14 @@ Severity must be assigned deterministically based on rule classification, the sc
 
 Respond ONLY with valid JSON matching `report.schema.json`:
 
+Every finding MUST carry the fields the schema requires: `rule_id`, `path`, `snippet`, `severity`, `title`,
+`description` and `remediation`. `snippet` is the offending code as it appears in the file - copy it from the
+candidate the scanner supplied (it is at most 200 characters there) rather than paraphrasing it, and never omit it:
+a performance finding that does not name the code it is about cannot be reviewed or applied, which is why the
+schema rejects a report whose findings lack it (agents-sz8q: the schema required this field while this SKILL asked
+for the other six, so a model that followed the SKILL lost every candidate it found). For every non-concurrency
+finding also provide `proposed_fix_diff` as described above, and withhold it for concurrency recommendations.
+
 ```json
 {
   "summary": "Reviewed recent 5 commits and 12 source files in fauxmium; identified 2 high-impact performance issues (sequential async fetch waterfall and render-blocking script) with ready-to-apply fixes.",
