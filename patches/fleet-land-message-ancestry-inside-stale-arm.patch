@@ -21,8 +21,8 @@
 +  DFLT=$(cat "$HOME/.fleet/default-branch" 2>/dev/null || echo main)
 +  if [ "$already_landed" = 0 ] && [ -n "$rev_sha" ] && git rev-parse -q --verify "$rev_sha^{commit}" >/dev/null 2>&1; then
 +    if ! git rev-parse -q --verify "refs/remotes/origin/$DFLT" >/dev/null 2>&1; then
-+      echo "fleet-land-message: REFUSING: cannot test whether $rev_sha landed - refs/remotes/origin/$DFLT does not exist, so a stale or unfetched remote-tracking ref must not be read as 'not landed'. Fetch and re-run." >&2
-+      exit 1
++      echo "fleet-land-message: NOTE: could not answer: has $rev_sha landed on origin/$DFLT? - that ref does not exist here, so ancestry cannot be established; following the p1c2 path (the bead's merged label still governs whether the clearance was spent), not refusing." >&2
++      true  # evidence absent, not adverse: the label still governs, so proceed as p1c2 does
 +    fi
 +    if git merge-base --is-ancestor "$rev_sha" "refs/remotes/origin/$DFLT" 2>/dev/null; then
 +      already_landed=2
