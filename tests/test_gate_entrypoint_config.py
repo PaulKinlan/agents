@@ -1422,7 +1422,167 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
                          "and must not offer the form that writes a different file")
 
 
+class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(unittest.TestCase):
+    """agents-0r1c, THIRD SHAPE (coord ruling, 2026-10-14T00:45Z): A PREDICTION IS NOT EVIDENCE.
+
+    The defect: the live ~/.fleet/check.conf was installed by agents-factory and carries `bash
+    tools/fast-gate.sh` plus a suite command needing tools/ and tests/, which exist only in agents-factory, so a
+    gate in any other repo died with EXIT 127 - a message about a MISSING TOOL when the truth is a FOREIGN
+    CONFIG. The first two attempts to fix it refused the command AT HAND-OUT TIME, on a prediction, and review
+    broke them FOUR times: it missed `bash ./tools/fast-gate.sh`; then it falsely refused an output redirection
+    (`bash tools/fast-gate.sh > logs/result.log`), `deno test` (a subcommand read as a script path) and
+    `timeout -k 30 60s` (a wrapper's own option argument read as a command word). Every round was a narrower
+    parse of a shell command line and every round the parser was wrong, because it was guessing at a property it
+    cannot see. The two error directions are not equal: A FALSE REFUSAL BREAKS A WORKING GATE, a MISS merely
+    fails to explain a 127 that was going to happen anyway.
+
+    So the acceptance coord replaced is the one asserted here. (1) NO COMMAND IS EVER REFUSED - the four
+    repros above are all reported normally, and they are asserted together because they are the fleet's
+    evidence that this shape is right. (2) THE DIAGNOSTIC SPEAKS AFTER AN OBSERVED FAILURE: given a
+    command-not-found exit code it names the conf's Project: stamp, the tokens that do not resolve here and the
+    repair line; given anything else it is silent, so a runner may call it after every run and it can never
+    change a verdict. The controls are the point: a resolvable config produces no diagnostic even on 127, and a
+    successful run produces none at all.
+    """
+
+    def _repo(self, tag, commands, stamp='# Project: agents-factory (/some/other/checkout)\n', files=()):
+        """A second repo that carries the reader (a copy of tools/check-cmd.sh + the tracked conf) and a HOME-level
+        config describing commands that may or may not resolve in it - the shape of a lane worktree on a shared
+        host, which is where this defect is measured. `files` are extra repo paths to create."""
+        home = Path(_registered_tmp_home(self, tag))
+        repo = home / "repoB"
+        (repo / "tools").mkdir(parents=True)
+        for name in ("check-cmd.sh", "check.conf"):
+            shutil.copy(ROOT / "tools" / name, repo / "tools" / name)
+        for rel in files:
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\nprintf ok\n", encoding="utf-8")
+            path.chmod(0o755)
+        conf = home / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(stamp + "".join(f'{k}="{v}"\n' for k, v in commands.items()), encoding="utf-8")
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["FLEET_CHECK_CONF"] = str(conf)
+        return repo, env
+
+    def _read(self, repo, env, *args):
+        return subprocess.run(["bash", "tools/check-cmd.sh", *args], capture_output=True, text=True,
+                              timeout=60, env=env, cwd=str(repo))
+
+    # ---- (1) NOTHING IS REFUSED. Each of these was a FALSE REFUSAL in one of the two earlier shapes.
+
+    def test_a_foreign_command_that_cannot_run_here_is_reported_not_refused(self):
+        """The original defect case, and the acceptance that changed: the command is REPORTED. Explaining why it
+        will fail is now a job for the runner that observes the failure (see the diagnostic tests below)."""
+        repo, env = self._repo("0r1c-foreign-",
+                               {"CHECK_CMD": "python3 -m unittest discover -s tests -t . -v",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        r = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 0, f"the reader must not refuse on a prediction: {r.stderr[:300]}")
+        self.assertEqual(r.stdout.strip(), "bash tools/fast-gate.sh")
+        self.assertNotIn("REFUSING", r.stderr)
+
+    def test_the_four_false_refusals_are_gone(self):
+        """All four repros from review, in one place, because together they are the evidence for the shape:
+        a ./ prefix, an output redirection target, deno's SUBCOMMAND and a wrapper's own option argument. Each
+        one was refused by an earlier version of this guard while being perfectly runnable."""
+        cases = {
+            "0r1c-dotslash-": ("bash ./tools/fast-gate.sh", ()),
+            "0r1c-redirect-": ("bash tools/fast-gate.sh > logs/result.log", ("tools/fast-gate.sh",)),
+            "0r1c-denotest-": ("deno test", ()),
+            "0r1c-timeoutopt-": ("timeout -k 30 60s bash tools/fast-gate.sh", ("tools/fast-gate.sh",)),
+            "0r1c-niceopt-": ("nice -n 10 bash tools/fast-gate.sh", ("tools/fast-gate.sh",)),
+        }
+        for tag, (cmd, files) in cases.items():
+            with self.subTest(cmd=cmd):
+                repo, env = self._repo(tag, {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                             "CHECK_FAST_CMD": cmd}, files=files)
+                r = self._read(repo, env, "CHECK_FAST_CMD")
+                self.assertEqual(r.returncode, 0, f"{cmd!r} must be reported, not refused: {r.stderr[:300]}")
+                self.assertEqual(r.stdout.strip(), cmd)
+                self.assertFalse((repo / "logs").exists(), "the reader must not create anything either")
+
+    def test_a_config_whose_paths_resolve_here_is_reported(self):
+        """The false-positive control: a config stamped from another checkout whose named paths all exist here
+        (a lane worktree of the same project) is read normally, as it always was."""
+        repo, env = self._repo("0r1c-legit-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                "CHECK_FAST_CMD": "bash tools/check.conf"})
+        r = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 0, f"a resolvable config must be read normally: {r.stderr}")
+        self.assertEqual(r.stdout.strip(), "bash tools/check.conf")
+
+    def test_install_still_works_on_an_unrunnable_config(self):
+        """A broken config must never be a trap: the way out cannot be disabled by the thing it repairs."""
+        repo, env = self._repo("0r1c-repair-", {"CHECK_CMD": "bash tools/full-gate.sh",
+                                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        r = self._read(repo, env, "--install")
+        self.assertEqual(r.returncode, 0, f"--install must still work on a broken config: {r.stderr[:300]}")
+        self.assertIn("installed the project's gate command", r.stdout)
+
+    # ---- (2) THE DIAGNOSTIC, AFTER THE FACT.
+
+    def test_a_command_not_found_failure_is_explained_with_stamp_token_and_repair(self):
+        """THE NEW ACCEPTANCE: the runner observed a 127, so the diagnostic may now name what is actually known -
+        the conf's own stamp, the token that does not resolve here, and the one-line repair. Nothing here is a
+        prediction: it speaks only after the command has already failed by itself."""
+        repo, env = self._repo("0r1c-explain-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        r = self._read(repo, env, "--explain-failure", "127", "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 0, "the diagnostic is not a gate: it must not fail the caller")
+        self.assertIn("agents-factory (/some/other/checkout)", r.stderr, "the stamp names who installed it")
+        self.assertIn("tools/fast-gate.sh", r.stderr, "and the token that does not resolve here")
+        self.assertIn("--install", r.stderr, "and the repair")
+
+    def test_a_not_on_path_command_word_is_named_too(self):
+        repo, env = self._repo("0r1c-explain-path-",
+                               {"CHECK_CMD": "definitely-not-a-program --flag",
+                                "CHECK_FAST_CMD": "bash tools/check-cmd.sh --check"})
+        r = self._read(repo, env, "--explain-failure", "127", "CHECK_CMD")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("definitely-not-a-program", r.stderr)
+        self.assertIn("not on PATH", r.stderr)
+
+    def test_the_diagnostic_is_silent_unless_the_failure_is_command_not_found(self):
+        """THE CONTROL THAT KEEPS IT HONEST. A run that failed for its own reasons - a failing test suite - must
+        get no foreign-config note at all, and neither must a run that passed. Without this, the diagnostic
+        would become a claim attached to every failure, which is the guessing this shape exists to remove."""
+        repo, env = self._repo("0r1c-explain-quiet-",
+                               {"CHECK_CMD": "python3 -m unittest discover -s tests -t .",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        for rc in ("0", "1", "2", "4"):
+            with self.subTest(rc=rc):
+                r = self._read(repo, env, "--explain-failure", rc, "CHECK_FAST_CMD")
+                self.assertEqual(r.returncode, 0)
+                self.assertEqual(r.stderr.strip(), "", f"rc={rc} is not command-not-found: stay silent")
+        # ...and 126, found but not executable, is the other half of the same class.
+        r = self._read(repo, env, "--explain-failure", "126", "CHECK_FAST_CMD")
+        self.assertIn("tools/fast-gate.sh", r.stderr)
+
+    def test_a_resolvable_config_gets_no_token_blamed_on_it(self):
+        """The second control: on a 127 from a config whose tokens all resolve here, the note says the stamp and
+        admits it cannot name a token - it must not invent one, because that is the failure mode this whole bead
+        is about. The stamp is still named, because attribution is a fact about the file."""
+        repo, env = self._repo("0r1c-explain-resolvable-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                "CHECK_FAST_CMD": "bash tools/check.conf"})
+        r = self._read(repo, env, "--explain-failure", "127", "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("agents-factory (/some/other/checkout)", r.stderr)
+        self.assertIn("cannot name", r.stderr)
+        self.assertNotIn("It names [", r.stderr, "no unresolved token exists here, so none may be named")
+
+    def test_an_unstamped_config_is_not_attributed_to_a_repo(self):
+        repo, env = self._repo("0r1c-explain-unstamped-", {"CHECK_FAST_CMD": "bash tools/fast-gate.sh"}, stamp="")
+        r = self._read(repo, env, "--explain-failure", "127", "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("no 'Project:' stamp", r.stderr)
+        self.assertNotIn("was installed by", r.stderr,
+                         "the note must not attribute a file nobody stamped to a repo")
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
