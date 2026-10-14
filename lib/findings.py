@@ -1451,6 +1451,28 @@ CANDIDATE_PROMPT_SLICE = 50
 INCOMPLETE_STATUS = "INCOMPLETE"
 
 
+def station_is_incomplete(station: Any) -> bool:
+    """The one completeness predicate (agents-kve2, agents-pim5).
+
+    Every surface that decides "is this station a clean result?" comes through here. When each surface
+    re-derived the answer from the status plus its own erasure list, three things went wrong at once: the
+    header counted a partial station as having a verdict it did not have, the Clean Delta banner swallowed
+    the incomplete state on a run with nothing new, and the console named one station in two contradictory
+    banners. A fourth surface added later cannot forget a rule it does not restate.
+    """
+    return bool(isinstance(station, dict) and station.get("complete") is False)
+
+
+def station_has_verdict(station: Any) -> bool:
+    """Whether the station produced a verdict at all. Completeness is a SEPARATE fact, not folded in.
+
+    An ALERT whose triage was partial still has a verdict - the alarm is the outcome and must not be
+    softened - and it is separately flagged as incomplete. A station whose status is INCOMPLETE has no
+    verdict by construction, because INCOMPLETE is not in VERDICT_STATUSES.
+    """
+    return bool(isinstance(station, dict) and station.get("status") in VERDICT_STATUSES)
+
+
 def read_candidate_count(run_dir: Any) -> Optional[int]:
     """How many candidates the station's pre-pass produced, or None when it had no pre-pass.
 
@@ -1699,10 +1721,11 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     suppressed = [f for f in live if f["state"] == "wontfix"]
     withheld = [f for f in findings if reduced(f)]
     env_failed = [s for s in (stations or []) if s.get("status") == "ENV_FAILURE"]
-    # A coverage-partial station is named by the banner below with its own counts; it DID produce a report,
-    # so it must not also be listed as a station that produced no verdict (agents-xx9t).
-    no_verdict = [s for s in (stations or []) if s.get("status") not in VERDICT_STATUSES
-                  and s.get("status") != "ENV_FAILURE" and s.get("complete") is not False]
+    # Each of these three banners names its own stations and no station appears in two: a coverage-partial
+    # station did produce a report (it just cannot show it triaged what it was given), and an ENV_FAILURE has
+    # its own banner. Both predicates are the shared ones, never a local re-derivation (agents-kve2, agents-pim5).
+    no_verdict = [s for s in (stations or []) if not station_has_verdict(s)
+                  and s.get("status") != "ENV_FAILURE" and not station_is_incomplete(s)]
 
     lines = [
         f"# Software Factory Delta Report: {target_name}",
@@ -1710,7 +1733,9 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         f"",
     ]
     if stations is not None:
-        has_verdict_count = len(stations) - len(env_failed) - len(no_verdict)
+        # By predicate, not by subtraction: subtracting an erasure list counted a partial station as
+        # having a verdict, which is the header telling the reader the opposite of the banner (agents-kve2).
+        has_verdict_count = sum(1 for s in stations if station_has_verdict(s))
         lines.append(f"Line: `{line_name or '?'}` — {len(stations)} station(s), "
                      f"{has_verdict_count} with a verdict.")
         lines.append("")
@@ -1740,7 +1765,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"> 🚨 **ENVIRONMENT FAILURE**: {len(env_failed)} station(s) failed due to adapter authentication/environment issues: {names}. "
                      "Findings for these stations are UNKNOWN (not zero). The stations could not run. This run is NOT clean.")
         lines.append("")
-    partial_triage = [s for s in (stations or []) if s.get("complete") is False]
+    partial_triage = [s for s in (stations or []) if station_is_incomplete(s)]
     if partial_triage:
         names = ", ".join(
             f"`{s.get('station')}` ({s.get('candidates_accounted')} of {s.get('candidates_presented')} shown)"
@@ -1753,7 +1778,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"> **INCOMPLETE**: {len(no_verdict)} station(s) produced no verdict: {names}. "
                      "Their zero is not a clean result; this run is not clean.")
         lines.append("")
-    elif not env_failure and not env_failed and stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
+    elif not env_failure and not env_failed and not partial_triage \
+            and stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
         lines.append("> **Clean Delta**: No new, regressed, or resolved findings in this run.")
         lines.append("")
 
@@ -1767,13 +1793,13 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append("| Station | Status | Findings | Criticals | Note |")
         lines.append("|:---|:---:|:---:|:---:|:---|")
         for s in stations:
-            has_verdict = s.get("status") in VERDICT_STATUSES
+            has_verdict = station_has_verdict(s)
             count = s.get("findings_count") if has_verdict else "—"
             crit = s.get("criticals") if has_verdict else "—"
-            if has_verdict and s.get("complete") is False:
+            if has_verdict and station_is_incomplete(s):
                 # The counts sit beside the status that depends on them, not only in the banner.
                 count = f"{count} ({s.get('candidates_accounted')}/{s.get('candidates_presented')})"
-            note = str(s.get("error") or "") or (str(s.get("note") or "") if s.get("complete") is False else "")
+            note = str(s.get("error") or "") or (str(s.get("note") or "") if station_is_incomplete(s) else "")
             note = note.replace("|", "/").replace("\n", " ")[:200]
             lines.append(f"| `{s.get('station')}` | {s.get('status')} | {count} | {crit} | {note} |")
         lines.append("")

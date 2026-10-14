@@ -36,7 +36,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count,
+                             candidate_coverage, read_candidate_count, station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
@@ -65,7 +65,7 @@ except ImportError:
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count,
+                             candidate_coverage, read_candidate_count, station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
@@ -2594,7 +2594,7 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         if env_fails:
             print(f"🚨 {len(env_fails)} station(s) encountered ENVIRONMENT FAILURE (adapter auth): "
                   f"{', '.join(sc['station'] for sc in env_fails)}.\n")
-        partial = [sc for sc in scorecard if sc.get("complete") is False]
+        partial = [sc for sc in scorecard if station_is_incomplete(sc)]
         if partial:
             print(f"🚧 {len(partial)} station(s) did not account for the candidates they were shown: "
                   + ", ".join(f"'{sc['station']}' ({sc.get('candidates_accounted')} of "
@@ -2604,7 +2604,10 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         if timeouts:
             print(f"⏱️  {len(timeouts)} station(s) TIMED OUT: "
                   f"{', '.join(sc['station'] for sc in timeouts)}.\n")
-        other_errored = [sc for sc in errored if sc["status"] != "ENV_FAILURE"]
+        # A station already named by the coverage banner above is not named again here: one station, one
+        # banner, from the shared predicate rather than from a second local condition (agents-pim5).
+        other_errored = [sc for sc in errored
+                         if sc["status"] != "ENV_FAILURE" and not station_is_incomplete(sc)]
         if other_errored:
             print(f"⚠️  {len(other_errored)} station(s) produced no verdict: "
                   f"{', '.join(sc['station'] for sc in other_errored)}. This run is not clean.\n")

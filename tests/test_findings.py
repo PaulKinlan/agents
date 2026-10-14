@@ -22,7 +22,8 @@ from unittest import mock
 from lib import findings
 from lib.candidate_identity import assign_candidate_ids
 from lib.findings import (FindingsStore, StoreFileError, bind_severity, CANDIDATE_PROMPT_SLICE,
-                          candidate_coverage, read_candidate_count)
+                          candidate_coverage, read_candidate_count, station_has_verdict,
+                          station_is_incomplete)
 from lib.redaction import redact_finding, redact_for_storage
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
@@ -1500,6 +1501,39 @@ class TestCandidateCoverage(unittest.TestCase):
     def test_one_candidate_short_of_the_slice_is_incomplete(self):
         self.assertFalse(candidate_coverage(1, 0)["complete"])
         self.assertTrue(candidate_coverage(1, 1)["complete"])
+
+
+class TestStationPredicates(unittest.TestCase):
+    """agents-kve2, agents-pim5: one predicate pair, and the two facts stay independent.
+
+    The three surfaces that broke each re-derived "has a verdict" locally. These pin the shared answer,
+    including the case a single fused predicate would get wrong: an ALERT with a partial triage HAS a
+    verdict (the alarm) and IS incomplete (the caveat) at the same time.
+    """
+
+    def test_completeness_is_the_missing_key_tolerant_way_round(self):
+        self.assertFalse(station_is_incomplete({"status": "PASS"}))
+        self.assertFalse(station_is_incomplete({"status": "PASS", "complete": True}))
+        self.assertTrue(station_is_incomplete({"status": "PASS", "complete": False}))
+        self.assertTrue(station_is_incomplete({"status": "INCOMPLETE", "complete": False}))
+
+    def test_an_incomplete_station_has_no_verdict(self):
+        self.assertFalse(station_has_verdict({"status": "INCOMPLETE", "complete": False}))
+        self.assertFalse(station_has_verdict({"status": "ERROR"}))
+        self.assertFalse(station_has_verdict({"status": "TIMEOUT"}))
+        self.assertFalse(station_has_verdict({"status": "ENV_FAILURE"}))
+        self.assertFalse(station_has_verdict({"status": "SKIPPED"}))
+
+    def test_the_alarm_keeps_its_verdict_and_keeps_its_caveat(self):
+        partial_alert = {"status": "ALERT", "criticals": 1, "complete": False}
+        self.assertTrue(station_has_verdict(partial_alert))
+        self.assertTrue(station_is_incomplete(partial_alert))
+
+    def test_a_clean_verdict_is_neither_partial_nor_verdictless(self):
+        for status in ("PASS", "ALERT"):
+            with self.subTest(status):
+                self.assertTrue(station_has_verdict({"status": status}))
+                self.assertFalse(station_is_incomplete({"status": status}))
 
 
 if __name__ == "__main__":

@@ -624,6 +624,43 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
                           station["candidates_accounted"]), (77, 50, 50))
         self.assertIs(station["complete"], True)
 
+    def test_a_partial_triage_with_nothing_new_never_claims_a_clean_delta(self):
+        """agents-kve2: the exact shape of the six runs - 49 shown, 0 accounted, nothing new. The Clean
+        Delta branch was an elif of the no-verdict banner with no coverage check, so the report said both
+        'INCOMPLETE' and 'Clean Delta', and the header counted the station as having a verdict."""
+        self.box.agent("zero", report(), prepass=prepass(49))
+        self.box.line(["zero"])
+        _, out = self.box.run_line()
+
+        delta = self.box.findings("target-delta.md")
+        self.assertIn("did not account for the candidates they were shown", delta)
+        self.assertIn("`zero` (0 of 49 shown)", delta)
+        self.assertNotIn("Clean Delta", delta)
+        self.assertIn("1 station(s), 0 with a verdict", delta)
+        self.assertNotIn("produced no verdict", delta)          # one banner per station, not two
+        self.assertNotIn("produced no verdict", out)
+        self.assertIn("0 of 49", out)
+
+    def test_a_complete_run_with_nothing_new_still_reads_clean_delta(self):
+        """The mirror: suppressing the clean banner for genuinely complete runs would be the same error
+        reversed. A pre-pass that found nothing, and a fully triaged all-false-positive scan, are both
+        complete - and a complete scan with nothing new is allowed to say so."""
+        self.box.agent("empty", report(), prepass=prepass(0))
+        self.box.line(["empty"])
+        _, _ = self.box.run_line()
+        self.assertIn("Clean Delta", self.box.findings("target-delta.md"))
+
+        self.box.agent("noisy", report(*[finding(rule_id="r1", path=f"b{i}.js", line_number=i + 1,
+                                                title=f"F{i}", verdict="false_positive")
+                                        for i in range(3)]), prepass=prepass(3))
+        self.box.line(["noisy"])
+        _, _ = self.box.run_line()
+        noisy = self.box.findings("target-delta.md")   # the LINE report carries the station table
+        self.assertIn("Clean Delta", noisy)
+        self.assertNotIn("did not account", noisy)
+        row = next(l for l in noisy.splitlines() if l.startswith("| `noisy`"))
+        self.assertIn("PASS", row)
+
     def test_a_critical_still_alerts_when_the_triage_is_partial(self):
         """The alarm is the outcome and must not be softened by the coverage fact - but the coverage is
         still recorded, so the reader sees both."""
