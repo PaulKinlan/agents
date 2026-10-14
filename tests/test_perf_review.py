@@ -10,8 +10,10 @@ Verifies that:
 4. The factory's pi models.json generation includes samplingParams temperature pinning.
 """
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import re
@@ -24,6 +26,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+from tests.test_factory_truth import Sandbox, factory_cli, report  # noqa: E402
 
 from lib.findings import FindingsStore  # noqa: E402
 from lib.report_schema import (  # noqa: E402
@@ -1031,6 +1035,134 @@ class TestFactorySamplingParams(unittest.TestCase):
             for m in models:
                 self.assertIn("samplingParams", m)
                 self.assertEqual(m["samplingParams"].get("temperature"), 0.1)
+
+
+class TestPerfReviewDeclaresItsContextChannel(unittest.TestCase):
+    """agents-ufl3: the three inputs this station's SKILL names must reach the MODEL, not just the file.
+
+    The SKILL tells the model to examine `recent_commits`, `recently_changed_files` and
+    `recent_diff_excerpt`. The pre-pass gathered all three and the dispatcher appended only
+    `candidates` to the prompt, so the station asked for evidence nothing delivered. The channel
+    that closes it is the landed opt-in one (ADR agents-3f4b): a payload carrying a `context` key
+    has its value appended to the real prompt.
+
+    These tests assert the WHOLE chain with the REAL scanner rather than a formatting stub: the
+    scanner's payload is driven through the real dispatcher and the assertions are made on the
+    RETAINED PROMPT, because asserting a config value or a payload field would pass even if nothing
+    ever reached the model. The control below is what makes that a measurement rather than a
+    coincidence.
+    """
+
+    CONTEXT_KEYS = ("recent_commits", "recently_changed_files", "recent_diff_excerpt")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="ufl3-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.repo = self.tmp / "scanned"
+        self.repo.mkdir()
+        for argv in (["git", "init", "-q", "-b", "main", "."],
+                     ["git", "config", "user.name", "T"],
+                     ["git", "config", "user.email", "t@t.com"]):
+            subprocess.run(argv, cwd=self.repo, check=True, capture_output=True)
+        (self.repo / "app.js").write_text("const x = 1;\n", encoding="utf-8")
+        (self.repo / "index.html").write_text("<html><body>hi</body></html>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "chore: initial page"], cwd=self.repo, check=True, capture_output=True)
+        # TWO commits on purpose: with a single-commit repo `git diff HEAD~1..HEAD` fails and the
+        # excerpt comes back EMPTY, so an assertion on it would pass while measuring nothing.
+        (self.repo / "index.html").write_text(
+            '<head><script src="blocking.js"></script></head>\n', encoding="utf-8")
+        (self.repo / "app.js").write_text(
+            "const w = document.body.offsetWidth;\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "feat: render-blocking script and a forced layout read"],
+                       cwd=self.repo, check=True, capture_output=True)
+        (self.repo / "app.js").write_text(
+            "const w = document.body.offsetWidth;\nfor (const u of urls) { await fetch(u); }\n",
+            encoding="utf-8")
+
+    def scanner_payload(self):
+        """Run the REAL pre-pass exactly as the dispatcher does, and return its parsed payload."""
+        out = self.tmp / "payload.json"
+        env = dict(os.environ, FACTORY_ALLOW_UNPINNED_TOOLS="1")
+        with mock.patch.dict(os.environ, env):
+            proc = subprocess.run(
+                [sys.executable, str(SCANNER_SCRIPT), "--target", str(self.repo), "--output", str(out)],
+                capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, f"the real scanner must run: {proc.stderr[-400:]}")
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_the_real_payload_declares_the_three_inputs_on_the_context_channel(self):
+        payload = self.scanner_payload()
+        self.assertIn("context", payload, "the station must opt in by key presence on the context channel")
+        self.assertEqual(sorted(payload["context"]), sorted(self.CONTEXT_KEYS))
+        ctx = payload["context"]
+        self.assertTrue(any("render-blocking" in c for c in ctx["recent_commits"]),
+                        f"recent_commits must carry the commits: {ctx['recent_commits']}")
+        self.assertIn("app.js", ctx["recently_changed_files"])
+        self.assertIn("offsetWidth", ctx["recent_diff_excerpt"],
+                      "the excerpt must carry actual diff text, not an empty string")
+        # One source for both spellings, so the recorded result and the model's input cannot drift.
+        for key in self.CONTEXT_KEYS:
+            self.assertEqual(payload[key], ctx[key], f"top-level {key} and its context copy must agree")
+
+    def prompt_for(self, payload):
+        box_root = self.tmp / "box"
+        box_root.mkdir(exist_ok=True)
+        box = Sandbox(box_root)
+        feed = self.tmp / "feed.json"
+        feed.write_text(json.dumps(payload), encoding="utf-8")
+        prepass = ("import json, shutil, sys\n"
+                   f"shutil.copyfile({str(feed)!r}, sys.argv[sys.argv.index('--output') + 1])\n")
+        box.agent("probe", report(), prepass=prepass)
+        targets = box.root / "targets"
+        targets.mkdir()
+        (targets / "trusted.yaml").write_text(
+            f"name: trusted\npath: {box.target}\nvisibility: private\ntrusted: true\n", encoding="utf-8")
+        before = set((box.root / "runs").glob("probe-*")) if (box.root / "runs").exists() else set()
+        with box.patched(), mock.patch.dict(os.environ, {"FACTORY_ALLOW_UNSANDBOXED": "1"}), \
+             mock.patch("lib.sandbox._probe_result", False), contextlib.redirect_stdout(io.StringIO()):
+            factory_cli.run_agent("probe", "trusted", engine_arg="pi", explicit_sink="file")
+        after = set((box.root / "runs").glob("probe-*")) - before
+        self.assertEqual(len(after), 1, "one actual dispatcher run must write one prompt")
+        return (after.pop() / "prompt.txt").read_text(encoding="utf-8")
+
+    def test_the_three_inputs_reach_the_real_model_prompt(self):
+        payload = self.scanner_payload()
+        self.assertIn("context", payload, "the station must declare the channel this test measures")
+        prompt = self.prompt_for(payload)
+        block = json.dumps(payload["context"], indent=2)
+        self.assertIn("Station Context:", prompt)
+        # Assert the CONTEXT BLOCK ITSELF rather than needles that merely occur somewhere in the prompt.
+        # 'offsetWidth' and 'app.js' both reach the model through Scanner Data, because a candidate
+        # carries an excerpt of the very code the change touched - so neither discriminates this
+        # channel, and asserting them would pass even if the context never arrived. The serialized
+        # block, in the channel's own format, can only have come from the context key, and asserting
+        # it verbatim also proves the context is not truncated the way the 50-candidate slice would
+        # truncate it (the ADR forbids applying that slice to the station's declared context).
+        self.assertIn(block, prompt, "the whole declared context must reach the model verbatim")
+        for key in self.CONTEXT_KEYS:
+            self.assertIn(f'"{key}"', block)
+
+    def test_without_the_context_key_the_model_still_sees_none_of_them(self):
+        """THE CONTROL: without the opt-in key the prompt must not carry the inputs.
+
+        This is what makes the test above a measurement of the channel rather than of the prompt
+        happening to contain those strings some other way.
+        """
+        payload = self.scanner_payload()
+        self.assertIn("context", payload, "the station must declare the channel this test measures")
+        block = json.dumps(payload["context"], indent=2)
+        stripped = {k: v for k, v in payload.items() if k != "context"}
+        prompt = self.prompt_for(stripped)
+        self.assertNotIn("Station Context:", prompt)
+        self.assertNotIn(block, prompt)
+        # The needles are the channel marker, the serialized block and the context-only key name -
+        # NOT a code string: 'offsetWidth' arrives through Scanner Data regardless, so asserting its
+        # absence here would be asserting something this channel never controlled. The first version
+        # of this control did exactly that and went red, which is how the mistake was found.
+        self.assertNotIn('"recent_diff_excerpt"', prompt)
 
 
 if __name__ == "__main__":
