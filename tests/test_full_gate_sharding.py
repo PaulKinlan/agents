@@ -89,14 +89,27 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertIn("executed ids=2 expected=2", res.stdout)
 
     def test_silent_child_omission_refuses_even_with_zero_exit(self):
+        """A nested run that exits 0 because it swallowed a module must be refused, and say why.
+
+        The DIAGNOSIS is asserted before the exit status (agents-ou2p): when the nested gate wrongly
+        exits 0 it is this case's id-set check that knows the difference, and asserting the return
+        code first made the failure read 'AssertionError: 0 == 0' - which names neither the
+        condition that failed nor the likely cause.
+        """
         self.module("a", " def test_one(self): pass\n"
                          " if os.getenv('FULL_GATE_SHARD_CHILD') != '1':\n"
                          "  def test_only_in_serial(self): pass\n")
         res = self.run_gate()
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("ID SET MISMATCH", res.stdout)
-        self.assertIn("tests.test_a.Case.test_only_in_serial", res.stdout)
-        self.assertIn("failing modules: tests.test_a", res.stdout)
+        self.assertIn(
+            "ID SET MISMATCH", res.stdout,
+            "no id-set mismatch in the gate output - the nested run most likely inherited the "
+            "shard marker and never ran the serial-only test:\n" + res.stdout + res.stderr)
+        self.assertIn("tests.test_a.Case.test_only_in_serial", res.stdout, res.stdout + res.stderr)
+        self.assertIn("failing modules: tests.test_a", res.stdout, res.stdout + res.stderr)
+        self.assertNotEqual(
+            res.returncode, 0,
+            "the nested gate exited 0 despite reporting the id-set mismatch and the failing "
+            "module above, so the refusal under test is missing:\n" + res.stdout + res.stderr)
 
     def test_nested_gate_ignores_outer_shard_marker_for_serial_discovery(self):
         self.module("nested", " def test_one(self): pass\n"
