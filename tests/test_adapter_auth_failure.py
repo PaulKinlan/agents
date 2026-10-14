@@ -247,6 +247,8 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
         # the factory dispatcher's own runtime (every lib/*.py by GLOB, plus the lib/sinks
         # package directory), not a station script's dependencies, so
         # tests/sandbox_fixtures.py:copy_station_script does not apply. Different case.
+        # Contract (agents-v52t): the dispatcher runtime, staged exhaustively by glob; lib/sinks as a package tree.
+        STAGED_RUNTIME = ("dispatcher", "all-lib", ("sinks",))
         for mod in (ROOT / "lib").glob("*.py"):
             shutil.copyfile(mod, self.root / "lib" / mod.name)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.

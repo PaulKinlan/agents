@@ -416,6 +416,8 @@ class TestDispatcherChildEnvironment(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            # Contract (agents-v52t): the engine runtime, staged by name; lib/sinks as a package tree.
+            STAGED_RUNTIME = ("engine", "named", ("sinks",))
             for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "net_forward.py", "egress_proxy.py", "line_numbers.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
             # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
@@ -646,6 +648,8 @@ class TestDispatcherCandidateBinding(unittest.TestCase):
             adapter = sandbox / "lib" / "adapters" / "pi.sh"
             shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
             adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            # Contract (agents-v52t): the engine runtime, staged by name; lib/sinks as a package tree.
+            STAGED_RUNTIME = ("engine", "named", ("sinks",))
             for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "net_forward.py", "egress_proxy.py", "line_numbers.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
             # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
@@ -765,6 +769,8 @@ class TestRawTargetVisibilityDispatch(unittest.TestCase):
         adapter = sandbox / "lib" / "adapters" / "pi.sh"
         shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / "pi.sh", adapter)
         adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+        # Contract (agents-v52t): the engine runtime, staged by name; lib/sinks as a package tree.
+        STAGED_RUNTIME = ("engine", "named", ("sinks",))
         for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py",
                        "net_forward.py", "egress_proxy.py", "line_numbers.py"):
             shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
@@ -867,6 +873,8 @@ class TestPerStationEngine(unittest.TestCase):
                 adapter = sandbox / "lib" / "adapters" / f"{engine}.sh"
                 shutil.copyfile(FACTORY_ROOT / "lib" / "adapters" / f"{engine}.sh", adapter)
                 adapter.chmod(adapter.stat().st_mode | stat.S_IEXEC)
+            # Contract (agents-v52t): the engine runtime, staged by name; lib/sinks as a package tree.
+            STAGED_RUNTIME = ("engine", "named", ("sinks",))
             for module in ("findings.py", "redaction.py", "embargo.py", "tool_pins.py", "net_forward.py", "egress_proxy.py", "line_numbers.py"):
                 shutil.copyfile(FACTORY_ROOT / "lib" / module, sandbox / "lib" / module)
             # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.

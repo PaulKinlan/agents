@@ -236,10 +236,14 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
     findings.py costs a tree-wide edit and the fast gate's omitted suites fail for whoever runs
     them next rather than for whoever broke them.
 
-    THE RULE IS DERIVED, NOT ENUMERATED, and it is calibrated against the real tree rather than
-    guessed. A list that stages `findings.py` builds the engine, so it must carry the HARD import
-    closure of lib/findings.py; a list that also stages factory-only modules builds the whole
-    dispatcher, so it must carry the hard closure of `factory` too. "Hard" is doing real work in
+    THE REQUIREMENT IS DERIVED FROM THE SOURCE, AND THE ENTRY POINT IS DECLARED NEXT TO THE LOOP
+    (agents-v52t, agents-e6k3). A loop that stages an entry point must carry the HARD import closure of
+    that entry point - lib/findings.py for the engine, `factory`'s own module-scope closure for the
+    dispatcher - and WHICH one it stages is the author's declaration rather than this rule's guess. The
+    guess is what the previous version did (a loop whose list carried budget.py or child_env.py was treated
+    as a dispatcher) and it was wrong in both directions on measured cases: an engine-only tuple with
+    budget.py copied OUTSIDE the loop is not a dispatcher, and a list this rule could not read was treated
+    as something to report rather than as a fact to state. "Hard" is doing real work in
     that sentence and it is the reason this passes today:
       - module scope only - an import inside a function runs when it is called, so a tree that
         never calls it needs no copy of the module;
@@ -254,8 +258,12 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
     closure flagged six sites for lib/sandbox.py (imported at module scope by lib/egress_proxy.py)
     while every one of those suites passes, so the rule is the closure of the ENTRY POINTS a tree
     runs, not of every file its list happens to copy. And "which entry points does this list run?"
-    is answered by the dispatcher's own dependency markers (budget.py, child_env.py), not by "it
-    copies something only factory imports" - that weaker test failed six healthy sites too.
+    is answered by the declaration next to the loop: the dispatcher's own dependency markers
+    (budget.py, child_env.py) were the PROXY for it, and a proxy that has to be re-calibrated every time a
+    builder's copy set moves is exactly what a declaration replaces. The declared values are VALIDATED
+    rather than trusted - an unknown entry, coverage or package is a diagnostic, not a silent pass - and the
+    declaration is read from the AST of the statement immediately before the loop, so it attaches to one
+    loop rather than to a file.
 
     TWO MORE SHAPES OF WRONG, both found by reviewers and both fixed here rather than narrowed away
     (agents-85ef): a class BODY executes at import time, so `class Init: from lib.absent import x`
@@ -276,18 +284,40 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         them) and still on four when it required the body to copy something - no text search can exclude this
         guard's own source, which contains `findings` and `budget` throughout. The hole it aimed at was real
         (agents-n5e0: a concatenated list resolved to nothing, was skipped in silence, and reported the same
-        green as a list that was read and checked), so what replaced it is a three-way classification whose
-        middle class is derived from THIS rule's own construction rather than from a search of the text:
-        (1) RESOLVE MORE FIRST - a name bound to an earlier list, `BASE + ('embargo.py',)` and
-        `[*BASE, 'embargo.py']` are read by name, because where a case can be checked, checking beats
-        refusing; (2) EXHAUSTIVE BY CONSTRUCTION - an iterable that enumerates every lib/*.py covers the
-        whole requirement space, so green for it is justified rather than unchecked; (3) EVERYTHING ELSE
-        THAT STAGES LIB MODULES is reported LOUDLY as an unreadable list. Class 3 needs one further fact to
-        stay green on a healthy tree - the loop must COPY a lib file whose SOURCE path is built from its own
-        loop variable, which is what makes that variable a module name rather than an incidental counter -
-        and it was measured over all nine loops under tests/ whose iterable this rule cannot read: one is
-        the exhaustive lib-glob, eight are not staging loops by that test, none is left, so the report is
-        silent on today's tree and fires only on a list genuinely built at runtime.
+        green as a list that was read and checked), and the contract below is what replaced the search: what a
+        loop is for is DECLARED next to it, so nothing has to be guessed from the text at all.
+
+    THE CONTRACT, AND WHAT IT CHECKS. Immediately before each staging loop sits one literal declaration:
+        STAGED_RUNTIME = ("dispatcher", "named", ("sinks",))
+      - entry: `engine` (lib/findings.py) or `dispatcher` (the factory entry point, even when factory itself is
+        copied later by a consumer). It selects which import-time closure is required; it is not inferred.
+      - coverage: `named` reads the loop's module list (literals, module-level constants and concatenations of
+        them) and unions it with the other individual lib/*.py files the SAME BUILDER copies - budget.py is
+        copied outside the loop in every one of these builders, so counting only the loop's list would demand
+        a module the builder does copy, and moving budget.py into the tuple must change nothing. Or `all-lib`,
+        allowed ONLY when the loop demonstrably stages every lib/*.py, which is what makes "nothing can be
+        missing" true rather than asserted.
+      - packages (optional): names a package directory under lib/ (sinks) that the same builder stages with a
+        copytree. The copytree is VERIFIED in the AST rather than trusted, because a label nothing checks is a
+        claim the guard has not tested. A builder that instead names INDIVIDUAL members of a declared package
+        is a diagnostic: this rule does not traverse a package's imports, so those files' own closure is
+        unchecked, and saying so is the honest answer rather than a silent hole.
+    WHERE IT REFUSES, all of it structural and none of it a text search: an eligible loop with no declaration;
+    a declaration whose fields cannot be read, that names an unknown entry/coverage/package, or that sits next
+    to something that is not an eligible loop (an orphan, which is also how a duplicate is caught); a named
+    list that cannot be read AT THAT POINT (dynamic, re-bound, shadowed, not yet bound here, or empty); an
+    `all-lib` claim whose iterable is not a glob/iterdir over every lib/*.py; a builder that stages into two
+    destinations, or through one this rule cannot read; a declared package with no copytree in that builder.
+    ELIGIBILITY IS STRUCTURAL, and the loop variable must NAME THE FILE - the component after the literal
+    `lib` has to be the loop variable or an f-string built from it. That single fact is what keeps three
+    healthy loops green without a declaration (the shell ADAPTER loops in tests/test_factory_core.py and
+    tests/test_line_andon.py, and a copytree of lib/sinks inside a loop over env spellings), and it is the
+    replacement for the text predicate the ruling forbids - "the body mentions lib" fired on all three.
+    THE SHARED BLIND SPOT, RECORDED WITH ITS MEASUREMENT (agents-v52t): a loop that delegates the copy to a
+    helper (`stage(module)`, where `stage` does the copyfile) is not eligible, so it needs no declaration and
+    nothing about it is checked. Measured when the contract was ruled: 0 of the 13 lib-copying sites in
+    tests/ delegate the copy, so this is a limitation with no site behind it, written down here rather than
+    left for a reader to discover by reasoning about the code.
 
     THE TWO AXES OF WRONG, so the next edit knows which way it can break this guard (five review rounds and three
     self-attacks produced findings on exactly these two and nothing else). They are keyed to the fix as well as to
@@ -379,14 +409,13 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
 
     engine = closure(["findings"])
     runtime = engine | closure(list(hard_local_imports(root / "factory")) + ["findings"])
-    # WHICH REQUIREMENT APPLIES IS CALIBRATED, NOT MERELY DERIVED. "Stages findings.py" is the
-    # engine; a list that also stages budget.py or child_env.py is building the DISPATCHER, because
-    # those are modules only `factory` imports at module scope. The first cut of this rule keyed on
-    # "stages any factory-only module", which flagged six sites for sandbox/budget/... because they
-    # copy lib/egress_proxy.py (to exercise the proxy directly) without building a dispatcher - and
-    # every one of those suites passes. A guard that fails on a healthy tree is worse than none, so
-    # the discriminator is the dispatcher's own dependency set, verified against all ten sites.
-    dispatcher_markers = {"budget", "child_env"}
+    # WHICH REQUIREMENT APPLIES IS DECLARED, NOT INFERRED ANY MORE (agents-v52t, agents-e6k3). The rule
+    # before this one chose the dispatcher when the loop's own list carried budget.py or child_env.py, the
+    # modules only `factory` imports at module scope. That heuristic was wrong in both measured directions: an
+    # engine-only tuple with budget.py copied OUTSIDE the loop is not a dispatcher (four builders here), and a
+    # list the rule could not read became a mandatory report instead of a fact to state. The closures below
+    # are what the declaration selects between; declared_contract reads and validates the choice, and nothing
+    # here guesses an entry point.
 
     def literal_list(node: ast.AST, scopes: list[dict[str, list[str] | None]]) -> list[str] | None:
         """Read a staging list, or None when this rule genuinely cannot.
@@ -431,12 +460,11 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         return names
 
     def stages_every_lib_py(node: ast.AST) -> bool:
-        """An iterable that enumerates EVERY lib/*.py satisfies every requirement this rule can produce, so green
-        for it is JUSTIFIED rather than unchecked. The proof is this rule's own construction above: a requirement
-        is `root/'lib'/f'{module}.py'` and only non-directory modules under lib/ are ever returned, so a list
-        holding all of lib/*.py cannot be missing anything. This is the class a blanket "fail loudly on any
-        unreadable list" turned RED (tests/test_adapter_auth_failure.py:250), and the reason the rule is a
-        three-way classification rather than a refusal.
+        """An iterable that enumerates EVERY lib/*.py, which is the only way a loop is allowed to answer the
+        requirement without naming modules. The proof is this rule's own construction above: a requirement is
+        `root/'lib'/f'{module}.py'` and only non-directory modules under lib/ are ever returned, so a loop that
+        copies all of lib/*.py cannot be missing anything. Whether a loop MAY claim that is a separate check
+        (the contract's `all-lib` coverage): this only reads the iterable.
         """
         while (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                and node.func.id in {"sorted", "list", "tuple", "set"} and node.args):
@@ -452,30 +480,243 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             return pattern.endswith(".py") and "*" in pattern and ("lib" in receiver or "lib" in pattern)
         return False
 
-    def stages_lib_modules_by_variable(node: ast.For) -> bool:
-        """Whether a loop whose iterable this rule cannot read is ACTUALLY a staging loop: it copies a lib file
-        whose SOURCE path is built from its own loop variable, which is what makes that variable a module NAME
-        rather than an incidental counter.
+    # ---------------- the adjacent contract (agents-v52t, agents-e6k3) ----------------
+    # WHICH LOOP IS A CONTRACT SITE, AND WHAT IT OWES, IS NOW DECLARED NEXT TO IT. The rule before this one
+    # decided both by inference: it read the loop's list, guessed the entry point from whether budget.py or
+    # child_env.py appeared in it, and treated a list it could not read as a mandatory report. Each of those
+    # three answers was wrong in a measured, argued case (an engine-only tuple with budget.py copied outside
+    # the loop is not a dispatcher; an unreadable list is not automatically a missing module), so the entry and
+    # the coverage are the author's statement of what the test builds, and the guard's job is to check that
+    # statement against the AST and the repository rather than to guess it. The three sections below are the
+    # whole mechanism: read the declaration, decide structurally whether a loop is a staging loop, and compare
+    # what the builder actually stages against what the declared entry point imports at import time.
+    DECLARATION = "STAGED_RUNTIME"
+    ENTRIES = {"engine": engine, "dispatcher": runtime}
+    COVERAGES = ("named", "all-lib")
+    KNOWN_PACKAGES = ("sinks",)
+    COPY_CALLS = {"copyfile", "copy", "copy2", "copytree", "move"}
 
-        This is the discriminator the file used to say it did not have (agents-n5e0), and it is a shape test on
-        the copy call rather than a search of the source text, because a text search cannot exclude this guard's
-        own loops: "the body mentions lib" fired on seven healthy loops and "the body copies something" still on
-        four (see the docstring above). Measured over the nine loops under tests/ whose iterable is unreadable:
-        this test is false for eight of them and the ninth is the exhaustive lib-glob, so the report below stays
-        silent on today's tree.
+    def declared_contract(statement: ast.stmt | None) -> tuple[tuple[str, str, tuple[str, ...]] | None, str | None]:
+        """The declaration ADJACENT to a loop, or (None, None) when this statement is not one.
+
+        ADJACENT means the statement immediately before the loop in the SAME statement list, which is what
+        makes the declaration attach to one loop rather than to a file or a builder. A declaration carrying a
+        field this guard cannot read is a DIAGNOSTIC, not a failed read that falls through to inference: the
+        ruling's condition is that an undeclared or unreadable contract is never a silent pass, and the
+        converse - a contract nobody can read - is worth no more than none at all.
         """
-        loop_variables = {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+        if statement is None:
+            return None, None
+        if isinstance(statement, ast.Assign):
+            value = statement.value
+            targets = {t.id for t in statement.targets if isinstance(t, ast.Name)}
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            value = statement.value
+            targets = {statement.target.id} if isinstance(statement.target, ast.Name) else set()
+        else:
+            return None, None
+        if DECLARATION not in targets:
+            return None, None
+        prefix = f"{statement.lineno}: {DECLARATION} "
+        if not isinstance(value, (ast.Tuple, ast.List)):
+            return None, (prefix + "must be a literal tuple written immediately before its loop, because a "
+                                     "contract this guard cannot read cannot be checked against the loop")
+        fields: list[str | tuple[str, ...]] = []
+        for element in value.elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                fields.append(element.value)
+            elif isinstance(element, (ast.Tuple, ast.List)) and all(
+                    isinstance(member, ast.Constant) and isinstance(member.value, str)
+                    for member in element.elts):
+                fields.append(tuple(member.value for member in element.elts))
+            else:
+                return None, (prefix + "has a field that is not a literal string or a literal tuple of "
+                                         "strings, so the contract cannot be read")
+        if len(fields) < 2:
+            return None, (prefix + "needs at least (entry, coverage); the entry is engine or dispatcher and "
+                                     "the coverage is named or all-lib")
+        entry, coverage = fields[0], fields[1]
+        if entry not in ENTRIES:
+            return None, (prefix + f"declares an entry point this guard does not know ({entry!r}); it knows "
+                                     f"{sorted(ENTRIES)}, and guessing which one a loop builds is what this "
+                                     "contract replaced")
+        if coverage not in COVERAGES:
+            return None, (prefix + f"declares a coverage this guard does not know ({coverage!r}); it knows "
+                                     f"{list(COVERAGES)}")
+        packages: tuple[str, ...] = ()
+        if len(fields) > 2:
+            third = fields[2]
+            if len(fields) > 3 or not isinstance(third, tuple):
+                return None, (prefix + "declares more than (entry, coverage, packages), or a packages field "
+                                         "that is not a literal tuple")
+            packages = third
+        for package in packages:
+            if package not in KNOWN_PACKAGES:
+                return None, (prefix + f"declares package {package!r}, which is not a package directory under "
+                                         f"lib/ ({list(KNOWN_PACKAGES)}); declaring a package the guard cannot "
+                                         "verify is worse than declaring none")
+        return (str(entry), str(coverage), packages), None
+
+    def path_parts(node: ast.AST) -> list[ast.AST]:
+        """A `/`-joined path expression as its components, in order."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            return path_parts(node.left) + path_parts(node.right)
+        return [node]
+
+    def literal_part(node: ast.AST) -> str | None:
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    def names_lib(node: ast.AST) -> bool:
+        """Whether a path expression has `lib` as one of its literal components - a STRUCTURE test on the
+        arguments of a copy call, never a search of the loop's text. The text search was the previous rule's
+        eligibility proxy and the ruling forbids it precisely because "the body mentions lib" fires on healthy
+        loops that merely copy something else under a directory whose name happens to contain it.
+        """
+        return any(literal_part(part) == "lib" for part in path_parts(node))
+
+    def staging_prefix(node: ast.AST) -> str | None:
+        """The staged lib DIRECTORY a destination writes into, keyed by the expression BEFORE its literal `lib`
+        component: everything after it is a file or package name. None when the destination has no literal
+        `lib`, which means it is not a staged lib copy at all.
+        """
+        parts = path_parts(node)
+        for index, part in enumerate(parts):
+            if literal_part(part) == "lib":
+                return " / ".join(ast.unparse(prefix) for prefix in parts[:index])
+        return None
+
+    def local_aliases(statements: list[ast.stmt]) -> dict[str, ast.AST]:
+        """`name = <path expression>` bindings in one statement list, which is what lets a builder assign its
+        roots and its `src` before copying (tests/test_pi_keyless_broker.py:86 stages through exactly that).
+        """
+        aliases: dict[str, ast.AST] = {}
+        for statement in statements:
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        aliases[target.id] = statement.value
+            elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+                if statement.value is not None:
+                    aliases[statement.target.id] = statement.value
+        return aliases
+
+    def dereference(node: ast.AST, aliases: dict[str, ast.AST]) -> ast.AST:
+        """Follow a name to the expression it is bound to in this builder, once."""
+        if isinstance(node, ast.Name) and node.id in aliases:
+            return aliases[node.id]
+        return node
+
+    def loop_variables(node: ast.For) -> set[str]:
+        return {name.id for name in ast.walk(node.target) if isinstance(name, ast.Name)}
+
+    def stages_lib_modules(node: ast.For) -> bool:
+        """Whether this loop COPIES lib modules into a staged lib directory - the structural eligibility test.
+
+        Two shapes qualify, and both are read from the copy CALL rather than from the loop's text - the ruling
+        forbids a text predicate because "the body mentions lib" fires on healthy loops, and three measured
+        loops under tests/ copy something else out of a lib/ subdirectory inside a loop (the shell ADAPTER
+        loops in tests/test_factory_core.py and tests/test_line_andon.py, and a copytree of lib/sinks inside a
+        loop over env spellings in tests/test_sink_adapters.py). The distinguishing fact is that the loop
+        variable must NAME THE FILE: the component after the literal `lib` is the loop variable (or an
+        f-string built from it), not a literal directory such as `adapters`. A loop that neither uses its
+        variable in the source nor enumerates lib/*.py itself is not a staging loop and needs no contract,
+        which is what keeps those three loops and tests/test_coverage_contract.py:81 green with no declaration.
+        """
+        aliases = local_aliases(list(ast.walk(node)))
+        exhaustive = stages_every_lib_py(node.iter)
+        variables = loop_variables(node)
         for call in ast.walk(node):
-            if not isinstance(call, ast.Call) or not call.args:
+            if not isinstance(call, ast.Call) or len(call.args) < 2 or call_name(call) not in COPY_CALLS:
                 continue
-            func = call.func
-            name = func.attr if isinstance(func, ast.Attribute) else (
-                func.id if isinstance(func, ast.Name) else "")
-            if name not in {"copyfile", "copy", "copy2", "copytree", "move"}:
+            source = dereference(call.args[0], aliases)
+            destination = dereference(call.args[1], aliases)
+            if not names_lib(destination):
                 continue
-            if {n.id for n in ast.walk(call.args[0]) if isinstance(n, ast.Name)} & loop_variables:
+            names_the_file = bool({name.id for name in ast.walk(source) if isinstance(name, ast.Name)}
+                                  & variables)
+            if not names_the_file:
+                continue
+            if names_lib(source):
+                parts = path_parts(source)
+                tail = parts[[literal_part(part) == "lib" for part in parts].index(True) + 1:]
+                if not tail:
+                    continue
+                head = literal_part(tail[0])
+                # A literal tail names the FILE: it must be a Python module. `lib/adapters/pi.sh` is a shell
+                # adapter staged for the dispatcher, not a module list, and demanding a contract for it is the
+                # over-refusal this test exists to avoid.
+                if head is not None and not head.endswith(".py"):
+                    continue
+                return True
+            if exhaustive and isinstance(source, ast.Name) and source.id in variables:
                 return True
         return False
+
+    def call_name(call: ast.Call) -> str:
+        func = call.func
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return func.id if isinstance(func, ast.Name) else ""
+
+    def builder_staging(statements: list[ast.stmt]) -> tuple[set[str], set[str], set[str],
+                                                            dict[str, list[tuple[int, str]]],
+                                                            list[tuple[int, str]]]:
+        """What ONE builder stages into its staged lib directory: (module names, staged packages, destination
+        roots, unsupported shapes).
+
+        THE UNION IS THE POINT (the ruling's condition): `budget.py` is copied OUTSIDE the loop in every one of
+        these builders, so counting only the loop's list would demand a module the builder does copy - and
+        moving budget.py INTO the tuple must change nothing, which it cannot if the union already holds it. The
+        destination roots are collected for the same reason: a builder that stages into two different places, or
+        through a destination this guard cannot read, is a DIAGNOSTIC rather than an assumed pass, because the
+        union of two unrelated trees proves nothing about either.
+        """
+        modules: set[str] = set()
+        packages: set[str] = set()
+        destinations: set[str] = set()
+        member_copies: dict[str, list[tuple[int, str]]] = {}
+        unsupported: list[tuple[int, str]] = []
+        aliases = local_aliases(statements)
+        for statement in statements:
+            for call in ast.walk(statement):
+                if not isinstance(call, ast.Call) or len(call.args) < 2 or call_name(call) not in COPY_CALLS:
+                    continue
+                source = dereference(call.args[0], aliases)
+                destination = dereference(call.args[1], aliases)
+                prefix = staging_prefix(destination)
+                if prefix is None:
+                    continue
+                destinations.add(prefix)
+                parts = path_parts(source)
+                under_lib = [index for index, part in enumerate(parts) if literal_part(part) == "lib"]
+                if under_lib:
+                    tail = parts[under_lib[-1] + 1:]
+                    literal_tail = [literal_part(part) for part in tail]
+                    directory = literal_tail[0] if literal_tail else None
+                    if directory and (root / "lib" / directory).is_dir():
+                        # A DIRECTORY under lib/: a package staged as a TREE by copytree, or an individual member
+                        # copied out of it. The two are different claims and only the second can be unsupported -
+                        # and only for a package the CONTRACT declares, because lib/adapters is a directory of
+                        # shell scripts, not a package whose Python imports could go unchecked (agents-v52t's
+                        # condition is about a declared package's traversal, not about every subdirectory).
+                        if call_name(call) == "copytree":
+                            packages.add(directory)
+                        else:
+                            member_copies.setdefault(directory, []).append(
+                                (call.lineno, literal_tail[1] if len(literal_tail) > 1 and literal_tail[1]
+                                 else ast.unparse(source)))
+                        continue
+                    if directory and directory.endswith(".py"):
+                        modules.add(directory[:-3])
+                    # A dynamic component (the loop's module, a mod.name, an f-string) is the LOOP's copy: the
+                    # loop's own list names it, and resolving that list is the loop's job below.
+        if len(destinations) > 1:
+            unsupported.append((
+                statements[0].lineno,
+                "this builder stages lib modules into more than one destination ("
+                + ", ".join(sorted(destinations))
+                + "), so there is no single staged tree whose imports the loop's list can be checked against"))
+        return modules, packages, destinations, member_copies, unsupported
 
     problems: list[str] = []
     for path in sorted((root / "tests").glob("*.py")):
@@ -586,7 +827,8 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             return names
 
         def walk_statements(statements: list[ast.stmt], scopes: list[dict[str, list[str] | None]],
-                            found: list[tuple[ast.For, list[dict[str, list[str] | None]]]]) -> None:
+                            found: list[tuple[ast.For, list[dict[str, list[str] | None]],
+                                              list[ast.stmt], int]]) -> None:
             """Walk ONE statement list IN ORDER, recording each loop with the bindings IN EFFECT AT ITS POSITION.
 
             THE AXIS IS POSITION, NOT SCOPE (agents-e340, round 4 of review). The previous version built a
@@ -605,11 +847,14 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
             for statement in statements:
                 for name in store_names(statement):
                     local.setdefault(name, None)
-            for statement in statements:
+            for index, statement in enumerate(statements):
                 local.update(binding_values(statement, scopes + [local]))
                 here = scopes + [dict(local)]
                 if isinstance(statement, ast.For):
-                    found.append((statement, here))
+                    # The statement list and the position are recorded with the loop because the CONTRACT that
+                    # now governs it is the statement immediately before it in that list (agents-v52t), and the
+                    # builder whose copies it must union is that same list.
+                    found.append((statement, here, statements, index))
                 if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     scope: dict[str, list[str] | None] = {name: None for name in definition_bindings(statement)}
                     walk_statements(statement.body, here + [scope], found)
@@ -627,36 +872,96 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                 for case in getattr(statement, "cases", None) or []:
                     walk_statements(case.body, here, found)
 
-        loops: list[tuple[ast.For, list[dict[str, list[str] | None]]]] = []
+        loops: list[tuple[ast.For, list[dict[str, list[str] | None]], list[ast.stmt], int]] = []
         walk_statements(tree.body, [], loops)
-        for node, scopes in loops:
-            names = literal_list(node.iter, scopes)
-            body = ast.unparse(node)
-            if '"lib"' not in body and "'lib'" not in body:
+        for node, scopes, statements, index in loops:
+            declared, unreadable = declared_contract(statements[index - 1] if index else None)
+            eligible = stages_lib_modules(node)
+            if not eligible:
+                # A DECLARATION WITH NO STAGING LOOP IS AN ORPHAN (the ruling's condition): it is either a
+                # contract attached to the wrong statement, or a duplicate of the one that attaches to the loop,
+                # and either way nothing checks it - so it is reported rather than ignored.
+                if unreadable is not None:
+                    problems.append(f"{path.name}:{unreadable}")
+                elif declared is not None:
+                    problems.append(
+                        f"{path.name}:{statements[index - 1].lineno}: {DECLARATION} is declared here but the "
+                        f"loop after it does not copy lib modules into a staged lib directory, so the "
+                        f"declaration is never checked"
+                    )
                 continue
-            if names is None:
-                # THE GUARD MUST SAY WHAT IT COULD NOT SEE (agents-n5e0). `if not names: continue` swallowed
-                # this case silently - and an EMPTY literal list with it - so a staging list that could not be
-                # read AT THIS POINT reported the same green as one that was READ AND CHECKED. The two classes
-                # above are handled first: an exhaustive lib-glob cannot be missing a module, so green is
-                # justified; anything else that stages lib modules by name is reported so the author can make it
-                # checkable. Since agents-e340 the wording names the POSITION rather than only "built at
-                # runtime", because a name bound later in the same scope, a shadowing local, a parameter and a
-                # genuinely dynamic expression all arrive here.
-                if stages_every_lib_py(node.iter) or not stages_lib_modules_by_variable(node):
-                    continue
+            if unreadable is not None:
+                problems.append(f"{path.name}:{unreadable}")
+                continue
+            if declared is None:
                 problems.append(
-                    f"{path.name}:{node.lineno}: this loop stages lib modules named by a list this guard "
-                    f"cannot read at this point (it is dynamic, re-bound, shadowed, or not yet bound here), so "
-                    f"no requirement can be checked against it and a missing module would pass unnoticed; make "
-                    f"it a literal or a constant bound before the loop, or stage every lib/*.py with a glob, so "
-                    f"the modules the runtime imports can be checked"
+                    f"{path.name}:{node.lineno}: this loop copies lib modules into a staged lib directory but "
+                    f"carries no {DECLARATION} contract adjacent to it, so which entry point it builds and how "
+                    f"it covers that entry point's import-time closure cannot be checked; write the contract "
+                    f"immediately before the loop - e.g. {DECLARATION} = (\"engine\", \"named\") - because "
+                    f"guessing it from the list is what this contract replaced"
                 )
                 continue
-            staged = {n[:-3] if n.endswith(".py") else n for n in names}
-            if "findings" not in staged and "budget" not in staged:
+            entry, coverage, packages = declared
+            required = ENTRIES[entry]
+            staged_now, staged_packages, destinations, member_copies, unsupported = builder_staging(statements)
+            for shape_line, shape in unsupported:
+                problems.append(f"{path.name}:{shape_line}: {shape}")
+            if not destinations:
+                problems.append(
+                    f"{path.name}:{node.lineno}: this loop is declared as a staging loop but its destination "
+                    f"cannot be read, so the staged tree it builds cannot be checked"
+                )
                 continue
-            required = runtime if staged & dispatcher_markers else engine
+            if coverage == "all-lib":
+                # `all-lib` is allowed ONLY when the loop demonstrably stages every lib/*.py, because that is
+                # the whole justification for answering every requirement without naming modules.
+                if not stages_every_lib_py(node.iter):
+                    problems.append(
+                        f"{path.name}:{node.lineno}: this loop declares all-lib coverage but its iterable does "
+                        f"not enumerate every lib/*.py (it is not a glob or iterdir over lib with a .py "
+                        f"filter), so the claim that nothing can be missing is not supported by the loop"
+                    )
+                    continue
+                # The coverage claim is read as the modules it actually stages: every lib/*.py, which is what
+                # makes "nothing can be missing" true rather than merely asserted.
+                staged: set[str] = {module.stem for module in (root / "lib").glob("*.py")} | staged_now
+            else:
+                names = literal_list(node.iter, scopes)
+                if names is None or not names:
+                    problems.append(
+                        f"{path.name}:{node.lineno}: this loop stages lib modules named by a list this guard "
+                        f"cannot read at this point (it is dynamic, re-bound, shadowed, not yet bound here, or "
+                        f"empty), so the modules the declared {entry} runtime imports cannot be checked against "
+                        f"it; make it a literal or a constant bound before the loop, or declare all-lib coverage "
+                        f"with a glob over every lib/*.py"
+                    )
+                    continue
+                staged = {name[:-3] if name.endswith(".py") else name for name in names} | staged_now
+            for package in packages:
+                if not (root / "lib" / package).is_dir():
+                    problems.append(
+                        f"{path.name}:{node.lineno}: the contract declares the {package} package but "
+                        f"lib/{package} is not a package directory in this repository"
+                    )
+                    continue
+                if package not in staged_packages:
+                    problems.append(
+                        f"{path.name}:{node.lineno}: the contract declares the {package} package but this "
+                        f"builder never copies it into the staged lib directory (no copytree of lib/{package} "
+                        f"in the same builder), so the package's own imports go unchecked"
+                    )
+                # THE PACKAGE RULE'S OTHER HALF (the ruling's condition): a declared package may be staged as a
+                # tree, or its members may be named individually - but then their own closure has to be declared
+                # too, because this rule does not traverse a package's imports. Reported whether or not the
+                # copytree is there: naming a member individually is the same unchecked-closure claim in both
+                # cases, and a reader who removed the copytree needs to hear both problems.
+                for line, member in member_copies.get(package, []):
+                    problems.append(
+                        f"{path.name}:{line}: this builder copies {member} out of the declared "
+                        f"lib/{package} package by name, so that file's own imports are unchecked; declare "
+                        f"the package with a copytree (staging the whole tree) or stop naming its members"
+                    )
             missing = sorted(required - staged)
             if missing:
                 problems.append(
@@ -676,7 +981,9 @@ def staged_suite_source(modules: tuple[str, ...]) -> str:
     listed = ", ".join(f'"{module}"' for module in modules)
     return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
             f"MODULES = ({listed})\n"
-            "def build(root):\n    for module in MODULES:\n"
+            "def build(root):\n"
+            '    STAGED_RUNTIME = ("engine", "named")\n'
+            "    for module in MODULES:\n"
             '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
 
@@ -721,7 +1028,9 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
             return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
                     'BASE = ("findings.py",)\n'
                     f"MODULES = {modules_expression}\n"
-                    "def build(root):\n    for module in MODULES:\n"
+                    "def build(root):\n"
+                    '    STAGED_RUNTIME = ("engine", "named")\n'
+                    "    for module in MODULES:\n"
                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         concatenated = staged_tree(findings_source)
@@ -759,7 +1068,9 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
             return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
                     'BASE = ("findings.py",)\n'
                     f"{statements}"
-                    "def build(root):\n    for module in MODULES:\n"
+                    "def build(root):\n"
+                    '    STAGED_RUNTIME = ("engine", "named")\n'
+                    "    for module in MODULES:\n"
                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         def reported(statements: str) -> str:
@@ -804,7 +1115,9 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
                 + prelude + definition, encoding="utf-8")
             return "\n".join(staged_runtime_missing_modules(tree))
 
-        copy_loop = ('    for module in MODULES:\n'
+        copy_loop = ('    STAGED_RUNTIME = ("engine", "named")\n'
+
+                             '    for module in MODULES:\n'
                      '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         shadowed = reported('def build(root):\n    MODULES = ("findings.py", "embargo.py")\n' + copy_loop)
@@ -834,7 +1147,8 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         """
         findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
         module_prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
-        copy_loop = ('    for module in MODULES:\n'
+        copy_loop = ('    STAGED_RUNTIME = ("engine", "named")\n'
+                             '    for module in MODULES:\n'
                      '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         def reported(body: str) -> str:
@@ -868,7 +1182,8 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         """
         findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
         prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
-        copy_loop = ('    for module in MODULES:\n'
+        copy_loop = ('    STAGED_RUNTIME = ("engine", "named")\n'
+                             '    for module in MODULES:\n'
                      '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         def reported(body: str) -> str:
@@ -898,7 +1213,8 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         """
         findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
         prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
-        copy_loop = ('    for module in MODULES:\n'
+        copy_loop = ('    STAGED_RUNTIME = ("engine", "named")\n'
+                             '    for module in MODULES:\n'
                      '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         def reported(body: str) -> str:
@@ -935,7 +1251,8 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         """
         findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
         prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
-        copy_loop = ('    for module in MODULES:\n'
+        copy_loop = ('    STAGED_RUNTIME = ("engine", "named")\n'
+                             '    for module in MODULES:\n'
                      '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         def reported(body: str) -> str:
@@ -966,7 +1283,8 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         """
         findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
         prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
-        copy_loop = ('    for module in MODULES:\n'
+        copy_loop = ('    STAGED_RUNTIME = ("engine", "named")\n'
+                             '    for module in MODULES:\n'
                      '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
 
         def reported(body: str) -> str:
@@ -981,12 +1299,14 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
                       "a type parameter holds a TypeVar in the body, so the global must not be read there")
 
         generic_class = reported('class Builder[MODULES]:\n    def build(self, root):\n'
+                                 '        STAGED_RUNTIME = ("engine", "named")\n'
                                  '        for module in MODULES:\n'
                                  '            shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
         self.assertIn("cannot read at this point", generic_class,
                       "a method of a generic class sees the type parameter too")
 
         no_leak = reported("def build[MODULES](root):\n    return MODULES\n"
+                           'STAGED_RUNTIME = ("engine", "named")\n'
                            "for module in MODULES:\n"
                            "    shutil.copyfile(ROOT / \"lib\" / module, root / \"lib\" / module)\n")
         self.assertEqual(no_leak, "",
@@ -1013,7 +1333,8 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
 
         runtime_built = staged_tree(findings_source)
         (runtime_built / "tests" / "test_staged.py").write_text(
-            suite('    for module in listed_modules():\n'
+            suite('    STAGED_RUNTIME = ("engine", "named")\n'
+                  '    for module in listed_modules():\n'
                   '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n'),
             encoding="utf-8")
         problems = staged_runtime_missing_modules(runtime_built)
@@ -1025,7 +1346,8 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
 
         exhaustive = staged_tree(findings_source)
         (exhaustive / "tests" / "test_staged.py").write_text(
-            suite('    for source in sorted((ROOT / "lib").glob("*.py")):\n'
+            suite('    STAGED_RUNTIME = ("engine", "all-lib")\n'
+                  '    for source in sorted((ROOT / "lib").glob("*.py")):\n'
                   '        shutil.copyfile(source, root / "lib" / source.name)\n'),
             encoding="utf-8")
         self.assertEqual(staged_runtime_missing_modules(exhaustive), [],
@@ -1040,6 +1362,124 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         self.assertEqual(staged_runtime_missing_modules(case_table), [],
                          "the loop variable is an incidental counter, not a module name, so a loop with "
                          "literal copy sources is not a staging list")
+
+    def test_the_contract_decides_the_entry_point_and_the_coverage(self):
+        """agents-v52t / agents-e6k3: the declaration is the authority, and the guard VALIDATES it.
+
+        Every case here is a declaration the old inference could not express and a healthy tree has to keep
+        green - which is why the entry point and the coverage are declared rather than guessed. The dispatcher
+        case is the one the old proxy got wrong: budget.py is copied OUTSIDE this builder's loop, so the loop's
+        own tuple looks engine-only, and the contract says dispatcher because that is what the builder builds.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(declaration: str, modules: str = '("findings.py", "embargo.py", "extra.py")',
+                  extra: str = "") -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    f"MODULES = {modules}\n"
+                    "def build(root):\n"
+                    f"    {declaration}\n"
+                    "    for module in MODULES:\n"
+                    '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n'
+                    + extra)
+
+        def reported(declaration: str, **kwargs: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(suite(declaration, **kwargs), encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        self.assertEqual(reported('STAGED_RUNTIME = ("engine", "named")'), "",
+                         "the declared engine closure is complete here, so the declaration is honoured")
+        self.assertIn("extra.py", reported('STAGED_RUNTIME = ("engine", "named")',
+                                           modules='("findings.py", "embargo.py")'),
+                      "a declared engine list missing a hard import is still named, module and all")
+        self.assertIn("cannot read at this point", reported('STAGED_RUNTIME = ("engine", "named")',
+                                                            modules="listed_modules()"),
+                      "an unreadable list under a contract is a DIAGNOSTIC, never a skip")
+        self.assertIn("does not know", reported('STAGED_RUNTIME = ("dispatcherr", "named")'),
+                      "a misspelled entry point is a diagnostic rather than a silent engine check")
+        self.assertIn("is not a package directory",
+                      reported('STAGED_RUNTIME = ("engine", "named", ("snks",))'),
+                      "an unknown package name is a diagnostic rather than an unchecked label")
+        # An ORPHAN declaration: the statement after it is not an eligible loop, so nothing checks it. This is
+        # also how a duplicate is caught - only the declaration adjacent to the loop can be honoured.
+        orphan_tree = staged_tree(findings_source)
+        (orphan_tree / "tests" / "test_staged.py").write_text(
+            "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+            'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+            "def build(root):\n"
+            '    STAGED_RUNTIME = ("engine", "named")\n'
+            "    for other in ():\n"
+            "        pass\n", encoding="utf-8")
+        self.assertIn("is declared here but",
+                      "\n".join(staged_runtime_missing_modules(orphan_tree)),
+                      "a declaration whose loop is not a staging loop is an ORPHAN, not a pass")
+        self.assertIn("all-lib", reported('STAGED_RUNTIME = ("engine", "all-lib")'),
+                      "all-lib is refused when the loop names modules instead of enumerating lib/*.py")
+
+        # budget.py copied OUTSIDE the loop: an engine declaration must not pick up the dispatcher requirement
+        # (the old proxy did exactly that), and moving budget INTO the tuple must change nothing at all.
+        outside = '    shutil.copyfile(ROOT / "lib" / "budget.py", root / "lib" / "budget.py")\n'
+        self.assertEqual(reported('STAGED_RUNTIME = ("engine", "named")', extra=outside), "",
+                         "an engine declaration must not be reclassified by a module copied elsewhere")
+        self.assertEqual(reported('STAGED_RUNTIME = ("engine", "named")',
+                                  modules='("findings.py", "embargo.py", "extra.py", "budget.py")'), "",
+                         "moving budget.py into the tuple changes nothing, as the ruling requires")
+
+        # A DECLARED DISPATCHER IS DEMANDED IN FULL: budget.py and child_env.py are the modules only factory
+        # imports at module scope, and the staged tree must actually carry them.
+        dispatcher = 'STAGED_RUNTIME = ("dispatcher", "named")'
+        tree = staged_tree(findings_source)
+        (tree / "lib" / "budget.py").write_text("\n", encoding="utf-8")
+        (tree / "lib" / "child_env.py").write_text("\n", encoding="utf-8")
+        (tree / "factory").write_text("from lib.budget import x\nfrom lib.child_env import y\n",
+                                      encoding="utf-8")
+        (tree / "tests" / "test_staged.py").write_text(suite(dispatcher), encoding="utf-8")
+        dispatcher_missing = "\n".join(staged_runtime_missing_modules(tree))
+        self.assertIn("budget.py", dispatcher_missing,
+                      "a declared dispatcher that does not stage budget.py must fail")
+        self.assertIn("child_env.py", dispatcher_missing,
+                      "...and child_env.py too, because the closure is the dispatcher's, not the engine's")
+
+    def test_the_declared_package_is_verified_in_the_ast_not_trusted(self):
+        """The package field is checked rather than believed, which is the whole point of declaring it.
+
+        `("sinks",)` means "this builder stages the whole package with a copytree". Removing that copytree has
+        to be a diagnostic - otherwise the label would be a comment the guard repeats back. The other half is
+        the rule the ruling names: naming INDIVIDUAL members of a declared package is refused, because the
+        guard does not traverse a package's imports and those files' closure would go unchecked in silence.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+
+        def suite(declaration: str, extra: str) -> str:
+            return ("import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                    'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+                    "def build(root):\n"
+                    f"    {declaration}\n"
+                    "    for module in MODULES:\n"
+                    '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n'
+                    + extra)
+
+        def reported(declaration: str, extra: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "lib" / "sinks").mkdir(exist_ok=True)
+            (tree / "lib" / "sinks" / "command.py").write_text("\n", encoding="utf-8")
+            (tree / "tests" / "test_staged.py").write_text(suite(declaration, extra), encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        copytree = ('    shutil.copytree(ROOT / "lib" / "sinks", root / "lib" / "sinks", '
+                    'dirs_exist_ok=True)\n')
+        declaration = 'STAGED_RUNTIME = ("engine", "named", ("sinks",))'
+        self.assertEqual(reported(declaration, copytree), "",
+                         "the contract is satisfied by the copytree it names")
+        missing_tree = reported(declaration, "")
+        self.assertIn("never copies it", missing_tree,
+                      "a declared package with no copytree is a diagnostic, not a restated label")
+        member = reported(declaration,
+                          '    shutil.copyfile(ROOT / "lib" / "sinks" / "command.py",\n'
+                          '                    root / "lib" / "sinks" / "command.py")\n')
+        self.assertIn("by name", member,
+                      "copying one declared package member by name leaves that file's imports unchecked")
 
     def test_the_guard_names_the_site_and_the_missing_module(self):
         """The case the guard must REJECT, so a green result means something.
@@ -1084,7 +1524,9 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
             (tmp / "tests" / "test_staged.py").write_text(
                 "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
                 'MODULES = ("findings.py",)\n'
-                'def build(root):\n    for module in MODULES:\n'
+                'def build(root):\n'
+                '    STAGED_RUNTIME = ("engine", "named")\n'
+                '    for module in MODULES:\n'
                 '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n',
                 encoding="utf-8")
             problems = staged_runtime_missing_modules(tmp)
