@@ -116,6 +116,18 @@ DELTA_KEYS = ("new", "regressed", "fixed", "unchanged", "suppressed", "false_pos
               # finding appearing where an old one retired, so the delta DISCLOSES the ambiguity and
               # changes nothing that a reader or a sink acts on.
               "possible_rekey",
+              # The ANCHORED, CROSS-STATION subset of the same information counter, beside it and
+              # never inside it (agents-09wf, decision agents-u2xe option (a)+(c)). `possible_rekey`
+              # requires BOTH sides to be prose-bound, so a location twin with a stable anchor on
+              # either side was silently dropped from it; this counter discloses those pairs instead
+              # of reclassifying them. It is CROSS-STATION ONLY: a station-local anchored pair stays
+              # refused, because there the anchor IS comparable and "the anchor would have matched"
+              # is exactly what makes it not a re-key. No id value is ever compared across stations
+              # here - `candidate-id` is assigned per station at scan time and copied rather than
+              # re-derived, so at run scope there is no run-level anchor for it to match. Two
+              # counters, disjoint by construction: this one counts at least-one-anchored pairs, the
+              # other counts both-prose-bound pairs, and neither value can move the other.
+              "possible_rekey_anchored",
               # Model echoes are not scanner selection. Count invalid/unshown identities and
               # contradictions with a fact-bound id without changing the fact binding (agents-hoxs).
               "anchor_unknown", "anchor_disagreement")
@@ -1705,6 +1717,59 @@ def aggregate_candidate_coverage(candidates_in: Optional[int],
             "identity": "identity-claimed-aggregate", "candidate_claims": claims}
 
 
+def _run_level_anchored_cross_station_pairs(findings: List[Dict[str, Any]],
+                                            fixed: List[Dict[str, Any]]) -> int:
+    """Location twins across stations where AT LEAST ONE side is ANCHORED - counted, never paired.
+
+    agents-09wf, the implementation of decision agents-u2xe option (a)+(c). `_run_level_possible_rekeys`
+    above requires BOTH sides to be prose-bound, so a twin with a stable anchor (`candidate-id` is in
+    IDENTITY_STABLE_SOURCES) is skipped there and was therefore neither counted nor disclosed. The
+    nightly's own example has exactly that shape: a `new` row under vuln-triage (no-candidate-index) and
+    a Fixed twin under modern-web (candidate-id) at the same location. This function DISCLOSES those
+    pairs and does nothing else - the classification of both rows is untouched, nothing is paired for
+    action, and no id value is compared (see the DELTA_KEYS comment).
+
+    CROSS-STATION ONLY, and that restriction is the whole soundness point. Station-local anchored pairs
+    remain refused here AND at the station: there the anchor is comparable, "the anchor would have
+    matched this station's rows" is sound, and such a pair is not a re-key - the case the original
+    refusal exists for. Both rows must also carry a KNOWN `agent` and those agents must DIFFER: an
+    unknown agent is not evidence of a cross-station pair, so it is left out and the count stays a
+    FLOOR rather than a guess (agents-yh0z's discipline).
+
+    Shape rules are the same as the sibling pass, deliberately: an exact usable line is required on
+    both sides, the pair key is `(normalize_path, line)`, and one retiring row explains exactly ONE
+    appearance (agents-l3j1), consumed by popping the matched partner.
+    """
+    retiring: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in fixed:
+        line = usable_line_number(row.get("line_number"))
+        if line is None:
+            continue
+        retiring.setdefault((normalize_path(row.get("path")), line), []).append(row)
+    pairs = 0
+    for row in findings:
+        if row.get("change") != "new" or row.get("false_positive"):
+            continue
+        line = usable_line_number(row.get("line_number"))
+        if line is None:
+            continue
+        pool = retiring.get((normalize_path(row.get("path")), line))
+        if not pool:
+            continue
+        appearance_agent = row.get("agent")
+        for index, twin in enumerate(pool):
+            # at least one side anchored = NOT (both prose-bound); the both-prose-bound pairs belong to
+            # the sibling counter above, so the two counters cannot double-count the same pair
+            if is_unanchored_finding(row) and is_unanchored_finding(twin):
+                continue
+            twin_agent = twin.get("agent")
+            if not appearance_agent or not twin_agent or appearance_agent == twin_agent:
+                continue
+            pool.pop(index)
+            pairs += 1
+            break
+    return pairs
+
 def _run_level_possible_rekeys(findings: List[Dict[str, Any]],
                               fixed: List[Dict[str, Any]]) -> int:
     """The possible-re-key pairs over the WHOLE RUN, which is what the counter always claimed to count.
@@ -1786,6 +1851,11 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
     # recomputation needs, so a fragment shape that lacks them cannot silently lower the count.
     stats["possible_rekey"] = max(int(stats.get("possible_rekey", 0) or 0),
                                   _run_level_possible_rekeys(findings, fixed))
+    # agents-09wf: the anchored cross-station subset, DISCLOSED beside `possible_rekey` and never inside
+    # it. ADDITIVE: this line cannot lower the sibling's value (a separate function and a separate key),
+    # which is why the two counters are disjoint by construction rather than by agreement.
+    stats["possible_rekey_anchored"] = max(int(stats.get("possible_rekey_anchored", 0) or 0),
+                                           _run_level_anchored_cross_station_pairs(findings, fixed))
     report = _dispatch_file(target_name, findings, stats, fixed, sink_results=sinks,
                             stations=stations, line_name=line_name, findings_dir=findings_dir)
     machine = report.with_name(f"{target_name}-line.json")
@@ -1975,6 +2045,24 @@ def _unanchored_new_note(stats: Dict[str, int]) -> List[str]:
     return note
 
 
+def _possible_rekey_anchored_note(stats: Dict[str, int]) -> List[str]:
+    """The banner for anchored cross-station location twins (agents-09wf, decision agents-u2xe (a)+(c)).
+
+    DISCLOSURE, NOT A RECLASSIFICATION - the same standing rule as `possible_rekey`: the rows keep their
+    classification and their detail, and nothing a reader or a sink acts on changes. This note exists so
+    that such a pair is neither silently `New` nor silently counted as a prose-bound re-key.
+    """
+    pairs = int(stats.get("possible_rekey_anchored", 0) or 0)
+    if not pairs:
+        return []
+    plural = "pair" if pairs == 1 else "pairs"
+    return [f"**Advisory**: {pairs} {plural} of new/retired rows share an exact location across two "
+            "stations with a stable anchor on at least one side. These are DISCLOSED, not reclassified: "
+            "the rows keep their own states, and no anchor is compared across stations because a "
+            "`candidate-id` anchor is assigned per station and is not comparable at run scope. "
+            "(agents-09wf)"]
+
+
 def _anchor_echo_note(stats: Dict[str, int]) -> List[str]:
     """Disclose untrusted model echoes by count, never by copying their raw values to a report."""
     unknown = int(stats.get("anchor_unknown", 0) or 0)
@@ -2081,6 +2169,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     lines += _migration_note(stats)
     lines += _unanchored_fixed_note(stats)
     lines += _unanchored_new_note(stats)
+    lines += _possible_rekey_anchored_note(stats)
     lines += _anchor_echo_note(stats)
 
     if stations is not None:

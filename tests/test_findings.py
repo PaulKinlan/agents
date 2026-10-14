@@ -1871,6 +1871,107 @@ class TestLineDeltaVerdictCounts(unittest.TestCase):
             ])
         self.assertEqual(stats["possible_rekey"], 1)
 
+
+    def test_an_anchored_cross_station_pair_is_disclosed_and_nothing_is_reclassified(self):
+        """agents-09wf / decision agents-u2xe option (a)+(c): the nightly's OWN example, now DISCLOSED.
+
+        `docs/css/factory.css:192` is a `new` row under vuln-triage (`no-candidate-index`) whose Fixed
+        twin modern-web booked with `candidate-id`. `test_an_anchored_twin_is_still_refused_when_another_
+        station_booked_it` above pins that the pair is REFUSED - and it stays refused, which is why this
+        test asserts `possible_rekey` is still 0: the two counters are DISJOINT by construction (the
+        sibling counts both-prose-bound pairs, this one counts at-least-one-anchored pairs), so the old
+        value cannot move. What changes is that the pair is no longer SILENTLY dropped: it appears in its
+        own disclosed counter and its own banner, and both rows keep their states.
+
+        The "unchanged on real data" premise is ATTRIBUTED, not re-derived here: over the 2026-10-14
+        03:xx nightly's eleven station fragments the run-level count under the original rule equalled the
+        summed station counters (2), with no cross-station same-location New/Fixed coincidence - measured
+        on agents-pxzb by imp-dflt. This code does not depend on that measurement being right; it depends
+        on it to say the DISCLOSED count is 0 on today's data.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new")], [], 0)),
+                ("modern-web", ([], [self._pxzb_row("modern-web", "candidate-id")], 0)),
+            ])
+            report = (root / "target-delta.md").read_text(encoding="utf-8")
+        self.assertEqual(stats["possible_rekey_anchored"], 1,
+                         "the anchored cross-station twin is disclosed instead of silently dropped")
+        self.assertEqual(stats["possible_rekey"], 0,
+                         "and the original counter is UNCHANGED - the pair is not reclassified into it")
+        self.assertEqual((stats["new"], stats["fixed"]), (1, 1),
+                         "nothing is reclassified: the appearance is still new and the twin still Fixed")
+        self.assertIn("Advisory", report, "the disclosure reaches the report, not only the stats dict")
+        self.assertIn("not reclassified", report)
+
+    def test_a_station_local_anchored_pair_stays_refused_and_uncounted(self):
+        """THE COUNTEREXAMPLE THAT MUST STILL FAIL, and the reason the counter is cross-station only.
+
+        Inside ONE station the anchor IS comparable: `candidate-id` there means "the station assigned
+        this identity to a candidate it presented", so "the anchor would have matched" is sound and the
+        pair is genuinely not a re-key. That is the case the original refusal exists for, so it must be
+        neither paired nor disclosed - if this goes green by accident, the change has drifted from the
+        decision.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new")],
+                                 [self._pxzb_row("vuln-triage", "candidate-id")], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey_anchored"], 0,
+                         "a station-local anchored pair is not disclosed as a cross-station one")
+        self.assertEqual(stats["possible_rekey"], 0, "and it is still not a prose-bound re-key either")
+
+    def test_a_prose_bound_cross_station_pair_stays_in_the_original_counter_only(self):
+        """The other disjointness direction: a cross-station pair with NO anchor on either side belongs
+        to `possible_rekey` and must not also appear in the anchored counter - otherwise one pair would
+        be reported twice and the two numbers would stop being additive."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new")], [], 0)),
+                ("modern-web", ([], [self._pxzb_row("modern-web", "model-snippet")], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey"], 1, "both sides prose-bound is the original counter's case")
+        self.assertEqual(stats["possible_rekey_anchored"], 0,
+                         "and it is not double-counted into the anchored one")
+
+    def test_an_unknown_agent_is_not_evidence_of_a_cross_station_pair(self):
+        """A FLOOR rather than a guess (agents-yh0z's discipline): the counter needs a KNOWN, DIFFERING
+        agent on both sides. An anchored twin whose station is unknown is not evidence that the pair is
+        cross-station, so it is left out rather than assumed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unknown = self._pxzb_row("modern-web", "candidate-id")
+            unknown.pop("agent")
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new")], [], 0)),
+                ("modern-web", ([], [unknown], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey_anchored"], 0,
+                         "an unknown agent cannot establish that the pair spans two stations")
+
+    def test_two_appearances_consume_one_retiring_row_in_the_anchored_counter(self):
+        """One retiring row explains exactly ONE appearance (agents-l3j1), and the anchored counter keeps
+        that rule too: without the consume, N appearances at a recycled line would all count against a
+        single retired row."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new"),
+                                  self._pxzb_row("vuln-triage", "model-snippet", state="new",
+                                                 change="new")], [], 0)),
+                ("modern-web", ([], [self._pxzb_row("modern-web", "candidate-id")], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey_anchored"], 1,
+                         "one retiring row, two anchored-eligible appearances, ONE pair")
     def test_a_row_with_no_usable_line_is_never_paired(self):
         """The floor rule (agents-yh0z) survives the move: rows whose line the scanner could not name are
         not paired on a location neither of them has."""

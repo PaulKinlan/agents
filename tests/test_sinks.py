@@ -295,6 +295,12 @@ class TestSinks(SinkFixture, unittest.TestCase):
                                         "false_positive": 0, "migrated": 0,
                                         "fixed_unanchored": 0,
                                         "new_unanchored": 0, "possible_rekey": 0,
+                                        # agents-09wf: the anchored cross-station subset counter, beside
+                                        # `possible_rekey` rather than inside it. Enumerated here because
+                                        # this assertion is exhaustive on the stats key set, so an ADDITIVE
+                                        # counter still has to be listed - and listing it is what keeps this
+                                        # test able to notice a counter that appears without a decision.
+                                        "possible_rekey_anchored": 0,
                                         "anchor_unknown": 0, "anchor_disagreement": 0})
         self.assertEqual(len(self.store()["findings"]), 1)
 
