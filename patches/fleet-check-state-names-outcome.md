@@ -144,6 +144,12 @@ shows the same shape at scale: 13 entries for a 10-module run.
   `.error`). That is deliberate: it is the one meaning the word keeps.
 - **The wake's 7-character sha is still 7 characters.** The wake now carries BOTH identities — the short sha as the
   human tip name and the tree as the label the cache keys on — rather than replacing one with the other.
-- **`tests/fleet-gate-check.test.sh` has pre-existing failures** on this VM (13a-13d, "unverifiable id inside a repo
-  is REFUSED", and 15b6), and they fail identically against a pristine copy and against this patch, which is how
-  they were attributed rather than assumed to be mine.
+- **`tests/fleet-gate-check.test.sh` has 5 failures in MY harness and they are my instrument, not the patch:** 13a-13d
+  ("unverifiable id inside a repo is REFUSED") and 15b6, failing with 370 passed / 5 failed against a pristine copy
+  and 370 passed / 5 failed against this patch — identical arm for arm, which is how they were attributed rather
+  than assumed to be mine. The 13a-13d cause is MEASURED, not guessed: those arms assert the refusal that only
+  fires when the invocation has a repo (`state=UNKNOWN`, rc 2), and my copies of `~/fleet` are not git checkouts,
+  so `fleet-check --status <40-char id>` from there takes the documented bare-hash path the SAME suite pins in
+  arm 13g: `{"state":"NONE",...}` rc 0 outside a repo versus `{"state":"UNKNOWN",...}` rc 2 inside one. A hub
+  lane running the suite from a checkout will not see them; the arm 20c3 this patch changes passes in my harness
+  ("ok 20c3 inbox notification names the tree the cache keys on").
