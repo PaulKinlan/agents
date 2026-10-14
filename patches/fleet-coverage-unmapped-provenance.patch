@@ -65,12 +65,28 @@
      omitted_list = sorted(list(omitted_suites))
  
      if coverage_state == "UNKNOWN":
-@@ -794,7 +809,7 @@
+@@ -838,23 +838,23 @@
+         omitted_list = []
+         suites_indeterminate = True
+     elif unmapped:
+         # fleet-84wna: a record may not claim coverage=KNOWN while carrying a non-empty unmapped list. KNOWN is the
+         # field a reviewer reads to decide whether to reproduce a change, so "KNOWN with a footnote" tells them the
+         # work was covered when this very record says it was not - a claim about an object that is not derived from
+         # the object. The pair 6f/6g in tests/check-coverage.test.sh asserted both halves in two consecutive lines.
+         # The run happened (so this is not UNKNOWN) and some changed paths were not placed (so it is not KNOWN):
          # PARTIAL is the honest word. The names, not just the count, are in the unmapped list the caller prints.
          coverage_state = "PARTIAL"
          partial_reason = ("%d changed path(s) were not placed by any executed suite: %s"
 -                          % (len(unmapped), ", ".join(unmapped[:8])))
 +                          % (len(unmapped), ", ".join(e["path"] for e in unmapped[:8])))
+ 
+     # If the manifest explicitly marked certifiable: false, the gate certified that it cannot certify
+     # this run (e.g. pre-execution refusal, check-map error, skipped suite, or gate failure).
+     # Coverage must never be reported as KNOWN when the manifest is certifiable: false (fleet-q8uhn).
+     if manifest_certifiable is False and coverage_state == "KNOWN":
+         coverage_state = "PARTIAL"
+         if not partial_reason:
+             partial_reason = "the gate manifest marked certifiable false"
  
      return {
          "suites": suites_list,
@@ -220,7 +236,15 @@
  if [ -n "${u// /}" ] && [ "$st" = "KNOWN" ]; then
    bad "6h a record with unmapped paths must not report coverage KNOWN" "unmapped=[$u] coverage=[$st]"
  else
-@@ -221,7 +226,7 @@
+@@ -213,31 +213,75 @@
+ # change - a warning that is always on, which is the defect family this bead exists to remove.
+ R7=$ROOT/seven; mkdir -p "$R7/tests"; new_repo "$R7"
+ printf 'echo t\n' > "$R7/tests/thing.test.sh"
+ printf 'echo o\n' > "$R7/tests/other.test.sh"
+ git -C "$R7" add -A && git -C "$R7" -c user.email=t@t -c user.name=t commit -q -m "add tests"
+ printf 'echo more\n' >> "$R7/tests/thing.test.sh"
+ git -C "$R7" add -A && git -C "$R7" -c user.email=t@t -c user.name=t commit -q -m "change the test file"
+ SHA7=$(git -C "$R7" rev-parse HEAD)
  
  # (a) the gate RAN the changed suite: the hub-style markers name it -> not unmapped
  printf '== tests/thing.test.sh\nok 1 - runs\n-- thing finished in 1s\n' > "$ROOT/log-hub-ran.txt"
@@ -228,15 +252,13 @@
 +out=$(run "$R7" "$ROOT/log-hub-ran.txt" "$SHA7"); u=" $(unmapped_paths <<<"$out") "; su=$(jq_get suites <<<"$out")
  # (other.test.sh is also part of the change set and the gate did not run it, so it stays flagged; the
  # assertion is that the file the gate DID run is not.)
- case " $u " in *" tests/thing.test.sh "*) ok "7c a changed test file the gate did NOT run is still flagged" "[$u]";; *) ok "7a a changed test file the gate ran is not reported unmapped";; esac
-@@ -229,9 +234,53 @@
+ case " $u " in *" tests/thing.test.sh "*) bad "7a the ran test file is still reported unmapped" "[$u]";; *) ok "7a a changed test file the gate ran is not reported unmapped";; esac
+ case " $su " in *" tests/thing.test.sh "*) ok "7b the hub's own suite marker is read as executed";; *) bad "7b hub marker not parsed" "[$su]";; esac
  
  # (b) the gate ran a DIFFERENT suite only: the changed test file genuinely did not run -> still flagged
  printf '== tests/other.test.sh\n-- other finished in 1s\n' > "$ROOT/log-hub-other.txt"
 -out=$(run "$R7" "$ROOT/log-hub-other.txt" "$SHA7"); u=$(jq_get unmapped <<<"$out")
 +out=$(run "$R7" "$ROOT/log-hub-other.txt" "$SHA7"); u=" $(unmapped_paths <<<"$out") "
- case " $u " in *" tests/thing.test.sh "*) ok "7c a changed test file the gate did NOT run is still flagged (the warning keeps its meaning)";; *) bad "7c unexecuted test file must stay unmapped" "[$u]";; esac
- 
 +echo "8. agents-tpw5: WHERE each unmapped entry came from (gate marker vs reporter inference)"
 +# The whole report rests on this distinction. An entry the gate's own `fast-gate: unmapped:` marker names is
 +# EVIDENCE; an entry this tool could not PLACE is its INFERENCE. Both stay in .unmapped and both still make
@@ -281,9 +303,17 @@
 +  && ok "8e every published entry carries its own source, with no parallel provenance field" \
 +  || bad "8e each entry must say where it came from" "$out"
 +
- if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
- printf '%s passed, %s failed\n' "$PASS" "$FAIL"
- [ "$FAIL" = 0 ]
+ case " $u " in *" tests/thing.test.sh "*) ok "7c a changed test file the gate did NOT run is still flagged (the warning keeps its meaning)";; *) bad "7c unexecuted test file must stay unmapped" "[$u]";; esac
+ 
+ echo "8. gate bookkeeping takes precedence over test runner heuristics (fleet-1v7aq)"
+ # Simulated gate runs inside test suites (e.g. tests/fleet-gate-check.test.sh) echo test-shaped lines
+ # and command strings into the gate log. With gate-level bookkeeping (manifest, hub markers, or suite markers)
+ # present, runner regexes must not harvest text from suite stdout into executed suites, preventing
+ # false-green coverage on unrelated changed files.
+ R8=$ROOT/eight; mkdir -p "$R8/src" "$R8/tests"; new_repo "$R8"
+ cat > "$R8/src/auth.ts" <<'EOF'
+ export const auth = 1;
+ EOF
 --- a/tests/fleet-gate-check.test.sh
 +++ b/tests/fleet-gate-check.test.sh
 @@ -784,6 +784,58 @@
