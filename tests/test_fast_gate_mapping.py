@@ -898,9 +898,10 @@ class TestFastGateMapping(unittest.TestCase):
 
         Exempt means rc 0 with NO suite. A tracked or new `.beads/hooks/*` path instead
         SELECTS the hook suite (rc 0 with a suite), while a new non-hook path with no
-        mapping refuses by name. Selection is NOT proof that the suite examines that
-        hook's contents: today it reads only pre-commit; agents-3ryx owns that P2 gap.
-        The two non-hook refusals stay red against the former blanket `.beads/*` ignore.
+        mapping refuses by name. Selection is NOT content coverage: the now-landed
+        agents-3ryx suite checks tracked hook NAMES/modes but does not execute a new
+        hook or validate its contents. The two non-hook refusals stay red against the
+        former blanket `.beads/*` ignore.
         """
         tracked = subprocess.check_output(["git", "ls-files", ".beads/"], text=True).split()
         ignored = [path for path in tracked if not path.startswith(".beads/hooks/")]
@@ -917,7 +918,7 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, f"{path}: hook path maps rather than refusing: {res.stderr}")
                 self.assertIn("tests/test_beads_hook_fail_open.py", res.stdout.splitlines(),
                               f"{path}: hook suite must be SELECTED before the ignore arm; "
-                              "selection does NOT prove content coverage (agents-3ryx)")
+                              "selection does NOT prove hook-content coverage (agents-3ryx pins tracked names)")
         for path in (".beads/unexpected.sh", ".beads/scripts/evil.py"):
             with self.subTest(unmatched_non_hook=path):
                 res = run_fast_gate([path])
