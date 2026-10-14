@@ -1849,5 +1849,105 @@ class TestIgnoredArmFragmentsAreAnnouncedOnTheUnmappedFailure(unittest.TestCase)
         )
 
 
+class TestIgnoredArmFragmentsAreAnnouncedWhenTheLoaderItselfFails(unittest.TestCase):
+    """agents-71vj: the other exit that reads FAST_GATE_IGNORED_ARMS, and the last one that stayed silent.
+
+    agents-kfe8 fixed the unmapped-file refusal. The LOADER'S OWN failure remained: a lane whose registry will
+    not load at all is looking at the fragment it just added, and the two facts it needs are 'a fragment
+    refused to load' and 'an untracked fragment was never read'. Only the first was printed. The ignored list
+    is assembled by the enumeration that runs BEFORE sourcing, so it is complete at this exit - it was simply
+    not reported, which is why this is one missing call rather than new machinery.
+
+    warn-and-ignore stays non-fatal: this exit fails the gate for the loader's reason and only ADDS a line.
+    """
+
+    STRAY = "999-71vj-stray.sh"
+    WARNING = "WARNING: ignoring UNTRACKED arm fragment"
+
+    def _gate_with_a_registry(self, stray: bool, *, broken: bool = True, changed: str = "lib/findings.py",
+                              dry_run: bool = True) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tools").mkdir(parents=True)
+            shutil.copy2(ROOT / "tools" / "fast-gate.sh", root / "tools" / "fast-gate.sh")
+            shutil.copytree(ARMS_DIR, root / "tools" / "fast-gate-arms.d")
+            if broken:
+                # A TRACKED fragment registering a stage that defines no function: the loader's own validation
+                # refuses it, which is the exit under test (not a missing arm, and not a bad usage).
+                (root / "tools" / "fast-gate-arms.d" / "997-71vj-broken.sh").write_text(
+                    "# registers a stage that defines no function, so the loader must refuse the registry\n"
+                    'FAST_GATE_ARM_STAGES="$FAST_GATE_ARM_STAGES fast_gate_71vj_absent"\n',
+                    encoding="utf-8",
+                )
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "tools"], check=True)
+            if stray:
+                # Written AFTER the index is taken, so it is UNTRACKED - the only state in which a fragment is
+                # ignored rather than sourced. A copy, never the live registry: see the kfe8 class above for
+                # why writing there would make this test the hazard it exists to check for.
+                (root / "tools" / "fast-gate-arms.d" / self.STRAY).write_text(
+                    "fast_gate_71vj_stray() { return 1; }\n"
+                    'FAST_GATE_ARM_STAGES="$FAST_GATE_ARM_STAGES fast_gate_71vj_stray"\n',
+                    encoding="utf-8",
+                )
+            env = {**os.environ, "GIT_CHANGED": changed}
+            env.pop("FAST_GATE_DRY_RUN", None)
+            if dry_run:
+                env["FAST_GATE_DRY_RUN"] = "1"
+            return subprocess.run(
+                ["bash", "tools/fast-gate.sh"], cwd=root, capture_output=True, text=True, timeout=120,
+                env=env,
+            )
+
+    def test_a_loader_failure_still_names_the_untracked_fragment_it_never_read(self):
+        proc = self._gate_with_a_registry(True)
+        self.assertEqual(proc.returncode, 1, "a registry that fails validation is still fatal")
+        self.assertIn(
+            "fast_gate_71vj_absent", proc.stderr,
+            "the discriminator that this is the LOADER-FAILURE exit and not another refusal: unless the loader "
+            "names the registration it rejected, this test is exercising some other path",
+        )
+        self.assertIn(
+            self.STRAY, proc.stderr,
+            "a lane debugging a registry that will not load is the reader who most needs to know that an "
+            "untracked fragment was never read: the ignored list is complete at this exit and was simply not "
+            "printed (agents-71vj)",
+        )
+        clean = self._gate_with_a_registry(False)
+        self.assertEqual(clean.returncode, 1)
+        self.assertNotIn(
+            self.WARNING, clean.stderr,
+            "the pairing that keeps the assertion above from being vacuous: with nothing untracked there is "
+            "nothing to warn about, so the warning must be caused by the stray and not by the failure",
+        )
+
+    def test_the_untracked_warning_is_emitted_exactly_once_on_every_exit(self):
+        """agents-zmaz (found by agents-factory-rev-m784 reviewing agents-71vj), and the reason this case exists.
+
+        The case above asserts the warning's PRESENCE, and presence cannot see a duplicate: the first version of
+        this change reported at top level before the loader AND at every exit that already reported, so a lane
+        editing its registry read the same warning two or three times - measured by the reviewer at the dry-run
+        exit, the normal-run exit and the unmapped-failure exit. The property is therefore a COUNT, and it is
+        asserted on the exits that emit the warning. A repeated line trains a lane to skim exactly the notice
+        that tells it its new arm fragment was never read.
+        """
+        cases = (
+            ("the loader's own failure", dict(broken=True)),
+            ("the dry run with a healthy registry", dict(broken=False)),
+            ("an unmapped failure", dict(broken=False, changed="zz-zmaz-unmapped-probe.py")),
+        )
+        for label, kwargs in cases:
+            with self.subTest(exit=label):
+                proc = self._gate_with_a_registry(True, **kwargs)
+                count = proc.stderr.count(self.WARNING)
+                self.assertEqual(
+                    count, 1,
+                    f"{label}: the untracked-fragment warning must be emitted EXACTLY once, not {count} "
+                    "times - reporting on the failure branch and also unconditionally before the loader is how "
+                    "the duplicate arrives (agents-zmaz). stderr was:\n" + proc.stderr[-800:],
+                )
+                self.assertIn(self.STRAY, proc.stderr, f"{label}: the warning must still name the fragment")
+
+
 if __name__ == "__main__":
     unittest.main()
