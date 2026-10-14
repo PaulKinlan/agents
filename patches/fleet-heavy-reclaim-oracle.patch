@@ -1,26 +1,27 @@
 diff --git a/tests/fleet-heavy-reclaim.test.sh b/tests/fleet-heavy-reclaim.test.sh
-index 9b01f3e..c24bdac 100755
+index 9b01f3e..3eb5f2c 100755
 --- a/tests/fleet-heavy-reclaim.test.sh
 +++ b/tests/fleet-heavy-reclaim.test.sh
-@@ -94,8 +94,20 @@ echo "7. archiving must never destroy an earlier archive (fleet-ue1i - data loss
- # A month-stamped archive name meant the SECOND run in a month overwrote the first, and since the input is
- # removed after a successful archive, the first archive's evidence was then gone. Two runs, two files, and both
+@@ -96,6 +96,22 @@ echo "7. archiving must never destroy an earlier archive (fleet-ue1i - data loss
  # must still be recoverable.
+ DH="$HERE/bin/fleet-disk-hygiene"
+ newdir; HOMEDIR=$D; mkdir -p "$HOMEDIR/demo-evidence"
 +# THE ORACLE IS MADE DETERMINISTIC HERE, AND THE DESTRUCTIVE TOOL IS COPIED, NOT REIMPLEMENTED.
 +# The tool derives its liveness oracle from ITS OWN DIRECTORY (<dir>/fleet-path-idle.py), and on a lane VM that
 +# oracle reports "uninspectable" for processes it cannot read - measured: 'uninspectable pid=390 state=S' for a
 +# same-user sd-pam whose /proc/<pid>/fd is not readable - and an uninspectable entry is conservatively treated as
 +# NOT idle, so the archive step is skipped. That made the two assertions below fail on the UNMODIFIED file in a
 +# complete tree, which turns every unrelated change red by association.
-+# The TOOL is right and is not changed: skipping an archive it cannot prove safe is correct for a destructive step.
++# The TOOL is right and is not changed; skipping an archive it cannot prove safe is correct for a destructive step.
 +# What section 7 tests is that TWO RUNS PRODUCE TWO ARCHIVES, so the oracle is stubbed deterministic and the real
 +# tool is driven from a copy. Liveness itself is tested by sections 1-3, which is where it belongs.
- DH="$HERE/bin/fleet-disk-hygiene"
--newdir; HOMEDIR=$D; mkdir -p "$HOMEDIR/demo-evidence"
-+newdir; HOMEDIR=$D;
-+SD="$D/with-deterministic-oracle"; mkdir -p "$SD"; cp "$DH" "$SD/fleet-disk-hygiene"
-+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SD/fleet-path-idle.py"; chmod +x "$SD/fleet-path-idle.py"
-+DH="$SD/fleet-disk-hygiene" mkdir -p "$HOMEDIR/demo-evidence"
++# DH IS REASSIGNED ON A LINE OF ITS OWN, BELOW, AND ONLY AFTER $D EXISTS (agents-vo5z, P1).
++SD="$D/with-deterministic-oracle"
++mkdir -p "$SD"
++cp "$DH" "$SD/fleet-disk-hygiene"
++printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SD/fleet-path-idle.py"
++chmod +x "$SD/fleet-path-idle.py"
++DH="$SD/fleet-disk-hygiene"
  printf 'first\n'  > "$HOMEDIR/demo-evidence/one.txt"; touch -d "20 days ago" "$HOMEDIR/demo-evidence/one.txt"
  ( cd "$HERE" && HOME="$HOMEDIR" FLEET_EVIDENCE_KEEP_DAYS=0 timeout 120 bash "$DH" --quiet >/dev/null 2>&1 )
  printf 'second\n' > "$HOMEDIR/demo-evidence/two.txt"; touch -d "20 days ago" "$HOMEDIR/demo-evidence/two.txt"

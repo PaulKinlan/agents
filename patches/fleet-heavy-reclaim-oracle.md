@@ -31,18 +31,52 @@ fixture now **makes the oracle deterministic** instead of inheriting it from the
 
 ### The fix
 
-Section 7 copies the real tool into a temp directory and places a stub `fleet-path-idle.py` beside it, then drives
-the copy. That is possible precisely because the oracle is directory-relative, so no tool change is needed and no
-override is invented. Liveness itself is tested by sections 1-3, which is where it belongs; section 7 tests that
-**two runs produce two archives**, which is what its comment has always said.
+Section 7 copies the real tool into `$D/with-deterministic-oracle` (inside the fixture's own temp dir, so runs
+cannot collide) and places a stub `fleet-path-idle.py` beside it, then drives the copy. That is possible precisely
+because the oracle is directory-relative, so no tool change is needed and no override is invented. The block is
+placed **after** the fixture's `newdir` line, so `$D` is bound before it is used. Liveness itself is tested by
+sections 1-3, which is where it belongs; section 7 tests that **two runs produce two archives**.
+
+### Two defects in my OWN first patch, and how each was found
+
+The first version of this patch had two wiring faults, and neither was visible to the checks I had run. Both are
+recorded here because the differences between them are the point.
+
+1. **A line glued onto the end of another (agents-vo5z, P1, found by the reviewer).** The patch anchored on a line
+   *prefix*, so the rest of that original line - `mkdir -p "$HOMEDIR/demo-evidence"` - was preserved and joined
+   onto my last inserted line, producing `DH="$SD/fleet-disk-hygiene" mkdir -p ...`. That is **valid bash**: the
+   assignment is scoped to that one command, so `DH` stayed unset and the **deployed** tool ran with the real
+   oracle. `bash -n` passed, and my A/B/C drives were run **outside the file**, so neither could see it. The
+   antidote is not a better syntax check; it is **running the patched text in situ** and **naming the invocation**
+   that actually runs, both of which now exist below.
+2. **A block placed before the variable it reads (found by my own in-situ run, not by the reviewer).** The fixed
+   version first put the stub block immediately after the `DH=` line - *before* `newdir` ran - so `$D` was unbound:
+   fatal under the file's `set -u`, and outside it the copy would have been made into `/`. Running the patched
+   section is the only reason this was caught before the round.
+
+A third episode is worth recording for the same reason: my first month-stamped control mutated the **script's**
+text while the archive name lives in the **tool that gets copied**, so the control passed and was **vacuous**. It
+now mutates a copy of the tool, and the mutation's landing is asserted before the control is believed.
 
 ### Evidence, driven, with both directions of control
 
+Each row below is the **patched text run in situ** - the extracted section with the file's own helpers - not a
+reimplementation of its logic:
+
 | drive | result |
 |---|---|
-| deterministic oracle (rc 0 = idle) + real tool | **2 archives**, `one.txt` recoverable -> the two assertions **pass** |
-| CONTROL: stub reports NOT idle | **0 archives** -> fails, proving the stub is wired in and the gate is live rather than decorative |
-| CONTROL: the real bug - a month-stamped archive name | **1 archive**, `one.txt` **gone** -> fails, proving the fixed fixture still catches the defect section 7 was written for |
+| deterministic oracle, real tool copied in | **2 archives**, `one.txt` recoverable -> `2 passed, 0 failed` |
+| CONTROL: stub reports NOT idle | **0 archives** -> `0 passed, 2 failed`, which is the only evidence the stub is in the path rather than cosmetic |
+| CONTROL: month-stamped archive name, in a COPY of the tool | **1 archive**, `one.txt` **gone** -> fails, so the fixture still catches the defect section 7 was written for |
+
+**The invocation that actually runs**, traced with `bash -x`:
+
+```
+bash /tmp/tmp.Uwu1x3r4IF/with-deterministic-oracle/fleet-disk-hygiene --quiet
+```
+
+That is the temp copy and its stubbed oracle - not `$HERE/bin/fleet-disk-hygiene` - so the reviewer can see the
+copy and the stub are the ones reached rather than inferring it from a pass.
 
 Delivery contract, driven: `patch -p1 --fuzz=0` applies onto the recorded preimage, and the applied copy parses.
 
