@@ -21,6 +21,7 @@ class TestInstallExistingCommand(unittest.TestCase):
         self.conf = self.home / ".fleet" / "check.conf"
         self.conf.parent.mkdir()
         self.env = dict(os.environ, HOME=str(self.home))
+        self.env.pop("FLEET_CHECK_CONF", None)
         self.resolver = ROOT / "tools" / "check-cmd.sh"
 
     def install(self, *args):
@@ -102,6 +103,18 @@ class TestInstallExistingCommand(unittest.TestCase):
                              text=True, capture_output=True, timeout=30)
         self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("--force", res.stderr)
+
+    def test_explicit_fleet_check_conf_wins_over_global(self):
+        old_global = self.old("bash tools/gate.sh")
+        custom = Path(self.tmp.name) / "custom.conf"
+        env = dict(self.env, FLEET_CHECK_CONF=str(custom))
+        res = subprocess.run(["bash", str(self.resolver), "--install", "--global"],
+                             cwd=ROOT, env=env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"--global ignored: FLEET_CHECK_CONF={custom} is explicit and wins", res.stderr)
+        self.assertTrue(custom.is_file())
+        self.assertEqual(self.conf.read_text(), old_global)
+        self.assertEqual(self.backups(), [])
 
     def test_red_first_mutant_without_guard_fails_refusal_property(self):
         # Remove only the install guard in a private copy; the same behavioural assertion MUST go red.
