@@ -812,7 +812,9 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
         # this class drifts the HOST-WIDE file (FLEET_CHECK_CONF is pointed at ~/.fleet/check.conf), and since
         # agents-0utp the bare form writes the repo-local default instead. The next class runs the printed
         # command and proves it repairs the file it names; here the shape is pinned for this destination.
-        self.assertIn("repair with: bash tools/check-cmd.sh --install --global", r.stderr)
+        self.assertIn("repair with:", r.stderr)
+        self.assertIn(f"bash {ROOT / 'tools' / 'check-cmd.sh'} --install --global", r.stderr,
+                      "agents-e3aw: the repair names the reader by its resolved path, so it runs from any cwd")
 
 
 class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
@@ -1301,7 +1303,7 @@ class TestTheDefaultInstallDestinationIsRepoLocal(unittest.TestCase):
                       "to call every destination machine-global, and after the default moved the more damaging "
                       "half of that was the repair it named (agents-0utp)")
         self.assertNotIn("THIS COPY IS MACHINE-GLOBAL", repo_text)
-        self.assertIn("bash tools/check-cmd.sh --install", repo_text,
+        self.assertIn(f"bash {ROOT / 'tools' / 'check-cmd.sh'} --install", repo_text,
                       "in THIS life the bare form does write this file, so it is the correct repair to name")
 
     def test_global_flag_is_the_explicit_opt_in_for_the_host_wide_file(self):
@@ -1369,17 +1371,97 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
         self.assertTrue(repair, f"--check must print the repair: {first.stderr[:300]}")
         self.assertIn(expect_in_command, repair,
                       f"the repair for {dest} must be the command that writes IT; got: {repair}")
+        # agents-e3aw (fourth round): the resolved path is proven by RUNNING the command from somewhere else,
+        # because a RELATIVE path is exactly what fails there. A literal `assertIn(str(ROOT/"tools"/"check-cmd.sh"),
+        # repair)` used to stand here, and it was not belt and braces - it was a FALSE-NEGATIVE GENERATOR, driven:
+        # with the reader under ".../repo with space" the CORRECT %q repair is
+        # `bash /tmp/.../repo\ with\ space/tools/check-cmd.sh --install --global`, which does not contain the
+        # literal path, so the assertion goes FALSE on a correct fix while the run beside it passes. It was latent
+        # only because this fixture's ROOT has no space - an input held fixed while the property was claimed. The
+        # text property it was reaching for is asserted below ON THE FILE instead, where no spelling can decide it.
 
         # THE PROPERTY: run exactly what it printed, then ask again. Through a shell, because that is what a
         # reader does with a printed command line - and because the FLEET_CHECK_CONF form is a shell assignment
-        # prefix, not a program name.
+        # prefix, not a program name. agents-e3aw: IT IS RUN FROM A FOREIGN CWD, DELIBERATELY. The printed
+        # command is guidance for whoever read the message, and that person is not standing in this repo: driven
+        # on the tip before this fix, `bash tools/check-cmd.sh --install` - the whole printed repair - failed
+        # with "No such file or directory" from a subdirectory and from /tmp, while this test passed because it
+        # ran the command from the repo root. A test that runs the string in the one directory where it works
+        # asserts the string, not the property the string exists to deliver.
+        elsewhere = Path(_registered_tmp_home(self, "p8lh-elsewhere-")) / "not-the-repo"
+        elsewhere.mkdir(parents=True, exist_ok=True)
         ran = subprocess.run(["bash", "-c", repair], capture_output=True, text=True, timeout=60,
-                             env=env, cwd=str(ROOT))
+                             env=env, cwd=str(elsewhere))
         self.assertEqual(ran.returncode, 0, f"the printed repair must succeed: {ran.stderr[:300]}")
+        # THE REPAIR REACHES THE FILE THE REPORT NAMED - and this assertion IS that property, rather than a
+        # spelling of it: --check reads exactly the file it reported on, so a clean answer here means the repair
+        # rewrote THAT file. I first added byte-level assertions here (the file changed, the foreign stamp gone)
+        # and removed them again, because driving them showed they cannot fail independently of this chain: with
+        # the historical p8lh defect reintroduced (a repair that names the right command but writes elsewhere)
+        # the failure surfaces HERE, and with a correct repair they merely pass. An assertion that can only
+        # agree with the line above is the same illusory coverage as the literal one this round removed - and a
+        # stamp assertion would carry the same latent false-negative risk (a future installer that preserves an
+        # existing stamp would make it fail on a correct fix).
         second = self._check(env)
         self.assertEqual(second.returncode, 0,
-                         "following the printed repair must REMOVE the drift it reported - on the tip before "
+                         "following the printed repair must REMOVE the drift it reported, which proves it "
+                         "reached the file that report named - on the tip before "
                          f"agents-p8lh this fails, because the command wrote a different file: {second.stderr[:300]}")
+
+    def test_the_printed_repair_survives_paths_containing_spaces(self):
+        """agents-e3aw: RESOLVING the path is not enough. The printed command is consumed by a SHELL, so a path
+        that needs quoting must be PRINTED quoted - and driven on the unquoted form it was not: with the reader
+        at "/tmp/e3aw space/tools/check-cmd.sh" and a destination under ".../dir with space/", the printed
+        commands died by word splitting while the quoted form ran. Every other test in this class uses temp
+        paths with NO spaces, which is exactly why their runnability assertion passed on an unquoted form: the
+        property is over PATHS, not only over directories. (Found by driving one of the reviewer's variant
+        paths - a path containing a space - rather than by reasoning about the code.)"""
+        spaced_repo = Path(_registered_tmp_home(self, "e3aw space-")) / "repo copy"
+        (spaced_repo / "tools").mkdir(parents=True, exist_ok=True)
+        for name in ("check-cmd.sh", "check.conf"):
+            shutil.copy(ROOT / "tools" / name, spaced_repo / "tools" / name)
+        reader = spaced_repo / "tools" / "check-cmd.sh"
+        elsewhere = Path(_registered_tmp_home(self, "e3aw-elsewhere-")) / "not-the-repo"
+        elsewhere.mkdir(parents=True, exist_ok=True)
+
+        def check(env):
+            return subprocess.run(["bash", str(reader), "--check"], capture_output=True, text=True,
+                                  timeout=60, env=env, cwd="/tmp")
+
+        # (a) the reader's own path contains a space: the bare form is printed to a reader standing elsewhere,
+        # so the path in it must survive being pasted into a shell.
+        home = Path(_registered_tmp_home(self, "e3aw home-"))
+        # --check reports on OVERRIDE, which with no FLEET_CHECK_CONF is the host-wide $HOME/.fleet/check.conf
+        # (the repo-local name is the --install DESTINATION, not the file --check reads) - so this is where the
+        # drift belongs for the bare/--global form.
+        self._write_drifting(home / ".fleet" / "check.conf")
+        env = self._env(home)
+        first = check(env)
+        self.assertEqual(first.returncode, 1, f"expected drift: {first.stderr[:300]}")
+        repair = self._printed_repair(first.stderr)
+        self.assertTrue(repair, f"no printed repair: {first.stderr[:300]}")
+        ran = subprocess.run(["bash", "-c", repair], capture_output=True, text=True, timeout=60,
+                             env=env, cwd=str(elsewhere))
+        self.assertEqual(ran.returncode, 0,
+                         f"the printed repair must run with a space in the path; printed: {repair!r}; "
+                         f"stderr: {ran.stderr[:300]}")
+        self.assertEqual(check(env).returncode, 0, "following the printed repair must remove the drift")
+
+        # (b) the DESTINATION contains a space, through the FLEET_CHECK_CONF form: the assignment prefix is part
+        # of the printed command, so it needs quoting too - the same defect one argument over.
+        dest = Path(_registered_tmp_home(self, "e3aw dest-")) / "dir with space" / "team conf.conf"
+        self._write_drifting(dest)
+        env2 = self._env(home, {"FLEET_CHECK_CONF": str(dest)})
+        second = check(env2)
+        self.assertEqual(second.returncode, 1, f"expected drift on the override: {second.stderr[:300]}")
+        repair2 = self._printed_repair(second.stderr)
+        self.assertTrue(repair2, f"no printed repair for the override: {second.stderr[:300]}")
+        ran2 = subprocess.run(["bash", "-c", repair2], capture_output=True, text=True, timeout=60,
+                              env=env2, cwd=str(elsewhere))
+        self.assertEqual(ran2.returncode, 0,
+                         f"the printed repair must run with a space in the DESTINATION; printed: {repair2!r}; "
+                         f"stderr: {ran2.stderr[:300]}")
+        self.assertEqual(check(env2).returncode, 0, "following the repair must remove the override drift")
 
     def test_the_repair_for_the_host_wide_file_writes_the_host_wide_file(self):
         home = _registered_tmp_home(self, "p8lh-global-")
@@ -1399,9 +1481,14 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
         self._write_drifting(dest)
         # A lane reaches the repo-local default exactly this way - the install NOTE tells it to set the variable
         # to the path it just wrote - and for THIS destination the bare form is the correct repair.
-        self._assert_repair_reaches(home, {"FLEET_CHECK_CONF": str(dest)}, dest,
-                                    "bash tools/check-cmd.sh --install")
-        self.assertNotIn("--global", self._printed_repair(self._check(self._env(home, {"FLEET_CHECK_CONF": str(dest)})).stderr),
+        self._assert_repair_reaches(home, {"FLEET_CHECK_CONF": str(dest)}, dest, "--install")
+        # RE-CREATE THE DRIFT BEFORE INSPECTING THE REPAIR. The helper above RUNS the printed command, so a second
+        # --check finds nothing to repair and prints no repair line - and `assertNotIn("--global", "")` passes
+        # vacuously. That vacuity was here before agents-e3aw; asserting on an empty string is not an assertion.
+        self._write_drifting(dest)
+        repair = self._printed_repair(self._check(self._env(home, {"FLEET_CHECK_CONF": str(dest)})).stderr)
+        self.assertTrue(repair, "there must be a repair line to inspect")
+        self.assertNotIn("--global", repair,
                          "the bare form writes this file; naming --global would write the host-wide one instead")
 
     def test_the_point_of_use_warning_names_the_same_repair(self):
@@ -1416,10 +1503,23 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
         r = subprocess.run(["bash", str(ROOT / "tools" / "fast-gate.sh")], capture_output=True, text=True,
                            timeout=120, env=env, cwd=str(ROOT))
         self.assertIn("WARNING (agents-d081)", r.stderr)
-        self.assertIn("repair: bash tools/check-cmd.sh --install --global", r.stderr,
+        self.assertIn("--install --global", r.stderr,
                       "the point-of-use warning must name the command that writes the drifting file")
+        self.assertIn(str(ROOT / "tools" / "check-cmd.sh"), r.stderr,
+                      "and must name the reader by a path that runs from any cwd (agents-e3aw)")
         self.assertNotIn("repair: bash tools/check-cmd.sh --install - ", r.stderr,
                          "and must not offer the form that writes a different file")
+        # agents-e3aw (generalisation): the DETAIL line carries this file's own command, and it was hardcoded
+        # relative while the file already had the resolved path in hand - a reader standing anywhere but the repo
+        # root was told to run something that does not exist there. Every printed command in this surface now
+        # names a path that runs from any cwd.
+        detail = [line for line in r.stderr.splitlines() if "detail:" in line]
+        self.assertTrue(detail, f"the warning must carry a detail line: {r.stderr[:300]}")
+        # THE WHOLE SUBSTRING, DELIBERATELY: asserting only that the resolved path appears SOMEWHERE in this line
+        # passes on the broken form, because the same line also carries the repair, which is already resolved -
+        # a nearby match is not the assertion. Control: with the detail command relative, this fails.
+        self.assertIn(f"detail: bash {ROOT / 'tools' / 'check-cmd.sh'} --check", detail[0],
+                      f"the detail line's own command must name the resolved reader: {detail[0]}")
 
 
 class _ReaderHarness(unittest.TestCase):

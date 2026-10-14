@@ -7,8 +7,95 @@
   tail is captured, so the note lands in the record's tail and in the `[check]` message exactly once.
 - **Baseline file hash (the live bytes this patch was generated against and applies to):**
   `455e3b05d2dc172c2d2149dd47b33ac4d77266b57d45765506d2e2b362c10498  bin/fleet-check`
-  (767 lines; patched result `200f5119d0043980b011cc7acfac5ebbabbe62a179a127225284a28678633d3f`)
-- **Revision:** THIRD shape, and the name changed with it — the patch is
+  (baseline 767 lines; patched result `0e31c8f2b7538f6544ce4b29b6dd7744799349fbbb9b795a2679a8ac48e63135`,
+  which is 869 lines - both counts measured with `wc -l` on the two files, not carried over from an
+  earlier revision)
+- **Revision (agents-e3aw, fourth round): a LITERAL ASSERTION REMOVED FROM THE PROPERTY HELPER, because it was a
+  false-negative generator, and two byte-level assertions I first added were then dropped for the same reason
+  measured in the other direction.** The helper ran the printed repair from a foreign cwd and ALSO asserted that
+  the resolved reader path appears in the string; driven with the reader under `.../repo with space`, the
+  CORRECT `%q` repair contains the ESCAPED path and not the literal one, so the assertion goes FALSE on a correct
+  fix while the run beside it passes - latent only because the fixture's `ROOT` has no space. The property it was
+  reaching for, THE REPAIR REACHES THE FILE THE REPORT NAMED, is carried by the behavioural chain that was
+  already there: `--check` reads exactly the file it reported on, so a clean re-check means the repair rewrote
+  THAT file. Driving it settled the design - with the historical p8lh defect reintroduced (a repair naming the
+  right command but writing elsewhere) the failure surfaces at that chain, so a separate byte-level assertion
+  could only ever agree with it, and a stamp-based one would carry the same latent false-negative risk.
+  **THREE LEVELS OF ONE DEFECT, WHICH IS WHY THIS BEAD IS AS MUCH ABOUT TESTS AS ABOUT PATHS.** Level one: an
+  assertion that compares a STRING the tool printed, so it passes while the guidance the string describes is
+  unrunnable - the repair was judged by its spelling and the spelling was fine. Level two: an assertion satisfied
+  by an EMPTY string, so a green suite covered a property it never exercised (`assertNotIn("--global", "")` after
+  the drift had already been repaired out from under it). Level three, this round: an assertion that cannot FAIL
+  INDEPENDENTLY of the behavioural run beside it. I added byte-level checks for "the repair reached the file the
+  report named", drove the historical p8lh defect back in, and the failure surfaced at the existing `--check`
+  chain and never at the new lines - so they were removed rather than kept as belt and braces. An assertion that
+  can only agree with the run beside it is ILLUSORY COVERAGE, and a stamp-based one would have carried the same
+  latent false-negative risk this round removes (a future installer that preserves an existing stamp would fail
+  it on a correct fix). **The next person writing an assertion beside a behavioural check should recognise the
+  third shape, because it looks like care.**
+  **And a slip of my own, recorded because it is the same lesson one layer out:** the paragraphs above first went
+  into this file through a Python string that escaped its backticks, leaving eight stray backslashes - in a
+  document whose subject is SHELL QUOTING, silently escaping the punctuation the document is about. It was caught
+  by grepping the file for the escape rather than by proofreading it: use the cheap mechanical check, not the
+  attentive eye, exactly as the fast-gate diff earlier was settled by a named range rather than by memory.
+- **Revision (agents-e3aw, third round): THE PRINTED PATH IS ALSO QUOTED, because the printed command is
+  consumed by a SHELL - and RESOLVING a path is not the same as QUOTING it.** Driven, not reasoned: with the
+  reader under "/tmp/e3aw space" and a foreign stamped config, the note printed
+  `bash /tmp/e3aw space/tools/check-cmd.sh --install` UNQUOTED; running exactly that from a foreign cwd failed
+  by word splitting, the reader's own `--install` failure line printed the same unquoted form and failed
+  identically, and `bash "/tmp/e3aw space/tools/check-cmd.sh" --install` RAN. The destination is the same
+  argument one over: on the FLEET_CHECK_CONF form a config at `.../dir with space/team conf.conf` failed as
+  well, so the assignment prefix is quoted too. Both copies now print `%q`, which covers metacharacters
+  generally rather than special-casing a space. **The test that would have caught it did not exist because every
+  fixture path was a temp path with no spaces - the same lesson as the round below, one attribute further: the
+  property is over PATHS, not only over directories.** The new test RUNS the printed repair from a foreign cwd
+  with a space in the reader's path and again with a space in the destination, and with `%s` restored it is the
+  ONE test that fails while the other 47 pass.
+  **THE GENERALISATION, which is the finding rather than this instance: each of the three revisions so far fixed
+  one ATTRIBUTE of the printed command and left the next one, because the test asserted the attribute that had
+  just been fixed.** Round one fixed WHICH command is offered and left WHERE it runs; round two resolved the path
+  and left how it is QUOTED; this round quotes it. The property therefore has to be stated over the whole
+  command - THE PRINTED COMMAND RUNS AS PRINTED, FOR ANY PATH - and the test has to vary the path's CONTENT as
+  well as the directory it runs from, because a test that varies one attribute while holding another fixed can
+  pass on every value it tries (which is exactly how a fixture with no spaces in it let an unquoted form pass a
+  runnability assertion). Stated over the whole command, the next attribute has nowhere to hide.
+  **Asked by coord to state the general form, and it is the same sentence that was already true of the two
+  rounds below: a property stated over the whole command is what stops a fourth round.**
+  **Severity ordering, stated so the contrast is on the record:** this defect fails LOUDLY and requires a space
+  in a path; the vacuous assertion repaired in the round below failed SILENTLY and required nothing. Silent
+  beats loud as a severity ordering, which is why the vacuous one was worth recording even though it never
+  misled an operator. The same sweep found one further INSTRUCTION - the note that tells a lane it sets
+  `FLEET_CHECK_CONF=<dest>` to point the gate at the repo-local file - now quoted for the same reason, while the
+  line beside it that merely REPORTS which config is active is deliberately left as prose: quoting a report for a
+  shell that will never consume it would be symmetry rather than a fix.
+- **Revision (agents-e3aw, second round): the repair must RUN FROM WHERE IT IS READ, so its path is resolved.**
+  The revision below offered `bash tools/check-cmd.sh --install` when the reader is present - and that is a
+  RELATIVE path, which runs only from the repo root while the reader of the message is standing anywhere. Driven
+  on the bytes of the first round: invoked from the repo root, from a subdirectory, and by absolute path from
+  outside the repo, the note printed the IDENTICAL command, and running it then succeeded in the first case and
+  failed with `No such file or directory` in the other two. The reader is designed to be called by a RUNNER and a
+  runner's cwd is not guaranteed to be the repo root - the repo's own installer already calls it by absolute path
+  (`install.sh`). The artifact now prints the path it JUST TESTED (`[ -f "$top/tools/check-cmd.sh" ]`), so the
+  command cannot name a file that was not there, and the in-repo half of the same fix prints the reader's own
+  resolved path from `BASH_SOURCE` - the same source `ROOT` is derived from. **THE TEST IS THE LESSON: the
+  existing test asserted the printed STRING and ran it from the repo root, which is why four rounds of this family
+  kept passing while the guidance was unrunnable. A test that runs a printed command in the one directory where it
+  happens to work asserts the string rather than the property the string exists to deliver** - that test now runs
+  the printed command from a directory that is NOT the repo (agents-e3aw), and with the relative form restored it
+  goes red (measured: six failures), including every destination variant.
+- **Revision (agents-e3aw, first round):** the repair line now names only what the reader can see. The first revision of
+  this artifact printed *"Repair: give this repo its own config (bash tools/check-cmd.sh --install writes
+  $HOME/.fleet/<repo>-check.conf) and point the gate at it with FLEET_CHECK_CONF, or re-install the host-wide
+  file from the repo that should own it"* — which tells the reader to run an installer **in the repo the gate
+  ran from**, the one repo that may not have it and precisely the situation the note exists for, and then says
+  to fix the host-wide file "from the repo that should own it" **without naming it**, although the note had
+  already resolved that repo from the config's own stamp (`prov`, printed as "was installed by …" one line
+  above). Driven side by side on the same three inputs, the old text says that same sentence in every case,
+  including the case where `tools/check-cmd.sh` does not exist; the new text offers the installer only when it
+  is really there, and names the stamped repo by name or says plainly that the config carries no stamp. **Any
+  evidence predating this revision is void: the patched bytes changed** (the artifact is a delivery to the hub,
+  and has not been applied to any live `~/fleet`).
+- **Revision history:** THIRD shape, and the name changed with it — the patch is
   `fleet-check-explain-foreign-config.patch` (it was `fleet-check-refuse-foreign-config.patch`, which
   described a refusal that no longer exists; the old artifact and its write-up are deleted in the same
   commit, and the patch had never been handed to the hub). Rounds one and two of the refusal shape
@@ -100,8 +187,22 @@ the log and carried in the message.
   - **the real case** — a stamped foreign config (`# Project: agents-factory (/some/other/checkout)`)
     naming `bash tools/fast-gate.sh` in a repo where that script is absent: the command RUNS, fails 127
     by itself, and the lane's message carries `NOTE (agents-0r1c) … was installed by agents-factory
-    (/some/other/checkout) — it names [tools/fast-gate.sh], which do not resolve in <repo> … Repair: …
-    --install …` — **exactly once**, and `refusals=0`;
+    (/some/other/checkout) — it names [tools/fast-gate.sh], which do not resolve in <repo>` — **exactly
+    once**, `refusals=0`, followed by the repair lines below;
+  - **agents-e3aw (second round), the printed command RUN FROM A FOREIGN CWD**: the repaired note prints
+    `bash <repo>/tools/check-cmd.sh --install`, and that command runs from the repo root, from the repo's own
+    `tools/` directory, and from `/tmp` - whereas the first round's relative form ran only in the first case and
+    failed with `No such file or directory` in the other two. The in-repo reader was fixed the same way and its
+    suite now runs every printed repair from a directory that is not the repo: with the relative form restored,
+    six tests fail (the three destination variants, the point-of-use warning, the repo-local case and the install
+    header), and all 47 pass with the resolved path;
+  - **agents-e3aw (first round), driven in three situations against the SAME extracted diagnostic, old
+    revision beside new**: (1) repo HAS `tools/check-cmd.sh` + stamped config → new text offers
+    `bash tools/check-cmd.sh --install`; (2) repo does NOT have it + stamped config → new text says there
+    is no installer to run here, and names the stamped repo (`agents-factory (/some/other/checkout)`) as
+    the owner of the host-wide file; (3) no stamp → says plainly that the config carries no stamp so the
+    note cannot name the repo. In all three the OLD text printed the same unrunnable instruction, which is
+    the defect this revision fixes;
   - **agents-v0ip, fixed:** `deno test` → runs; exit 1 from deno itself (no `deno.json`), no refusal;
   - **agents-biz8, fixed:** `timeout -k 30 60s bash tools/fast-gate.sh` → runs; `PASS`, exit 0, and no
     note (nothing failed, so there is nothing to explain);
