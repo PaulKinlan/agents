@@ -166,7 +166,14 @@ STDOUT_CANDIDATES_KEY = "candidates"
 # and cosmetic only — the raw value is still in the local run artifact.
 IDENTITY_SHAPES = {
     "agent": (re.compile(r"[A-Za-z0-9_.-]{1,64}"), "unknown-agent"),
-    "rule": (re.compile(r"[A-Za-z0-9_.:-]{1,64}"), "unclassified"),
+    # `/` is part of the shape because the project's own documentation prescribes it: the
+    # log-check and test-gap skills both give `rule_id` as `<station>/<rule-name>`
+    # (agents/log-check/SKILL.md, agents/test-gap/SKILL.md), so refusing the delimiter meant
+    # every documented label was replaced by the fallback and the whole family read as
+    # `unclassified` (agents-uubs). It does not weaken the check: what stops a smuggled
+    # value is OPAQUE_RUN below, not the delimiter class - a slashed 40-character run is
+    # still refused, which the test asserts in the same case.
+    "rule": (re.compile(r"[A-Za-z0-9_.:/-]{1,64}"), "unclassified"),
     # The model's own label, treated exactly like a rule id - same shape, same fail-closed
     # fallback - except that a refused label becomes empty rather than "unclassified": there
     # is no label to show, and inventing one would be the thing this field exists to avoid.
@@ -177,7 +184,7 @@ IDENTITY_SHAPES = {
     # label under 20 characters, or one broken up by delimiters, matches this pattern and
     # OPAQUE_RUN both while still being a secret, and a mask that cannot be proven sufficient is
     # not a mask. The raw label stays in the model's own output in the run artifact.
-    "model_rule": (re.compile(r"[A-Za-z0-9_.:-]{1,64}"), ""),
+    "model_rule": (re.compile(r"[A-Za-z0-9_.:/-]{1,64}"), ""),
     "path": (re.compile(r"[A-Za-z0-9_. /-]{1,200}"), "unknown"),
 }
 OPAQUE_RUN = re.compile(r"[A-Za-z0-9]{20,}")
