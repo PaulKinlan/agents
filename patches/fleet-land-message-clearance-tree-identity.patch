@@ -1,0 +1,232 @@
+# patches/fleet-land-message-clearance-tree-identity.patch
+# Key the REVIEW CLEARANCE on the tree, not the tip sha (agents-ivp7).
+# Distinct from patches/fleet-land-message-tree-identity.patch (agents-19jh), which is the --gate side and is
+# already applied in the deployed base this patch is cut against.
+# Base: bin/fleet-land-message f6de093900f6b059db1a9797bfe2e5a0b3cecebe6fd9f07c58df34a0d4b86a30 (64670 B)
+#       tests/fleet-land-message.test.sh 91dfa5c97995244bfe2e8ce3f0bd7e5d3a5f8bb5be5ed67d4ef99a5b2c1ebc0f (91463 B)
+# Apply from the fleet repo root: patch -p1 < patches/fleet-land-message-clearance-tree-identity.patch
+
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
+@@ -217,6 +217,10 @@
+ done
+ tip=$(git rev-parse --short "${target_ref:-unknown}" 2>/dev/null || echo "")
+ tip=${tip:-unknown}
++# The TREE the tip names (agents-ivp7): the sha identifies the reviewed commit, the tree identifies the
++# gated CONTENT, and clearance travels with the content. Resolved here so every message below can
++# print it - a reader told "stale" with no tree cannot tell a real move from a rebase.
++tip_tree=$(git rev-parse -q --verify "${target_ref:-unknown}^{tree}" 2>/dev/null || echo "")
+ base=""
+ for cand in "origin/$D" "$D"; do
+   git rev-parse --verify -q "$cand" >/dev/null 2>&1 || continue
+@@ -271,7 +275,7 @@
+   | "\(.key)\t\(.value.author // "?")\t\(.value.created_at // "?")"' <<<"$COMMENTS" 2>/dev/null)
+ 
+ rev_pick=""; rev_idx=""; rev_who=""; rev_at=""; rev_verdict=""; rev_sha=""; rev_state="NONE"
+-rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_run_id=""
++rev_cleared=false; rev_unreviewed=0; rev_delta_identical=false; rev_tree_identical=false; rev_run_id=""
+ 
+ # ---------- reviewer independence: which verdicts may be operative (fleet-ry7m) ----------
+ # A verdict comment authored by the BRANCH AUTHOR'S OWN LANE cannot mask a verdict from any other actor:
+@@ -398,12 +402,24 @@
+     rev_full=$(git rev-parse -q --verify "$rev_sha^{commit}" 2>/dev/null || echo "")
+     tip_full=$(git rev-parse -q --verify "${target_ref:-$BRANCH}^{commit}" 2>/dev/null || echo "")
+     if [ -n "$rev_full" ] && [ -n "$tip_full" ]; then
++      rev_tree=$(git rev-parse -q --verify "$rev_full^{tree}" 2>/dev/null || echo "")
++      tip_tree_full=$(git rev-parse -q --verify "$tip_full^{tree}" 2>/dev/null || echo "")
+       if [ "$rev_full" = "$tip_full" ]; then
+         rev_state="CURRENT"
+         # POSITIVE IS THE SHARED DECISION (fleet-fudl), not a list retyped here. When this was a second
+         # hardcoded word list, the parser accepted HOLDS as a verdict and THIS line then refused the landing
+         # and stripped the merge-queue label: the review was read correctly and thrown away one branch later.
+         if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
++      elif [ -n "$rev_tree" ] && [ "$rev_tree" = "$tip_tree_full" ]; then
++        # TREE IDENTITY (agents-ivp7). A tree-preserving rebase moves the COMMIT and keeps the CONTENT exactly:
++        # the gate and the suites measured the tree, so a clearance whose tree equals the tip's tree still
++        # describes the bytes on the branch. Keying on tips alone refused that clearance, and because every lane
++        # is told to rebase onto landed main before handing over, the refusal was on the common path and cost a
++        # full gate for content already gated. The verdict still names the commit it was formed on - that rule
++        # does not bend - and this branch records the tree that carried it forward.
++        rev_state="CURRENT"
++        rev_tree_identical=true
++        if fleet_verdict_is_positive "$rev_verdict"; then rev_cleared=true; else rev_cleared=false; fi
+       elif git merge-base --is-ancestor "$rev_full" "$tip_full" 2>/dev/null; then
+         rev_state="STALE"
+         rev_unreviewed=$(git rev-list --count "$rev_full..$tip_full" 2>/dev/null || echo 0)
+@@ -701,6 +717,8 @@
+   if [ "$rev_cleared" = true ]; then
+     if [ "$rev_delta_identical" = true ]; then
+       rev_line="PASS (verdict: $rev_verdict) for commit $rev_sha (rebased: delta identical to tip $tip) by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence]"
++    elif [ "$rev_tree_identical" = true ]; then
++      rev_line="PASS (verdict: $rev_verdict) for commit $rev_sha (tree identical to tip $tip: ${rev_tree:-?}) by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence]"
+     else
+       rev_line="PASS (verdict: $rev_verdict) for commit ${rev_sha:-$tip} by $rev_who at $rev_at [reviewer ${rev_reviewer_model:-?}; independence: $rev_independence]"
+     fi
+@@ -710,9 +728,9 @@
+     rev_line="FAIL: verdict was $rev_verdict for commit ${rev_sha:-$tip} by $rev_who at $rev_at — NOT CLEARED"
+   fi
+ elif [ "$rev_state" = "STALE" ]; then
+-  rev_line="STALE: review covered $rev_sha, but origin/$BRANCH moved to $tip (+$rev_unreviewed commit(s) unreviewed) — NOT CLEARED"
++  rev_line="STALE: review covered $rev_sha (tree ${rev_tree:-?}), but origin/$BRANCH moved to $tip (tree ${tip_tree_full:-${tip_tree:-?}}) (+$rev_unreviewed commit(s) unreviewed) — NOT CLEARED"
+ elif [ "$rev_state" = "DIVERGED" ]; then
+-  rev_line="DIVERGED: review covered $rev_sha, but origin/$BRANCH tip is $tip (not in history) — NOT CLEARED"
++  rev_line="DIVERGED: review covered $rev_sha (tree ${rev_tree:-?}), but origin/$BRANCH tip is $tip (tree ${tip_tree_full:-${tip_tree:-?}}, not in history) — NOT CLEARED"
+ elif [ "$rev_state" = "UNRESOLVED" ]; then
+   rev_line="UNRESOLVED: reviewed commit $rev_sha cannot be resolved on origin/$BRANCH — NOT CLEARED"
+ elif [ "$rev_state" = "UNPINNED" ]; then
+@@ -751,9 +769,9 @@
+   if [ "$rev_state" = "STALE" ] || [ "$rev_state" = "DIVERGED" ]; then
+     if [ ${#rm_labels[@]} -gt 0 ]; then
+       bdf update "$BEAD" "${rm_labels[@]}" >/dev/null 2>&1 || true
+-      bdf comments add "$BEAD" "merge-queue clearance invalidated: branch tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)). Re-review required." >/dev/null 2>&1 || true
++      bdf comments add "$BEAD" "merge-queue clearance invalidated: branch tip $tip (tree ${tip_tree_full:-${tip_tree:-?}}) moved after review for $rev_sha (tree ${rev_tree:-?}) (+$rev_unreviewed unreviewed commit(s)). Re-review required." >/dev/null 2>&1 || true
+     fi
+-    echo "fleet-land-message: REFUSING: origin/$BRANCH tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)). Clearance invalidated$([ "$has_mq" = 1 ] && echo " and merge-queue label removed from $BEAD")." >&2
++    echo "fleet-land-message: REFUSING: origin/$BRANCH tip $tip (tree ${tip_tree_full:-${tip_tree:-?}}) moved after review for $rev_sha (tree ${rev_tree:-?}) (+$rev_unreviewed unreviewed commit(s)). Clearance invalidated$([ "$has_mq" = 1 ] && echo " and merge-queue label removed from $BEAD")." >&2
+     exit 1
+   elif [ "$rev_state" = "UNRESOLVED" ]; then
+     if [ ${#rm_labels[@]} -gt 0 ]; then
+@@ -976,6 +994,8 @@
+     --arg rev_who "${rev_who:-}" --arg rev_at "${rev_at:-}" --argjson rev_unreviewed "${rev_unreviewed:-0}" \
+     --argjson rev_cleared "$rev_cleared" --arg rev_tip "$tip" \
+     --argjson rev_delta_identical "${rev_delta_identical:-false}" \
++    --argjson rev_tree_identical "${rev_tree_identical:-false}" \
++    --arg rev_tree "${rev_tree:-}" --arg tip_tree "${tip_tree_full:-${tip_tree:-}}" \
+     --arg rev_run_id "${rev_run_id:-}" \
+     --arg cleared_sha "${cleared_label_sha:-}" \
+     --arg rev_independence "${rev_independence:-unknown}" --arg rev_reviewer_model "${rev_reviewer_model:-}" \
+@@ -988,7 +1008,8 @@
+                rejected_blocks:$rejected,mentions_without_a_block:$mentions},
+       review:{state:$rev_state,verdict:$rev_verdict,reviewed_sha:$rev_sha,tip_sha:$rev_tip,
+               unreviewed_commits:$rev_unreviewed,author:$rev_who,at:$rev_at,cleared:$rev_cleared,
+-              delta_identical:$rev_delta_identical,run_id:$rev_run_id,cleared_sha:$cleared_sha,
++              delta_identical:$rev_delta_identical,tree_identical:$rev_tree_identical,
++              reviewed_tree:$rev_tree,tip_tree:$tip_tree,run_id:$rev_run_id,cleared_sha:$cleared_sha,
+               branch_author:$branch_author,independence:$rev_independence,
+               reviewer_model:$rev_reviewer_model,author_model:$rev_author_model,
+               author_lane_verdicts_ignored:$rev_author_ignored,author_lane_verdict_shas:$rev_author_ignored_shas,
+--- a/tests/fleet-land-message.test.sh
++++ b/tests/fleet-land-message.test.sh
+@@ -479,7 +479,8 @@
+ # 11f/11g: Pre-merge invocation must refuse, exit 1, and strip merge-queue label
+ out_stale_refuse=$(run tk-1 fleet/thing); rc_refuse=$?
+ [ "$rc_refuse" = 1 ] && ok "11e pre-merge invocation refuses and exits 1 when tip moved after review" || bad "11e expected exit 1 on stale review" "rc=$rc_refuse out=$out_stale_refuse"
+-has "$out_stale_refuse" "REFUSING: origin/fleet/thing tip $new_tip moved after review for $thing_tip" "11f refusal error explains tip moved"
++has "$out_stale_refuse" "REFUSING: origin/fleet/thing tip $new_tip (tree " "11f refusal error explains tip moved and names the tip's tree"
++has "$out_stale_refuse" "moved after review for $thing_tip (tree " "11f2 ...and the reviewed commit's tree, so a rebase is distinguishable from a real move"
+ has "$(cat "$FIX/bd-updates.log" 2>/dev/null)" "bd update tk-1 --remove-label merge-queue" "11g merge-queue label stripped from bead"
+ has "$(cat "$FIX/bd-updates.log" 2>/dev/null)" "--remove-label cleared:abcd123" "11g2 cleared label stripped from bead (fleet-60zh)"
+ has "$(cat "$FIX/bd-comments-added.log" 2>/dev/null)" "merge-queue clearance invalidated" "11h invalidation comment added to bead"
+@@ -492,13 +493,14 @@
+ 
+ # 11k: --allow-stale overrides refusal and prints STALE review section
+ out_allow=$(run --allow-stale tk-1 fleet/thing)
+-has "$out_allow" "STALE: review covered $thing_tip, but origin/fleet/thing moved to $new_tip" "11k --allow-stale allows printing STALE review"
++has "$out_allow" "STALE: review covered $thing_tip (tree " "11k --allow-stale allows printing STALE review, naming the reviewed tree"
++has "$out_allow" "moved to $new_tip (tree " "11k2 ...and the tip's tree"
+ 
+ # 11l: --gate post-merge amend does not refuse and carries review section
+ git -C "$ROOT/repo" checkout -q fleet/thing
+ out_gate_stale=$(run --gate "$new_tip" tk-1 fleet/thing)
+ git -C "$ROOT/repo" checkout -q main
+-has "$out_gate_stale" "STALE: review covered $thing_tip, but origin/fleet/thing moved to $new_tip" "11l --gate post-merge amend does not refuse"
++has "$out_gate_stale" "STALE: review covered $thing_tip (tree " "11l --gate post-merge amend does not refuse (report names trees)"
+ 
+ # 11m/11n: Review verdict FAIL refuses merge and reports FAIL
+ cat > "$B" <<J
+@@ -679,7 +681,8 @@
+ J
+ out_remote_tip=$(run tk-1 fleet/thing); rc_remote_tip=$?
+ [ "$rc_remote_tip" = 1 ] && ok "11y pre-merge detects remote tip movement when local branch is stale" || bad "11y expected exit 1 on remote tip movement" "rc=$rc_remote_tip out=$out_remote_tip"
+-has "$out_remote_tip" "REFUSING: origin/fleet/thing tip $new_tip moved after review for $thing_tip" "11z remote tip refusal error explains remote tip moved"
++has "$out_remote_tip" "REFUSING: origin/fleet/thing tip $new_tip (tree " "11z remote tip refusal error names the tip's tree"
++has "$out_remote_tip" "moved after review for $thing_tip (tree " "11z2 ...and the reviewed commit's tree"
+ 
+ echo "12. delta-identity fallback, placeholder filtering, and author-agnostic review (fleet-15b5)"
+ rm -f "$FIX/bd-comments-added.log" "$FIX/bd-updates.log"
+@@ -728,7 +731,7 @@
+ rm -f "$FIX/bd-comments-added.log" "$FIX/bd-updates.log"
+ out_d1_diff=$(run tk-1 fleet/delta1); rc_d1_diff=$?
+ [ "$rc_d1_diff" = 1 ] && ok "12f differing delta after rebase refuses to land" || bad "12f expected exit 1 when deltas differ" "rc=$rc_d1_diff out=$out_d1_diff"
+-has "$out_d1_diff" "REFUSING: origin/fleet/delta1 tip $d1_diverged_tip moved after review for $d1_rev" "12g refusal error explains tip moved when deltas differ"
++has "$out_d1_diff" "REFUSING: origin/fleet/delta1 tip $d1_diverged_tip (tree " "12g refusal error explains tip moved when deltas differ, naming its tree"
+ has "$(cat "$FIX/bd-updates.log" 2>/dev/null)" "bd update tk-1 --remove-label merge-queue" "12h merge-queue stripped when deltas differ"
+ 
+ # 12i: Negative fixture 2: invalid explicit base on an otherwise identical rebase fails closed (P1 finding)
+@@ -782,7 +785,7 @@
+ rm -f "$FIX/bd-comments-added.log" "$FIX/bd-updates.log"
+ out_ws=$(run tk-1 fleet/delta1); rc_ws=$?
+ [ "$rc_ws" = 1 ] && ok "12j whitespace-only modification after rebase refuses to land" || bad "12j expected exit 1 on whitespace change" "rc=$rc_ws out=$out_ws"
+-has "$out_ws" "REFUSING: origin/fleet/delta1 tip $d1_ws_tip moved after review for $d1_rev" "12k whitespace change refusal error explains tip moved"
++has "$out_ws" "REFUSING: origin/fleet/delta1 tip $d1_ws_tip (tree " "12k whitespace change refusal error names the tip's tree too"
+ 
+ # 12l-12o: VERDICT placeholder filtering
+ # Reset fleet/delta1 back to d1_tip where delta identity held
+@@ -1331,6 +1334,67 @@
+ has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
+ has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
+ 
++echo "36. tree-identical rebase keeps a valid clearance (agents-ivp7)"
++# THE DEFECT THIS SECTION PINS: fleet-land-message compared TIPS, so a commit that moved without changing the
++# TREE read as STALE and the landing refused - paying a full gate for content that was already gated. Every lane
++# is told to rebase onto landed main before handing over, so this is the common path, not an edge case. The fix
++# keys the CLEARANCE on the tree (what the gate measured) while the verdict keeps NAMING the commit it was
++# formed on. Both directions are asserted: a tree-identical move is CLEARED, a real change is still REFUSED
++# with both trees named. A fresh branch is used so the fixture cannot depend on what earlier sections moved.
++TT_BRANCH=fleet/treeident
++git -C "$ROOT/repo" checkout -q main
++git -C "$ROOT/repo" checkout -q -b "$TT_BRANCH"
++echo "ident" > ident.txt
++git -C "$ROOT/repo" add ident.txt
++git -C "$ROOT/repo" -c user.email=t@t -c user.name=t commit -q -m "feat: identified work"
++tt_tip=$(git -C "$ROOT/repo" rev-parse "$TT_BRANCH")
++tt_tree=$(git -C "$ROOT/repo" rev-parse "$TT_BRANCH^{tree}")
++tt_parent=$(git -C "$ROOT/repo" rev-parse "$TT_BRANCH^")
++rm -f "$FIX/bd-updates.log" "$FIX/bd-comments-added.log"
++cat > "$ROOT/fix/show.json" <<'J'
++[{"id":"tk-1","title":"Add the thing","description":"The thing was missing.","status":"open","priority":2,"labels":["merge-queue","cleared:abcd123"]}]
++J
++# A metadata-only rebase: same TREE, new commit object, and NOT an ancestor of the reviewed commit (the
++# sibling-commit shape a rebase onto a moved base actually produces).
++tt_new=$(git -C "$ROOT/repo" commit-tree "$tt_tree" -p "$tt_parent" -m "rebase: same tree, new commit")
++git -C "$ROOT/repo" checkout -q main
++git -C "$ROOT/repo" branch -f "$TT_BRANCH" "$tt_new"
++tt_short=$(git -C "$ROOT/repo" rev-parse --short "$TT_BRANCH")
++cat > "$B" <<J
++[{"author":"proj-lane-1","created_at":"2026-10-13T10:00:00Z",
++  "text":"LAND-SUMMARY\nWHAT: thing.\nWHY: why.\nEFFECT: effect."},
++ {"author":"proj-rev-1","created_at":"2026-10-13T11:00:00Z",
++  "text":"VERDICT: PASS\nDelta: tk-1 base..$tt_tip branch $TT_BRANCH\nGate: fleet-check PASS for $tt_tip"}]
++J
++tt_rc=0
++tt_out=$(run tk-1 "$TT_BRANCH") || tt_rc=$?
++[ "$tt_rc" = 0 ] && ok "36a tree-identical rebase is CLEARED (rc 0)" || bad "36a tree-identical rebase refused" "rc=$tt_rc out=$tt_out"
++has "$tt_out" "tree identical to tip" "36b the landing message says WHY the clearance carried (tree identity)"
++has "$tt_out" "for commit $tt_tip" "36c ...and still NAMES the commit the verdict was formed on"
++j_tt=$(run --print-json tk-1 "$TT_BRANCH")
++eq "$(jq -r '.review.state' <<<"$j_tt")" "CURRENT" "36d JSON review state is CURRENT for a tree-identical tip"
++eq "$(jq -r '.review.cleared' <<<"$j_tt")" "true" "36e JSON review cleared is true"
++eq "$(jq -r '.review.tree_identical' <<<"$j_tt")" "true" "36f JSON exposes tree_identical"
++eq "$(jq -r '.review.reviewed_tree' <<<"$j_tt")" "$tt_tree" "36g JSON names the reviewed tree"
++eq "$(jq -r '.review.tip_tree' <<<"$j_tt")" "$tt_tree" "36h ...which equals the tip's tree"
++[ ! -f "$FIX/bd-updates.log" ] && ok "36i no queue state was touched (nothing was refused)" || bad "36i must not strip labels" "$(cat "$FIX/bd-updates.log")"
++
++# THE CONTROL: a real content change on the same branch is still REFUSED, and the refusal names BOTH trees so a
++# reader can tell a genuine move from a rebase without running git by hand.
++git -C "$ROOT/repo" checkout -q "$TT_BRANCH"
++echo "genuinely new content" >> ident.txt
++git -C "$ROOT/repo" add ident.txt
++git -C "$ROOT/repo" -c user.email=t@t -c user.name=t commit -q -m "feat: real change after review"
++tt2_short=$(git -C "$ROOT/repo" rev-parse --short "$TT_BRANCH")
++tt2_tree=$(git -C "$ROOT/repo" rev-parse "$TT_BRANCH^{tree}")
++git -C "$ROOT/repo" checkout -q main
++tt2_rc=0
++tt2_err=$(GATE_FIXTURE="$ROOT/fix/gate.json" timeout 60 bash "$LM" tk-1 "$TT_BRANCH" 2>&1 >/dev/null) || tt2_rc=$?
++[ "$tt2_rc" = 1 ] && ok "36j a real content change is still REFUSED" || bad "36j expected refusal" "rc=$tt2_rc err=$tt2_err"
++has "$tt2_err" "tip $tt2_short (tree $tt2_tree)" "36k the refusal names the tip's TREE"
++has "$tt2_err" "(tree $tt_tree)" "36l ...and the reviewed commit's tree, so the difference is visible"
++has "$(cat "$FIX/bd-comments-added.log" 2>/dev/null)" "(tree $tt2_tree)" "36m the bead comment carries both trees too"
++
+ if [ "$FAIL" -gt 0 ]; then
+   echo "Failed tests ($FAIL):"
+   for f in "${FAILED_TESTS[@]}"; do
