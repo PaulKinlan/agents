@@ -1,5 +1,5 @@
 # patches/fleet-lanes-list-model-unknown.patch
-# remote/lanes.sh: lanes list reports UNKNOWN rather than (default) when effective model unrecorded (agents-oi00).
+# remote/lanes.sh: lanes list reports state.json model before UNKNOWN when .model unrecorded (agents-oi00, agents-az5m).
 # Base (MEASURED on this VM's deployed fleet copy):
 #   remote/lanes.sh         40537 bytes sha256 7f0be21489db73e4d18821c58e6e669d22ec54f5192bc00bf158b5b9d422e4aa
 #   tests/lanes.test.sh     64678 bytes sha256 bbe6c9339457e2144d63b59a612c7adb15443c84480b14919e7788f4abfa00d5
@@ -7,28 +7,30 @@
 
 --- a/remote/lanes.sh
 +++ b/remote/lanes.sh
-@@ -542,7 +542,7 @@
+@@ -542,7 +542,9 @@
      for f in "$LD"/*.conf; do [ -f "$f" ] || continue; l=$(basename "$f" .conf)
        ( source "$f"; st=$(lane_status "$l")
          m=$(cat "$LD/$l.model" 2>/dev/null || echo "")
 -        [ -z "$m" ] && m="${MODEL:-(default)}"
-+        [ -z "$m" ] && m="${MODEL:-UNKNOWN}"
++        [ -z "$m" ] && m="${MODEL:-}"
++        [ -z "$m" ] && m=$(jq -r '.model // empty' "$LD/$l.state.json" 2>/dev/null)
++        [ -z "$m" ] && m="UNKNOWN"
          cs=$(checkout_state "$l"); [ -n "$cs" ] && cs="  [$cs]"
          printf '%-14s %-11s %-8s %s  %s%s\n' "$l" "$ROLE" "$st" "$m" "${WORKDIR:-}" "$cs" ); done ;;
    check)
 --- a/tests/lanes.test.sh
 +++ b/tests/lanes.test.sh
-@@ -1062,6 +1062,43 @@
+@@ -1062,6 +1062,57 @@
  lanes retire imp-live-rot >/dev/null 2>&1 || true
  echo '{}' > "$HOME/.fleet/model-cooldown.json"
  
-+echo "30. lanes list distinguishes unknown effective model from default and reports actual model from session record (agents-oi00)"
-+# 30a-30c: a lane with no .model file and empty MODEL in conf must report UNKNOWN, not (default).
++echo "30. lanes list distinguishes unknown effective model from default and reports actual model from state/session (agents-oi00, agents-az5m)"
++# 30a-30c: a lane with no .model file, empty MODEL in conf, and no runtime state must report UNKNOWN, not (default).
 +# A lane explicitly configured with MODEL='(default)' must report (default), ensuring the states are distinguishable.
 +printf 'ROLE=coord\nMODEL=\nWORKDIR=%s\nBEAD=\n' "$HOME/fleet-manager" > "$HOME/.fleet/lanes/coord-unk.conf"
-+rm -f "$HOME/.fleet/lanes/coord-unk.model"
++rm -f "$HOME/.fleet/lanes/coord-unk.model" "$HOME/.fleet/lanes/coord-unk.state.json"
 +printf "ROLE=implementer\nMODEL='(default)'\nWORKDIR=%s\nBEAD=\n" "$HOME/fleet-manager" > "$HOME/.fleet/lanes/imp-dflt.conf"
-+rm -f "$HOME/.fleet/lanes/imp-dflt.model"
++rm -f "$HOME/.fleet/lanes/imp-dflt.model" "$HOME/.fleet/lanes/imp-dflt.state.json"
 +
 +list_out=$(lanes list)
 +unk_row=$(grep "^coord-unk " <<<"$list_out")
@@ -38,7 +40,20 @@
 +hasnt "$unk_row" "(default)" "30b unknown model lane does not assert (default)"
 +has "$dflt_row" "(default)" "30c explicit default model reports (default), distinguishable from UNKNOWN"
 +
-+# 30d-30e: standing test - a lane whose requested model (in conf) and effective model (in session record)
++# 30d-30f: a lane whose conf is empty and .model pointer is missing, but whose runtime state.json
++# records an effective model (agents-az5m - the live coord case), must report that model from state.json,
++# not UNKNOWN and not (default).
++printf 'ROLE=coord\nMODEL=\nWORKDIR=%s\nBEAD=\n' "$HOME/fleet-manager" > "$HOME/.fleet/lanes/coord-live.conf"
++rm -f "$HOME/.fleet/lanes/coord-live.model"
++echo '{"lane":"coord-live","model":"deepseek/deepseek-flash"}' > "$HOME/.fleet/lanes/coord-live.state.json"
++
++live_out=$(lanes list)
++coord_row=$(grep "^coord-live " <<<"$live_out")
++has "$coord_row" "deepseek/deepseek-flash" "30d lane with empty conf and missing .model reports runtime state model"
++hasnt "$coord_row" "UNKNOWN" "30e lane with runtime state model does not report UNKNOWN"
++hasnt "$coord_row" "(default)" "30f lane with runtime state model does not report (default)"
++
++# 30g-30h: standing test - a lane whose requested model (in conf) and effective model (in session record)
 +# differ. lanes.sh list must report the effective model from .model agreeing with the session record,
 +# rather than the requested model from conf.
 +printf 'ROLE=reviewer\nMODEL=antigravity/claude-opus-5-5\nWORKDIR=%s\nBEAD=bead-diff\n' "$HOME/fleet-manager" > "$HOME/.fleet/lanes/rev-diff.conf"
@@ -51,11 +66,12 @@
 +# Verify effective model from the session record matches what list reports
 +eff_model=$(jq -r 'select(.type=="model_change") | "\(.provider)/\(.modelId)"' "$diff_session")
 +diff_row=$(lanes list | grep "^rev-diff ")
-+has "$diff_row" "$eff_model" "30d lanes list reports effective model matching session record"
-+hasnt "$diff_row" "antigravity/claude-opus-5-5" "30e lanes list does not report requested model when effective model differs"
++has "$diff_row" "$eff_model" "30g lanes list reports effective model matching session record"
++hasnt "$diff_row" "antigravity/claude-opus-5-5" "30h lanes list does not report requested model when effective model differs"
 +
-+rm -f "$HOME/.fleet/lanes/coord-unk.conf" "$HOME/.fleet/lanes/coord-unk.model"
-+rm -f "$HOME/.fleet/lanes/imp-dflt.conf" "$HOME/.fleet/lanes/imp-dflt.model"
++rm -f "$HOME/.fleet/lanes/coord-unk.conf" "$HOME/.fleet/lanes/coord-unk.model" "$HOME/.fleet/lanes/coord-unk.state.json"
++rm -f "$HOME/.fleet/lanes/imp-dflt.conf" "$HOME/.fleet/lanes/imp-dflt.model" "$HOME/.fleet/lanes/imp-dflt.state.json"
++rm -f "$HOME/.fleet/lanes/coord-live.conf" "$HOME/.fleet/lanes/coord-live.model" "$HOME/.fleet/lanes/coord-live.state.json"
 +rm -f "$HOME/.fleet/lanes/rev-diff.conf" "$HOME/.fleet/lanes/rev-diff.model" "$HOME/.fleet/lanes/rev-diff.sid"
 +rm -f "$diff_session"
 +
