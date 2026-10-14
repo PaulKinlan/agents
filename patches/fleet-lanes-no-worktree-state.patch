@@ -1,0 +1,192 @@
+diff --git a/remote/autopilot.sh b/remote/autopilot.sh
+index 619daa9..781195e 100755
+--- a/remote/autopilot.sh
++++ b/remote/autopilot.sh
+@@ -8,7 +8,35 @@ say() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
+ [ "$(cat "$HOME/.fleet/autopilot" 2>/dev/null || echo on)" = on ] || exit 0
+ hold=$(curl -s -m 10 "http://localhost:${FLEET_INBOX_PORT:-7777}/hold" | jq -r '.hold.mode // "off"' 2>/dev/null)
+ [ "${hold:-off}" = off ] || { say "skip: hold=$hold"; exit 0; }
+-bash "$HOME/fleet/remote/lanes.sh" list | awk '$1=="coord" && ($3=="running" || $3=="busy" || $3=="idle"){f=1} END{exit !f}' || { say "skip: coord lane not running"; exit 0; }
++# fleet-aaxx: THE COORD ROW'S SHAPE IS NAMED HERE, BECAUSE A POSITIONAL PARSER THAT DOES NOT NAME ITS ROW reads a
++# row shape it was not written against and says nothing about it. That is not hypothetical: a lane with NO
++# worktree appends [no-worktree] to its row, and this parser used to answer "coord is busy" for it because it
++# only ever looked at $3 - so a coord that could not work read as live and got nudged. The row is
++#   <lane> <role> <status> <model> <workdir> [<checkout-state>]
++# and the marker is APPENDED, so $3 is still the status (pinned by tests/lanes.test.sh 17j and 31c). A coord whose
++# checkout is not usable is NOT a live coord, and a marker outside the vocabulary below is a REFUSAL rather than a
++# pass - an unknown token means this parser is reading a row it does not understand, and reading it as healthy is
++# the silent fall-through this exists to remove. NOTHING HERE RE-SPAWNS, restarts or repairs a lane: the hub's
++# decision 3 is that only genuinely broken lanes are re-spawned, and that call is a human's or coord's, not a
++# 10-minute timer's. The marker vocabulary is the one remote/lanes.sh checkout_state() emits.
++coord_checkout=$(bash "$HOME/fleet/remote/lanes.sh" list | awk '
++  $1 != "coord" { next }
++  {
++    status_ok = ($3 == "running" || $3 == "busy" || $3 == "idle")
++    marker = ""
++    for (i = 4; i <= NF; i++) if ($i ~ /^\[[a-z0-9-]+\]$/) marker = substr($i, 2, length($i) - 2)
++    if (marker == "") { if (status_ok) seen = "live"; next }
++    if (marker == "no-checkout" || marker == "checkout-missing" || marker == "no-worktree" || marker == "checkout-broken" || marker == "checkout-leaked") { seen = marker; next }
++    seen = "unrecognised:" marker
++  }
++  END { print seen }
++')
++case "$coord_checkout" in
++  live) : ;;
++  "") { say "skip: coord lane not running (no coord row and no live status in lanes list)"; exit 0; } ;;
++  unrecognised:*) { say "skip: the coord row carries a checkout marker this parser does not know (${coord_checkout#unrecognised:}) - refusing the row rather than reading the wrong field"; exit 0; } ;;
++  *) { say "skip: the coord lane's checkout state is $coord_checkout, so it is not a live coord"; exit 0; } ;;
++esac
+ day="$HOME/.fleet/autopilot-$(date -u +%F)"; n=$(cat "$day" 2>/dev/null || echo 0)
+ [ "$n" -lt "${FLEET_AUTOPILOT_MAX_PER_DAY:-8}" ] || { say "skip: daily cap $n reached"; exit 0; }
+ # a nudge is still being handled? (one per 30 min at most)
+diff --git a/remote/lanes.sh b/remote/lanes.sh
+index b6a383f..6f74f27 100755
+--- a/remote/lanes.sh
++++ b/remote/lanes.sh
+@@ -12,7 +12,9 @@
+ #   lanes.sh restart <lane> [reason]  restart a lane (pi resumes the same session; reason is told to the lane)
+ #   lanes.sh fresh <lane> [reason]    restart the lane on a NEW session (state recovered from beads)
+ #   lanes.sh list                     lanes with role/model/state (a checkout that is gone or broken is
+-#                                     marked at the end of the line: [checkout-missing], [checkout-broken])
++#                                     marked at the END of the line, and the marker is APPENDED so the columns
++#                                     before it do not move: [checkout-missing], [checkout-broken], [no-worktree]
++#                                     - the path holds no git worktree at all - [no-checkout], [checkout-leaked])
+ #   lanes.sh check                    report lanes whose checkout the deploy temp path leaked into, and
+ #                                     a leaked FLEET_VM/FLEET_PROJECT in ~/.fleet/env; exit 1 if any (fleet-1djm)
+ #   lanes.sh running <lane>           check if lane is running (exit 0) or stopped/parked (exit 1)
+@@ -165,8 +167,20 @@ checkout_state() {   # <lane> -> "" when its checkout is usable, else a short to
+     "$HOME"/worktrees/*) case "${wd#"$HOME"/worktrees/}" in */*) printf 'checkout-leaked'; return 0 ;; esac ;;
+   esac
+   [ -d "$wd" ] || { printf 'checkout-missing'; return 0; }
++  # fleet-aaxx: A WORKTREE HAS A .git AT ITS ROOT - a directory in an independent clone, a FILE in a linked
++  # worktree - so its ABSENCE is what "this path is not a lane worktree at all" looks like: the shape a
++  # pre-validation spawn wrote into a conf (a legacy registration, agents-c3vf). That is a DIFFERENT fault from a
++  # worktree whose .git is present and dead, and until this line existed both reduced to the same string, so an
++  # operator could not tell "there is no worktree" from "the worktree is broken" - and a lane in the first state
++  # read as merely parked while it held real beads (the incident this bead was filed from). Nothing is broken and
++  # nothing can be repaired IN PLACE here, which is why it is its own token rather than a wording change: the
++  # repair is a re-spawn, and the token is what makes that sayable. `-e` (not `-d`) on purpose: it covers both
++  # forms of the marker. It also, correctly, stops a WORKDIR that is merely a SUBDIRECTORY of some unrelated repo
++  # from reading as a healthy worktree: `git rev-parse --git-dir` succeeds there, but a lane worktree is a path
++  # with its own .git, not a path inside one.
++  if [ ! -e "$wd/.git" ]; then printf 'no-worktree'; return 0; fi
+   git -C "$wd" rev-parse --git-dir >/dev/null 2>&1 && return 0
+-  printf 'checkout-broken'   # .git exists but is not a working repo: its gitdir target is gone, or it is not one
++  printf 'checkout-broken'   # a .git IS present but is not a working repo: its gitdir target is gone
+ }
+ dead_gitdir() {    # <lane> -> the gitdir a broken checkout points at, when we can read it (for the message)
+   local lane=$1 wd t
+@@ -559,11 +573,11 @@ case $c in
+       case "$cs" in
+         no-checkout)    why="no checkout path recorded" ;;
+         checkout-missing) why="the checkout directory does not exist" ;;
++        no-worktree) why="it holds no git repository at all, so this registration has no lane worktree: the shape a PRE-VALIDATION lanes.sh spawn wrote (WORKDIR not a worktree path) - spawn now derives the worktree and refuses an empty bead (fleet-kjm5, fleet-c3vf)"
++                stale_registration=1 ;;
+         *) dg=$(dead_gitdir "$l")
+            if [ -n "$dg" ]; then why=".git points at $dg, which no longer exists (a checkout that was removed, e.g. a deploy temp root)"
+-           else why="it holds no git repository at all, so this registration has no lane worktree: the shape a PRE-VALIDATION lanes.sh spawn wrote (WORKDIR not a worktree path) - spawn now derives the worktree and refuses an empty bead (fleet-kjm5, fleet-c3vf)"
+-                stale_registration=1
+-           fi ;;
++           else why="its .git is present but git cannot use it, and it does not name a missing gitdir"; fi ;;
+       esac
+       case "$cs" in
+         checkout-leaked) why="the checkout PATH carries the deploy's temp directory, so it works only while that directory exists (a path, not a project name, was used as the project)"
+diff --git a/tests/lanes.test.sh b/tests/lanes.test.sh
+index 3c2c1b1..b43d91b 100755
+--- a/tests/lanes.test.sh
++++ b/tests/lanes.test.sh
+@@ -1082,10 +1082,93 @@ has "$out" "re-spawn the lane" "30d the next action is the one that repairs it"
+ had_retire=$(grep -c "lanes.sh retire stale-reg deregisters" <<<"$out" || true)
+ [ "$had_retire" = 0 ] && ok "30e it does NOT advise retiring a working lane to repair a stale registration" || bad "30e wrong advice given" "$(grep 'lanes.sh retire stale-reg' <<<"$out")"
+ [ "$rc" != 0 ] && ok "30f a malformed registration exits non-zero so a sweep can see it" || bad "30f non-zero exit" "rc=$rc"
+-grep -q '\[checkout-broken\]' <<<"$(lanes list | grep stale-reg)" && ok "30g the list marker is unchanged (autopilot.sh parses the column positionally)" || bad "30g list marker changed" "$(lanes list | grep stale-reg)"
++# 30g MOVED WITH fleet-aaxx, ON PURPOSE: this registration has no worktree at all, and giving that its own
++# token is the whole of that change (see section 31). What must NOT move is the marker's POSITION: it is still
++# APPENDED, so field 3 is still the state (17j, and 31c for the new token). 30b-30e - the diagnosis and the next
++# action - are unchanged, and that is the control that this is a vocabulary change rather than a behaviour one.
++grep -q '\[no-worktree\]' <<<"$(lanes list | grep stale-reg)" && ok "30g the list marker names the state this registration is actually in (no-worktree, fleet-aaxx)" || bad "30g list marker" "$(lanes list | grep stale-reg)"
+ # The dead-gitdir shape keeps its own wording and its own next action (17e-17g above must not move).
+ rm -f "$ldir/stale-reg".*
+ 
++echo "31. a registration with NO worktree has its own state, and its POSITIONAL consumer knows it (fleet-aaxx)"
++# Why: until this, `list` reduced two different faults to one string - a lane with NO worktree and a lane whose
++# worktree is BROKEN - so neither an operator nor autopilot.sh could tell "there is nothing to work in" from "the
++# worktree needs repair". The incident: a lane spawned with a legacy conf sat with WORKDIR=/tmp, `list` reported
++# checkout-broken, and it idled for hours HOLDING REAL BEADS while reading as alive to every check except a
++# watchdog. A state nobody can act on is the difference between a parked lane and an invisible one.
++#
++# (a)/(b) TWO STATES, BOTH DIRECTIONS DRIVEN WITH REAL OUTPUT: a dead gitdir under a real worktree path keeps
++# checkout-broken; a path that holds no worktree at all is now no-worktree.
++nw_wd="$HOME/legacy-checkout"; mkdir -p "$nw_wd"
++printf 'ROLE=%s\nMODEL=%s\nWORKDIR=%s\nBEAD=bead-no-worktree-lane\n' implementer "'(default)'" "$nw_wd" > "$ldir/no-worktree-lane.conf"
++for ext in sid started stop prompt.md model state.json; do echo x > "$ldir/no-worktree-lane.$ext"; done
++dead_wd="$HOME/worktrees/fleet-manager-dead31"; mkdir -p "$dead_wd"
++printf 'gitdir: %s\n' "$HOME/tmp/tmpdeadroot31/repo-b/.git/worktrees/repo-b-dead31" > "$dead_wd/.git"
++printf 'ROLE=%s\nMODEL=\nWORKDIR=%s\nBEAD=bead-dead31-lane\n' reviewer "$dead_wd" > "$ldir/dead31-lane.conf"
++for ext in sid started stop prompt.md model state.json; do echo x > "$ldir/dead31-lane.$ext"; done
++grep -q '\[no-worktree\]' <<<"$(lanes list | grep no-worktree-lane)" && ok "31a list marks a registration whose path holds no worktree as no-worktree" || bad "31a list marker for no worktree" "$(lanes list | grep no-worktree-lane)"
++grep -q '\[checkout-broken\]' <<<"$(lanes list | grep dead31-lane)" && ok "31b and a DEAD WORKTREE still reports checkout-broken (driven both ways)" || bad "31b dead gitdir still broken" "$(lanes list | grep dead31-lane)"
++# (c) THE POSITIONAL CONTRACT THE CONSUMER DEPENDS ON: the marker is APPENDED, so field 3 is still the state.
++# 17j pins this for checkout-broken; this pins it for the new token.
++lanes list | awk '$1=="no-worktree-lane" && $3=="parked"{f=1} END{exit !f}' && ok "31c the new marker is APPENDED too: \$3 is still the state" || bad "31c positional parse for no-worktree" "$(lanes list | grep no-worktree-lane)"
++set +e; out=$(lanes check); rc=$?; set -e
++has "$out" "no lane worktree" "31d check keeps the meaning that was already right for this case"
++has "$out" "re-spawn the lane" "31e and keeps the next action that actually repairs it (not retire)"
++grep -q '^no-worktree-lane *no-worktree' <<<"$out" && ok "31f check reports the no-worktree lane under the new state" || bad "31f check state for no-worktree" "$(grep '^no-worktree-lane' <<<"$out")"
++grep -q '^dead31-lane *checkout-broken' <<<"$out" && ok "31g and the dead worktree under checkout-broken - the two are distinguishable in check too" || bad "31g check state for dead gitdir" "$(grep '^dead31-lane' <<<"$out")"
++[ "$rc" != 0 ] && ok "31h a no-worktree registration still exits non-zero, so a sweep sees it" || bad "31h non-zero exit" "rc=$rc"
++#
++# (c) THE CONSUMER IS DRIVEN, NOT READ: a fixture HOME whose lanes.sh prints ONE crafted coord row, run through the
++# REAL remote/autopilot.sh. The daily cap is pre-set to 8, so anything that gets PAST the parser stops with a
++# KNOWN later message - which is what makes the two stages distinguishable, and what makes this RED-FIRST: against
++# the pristine parser the no-worktree row passes (it only ever looked at $3) and the log carries the LATER message.
++ap="$ROOT/autopilot"; rm -rf "$ap"; mkdir -p "$ap/home/.fleet" "$ap/home/fleet/remote" "$ap/home/bin"
++# autopilot.sh runs under `set -u` and reads FLEET_VM/FLEET_PROJECT from ~/.fleet/env, so the fixture must carry a
++# real one: an empty env file aborts the script at its first line of work with 'FLEET_VM: unbound variable' and no
++# log at all, which reads exactly like a parser refusal unless the log's ABSENCE is itself visible (it is: 31n).
++printf 'export FLEET_VM=test-vm FLEET_PROJECT=x\n' > "$ap/home/.fleet/env"
++: > "$ap/home/fleet/fleet.conf"; echo x > "$ap/home/.fleet/project"; echo on > "$ap/home/.fleet/autopilot"
++echo 8 > "$ap/home/.fleet/autopilot-$(date -u +%F)"
++cat > "$ap/home/bin/curl" <<'AXCURL'
++#!/usr/bin/env bash
++printf '{"hold":{"mode":"off"}}'
++AXCURL
++cat > "$ap/home/fleet/remote/lanes.sh" <<'AXLANES'
++#!/usr/bin/env bash
++printf '%s\n' "$*" >> "$AX_CALLS"
++m=$(cat "$AX_MARKER_FILE" 2>/dev/null || true)
++if [ -n "$m" ]; then printf 'coord          coord       busy     deepseek/deepseek-flash  /home/x/worktrees/y  [%s]\n' "$m"
++else printf 'coord          coord       busy     deepseek/deepseek-flash  /home/x/worktrees/y\n'; fi
++AXLANES
++chmod +x "$ap/home/bin/curl" "$ap/home/fleet/remote/lanes.sh"
++ap_run() {  # <marker, or empty for a healthy row> -> the autopilot log of that run ('<no log>' when it made none)
++  : > "$ap/calls"
++  rm -f "$ap/home/.fleet/autopilot.log"
++  if [ -n "${1:-}" ]; then printf '%s' "$1" > "$ap/marker"; else rm -f "$ap/marker"; fi
++  env -i PATH="$ap/home/bin:/usr/bin:/bin" HOME="$ap/home" AX_CALLS="$ap/calls" AX_MARKER_FILE="$ap/marker" \
++    timeout 30 bash "$HERE/remote/autopilot.sh" >/dev/null 2>&1 || true
++  # A MISSING LOG IS ITS OWN ANSWER, not a failure to read: `cat` without the guard aborts this whole file under
++  # the `set -e` an earlier section turned on, which is how the first version of this section silently skipped
++  # 31i-31m while reporting zero failures - a test that cannot run reads as a test that passed.
++  cat "$ap/home/.fleet/autopilot.log" 2>/dev/null || printf '<no log>'
++}
++log=$(ap_run no-worktree)
++grep -q "checkout state is no-worktree" <<<"$log" && ok "31i autopilot REFUSES a coord row with no worktree instead of reading it as live" || bad "31i no-worktree coord read as live" "$log"
++grep -q "daily cap" <<<"$log" && bad "31j the no-worktree row reached past the parser" "$log" || ok "31j and it never reaches the code that would nudge coord"
++log=$(ap_run "")
++grep -q "daily cap" <<<"$log" && ok "31k a HEALTHY coord row still passes the parser (the refusal is not a blanket one)" || bad "31k healthy row refused" "$log"
++log=$(ap_run something-else)
++grep -q "does not know (something-else)" <<<"$log" && ok "31l an UNRECOGNISED marker is refused, not silently read as healthy" || bad "31l unknown marker fell through" "$log"
++calls=$(sort -u "$ap/calls" | tr '\n' ' ')
++[ "$calls" = "list " ] && ok "31m the consumer only ever READ the lane table: no lane was started, stopped or re-spawned" || bad "31m consumer mutated lanes" "calls=[$calls]"
++# 31n: the control for the instrument itself. Every assertion above reads a LOG, so a fixture that produces NO log
++# makes them all fail for a reason that has nothing to do with the parser - and the first version of this section
++# proved it: an empty ~/.fleet/env aborted autopilot.sh at FLEET_VM with `set -u`, and because `cat` on the missing
++# log then aborted THIS file under `set -e`, the five assertions never ran at all and the run still reported zero
++# failures. Assert the instrument produces a log before any of them.
++[ "$(ap_run "")" != "<no log>" ] && ok "31n the autopilot fixture produces a log at all (the assertions above are not vacuous)" || bad "31n fixture produced no log" "autopilot.sh exited before its first say()"
++rm -f "$ldir/no-worktree-lane".* "$ldir/dead31-lane".*
++
+ echo
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
