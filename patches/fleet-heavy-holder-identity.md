@@ -1,7 +1,9 @@
 ## `fleet-heavy-holder-identity.patch` (agents-lhow)
 
-**Applies on top of** `~/fleet/bin/fleet-heavy` (14378 bytes, sha256 33ecf140e615852a...) **plus both settled patches**
-in this directory: `fleet-heavy-jobend-holder-attribution.patch` first, then
+**Cut against an alternate, NOT INSTALLED generation** (14,378 bytes, SHA-256
+`33ecf140e615852a9d374b27b6e4b956365b80f3e942f25a6a5d897db0617e58`, at
+`~/fleet/fleet-heavy` and `~/fleet-copy/bin/fleet-heavy`, NOT live `~/fleet/bin/fleet-heavy`)
+**plus both settled patches** in this directory: `fleet-heavy-jobend-holder-attribution.patch` first, then
 `fleet-heavy-reclaim-live-pid-vs-holder.patch`, then this one. Order matters only in that this patch
 removes a check the sweep patch added; the function change itself is independent of both.
 
@@ -67,9 +69,17 @@ to reconstruct the target by hand. This re-cut has `--- a/bin/fleet-heavy` / `++
   a file of 322 lines, sha256 `9e30db1f62c2ac4f...`; the three re-cuts applied in the same order produce
   a BYTE-IDENTICAL file. `bash -n` is clean and the structural anchors survive (`slot_state`,
   `ticket_take`, `ticket_drop`, `slot_fd_holders`, `reclaim_abandoned_slot`).
-* **CAVEAT, measured:** this VM's `~/fleet/bin/fleet-heavy` is NOT the file these patches target - it is
-  the older 154-line snapshot (sha `0f95ccd3...`), i.e. commit `3180e13` of the integration repo, while
-  the write-ups' base `33ecf140...` is `0c69746` ("sync: match pristine ~/fleet baseline (2026-10-12
-  21:10 update)"). Applying against the stale deployed copy fails every hunk because the reclaim
-  machinery the patch edits (`reclaim_abandoned_slot`, `slot_fd_holders`) does not exist there at all.
-  The base named above is the one the patch was cut against and the one the hub has.
+* **CAVEAT, measured on this VM:** the LIVE executable is `~/fleet/bin/fleet-heavy`, **154 lines,
+  7,850 bytes**, SHA-256 `0f95ccd3c392b9736362713ce006f0b21f02f80e49951eda3da5ae1cf9863a91`.
+  The **alternate 14,378-byte base is NOT installed in `bin/`**; it remains at the top-level
+  `~/fleet/fleet-heavy` and `~/fleet-copy/bin/fleet-heavy`, SHA-256
+  `33ecf140e615852a9d374b27b6e4b956365b80f3e942f25a6a5d897db0617e58`.
+  On a COPY of the live 7,850-byte file the first patch's strict `patch -p1 --fuzz=0 --dry-run`
+  fails rc 1 (hunk at 197); on a COPY of the alternate base the three ordered re-cuts apply
+  strictly with no rejects and yield SHA-256
+  `9e30db1f62c2ac4f8143353a6bf76afc2b1bb93eda563c008068fa6c1059310a`.
+  Thus the live copy is not an obsolete copy of the declared base; they are different
+  generations. **STOP before installing**: the hub must deliberately choose and establish the
+  14,378-byte generation as the executable, validate that transition and then check each
+  ordered prerequisite against its actual SHA-256. Neither a patch dry-run on the wrong path
+  nor the presence of a top-level file constitutes a live `bin/` installation.
