@@ -1,0 +1,85 @@
+--- a/bin/fleet-tmp-clean
++++ b/bin/fleet-tmp-clean
+@@ -44,6 +44,7 @@
+ # Track reclaimed bytes (in KB)
+ reclaimed_dead_pids_kb=0
+ reclaimed_stale_tmp_kb=0
++reclaimed_scratch_kb=0
+ reclaimed_uv_kb=0
+ reclaimed_npx_kb=0
+ reclaimed_deps_kb=0
+@@ -181,6 +182,57 @@
+   fi
+ done
+ 
++# 2b. FLEET SCRATCH: age-bounded rotation for the /tmp this fleet creates. agents-pm4q; the fleet-wide case is
++#     fleet-r5uje (mwg-train's breakdown), referenced here rather than re-argued.
++#     WHY A SHORTER BOUND IS NEEDED: rule 2 prunes at 2 days, but a THROWAWAY COPY OF THE FLEET REPO costs ~430-446
++#     MiB because sdk-host/node_modules is inside it, so ten of them are 4.5 GB - and they regrow within HOURS of a
++#     sweep (measured on this VM: five such copies were back the same evening, 446 MiB each). The 2-day bound cannot
++#     bite before the disk is under pressure.
++#     THE TWO BOUNDS, AND NEITHER IS A HEURISTIC: AGE (FLEET_TMP_SCRATCH_MIN_AGE_MIN, default 180 minutes) plus a
++#     LIVENESS check - never how a run ended. Per fleet-2o7hq an outcome-bounded rule preserves nothing when a run
++#     goes wrong in a way its counter cannot see, and a rotation that deletes too eagerly is worse than a full disk
++#     because it breaks runs in ways nobody attributes to disk hygiene.
++#     THE SAFETY MECHANISM IS AN EXPLICIT PREFIX, NOT A GUESS: the blanket checkout protection is relaxed ONLY for
++#     names matching FLEET_TMP_SCRATCH_PREFIX (default fleet-scratch-*), because that prefix is a PROMISE by the
++#     creating harness that the directory is disposable. Everything else keeps the existing protection - a copied
++#     repo that is not so named is never touched, however old. That is the convention half of the bead's ask: a
++#     harness that cannot clean up after itself names its directory into this prefix.
++SCRATCH_MIN_AGE_MIN=${FLEET_TMP_SCRATCH_MIN_AGE_MIN:-180}
++SCRATCH_PREFIX=${FLEET_TMP_SCRATCH_PREFIX:-fleet-scratch-*}
++# Ephemeral populations that are not repos and are safe at a short age: Dolt block-store spools are written for one
++# operation and abandoned, and a stale or zero-length spool is itself a known fault (a zero-length spool makes the
++# next read fail with 'negative offset'). Its own knob, so it can be tightened or emptied independently.
++SPOOL_PREFIX=${FLEET_TMP_SPOOL_PREFIX:-nbs-spool-*}
++scratch_count=0
++mapfile -d '' -t scratch_candidates < <(find "$TMP_DIR" -maxdepth 1 -user "$USER_NAME" -mmin +"$SCRATCH_MIN_AGE_MIN" \( -name "$SCRATCH_PREFIX" -o -name "$SPOOL_PREFIX" \) -print0 2>/dev/null)
++for p in "${scratch_candidates[@]}"; do
++  [ -e "$p" ] || continue
++  base=$(basename "$p")
++  grep -qE "^(${KEEP})" <<<"$base" && continue
++  # LIVENESS, the second bound. A timeout means SKIP, never delete - the safe direction.
++  if command -v lsof >/dev/null 2>&1; then
++    if lsof_out=$(timeout 5 lsof +D "$p" 2>/dev/null); then
++      [ -n "$lsof_out" ] && { echo "scratch-in-use: skip $p (open files)"; continue; }
++    else
++      rc=$?
++      [ "$rc" -ne 1 ] && { echo "scratch-in-use: skip $p (lsof could not prove it idle, rc=$rc)"; continue; }
++    fi
++  fi
++  # A named scratch prefix may contain a .git - that is the promise. Anything else keeps the protection.
++  if ! grep -qE "^(${SCRATCH_PREFIX}|${SPOOL_PREFIX})" <<<"$base" && contains_checkout "$p"; then
++    echo "checkout-protected: skip $p (nested .git/.beads or unreadable subtree)"
++    continue
++  fi
++  sz=$(size_kb "$p"); sz=${sz:-0}
++  report_tmp "$p" "$sz"
++  if [ "$DRY_RUN" -eq 1 ]; then
++    echo "[dry-run] fleet scratch (>${SCRATCH_MIN_AGE_MIN}m): would remove $p (${sz}KB)"
++  elif safe_remove "$p"; then
++    scratch_count=$((scratch_count + 1))
++    reclaimed_scratch_kb=$((reclaimed_scratch_kb + sz))
++  fi
++done
++
+ # 3. Language and build caches
+ # 3a. uv cache prune (safe: re-downloads nothing in use)
+ if command -v uv >/dev/null 2>&1; then
+@@ -277,14 +329,14 @@
+   done
+ fi
+ 
+-total_reclaimed_kb=$((reclaimed_dead_pids_kb + reclaimed_stale_tmp_kb + reclaimed_uv_kb + reclaimed_npx_kb + reclaimed_deps_kb + reclaimed_home_kb))
++total_reclaimed_kb=$((reclaimed_dead_pids_kb + reclaimed_stale_tmp_kb + reclaimed_scratch_kb + reclaimed_uv_kb + reclaimed_npx_kb + reclaimed_deps_kb + reclaimed_home_kb))
+ total_reclaimed_mb=$((total_reclaimed_kb / 1024))
+ 
+ cur_tmp=$(du -sh "$TMP_DIR" 2>/dev/null | cut -f1)
+ cur_free=$(df -h / 2>/dev/null | awk 'NR==2{print $4}')
+ cur_pct=$(df -h / 2>/dev/null | awk 'NR==2{print $5}')
+ 
+-summary="reclaimed=${total_reclaimed_mb}MB (dead_pids=${dead_pids_count} [${reclaimed_dead_pids_kb}KB], stale_tmp=${stale_tmp_count} [${reclaimed_stale_tmp_kb}KB], uv=${reclaimed_uv_kb}KB, npx=${reclaimed_npx_kb}KB, deps=${reclaimed_deps_kb}KB, home_caches=${reclaimed_home_kb}KB) tmp=${cur_tmp} disk_free=${cur_free} (${cur_pct})"
++summary="reclaimed=${total_reclaimed_mb}MB (dead_pids=${dead_pids_count} [${reclaimed_dead_pids_kb}KB], fleet_scratch=${scratch_count} [${reclaimed_scratch_kb}KB], stale_tmp=${stale_tmp_count} [${reclaimed_stale_tmp_kb}KB], uv=${reclaimed_uv_kb}KB, npx=${reclaimed_npx_kb}KB, deps=${reclaimed_deps_kb}KB, home_caches=${reclaimed_home_kb}KB) tmp=${cur_tmp} disk_free=${cur_free} (${cur_pct})"
+ 
+ if [ "$DRY_RUN" -eq 1 ]; then
+   echo "fleet-tmp-clean [dry-run]: $summary"
