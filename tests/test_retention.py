@@ -1119,8 +1119,8 @@ class TestFailedApplyRemovalGoesThroughTheChokePoint(unittest.TestCase):
 # inventory cannot drift from the code in either direction.
 
 _PY_DELETION_PATTERNS = ("shutil.rmtree(", "os.unlink(", "os.remove(",
-                         ".unlink(", "rm -rf", "rm -fr")
-_SH_DELETION_PATTERNS = ("rm -rf", "rm -fr")
+                         ".unlink(", "os.rmdir(", ".rmdir(", "rm -rf", "rm -fr")
+_SH_DELETION_PATTERNS = ("rm -rf", "rm -fr", "rmdir ", "rm -r")
 
 _DELETION_INVENTORY = (
     # (relpath, line substring, expected count, disposition, reason)
@@ -1297,6 +1297,69 @@ class TestRunRootDeletionInventory(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("shutil.rmtree(some_new_path", errors[0])
         self.assertIn("factory", errors[0])
+
+    def test_a_directory_removal_is_a_deletion_primitive_the_scan_can_see(self):
+        """agents-3gak: the pattern table is this inventory's ONLY SENSOR, so a primitive it was never
+        taught is invisible to both tiers at once - `_deletion_sites` never matches it, and nothing
+        about the file that uses it can select this suite for it. `os.rmdir(` and `.rmdir(` were
+        missing, so a DIRECTORY removal was not a deletion primitive as far as either tier was
+        concerned: a deleter could have been added to the shipped source and the inventory would have
+        stayed silent rather than naming the site.
+
+        The fixture is run through the REAL scan and checked by what it finds, not by comparing the
+        table against a list of names: a test that asserts the table's contents passes for a pattern
+        that matches nothing, and an entry with no test is what the next tidy-up deletes.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "factory").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            probe = root / "lib" / "probe.py"
+            probe.parent.mkdir()
+            probe.write_text(
+                "import os\n"
+                "from pathlib import Path\n"
+                "\n"
+                "def clean(d):\n"
+                "    os.rmdir(d / 'empty')\n"
+                "    Path(d / 'other').rmdir()\n",
+                encoding="utf-8")
+            sites = _deletion_sites(root)
+        lines = [line for _rel, line in sites]
+        self.assertEqual(
+            (len(sites), sorted(lines)),
+            (2, ["Path(d / 'other').rmdir()", "os.rmdir(d / 'empty')"]),
+            "both directory removals must be FOUND by the scan, or the inventory is blind to them "
+            f"(saw {sites})")
+
+    def test_a_directory_removal_with_no_inventory_entry_would_be_named(self):
+        """The other half of the same fact: once the scan sees it, the inventory must still govern it.
+        A site the table matches but the inventory does not enumerate is a named failure, not silence."""
+        errors = _inventory_errors(_deletion_sites(ROOT)
+                                   + [("lib/probe.py", "os.rmdir(d / 'empty')")])
+        self.assertEqual(len(errors), 1, "the REAL inventory must be complete, and this one site the only new error")
+        self.assertIn("os.rmdir(d / 'empty')", errors[0])
+        self.assertIn("unenumerated deletion site", errors[0])
+
+    def test_a_shell_directory_removal_is_a_deletion_primitive_the_scan_can_see(self):
+        """The same gap in the SHELL table, closed in the same breath because it is the same table and the
+        same class: `rmdir` and `rm -r` are directory removals, and the shell half knew only `rm -rf` / `rm
+        -fr`. Zero such sites exist in the shipped shell today (measured), so this table edit cannot make
+        the inventory stale - it only stops a future one from being invisible."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "factory").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            (root / "tools").mkdir()
+            (root / "tools" / "probe.sh").write_text(
+                "#!/usr/bin/env bash\n"
+                "rmdir \"$work/empty\"\n"
+                "rm -r \"$work/other\"\n",
+                encoding="utf-8")
+            sites = _deletion_sites(root)
+        lines = [line for _rel, line in sites]
+        self.assertEqual(
+            (len(sites), sorted(lines)),
+            (2, ['rm -r "$work/other"', 'rmdir "$work/empty"']),
+            f"both shell directory removals must be FOUND by the scan (saw {sites})")
 
     def test_a_deleter_removed_without_updating_the_inventory_fails(self):
         sites = [(rel, line) for rel, line in _deletion_sites(ROOT)
