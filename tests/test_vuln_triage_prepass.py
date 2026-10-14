@@ -243,6 +243,51 @@ class TestVulnTriageClustering(unittest.TestCase):
             self.assertEqual(payload["cluster_count"], 2)
             self.assertEqual(len(payload["clusters"]), 2)
 
+    def test_end_to_end_does_not_reingest_its_own_findings(self):
+        """agents-3o86: triage's stored output cannot feed its next pre-pass."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            mock_root = tmp_path / "mock_root"
+            mock_script = copy_station_script(
+                mock_root,
+                ROOT / "agents" / "vuln-triage" / "scripts" / "triage.py",
+                "agents/vuln-triage/scripts/triage.py",
+            )
+            store = mock_root / "findings"
+            store.mkdir(parents=True)
+            (store / "target.json").write_text(json.dumps({"findings": {
+                "self-new": {"agent": "vuln-triage", "state": "new", "path": "self.py",
+                             "line_number": "?", "rule_id": "unclassified"},
+                "self-regressed": {"agent": "vuln-triage", "state": "regressed", "path": "self.py",
+                                   "line_number": 10, "rule_id": "vuln-triage/prior"},
+                "self-accepted": {"agent": "vuln-triage", "state": "accepted", "path": "self.py",
+                                  "line_number": 20, "rule_id": "vuln-triage/accepted"},
+                "discovery": {"agent": "vuln-discovery", "state": "new", "path": "a.py",
+                              "line_number": 10, "rule_id": "discovery"},
+                "verified": {"agent": "vuln-verify", "state": "accepted", "path": "b.py",
+                             "line_number": 20, "rule_id": "verified"},
+                "legacy-null": {"agent": None, "state": "regressed", "path": "c.py",
+                                "line_number": "?", "rule_id": "legacy-null"},
+                "legacy-absent": {"state": "new", "path": "d.py",
+                                  "line_number": 30, "rule_id": "legacy-absent"},
+                "inactive": {"agent": "secret-scan", "state": "fixed", "path": "e.py",
+                             "line_number": 40, "rule_id": "inactive"},
+            }}), encoding="utf-8")
+            target = tmp_path / "target"
+            target.mkdir()
+            output = tmp_path / "result.json"
+            result = subprocess.run([sys.executable, str(mock_script), "--target", str(target),
+                                     "--output", str(output)], capture_output=True, text=True, check=True,
+                                    timeout=15)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            items = [item for cluster in payload["clusters"] for item in cluster["items"]]
+            self.assertFalse(any(item.get("agent") == "vuln-triage" for item in items),
+                             "self-origin vuln-triage records re-entered the candidate pre-pass")
+            self.assertEqual({item["rule_id"] for item in items},
+                             {"discovery", "verified", "legacy-null", "legacy-absent"})
+            self.assertEqual(payload["total_active_findings"], 4)
+            self.assertIn("4 findings grouped into", result.stdout)
+
 
 class TestThreatModelContextSummary(unittest.TestCase):
     """agents-tawg: test visible summarization path and findings-store threat model copy."""

@@ -58,6 +58,10 @@ def gather_findings(target_name: str) -> List[Dict[str, Any]]:
         try:
             data = json.loads(store_file.read_text(encoding="utf-8"))
             for item in data.get("findings", {}).values():
+                # Our prior reports are not candidates for our next pre-pass;
+                # keep other agents' findings, including legacy rows without an agent.
+                if item.get("agent") == "vuln-triage":
+                    continue
                 if item.get("state") in ("new", "regressed", "accepted"):
                     findings.append(item)
         except Exception:
