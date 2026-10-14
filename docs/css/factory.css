@@ -224,7 +224,14 @@
         background: linear-gradient(to right, rgb(139 184 255 / 18%), transparent);
       }
       pre > code::after {
-        grid-column: 3; inset-inline-end: 0; translate: -.9rem 0;
+        /* NO translate here (agents-zjfq): the band is pinned to the scrollport's inline end by position: sticky
+           plus inset-inline-end: 0, which needs no offset. A `translate: -.9rem 0` used to sit here and shifted
+           the right band one band-width INSIDE the edge, so the two indicators were asymmetric - the left one
+           flush at the start edge, the right one .9rem short of the end edge. Measured in Chrome: with the
+           translate the right band's box is 834..849 against a scrollport content edge of 863 (14px inside); with
+           it removed 849..863, flush, symmetric with the left band at 265..279. It is not user-visible yet - the
+           retained 35% fallback gradient covers it - so it is fixed for the geometry, not for a symptom. */
+        grid-column: 3; inset-inline-end: 0;
         background: linear-gradient(to left, rgb(139 184 255 / 18%), transparent);
       }
       @container scroll-state(scrollable: inline-start) { pre > code::before { opacity: 1; } }
