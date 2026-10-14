@@ -1,0 +1,156 @@
+--- a/remote/check-coverage.py
++++ b/remote/check-coverage.py
+@@ -777,12 +777,25 @@
+                 unmapped.append(f)
+ 
+     unmapped = sorted(list(set(unmapped)))
++    # agents-tpw5: WHERE EACH PUBLISHED ENTRY CAME FROM, derived from the list that is actually published so
++    # the map's keys cannot drift from `.unmapped`. The gate's own `fast-gate: unmapped:` marker is EVIDENCE;
++    # an entry this script appended because it could not PLACE the path is this script's INFERENCE. A report
++    # that shows both in the same voice is a report whose negative result is not evidence - the reporter's own
++    # principle at the fleet-agch guard below, whose per-path half was missing - and this file's sibling test
++    # says the cost plainly: a warning that always fires is a warning everyone learns to ignore, while this
++    # warning exists to catch a genuinely uncovered change. THE STATE MACHINE IS DELIBERATELY UNTOUCHED: an
++    # inferred omission still lands in `.unmapped`, still makes the record PARTIAL, and still fails loud.
++    unmapped_source = {f: ("gate" if f in explicit_unmapped else "inference") for f in unmapped}
++
+     omitted_list = sorted(list(omitted_suites))
+ 
+     if coverage_state == "UNKNOWN":
+         # An absence of evidence must not be reported as a zero: keep the changed list for context in the
+         # note, but publish no unmapped list, and mark the run non-conclusive for coverage.
+         unmapped = []
++        # and the provenance map must not outlive the list it describes: a record naming sources for entries
++        # it does not publish is the same "claim not derived from the object" defect this branch prevents.
++        unmapped_source = {}
+         omitted_list = []
+         suites_indeterminate = True
+     elif unmapped:
+@@ -799,6 +812,7 @@
+     return {
+         "suites": suites_list,
+         "unmapped": unmapped,
++        "unmapped_source": unmapped_source,
+         "omitted": omitted_list,
+         "changed": changed_files,
+         "indeterminate": suites_indeterminate,
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -284,7 +284,11 @@
+               cov_info=" [coverage UNKNOWN: $(jq -r '.coverage.unknown_reason // "not determinable from the gate log"' "$rec" 2>/dev/null || echo "not determinable from the gate log") - $num_changed changed file(s) NOT demonstrated to be exercised]"
+             elif [ "$num_unmapped" -gt 0 ] || [ "$num_omitted" -gt 0 ]; then
+               unm_str=$(jq -r '.unmapped | if length > 0 then join(", ") + " unmapped" else "" end' "$rec" 2>/dev/null)
+-              cov_info=" Coverage warning: ${unm_str:-files unmapped}$omitted_info."
++              # agents-tpw5: a reader must be able to tell EVIDENCE from INFERENCE in the same list. The
++              # entry the gate's own marker named is evidence; an entry the reporter could not PLACE is its
++              # own inference. Fail-loud is unchanged - this only says which is which.
++              prov_info=$(jq -r '(.coverage.unmapped_source // {}) | ([.[] | select(. == "inference")] | length) as $i | if $i > 0 then " (" + ($i|tostring) + " unplaced by the reporter, not named by the gate)" else "" end' "$rec" 2>/dev/null)
++              cov_info=" Coverage warning: ${unm_str:-files unmapped}$prov_info$omitted_info."
+             elif [ "$num_suites" -gt 0 ]; then
+               cov_info=" Coverage: ran $num_suites suite(s) ($(jq -r '.suites | join(", ")' "$rec"))."
+             elif [ "$is_indeterminate" = "true" ]; then
+@@ -535,7 +539,10 @@
+     # names the reason and says the changed files were not demonstrated, rather than implying zero coverage.
+     cov_note=" [coverage UNKNOWN: ${unknown_reason:-not determinable from the gate log} - $num_changed changed file(s) NOT demonstrated to be exercised]"
+   elif [ "$num_unmapped" -gt 0 ] || [ "$num_omitted" -gt 0 ]; then
+-    cov_note=" [COVERAGE WARNING: $num_unmapped unmapped changed file(s): $unmapped_list${omitted_list:+ (omitted: $omitted_list)}${suites_list:+ (ran $num_suites suite(s): $suites_list)}]"
++    # byte-identical note to the cached path above (fleet-265v keeps one string, two paths): in the FRESH
++    # object the provenance field is top-level, in the RECORD it is nested under .coverage (fleet-265v).
++    prov_note=$(jq -r '(.unmapped_source // {}) | ([.[] | select(. == "inference")] | length) as $i | if $i > 0 then " (" + ($i|tostring) + " unplaced by the reporter, not named by the gate)" else "" end' "$cov_out" 2>/dev/null)
++        cov_note=" [COVERAGE WARNING: $num_unmapped unmapped changed file(s): $unmapped_list${prov_note}${omitted_list:+ (omitted: $omitted_list)}${suites_list:+ (ran $num_suites suite(s): $suites_list)}]"
+   elif [ "$num_suites" -gt 0 ]; then
+     cov_note=" [coverage: ran $num_suites suite(s): $suites_list]"
+   elif [ "$is_indeterminate" = "true" ]; then
+--- a/tests/check-coverage.test.sh
++++ b/tests/check-coverage.test.sh
+@@ -232,6 +232,41 @@
+ out=$(run "$R7" "$ROOT/log-hub-other.txt" "$SHA7"); u=$(jq_get unmapped <<<"$out")
+ case " $u " in *" tests/thing.test.sh "*) ok "7c a changed test file the gate did NOT run is still flagged (the warning keeps its meaning)";; *) bad "7c unexecuted test file must stay unmapped" "[$u]";; esac
+ 
++echo "8. agents-tpw5: WHERE each unmapped entry came from (gate marker vs reporter inference)"
++# The whole report rests on this distinction. An entry the gate's own `fast-gate: unmapped:` marker names is
++# EVIDENCE; an entry this tool could not PLACE is its INFERENCE. Both stay in .unmapped and both still make
++# the record PARTIAL - fail-loud is untouched - but the reader can tell them apart, which is what keeps this
++# warning worth reading (see the header: a warning that always fires is one everyone learns to ignore).
++R8=$ROOT/eight; mkdir -p "$R8/tools" "$R8/tests"; new_repo "$R8"
++  printf '#!/bin/sh\n' > "$R8/tools/deploy-thing.sh"; printf 'import unittest\n' > "$R8/tests/test_ops_contract.py"
++  git -C "$R8" add -A; git -C "$R8" -c user.email=t@t -c user.name=t commit -q -m base8
++  printf '# change\n' >> "$R8/tools/deploy-thing.sh"; git -C "$R8" add -A
++  git -C "$R8" -c user.email=t@t -c user.name=t commit -q -m change8
++  SHA8=$(git -C "$R8" rev-parse HEAD)
++
++# (a) the gate ran a suite for the delta but named no omission: the tool cannot PLACE the path -> INFERENCE.
++#     This is the case no stem normalisation can ever reach, because the path is placed by an ARM.
++printf 'fast-gate: running: tests/test_ops_contract.py\nfast-gate: passed: tests/test_ops_contract.py\n' > "$ROOT/log-eight-a.txt"
++out=$(run "$R8" "$ROOT/log-eight-a.txt" "$SHA8")
++src=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('unmapped_source',{}).get('tools/deploy-thing.sh',''))" <<<"$out")
++[ "$src" = "inference" ] && ok "8a an unplaced path is recorded as the tool's INFERENCE" || bad "8a expected inference" "$out"
++st=$(jq_field coverage <<<"$out"); u=$(jq_get unmapped <<<"$out")
++[ "$st" = "PARTIAL" ] && case " $u " in *" tools/deploy-thing.sh "*) ok "8b ... and it is still published and still PARTIAL (fail-loud untouched)";; *) bad "8b fail-loud must not change" "$out";; esac || bad "8b expected PARTIAL" "$out"
++
++# (b) the gate's own marker names it: same file, same run shape -> EVIDENCE. The control that makes 8a a
++#     measurement rather than a decoration.
++printf 'fast-gate: unmapped: tools/deploy-thing.sh\nfast-gate: running: tests/test_ops_contract.py\nfast-gate: passed: tests/test_ops_contract.py\n' > "$ROOT/log-eight-b.txt"
++out=$(run "$R8" "$ROOT/log-eight-b.txt" "$SHA8")
++src=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('unmapped_source',{}).get('tools/deploy-thing.sh',''))" <<<"$out")
++[ "$src" = "gate" ] && ok "8c the gate's own marker records EVIDENCE, not inference" || bad "8c expected gate" "$out"
++
++# (c) UNKNOWN publishes no unmapped list, so the provenance map must not outlive the list it describes: a
++#     record naming sources for entries it does not publish is the defect this branch exists to prevent.
++printf 'nothing useful here\n' > "$ROOT/log-eight-c.txt"
++out=$(run "$R8" "$ROOT/log-eight-c.txt" "$SHA8")
++python3 -c "import json,sys; d=json.load(sys.stdin); assert d['coverage']=='UNKNOWN' and d['unmapped']==[] and d.get('unmapped_source')=={}, d" <<<"$out" \
++  && ok "8d UNKNOWN clears the provenance map with the list" || bad "8d the map must not outlive the list" "$out"
++
+ if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
+--- a/tests/fleet-gate-check.test.sh
++++ b/tests/fleet-gate-check.test.sh
+@@ -760,6 +760,29 @@
+ ( cd "$COV_REPO" && check --fast )
+ wait_check "$app_rec"
+ has "$(jq -c .unmapped "$app_rec" 2>/dev/null)" "lib/extra.py" "14q explicit unmapped file captured in record"
++
++# agents-tpw5: the gate's marker is EVIDENCE - and now the record says so. The other direction (a path the
++# reporter could not place, still published and still failing loud) is 14s below.
++has "$(jq -c '.coverage.unmapped_source["lib/extra.py"]' "$app_rec" 2>/dev/null)" '"gate"' "14q2 the record says that omission came from the gate's own marker, not the reporter's inference"
++
++# agents-tpw5 second direction, and the READER re-pin: a changed path no arm names, a suite that ran, and NO
++# unmapped marker in the log. The entry is the reporter's inference; the record must still publish it (that
++# is the fail-loud property, unchanged) and the reader's warning must say which kind of claim it is.
++rm -f "$CURL_LOG"
++( cd "$COV_REPO" && mkdir -p tools && printf '#!/bin/sh\n' > tools/unplaced-probe.sh \
++  && git add tools/unplaced-probe.sh && git commit -q -m "an unplaceable tool" )
++probe_tree=$(git -C "$COV_REPO" rev-parse 'HEAD^{tree}')
++probe_rec="$HOME/.fleet/checks/$probe_tree.fast.json"
++cat << 'SH' > "$CHECK_CONF"
++CHECK_FAST_CMD='echo "fast-gate: running: tests/test_findings.py"; echo "fast-gate: passed: tests/test_findings.py"'
++CHECK_FAST_TIMEOUT=30
++SH
++( cd "$COV_REPO" && check --fast )
++wait_check "$probe_rec"
++has "$(jq -c .unmapped "$probe_rec" 2>/dev/null)" "tools/unplaced-probe.sh" "14s an unplaced changed path is still published (fail-loud unchanged)"
++has "$(jq -r '.coverage.unmapped_source["tools/unplaced-probe.sh"] // ""' "$probe_rec" 2>/dev/null)" "inference" "14t the record says that omission is the reporter's inference, not the gate's marker"
++probe_out=$(cd "$COV_REPO" && check --fast 2>&1)
++has "$probe_out" "unplaced by the reporter" "14u the cached PASS output tells the reader which entries are inference"
+ has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/auth.test.ts" "14r deno test line captured in suites"
+ if wait_curl "COVERAGE WARNING"; then
+   has "$(cat "$CURL_LOG" 2>/dev/null)" "COVERAGE WARNING" "14s explicit unmapped produces COVERAGE WARNING notification"
+--- a/tests/project-template.test.sh
++++ b/tests/project-template.test.sh
+@@ -260,6 +260,14 @@
+ else
+   bad "D17 ... and the fail-loud case lands in the record as unmapped" "$cov"
+ fi
++# agents-tpw5: and the provenance map covers EXACTLY the published list. Asserted as that invariant rather
++# than as a value, because whether this fixture's orphan is gate-marked or reporter-inferred depends on the
++# template's own arms, while "the map describes the list and nothing else" must hold either way.
++if [ "$(jq -r '(.unmapped_source // {}) | length' <<<"$cov")" = "$(jq -r '.unmapped | length' <<<"$cov")" ]; then
++  ok "D17b ... and the provenance map covers exactly the published unmapped list"
++else
++  bad "D17b provenance map must describe exactly the published list" "$cov"
++fi
+ 
+ # The generated constraint file is the deliverable, not decoration: spot-check that it carries the rule set
+ # and the citations, because that file is what every future lane reads first.
