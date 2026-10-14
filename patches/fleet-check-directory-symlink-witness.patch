@@ -1,0 +1,119 @@
+diff --git a/bin/fleet-check b/bin/fleet-check
+index 68605d8..31f5e8f 100755
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -713,24 +713,38 @@ worktree_digest() {
+ # content and a target rewrite is witnessed through the link (fleet-sohq) - with no second pass to pay for.
+ worktree_content_digest() {
+   local hashes f
+-  if hashes=$(git ls-files -z 2>/dev/null | xargs -0 -r git hash-object --no-filters -- 2>/dev/null); then
+-    # THE HAPPY PATH IS ALSO THE FAST PATH: one git process for the whole list, measured at 0.030s for 381
+-    # tracked files against 0.020s for the metadata form it replaces, and 0.027s against 0.023s for 2280 files.
++  local -a batch=()
++  # agents-eea2: ONE TRACKED SYMLINK TO A DIRECTORY MAKES THE BATCH ABORT, WHICH MADE THE FAST PATH BELOW
++  # UNREACHABLE IN EVERY REPO THAT HAS ONE - and this repo has one: `skills -> agents` is tracked, mode 120000,
++  # the only directory link in the tree. Measured on the worktree at 493 tracked paths,
++  # `git ls-files -z | xargs -0 -r git hash-object --no-filters --` returned rc 123 having printed 326 hashes,
++  # so 167 paths were dropped by the abort (exactly the truncation the fallback below exists for) and EVERY
++  # digest took the one-git-process-per-path path: 0.90s per digest against 0.018s for the metadata form it
++  # replaces, and this function is called at BOTH ends of every run. The 0.030s recorded for the fast path is a
++  # measurement of a repo with no directory link, so it does not describe the repo that has the only one in the
++  # fleet. A path whose content cannot be read AS content (a link to a directory, a broken link, a submodule) is
++  # therefore filtered out HERE and recorded by the SAME identity marker the fallback recorded for it, so the
++  # witness is unchanged and only WHICH paths are batched changes. Measured after the filter: 0.046s per digest,
++  # and a digest that is identical at both readings. A path that IS a file but unreadable is still the fallback's
++  # business, not this filter's - `[ -f ]` is true for it and the batch may still abort on it.
++  while IFS= read -r -d '' f; do
++    if [ -f "$f" ]; then batch+=("$f"); else printf 'unreadable-as-content %s\n' "$f"; fi
++  done < <(git ls-files -z 2>/dev/null)
++  [ "${#batch[@]}" -gt 0 ] || return 0
++  if hashes=$(printf '%s\0' "${batch[@]}" | xargs -0 -r git hash-object --no-filters -- 2>/dev/null); then
++    # THE HAPPY PATH IS ALSO THE FAST PATH: one git process for the whole list, measured at 0.046s for the 492
++    # paths of this repo that are not the directory link, against 0.018s for the metadata form it replaces.
+     printf '%s\n' "$hashes"
+   else
+     # GIT ABORTS THE WHOLE BATCH ON A PATH IT CANNOT READ, and a truncated list would silently weaken the
+     # witness instead of failing it: measured, one broken symlink in a six-path repo yielded TWO hashes and
+     # exit 123, with no indication in the output that four paths were skipped. So the status is checked, and
+-    # on failure every path is read on its own with a MARKER for the ones that have no content to hash (a
+-    # broken symlink, a link to a directory, a submodule). A marker is a witness of the path's identity, not
+-    # of content that does not exist, and it keeps the digest complete and stable across the two readings.
+-    while IFS= read -r -d '' f; do
+-      if [ -f "$f" ]; then
+-        git hash-object --no-filters -- "$f" 2>/dev/null || printf 'unhashable %s\n' "$f"
+-      else
+-        printf 'unreadable-as-content %s\n' "$f"
+-      fi
+-    done < <(git ls-files -z 2>/dev/null)
++    # on failure every REMAINING path is read on its own with a MARKER for the ones that have no content to hash.
++    # A marker is a witness of the path's identity, not of content that does not exist, and it keeps the digest
++    # complete and stable across the two readings.
++    for f in "${batch[@]}"; do
++      git hash-object --no-filters -- "$f" 2>/dev/null || printf 'unhashable %s\n' "$f"
++    done
+   fi
+ }
+ # fleet-arx8: the fingerprint of what the suites could read when the run began, compared against the same
+diff --git a/tests/fleet-check-tree-stability.test.sh b/tests/fleet-check-tree-stability.test.sh
+index 92f71db..e98f7a8 100755
+--- a/tests/fleet-check-tree-stability.test.sh
++++ b/tests/fleet-check-tree-stability.test.sh
+@@ -83,11 +83,12 @@ marker_state() {
+   return 1
+ }
+ 
+-# run_arm NAME EXPECTED_STATE CHECK_FAST_CMD MARKER [EXTERNAL_TARGET] [HOLD_FILE]
++# run_arm NAME EXPECTED_STATE CHECK_FAST_CMD MARKER [EXTERNAL_TARGET] [HOLD_FILE] [TARGET_KIND]
+ # Builds a clean repo, runs a fast gate whose command does something to the tree, and prints the verdict.
+ # HOLD_FILE, when given, freezes the gate's notification POST until this function releases it (fleet-c050).
++# TARGET_KIND names how EXTERNAL_TARGET is created: `file` (the default, arm 6's case) or `directory` (arm 9).
+ run_arm() {
+-  local name="$1" expected="$2" cmd="$3" marker="$4" external_target="${5:-}" hold="${6:-}"
++  local name="$1" expected="$2" cmd="$3" marker="$4" external_target="${5:-}" hold="${6:-}" kind="${7:-file}"
+   if [ -n "$hold" ]; then export FLEET_CHECK_TEST_HOLD="$hold"; else unset FLEET_CHECK_TEST_HOLD; fi
+   local T R rec state tree_before tree_after
+   T=$(mktemp -d "$ROOT/arm.XXXXXX"); R="$T/repo"
+@@ -97,7 +98,16 @@ run_arm() {
+   if [ -n "$external_target" ]; then
+     # fleet-sohq: a TRACKED SYMLINK whose target lives OUTSIDE the repo. The link's own metadata does not move
+     # when the target's content does, so witnessing the link alone is blind to it.
+-    printf 'original' > "$external_target"
++    # agents-eea2: TARGET_KIND=directory makes that target a DIRECTORY, which is a DIFFERENT witness problem
++    # from the file case above and the one this repo actually has (`skills -> agents`, tracked, the only
++    # directory link in the tree). The target is a directory that CONTAINS a file, so the arm can tell "an entry
++    # inside a followed directory moved" apart from "the directory itself is missing".
++    if [ "$kind" = directory ]; then
++      mkdir -p "$external_target/entries"
++      printf 'inner' > "$external_target/entries/inner"
++    else
++      printf 'original' > "$external_target"
++    fi
+     ln -s "$external_target" "$R/input"
+   else
+     printf 'original' > "$R/input"
+@@ -278,6 +288,25 @@ run_arm same-bytes-rewrite PASS 'cp input /tmp/bp6m-keep.$$; cp /tmp/bp6m-keep.$
+ # Arm 4 (CONTROL): nothing touches the tree - must stay PASS, or the guard fires on healthy runs.
+ run_arm clean-run PASS 'echo gate work done' 'gate work done'
+ 
++# Arm 9 (agents-eea2): THE OTHER SYMLINK FACE, AND THE ONE THIS REPO HAS. Arm 6 is a link to a FILE; this is
++# a link to a DIRECTORY (`skills -> agents` is tracked in this repo, mode 120000, and it is the only one).
++# `stat -L` FOLLOWS that link to the DIRECTORY INODE, whose nsec ctime ADVANCES whenever an entry is created or
++# removed inside it - so a suite that writes a scratch file INTO a followed directory moved the fingerprint,
++# while HEAD^{tree}, the porcelain and `git diff HEAD` did not move at all. Measured on this repo:
++# tests/test_report_schema.py creates and removes `agents/zz_debris_probe_tmp/report.schema.json` inside the
++# followed `agents/`, and THAT is what turned two clean 13-suite runs into STALE with the reason 'the worktree's
++# CONTENT changed during the run' while every suite read the same bytes throughout.
++#
++# A DIRECTORY'S INODE CTIME IS NOT CONTENT, which is the whole assertion. The tracked bytes under the directory
++# are already witnessed path by path, and UNTRACKED debris inside it is outside this witness BY DESIGN
++# (fleet-arx8: the witness ignores untracked files, because counting a gate's own byproducts as a tree mutation
++# is what turned four of five union-gate failures into STALE). So the metadata form's alarm here is a FALSE
++# STALE, and the expected state under the content witness is PASS. RED-FIRST: run this arm against the deployed
++# (metadata) gate and it reports 'expected PASS, state=STALE' - which is the defect, reproduced deliberately.
++# The debris is created and removed entirely (entry create + entry remove), because a directory inode's ctime
++# advances on both and cannot be restored from userland; the tracked link's OWN metadata does not move either way.
++run_arm directory-symlink-churn PASS 'printf probe > input/probe; rm -f input/probe; echo dir-churn-done' dir-churn-done "$ROOT/arm9-followed-directory" "" directory
++
+ echo ""
+ echo "$PASS passed, $FAIL failed"
+ [ "$FAIL" -eq 0 ]
