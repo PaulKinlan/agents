@@ -107,3 +107,28 @@ slot fd, so the substitution's own fork/grep/tr are holders by the function's ow
 defect `agents-nxj8` patches at the job-end sweep call site; the durable fix is **inside**
 `slot_fd_holders`, where it would cover all three callers at once. Filed separately so neither patch
 has to be amended while it is under review.
+
+### Re-cut for usable path headers (agents-2b5j, 2026-10-14)
+
+**The change is identical; only the headers changed.** The delivered artifact carried
+`--- /home/exedev/fleet/bin/fleet-heavy` (an ABSOLUTE path in one, `base` -> `x` placeholders in another,
+`/tmp/lhow/...` scratch paths in the third) with a `+++` path pointing at a scratch copy, so the hub had
+to reconstruct the target by hand. This re-cut has `--- a/bin/fleet-heavy` / `+++ b/bin/fleet-heavy`, so
+`patch -p1` from a checkout root applies it.
+
+* artifact: `fleet-heavy-reclaim-live-pid-vs-holder.patch`, 3302 bytes, sha256 `2553035d8d0f8c24f5f493a1040fdacb80924c207501d15702b32ef6e64369a3`, hunk `@@ -92,7 +92,27 @@`
+* base, unchanged from the original write-up: `bin/fleet-heavy` 14378 bytes, sha256
+  `33ecf140e615852a...` - present in the integration copy (`~/fleet-copy/bin/fleet-heavy`). It applies
+  on top of the base file alone.
+* **ACCEPTANCE, run against a COPY of that base** (not the deployed file - see the caveat below):
+  `patch -p1 -F0 --dry-run` exits 0 with no fuzz and no offset, and the hunk lands at `@@ -92,7 +92,27 @@`.
+* **The re-cut cannot be a different change:** the three originals applied in order to the base produce
+  a file of 322 lines, sha256 `9e30db1f62c2ac4f...`; the three re-cuts applied in the same order produce
+  a BYTE-IDENTICAL file. `bash -n` is clean and the structural anchors survive (`slot_state`,
+  `ticket_take`, `ticket_drop`, `slot_fd_holders`, `reclaim_abandoned_slot`).
+* **CAVEAT, measured:** this VM's `~/fleet/bin/fleet-heavy` is NOT the file these patches target - it is
+  the older 154-line snapshot (sha `0f95ccd3...`), i.e. commit `3180e13` of the integration repo, while
+  the write-ups' base `33ecf140...` is `0c69746` ("sync: match pristine ~/fleet baseline (2026-10-12
+  21:10 update)"). Applying against the stale deployed copy fails every hunk because the reclaim
+  machinery the patch edits (`reclaim_abandoned_slot`, `slot_fd_holders`) does not exist there at all.
+  The base named above is the one the patch was cut against and the one the hub has.

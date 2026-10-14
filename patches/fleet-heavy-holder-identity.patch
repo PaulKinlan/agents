@@ -1,5 +1,5 @@
---- /tmp/lhow/fleet-heavy	2026-10-13 02:44:10.333452216 +0000
-+++ /tmp/lhow/fleet-heavy-lhow	2026-10-13 02:44:23.349508245 +0000
+--- a/bin/fleet-heavy
++++ b/bin/fleet-heavy
 @@ -53,14 +53,22 @@
    for p in /proc/[0-9]*; do
      [ -d "$p/fd" ] || continue
