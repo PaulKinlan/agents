@@ -16,6 +16,10 @@ import tempfile
 import unittest
 from unittest import mock
 
+# The tracked-file instrument (tests/__init__.py): this guard reads the tree the same way the builders it
+# polices now do, so the claim and the evidence come from one source (agents-zf2p, agents-4ieg).
+from tests import has_git_index, tracked_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -251,6 +255,23 @@ def _test_modules(root: Path) -> list[Path]:
     if listed:
         return sorted(root / p for p in listed if p.endswith(".py"))
     return sorted((root / "tests").glob("*.py"))
+
+
+def _lib_modules(root: Path) -> list[Path]:
+    """Every direct-child lib/*.py, from GIT'S INDEX where there is one (agents-zf2p).
+
+    The all-lib claim is 'this builder staged every lib/*.py', so the set the builder is CHECKED against has to
+    be read from the same source the builder reads. A filesystem glob here counted an untracked probe under
+    lib/ as a module the builder had staged - the machine rather than the tree, which is the pathology
+    docs/speed.md names and the same defect agents-kb0y fixed for the test-module enumeration above.
+
+    A NON-GIT ROOT still falls back to the filesystem, because this guard is called with synthetic roots by its
+    own unit tests (staged_tree); there is no index to ask, so in that case the filesystem is the whole tree.
+    """
+    if has_git_index(root):
+        return sorted(p for p in tracked_paths("lib", root=root)
+                      if p.parent == root / "lib" and p.suffix == ".py")
+    return sorted((root / "lib").glob("*.py"))
 
 
 def staged_runtime_missing_modules(root: Path) -> list[str]:
@@ -498,6 +519,15 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         while (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                and node.func.id in {"sorted", "list", "tuple", "set"} and node.args):
             node = node.args[0]
+        # GIT'S INDEX IS AN EQUAL PROOF (agents-zf2p): tracked_paths('lib') is a git PATHSPEC, so it enumerates
+        # a superset of lib/*.py (it also matches lib/sinks/...), and the caller filters the components it
+        # means. The pathspec must BE lib and not a subdirectory of it - tracked_paths('lib/adapters') is not a
+        # proof that every lib/*.py is staged, and accepting it would be a false green of exactly the kind this
+        # rule exists to prevent, so it is pinned by its own control below.
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "tracked_paths"
+                and len(node.args) == 1 and isinstance(node.args[0], ast.Constant)
+                and str(node.args[0].value).strip("/") == "lib"):
+            return True
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             return False
         method = node.func.attr
@@ -955,8 +985,9 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                     )
                     continue
                 # The coverage claim is read as the modules it actually stages: every lib/*.py, which is what
-                # makes "nothing can be missing" true rather than merely asserted.
-                staged: set[str] = {module.stem for module in (root / "lib").glob("*.py")} | staged_now
+                # makes "nothing can be missing" true rather than merely asserted. Read from the same source as
+                # the builder (agents-zf2p): an untracked probe under lib/ is not a module the builder staged.
+                staged: set[str] = {module.stem for module in _lib_modules(root)} | staged_now
             else:
                 names = literal_list(node.iter, scopes)
                 if names is None or not names:
@@ -1430,6 +1461,37 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         self.assertEqual(staged_runtime_missing_modules(exhaustive), [],
                          "a list holding every lib/*.py cannot be missing a module, so green is justified "
                          "rather than a false refusal")
+
+        # GIT'S INDEX IS THE OTHER EXHAUSTIVE PROOF (agents-zf2p), and both routes into it are pinned here
+        # because the one that depends on this rule is the bare-variable one: with a source that is the loop
+        # variable itself, stages_lib_modules only calls this loop a staging loop when
+        # stages_every_lib_py(node.iter) is true, so refusing the tracks idiom would not REPORT the loop - it
+        # would stop policing it at all. A NO-NEGATIVE-CONTROL NOTE, so the missing case is a decision rather
+        # than an oversight: a pathspec that is not lib is not reachable as a false acceptance here, because
+        # such a loop copies out of a lib SUBDIRECTORY, which stages_lib_modules already excludes as a shell
+        # adapter copy rather than a module list. The synthetic root below is not a git work tree, so these two
+        # cases also cover the filesystem fallback in _lib_modules.
+        indexed = staged_tree(findings_source)
+        (indexed / "tests" / "test_staged.py").write_text(
+            suite('    STAGED_RUNTIME = ("engine", "all-lib")\n'
+                  '    for source in tracked_paths("lib"):\n'
+                  '        if source.parent != ROOT / "lib" or source.suffix != ".py":\n'
+                  '            continue\n'
+                  '        shutil.copyfile(ROOT / "lib" / source.name, root / "lib" / source.name)\n'),
+            encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(indexed), [],
+                         "a builder that stages every tracked lib/*.py cannot be missing a module, so green "
+                         "is justified rather than a false refusal")
+
+        bare_variable = staged_tree(findings_source)
+        (bare_variable / "tests" / "test_staged.py").write_text(
+            suite('    STAGED_RUNTIME = ("engine", "all-lib")\n'
+                  '    for source in sorted(tracked_paths("lib")):\n'
+                  '        shutil.copyfile(source, root / "lib" / source.name)\n'),
+            encoding="utf-8")
+        self.assertEqual(staged_runtime_missing_modules(bare_variable), [],
+                         "the tracked iterable licenses the claim through the bare-variable route too, so "
+                         "the loop is still policed instead of being silently skipped")
 
         case_table = staged_tree(findings_source)
         (case_table / "tests" / "test_staged.py").write_text(

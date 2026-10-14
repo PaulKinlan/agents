@@ -30,6 +30,11 @@ import importlib.util
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# The tracked-file instrument (tests/__init__.py). The dispatcher fixture stages its runtime from GIT'S
+# INDEX rather than globbing lib/, because the filesystem is not a frozen set during a run and another
+# shard's probe is not part of this tree (agents-zf2p, the agents-4ieg shape).
+from tests import tracked_paths
+
 # agents-28nn round 5: run_agent pin-verifies the engine binary before the adapter may
 # execute it; these tests drive run_agent in-process with stub adapters, so they run
 # under the same documented dev/test opt-in the other in-process harnesses use.
@@ -243,14 +248,31 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
             )
 
         (self.root / "lib" / "adapters").mkdir(parents=True)
+        self._stage_dispatcher_runtime()
+
+    def _stage_dispatcher_runtime(self):
+        """Stage the dispatcher's own runtime into self.root: every lib/*.py plus the lib/sinks package.
+
+        A METHOD RATHER THAN SETUP LINES (agents-zf2p) so the instrument itself can be tested: the debris test
+        below re-runs THIS builder with an untracked probe under lib/ and asserts that nothing was staged,
+        which is the property the loop is being changed to have.
+        """
         # agents-r2ne census: a FACTORY-runtime tree, not a station-script fixture - this copies
-        # the factory dispatcher's own runtime (every lib/*.py by GLOB, plus the lib/sinks
+        # the factory dispatcher's own runtime (every lib/*.py by INDEX, plus the lib/sinks
         # package directory), not a station script's dependencies, so
         # tests/sandbox_fixtures.py:copy_station_script does not apply. Different case.
-        # Contract (agents-v52t): the dispatcher runtime, staged exhaustively by glob; lib/sinks as a package tree.
+        # Contract (agents-v52t): the dispatcher runtime, staged exhaustively; lib/sinks as a package tree.
         STAGED_RUNTIME = ("dispatcher", "all-lib", ("sinks",))
-        for mod in (ROOT / "lib").glob("*.py"):
-            shutil.copyfile(mod, self.root / "lib" / mod.name)
+        # TRACKED, NOT THE FILESYSTEM (agents-zf2p, the agents-4ieg shape): this loop globbed lib/*.py, so a
+        # probe another shard left under lib/ was staged into the fixture as though it were part of the
+        # dispatcher's runtime - a fixture built from what happened to be ON DISK rather than from the tree
+        # docs/speed.md describes. git's index is the set the gate witnesses; tracked_paths('lib') enumerates a
+        # SUPERSET of lib/*.py (it is a pathspec, so it also matches lib/sinks/...), which is why the filter
+        # below narrows it to the direct-child modules this builder stages.
+        for module in tracked_paths("lib"):
+            if module.parent != ROOT / "lib" or module.suffix != ".py":
+                continue
+            shutil.copyfile(ROOT / "lib" / module.name, self.root / "lib" / module.name)
         # Sink adapters (fleet-km8): findings.py delegates delivery to lib/sinks.
         shutil.copytree(ROOT / "lib" / "sinks", self.root / "lib" / "sinks", dirs_exist_ok=True)
 
@@ -400,6 +422,37 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
         self.assertIn("ENV_FAILURE", output)
         self.assertIn("SKIPPED", output)
         self.assertIn("next-station", output)
+
+    def test_an_untracked_lib_probe_is_not_staged_into_the_line_fixture(self):
+        """agents-zf2p: the staged runtime is built from git's index, not from whatever is on disk.
+
+        RED-FIRST, AND THE RED WAS MEASURED RATHER THAN ARGUED: with the loop this replaces
+        ((ROOT/'lib').glob('*.py')) the probe below WAS copied into the fixture's staged lib/, so
+        'zz_probe_tmp' appeared in a tree that is meant to hold the dispatcher's runtime and the sink package.
+        That is the shard-to-shard race this fixes: an untracked file another lane left behind (or the gate's
+        own bound kill left behind) becomes part of a fixture, and the failure lands on an unrelated suite.
+
+        The expected set is read INDEPENDENTLY of tracked_paths - a direct 'git ls-files lib' - so this pins
+        the staged tree against git rather than against the instrument under test.
+        """
+        probe = ROOT / "lib" / "zz_probe_tmp.py"
+        self.assertFalse(probe.exists(), f"{probe} already exists; refusing to clobber it")
+        probe.write_text("probe = 1\n", encoding="utf-8")
+        try:
+            self._stage_dispatcher_runtime()
+            staged = sorted(p.name for p in (self.root / "lib").glob("*.py") if p.name != "__init__.py")
+            self.assertNotIn(
+                "zz_probe_tmp.py", staged,
+                "an untracked file under lib/ was staged into the fixture, so this builder is reading the "
+                "filesystem and a probe another shard wrote becomes part of this tree (agents-zf2p)",
+            )
+            listed = subprocess.run(["git", "-C", str(ROOT), "ls-files", "lib"],
+                                    capture_output=True, text=True, check=True).stdout.splitlines()
+            expected = sorted(Path(name).name for name in listed
+                              if Path(name).parent == Path("lib") and name.endswith(".py"))
+            self.assertEqual(staged, expected, "the staged runtime must be exactly the tracked lib modules")
+        finally:
+            probe.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
