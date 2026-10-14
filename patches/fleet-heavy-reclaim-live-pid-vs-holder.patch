@@ -1,5 +1,5 @@
---- base	2026-10-13 02:01:03.822700762 +0000
-+++ x	2026-10-13 02:41:47.888834865 +0000
+--- a/bin/fleet-heavy
++++ b/bin/fleet-heavy
 @@ -92,7 +92,27 @@
    # A LIVE WRAPPER IS NEVER TOUCHED. fleet-heavy stays alive for the whole job (it waits on `nice` then exits),
    # so a live recorded pid means the job is running - however slow - and a slow gate is what this queue exists

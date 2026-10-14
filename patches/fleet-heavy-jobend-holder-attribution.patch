@@ -1,5 +1,5 @@
---- /home/exedev/fleet/bin/fleet-heavy	2026-10-12 21:10:28.000000000 +0000
-+++ /tmp/fleet-heavy-nxj8-r2	2026-10-13 01:31:14.707359075 +0000
+--- a/bin/fleet-heavy
++++ b/bin/fleet-heavy
 @@ -197,10 +197,52 @@
          # minutes, blocking every gate on the VM, their wrapper long gone.
          # So before releasing, sweep anything that is holding the slot and is not us. This is the source fix;
