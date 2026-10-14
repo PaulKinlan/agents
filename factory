@@ -82,8 +82,10 @@ except ImportError:
                                VERIFIED_PINS_ENV, allowlisted_path, configure_host_pins,
                                prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 
-# Import after the path-repair fallback so both invocation modes share the same verdict predicate.
-from lib.findings import station_has_verdict
+# Import after the path-repair fallback so both invocation modes share the same verdict
+# predicate and the opt-in accounting contract.
+from lib.findings import (aggregate_candidate_coverage, candidate_accounting_mode,
+                          station_has_verdict)
 
 
 # The in-sandbox net_forward relay ports (agents-2x6): the child's loopback endpoints the
@@ -1130,6 +1132,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         sys.exit(1)
 
     agent_cfg = load_yaml_simple(agent_yaml)
+    # Refuse an unknown accounting declaration BEFORE a pre-pass or model can run;
+    # absent declarations retain the byte-semantic row-mode judge.
+    accounting_mode = candidate_accounting_mode(agent_cfg)
     # containment, capabilities and budget are validated here, not only printed (SF-02,
     # agents-pnu). A declaration the factory cannot honour, or an engine that cannot enforce
     # the granted tool policy, refuses the run before any pre-pass or run directory.
@@ -2365,6 +2370,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         "run_dir": run_dir,
         "report": report,
         "report_path": report_path,
+        "candidate_accounting": accounting_mode,
         "target_name": target_name,
         "fragment": str(fragment) if fragment.exists() else None,
     }
@@ -2480,9 +2486,17 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
             # Identity when the pre-pass supplies it, count when it does not - and the station records WHICH
             # of the two it was, because a count-only check that reads like an identity check is the blind
             # spot agents-w9ni measured: five invented rows with no candidate_id read as "accounted 5 of 5".
-            coverage = candidate_coverage(read_candidate_count(run_dir), len(reported),
-                                          presented_ids=read_presented_candidate_ids(run_dir),
-                                          cited_ids=[f.get("candidate_id") for f in reported])
+            mode = candidate_accounting_mode(
+                {"candidate_accounting": res.get("candidate_accounting", "row") if res else "row"})
+            if mode == "aggregate-claimed":
+                coverage = aggregate_candidate_coverage(read_candidate_count(run_dir),
+                                                        report.get("findings", []),
+                                                        presented_ids=read_presented_candidate_ids(run_dir))
+            else:
+                # The row-mode judge is untouched, including its legacy count-only fallback.
+                coverage = candidate_coverage(read_candidate_count(run_dir), len(reported),
+                                              presented_ids=read_presented_candidate_ids(run_dir),
+                                              cited_ids=[f.get("candidate_id") for f in reported])
 
             # Outcome and validity are two facts (agents-xx9t). The alarm still wins the status, but a run
             # that cannot show it triaged what it was given never reads as PASS: it is INCOMPLETE, which is
@@ -2504,6 +2518,11 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                 "candidate_identity": coverage["identity"],
                 "complete": coverage["complete"],
                 "note": coverage["reason"],
+                # The raw model report is already saved in run_dir/report.json. Copy
+                # only an opted-in station's claimed ID-to-row map into the durable
+                # line scorecard too; a many-to-one claim is not semantic proof.
+                **({"candidate_claims": coverage["candidate_claims"]}
+                   if mode == "aggregate-claimed" else {}),
                 "fragment": res.get("fragment") if res else None,
                 "run_dir": str(res.get("run_dir")) if res else None,
             })

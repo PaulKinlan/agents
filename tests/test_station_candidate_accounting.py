@@ -27,8 +27,9 @@ import unittest
 from pathlib import Path
 
 from lib.embargo import is_false_positive, reported_severity
-from lib.findings import (CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS, candidate_coverage,
-                          read_candidate_count, read_presented_candidate_ids, write_line_report)
+from lib.findings import (CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS, aggregate_candidate_coverage,
+                          candidate_accounting_mode, candidate_coverage, read_candidate_count,
+                          read_presented_candidate_ids, write_line_report)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -185,6 +186,119 @@ class TestCountAndIdentityAreTwoBounds(unittest.TestCase):
         got = candidate_coverage(None, 7)
         self.assertTrue(got["complete"])
         self.assertEqual(got["identity"], "not-applicable")
+
+
+class TestAggregateCandidateAccounting(unittest.TestCase):
+    """agents-88cd: an opt-in CLAIMED many-to-one disposition, never a count fallback."""
+
+    def cover(self, ids, rows, total=None):
+        return aggregate_candidate_coverage(len(ids) if total is None else total, rows,
+                                            presented_ids=ids)
+
+    def test_two_clusters_one_root_cause_has_explicit_claimed_mapping(self):
+        got = self.cover(["A", "B"], [{"covered_candidate_ids": ["A", "B"],
+                                        "anchor_candidate_id": "A", "title": "one cause"}])
+        self.assertTrue(got["complete"])
+        self.assertEqual((got["identity"], got["candidates_accounted"]),
+                         ("identity-claimed-aggregate", 2))
+        self.assertEqual(got["candidate_claims"], [
+            {"row_index": 0, "covered_candidate_ids": ["A", "B"], "anchor_candidate_id": "A"}])
+
+    def test_echo_without_explicit_coverage_does_not_account_for_anything(self):
+        got = self.cover(["A"], [{"anchor_candidate_id": "A", "title": "found"}])
+        self.assertFalse(got["complete"])
+        self.assertEqual(got["candidates_accounted"], 0)
+        self.assertIn("covered_candidate_ids", got["reason"])
+
+    def test_an_unclaimed_presented_alias_is_incomplete(self):
+        got = self.cover(["A", "B"], [{"covered_candidate_ids": ["A"]}])
+        self.assertFalse(got["complete"])
+        self.assertEqual(got["candidates_accounted"], 1)
+        self.assertIn("missing", got["reason"])
+
+    def test_unknown_and_unshown_ids_fail_even_if_all_presented_ids_are_claimed(self):
+        unknown = self.cover(["A"], [{"covered_candidate_ids": ["A", "imagined"]}])
+        self.assertFalse(unknown["complete"])
+        self.assertIn("unknown", unknown["reason"])
+        unshown = self.cover(["A", "B"], [{"covered_candidate_ids": ["A", "B", "C"]}], total=2)
+        self.assertFalse(unshown["complete"])
+        self.assertIn("unknown", unshown["reason"])
+
+    def test_repeated_id_within_or_across_rows_is_not_silently_set_deduped(self):
+        within = self.cover(["A"], [{"covered_candidate_ids": ["A", "A"]}])
+        across = self.cover(["A"], [{"covered_candidate_ids": ["A"]},
+                                    {"covered_candidate_ids": ["A"]}])
+        for got in (within, across):
+            self.assertFalse(got["complete"])
+            self.assertIn("duplicate", got["reason"])
+
+    def test_primary_anchor_must_belong_to_its_own_row_claim(self):
+        got = self.cover(["A", "B"], [{"covered_candidate_ids": ["A"], "anchor_candidate_id": "B"},
+                                      {"covered_candidate_ids": ["B"]}])
+        self.assertFalse(got["complete"])
+        self.assertIn("anchor_candidate_id", got["reason"])
+
+    def test_dismissal_counts_by_claim_and_echo_is_not_required(self):
+        got = self.cover(["A", "B"], [
+            {"covered_candidate_ids": ["A"], "false_positive": True, "severity": "info"},
+            {"covered_candidate_ids": ["B"], "title": "real cause"}])
+        self.assertTrue(got["complete"])
+        self.assertEqual(got["candidates_accounted"], 2)
+
+    def test_only_first_fifty_ids_shown_may_be_claimed(self):
+        all_ids = [f"id-{i}" for i in range(52)]
+        presented = all_ids[:CANDIDATE_PROMPT_SLICE]
+        got = self.cover(presented, [{"covered_candidate_ids": presented}], total=52)
+        self.assertTrue(got["complete"])
+        self.assertEqual(got["candidates_presented"], CANDIDATE_PROMPT_SLICE)
+        unshown = self.cover(presented, [{"covered_candidate_ids": all_ids[:51]}], total=52)
+        self.assertFalse(unshown["complete"])
+        self.assertIn("unknown", unshown["reason"])
+
+    def test_zero_presented_and_zero_rows_is_complete_but_no_id_fallback_is_forbidden(self):
+        self.assertTrue(self.cover([], [], total=0)["complete"])
+        self.assertFalse(self.cover([], [{"covered_candidate_ids": []}], total=0)["complete"])
+        self.assertFalse(self.cover([], ["not-a-row"], total=0)["complete"])
+        got = self.cover([], [{"covered_candidate_ids": ["A"]}], total=1)
+        self.assertFalse(got["complete"])
+        self.assertIn("unique presented", got["reason"])
+        self.assertFalse(self.cover(["A", "A"], [{"covered_candidate_ids": ["A"]}])["complete"])
+
+    def test_opted_in_mode_without_a_candidate_prepass_cannot_claim_count_only(self):
+        got = aggregate_candidate_coverage(None, [{"covered_candidate_ids": ["A"]}],
+                                           presented_ids=None)
+        self.assertFalse(got["complete"])
+        self.assertEqual(got["identity"], "identity-claimed-aggregate")
+        self.assertIn("pre-pass", got["reason"])
+
+    def test_absent_coverage_list_cannot_pass_by_row_count(self):
+        for value in ([], None, "A", [1], [""], ["A", None]):
+            with self.subTest(value=value):
+                self.assertFalse(self.cover(["A"], [{"covered_candidate_ids": value}])["complete"])
+
+    def test_unknown_mode_refused_and_default_remains_row(self):
+        self.assertEqual(candidate_accounting_mode({}), "row")
+        self.assertEqual(candidate_accounting_mode({"candidate_accounting": "row"}), "row")
+        self.assertEqual(candidate_accounting_mode({"candidate_accounting": "aggregate-claimed"}),
+                         "aggregate-claimed")
+        for bad in ("aggregate", "unknown", None, 3, False):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                candidate_accounting_mode({"candidate_accounting": bad})
+
+    def test_old_row_mode_scores_and_count_only_fixtures_are_unchanged(self):
+        self.assertEqual(candidate_coverage(None, 7), {
+            "candidates_in": None, "candidates_presented": None,
+            "candidates_accounted": 7, "complete": True, "reason": "", "identity": "not-applicable"})
+        self.assertEqual(candidate_coverage(2, 2, presented_ids=[]), {
+            "candidates_in": 2, "candidates_presented": 2,
+            "candidates_accounted": 2, "complete": True, "reason": "", "identity": "count-only"})
+        self.assertEqual(candidate_coverage(2, 1, presented_ids=["A", "B"], cited_ids=["A"]), {
+            "candidates_in": 2, "candidates_presented": 2,
+            "candidates_accounted": 1, "complete": False,
+            "reason": "cited 1 of the 2 candidate id(s) shown (2 found by the pre-pass): a partial "
+                      "triage is not a clean result; every row - confirmed or dismissed - must carry "
+                      "the candidate_id of the pre-pass candidate it answers",
+            "identity": "identity-matched"})
 
 
 class TestPresentedIdsComeFromTheRun(unittest.TestCase):
