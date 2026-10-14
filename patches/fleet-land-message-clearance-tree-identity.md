@@ -1,5 +1,4 @@
-# fleet-land-message: key the landing clearance on the TREE, not the tip sha (agents-ivp7)
-
+## `fleet-land-message-clearance-tree-identity.patch` — key the landing clearance on the TREE, not the tip sha (agents-ivp7)
 `fleet-land-message` compared TIPS. A commit that moves without changing the tree — a tree-preserving rebase, an
 amend of the message, or a re-commit onto the same base — therefore read as STALE, the landing refused, and the
 merge queue stripped a clearance whose content was byte-identical to what the reviewer and the gate had already
