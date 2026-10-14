@@ -8,6 +8,7 @@ credential-free fetch step, and a fetch script that refuses anything that is not
 """
 
 import os
+import ast
 import re
 import subprocess
 import tempfile
@@ -134,6 +135,67 @@ def parse_env_entries(text: str) -> dict:
     return entries
 
 
+# WHAT THE PINNED REVISION MUST CARRY, AND WHAT KIND OF THING EACH ENTRY IS (agents-gvcu).
+#
+# The check below reads the pinned tree's AST rather than its text, because these are three
+# different kinds of thing: two function definitions, a class, a CLI option string and a name
+# used in code. A text search cannot tell a definition from a mention, so it was satisfied by a
+# pinned commit whose lib/ carried all five only inside COMMENTS - a pin that pinned nothing
+# looked pinned. Measured on the pin this table was written against: each entry occurs exactly
+# once at its stated kind, in the file named in the comment.
+PINNED_FIXES = (
+    ("def normalize_report", "FunctionDef", "normalize_report", "fleet-9wyi: field-name synonyms"),
+    ("--external-ref", "Constant", "--external-ref", "fleet-xkf: beads dedupe by fingerprint"),
+    ("def write_line_report", "FunctionDef", "write_line_report", "fleet-810: run-level delta report"),
+    ("class CommandSink", "ClassDef", "CommandSink", "fleet-km8: sink adapters + command sink"),
+    ("kill_group_on_exit", "Name", "kill_group_on_exit", "PR #29 review: command sink reaps its group"),
+)
+
+
+def pinned_lib_sources(sha: str) -> dict:
+    """{path: source} for every .py file in the PINNED commit's lib tree.
+
+    Read from the object store, not the worktree: the question is what that revision carries.
+    """
+    listed = subprocess.run(["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", sha, "--", "lib"],
+                            capture_output=True, text=True, timeout=30)
+    if listed.returncode != 0:
+        return {}
+    sources = {}
+    for path in listed.stdout.split():
+        if not path.endswith(".py"):
+            continue
+        blob = subprocess.run(["git", "-C", str(ROOT), "show", f"{sha}:{path}"],
+                              capture_output=True, text=True, timeout=30)
+        if blob.returncode == 0:
+            sources[path] = blob.stdout
+    return sources
+
+
+def pinned_code_occurrences(sources: dict, kind: str, name: str) -> int:
+    """How many AST nodes in the pinned tree are of `kind` and carry `name`.
+
+    An AST has no node for a comment, so this cannot be satisfied by prose - which is the whole
+    point. It is still only an EXISTENCE check: it does not prove the definition behaves.
+    """
+    found = 0
+    for path, src in sources.items():
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue          # a file that does not parse cannot be carrying a definition
+        for node in ast.walk(tree):
+            if kind == "FunctionDef" and isinstance(node, ast.FunctionDef) and node.name == name:
+                found += 1
+            elif kind == "ClassDef" and isinstance(node, ast.ClassDef) and node.name == name:
+                found += 1
+            elif kind == "Constant" and isinstance(node, ast.Constant) and node.value == name:
+                found += 1
+            elif kind == "Name" and isinstance(node, ast.Name) and node.id == name:
+                found += 1
+    return found
+
+
 class TestActionPinning(unittest.TestCase):
     def test_factory_ref_default_is_a_full_commit_sha(self):
         self.assertRegex(pinned_sha(), r"^[0-9a-f]{40}$")
@@ -152,17 +214,18 @@ class TestActionPinning(unittest.TestCase):
         ancestor = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", sha, "HEAD"],
                                   capture_output=True, timeout=30)
         self.assertEqual(ancestor.returncode, 0, "the pinned factory must be an ancestor of HEAD")
-        for marker in (
-            "def normalize_report",            # fleet-9wyi: field-name synonyms
-            "--external-ref",                  # fleet-xkf: beads dedupe by fingerprint
-            "def write_line_report",           # fleet-810: run-level delta report
-            "class CommandSink",               # fleet-km8: sink adapters + command sink
-            "kill_group_on_exit",              # PR #29 review: command sink reaps its group
-        ):
+        # agents-gvcu: read the pinned tree's AST, not its text. `git grep` observed the
+        # SPELLING of each marker anywhere in lib, comments included, so a pinned commit whose
+        # lib/ carried all five only in comments passed while pinning nothing.
+        sources = pinned_lib_sources(sha)
+        self.assertTrue(sources, f"pinned factory {sha[:12]} has no readable lib python sources")
+        for marker, kind, name, why in PINNED_FIXES:
             with self.subTest(marker=marker):
-                found = subprocess.run(["git", "-C", str(ROOT), "grep", "-q", "-F", "-e", marker,
-                                        sha, "--", "lib"], capture_output=True, timeout=30)
-                self.assertEqual(found.returncode, 0, f"pinned factory {sha[:12]} lacks {marker!r}")
+                occurrences = pinned_code_occurrences(sources, kind, name)
+                self.assertGreater(
+                    occurrences, 0,
+                    f"pinned factory {sha[:12]} carries no {kind} named {name!r} in lib "
+                    f"({marker!r} is only mentioned, not defined - {why})")
 
     def test_the_action_never_clones_a_branch(self):
         text = action_text()
