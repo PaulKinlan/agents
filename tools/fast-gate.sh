@@ -642,14 +642,12 @@ if mkdir -p "$summary_dir" 2>/dev/null; then
   echo "fast-gate: runner output -> $summary_file" >&2
 fi
 
-rc=0
-if [ -n "$summary_file" ]; then
-  # `tee -a` is load-bearing now: the header above is already in the file, and a plain tee would
-  # truncate it away on the first byte of runner output (agents-qtnv).
-  _fast_gate_write_summary="$summary_file"
-else
-  _fast_gate_write_summary=""
-fi
+# THE SUMMARY WRITE PATH LIVES AT THE INVOCATION BELOW, NOT INSIDE THE RUNNER (agents-ukk2, found by
+# agents-factory-rev-8ibx reviewing this change). It has to hold two properties at once: the runner's stream
+# is APPENDED to the summary rather than truncated onto the header already in the file (agents-qtnv), and the
+# stream must reach the file WHILE the run is still going. Buffering it in the runner and appending at the
+# end broke the second one - a preempted or hung run left the log and the summary with only the header, which
+# is exactly what happened to this change's first receipt attempt and what I could not explain at the time.
 
 # agents-8ibx: RUN THE SELECTION AS PARALLEL MODULE SHARDS. This block used to be one
 # `python3 -u -m unittest $modules` over the whole selection, which on this VM (nproc=8, one heavy slot)
@@ -666,13 +664,15 @@ fi
 # every selected module RAN SOMETHING (and reports the total), not that it ran an expected exact set.
 #
 # STDOUT IS NOT USED HERE, DELIBERATELY: it is the marker channel remote/check-coverage.py parses, and the
-# dry run above prints the suite list on it. The runner writes to stderr and to the summary file only, so
-# the dry run's stdout stays byte-identical - which is asserted, not assumed.
+# dry run above prints the suite list on it. Every line below goes to stderr, which the caller pipes through
+# `tee -a` into the summary file, so the dry run's stdout stays byte-identical - which is asserted, not assumed.
+# The name matters beyond clarity: tests/test_summary_identity.py finds a writer's runner command by shape,
+# and this call is the one carrying the append redirect, so the pin has to be able to see it (agents-8ibx).
+_fast_gate_unittest_shards() {
 FAST_GATE_RUN_MODULES="$modules" \
-FAST_GATE_RUN_SUMMARY="$_fast_gate_write_summary" \
 FAST_GATE_RUN_SHARDS="${FAST_GATE_SHARDS:-}" \
 FAST_GATE_RUN_COST_CACHE="${FLEET_CHECKS_DIR:-$HOME/.fleet/checks}/full-gate-module-costs.json" \
-python3 - <<'PY' || rc=$?
+python3 -u - <<'PY'
 import json, os, re, signal, subprocess, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -680,7 +680,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # executed nothing is indistinguishable from one that executed everything.
 TEST_LINE = re.compile(r"^\S+ \((tests\.[^()]+)\)(?= \.\.\.|[ \t]*$)", re.MULTILINE)
 modules = os.environ.get("FAST_GATE_RUN_MODULES", "").split()
-summary = os.environ.get("FAST_GATE_RUN_SUMMARY", "")
 cache = os.environ.get("FAST_GATE_RUN_COST_CACHE", "")
 
 
@@ -781,38 +780,28 @@ say("fast-gate: shards: %d module(s), %d worker(s)%s" % (
     len(modules), workers,
     "" if cache and os.path.exists(cache) else " (no measured cost cache: equal weights)"))
 
-order = sorted(modules, key=lambda m: (-COST[m], m))  # longest first, then stable
-results = {}
+failed = []
+empty = []
+total_ids = 0
+# STREAMED AS EACH MODULE FINISHES, not collected and printed at the end. The end-of-run form lost whatever a
+# preempted or hung run had already produced - the summary and the log kept only the header - and that is not
+# a cosmetic difference: it is the output a lane reads to see how far a killed gate got. The order here is
+# therefore completion order, which is also what a live reader wants; the append itself is the caller's
+# `tee -a`.
 with ThreadPoolExecutor(max_workers=workers) as pool:
-    futures = {pool.submit(run_module, m): m for m in order}
+    futures = {pool.submit(run_module, m): m for m in sorted(modules, key=lambda m: (-COST[m], m))}
     for fut in as_completed(futures):
         m = futures[fut]
         try:
-            results[m] = fut.result()
+            module, rc_shard, secs, out, ids = fut.result()
         except Exception as exc:  # a shard that could not even start
-            results[m] = (m, 1, 0.0, "%s: shard runner error: %s" % (m, exc), [])
-
-failed = []
-empty = []
-blocks = []
-total_ids = 0
-for m in modules:  # module order, so the report does not shuffle between runs
-    _, rc_shard, secs, out, ids = results[m]
-    total_ids += len(ids)
-    blocks.append("----- %s rc=%s %.1fs ids=%d -----\n%s" % (m, rc_shard, secs, len(ids), out.rstrip()))
-    if rc_shard != 0:
-        failed.append((m, rc_shard))
-    elif not ids:
-        empty.append(m)
-
-for block in blocks:
-    say(block)
-if summary:
-    try:
-        with open(summary, "a", encoding="utf-8") as fh:
-            fh.write("\n".join(blocks) + "\n")
-    except OSError as exc:
-        say("fast-gate: NOTE: could not append the shard output to %s: %s" % (summary, exc))
+            module, rc_shard, secs, out, ids = m, 1, 0.0, "%s: shard runner error: %s" % (m, exc), []
+        total_ids += len(ids)
+        say("----- %s rc=%s %.1fs ids=%d -----\n%s" % (module, rc_shard, secs, len(ids), out.rstrip()))
+        if rc_shard != 0:
+            failed.append((module, rc_shard))
+        elif not ids:
+            empty.append(module)
 
 # Non-marker diagnostics, in the existing `fast-gate: FAIL:` form. The `fast-gate: failed:` marker is
 # printed by the caller and its payload must stay SUITE NAMES ONLY (agents-lgdv), so the culprit is named
@@ -825,6 +814,16 @@ say("fast-gate: shards: %d module(s) ran, %d test id(s), %d failed, %d produced 
     len(modules), total_ids, len(failed), len(empty)))
 sys.exit(1 if (failed or empty) else 0)
 PY
+}
+
+rc=0
+if [ -n "$summary_file" ]; then
+  # `tee -a` is load-bearing (agents-qtnv) and asserted on the RUNNER COMMAND by tests/test_summary_identity.py
+  # - a comment containing those words once satisfied that pin, so it reads the command line (agents-undf).
+  _fast_gate_unittest_shards 2> >(tee -a "$summary_file" >&2) || rc=$?
+else
+  _fast_gate_unittest_shards || rc=$?
+fi
 
 FAST_GATE_TERMINATED=1
 # agents-es0y: THE IGNORED FRAGMENTS ARE REPEATED HERE, WHERE THE RECEIPT'S TAIL WILL SHOW THEM. The loader
