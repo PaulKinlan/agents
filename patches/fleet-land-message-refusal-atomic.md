@@ -64,6 +64,31 @@ hazards and only one of them is a bug in the tool:
    - `40d1`/`40d2`: a DIFFERENT refusal shape (an unresolvable `--gate`) also emits 0 stdout bytes, so the
      invariant is about every refusal path rather than one branch of it.
 
+### Round 2 (same bead, NEW TIP): what the round-1 clearance's notes asked for
+
+The round-1 tip was cleared `PASS-with-notes` and **explicitly NOT for landing**: its commit body claimed
+"every non-message exit writes 0 bytes to stdout" and the review's notes showed that claim was false as
+written. Three notes, all addressed here:
+
+1. **The USAGE path was the one early exit that wrote to stdout.** `bin/fleet-land-message:60` printed 19 lines
+   of usage to stdout and exited 2 - **measured: 1316 bytes stdout, 0 bytes stderr** - so a caller whose
+   invocation was mistyped had its message file CREATED AND FILLED WITH USAGE TEXT, which `git commit --amend
+   -F` would then record as the landing body. The tool now sends the usage text to **stderr**, like every other
+   refusal in the file. Every other early exit (including the bead-lookup failure at `:123`) already wrote
+   nothing to stdout; the reviewer checked them directly, so this was the only site.
+2. **The claim is now pinned as a FAMILY property rather than for two branches of it.** The new `40e` block
+   asserts, for each early exit, `rc != 0` AND stdout is 0 bytes AND a diagnostic is on stderr - for the usage
+   failure (`40e1`-`40e3`), an unknown flag (`40e4`/`40e5`) and the **bead-lookup failure** (`40e6`-`40e8`,
+   the round's own P3 note). The lookup path is drivable with no live beads DB because the harness stubs `bd`
+   from `$FIX`, so an absent `show.json` IS the lookup failure.
+3. **`LM_OVERRIDE` now fails loudly when it is not a file.** The round's notes were produced against a tool
+   selected by `LM_OVERRIDE`, and the natural mistake is to pass a DIRECTORY (reading "another revision" as
+   "another tree"), which makes `bash <directory>` fail once per fixture while the summary still prints a
+   verdict-shaped line: **measured, `65 passed, 248 failed`, IDENTICALLY against a patched and an unpatched
+   tool**. The harness now refuses with a message naming the shape it wants, so a red/green measurement cannot
+   be silently wrong. (Same trap one level down: the tool needs its sibling `bin/fleet-verdict-words.sh`; a
+   partial copy without it makes every fixture fail the same way, which is why the Apply section names it.)
+
 ### Verification (measured, on this VM, 2026-10-14)
 
 The hub's own suite is self-contained (throwaway repo + stubs, no network, no beads DB) and supports
@@ -72,16 +97,18 @@ produced rather than asserted:
 
 ```
 # GREEN: the patched tool + the new assertions (applied from THIS patch's bytes)
-bash tests/fleet-land-message.test.sh                      # 305 passed, 0 failed
+bash tests/fleet-land-message.test.sh                      # 313 passed, 0 failed
 # RED: the SAME new assertions against the UNPATCHED tool
 LM_OVERRIDE=/home/exedev/fleet/bin/fleet-land-message bash tests/fleet-land-message.test.sh
-                                                           # 301 passed, 4 failed
+                                                           # 307 passed, 6 failed
 ```
 
-The four red failures are exactly the four assertions that depend on the tool change (`10d1`, `10d2`, `40c2`,
-`40c3`) - so each new assertion is load-bearing, and the 301 that pass in both directions are the suite's
-existing coverage, unbroken. The patch also applies cleanly to the pristine bytes (`git apply --check` OK) and
-the applied result is byte-identical to the tree the 305/0 run was taken from.
+The six red failures are exactly the assertions that depend on the tool change: `10d1`, `10d2`, `40c2`,
+`40c3` from round 1, plus `40e2` ("usage went to stdout") and `40e3` ("stderr was empty") from round 2 - the
+two that pin the usage fix. So each new assertion is load-bearing, and the 307 that pass in both directions are
+the suite's existing coverage, unbroken. THE APPLY IS VERIFIED TWICE, because `--fuzz=0` is `patch`'s flag and
+not `git apply`'s: `git apply --check` reports clean, and `patch -p1 --fuzz=0 < this.patch` applies all three
+files with the result BYTE-IDENTICAL (`cmp`) to the tree the 313/0 run was taken from.
 
 ### Note on `agents-qngy`'s earlier artifact (why this refreshes a fix rather than duplicating one)
 
@@ -96,7 +123,16 @@ superseded by this one for those two files.
 
 ### Apply
 
+`--fuzz=0` is `patch`'s option, NOT `git apply`'s - this section previously taught `git apply --fuzz=0`,
+which is a usage error that applies nothing. Both instruments, as run here:
+
 ```
-cd /path/to/fleet && git apply --fuzz=0 /path/to/fleet-land-message-refusal-atomic.patch
-bash tests/fleet-land-message.test.sh     # expect: 305 passed, 0 failed
+cd /path/to/fleet
+git apply --check /path/to/fleet-land-message-refusal-atomic.patch      # clean
+patch -p1 --fuzz=0 < /path/to/fleet-land-message-refusal-atomic.patch  # applies all three files
+bash tests/fleet-land-message.test.sh     # expect: 313 passed, 0 failed
 ```
+
+Apply it into a COMPLETE tree (or with `bin/fleet-verdict-words.sh` present): the tool sources that sibling for
+its verdict vocabulary and exits 3 without it, and a tree missing it produces the same 65-passed/248-failed
+signature as a wrong `LM_OVERRIDE`.
