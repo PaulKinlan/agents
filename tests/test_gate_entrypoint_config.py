@@ -1422,6 +1422,109 @@ class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
                          "and must not offer the form that writes a different file")
 
 
+class TestTheReaderRefusesACommandThatCannotRunHere(unittest.TestCase):
+    """agents-0r1c: the reader half of the machine-global check.conf hazard.
+
+    agents-0utp fixed the WRITER and agents-p8lh made the printed repairs truthful, but a config ALREADY
+    installed by another repo keeps being read: the live ~/.fleet/check.conf carries `bash tools/fast-gate.sh`
+    and a suite command needing tools/ and tests/, which exist only in agents-factory. A gate in any other repo
+    died with EXIT 127 - a message about a MISSING TOOL when the truth is a FOREIGN CONFIG - and nothing in the
+    reader refused it. These tests are the acceptance coord named: a foreign stamped config carrying a
+    repo-relative command, the reader run from a DIFFERENT repo, refusing and naming the repo - plus the
+    controls that keep the guard from becoming its own defect.
+
+    THE TWO CONTROLS ARE THE POINT. (1) A config whose paths all resolve here is NOT refused, even when its
+    Project: stamp names another directory - a lane worktree of this same project is exactly that, and refusing
+    on identity alone would turn every worktree gate red for an innocent branch. (2) The refusal is scoped to
+    the OFFENDING FIELD: a caller asking for the one command that does resolve here still gets it. A guard that
+    failed either control would be worse than the defect it prevents, which is why they are asserted rather than
+    described. Removing the guard makes every refusal assertion below fail.
+    """
+
+    def _repo(self, tag, commands, stamp='# Project: agents-factory (/some/other/checkout)\n'):
+        """A second repo that carries the reader (a copy of tools/check-cmd.sh + the tracked conf) and a HOME-level
+        config describing commands that may or may not resolve in it - the shape of a lane worktree on a shared
+        host, which is where this defect is measured."""
+        home = Path(_registered_tmp_home(self, tag))
+        repo = home / "repoB"
+        (repo / "tools").mkdir(parents=True)
+        for name in ("check-cmd.sh", "check.conf"):
+            shutil.copy(ROOT / "tools" / name, repo / "tools" / name)
+        conf = home / ".fleet" / "check.conf"
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(stamp + "".join(f'{k}="{v}"\n' for k, v in commands.items()), encoding="utf-8")
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["FLEET_CHECK_CONF"] = str(conf)
+        return repo, env
+
+    def _read(self, repo, env, *args):
+        return subprocess.run(["bash", "tools/check-cmd.sh", *args], capture_output=True, text=True,
+                              timeout=60, env=env, cwd=str(repo))
+
+    def test_a_foreign_command_that_cannot_run_here_is_refused_and_the_repo_is_named(self):
+        repo, env = self._repo("0r1c-foreign-",
+                               {"CHECK_CMD": "python3 -m unittest discover -s tests -t . -v",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        r = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 2, f"the reader must REFUSE, not hand out a command that cannot run: {r.stdout}")
+        self.assertEqual(r.stdout, "", "a refusal must not print a command for anyone to run")
+        self.assertIn("REFUSING", r.stderr)
+        self.assertIn("agents-factory", r.stderr,
+                      "the refusal must name the repo the config came from, taken from the Project: stamp")
+        self.assertIn("tools/fast-gate.sh", r.stderr, "and the path that does not exist here")
+        self.assertIn("EXIT 127", r.stderr, "and why that matters: the failure reads as a missing tool")
+        self.assertRegex(r.stderr, r"repair: .*check-cmd\.sh --install",
+                         "every refusal must print the one-line repair (agents-0r1c)")
+
+    def test_the_unittest_discovery_flag_is_checked_as_a_path(self):
+        repo, env = self._repo("0r1c-suites-",
+                               {"CHECK_CMD": "python3 -m unittest discover -s tests -t . -v",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        r = self._read(repo, env)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("tests", r.stderr,
+                      "-s tests names a directory, and a repo without it cannot run that command either")
+
+    def test_the_refusal_is_scoped_to_the_offending_field(self):
+        repo, env = self._repo("0r1c-scoped-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        # CHECK_CMD names tools/check-cmd.sh, which IS here: it must still be reported.
+        good = self._read(repo, env, "CHECK_CMD")
+        self.assertEqual(good.returncode, 0, f"a resolvable command must not be refused: {good.stderr}")
+        self.assertEqual(good.stdout.strip(), "bash tools/check-cmd.sh --check")
+        bad = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(bad.returncode, 2, "...and the sibling that cannot run is still refused")
+
+    def test_a_config_whose_paths_resolve_here_is_not_refused(self):
+        """THE FALSE-POSITIVE CONTROL. The stamp names another checkout, and every named path exists here: this
+        is a lane worktree of the same project, and refusing it would make the guard a fleet-wide outage."""
+        repo, env = self._repo("0r1c-legit-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                "CHECK_FAST_CMD": "bash tools/check.conf"})
+        r = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 0, f"a resolvable config must be read normally: {r.stderr}")
+        self.assertEqual(r.stdout.strip(), "bash tools/check.conf")
+
+    def test_an_unstamped_config_is_refused_without_inventing_a_culprit(self):
+        repo, env = self._repo("0r1c-unstamped-", {"CHECK_FAST_CMD": "bash tools/fast-gate.sh"}, stamp="")
+        r = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 2, "an unstamped config can still name a command that cannot run here")
+        self.assertIn("no 'Project:' stamp", r.stderr)
+        self.assertNotIn("was installed by", r.stderr,
+                         "the reader must not attribute a file nobody stamped to a repo")
+
+    def test_install_still_repairs_an_unrunnable_config(self):
+        """THE WAY OUT HAS TO SURVIVE THE GUARD: if --install were refused too, the refusal would be a trap -
+        the only command that can fix the config is the one the config's state disables."""
+        repo, env = self._repo("0r1c-repair-", {"CHECK_CMD": "bash tools/full-gate.sh",
+                                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        r = self._read(repo, env, "--install")
+        self.assertEqual(r.returncode, 0, f"--install must still work on a broken config: {r.stderr[:300]}")
+        self.assertIn("installed the project's gate command", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 

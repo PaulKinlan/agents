@@ -67,6 +67,66 @@ install_cmd_for() {
   esac
 }
 
+# agents-0r1c: THE READER REFUSES A COMMAND THAT CANNOT RUN WHERE IT IS BEING HANDED OUT. agents-0utp fixed
+# the WRITER (a bare --install no longer rewrites the machine-global file) and agents-p8lh made the repairs
+# truthful, but a config already installed by another repo keeps being READ: ~/.fleet/check.conf carries
+# `bash tools/fast-gate.sh` and a suite command needing tools/ and tests/, all of which exist only in
+# agents-factory. A gate in any other repo died with EXIT 127 - a message about a MISSING TOOL, when the truth
+# is a FOREIGN CONFIG - and nothing in the reader refused it. THE TEST IS "CANNOT EXIST HERE", NOT "CAME FROM
+# ELSEWHERE": a config whose named paths all resolve in this repo is legitimate even when its Project: stamp
+# names another directory (a lane worktree of this same project is exactly that), so identity alone never
+# refuses - refusing on identity would turn every worktree gate red for an innocent branch. The stamp is used
+# for ATTRIBUTION in the message, not as the trigger.
+#
+# Repo-relative path tokens are extracted conservatively, because a FALSE REFUSAL is worse than the defect it
+# prevents: only tokens containing a slash, not starting with / or $ or -, not part of a URL or a variable
+# expansion, and not shell metacharacters of any kind. Flags that NAME a path (-s/-t for unittest discovery)
+# are checked as paths too, since that is how the poisoned CHECK_CMD fails. An unstamped config keeps the
+# existing path: it is not attributed to anyone, and the refusal says so instead of inventing a culprit.
+path_tokens() {
+  # stdin: a command string. stdout: each repo-relative path token, one per line.
+  tr ' \t\n' '\n\n\n' \
+    | sed -E 's/^[-]+//' \
+    | grep -E '^[A-Za-z0-9_][A-Za-z0-9_.@-]*(/[A-Za-z0-9_.@-]+)+$' \
+    | grep -vE '://' || true
+}
+
+# The flags that name a directory for unittest discovery (-s <dir>, -t <dir>) are arguments, not slashed tokens,
+# so `-s tests -t .` reads as two bare words. They are the exact shape the poisoned CHECK_CMD uses.
+flag_path_tokens() {
+  # stdin: a command string. stdout: the value of every -s/-t flag, one per line.
+  awk '{ for (i = 1; i < NF; i++) if ($i == "-s" || $i == "-t") print $(i + 1) }' \
+    | sed -E 's/^["'"'"']//; s/["'"'"']$//' \
+    | grep -E '^[A-Za-z0-9_][A-Za-z0-9_.@-]*(/[A-Za-z0-9_.@-]+)*$' || true
+}
+
+# Prints the repo/path this config says it was installed by, or empty when it carries no stamp.
+config_provenance() {
+  [ -r "$1" ] || return 0
+  grep -m1 -E '^# Project: ' "$1" 2>/dev/null | sed -E 's/^# Project: //' || true
+}
+
+# Returns non-zero (and prints the refusal) when one of the command's named paths does not exist in $ROOT.
+refuse_if_unrunnable() {
+  local field="$1" cmd="$2" missing="" tok
+  [ -n "$cmd" ] || return 0
+  for tok in $(printf '%s\n' "$cmd" | path_tokens) $(printf '%s\n' "$cmd" | flag_path_tokens); do
+    [ "$tok" = "." ] && continue            # `.` is the repo itself: it always exists here
+    if [ ! -e "$ROOT/$tok" ]; then missing="${missing}${missing:+, }$tok"; fi
+  done
+  [ -n "$missing" ] || return 0
+  local who=""
+  if [ -n "$provenance" ]; then who="was installed by $provenance and"; else who="carries no 'Project:' stamp and"; fi
+  echo "check-cmd: REFUSING to report $field: $CONFIG_SOURCE $who names [$missing], which does not exist in $ROOT." >&2
+  echo "check-cmd:   That command cannot run here - it fails with EXIT 127, which reads as a missing tool when the truth is a config naming paths from another repo." >&2
+  if [ -n "$REPO_CONF" ]; then
+    echo "check-cmd:   repair: $(install_cmd_for "$REPO_CONF")   # writes this repo its own config, $REPO_CONF; then point the gate at it: FLEET_CHECK_CONF=$REPO_CONF" >&2
+  else
+    echo "check-cmd:   repair: $(install_cmd_for "$GLOBAL_CONF")   # HOME is unset, so the host-wide file is the only destination this reader can name" >&2
+  fi
+  return 1
+}
+
 if [ ! -r "$TRACKED" ]; then
   echo "check-cmd: the TRACKED gate config is missing: $TRACKED" >&2
   echo "  It is the default a fresh VM gets and the file a reviewer can read. Refusing." >&2
@@ -307,11 +367,28 @@ fi
 
 : "${CHECK_CMD:?check-cmd: CHECK_CMD is unset or empty after reading $OVERRIDE - refusing to report a verdict about a command nobody chose}"
 
+# agents-0r1c: WHERE THE VALUES CAME FROM, and who to blame when they cannot run here. The attribution comes
+# from the file's own '# Project: <name> (<path>)' stamp, written by --install since agents-ia3p, so the refusal
+# can name the repo that installed the config the reader is being asked to trust. An UNSTAMPED file is not
+# attributed to anyone - the refusal says exactly that rather than inventing a culprit, which is the existing
+# path for a file that predates the stamp.
+provenance="$(config_provenance "$OVERRIDE")"
+CONFIG_SOURCE="${OVERRIDE:-the tracked file ${TRACKED}}"
+
 want="${1:-}"
 case "$want" in
-  "") printf 'CHECK_CMD=%s\nCHECK_FAST_CMD=%s\nCHECK_TIMEOUT=%s\nCHECK_FAST_TIMEOUT=%s\n' \
+  "")
+        # The whole set: EVERY command in it has to be runnable here, because the caller may use any of them.
+        refuse_if_unrunnable CHECK_CMD "${CHECK_CMD:-}" || exit 2
+        refuse_if_unrunnable CHECK_FAST_CMD "${CHECK_FAST_CMD:-}" || exit 2
+        printf 'CHECK_CMD=%s\nCHECK_FAST_CMD=%s\nCHECK_TIMEOUT=%s\nCHECK_FAST_TIMEOUT=%s\n' \
         "${CHECK_CMD}" "${CHECK_FAST_CMD:-}" "${CHECK_TIMEOUT:-}" "${CHECK_FAST_TIMEOUT:-}" ;;
-  CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT)
+  CHECK_CMD|CHECK_FAST_CMD)
+        # ONE FIELD ASKED FOR: refuse THAT command, not the file - the other one may be perfectly usable here,
+        # and a reader that refused the file would be making a bigger claim than the evidence supports.
+        refuse_if_unrunnable "$want" "${!want}" || exit 2
+        printf '%s\n' "${!want}" ;;
+  CHECK_TIMEOUT|CHECK_FAST_TIMEOUT)
         printf '%s\n' "${!want}" ;;
   --repair-hint)
         # agents-p8lh: ONE SOURCE OF TRUTH FOR THE REPAIR, for callers that must name it without knowing the
