@@ -133,11 +133,17 @@ _fast_gate_cleanup() {
 }
 _fast_gate_term() {
   FAST_GATE_TERMINATED=1
+  # agents-8ibx: the selection now runs as shard children, so a SIGTERM must reach them as well as this
+  # script. Before this change there was one child; now a killed gate would otherwise leave four module
+  # processes computing on a shared VM. The runner terminates its own pool on TERM (it installs a
+  # handler), so signalling the direct child is enough - this only has to reach that far.
+  pkill -TERM -P $$ 2>/dev/null || true
   echo "fast-gate: aborted: caught SIGTERM (stage: $FAST_GATE_STAGE)" >&2
   exit 143
 }
 _fast_gate_int() {
   FAST_GATE_TERMINATED=1
+  pkill -TERM -P $$ 2>/dev/null || true
   echo "fast-gate: aborted: caught SIGINT (stage: $FAST_GATE_STAGE)" >&2
   exit 130
 }
@@ -593,7 +599,11 @@ FAST_GATE_STAGE="preparing runner"
 modules="$(printf '%s\n' $files | sed 's#/#.#g; s#\.py$##' | tr '\n' ' ' | sed 's/ *$//')"
 
 FAST_GATE_STAGE="running tests ($modules)"
-echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules"
+# agents-8ibx: the runner below is still `python3 -u -m unittest`, one process per module instead of one for
+# the whole selection, so this line keeps its shape (the stage-announcement handshake reads `running:` and
+# the marker vocabulary is anchored on `fast-gate: running:` with the payload being suite names - neither is
+# disturbed by the trailing qualifier, which is not on a marker line).
+echo "fast-gate: base=$BASE; running: python3 -u -m unittest $modules (one process per module, sharded)"
 
 # agents-6jmx: keep a copy of the RUNNER's output in a file the job writes itself. The gate log
 # is the wrapper's file, and on a waited/preempted run the runner's output (which unittest writes
@@ -636,10 +646,172 @@ rc=0
 if [ -n "$summary_file" ]; then
   # `tee -a` is load-bearing now: the header above is already in the file, and a plain tee would
   # truncate it away on the first byte of runner output (agents-qtnv).
-  python3 -u -m unittest $modules > >(tee -a "$summary_file") 2> >(tee -a "$summary_file" >&2) || rc=$?
+  _fast_gate_write_summary="$summary_file"
 else
-  python3 -u -m unittest $modules || rc=$?
+  _fast_gate_write_summary=""
 fi
+
+# agents-8ibx: RUN THE SELECTION AS PARALLEL MODULE SHARDS. This block used to be one
+# `python3 -u -m unittest $modules` over the whole selection, which on this VM (nproc=8, one heavy slot)
+# used one core. Measured on an 8-path delta, 24 modules / 597 tests: 162.5s wall against 67.2s of child
+# CPU - the wall was hardly work. Against a 180s bound that leaves ~10% headroom, and a run that close is
+# bound-killed the moment a priority job arrives: two such kills held the single heavy slot for their full
+# 210s each and produced no verdict.
+#
+# The unit of parallelism is the TEST MODULE (ADR 0002 / agents-5fy0), which is the shape
+# tools/full-gate.sh already runs for the full gate - one process per module under a worker cap, longest
+# module first, and the same refusal to trust an exit code: a module that produces no executed test id is
+# a FAILURE even though its child exited 0. What is deliberately NOT copied from the full gate is its
+# serial discovery pass: the fast path cannot afford a second traverse of the suite, so this checks that
+# every selected module RAN SOMETHING (and reports the total), not that it ran an expected exact set.
+#
+# STDOUT IS NOT USED HERE, DELIBERATELY: it is the marker channel remote/check-coverage.py parses, and the
+# dry run above prints the suite list on it. The runner writes to stderr and to the summary file only, so
+# the dry run's stdout stays byte-identical - which is asserted, not assumed.
+FAST_GATE_RUN_MODULES="$modules" \
+FAST_GATE_RUN_SUMMARY="$_fast_gate_write_summary" \
+FAST_GATE_RUN_SHARDS="${FAST_GATE_SHARDS:-}" \
+FAST_GATE_RUN_COST_CACHE="${FLEET_CHECKS_DIR:-$HOME/.fleet/checks}/full-gate-module-costs.json" \
+python3 - <<'PY' || rc=$?
+import json, os, re, signal, subprocess, sys, threading, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# unittest -v carries the executed id in parentheses. Without -v there are only dots, and a module that
+# executed nothing is indistinguishable from one that executed everything.
+TEST_LINE = re.compile(r"^\S+ \((tests\.[^()]+)\)(?= \.\.\.|[ \t]*$)", re.MULTILINE)
+modules = os.environ.get("FAST_GATE_RUN_MODULES", "").split()
+summary = os.environ.get("FAST_GATE_RUN_SUMMARY", "")
+cache = os.environ.get("FAST_GATE_RUN_COST_CACHE", "")
+
+
+def say(line):
+    print(line, file=sys.stderr, flush=True)
+
+
+if not modules:
+    # A gate that runs nothing must not report PASS. The selection falls back to the smoke subset before
+    # here, so an empty selection means something upstream broke.
+    say("fast-gate: FAIL: the shard runner was given no modules - refusing to report a pass for an empty selection")
+    sys.exit(1)
+
+try:
+    workers = int(os.environ.get("FAST_GATE_RUN_SHARDS") or 0)
+except ValueError:
+    workers = 0
+if workers < 1:
+    # Shared-VM restraint (coord, agents-8ibx): this VM reports nproc=8 and runs seven lanes, and the
+    # single heavy slot is the budget - so four is the default and FAST_GATE_SHARDS is the override.
+    workers = min(4, os.cpu_count() or 1)
+workers = max(1, min(workers, len(modules)))
+
+
+def costs():
+    """Measured per-module seconds when the full gate already paid to measure them; else equal weights.
+
+    Same cache file tools/full-gate.sh writes, so the two runners order their work the same way.
+    """
+    data = {}
+    try:
+        with open(cache, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, ValueError):
+        data = {}
+    out = {}
+    for m in modules:
+        v = data.get(m)
+        out[m] = float(v) if isinstance(v, (int, float)) and 0 < v < 3600 else 1.0
+    return out
+
+
+COST = costs()
+live = {}
+live_lock = threading.Lock()
+
+
+def run_module(module):
+    start = time.monotonic()
+    proc = subprocess.Popen([sys.executable, "-u", "-m", "unittest", "-v", module],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    with live_lock:
+        live[module] = proc
+    try:
+        out, _ = proc.communicate()
+    finally:
+        with live_lock:
+            live.pop(module, None)
+    return module, proc.returncode, time.monotonic() - start, out, TEST_LINE.findall(out)
+
+
+def _terminate(signum, _frame):
+    """A killed gate must not leave its shards running: they hold the machine, not just the slot.
+
+    No announcement here on purpose. The gate's own trap prints `fast-gate: aborted: caught SIGTERM
+    (stage: running tests (<modules>))`, and that message carries the stage AND the module list; a second
+    abort line from this process would be a less informative duplicate of it.
+    """
+    with live_lock:
+        procs = list(live.values())
+    for p in procs:
+        try:
+            p.terminate()
+        except OSError:
+            pass
+    sys.exit(143 if signum == signal.SIGTERM else 130)
+
+
+signal.signal(signal.SIGTERM, _terminate)
+signal.signal(signal.SIGINT, _terminate)
+
+say("fast-gate: shards: %d module(s), %d worker(s)%s" % (
+    len(modules), workers,
+    "" if cache and os.path.exists(cache) else " (no measured cost cache: equal weights)"))
+
+order = sorted(modules, key=lambda m: (-COST[m], m))  # longest first, then stable
+results = {}
+with ThreadPoolExecutor(max_workers=workers) as pool:
+    futures = {pool.submit(run_module, m): m for m in order}
+    for fut in as_completed(futures):
+        m = futures[fut]
+        try:
+            results[m] = fut.result()
+        except Exception as exc:  # a shard that could not even start
+            results[m] = (m, 1, 0.0, "%s: shard runner error: %s" % (m, exc), [])
+
+failed = []
+empty = []
+blocks = []
+total_ids = 0
+for m in modules:  # module order, so the report does not shuffle between runs
+    _, rc_shard, secs, out, ids = results[m]
+    total_ids += len(ids)
+    blocks.append("----- %s rc=%s %.1fs ids=%d -----\n%s" % (m, rc_shard, secs, len(ids), out.rstrip()))
+    if rc_shard != 0:
+        failed.append((m, rc_shard))
+    elif not ids:
+        empty.append(m)
+
+for block in blocks:
+    say(block)
+if summary:
+    try:
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(blocks) + "\n")
+    except OSError as exc:
+        say("fast-gate: NOTE: could not append the shard output to %s: %s" % (summary, exc))
+
+# Non-marker diagnostics, in the existing `fast-gate: FAIL:` form. The `fast-gate: failed:` marker is
+# printed by the caller and its payload must stay SUITE NAMES ONLY (agents-lgdv), so the culprit is named
+# here instead - and both the marker's payload and its form are unchanged by sharding.
+for m, rc_shard in failed:
+    say("fast-gate: FAIL: shard module failed: %s (rc=%s)" % (m, rc_shard))
+for m in empty:
+    say("fast-gate: FAIL: shard module executed no tests: %s (rc=0 is not evidence that it ran)" % m)
+say("fast-gate: shards: %d module(s) ran, %d test id(s), %d failed, %d produced none" % (
+    len(modules), total_ids, len(failed), len(empty)))
+sys.exit(1 if (failed or empty) else 0)
+PY
 
 FAST_GATE_TERMINATED=1
 # agents-es0y: THE IGNORED FRAGMENTS ARE REPEATED HERE, WHERE THE RECEIPT'S TAIL WILL SHOW THEM. The loader
