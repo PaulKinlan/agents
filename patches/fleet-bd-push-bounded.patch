@@ -1,0 +1,342 @@
+diff --git a/bin/bd b/bin/bd
+index 723856f..9f58a2f 100755
+--- a/bin/bd
++++ b/bin/bd
+@@ -246,7 +246,147 @@ guard_worktree_beads_decoy() {
+ 
+ guard_worktree_beads_decoy "$@"
+ 
++# ------------------------------------------------ fleet-etvw ------------------------------------------------
++# A HUNG NETWORK PUSH MUST NOT HOLD A VM-WIDE LOCK INDEFINITELY, AND THE LOCK MUST STAY WITH THE WORK.
++#
++# The incident (2026-10-14, measured): ONE `bd dolt push` whose `git push --force-with-lease` was stuck in
++# send-pack held $HOME/.fleet/bd.lock - the lock EVERY lane on this VM serialises on - for about 16 minutes.
++# Every other lane's bd call then queued behind `flock -w 300`, so bead comments, labels, verdicts and
++# clearances were delayed or lost, and the merger's bounded command hit its 900s ceiling with its bead writes
++# unrun. The lock was held because NOTHING BOUNDED THE HOLDER: `flock -w 300` bounds how long a WAITER waits
++# and says nothing about how long a holder holds, and the holder here is a network operation.
++#
++# TWO THINGS HAD TO CHANGE, AND FIXING ONLY THE FIRST WOULD NOT HAVE RELEASED THE LOCK:
++#   1. THE HOLDER IS NOW BOUNDED. The subcommands that reach the network run under `timeout -k <grace>
++#      <bound>`; a purely local ledger write keeps its unbounded path, because a local write cannot stall on a
++#      remote and adding a bound there would invent a new way for a legitimate write to fail.
++# TWO PROPERTIES ARE REQUIRED, AND THEY ARE A CONJUNCTION RATHER THAN A TRADE-OFF. THIS PATCH'S FIRST CUT GOT
++# THE SECOND ONE WRONG, WHICH IS WHY THE PROTOCOL BELOW IS "OWN THE GROUP" RATHER THAN "CLOSE THE FD":
++#   (1) THE BOUND. A stalled remote must not hold the lock past a bound, AND THE RELEASE MUST BE REAL: the
++#       failure this replaces was not just a long hold, it was a timeout that CLAIMED the lock was released
++#       while an orphaned `git` still held it - and a lock that believes it is free is a lock nobody will ever
++#       reclaim. (2) MUTUAL EXCLUSION. The lock must be held by the WORK for as long as the work is alive, so
++#       that killing the HOLDER (fleet-heavy, the reaper, a bounded gate - the fleet does this all day) cannot
++#       let two bd runs touch the same Dolt DB. agents-ttxh is the P1 for the other half of exactly this: a
++#       shim that closes the fd for its child releases the lock when the shim dies while bd still runs.
++# THE FIRST CUT SATISFIED (1) BY CLOSING THE FD (`flock -o`) AND THEREBY BROKE (2), measured on this VM: with
++# -o, SIGKILLing the holder while the payload was still working let a SECOND bd run concurrently, where the
++# deployed shim keeps it blocked because the work inherits the fd. `-o` was load-bearing for (1) and mutually
++# exclusive with (2), so the protocol here changes from "close the fd" to "own the group":
++#   * NO -o ANYWHERE. The lock fd stays inherited by the payload, so the lock lives with the work.
++#   * THE PAYLOAD RUNS IN ITS OWN PROCESS GROUP, and the bound kills THAT GROUP, so the last fd closes and the
++#     release is true by construction rather than by declaration.
++#   * NOTHING ELSE IS SIGNALLED. The group is the payload's own, so a neighbouring lane's processes and any
++#     second payload outside this group are untouched - "kill the group" is one keystroke from "kill the
++#     wrong group", and that is how a lane loses someone else's work.
++#
++# ON TIMEOUT THE COMMAND FAILS LOUDLY. The symptom being fixed is a SILENT non-write: `bd update <id> --claim`
++# can print "Updated issue" while the write is lost, which reads exactly like success until someone reads the
++# bead back. Timeout's own codes are kept rather than mapped - 124/137/143 already mean "the bound killed it:
++# unknown, not a pass" in this fleet - and the remote-advice path is skipped, because advice about the remote
++# is not the diagnosis when the remote is merely slow.
++#
++# THE OPERATIONAL RULE IS PRINTED WITH THE FAILURE, not only written down: contention means BACK OFF AND
++# RETRY, KILL NOTHING. That rule is what kept tonight's incident at ~16 minutes instead of an orphaned lock
++# holder, and it is delivered here because this is where an operator meets it. It is deliberately NOT a new
++# section in roles/lessons.md: that file is 18 bytes below its own 180KB test ceiling, so a new section fails
++# tests/lessons.test.sh (measured on agents-etvw) - a lesson needs a compress pass first.
++net_bound="${FLEET_BD_PUSH_TIMEOUT:-180}"    # seconds a network push/pull may hold the VM-wide lock
++net_grace="${FLEET_BD_PUSH_GRACE:-15}"       # seconds between SIGTERM and SIGKILL for that payload
++
++# The payload's own group. `shift 2` leaves "$@" as the real bd command with the user's arguments intact.
++# `kill -TERM 0` / `kill -KILL 0` signal the CURRENT PROCESS GROUP, which is why this needs no pgid arithmetic;
++# the trap is what lets the group be TERMed and then KILLed, rather than the leader dying on the first signal
++# and leaving something that ignores TERM still holding the lock fd.
++bd_net_group_script='
++  B="$1"; G="$2"; shift 2
++  rc=0; finished=0
++  # TWO CASES, ONE TRAP. On the BOUND the group is TERMed and then KILLed so the last fd closes. On NORMAL
++  # COMPLETION the same group signal is sent for a different reason: THE WATCHDOG IS A SUBSHELL, and killing a
++  # subshell does NOT kill its `sleep` - that `sleep` inherits the lock fd, so it would hold the VM-wide lock for
++  # the rest of the bound after a push that already succeeded. Measured: a fast push left `sleep 30` holding the
++  # lock. Only a signal to the GROUP reaches that sleep, so the group is what gets signalled here too, and the
++  # trap exits with the payload own status because "finished" says the group signal is ours.
++  onterm() {
++    if [ "$finished" = 1 ]; then exit "$rc"; fi
++    kill -TERM 0 2>/dev/null; sleep "$G"; kill -KILL 0 2>/dev/null
++  }
++  trap onterm TERM
++  ( sleep "$B"; kill -TERM 0 2>/dev/null ) &
++  "$@" &
++  p=$!
++  wait "$p"; rc=$?
++  finished=1
++  kill -TERM -$$ 2>/dev/null
++  exit "$rc"
++'
++
++# ------------------------------------------------ fleet-5nho ------------------------------------------------
++# THE DECISION MUST NOT DEPEND ON WHICH ARGUMENT POSITION A FLAG HAPPENS TO OCCUPY.
++# `bd_reaches_network` read $1 and $2, so a leading global flag moved the subcommand out of the position it was
++# reading and the call was classified as LOCAL. Measured through the installed shim, same hanging stub: plain
++# `dolt push` was killed at 2.0s with the report, while `bd -C <dir> dolt push`, `bd --no-color dolt push`,
++# `bd --directory=<dir> dolt push` and `bd -C <dir> sync` each ran the full hang, held the VM-wide lock and
++# said nothing. Those are ordinary fleet invocations (roles/lessons.md), so the wedge this patch exists to
++# close was reachable through a flag.
++#
++# THIS EXACT MISTAKE WAS ALREADY MADE AND FIXED ONCE IN THIS FILE, which is why the fix is shaped this way:
++# fleet-4vve's deny-list was defeated by `bd --no-color close <foreign>` for the same reason, and its
++# resolution records that a list of value-taking flags is the deny-list mistake one level down - it can only
++# name the flags that already exist. So there are TWO LAYERS, and the second is what makes this fail CLOSED:
++#   1. SKIP THE LEADING GLOBALS, so `-C <dir>`, `--directory[=<dir>]`, `--no-color` and the rest classify as
++#      the subcommand they precede rather than as the subcommand themselves.
++#   2. SCAN FOR THE NETWORK SHAPE ANYWHERE in argv, because layer 1 rests on knowing which flags consume a value
++#      and THAT knowledge is the fragile part. The two error directions are not symmetric: missing a network
++#      call wedges every lane on this VM, while bounding a local call costs a watchdog cancelled the moment the
++#      call returns (measured: 0.0s added on the ordinary path, row 6f).
++bd_flag_takes_value() {   # leading globals whose value is a SEPARATE argument
++  case "$1" in -C|--directory|--database|--db|--actor) return 0 ;; esac
++  return 1
++}
++
++bd_subcommand() {   # <argv...> -> the subcommand, with leading global flags skipped rather than assumed away
++  while [ "$#" -gt 0 ]; do
++    case "$1" in
++      --) shift; break ;;
++      -*) if bd_flag_takes_value "$1"; then shift 2; else shift; fi ;;
++      *) break ;;
++    esac
++  done
++  printf '%s' "${1:-}"
++}
++
++bd_reaches_network() {   # <argv...> - the subcommands that can block on a remote
++  local a prev=""
++  case "$(bd_subcommand "$@")" in sync) return 0 ;; esac
++  # layer 2: the shape anywhere, so a flag whose value-consumption this file does not know cannot hide it
++  for a in "$@"; do
++    case "$a" in
++      sync) return 0 ;;
++      push|pull|fetch) [ "$prev" = dolt ] && return 0 ;;
++    esac
++    prev="$a"
++  done
++  return 1
++}
++
++bd_bound_killed_it() { case "${1:-}" in 124|137|143) return 0 ;; esac; return 1; }
++
++bd_timeout_report() {   # <rc> <argv...>
++  local rc="$1"; shift
++  {
++    printf 'bd: TIMED OUT (fleet-etvw): `bd %s` did not finish within %ss and was killed (rc=%s).\n' "$*" "$net_bound" "$rc"
++    printf 'bd: THE WRITE DID NOT LAND. A local Dolt commit may exist; the REMOTE push definitely did not.\n'
++    printf 'bd: The VM-wide lock is RELEASED - every other lane on this machine can write again.\n'
++    printf 'bd: BACK OFF AND RETRY, KILL NOTHING. Never kill another lane\x27s push: a retry after the remote\n'
++    printf 'bd: unblocks costs seconds, while an orphaned lock holder costs every lane on this VM minutes.\n'
++    printf 'bd: Nothing was retried automatically, and this is not a pass - 124 means the bound killed it.\n'
++  } >&2
++}
++
+ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
++  # Nested call (bd -> git hook -> bd) under a lock its parent already holds: no lock is taken here, so there
++  # is no hold to bound. Bounding this path would only make a legitimate nested write failable.
+   "$real" "$@"
+   rc=$?
+   check_push_failure "$rc" "$@"
+@@ -254,7 +394,24 @@ if [ -n "${FLEET_BD_LOCKED:-}" ]; then
+ fi
+ 
+ export FLEET_BD_LOCKED=1
+-flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
+-rc=$?
++if bd_reaches_network "$@"; then
++  # THE PAYLOAD OWNS ITS GROUP and the bound kills that group - and ONLY that group. No -o, so the lock fd
++  # stays with the work (property 2), and `setsid -w` makes the payload a group leader while still reporting its
++  # exit status. CLASSIFICATION: the bound's report must not depend on WHICH signal surfaced from killing the
++  # group, so the elapsed time is the witness - a non-zero exit that also ran to the bound IS the bound firing,
++  # and it is normalised to 124, the code this fleet already reads as "the bound killed it: unknown, not a
++  # pass". A SUCCESSFUL command is never reclassified, which is why the exit code is tested alongside the time.
++  net_started=$(date +%s)
++  flock -w 300 "$HOME/.fleet/bd.lock" setsid -w bash -c "$bd_net_group_script" _ "$net_bound" "$net_grace" "$real" "$@"
++  rc=$?
++  net_elapsed=$(( $(date +%s) - net_started ))
++  if [ "$rc" -ne 0 ] && { bd_bound_killed_it "$rc" || [ "$net_elapsed" -ge "$net_bound" ]; }; then
++    bd_timeout_report 124 "$@"
++    exit 124
++  fi
++else
++  flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
++  rc=$?
++fi
+ check_push_failure "$rc" "$@"
+ exit "$rc"
+diff --git a/tests/bd-shim.test.sh b/tests/bd-shim.test.sh
+index da473cd..258b039 100755
+--- a/tests/bd-shim.test.sh
++++ b/tests/bd-shim.test.sh
+@@ -85,6 +85,158 @@ L=$(cat "$BD_LOCKLOG")
+ FLEET_BD_LOCKED=1 HOME="$T" bash "$SHIM" comment bd-test --stdin <<< "bypass body"
+ grep -q '^ARG:comment' "$BD_LOG" && ok "5b FLEET_BD_LOCKED nesting escape still reaches bd" || bad "5b bypass path broken" ""
+ 
++echo "6. a network push is BOUNDED, and its release is REAL rather than announced (fleet-etvw)"
++# THE FIXTURE'S QUESTION: the stub's `dolt push` hangs - what does a SECOND lane see while it hangs, what does
++# the lock do when the bound fires, and what does it do after a push that SUCCEEDS? Both shims are driven by the
++# same fixture, so the only variable is the code.
++cat > "$T/.local/bin/bd" <<'STUB6'
++#!/usr/bin/env bash
++if [ "${1:-}" = dolt ] && [ "${2:-}" = push ]; then echo "push start" >> "$BD_LOCKLOG"; sleep "${STUB_SLEEP:-8}"; echo "push end" >> "$BD_LOCKLOG"; exit 0; fi
++echo "local ok: $*" >> "$BD_LOCKLOG"
++STUB6
++chmod +x "$T/.local/bin/bd"
++# RED-FIRST CONTROL, built the way this suite already builds one (bd-guard.test.sh's $MUT): the bound is removed
++# by making the network predicate false, so the unbounded path is taken with no other change.
++MUT="$ROOT/bd-unbounded"; sed 's/^if bd_reaches_network "$@"; then$/if false; then/' "$SHIM" > "$MUT"; chmod +x "$MUT"
++case_probe() {   # <shim> <bound> <second-lane bound> -> '<rc> <second rc> <said-not-landed> <lock free>'
++  : > "$BD_LOCKLOG"; rm -f "$T/.fleet/bd.lock"
++  STUB_SLEEP=8 FLEET_BD_PUSH_TIMEOUT="$2" FLEET_BD_PUSH_GRACE=1 HOME="$T" timeout 12 bash "$1" dolt push > "$ROOT/out" 2>&1 &
++  local hp=$!
++  sleep 0.5                                    # let the holder take the lock before asking about it
++  HOME="$T" timeout "$3" bash "$1" list >/dev/null 2>&1; local second=$?
++  wait $hp 2>/dev/null; local first=$?
++  local free=no; flock -n "$T/.fleet/bd.lock" true 2>/dev/null && free=yes
++  printf '%s %s %s %s' "$first" "$second" "$(grep -qi 'WRITE DID NOT LAND' "$ROOT/out" && echo yes || echo no)" "$free"
++}
++R=$(case_probe "$SHIM" 2 8); set -- $R
++eq "$1" "124" "6a a bounded network push exits 124 - normalised, so the report does not depend on which signal surfaced"
++eq "$2" "0" "6b the next lane's local write succeeds: the release is real, not announced"
++eq "$3" "yes" "6c the failure says the write DID NOT LAND (a silent non-write is the thing being fixed)"
++eq "$4" "yes" "6d the lock is FREE the moment the bound fires"
++grep -q 'BACK OFF AND RETRY, KILL NOTHING' "$ROOT/out" \
++  && ok "6e the message carries the operational rule where an operator meets it" \
++  || bad "6e the operational rule is not in the failure message" "$(head -3 "$ROOT/out")"
++# 6f THE ORDINARY PATH - and the leak that was measured exactly here. A successful push must release the lock as
++# it returns. The first cut of this patch left the lock held by the WATCHDOG'S `sleep`: killing a subshell does
++# not kill its `sleep`, and that `sleep` inherits the lock fd, so a push that had ALREADY SUCCEEDED held the
++# VM-wide lock for the rest of the bound. A lock nobody is using is indistinguishable from a lock somebody is.
++R=$(case_probe_fast() {
++  : > "$BD_LOCKLOG"; rm -f "$T/.fleet/bd.lock"
++  STUB_SLEEP=0 FLEET_BD_PUSH_TIMEOUT=30 HOME="$T" timeout 12 bash "$1" dolt push > "$ROOT/out" 2>&1; local rc=$?
++  local free=no; flock -n "$T/.fleet/bd.lock" true 2>/dev/null && free=yes
++  printf '%s %s %s' "$rc" "$free" "$( [ -s "$ROOT/out" ] && echo noisy || echo quiet)"
++}; case_probe_fast "$SHIM"); set -- $R
++eq "$1" "0" "6f a fast push still succeeds"
++eq "$2" "yes" "6g and it releases the lock as it returns (an orphaned watchdog cannot hold it)"
++eq "$3" "quiet" "6h it prints nothing when it works"
++R=$(case_probe "$MUT" 60 3); set -- $R
++eq "$2" "124" "6i RED-FIRST: with the bound removed the SAME fixture BLOCKS another lane's local write"
++eq "$3" "no" "6j RED-FIRST: and says nothing about the write not landing - the silent wedge"
++HOME="$T" timeout 8 bash "$SHIM" list > "$ROOT/out.local" 2>&1 \
++  && ok "6k a LOCAL subcommand is not bounded and is not made failable by this change" \
++  || bad "6k a local subcommand failed" "$(head -3 "$ROOT/out.local")"
++grep -q 'TIMED OUT' "$ROOT/out.local" && bad "6l a local call printed the timeout report" "" || ok "6l no timeout report on the local path"
++
++echo "7. the lock belongs to the WORK, and the group kill is NARROW (fleet-etvw, agents-ttxh)"
++# WHY THE FIND-THE-HOLDER STEP IS PART OF THE TEST RATHER THAN A CONVENIENCE: an earlier version of this drive
++# matched the holder with a pkill/pgrep pattern and reported "still serialised" when the kill had not landed at
++# all - it was VACUOUS, and it nearly went into the record as a measurement. The check that the holder was FOUND
++# and DID DIE is what makes 7b mean anything, so it is asserted.
++cat > "$T/.local/bin/bd" <<'STUB7'
++#!/usr/bin/env bash
++if [ "${1:-}" = dolt ] && [ "${2:-}" = push ]; then echo "push start" >> "$BD_LOCKLOG"; sleep "${STUB_SLEEP:-20}"; exit 0; fi
++echo "local ok" >> "$BD_LOCKLOG"
++STUB7
++chmod +x "$T/.local/bin/bd"
++# 7c's control is the OPPOSITE mutation from 6i: `-o` is added back, which is precisely the design that
++# satisfied the bound by giving up mutual exclusion (agents-ttxh). 7b must be red against it.
++MUT2="$ROOT/bd-closes-fd"; sed 's/flock -w 300/flock -o -w 300/g' "$SHIM" > "$MUT2"; chmod +x "$MUT2"
++find_holder() {  # by PROCESS NAME plus this fixture's own lock path: a pattern alone can match the caller
++  local p
++  for p in $(pgrep -x flock 2>/dev/null); do
++    case "$(tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline")" in *"$T/.fleet/bd.lock"*) printf '%s' "$p"; return 0 ;; esac
++  done
++  return 1
++}
++second_call_while_working() {   # <shim> -> '<killed> <second-lane rc>'
++  : > "$BD_LOCKLOG"; rm -f "$T/.fleet/bd.lock"
++  STUB_SLEEP=20 FLEET_BD_PUSH_TIMEOUT=60 HOME="$T" timeout 30 bash "$1" dolt push >/dev/null 2>&1 &
++  local hp=$! holder killed=NO
++  sleep 0.8
++  holder=$(find_holder) || holder=""
++  [ -n "$holder" ] && { kill -KILL "$holder" 2>/dev/null; sleep 0.3; kill -0 "$holder" 2>/dev/null || killed=YES; }
++  HOME="$T" timeout 4 bash "$1" list >/dev/null 2>&1; local second=$?
++  pkill -x -f "sleep 20" 2>/dev/null; kill -9 "$hp" 2>/dev/null; wait "$hp" 2>/dev/null
++  printf '%s %s' "$killed" "$second"
++}
++holder=$(find_holder) && bad "7a a holder was found before one was started" "" || ok "7a the holder lookup has teeth: a wrong/nonexistent target finds nothing"
++R=$(second_call_while_working "$SHIM"); set -- $R
++eq "$1" "YES" "7b the holder was found and SIGKILLED while the payload was still working (the non-vacuity check)"
++eq "$2" "124" "7c MUTUAL EXCLUSION: a second bd is BLOCKED - the WORK holds the lock, so killing the holder does not release it"
++R=$(second_call_while_working "$MUT2"); set -- $R
++eq "$1" "YES" "7d the control killed its holder too, so the comparison is like for like"
++[ "$2" != "124" ] && ok "7e RED-FIRST: a shim that closes the fd lets a SECOND bd RUN after the holder dies - the agents-ttxh defect, and the reason 7c is worth pinning" \
++  || bad "7e the fd-closing control did NOT reproduce the defect" "second-lane rc=$2"
++# 7f THE NARROW GROUP KILL: "kill the group" is one keystroke from "kill the wrong group", so prove that a
++# neighbour outside the payload's group survives the bound.
++sleep 25 & neighbour=$!
++sleep 25 & other=$!
++sleep 0.2
++: > "$BD_LOCKLOG"; rm -f "$T/.fleet/bd.lock"
++STUB_SLEEP=20 FLEET_BD_PUSH_TIMEOUT=2 FLEET_BD_PUSH_GRACE=1 HOME="$T" timeout 12 bash "$SHIM" dolt push >/dev/null 2>&1
++n1=DEAD; kill -0 "$neighbour" 2>/dev/null && n1=ALIVE
++n2=DEAD; kill -0 "$other" 2>/dev/null && n2=ALIVE
++eq "$n1/$n2" "ALIVE/ALIVE" "7f NEIGHBOURS SURVIVE: the group kill reached the payload's group and nothing else"
++kill "$neighbour" "$other" 2>/dev/null
++
++echo "8. the network decision does not depend on which argument position a flag occupies (fleet-5nho)"
++# THE DEFECT: the decision read $1, so a LEADING GLOBAL FLAG moved the subcommand out of the position being
++# read and the call was classified LOCAL - it ran unbounded, which is the wedge this patch exists to close,
++# reachable through an ordinary flag. Measured before the fix, on this fixture: plain `dolt push` was killed at
++# 2.0s with the report, while `-C <dir> dolt push`, `--no-color dolt push`, `--directory=<dir> dolt push` and
++# `-C <dir> sync` each ran the full stub sleep holding the VM-wide lock and saying nothing.
++cat > "$T/.local/bin/bd" <<'STUB8'
++#!/usr/bin/env bash
++case " $* " in *" dolt push "*|*" dolt pull "*|*" dolt fetch "*|*" sync "*) echo "network: $*" >> "$BD_LOCKLOG"; sleep "${STUB_SLEEP:-6}"; exit 0 ;; esac
++echo "local: $*" >> "$BD_LOCKLOG"; sleep "${STUB_LOCAL_SLEEP:-0}"; exit 0
++STUB8
++chmod +x "$T/.local/bin/bd"
++# ALSO WHY THIS SUITE'S ROWS ARE SHAPED AS THEY ARE: the fix has two layers, and a mutant that only removed one
++# would still pass - so the mutant below is the PRE-FIX decision, both layers undone (layer 1 reads $1 again,
++# layer 2 stops scanning). Both sed targets are single unique lines, so this is the old function rather than an
++# approximation of it, and it is what makes 8b onwards meaningful rather than merely green.
++MUT3="$ROOT/bd-positional"
++sed -e 's|^  case "\$(bd_subcommand "\$@")" in sync) return 0 ;; esac$|  case "${1:-}" in sync) return 0 ;; esac|' \
++    -e 's|^  for a in "\$@"; do$|  for a in ""; do|' "$SHIM" > "$MUT3"
++chmod +x "$MUT3"
++STUB_SLEEP=6; STUB_LOCAL_SLEEP=0
++armed() {   # <shim> <args...> -> 'armed? rc'
++  : > "$BD_LOCKLOG"; rm -f "$T/.fleet/bd.lock"
++  local rc
++  STUB_SLEEP="$STUB_SLEEP" STUB_LOCAL_SLEEP="$STUB_LOCAL_SLEEP" FLEET_BD_PUSH_TIMEOUT=1 FLEET_BD_PUSH_GRACE=1 \
++    HOME="$T" timeout 20 bash "$1" "${@:2}" > "$ROOT/out" 2>&1
++  rc=$?    # FIRST, before any command substitution: $? would otherwise be grep's status, not the call's
++  printf '%s/%s' "$(grep -qi 'TIMED OUT' "$ROOT/out" && echo yes || echo no)" "$rc"
++}
++eq "$(armed "$SHIM" dolt push)" "yes/124" "8a the control: a plain network call is bounded and says so"
++eq "$(armed "$SHIM" -C /dir dolt push)" "yes/124" "8b a leading -C <dir> no longer hides the network call"
++eq "$(armed "$SHIM" --no-color dolt push)" "yes/124" "8c nor does --no-color"
++eq "$(armed "$SHIM" -C /dir sync)" "yes/124" "8d nor does -C <dir> in front of sync"
++eq "$(armed "$SHIM" --directory=/dir dolt push)" "yes/124" "8e nor the --flag=value form, which consumes no separate argument"
++eq "$(armed "$SHIM" -C /dir --no-color dolt pull)" "yes/124" "8f nor several leading globals at once"
++eq "$(armed "$MUT3" -C /dir dolt push)" "no/0" "8g RED-FIRST: the PRE-FIX decision let this same call run unbounded and said nothing"
++# 8h THE NEGATIVE CONTROL, and it is a DESIGN PROPERTY rather than an oversight: a NON-network subcommand with
++# the same leading flags must stay unbounded. A local call that hangs for 3s is NOT killed at a 1s bound - if
++# the fix had been "bound everything that carries a flag", this is the row that would catch it.
++STUB_LOCAL_SLEEP=3
++t0=$(date +%s%N); eq "$(armed "$SHIM" --no-color show agents-eea2)" "no/0" "8h even a HANGING local call with --no-color is not bounded: only network subcommands are"
++t1=$(date +%s%N)
++[ "$(echo "scale=0;($t1-$t0)/1000000000"|bc)" -ge 3 ] \
++  && ok "8i ...and it ran to completion rather than being cut at the 1s bound, so 8h is a real control" \
++  || bad "8i the local call finished too fast to prove anything" "elapsed under 3s"
++eq "$(armed "$SHIM" -C /dir list)" "no/0" "8j and the same holds for -C <dir> on a local subcommand"
++STUB_LOCAL_SLEEP=0
++
+ if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
