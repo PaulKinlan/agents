@@ -34,7 +34,7 @@ import unittest
 from pathlib import Path
 
 from tests.test_fast_gate_consumer_coverage import _load_oracle
-from tests.test_fast_gate_mapping import resolve_fast_gate
+from tests.test_fast_gate_mapping import resolve_fast_gate, tracked_arm_fragments
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = "lib/egress_proxy.py"
@@ -73,8 +73,7 @@ class TestImporterShapedBoundaries(unittest.TestCase):
         # The arms live in tools/fast-gate-arms.d/ since agents-hr6q (ADR 0002), so the registry is what
         # has to carry this arm now - reading only the script would let the arm be deleted unseen.
         gate = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in sorted((ROOT / "tools" / "fast-gate-arms.d").glob("*.sh"))
+            path.read_text(encoding="utf-8") for path in tracked_arm_fragments()
         )
         self.assertIn(
             f"{HARNESS})",
