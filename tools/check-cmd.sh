@@ -37,6 +37,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRACKED="$ROOT/tools/check.conf"
+# agents-bf1f: THE READER'S FIELDS ARE NAMED IN ONE PLACE. The diagnostic below accepts a FIELD argument, and a
+# typed copy of the list in its error message would be a repair instruction that names the wrong thing the day a
+# field is added or removed - the agents-p8lh defect, where the printed instruction stops matching the code. One
+# list, used by the validation AND by the message, with a test that ties it to the dispatch (the reader's plain
+# field query) so the two cannot drift apart unnoticed.
+FIELDS="CHECK_CMD CHECK_FAST_CMD CHECK_TIMEOUT CHECK_FAST_TIMEOUT"
 # agents-0utp: WHERE --install WRITES IS ITS OWN DECISION, AND THE DEFAULT IS REPO-LOCAL. The header has always
 # described two lives for this file; the installer used to behave as if only one existed and wrote the
 # MACHINE-GLOBAL path by default - which is how installing from repo A silently gave repo B a gate command naming
@@ -127,6 +133,18 @@ config_provenance() {
 explain_failure() {
   local rc="${1:-}" field="${2:-CHECK_CMD}" cmd tok missing="" who
   case "$rc" in 126|127) ;; *) return 0 ;; esac          # 127 command not found, 126 found but not executable
+  # agents-bf1f: THE FIELD NAME IS VALIDATED BEFORE IT IS EXPANDED INDIRECTLY, because bash rejects a malformed
+  # NAME before any default can apply: `--explain-failure 127 "not a field"` died with "invalid variable name" and
+  # exit 1, breaking this diagnostic's own contract ("always exit 0, so a runner may call it unconditionally after
+  # any run") for a CALLER-side typo, and `${!field-}` does not help - the name is the problem, not the value.
+  # A tool is allowed to be loud about its OWN misuse while staying silent about gates, which is why this prints a
+  # usage line rather than nothing: silence here would leave a runner believing it had asked a valid question.
+  case " $FIELDS " in
+    *" $field "*) ;;
+    *) printf 'check-cmd: --explain-failure: unknown field %s; expected one of %s. Nothing was explained, and this is not a verdict about any gate.\n' \
+         "${field:-<empty>}" "$FIELDS" >&2
+       return 0 ;;
+  esac
   cmd="${!field:-}"
   [ -n "$cmd" ] || return 0
   for tok in $(printf '%s\n' "$cmd" | command_tokens | sort -u); do

@@ -1537,6 +1537,58 @@ class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(unittest.TestCa
         self.assertIn("tools/fast-gate.sh", r.stderr, "and the token that does not resolve here")
         self.assertIn("--install", r.stderr, "and the repair")
 
+    def test_a_malformed_field_name_cannot_break_the_always_exit_0_contract(self):
+        """agents-bf1f: the diagnostic's contract is "always exit 0, so a runner may call it unconditionally after
+        any run". A CALLER-side typo used to break it: `--explain-failure 127 "not a field"` reached
+        `cmd="${!field:-}"`, bash rejected the malformed NAME before any default could apply, and the command died
+        with "invalid variable name" and exit 1 - a tool failing the caller that mistyped its own interface. The
+        field is now validated first, and the answer is a usage line rather than silence, because a runner that
+        asked an invalid question must not be left believing it asked a valid one."""
+        repo, env = self._repo("0r1c-badfield-",
+                               {"CHECK_CMD": "definitely-not-a-program --flag",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        for field in ("not a field", "CHECK_CMD;echo", "-v", "1"):
+            with self.subTest(field=field):
+                r = self._read(repo, env, "--explain-failure", "127", field)
+                self.assertEqual(r.returncode, 0, f"a malformed field must not fail the caller: {r.stderr[:200]}")
+                self.assertIn("unknown field", r.stderr)
+                self.assertNotIn("NOTE (agents-0r1c)", r.stdout + r.stderr,
+                                 "a usage error is not a verdict about a gate")
+        # The MESSAGE never leaves a runner guessing: it names the fields that exist.
+        for name in ("CHECK_CMD", "CHECK_FAST_CMD"):
+            self.assertIn(name, self._read(repo, env, "--explain-failure", "127", "x").stderr)
+        # ...and a valid field still explains, so the validation did not disable the diagnostic.
+        ok = self._read(repo, env, "--explain-failure", "127", "CHECK_CMD")
+        self.assertEqual(ok.returncode, 0)
+        self.assertIn("NOTE (agents-0r1c)", ok.stderr)
+        self.assertIn("definitely-not-a-program", ok.stderr)
+
+    def test_the_accepted_field_list_is_derived_and_matches_the_reader(self):
+        """THE LIST IN THE MESSAGE IS PART OF THE COMPLAINT, SO IT MUST NOT GO STALE (agents-p8lh's class: a
+        printed instruction that stops naming what the code does). This test DERIVES the names from the message the
+        diagnostic prints - it does not hardcode them - and then asks the reader about every one of them, twice: the
+        diagnostic must accept it, and the plain field query must report it. Adding or removing a field without
+        updating the single list therefore fails here instead of producing a repair hint that names the wrong
+        thing."""
+        repo, env = self._repo("0r1c-fields-",
+                               {"CHECK_CMD": "echo hi", "CHECK_FAST_CMD": "echo hi"})
+        r = self._read(repo, env, "--explain-failure", "127", "not-a-field")
+        self.assertEqual(r.returncode, 0)
+        message = r.stderr
+        self.assertIn("expected one of", message)
+        names = re.findall(r"CHECK_[A-Z_]+", message.split("expected one of", 1)[1])
+        self.assertTrue(names, f"the usage line names no fields: {message!r}")
+        for name in names:
+            with self.subTest(field=name):
+                accepted = self._read(repo, env, "--explain-failure", "127", name)
+                self.assertEqual(accepted.returncode, 0)
+                self.assertNotIn("unknown field", accepted.stderr,
+                                 f"{name} is offered by the message but refused by the diagnostic")
+                reported = self._read(repo, env, name)
+                self.assertEqual(reported.returncode, 0,
+                                 f"{name} is offered by the message but the reader cannot report it: {reported.stderr[:120]}")
+                self.assertNotIn("unknown field", reported.stderr)
+
     def test_a_not_on_path_command_word_is_named_too(self):
         repo, env = self._repo("0r1c-explain-path-",
                                {"CHECK_CMD": "definitely-not-a-program --flag",
