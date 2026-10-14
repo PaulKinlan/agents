@@ -893,23 +893,37 @@ class TestFastGateMapping(unittest.TestCase):
                                     "(agents-dxtx - the exemption is per file, not per directory)")
                 self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
 
-    def test_beads_exemption_is_per_file_not_per_directory(self):
-        """agents-3jb4: the `.beads/` ignore arm is a DIRECTORY that holds executable git hooks, so an
-        exemption written as `.beads/*` silences every future file there instead of naming the ten tracked
-        paths the search measured. Both halves are asserted: each tracked path stays exempt, and a path that
-        is not tracked is refused by name. Red against the broad pattern (rc 0, empty suite list)."""
+    def test_beads_named_exemptions_vs_hook_mapping_not_hook_coverage(self):
+        """agents-3jb4/v03q: named non-hook exemptions and the earlier hook mapping differ.
+
+        Exempt means rc 0 with NO suite. A tracked or new `.beads/hooks/*` path instead
+        SELECTS the hook suite (rc 0 with a suite), while a new non-hook path with no
+        mapping refuses by name. Selection is NOT proof that the suite examines that
+        hook's contents: today it reads only pre-commit; agents-3ryx owns that P2 gap.
+        The two non-hook refusals stay red against the former blanket `.beads/*` ignore.
+        """
         tracked = subprocess.check_output(["git", "ls-files", ".beads/"], text=True).split()
-        self.assertTrue(tracked, "the tracked .beads/ paths are the object this exemption is written for")
-        for path in tracked:
-            with self.subTest(tracked=path):
-                self.assertEqual(run_fast_gate([path]).returncode, 0,
-                                 f"{path}: a TRACKED .beads/ path is the measured exemption and stays exempt")
+        ignored = [path for path in tracked if not path.startswith(".beads/hooks/")]
+        hooks = [path for path in tracked if path.startswith(".beads/hooks/")]
+        self.assertTrue(ignored and hooks, "both named exemptions and hook mapping must have tracked examples")
+        for path in ignored:
+            with self.subTest(exempt=path):
+                res = run_fast_gate([path])
+                self.assertEqual(res.returncode, 0, f"{path}: named exemption must not abort the gate")
+                self.assertEqual(res.stdout.strip(), "", f"{path}: named exemption selects no suite")
+        for path in (*hooks, ".beads/hooks/new-hook.sh"):
+            with self.subTest(selected_hook=path):
+                res = run_fast_gate([path])
+                self.assertEqual(res.returncode, 0, f"{path}: hook path maps rather than refusing: {res.stderr}")
+                self.assertIn("tests/test_beads_hook_fail_open.py", res.stdout.splitlines(),
+                              f"{path}: hook suite must be SELECTED before the ignore arm; "
+                              "selection does NOT prove content coverage (agents-3ryx)")
         for path in (".beads/unexpected.sh", ".beads/scripts/evil.py"):
-            with self.subTest(new=path):
+            with self.subTest(unmatched_non_hook=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0,
-                                    f"{path}: a new file under .beads/ must NOT be exempt "
-                                    "(agents-3jb4 - the exemption is per file, not per directory)")
+                                    f"{path}: a new UNMAPPED non-hook path must NOT be exempt "
+                                    "(agents-3jb4 - exemption is per file, not per directory)")
                 self.assertIn(path, res.stderr, f"{path}: the refusal must name the file")
 
     def test_tree_guard_tier_runs_on_every_mapped_delta(self):
