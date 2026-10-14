@@ -1,4 +1,22 @@
-## UNVERIFIED WORK IN PROGRESS - implements coord's ruling of 2026-10-14 (attempt-N attribution, one-re-run bound, disagreement is RED). The three ruled behaviours are IMPLEMENTED and bash -n clean, but the drive that proves them is INCOMPLETE: the stubbed gate queues behind the real heavy slot, so the record was still RUNNING when each assertion ran. Do NOT land this in place of the pre-ruling patch without re-running the drive with FLEET_HEAVY_DIR pointed at a private directory.
+## DRIVEN AND VERIFIED against coord's ruling of 2026-10-14 (attempt-N attribution, one-re-run bound, disagreement is RED).
+
+The three ruled behaviours the pre-ruling patch lacked are now demonstrated red-first, with the harness fix that
+made it possible (point FLEET_HEAVY_DIR at a private directory, so the stubbed gate stops contending for this
+VM's real heavy slot - the contention is what made the earlier drive inconclusive, not the code):
+  FAIL attempt 1, then a re-run whose stub PASSES
+  -> a cached read serves "attempt 2 on this tree - re-run by impl-b at <t> (reason: the flake the merger
+     measured)" AND "RED - the attempts on this tree DISAGREE: attempt 2 passed, but the recorded FAIL was
+     re-run rather than fixed", exiting 1                                            [requirements (2) and (4)]
+  -> a second re-run without an authoriser: "refusing a SECOND re-run of this tree: at most one is allowed
+     without authorisation", exit 2                                                  [requirement (3)]
+  -> a third attempt with --rerun-authorised-by=coord PROCEEDS and records
+     "authorised_by=coord reason=third go, authorised" in the preserved record       [requirements (1), (6)]
+  -> and the disagreement rule still holds on that attempt's result: RED again, exit 1
+
+Known limitation, disclosed rather than glossed: a later request on the same record overwrites the earlier
+request's reason in that record (the attempt RECORDS are all retained, each with its verdict, but a record
+carries only the most recent re-run attribution). Retaining a per-attempt attribution list would need a new
+array key - an ADDITION, not a field-type change - so it is a decision for coord, not something to smuggle in.
 
 ## patches/fleet-check-rerun-failed-tree.patch
 

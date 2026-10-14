@@ -10,49 +10,55 @@
      *) _args+=("$_a") ;;
    esac
  done
-@@ -256,6 +259,35 @@
+@@ -256,6 +259,41 @@
  fi
  
  exec 9>"$C/$tree.lock"; flock 9
-+# agents-5q0w: a re-run is requested deliberately, with a reason, and only for a FAILED tree. The prior
-+# verdict is NOT discarded: the fleet-0cxr rotation below already moves the old record and log aside as
-+# <rec>.1 before the new run is recorded, so the failure this re-run questions stays in the evidence.
-+# Coord's ruling: at most ONE re-run without authorisation, so a second needs an explicit
-+# --rerun-authorised-by=<lane> recorded with the attribution - no anonymous re-runs, and the exception
-+# is attributed to whoever granted it. A cached PASS is refused: re-running a passing tree would spend
-+# the fleet's scarcest resource to learn nothing.
++# agents-5q0w (coord ruling 2026-10-14): a re-run needs a reason; at most ONE without authorisation; a
++# disagreement is RED, not a vote. The prior verdict is never discarded - the fleet-0cxr rotation below
++# preserves it as <rec>.1 - so the failure is contextualised rather than replaced.
 +if [ -n "${RERUN_ASKED:-}" ] && [ -z "${RERUN_REASON:-}" ]; then
-+  echo "fleet-check: refusing --rerun without a reason: give one, e.g. --rerun=\"the broker test lost its socket race under shards\". A re-run that records no reason is indistinguishable from hiding a regression, which is why the reason is required." >&2
++  echo "fleet-check: refusing --rerun without a reason: give one, e.g. --rerun=\"the broker test lost its socket race under shards\". A reasonless re-run IS the defect this path exists to prevent." >&2
 +  exit 2
 +fi
 +if [ -n "${RERUN_REASON:-}" ]; then
++  # the count lives in the ROTATED history: a re-run records a fresh record that carries no .reruns.
++  prior_reruns=$(jq -r ".reruns // 0" "$rec" "$rec".[1-9] 2>/dev/null | sort -n | tail -1 || echo 0)
++  if [ "${prior_reruns:-0}" -ge 1 ] && [ -z "${RERUN_AUTHORISED_BY:-}" ]; then
++    echo "fleet-check: refusing a SECOND re-run of this tree: at most one is allowed without authorisation. Record the reason on the bead and ask the coordinator, then pass --rerun-authorised-by=<lane> - the authoriser is recorded." >&2
++    exit 2
++  fi
++  tree_red=0
++  if [ -f "${rec}.1" ] && [ "$(jq -r '.state // empty' "${rec}.1" 2>/dev/null)" = "FAIL" ] && [ -n "$(jq -r '.rerun_reason // empty' "${rec}.1" 2>/dev/null)" ]; then tree_red=1; fi
 +  case $(state) in
-+    FAIL)
-+      # the count lives in the ROTATED history, not only in $rec: a re-run's fresh record carries no
-+      # .reruns, so reading only $rec would let the bound never fire.
-+      prior_reruns=$(jq -r ".reruns // 0" "$rec" "$rec".[1-9] 2>/dev/null | sort -n | tail -1 || echo 0)
-+      if [ "${prior_reruns:-0}" -ge 1 ] && [ -z "${RERUN_AUTHORISED_BY:-}" ]; then
-+        echo "fleet-check: refusing a SECOND re-run of this tree: at most one is allowed without authorisation. Record the reason on the bead and ask the coordinator, then pass --rerun-authorised-by=<lane> - the authoriser is recorded." >&2
-+        exit 2
-+      fi
-+      # the attribution goes into the record IN PLACE, in the tool's own idiom, so the rotation below
-+      # preserves it into ${rec}.1 - and deliberately with no 2>/dev/null that could hide its own failure.
-+      jq --arg r "$RERUN_REASON" --arg b "$lane" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg ab "${RERUN_AUTHORISED_BY:-}" \
-+        '.rerun_reason = $r | .rerun_by = $b | .rerun_at = $t | .reruns = ((.reruns // 0) + 1) | if $ab != "" then .rerun_authorised_by = $ab else . end' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
-+      echo "fleet-check: re-running the gate for this tree at $lane's request (reason: $RERUN_REASON)${RERUN_AUTHORISED_BY:+ authorised by $RERUN_AUTHORISED_BY}. The prior FAIL verdict and this attribution are preserved at ${rec}.1, not replaced." ;;
-+    PASS) echo "fleet-check: refusing --rerun: this tree has a cached PASS, and re-running a passing tree spends the single heavy slot to learn nothing." >&2; exit 2 ;;
++    FAIL) : ;;
++    PASS) if [ "$tree_red" = 1 ]; then
++            if [ -z "${RERUN_AUTHORISED_BY:-}" ]; then
++              echo "fleet-check: refusing --rerun: this tree is RED - the attempts disagree (a PASS that is the result of a re-run after a recorded FAIL), and only the coordinator may authorise a further attempt. Record the reason on the bead, then pass --rerun-authorised-by=<lane>; the authoriser is recorded." >&2
++              exit 2
++            fi
++            echo "fleet-check: re-running a RED tree at $lane's request (reason: $RERUN_REASON), authorised by $RERUN_AUTHORISED_BY - a further attempt, which is the coordinator's exception."
++          else
++            echo "fleet-check: refusing --rerun: this tree has a cached PASS, and re-running a passing tree spends the single heavy slot to learn nothing." >&2
++            exit 2
++          fi ;;
 +  esac
++  # ONE attribution write for both paths, in the tool's own in-place idiom and WITHOUT a 2>/dev/null that
++  # could hide its own failure. It lands before the rotation, so it survives into <rec>.1.
++  jq --arg r "$RERUN_REASON" --arg b "$lane" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg ab "${RERUN_AUTHORISED_BY:-}" \
++    '.rerun_reason = $r | .rerun_by = $b | .rerun_at = $t | .reruns = ((.reruns // 0) + 1) | if $ab != "" then .rerun_authorised_by = $ab else . end' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
++  echo "fleet-check: re-running the gate for this tree at $lane's request (reason: $RERUN_REASON)${RERUN_AUTHORISED_BY:+ authorised by $RERUN_AUTHORISED_BY}. The prior verdict and this attribution are preserved at ${rec}.1, not replaced."
 +fi
  case $(state) in
    PASS) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
            # fleet-8pqa: a cached PASS is a verdict for the TREE it was produced against, so ask the artifact
-@@ -297,6 +329,21 @@
+@@ -297,17 +335,35 @@
            # record with no count prints UNRECORDED, and the count says 'recorded' because it counts what the
            # record was able to write, not every re-serve that ever happened.
            jq --arg l "$lane" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.reserves = ((.reserves // 0) + 1) | .reserved_by = ((.reserved_by // {}) | .[$l] = ((.[$l] // 0) + 1)) | .reserved_last = {lane:$l, at:$t}' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
-+          # agents-5q0w: name the attempt, and never present a re-run as a first-class pass. The attempt number is
-+          # DERIVED from the retention the rotation already provides (1 + the rotated siblings that exist), so no new
-+          # field is needed, and the attribution is read from <rec>.1 where it was written before the rotation.
++          # agents-5q0w: name the attempt, and never present a re-run as a first-class pass. N is DERIVED from the
++          # retention the rotation already gives (1 + the rotated siblings that exist), so no new field is needed, and
++          # the attribution is read from <rec>.1 where it was written before the rotation.
 +          attempt_n=$(( 1 + $(ls "$rec".[1-9] 2>/dev/null | wc -l) ))
 +          rerun_note=""
 +          if [ -f "${rec}.1" ]; then
@@ -68,13 +74,19 @@
            jq -r --arg cov "$cov_info" '"fleet-check: PASS (cached) for tree of \(.sha): ran by \(.lane) at \(.at) in \(.secs)s.\($cov) Log: \(.log) Re-serves recorded: " + (if .reserves == null then "UNRECORDED (no reserve count in this record: it was written before reserve attribution, or the record could not be updated)" else "\(.reserves) time(s) by \((.reserved_by // {}) | to_entries | map("\(.key)=\(.value)") | join(", ")), last by \(.reserved_last.lane) at \(.reserved_last.at)" end)' "$rec"; exit 0
            fi
          else
-@@ -306,7 +353,8 @@
+           echo "fleet-check: cached PASS was for a different command; re-running gate"
+         fi ;;
+   FAIL) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
++    if [ -n "${RERUN_REASON:-}" ]; then :; else
            # agents-dbit: recorded here too. A cached FAIL handed to a second lane is the same silent transfer of
            # one lane's evidence to another as a cached PASS.
            jq --arg l "$lane" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.reserves = ((.reserves // 0) + 1) | .reserved_by = ((.reserved_by // {}) | .[$l] = ((.[$l] // 0) + 1)) | .reserved_last = {lane:$l, at:$t}' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
 -          jq -r '"fleet-check: FAIL (cached, exit \(.rc)) for this exact tree: ran by \(.lane) at \(.at). Log: \(.log). Re-serves recorded: " + (if .reserves == null then "UNRECORDED (no reserve count in this record)" else "\(.reserves) time(s) by \((.reserved_by // {}) | to_entries | map("\(.key)=\(.value)") | join(", "))" end) + ". Re-running cannot change a deterministic failure: fix and commit. (Flaky? delete " + input_filename + " and re-run.)"' "$rec"; exit 1
+-        fi ;;
 +          if [ "$attempt_n" -gt 1 ]; then echo "fleet-check: attempt $attempt_n on this tree${rerun_note}"; fi
 +          jq -r '"fleet-check: FAIL (cached, exit \(.rc)) for this exact tree: ran by \(.lane) at \(.at). Log: \(.log). Re-serves recorded: " + (if .reserves == null then "UNRECORDED (no reserve count in this record)" else "\(.reserves) time(s) by \((.reserved_by // {}) | to_entries | map("\(.key)=\(.value)") | join(", "))" end) + ". Fix and commit, or, if you are claiming this was transient, re-run it deliberately with --rerun=\"why\" - that runs the gate once more and records your reason, your lane, and the prior verdict preserved at <record>.1. A re-run is not free and cannot change a real regression, so it is yours to justify. (A cached PASS needs none: delete " + input_filename + " and re-run.)"' "$rec"; exit 1
-         fi ;;
++fi
++fi ;;
    RUNNING) if kill -0 "$(jq -r .pid "$rec")" 2>/dev/null; then
               jq --arg l "$lane" '.waiters += [$l] | .waiters |= unique' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
+              echo "fleet-check: already running for this tree (started by $(jq -r .lane "$rec")); you'll get a [check] message when it finishes. End your turn."; exit 0
