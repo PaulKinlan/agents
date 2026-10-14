@@ -232,15 +232,22 @@ def _why_omitted(module, suite):
     )
 
 
-@functools.lru_cache(maxsize=None)
 def _tracked_test_files(root=None):
     """The tracked .py files under tests/ (agents-nder: from git's index, never a filesystem walk).
 
-    MEMOISED (agents-jn73): this is a pure function of the tree's INDEX, and the module asks it once per
-    lib module (21 times) plus once per caller of _oracle_importers, which measured as 42 git invocations
-    for one answer that cannot change during a run. A caller that ADDS a tracked file under tests/ must
-    clear it (see test_untracked_debris_is_not_absorbed_by_consumer_coverage), because the cache is keyed
-    on the argument and not on the index - the same condition _importing_suites is already cleared under.
+    NOT MEMOISED (agents-9891; agents-jn73's landed record states the asymmetry): this runs `git ls-files`, so
+    it reads the world's INDEX and memoising it was a BEHAVIOURAL change rather than only a cost change. It was
+    measured at ~0.04s of the 2.4s agents-jn73 bought (strip-only 8.72s vs both 8.68s, same tree, same machine,
+    back to back), which does not buy a cache whose safety rests on an argument instead of on purity.
+    _strip_code above stays memoised: it is pure, and it carried the whole win.
+
+    WHAT THIS DOES AND DOES NOT FIX, measured rather than assumed (and the distinction matters, because the
+    easy claim here is false): the ORACLE path (_oracle_importers, whose only cache was this one) is
+    index-live again - a mid-process `git add` is SEEN with no cache_clear, where on the jn73 bytes it was
+    MISSED. The MIRROR path is not: _importing_suites below is memoised in its own right (agents-y2b2, before
+    this bead) and caches the composed answer, which is why test_untracked_debris_is_not_absorbed_by_consumer_
+    coverage still clears it. So this removes a 0.04s cache whose correctness was conditional; it does not make
+    the module index-live.
     """
     root = root or ROOT
     out = subprocess.run(
@@ -400,7 +407,6 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
         probe.write_text("import unittest\nfrom lib import child_env\n", encoding="utf-8")
         try:
             _importing_suites.cache_clear()
-            _tracked_test_files.cache_clear()
             importers = _importing_suites("child_env")
             self.assertNotIn("tests/test_zz_debris_probe_tmp.py", importers)
             self.assertIn("tests/test_containment.py", importers)
@@ -412,7 +418,6 @@ class TestFastGateConsumerCoverage(unittest.TestCase):
         finally:
             probe.unlink(missing_ok=True)
             _importing_suites.cache_clear()
-            _tracked_test_files.cache_clear()
 
     def test_a_consumer_the_gate_does_not_select_must_be_allowlisted(self):
         failures = []
