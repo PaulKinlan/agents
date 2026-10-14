@@ -292,35 +292,61 @@ FAST_GATE_STAGE="mapping changed files"
 # not sourced: an invisible skip is the same defect in a quieter voice. A root with no work tree - the
 # synthetic fixture trees two suites build with copytree - has no index to ask, so there the filesystem IS
 # the whole tree and the glob stays, the same rule tests/__init__.py states for has_git_index.
+# Sets three globals from ONE listing of git's index (agents-es0y), and is called in the CALLER's shell:
+#   FAST_GATE_ARM_FRAGMENTS - the TRACKED fragments that exist under this ROOT, one per line
+#   FAST_GATE_ARM_TRACKED   - every TRACKED fragment path, whether or not it exists here (membership)
+#   FAST_GATE_IGNORED_ARMS  - *.sh in the directory git does not track, one per line
+# The caller must keep those lists: the ignored ones are REPEATED at the end of the gate, because the
+# loader runs long before any suite and a receipt shows only the tail - a warning emitted here is invisible
+# to exactly the lane it is for. stdout is not an option for it: stdout is the marker channel that
+# remote/check-coverage.py parses.
 fast_gate_arm_fragments() {
-  local _rel _rest _frag _stray _tracked=$'\n' _found=0
+  local _rel _rest _frag _stray
+  FAST_GATE_ARM_FRAGMENTS=""
+  FAST_GATE_ARM_TRACKED=$'\n'
+  FAST_GATE_IGNORED_ARMS=""
   if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     while IFS= read -r -d '' _rel; do
       _rest="${_rel#tools/fast-gate-arms.d/}"
       [ "$_rest" = "$_rel" ] && continue        # not under the arm registry
       case "$_rest" in */*) continue ;; esac     # a nested path is not a fragment
       case "$_rest" in *.sh) ;; *) continue ;; esac
-      _tracked="$_tracked$_rel"$'\n'
+      FAST_GATE_ARM_TRACKED="$FAST_GATE_ARM_TRACKED$_rel"$'\n'
       _frag="$ROOT/$_rel"
       [ -f "$_frag" ] || continue                # the index answered about ANOTHER tree
-      _found=$((_found + 1))
-      printf '%s\n' "$_frag"
+      FAST_GATE_ARM_FRAGMENTS="$FAST_GATE_ARM_FRAGMENTS$_frag"$'\n'
     done < <(git -C "$ROOT" ls-files -z -- 'tools/fast-gate-arms.d')
     # ONE read of the index, then pure-bash membership (agents-es0y, imp-dflt): a git process per stray
     # fragment on the gate's critical path is a cost the critical path should not pay.
     for _stray in "$ROOT"/tools/fast-gate-arms.d/*.sh; do
       [ -f "$_stray" ] || continue
       _rel="${_stray#"$ROOT"/}"
-      case "$_tracked" in *$'\n'"$_rel"$'\n'*) ;; *)
-        echo "fast-gate: WARNING: ignoring UNTRACKED arm fragment (not sourced): $_rel" >&2 ;;
+      case "$FAST_GATE_ARM_TRACKED" in *$'\n'"$_rel"$'\n'*) ;; *)
+        FAST_GATE_IGNORED_ARMS="$FAST_GATE_IGNORED_ARMS$_rel"$'\n' ;;
       esac
     done
-    [ "$_found" -gt 0 ] && return 0
+    if [ -n "$FAST_GATE_ARM_FRAGMENTS" ]; then
+      return 0
+    fi
     # The index named fragments and NOT ONE exists under this ROOT: the index answered about a different
     # tree - a copy of tools/ placed inside some other work tree. There is no index for THIS tree, so the
     # filesystem is the whole tree here, exactly as it is when there is no index at all.
   fi
-  printf '%s\n' "$ROOT"/tools/fast-gate-arms.d/*.sh
+  FAST_GATE_ARM_FRAGMENTS="$(printf '%s\n' "$ROOT"/tools/fast-gate-arms.d/*.sh)"
+  FAST_GATE_IGNORED_ARMS=""
+  return 0
+}
+
+# agents-es0y: ONE place for the notice, so every exit path a lane can actually read carries it - the dry
+# run prints it before it exits (a lane debugging why its new arm did not take effect reads that), and the
+# end of the gate repeats it where a receipt's tail will show it.
+fast_gate_report_ignored_arms() {
+  local _ignored_arm
+  : "${FAST_GATE_IGNORED_ARMS:=}"
+  while IFS= read -r _ignored_arm; do
+    [ -n "$_ignored_arm" ] || continue
+    echo "fast-gate: WARNING: ignoring UNTRACKED arm fragment (not sourced): $_ignored_arm" >&2
+  done <<< "$FAST_GATE_IGNORED_ARMS"
 }
 
 fast_gate_arms_load() {
@@ -328,6 +354,7 @@ fast_gate_arms_load() {
   local _before _new
   local _seen_stages=$'\n' _seen_patterns=$'\n'
   FAST_GATE_ARM_STAGES=""
+  fast_gate_arm_fragments
   while IFS= read -r _frag; do
     [ -f "$_frag" ] || continue
     _stage="${_frag#"$ROOT"/}"
@@ -369,7 +396,7 @@ fast_gate_arms_load() {
     # routinely contain parentheses (a rationale citing its bead). A comment read as a pattern would make
     # the duplicate guard fire on prose.
     done < <(sed -n '/# no arm in this fragment matched/!s/^    \([^ #)][^)]*\))\s*\(.*\)$/\1/p' "$_frag")
-  done < <(fast_gate_arm_fragments)
+  done <<< "$FAST_GATE_ARM_FRAGMENTS"
   case "$FAST_GATE_ARM_STAGES" in
     "") echo "fast-gate: FAIL: no arm stages were registered from tools/fast-gate-arms.d/" >&2; return 1 ;;
   esac
@@ -533,6 +560,7 @@ consumer_coverage="tests/test_fast_gate_consumer_coverage.py"
 if [ -z "$run" ] && [ -z "$mapped" ]; then
   if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
     FAST_GATE_TERMINATED=1
+    fast_gate_report_ignored_arms
     exit 0
   fi
   mapped="tests/test_factory_core.py"
@@ -547,6 +575,7 @@ fi
 # Dry-run support for testing mapping resolution without invoking unittest.
 if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
   FAST_GATE_TERMINATED=1
+  fast_gate_report_ignored_arms
   printf '%s\n' $files
   exit 0
 fi
@@ -604,6 +633,14 @@ else
 fi
 
 FAST_GATE_TERMINATED=1
+# agents-es0y: THE IGNORED FRAGMENTS ARE REPEATED HERE, WHERE THE RECEIPT'S TAIL WILL SHOW THEM. The loader
+# notices them thousands of lines earlier, and a lane reads a tail, so a warning emitted at load time is
+# invisible to exactly the lane it is for. Keep warn-and-ignore rather than fatal: not sourcing the fragment
+# already removes the execution path, so failing the gate would add no safety while turning a lane's
+# transient mid-write into a fleet-wide landing outage. stdout is deliberately not used - it is the marker
+# channel remote/check-coverage.py parses.
+fast_gate_report_ignored_arms
+
 if [ "$rc" -eq 0 ]; then
   passed_files="$(echo $files | tr '\n' ' ' | sed 's/ *$//')"
   echo "fast-gate: passed: $passed_files"
