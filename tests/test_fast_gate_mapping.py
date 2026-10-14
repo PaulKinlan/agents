@@ -1717,7 +1717,17 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
         """The structural half of agents-ywb5, because the duplicate-output signature above only fires for
         an UNMATCHED path. The shape itself is what matters: one loop over the delta, one loader call. Two
         `done <<< "$changed"` terminators is how the nested version announced itself."""
-        script = FAST_GATE.read_text(encoding="utf-8")
+        # agents-01e5: COUNT CODE, NOT PROSE. These three counts are structural pins on the gate's own
+        # source, and a raw text count cannot tell an invocation from a quotation of one - so a comment
+        # that explains or quotes the pinned call inflated the count and FAILED the pin for a change that
+        # kept the property. Driven before the fix: appending a prose line naming the call to
+        # tools/fast-gate.sh gave "2 != 1" with the invariant untouched, for all three strings below.
+        # PROSE IS FILTERED, CODE IS NOT: a genuine second invocation in code still counts twice, which the
+        # negative control pins. (Same reason and same shape as the registry scan further down.)
+        script = "\n".join(
+            line for line in FAST_GATE.read_text(encoding="utf-8").split("\n")
+            if not line.lstrip().startswith("#")
+        )
         self.assertEqual(script.count('done <<< "$changed"'), 1,
                          "exactly one loop may consume the changed-file list (agents-ywb5)")
         self.assertEqual(script.count("while IFS= read -r f; do"), 1,
