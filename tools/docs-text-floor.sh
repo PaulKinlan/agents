@@ -16,8 +16,12 @@
 # script the first time a page produced no result, before its own error branch could run (hence NO RESULT rather
 # than silence), and a placeholder substitution also matched the marker text it was printing. If an edit makes
 # every page print NO RESULT, suspect the injected JS first - that is the tool telling you it is broken.
-# Each verdict also reports counted=N, the number of text-bearing leaf elements it measured: a page whose
-# count is 0 is a NO RESULT rather than a pass, because a floor over nothing proves nothing.
+# Each verdict reports counted=N, the number of text-bearing leaf elements measured ON THAT PAGE, and the run
+# ends with FLOOR_SUMMARY pages=N verdicts=V below_total=B status=OK|INCOMPLETE. counted is PER PAGE and is
+# never a total, because a total can be read as coverage by someone who does not notice that a page produced
+# no verdict at all. A page with no usable verdict (payload did not run, no count reported, or counted=0) is
+# UNMEASURED: it fails the run and turns the status INCOMPLETE, so an incomplete sweep can never read as a
+# clean one - a count that is true but misleading is the same defect as no count.
 #
 # --inject-fifth-site is the CONTROL: it adds a synthetic label at 11px to a copy of one page, so the sweep has to
 # go red. A sweep that cannot fail proves nothing, and this flag is how you show it can.
@@ -83,7 +87,11 @@ for page in sorted(work.glob("*.html")):
     page.write_text(page.read_text().replace("</body>", payload + "</body>", 1))
 PY
 fail=0
+pages=0
+verdicts=0
+below_total=0
 for page in "$work"/*.html; do
+  pages=$((pages + 1))
   dom="$("$chrome" --headless=new --disable-gpu --no-sandbox --virtual-time-budget=4000 --dump-dom "file://$page" 2>/dev/null || true)"
   # Match the ELEMENT, not the script source that also contains the literal (the id prefix makes it unique),
   # and keep `set -e` from killing the script when a page produces no result at all.
@@ -102,6 +110,18 @@ for page in "$work"/*.html; do
       fail=1; continue;;
   esac
   echo "  $line"
+  verdicts=$((verdicts + 1))
+  below_total=$((below_total + $(printf '%s' "$line" | grep -o 'below=[0-9]*' | head -1 | cut -d= -f2)))
   case "$line" in *"below=0"*) ;; *) fail=1;; esac
 done
+# WHAT counted MEANS, stated where it is read. `counted` is PER PAGE - the number of text-bearing leaf elements
+# measured on that page - and it is never a total: a total can be read as coverage by a reader who never notices
+# that a page produced no verdict at all. So the run ends with how many pages there were, how many produced a
+# usable verdict, and a STATUS that says INCOMPLETE the moment they differ. A page with no verdict (payload did
+# not run, no count reported, counted=0) fails the run and makes every count in it unusable as coverage
+# (coord, agents-ssyq rework: a count that is TRUE but misleading is the same defect as no count).
+status=OK
+[ "$verdicts" -eq "$pages" ] || status=INCOMPLETE
+echo "FLOOR_SUMMARY pages=$pages verdicts=$verdicts below_total=$below_total status=$status"
+[ "$status" = OK ] || fail=1
 exit $fail

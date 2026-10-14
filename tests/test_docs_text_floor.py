@@ -162,6 +162,43 @@ class TestAVerdictMustSayWhatItLookedAt(DocsTextFloorBase):
             self.assertIn("counted=", line)
 
 
+class TestTheSummarySaysWhetherTheSweepWasComplete(DocsTextFloorBase):
+    """coord, on the count contract: a count that is TRUE but misleading is the same defect as no count. `counted`
+    is per page, and a reader who sees a large count must not be able to read it as coverage of pages that produced
+    no verdict at all - so the run ends with pages, verdicts and a status."""
+
+    def test_the_summary_reports_pages_verdicts_and_status(self):
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"FLOOR_SUMMARY pages={len(PAGES)} verdicts={len(PAGES)} below_total=0 status=OK", done.stdout)
+
+    def test_a_page_without_a_verdict_makes_the_run_incomplete(self):
+        """One page reports no count, so the counts of the other five must not be readable as coverage of six."""
+        (self.docs / "index.html").write_text(
+            "<!doctype html><body><!-- NO_COUNT_FIELD --><p>text</p></body>\n", encoding="utf-8")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f"pages={len(PAGES)} verdicts={len(PAGES) - 1}", done.stdout)
+        self.assertIn("status=INCOMPLETE", done.stdout)
+
+    def test_a_page_that_counted_nothing_also_makes_it_incomplete(self):
+        (self.docs / "stations.html").write_text(
+            "<!doctype html><body><!-- ZERO_COUNT --><p>text</p></body>\n", encoding="utf-8")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("status=INCOMPLETE", done.stdout)
+
+    def test_the_summary_below_total_adds_up_the_per_page_verdicts(self):
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("below_total=0", done.stdout)
+        for page in self.docs.glob("*.html"):
+            page.write_text("<!doctype html><body><p class='__fifth_site'>x</p></body>\n", encoding="utf-8")
+        red = self.run_tool()
+        self.assertIn(f"below_total={len(PAGES)}", red.stdout, "each page's below-count must reach the summary")
+        self.assertEqual(red.returncode, 1)
+
+
 class TestTheSweepReadsTheDocsItResolved(DocsTextFloorBase):
 
     def test_the_default_docs_dir_is_resolved_from_the_tools_own_location(self):

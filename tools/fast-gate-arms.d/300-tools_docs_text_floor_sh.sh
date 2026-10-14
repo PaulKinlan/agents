@@ -16,7 +16,7 @@ fast_gate_arms_300_tools_docs_text_floor_sh() {
       # with a stub chrome on PATH, so the fast gate never launches a browser: the real measurements (before: index
       # 5, lines 4, stations 113, use/help/install 1; after: every page below=0; control: below=1 with
       # p.__fifth_site=11.00px) were taken against real Chrome and are recorded with the change.
-      # Cost, measured: 1.7s for the 16 tests (no browser is started; the stub is what makes it that cheap).
+      # Cost, measured: 2.2s for the 20 tests (no browser is started; the stub is what makes it that cheap).
       mapped="$mapped tests/test_docs_text_floor.py"
       ;;
     *) return 1 ;;   # no arm in this fragment matched: the NEXT fragment gets its turn
