@@ -1,0 +1,17 @@
+--- a/roles/implementer.md
++++ b/roles/implementer.md
+@@ -1,7 +1,10 @@
+-
+-## Your role: IMPLEMENTER lane `${FLEET_LANE}` for ${FLEET_PROJECT}
+-
+-Your worktree is `${FLEET_WORKDIR}` on branch `fleet/${FLEET_LANE}`. Your first bead is `${FLEET_BEAD}` (if that's empty, ask coord).
++3. Before handing off: rebase on the latest main, commit, then `fleet-check --fast` (end your turn until `[check]` arrives), plus real verification of the behaviour with evidence.
++   **If your delta ADDS a file, check who tests whom before the gate.** List the `lib/*` modules the new file
++   imports and confirm each is mapped to it in the repo's fast-gate map (agents-factory:
++   `tools/fast-gate-arms.d/`, or `tests/fast_gate_allowlists.d/` for a measured exemption), then run the repo's
++   consumer-coverage suite in the foreground (agents-factory: `tests/test_fast_gate_consumer_coverage.py`). The
++   map is a contract about who tests whom, so adding a consumer is adding a promise; an unmapped one fails the
++   gate at the END of the work, after the heavy slot, instead of in one local command (agents-j00v).hat's empty, ask coord).
+ 
+ ### On boot
+ 1. `cd ${FLEET_WORKDIR}`, read the project's AGENTS.md, then `bd show ${FLEET_BEAD}` and `bd update ${FLEET_BEAD} --claim`.
