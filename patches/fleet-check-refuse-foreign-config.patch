@@ -1,0 +1,69 @@
+diff --git a/bin/fleet-check b/bin/fleet-check
+index 6c72b58..9e8326a 100755
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -211,6 +211,64 @@ if [ -z "$CHECK_CMD" ]; then
+     CHECK_CMD="npm test"; jq -e '.scripts.build' "$top/package.json" >/dev/null 2>&1 && CHECK_CMD="npm run build && npm test"
+   else echo "fleet-check: no CHECK_CMD in ~/.fleet/check.conf and nothing to auto-detect; ask coord to set it" >&2; exit 2; fi
+ fi
++# ---------------------------------------------------------------------------
++# agents-0r1c: REFUSE A GATE COMMAND THAT CANNOT RUN IN THE REPO BEING GATED.
++#
++# ORDERING WARNING - READ BEFORE APPLYING. This patch is the shared-reader half of agents-0r1c and
++# it is LOAD-BEARING, but DO NOT APPLY IT until the host's ~/.fleet/check.conf has been repaired.
++# On any host whose machine-global config was written by an --install from ONE repo, that file names
++# paths that exist only in that repo, and this guard refuses exactly such a command: applied first,
++# it turns every gate on that host into a refusal. Repair the host file first (give each repo its own
++# repo-local config and point its gate at it with FLEET_CHECK_CONF, or re-install the host-wide file
++# from the repo that is actually meant to own the host's gate), then apply this. The refusal is
++# deliberate and is what makes the next install loud rather than silent - the point is to stop the
++# config being WRITTEN silently, and by then the wrong file must not already be in service.
++#
++# WHY THIS EXISTS. agents-0utp fixed the WRITER (a bare --install no longer rewrites the
++# machine-global file) and agents-p8lh made the repairs it prints truthful, but a config ALREADY
++# installed by another repo keeps being read - and this file is the reader that reads it. The live
++# ~/.fleet/check.conf carries `bash tools/fast-gate.sh` and a suite command needing tools/ and
++# tests/, which exist only in the repo that installed it, so a gate in any other repo died with
++# EXIT 127: a message about a MISSING TOOL when the truth is a FOREIGN CONFIG.
++#
++# THE TEST IS "CANNOT EXIST HERE", NOT "CAME FROM ELSEWHERE": a config whose named paths all resolve
++# in $top is legitimate even when its '# Project:' stamp names another directory, because a worktree
++# of the same project is exactly that - refusing on identity alone would turn every worktree gate red
++# for an innocent branch. The stamp is used for ATTRIBUTION in the message, and an unstamped config
++# is refused without inventing a culprit. Token extraction is deliberately conservative (slashed
++# tokens, not starting with / $ or - and never a URL, plus the -s/-t values unittest discovery uses),
++# because a FALSE REFUSAL is worse than the defect it prevents.
++if [ -n "${CHECK_CMD:-}" ] && [ -n "${top:-}" ] && [ -r "$CHECK_CONF" ]; then
++  _fc_missing=""
++  _fc_tokens="$(
++    {
++      printf '%s\n' "$CHECK_CMD" | tr ' \t\n' '\n\n\n' | sed -E 's/^[-]+//' | grep -E '^[A-Za-z0-9_][A-Za-z0-9_.@-]*(/[A-Za-z0-9_.@-]+)+$' | grep -vE '://' || true
++      printf '%s\n' "$CHECK_CMD" | awk '{ for (i = 1; i < NF; i++) if ($i == "-s" || $i == "-t") print $(i + 1) }' \
++        | sed -E 's/^["'"'"']//; s/["'"'"']$//' | grep -E '^[A-Za-z0-9_][A-Za-z0-9_.@-]*(/[A-Za-z0-9_.@-]+)*$' || true
++    } | sort -u
++  )"
++  for _fc_tok in $_fc_tokens; do
++    [ "$_fc_tok" = "." ] && continue                       # `.` is the repo itself: it always exists here
++    [ -e "$top/$_fc_tok" ] || _fc_missing="${_fc_missing}${_fc_missing:+, }$_fc_tok"
++  done
++  if [ -n "$_fc_missing" ]; then
++    _fc_kind="the gate"; [ -n "${FAST:-}" ] && _fc_kind="the fast gate"
++    _fc_who="$(grep -m1 -E '^# Project: ' "$CHECK_CONF" 2>/dev/null | sed -E 's/^# Project: //' || true)"
++    if [ -n "$_fc_who" ]; then
++      _fc_attrib="was installed by $_fc_who and"
++    else
++      _fc_attrib="carries no 'Project:' stamp and"
++    fi
++    {
++      echo "fleet-check: REFUSING $_fc_kind for $top: $CHECK_CONF $_fc_attrib names [$_fc_missing], which does not exist in $top."
++      echo "fleet-check:   That command cannot run here - it fails with EXIT 127, which reads as a missing tool when the truth is a config naming paths from another repo."
++      echo "fleet-check:   No verdict was recorded for this tree, so this refusal cannot be mistaken for a result."
++      echo "fleet-check:   repair: give THIS repo its own config and point the gate at it - run the installer in $top, then set FLEET_CHECK_CONF to the file it wrote; or, if this repo is meant to own the host-wide config, re-install it with --install --global from the repo that is meant to own it."
++    } >&2
++    exit 2
++  fi
++fi
++
+ # ONLY THE MERGER RUNS THE FULL GATE (Paul, 2026-10-11: "the merger lanes being way too slow and way
+ # too aggressive on the number of reviews and tests"). Measured the same day across the fleet: 915 of 1781
+ # full-gate runs came from lanes that are NOT the merger - 54 of the fleet's 110 hours of gate time - and
