@@ -1653,6 +1653,47 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
                          "pattern or name it in DEAD_ARM_EXCEPTIONS with its reason")
 
 
+    def test_the_filesystem_fallback_announces_itself_and_stays_non_fatal(self):
+        """agents-wzmj: with no index to ask, the loader reads the FILESYSTEM - and in that state every
+        *.sh in the registry is sourced, so an UNTRACKED fragment is executed and the run otherwise looks
+        exactly like a protected one. It has to be able to say so.
+
+        Non-fatal is part of the contract rather than a convenience: two suites run the real gate from
+        exactly this kind of copy and depend on a probe fragment being sourced, so a refusal here would
+        break them rather than add safety."""
+        res = self._run_gate_in_copy("tests/test_retention.py")
+        self.assertEqual(res.returncode, 0, f"the fallback is a notice, never a refusal: {res.stderr}")
+        self.assertIn("WARNING (agents-wzmj)", res.stderr)
+        self.assertIn("this tree is not a git working tree", res.stderr,
+                      "the notice names WHICH fallback state engaged - no index here, versus an index that "
+                      "names fragments this tree does not have")
+        self.assertIn("WILL be sourced", res.stderr)
+        self.assertNotIn("agents-wzmj", res.stdout,
+                         "the notice must not touch stdout: it is the marker channel "
+                         "remote/check-coverage.py parses")
+
+    def test_a_normal_tracked_run_says_nothing_about_the_fallback(self):
+        """The other direction, and what makes the first a measurement rather than a decoration: a notice
+        that always prints is as uninformative as one that never prints."""
+        env = os.environ.copy()
+        env["GIT_CHANGED"] = "tests/test_retention.py"
+        env["FAST_GATE_DRY_RUN"] = "1"
+        res = subprocess.run(["bash", str(FAST_GATE)], cwd=str(ROOT), env=env,
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotIn("agents-wzmj", res.stderr)
+        self.assertNotIn("WILL be sourced", res.stderr)
+
+    def test_the_fallback_warns_while_it_still_resolves(self):
+        """The notice must not stand in for resolution: a mode that resolved NOTHING also prints a
+        distinctive line, so what is pinned is the pairing - the warning AND the suite the probe arm maps.
+        Without this, a fallback that warned and then resolved nothing would satisfy the test above."""
+        res = self._run_gate_in_copy("the-new-module.py",
+                                     self._probe("the-new-module.py", "tests/test_the_new_module.py"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("WARNING (agents-wzmj)", res.stderr)
+        self.assertIn("tests/test_the_new_module.py", res.stdout.split())
+
 class TestTheArmRegistryReaderIgnoresUntrackedFragments(unittest.TestCase):
     """agents-ncue: the arm registry reader must enumerate what the gate TRACKS, not what is on disk.
 
@@ -1683,7 +1724,6 @@ class TestTheArmRegistryReaderIgnoresUntrackedFragments(unittest.TestCase):
                 "an untracked fragment must not be enumerated: tools/fast-gate.sh SOURCES every *.sh it "
                 "finds (agents-es0y), so a reader that names one names code the gate would execute",
             )
-
 
 if __name__ == "__main__":
     unittest.main()

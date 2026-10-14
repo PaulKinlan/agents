@@ -305,6 +305,7 @@ fast_gate_arm_fragments() {
   FAST_GATE_ARM_FRAGMENTS=""
   FAST_GATE_ARM_TRACKED=$'\n'
   FAST_GATE_IGNORED_ARMS=""
+  FAST_GATE_ARMS_FALLBACK=""
   if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     while IFS= read -r -d '' _rel; do
       _rest="${_rel#tools/fast-gate-arms.d/}"
@@ -331,6 +332,15 @@ fast_gate_arm_fragments() {
     # The index named fragments and NOT ONE exists under this ROOT: the index answered about a different
     # tree - a copy of tools/ placed inside some other work tree. There is no index for THIS tree, so the
     # filesystem is the whole tree here, exactly as it is when there is no index at all.
+    #
+    # agents-wzmj: this is the state a STAGED DELETION OR RENAME of the registry reaches INSIDE A REAL
+    # WORK TREE, where the glob below then sources whatever *.sh is on disk. The two fallback states are
+    # distinguished so the notice can name which one engaged, which is the difference between 'untracked
+    # input was reachable here' and 'no index was available to ask'.
+    FAST_GATE_ARMS_FALLBACK="the index names arm fragments but none exist under this root"
+  else
+    # agents-wzmj: no work tree at all - the synthetic fixture trees two suites build with copytree.
+    FAST_GATE_ARMS_FALLBACK="this tree is not a git working tree"
   fi
   FAST_GATE_ARM_FRAGMENTS="$(printf '%s\n' "$ROOT"/tools/fast-gate-arms.d/*.sh)"
   FAST_GATE_IGNORED_ARMS=""
@@ -340,8 +350,15 @@ fast_gate_arm_fragments() {
 # agents-es0y: ONE place for the notice, so every exit path a lane can actually read carries it - the dry
 # run prints it before it exits (a lane debugging why its new arm did not take effect reads that), and the
 # end of the gate repeats it where a receipt's tail will show it.
+# agents-wzmj: the FILESYSTEM fallback is a notice on the same footing, not a second reporting
+# convention. It matters because in that state every *.sh in the registry is sourced, so an UNTRACKED
+# fragment is executed and the run otherwise looks exactly like a protected one. stderr only, for the
+# reason the loader states: stdout is the marker channel remote/check-coverage.py parses.
 fast_gate_report_ignored_arms() {
   local _ignored_arm
+  if [ -n "${FAST_GATE_ARMS_FALLBACK:-}" ]; then
+    echo "fast-gate: WARNING (agents-wzmj): arm fragments are read from the FILESYSTEM ($FAST_GATE_ARMS_FALLBACK), so UNTRACKED fragments in tools/fast-gate-arms.d/ WILL be sourced" >&2
+  fi
   : "${FAST_GATE_IGNORED_ARMS:=}"
   while IFS= read -r _ignored_arm; do
     [ -n "$_ignored_arm" ] || continue
