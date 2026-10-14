@@ -127,6 +127,13 @@ shows the same shape at scale: 13 entries for a 10-module run.
 
 ## What this does not cover
 
+- **One reader's NUMBERS change, deliberately, and it is not a clearance reader:** `bin/fleet-budget:209` drops any
+  record whose state is not `PASS`/`FAIL`, so an unsettled run used to be excluded from the gate-cost and
+  failure accounting entirely. It now enters with its real outcome and its real duration. That is the record being
+  honest about a run that happened; the alternative (dropping it) was never a claim, just an omission.
+- **Two readers are deliberately left alone:** `bin/fleet-budget`'s per-record projection (:85) and the architect's
+  cost command in `roles/architect.md:32` render `state` as context for a budget/cost question, not as clearance,
+  so the outcome word is the fact they want. Neither decides anything on it.
 - **The `.settled` dispatch is not exhaustive.** `fleet-check` and `fleet-land-message` are the consumers this
   patch knows about; a consumer outside `PaulKinlan/fleet` that reads a check record's `.state` and treats `PASS`
   as clearance would need the same one-line condition. Nothing in this repo reads a gate record's state.
@@ -137,3 +144,6 @@ shows the same shape at scale: 13 entries for a 10-module run.
   `.error`). That is deliberate: it is the one meaning the word keeps.
 - **The wake's 7-character sha is still 7 characters.** The wake now carries BOTH identities — the short sha as the
   human tip name and the tree as the label the cache keys on — rather than replacing one with the other.
+- **`tests/fleet-gate-check.test.sh` has pre-existing failures** on this VM (13a-13d, "unverifiable id inside a repo
+  is REFUSED", and 15b6), and they fail identically against a pristine copy and against this patch, which is how
+  they were attributed rather than assumed to be mine.
