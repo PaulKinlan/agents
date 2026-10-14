@@ -17,6 +17,7 @@ Validates:
 
 import ast
 import fnmatch
+import json
 import os
 import re
 import shutil
@@ -1431,6 +1432,84 @@ class TestReplacedGenericArmsKeepTheirNamesake(unittest.TestCase):
                     f"{path}: the arm no longer selects {missing} - a replaced arm must keep the "
                     "namesake and every consumer it was added for (agents-iqyz)",
                 )
+
+class TestArmSourceSignal(unittest.TestCase):
+    """fleet-6sgf: the gate reports which arm source it used, in the one machine-readable form a receipt can
+    carry, so fleet-check can stop claiming the same thing about untracked files in both states.
+
+    WHY THIS EXISTS: agents-6sgf found bin/fleet-check setting a STATIC .witnessed with every terminal state.
+    In the filesystem fallback every *.sh in the registry is sourced, so UNTRACKED arm files are read - and a
+    receipt said "NOT witnessed: untracked files" anyway. The consumer half cannot tell the states apart from
+    a log, so the producer half names the state here. Two properties matter beyond the happy path, and both are
+    regression tests for real bugs: a caller that names no destination must get NO FILE (a human run stays
+    silent), and a destination that cannot be written must cost the gate NOTHING - my first draft failed that
+    second one, because this script runs under set -e and a plain failing python call aborted the gate.
+    """
+
+    @staticmethod
+    def _checkout(tmp: Path, *, git: bool) -> Path:
+        """A copy of the real gate plus its registry. With git=True the registry is committed, which is the
+        state in which the loader reads arms from the INDEX; without it the loader must take its filesystem
+        fallback. Built fresh in every test so nothing here depends on the machine's own checkout."""
+        (tmp / "tools").mkdir(parents=True)
+        shutil.copy2(FAST_GATE, tmp / "tools" / "fast-gate.sh")
+        shutil.copytree(ARMS_DIR, tmp / "tools" / "fast-gate-arms.d")
+        if git:
+            for args in (["git", "init", "-q"], ["git", "add", "tools"],
+                         ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "registry"]):
+                subprocess.run(args, cwd=tmp, check=True, capture_output=True)
+        return tmp
+
+    def _run(self, tmp: Path, *, git: bool, signal: str | None) -> subprocess.CompletedProcess:
+        self._checkout(tmp, git=git)
+        env = os.environ.copy()
+        env["GIT_CHANGED"] = "tools/fast-gate.sh"
+        env["FAST_GATE_DRY_RUN"] = "1"
+        if signal is None:
+            env.pop("FLEET_GATE_SIGNAL_FILE", None)
+        else:
+            env["FLEET_GATE_SIGNAL_FILE"] = signal
+        return subprocess.run(["bash", str(tmp / "tools" / "fast-gate.sh")], cwd=str(tmp), env=env,
+                              capture_output=True, text=True)
+
+    @staticmethod
+    def _signal(tmp: Path) -> dict:
+        return json.loads((tmp / "signal.json").read_text(encoding="utf-8"))
+
+    def test_reports_the_index_when_the_arms_come_from_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            result = self._run(tmp, git=True, signal=str(tmp / "signal.json"))
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual({"schema": "fleet-gate-signal/1", "arms_source": "index", "arms_reason": ""},
+                             self._signal(tmp))
+
+    def test_reports_the_filesystem_fallback_so_untracked_arms_are_not_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            result = self._run(tmp, git=False, signal=str(tmp / "signal.json"))
+            self.assertEqual(0, result.returncode, result.stderr)
+            signal = self._signal(tmp)
+            self.assertEqual("fleet-gate-signal/1", signal["schema"])
+            self.assertEqual("fallback", signal["arms_source"])
+            self.assertIn("not a git working tree", signal["arms_reason"])
+
+    def test_names_nothing_when_the_caller_names_no_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            result = self._run(tmp, git=False, signal=None)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse((tmp / "signal.json").exists(),
+                             "the gate wrote a signal nobody asked for; a human run must stay silent")
+
+    def test_an_unwritable_destination_costs_the_gate_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            result = self._run(tmp, git=False, signal="/nonexistent-dir-6sgf/signal.json")
+            self.assertEqual(0, result.returncode,
+                             "a signal that cannot be written must never fail the gate (set -e trap)")
+            self.assertFalse((tmp / "signal.json").exists())
+
 
 class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
     """agents-hr6q (ADR 0002 sections 2 and 4): the arm table is tools/fast-gate-arms.d/, one fragment per
