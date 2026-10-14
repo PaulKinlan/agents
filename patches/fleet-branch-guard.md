@@ -51,7 +51,10 @@ those name different beads.`, with the full paths and the one-line repair beneat
 - The install block DRIVEN, not described: it creates the `pre-commit`, the installed hook then refuses a real
   commit, and a second install adds no duplicate block.
 - `patch -p1 --fuzz=0` CLEAN against the live hub files, byte-identical after apply. Preimages:
-  `remote/provision.sh` SHA256 `a98afcd129b0aa5b`; the guard and the fixture are new.
+  `remote/provision.sh` SHA256 `a98afcd129b0aa5b`, md5 `1f36acf716a0`, git blob `5ff6660045a0` - three digests of the same
+  bytes, so an md5 or a blob SHA1 does not "fail to match" a SHA256: compare like with like. (Reconciled against the
+  deployed hub file, 2026-10-14: all three agree, and the operative check remains the clean `--fuzz=0` apply above, which
+  a digest cannot substitute for.) The guard and the fixture are new.
 
 ### What it does NOT do
 
