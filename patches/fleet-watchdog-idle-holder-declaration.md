@@ -136,7 +136,7 @@ the context of a lane that is idle BY INSTRUCTION ... is churn with nothing to g
 is idle by declaration).
 
 **One second line, in the same block, because the first is incomplete without it.** The escalation's cleanup at
-`:394` deleted `state.alerts[\`idlehold:${k}\`]`, i.e. the key `idlehold:<vm>|<vm>-<lane>` - while `alert()` at
+`:394` deleted `state.alerts[`idlehold:${k}`]`, i.e. the key `idlehold:<vm>|<vm>-<lane>` - while `alert()` at
 `:387` writes the escalation under `idlehold:<vm>:<vm>-<lane>` (the colon form every other alert key uses). The
 clear therefore never matched the alert it was clearing, so an escalation about an idle holder could outlive the
 condition. Measured in the red run (below): after the lane had excused every bead it held, `state.alerts` still
