@@ -1,0 +1,220 @@
+diff --git a/roles/reviewer.md b/roles/reviewer.md
+--- a/roles/reviewer.md
++++ b/roles/reviewer.md
+@@ -81,7 +81,7 @@
+ Every verdict MUST explicitly name the reviewed commit SHA in `Delta: <mb>..<tip>` or `@<tip>`. An unpinned verdict is rejected by the merger; naming the tip prevents clearance floating across diverging commits (fleet-nick).
+ 
+ `PASS` = no finding at P1/P2. `PASS-with-notes` = only P3s, or a caveat that does not change behaviour.
+-On a passing verdict (`PASS` or `PASS-with-notes`), remove any existing `cleared:*` and `review-failed` labels first to prevent accumulating conflicting pins or stale rejection state, then add labels `reviewed` and `cleared:<tip-short>` to the bead (`for cl in $(bd show <bead> --json | jq -r '.[0].labels // [] | .[]' | grep -E '^(cleared:|review-failed$)'); do bd update <bead> --remove-label "$cl"; done && bd update <bead> --add-label reviewed --add-label cleared:<tip-short>`). This records the exact cleared commit SHA on the bead so clearance is readable from the board and independent of mutable branch refs (fleet-60zh).
++On a passing verdict (`PASS` or `PASS-with-notes`), remove any existing `cleared:*` and `review-failed` labels first to prevent accumulating conflicting pins or stale rejection state, then add labels `reviewed` and `cleared:<tip-short>` to the bead (`for cl in $(bd show <bead> --json | jq -r '.[0].labels // [] | .[]' | grep -E '^(cleared:|review-failed$)'); do bd update <bead> --remove-label "$cl"; done && bd update <bead> --add-label reviewed --add-label cleared:<tip-short>`). This records the exact cleared commit SHA on the bead so clearance is readable from the board and independent of mutable branch refs (fleet-60zh). **Use `bash ~/fleet/bin/fleet-clear <bead> <lane> <tip-short>` for this step** (agents-ayqi): it performs exactly this label write and REFUSES it - non-zero, no labels written - when the reviewer lane's *effective* family is the author's family, or when that family cannot be established at all (no `IMPL_MODEL`, or no readable turn record). A verdict is free text and names no model, so this is the only place the cross-family rule can be checked against what actually ran: an unestablished family is a BLOCKED clearance, not a satisfied one.
+ `FAIL` = at least one P1/P2, or the claimed behaviour does not reproduce. On FAIL, do NOT add clearance; remove any stale `cleared:*` label (`for cl in $(bd show <bead> --json | jq -r '.[0].labels // [] | .[]' | grep -E '^cleared:'); do bd update <bead> --remove-label "$cl"; done`), add labels `reviewed` and `review-failed` (`bd update <bead> --add-label reviewed --add-label review-failed --remove-label merge-queue`), and hand back to the author.
+ 
+ *Extractor format note (fleet-15b5):* A format that happens to satisfy a parser is not the same as a format the parser defines. The vocabulary is defined ONCE, in `bin/fleet-verdict-words.sh`, and read from there by both `bin/fleet-land-message` and `remote/review-cadence.sh` (fleet-fudl: the same word list written out in three components is what made `HOLDS` and `APPROVE` invisible to one tool while another accepted them). Both parsers accept:
+diff --git a/bin/fleet-clear b/bin/fleet-clear
+new file mode 100755
+--- /dev/null
++++ b/bin/fleet-clear
+@@ -0,0 +1,94 @@
++#!/usr/bin/env bash
++# fleet-clear - the CLEARANCE surface, with the reviewer-family check the record cannot make (agents-ayqi).
++#
++# WHY THIS EXISTS. A verdict is FREE TEXT: roles/reviewer.md:84 has the reviewer write `cleared:<tip-short>` with
++# bd, and bin/fleet-verdict-words.sh parses the VERDICT token out of that prose. Nothing in that record names the
++# model that RAN, so same-family protection keyed on the verdict's own text is nominal by construction. Measured
++# on 2026-10-14: three reviewer rounds were drawn into their author's family and were caught ONLY because the lane
++# volunteered $PI_MODEL - i.e. the cross-family rule was enforced by HONESTY rather than by the record. This turns
++# that compensating control into something the tooling does: it derives the reviewer's EFFECTIVE models from the
++# lane's own runtime records (via bin/fleet-model-audit, fleet-r3j4, which checks EVERY recorded turn) and REFUSES
++# - non-zero, no labels written - when the family is the author's family, or when it cannot be established at all.
++#
++# AN UNESTABLISHED FAMILY IS A BLOCKED CLEARANCE, NOT A SATISFIED ONE (coord, agents-ayqi). Every path that cannot
++# PROVE a cross-family reviewer refuses; the tool never defaults to clearing.
++#
++# The family is the provider prefix, the same definition the spawn-time guard uses (remote/pick-model.sh
++# takes ${FLEET_IMPL_MODEL%%/*}), so the two guards cannot disagree about what "family" means.
++#
++# USAGE: fleet-clear <bead> <lane> <tip-short>
++#   <lane> is the REVIEWER lane; the author's model is read from its conf's IMPL_MODEL, written at spawn.
++set -uo pipefail
++
++AUDIT=${FLEET_MODEL_AUDIT:-$HOME/fleet/bin/fleet-model-audit}
++BD=${FLEET_BD:-bd}
++
++refuse() { printf 'fleet-clear: REFUSED - %s\n' "$1" >&2; exit "${2:-1}"; }
++family() { printf '%s' "${1%%/*}"; }
++
++bead=${1:-}; lane=${2:-}; tip=${3:-}
++[ -n "$bead" ] && [ -n "$lane" ] && [ -n "$tip" ] \
++  || refuse "usage: fleet-clear <bead> <lane> <tip-short>" 2
++
++LD=${FLEET_LANES_DIR:-$HOME/.fleet/lanes}
++conf="$LD/$lane.conf"
++[ -f "$conf" ] || refuse "no conf for lane '$lane' ($conf), so the author's family cannot be established" 3
++
++# IMPL_MODEL is written by lanes.sh spawn with printf %q, so a plain model id is unquoted and a quoted one keeps
++# its quotes. Read both spellings rather than assuming, and never normalise a value that is not a plain id.
++impl=$(sed -n 's/^IMPL_MODEL=//p' "$conf" | head -1)
++case $impl in
++  \"*\") impl=${impl#\"}; impl=${impl%\"} ;;
++  \'*\') impl=${impl#\'}; impl=${impl%\'} ;;
++esac
++[ -n "$impl" ] || refuse "lane '$lane' records no IMPL_MODEL, so the family to exclude is UNKNOWN - an unestablished family is not a satisfied one" 3
++impl_fam=$(family "$impl")
++
++# ASK WITH A SENTINEL, NOT WITH THE AUTHOR'S MODEL (agents-b1ld, MEASURED). The auditor names only the turns
++# that did NOT match the asked model, and it prints them ALL ON ONE LINE. Two consequences bit this tool in a
++# live review: (1) a lane that ran a same-family turn AND a cross-family turn had the same-family turn dropped
++# by a greedy '.*', so it CLEARED; (2) a turn that ran the author's EXACT model is a MATCH and is not named at
++# all, so 'the reviewer ran the author's own model for one turn' was invisible and also CLEARED. Asking with a
++# model no lane ran makes EVERY recorded turn a mismatch, so every effective model is named and the family
++# comparison below runs over the COMPLETE set rather than over whatever the author-relative ask surfaced.
++sentinel="fleet-clear/sentinel"
++out=$("$AUDIT" lane "$lane" --asked "$sentinel" 2>&1); rc=$?
++
++# ANY UNKNOWN IN THE OUTPUT REFUSES, WHATEVER THE EXIT CODE (measured defect, agents-ayqi): a record with a blank
++# line among its turns makes the audit report UNKNOWN *and* a MISMATCH for the turns it could read, and its exit
++# code is then 1 - so an rc-only consumer would read "some other model ran" and CLEAR on a record the audit had
++# just said it could not read in full. That is the unestablished-treated-as-satisfied failure this tool exists to
++# prevent, so the check is on the OUTPUT, line-anchored, not on the code's precedence.
++if printf '%s\n' "$out" | grep -q '^UNKNOWN'; then
++  refuse "the lane's model record is not fully readable ($(printf '%s' "$out" | grep '^UNKNOWN' | head -1)), so its family is not established" 3
++fi
++
++if [ "$rc" = 0 ]; then
++  refuse "the audit matched $sentinel against a turn record, which cannot legitimately happen: the lane's records are not what this check assumes" 3
++fi
++
++if [ "$rc" = 1 ]; then
++  # Some turn ran another model. Compare FAMILIES, not ids: a fallback WITHIN a cross-family direction (asked
++  # antigravity/..., ran antigravity/...) is legitimate and must not be refused on the id alone.
++  named=$(printf '%s\n' "$out" | grep -o 'ran a turn on [^,]*, which is not' | sed 's/^ran a turn on //; s/, which is not$//')
++  [ -n "$named" ] || refuse "the audit reported a mismatch but named no model ('$out'), so the effective family is not established" 3
++  same=$(printf '%s\n' "$named" | while IFS= read -r m; do [ -n "$m" ] && [ "$(family "$m")" = "$impl_fam" ] && printf '%s\n' "$m"; done)
++  if [ -n "$same" ]; then
++    refuse "the reviewer ran $(printf '%s' "$same" | tr '\n' ' ')(family $impl_fam, the author's), among $(printf '%s' "$named" | tr '\n' ' ') - ANY same-family turn makes the verdict not independent" 1
++  fi
++  printf 'fleet-clear: %s reviewer family(ies): %s; author %s (%s)\n' \
++    "$lane" "$(printf '%s\n' "$named" | while IFS= read -r m; do [ -n "$m" ] && family "$m"; done | sort -u | tr '\n' ',' | sed 's/,$//')" "$impl_fam" "$impl"
++else
++  # rc 3 (UNKNOWN), 2 (usage), or anything else: the effective model was not established - a missing, empty or
++  # unreadable turn record, a blank line among records, a duplicate key, a value that differs only in case. Refuse.
++  refuse "the effective model is not established, so the reviewer's family cannot be checked against $impl_fam: $out" 3
++fi
++
++# Only reached when the family check PASSED. The label write is the one in roles/reviewer.md:84, unchanged: strip
++# any earlier pin or stale rejection first, then record the reviewed tip. Fail closed if bd cannot do it.
++old=$("$BD" show "$bead" --json 2>/dev/null | grep -oE '"(cleared:[^"]*|review-failed)"' | tr -d '"' | sort -u) || old=""
++for cl in $old; do "$BD" update "$bead" --remove-label "$cl" >/dev/null || refuse "could not remove label $cl; the clearance was not recorded" 4; done
++"$BD" update "$bead" --add-label reviewed --add-label "cleared:$tip" >/dev/null \
++  || refuse "could not write cleared:$tip; the clearance was not recorded" 4
++printf 'fleet-clear: CLEARED %s at %s for %s - reviewer %s is cross-family to author %s (family %s)\n' \
++  "$bead" "$tip" "$lane" "$(printf '%s\n' "$named" | head -1)" "$impl" "$impl_fam"
+diff --git a/tests/fleet-clear.test.sh b/tests/fleet-clear.test.sh
+new file mode 100755
+--- /dev/null
++++ b/tests/fleet-clear.test.sh
+@@ -0,0 +1,104 @@
++#!/usr/bin/env bash
++# Guards for bin/fleet-clear (agents-ayqi). Plain bash, no framework - the fleet test idiom.
++# Run: bash tests/fleet-clear.test.sh
++#
++# The drives use the REAL bin/fleet-model-audit against synthesised lane records (FLEET_LANES_DIR), so the check
++# under test is the real one end to end: no mock decides whether a family matches.
++set -uo pipefail
++HERE=$(cd "$(dirname "$0")" && pwd)
++TOOL=$HERE/../bin/fleet-clear
++ROOT=$(mktemp -d)
++trap 'rm -rf "$ROOT"' EXIT
++LANES=$ROOT/lanes; mkdir -p "$LANES"
++BIN=$ROOT/stubbin; mkdir -p "$BIN"
++pass=0; fail=0
++ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
++bad()  { fail=$((fail+1)); printf '  FAIL %s%s\n' "$1" "${2:+ - $2}"; }
++
++# A stub bd that records every label write, so "were labels written?" is observable rather than inferred.
++cat > "$BIN/bd-stub" <<'STUB'
++#!/usr/bin/env bash
++case $1 in
++  show) printf '[]\n' ;;
++  update) printf '%s\n' "$*" >> "$BD_LOG" ;;
++esac
++exit 0
++STUB
++cat > "$BIN/bd-fail" <<'STUB'
++#!/usr/bin/env bash
++exit 1
++STUB
++chmod +x "$BIN/bd-stub" "$BIN/bd-fail"
++
++# lane <name> <impl_model_in_conf> <models_that_ran...>
++lane() {
++  local n=$1 impl=$2; shift 2
++  printf 'ROLE=%q\nMODEL=%q\nWORKDIR=%q\nBEAD=%q\nIMPL_MODEL=%q\n' reviewer '' "/w" "bead" "$impl" > "$LANES/$n.conf"
++  : > "$LANES/$n.turns.jsonl"
++  local m
++  for m in "$@"; do printf '{"model":%s}\n' "\"$m\"" >> "$LANES/$n.turns.jsonl"; done
++  printf '%s' "${1:-none}" > "$LANES/$n.model"
++}
++
++# run <expect_rc> <label> <lane> [--bd-fail]
++run() {
++  local want=$1 label=$2 lane=$3; shift 3
++  export BD_LOG=$ROOT/bd.log; : > "$BD_LOG"
++  local bd=$BIN/bd-stub; [ "${1:-}" = "--bd-fail" ] && bd=$BIN/bd-fail
++  out=$(FLEET_LANES_DIR="$LANES" FLEET_BD="$bd" FLEET_MODEL_AUDIT="$HERE/../bin/fleet-model-audit" \
++        bash "$TOOL" bead-1 "$lane" abc1234 2>&1); rc=$?
++  if [ "$rc" = "$want" ]; then ok "$label (rc=$rc)"; else bad "$label" "rc=$rc want=$want: $out"; fi
++  LABELS=$(wc -l < "$BD_LOG" | tr -d ' ')
++}
++
++echo "bin/fleet-clear (agents-ayqi)"
++
++echo "1. a cross-family reviewer CLEARS, and the label write is the one roles/reviewer.md specifies"
++lane rev-x deepseek/deepseek-flash antigravity/gemini-3.8-flash
++run 0 "1a cross-family clears" rev-x
++[ "$LABELS" = 1 ] && grep -q -- '--add-label reviewed --add-label cleared:abc1234' "$ROOT/bd.log" \
++  && ok "1b it wrote reviewed + cleared:abc1234 in one update" || bad "1b label write" "$(cat "$ROOT/bd.log")"
++
++echo "1c-1f. MULTI-TURN: any same-family turn refuses, however many other turns were cross-family (agents-b1ld)"
++lane rev-mix deepseek/deepseek-flash deepseek/deepseek-chat antigravity/gemini-3.8-flash
++run 1 "1c same-family turn + cross-family turn -> REFUSED" rev-mix
++[ "$LABELS" = 0 ] && ok "1d and no labels written" || bad "1d labels written" "$(cat "$ROOT/bd.log")"
++lane rev-own deepseek/deepseek-flash deepseek/deepseek-flash antigravity/gemini-3.8-flash
++run 1 "1e the author's EXACT model on one turn + cross-family on another -> REFUSED" rev-own
++lane rev-dd deepseek/deepseek-flash deepseek/deepseek-v4-pro antigravity/gemini-3.8-flash
++run 1 "1f same-family fallback on one turn + cross-family on another -> REFUSED (families, not ids)" rev-dd
++
++echo "2. a fallback WITHIN a cross-family direction is not refused on the id alone (families, not ids)"
++lane rev-y deepseek/deepseek-flash antigravity/gemini-3.1-pro
++run 0 "2a antigravity run for a deepseek author clears" rev-y
++
++echo "3. the failure the bead is about: the rotation put the reviewer in the AUTHOR'S family"
++lane rev-z deepseek/deepseek-flash deepseek/deepseek-v4-pro
++run 1 "3a a same-family fallback is REFUSED" rev-z
++[ "$LABELS" = 0 ] && ok "3b and NO labels were written" || bad "3b labels written on refusal" "$(cat "$ROOT/bd.log")"
++lane rev-z2 deepseek/deepseek-flash deepseek/deepseek-flash
++run 1 "3c the author's OWN model is refused (rc 0 is the worst case, not the safe one)" rev-z2
++
++echo "4. an UNESTABLISHED family is a blocked clearance, not a satisfied one"
++lane rev-n deepseek/deepseek-flash antigravity/gemini-3.8-flash
++# IMPL_MODEL must be ABSENT for this drive, so write a conf without it rather than reuse a lane that has it.
++printf 'ROLE=reviewer\nMODEL=\nIMPL_MODEL=\n' > "$LANES/rev-none.conf"
++run 3 "4a no IMPL_MODEL -> refuse (exit 3)" rev-none
++: > "$LANES/rev-empty.turns.jsonl"; printf 'x' > "$LANES/rev-empty.model"
++printf 'ROLE=reviewer\nIMPL_MODEL=deepseek/deepseek-flash\n' > "$LANES/rev-empty.conf"
++run 3 "4b an EMPTY turn record -> refuse (nothing was verified)" rev-empty
++printf 'ROLE=reviewer\nIMPL_MODEL=deepseek/deepseek-flash\n' > "$LANES/rev-missing.conf"
++run 3 "4c NO turn record at all -> refuse (what it ran is not recorded)" rev-missing
++printf '{"model":"antigravity/gemini-3.8-flash"}\n\n' > "$LANES/rev-blank.turns.jsonl"
++printf 'ROLE=reviewer\nIMPL_MODEL=deepseek/deepseek-flash\n' > "$LANES/rev-blank.conf"
++run 3 "4d a blank line among records -> refuse (the record cannot be read in full)" rev-blank
++
++echo "5. THE CONTROL - the same lane with a DIFFERENT author family clears, so the refusal is the comparison"
++lane rev-c zai/glm-5.3 deepseek/deepseek-v4-pro
++run 0 "5a same effective model, author family zai -> clears" rev-c
++
++echo "6. it fails closed when it cannot record the clearance"
++run 4 "6a bd cannot write -> refuse, not a silent pass" rev-x --bd-fail
++
++printf 'fleet-clear.test.sh: %d passed, %d failed\n' "$pass" "$fail"
++[ "$fail" = 0 ]
