@@ -18,6 +18,17 @@
 #                                        3 when nothing is installed, 2 on a usage/tracked error.
 #                                        --check --quiet prints one line naming the keys (the form
 #                                        tools/fast-gate.sh warns from at the point of use).
+#         tools/check-cmd.sh --explain-failure <exit-code> [FIELD]
+#                                        agents-0r1c, third shape: the diagnostic a RUNNER calls after the
+#                                        command has already failed by itself. It speaks only for a
+#                                        command-not-found exit (127, or 126 not-executable), and then names
+#                                        the config's Project: stamp, the tokens that do not resolve here,
+#                                        and the repair. Silent and exit 0 otherwise, so it is safe to call
+#                                        after every run and it can never change a verdict. This file cannot
+#                                        refuse on a prediction: three attempts to do so at hand-out time
+#                                        broke working gates (`./` miss, then an output redirection, `deno
+#                                        test` and `timeout -k 30 60s` all falsely refused), because each was
+#                                        a narrower parse of a shell command line.
 #
 # IT FAILS LOUD. This file is sourced, so a syntax error in either config is fatal under
 # `set -e`, and a missing CHECK_CMD is an error rather than an empty string. A gate that
@@ -67,102 +78,40 @@ install_cmd_for() {
   esac
 }
 
-# agents-0r1c: THE READER REFUSES A COMMAND THAT CANNOT RUN WHERE IT IS BEING HANDED OUT. agents-0utp fixed
-# the WRITER (a bare --install no longer rewrites the machine-global file) and agents-p8lh made the repairs
-# truthful, but a config already installed by another repo keeps being READ: ~/.fleet/check.conf carries
-# `bash tools/fast-gate.sh` and a suite command needing tools/ and tests/, all of which exist only in
-# agents-factory. A gate in any other repo died with EXIT 127 - a message about a MISSING TOOL, when the truth
-# is a FOREIGN CONFIG - and nothing in the reader refused it. THE TEST IS "CANNOT EXIST HERE", NOT "CAME FROM
-# ELSEWHERE": a config whose named paths all resolve in this repo is legitimate even when its Project: stamp
-# names another directory (a lane worktree of this same project is exactly that), so identity alone never
-# refuses - refusing on identity would turn every worktree gate red for an innocent branch. The stamp is used
-# for ATTRIBUTION in the message, not as the trigger.
+# agents-0r1c, THIRD SHAPE - DO NOT REFUSE ON A PREDICTION; DIAGNOSE AFTER AN OBSERVED FAILURE.
+# (Ruling by coord, 2026-10-14T00:45Z, after three rounds of this guard failed in review: round one MISSED
+# `bash ./tools/fast-gate.sh` and OVER-REFUSED an output redirection; round two replaced the rule and
+# OVER-REFUSED again twice - `deno test`, where the interpreter rule read deno's SUBCOMMAND as a script path,
+# and `timeout -k 30 60s`, where the wrapper rule walked into the option's own argument and named the
+# duration. Every round was a narrower PARSE OF A SHELL COMMAND LINE, and every round the parser was wrong
+# about a construct it had not anticipated. That is a parser guessing at a property it cannot see, and the two
+# error directions are not equal: A FALSE REFUSAL BREAKS A WORKING GATE, while a MISS only fails to explain a
+# 127 that was going to happen anyway.)
 #
-# Repo-relative path tokens are extracted conservatively, because a FALSE REFUSAL is worse than the defect it
-# prevents: only tokens containing a slash, not starting with / or $ or -, not part of a URL or a variable
-# expansion, and not shell metacharacters of any kind. Flags that NAME a path (-s/-t for unittest discovery)
-# are checked as paths too, since that is how the poisoned CHECK_CMD fails. An unstamped config keeps the
-# existing path: it is not attributed to anyone, and the refusal says so instead of inventing a culprit.
-# agents-0r1c, RESHAPED AFTER agents-wisk AND agents-jqc4. The first version extracted "path-shaped tokens"
-# and checked them all. A reviewer broke it in BOTH directions on the same day: it MISSED `bash
-# ./tools/fast-gate.sh` (a ./ prefix is not a different command, it is the same missing file spelled
-# differently), and it REFUSED `bash tools/fast-gate.sh > logs/result.log` (a redirection target is a file the
-# command CREATES, not one it must read). A rule whose two errors are "misses a real case" and "blocks a real
-# case" has not decided what it is protecting, so this replaces the guess with the property it was always
-# about: REFUSE ONLY WHEN A PATH THE COMMAND MUST READ OR EXECUTE CANNOT EXIST HERE.
+# So this file no longer refuses anything. It ships a DIAGNOSTIC that a runner may call AFTER the command has
+# already failed by itself, and it speaks only when the failure is command-not-found class. What it then says
+# is what is actually known: the config's own '# Project:' stamp (who installed it), the tokens the command
+# names that do not resolve here, and the one-line repair. An observed fact cannot false-refuse anything.
 #
-# That is what EXIT 127 actually means, and it makes the candidate set small and defensible:
-#   1. the COMMAND WORD - with a slash it is a path that must exist, without one it is a PATH lookup, and
-#      either way a miss is a 127 (`bash` itself missing is as unrunnable as a missing script);
-#   2. the SCRIPT ARGUMENT of an interpreter (`bash tools/x.sh`, `python3 tools/x.py`) - skipping flags, and
-#      stopping at -c/-e/--command (the argument is CODE) and at -m (a MODULE, resolved on a search path);
-#   3. the values of -s and -t, but ONLY on a command line that mentions unittest/discover, because those are
-#      that tool TMs input directories - `sort -t ,` must not be read as a path;
-#   4. the target of a READ redirection (<), which must exist.
-# Everything else is ignored BY CONSTRUCTION: output redirections, plain arguments, flags. Output paths are
-# the case that broke the first version, and the fix for it is a rule, not an exception.
-# `./` is stripped before every existence check: agents-wisk's bypass, closed here.
-command_paths() {
-  # stdin: a command string. stdout: one candidate per line, prefixed P<TAB> (a path that must exist) or
-  # C<TAB> (a word that must resolve on PATH).
+# THE EXTRACTOR IS DELIBERATELY DUMB NOW, BECAUSE IT DECIDES NOTHING: the first word (after leading VAR=
+# assignments) if it does not resolve on PATH, and every token containing a slash that does not exist here.
+# A wrong name can only make an explanation of an already-observed failure less precise - it cannot refuse a
+# gate - which is exactly the property the parser could not have. No wrappers, no interpreter rules, no flag
+# semantics: those were the three sources of false refusals, and none of them is needed to explain a 127.
+command_tokens() {
+  # stdin: a command string. stdout: the first word, plus every word containing a slash.
   awk '
-    function unquote(w) { gsub(/^["\047]+/, "", w); gsub(/["\047]+$/, "", w); return w }
-    function stripdot(p) { while (p ~ /^\.\//) sub(/^\.\//, "", p); return p }
     {
-      n = split($0, raw, /[ \t]+/)
-      m = 0
-      skip = 0; read = 0
+      n = split($0, w, /[ \t]+/)
+      first = ""
       for (i = 1; i <= n; i++) {
-        if (raw[i] == "") continue
-        t = unquote(raw[i])
+        t = w[i]
+        gsub(/^["\047]+/, "", t); gsub(/["\047]+$/, "", t)
         if (t == "") continue
-        # WRITE redirections: the target is created, so it is never a candidate. Handles >, >>, 1>, 2>,
-        # 2>>, >&, 2>&1, and the attached forms >file / 2>>file.
-        if (t ~ /^[0-9]?>>?[^&>]/ || t == ">" || t == ">>" || t == "1>" || t == "2>" || t == "2>>" || t == ">&" || t ~ /^[0-9]?>>?&/) { skip = 1; continue }
-        # READ redirections: the target must exist (it is read). Heredocs (<<) are shell text, not a file.
-        if (t == "<" || t == "<&") { read = 1; continue }
-        if (t ~ /^<<?/) { skip = 1; continue }
-        if (skip) { skip = 0; continue }
-        if (read) { read = 0; print "P\t" stripdot(t); continue }
-        m++; word[m] = t
+        if (first == "") first = t
+        if (t ~ /\//) print t
       }
-      if (m == 0) exit
-      # Leading VAR=assignments and the wrappers that take their own arguments, then the command word.
-      j = 1
-      while (j <= m && word[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) j++
-      while (j <= m) {
-        b = word[j]; sub(/.*\//, "", b)
-        if (b == "env" || b == "nohup" || b == "setsid" || b == "nice" || b == "ionice" || b == "stdbuf" || b == "xvfb-run") {
-          j++
-          while (j <= m && (word[j] ~ /^-/ || word[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/)) j++
-          continue
-        }
-        if (b == "timeout") {           # timeout [flags] DURATION command ...
-          j++
-          while (j <= m && word[j] ~ /^-/) j++
-          j++                            # the duration
-          continue
-        }
-        break
-      }
-      if (j > m) exit
-      cmd = word[j]
-      b = cmd; sub(/.*\//, "", b)
-      if (cmd ~ /\//) print "P\t" stripdot(cmd); else print "C\t" b
-      # The script argument of an interpreter, if any.
-      if (b == "bash" || b == "sh" || b == "dash" || b == "zsh" || b == "ksh" || b == "python" || b == "python3" || b == "ruby" || b == "perl" || b == "php" || b == "node" || b == "deno") {
-        k = j + 1; stop = 0
-        while (k <= m) {
-          if (word[k] == "-c" || word[k] == "--command" || word[k] == "-m" || word[k] == "-") { stop = 1; break }
-          if (word[k] ~ /^-/) { k++; continue }
-          break
-        }
-        if (!stop && k <= m) print "P\t" stripdot(word[k])
-      }
-      # -s / -t are INPUT directories for unittest discovery only - `sort -t ,` is not a path.
-      if ($0 ~ /unittest|discover/) {
-        for (i = j; i < m; i++) if (word[i] == "-s" || word[i] == "-t") print "P\t" stripdot(word[i + 1])
-      }
+      if (first !~ /\//) print first
     }'
 }
 
@@ -172,36 +121,35 @@ config_provenance() {
   grep -m1 -E '^# Project: ' "$1" 2>/dev/null | sed -E 's/^# Project: //' || true
 }
 
-# Returns non-zero (and prints the refusal) when something the command must read or execute is not here.
-refuse_if_unrunnable() {
-  local field="$1" cmd="$2" missing="" kind val
+# THE POST-FAILURE DIAGNOSTIC. $1 = the exit code the runner OBSERVED, $2 = the field (default CHECK_CMD).
+# Prints nothing at all unless the code is command-not-found class, so it is safe for a runner to call
+# unconditionally after every run, and it never changes the verdict - the gate has already failed or passed.
+explain_failure() {
+  local rc="${1:-}" field="${2:-CHECK_CMD}" cmd tok missing="" who
+  case "$rc" in 126|127) ;; *) return 0 ;; esac          # 127 command not found, 126 found but not executable
+  cmd="${!field:-}"
   [ -n "$cmd" ] || return 0
-  while IFS=$'\t' read -r kind val; do
-    [ -n "$val" ] || continue
-    case "$kind" in
-      C)
-        # A bare command word: it has to resolve somewhere on PATH, exactly as the shell would when it
-        # reports 127. Builtins resolve here too, which is why `echo` and `[` never trip this.
-        command -v "$val" >/dev/null 2>&1 || missing="${missing}${missing:+, }$val (not on PATH)" ;;
-      P)
-        [ "$val" = "." ] && continue          # `.` is the repo itself: it always exists here
-        case "$val" in
-          /*) [ -e "$val" ]     || missing="${missing}${missing:+, }$val" ;;
-          *)  [ -e "$ROOT/$val" ] || missing="${missing}${missing:+, }$val" ;;
-        esac ;;
+  for tok in $(printf '%s\n' "$cmd" | command_tokens | sort -u); do
+    tok="${tok#./}"
+    case "$tok" in
+      ".") continue ;;
+      /*)  [ -e "$tok" ]      || missing="${missing}${missing:+, }$tok" ;;
+      */*) [ -e "$ROOT/$tok" ] || missing="${missing}${missing:+, }$tok" ;;
+      *)   command -v "$tok" >/dev/null 2>&1 || missing="${missing}${missing:+, }$tok (not on PATH)" ;;
     esac
-  done < <(printf '%s\n' "$cmd" | command_paths)
-  [ -n "$missing" ] || return 0
-  local who=""
-  if [ -n "$provenance" ]; then who="was installed by $provenance and"; else who="carries no 'Project:' stamp and"; fi
-  echo "check-cmd: REFUSING to report $field: $CONFIG_SOURCE $who names [$missing], which cannot be run here ($ROOT)." >&2
-  echo "check-cmd:   That command cannot run here - a missing program or script fails with EXIT 127, which reads as a missing tool when the truth is a config naming paths from another repo." >&2
+  done
+  if [ -n "$provenance" ]; then who="was installed by $provenance"; else who="carries no 'Project:' stamp"; fi
+  echo "check-cmd: NOTE (agents-0r1c): $field exited $rc, and $CONFIG_SOURCE $who." >&2
+  if [ -n "$missing" ]; then
+    echo "check-cmd:   It names [$missing]; those do not resolve in $ROOT, which is what a foreign config looks like from here." >&2
+  else
+    echo "check-cmd:   Every token it names does resolve in $ROOT, so the $rc came from something this diagnostic cannot name - do not read this as the config being innocent." >&2
+  fi
   if [ -n "$REPO_CONF" ]; then
     echo "check-cmd:   repair: $(install_cmd_for "$REPO_CONF")   # writes this repo its own config, $REPO_CONF; then point the gate at it: FLEET_CHECK_CONF=$REPO_CONF" >&2
   else
     echo "check-cmd:   repair: $(install_cmd_for "$GLOBAL_CONF")   # HOME is unset, so the host-wide file is the only destination this reader can name" >&2
   fi
-  return 1
 }
 
 if [ ! -r "$TRACKED" ]; then
@@ -444,29 +392,41 @@ fi
 
 : "${CHECK_CMD:?check-cmd: CHECK_CMD is unset or empty after reading $OVERRIDE - refusing to report a verdict about a command nobody chose}"
 
-# agents-0r1c: WHERE THE VALUES CAME FROM, and who to blame when they cannot run here. The attribution comes
-# from the file's own '# Project: <name> (<path>)' stamp, written by --install since agents-ia3p, so the refusal
-# can name the repo that installed the config the reader is being asked to trust. An UNSTAMPED file is not
-# attributed to anyone - the refusal says exactly that rather than inventing a culprit, which is the existing
-# path for a file that predates the stamp.
+# agents-0r1c, THIRD SHAPE: THE READER NO LONGER REFUSES ANYTHING (coord ruling, 2026-10-14T00:45Z). agents-0utp
+# fixed the WRITER (a bare --install no longer rewrites the machine-global file) and agents-p8lh made the
+# repairs it prints truthful, but a config already installed by another repo keeps being READ: the live
+# ~/.fleet/check.conf carries `bash tools/fast-gate.sh` and a suite command needing tools/ and tests/, all of
+# which exist only in agents-factory, so a gate in any other repo died with EXIT 127 - a message about a MISSING
+# TOOL when the truth is a FOREIGN CONFIG. THREE attempts to refuse that READ-time, at hand-out time, on a
+# prediction, failed in review (a missed ./ prefix; then an output redirection, `deno test`, and
+# `timeout -k 30 60s` all falsely refused), because each was a narrower parse of a shell command line and the
+# parser was always wrong about some construct it had not anticipated. A false refusal breaks a WORKING gate;
+# a miss only fails to explain a 127 that was going to happen anyway. So the diagnostic moved to where the
+# evidence is: explain_failure() above, called by whatever RUNNER observed the failure, and it speaks only on a
+# command-not-found exit. The attribution comes from the file's own '# Project: <name> (<path>)' stamp, written
+# by --install since agents-ia3p, so the note can name the repo that installed the config the reader is being
+# asked to trust; an UNSTAMPED file is not attributed to anyone - the note says exactly that rather than
+# inventing a culprit.
 provenance="$(config_provenance "$OVERRIDE")"
 CONFIG_SOURCE="${OVERRIDE:-the tracked file ${TRACKED}}"
 
 want="${1:-}"
 case "$want" in
   "")
-        # The whole set: EVERY command in it has to be runnable here, because the caller may use any of them.
-        refuse_if_unrunnable CHECK_CMD "${CHECK_CMD:-}" || exit 2
-        refuse_if_unrunnable CHECK_FAST_CMD "${CHECK_FAST_CMD:-}" || exit 2
+        # The whole set. Reported, not vetted: a command that cannot run here is still REPORTED, and the
+        # runner that observes its 127 is the thing that explains it (explain_failure).
         printf 'CHECK_CMD=%s\nCHECK_FAST_CMD=%s\nCHECK_TIMEOUT=%s\nCHECK_FAST_TIMEOUT=%s\n' \
         "${CHECK_CMD}" "${CHECK_FAST_CMD:-}" "${CHECK_TIMEOUT:-}" "${CHECK_FAST_TIMEOUT:-}" ;;
   CHECK_CMD|CHECK_FAST_CMD)
-        # ONE FIELD ASKED FOR: refuse THAT command, not the file - the other one may be perfectly usable here,
-        # and a reader that refused the file would be making a bigger claim than the evidence supports.
-        refuse_if_unrunnable "$want" "${!want}" || exit 2
         printf '%s\n' "${!want}" ;;
   CHECK_TIMEOUT|CHECK_FAST_TIMEOUT)
         printf '%s\n' "${!want}" ;;
+  --explain-failure)
+        # The runner half of the third shape: `--explain-failure <exit-code> [FIELD]` prints the note (stamp,
+        # unresolvable tokens, repair) when the code it is GIVEN is command-not-found class, and nothing
+        # otherwise, so a caller can invoke it unconditionally after any run and it cannot change a verdict.
+        # It is a diagnostic, not a gate: it always exits 0.
+        explain_failure "${2:-}" "${3:-CHECK_CMD}" ;;
   --repair-hint)
         # agents-p8lh: ONE SOURCE OF TRUTH FOR THE REPAIR, for callers that must name it without knowing the
         # destination - tools/fast-gate.sh warns about drift at the point of use and used to carry its own
