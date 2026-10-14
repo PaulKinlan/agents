@@ -1533,6 +1533,51 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
             "candidates_accounted": int(reported), "complete": complete, "reason": reason}
 
 
+def _run_level_possible_rekeys(findings: List[Dict[str, Any]],
+                              fixed: List[Dict[str, Any]]) -> int:
+    """The possible-re-key pairs over the WHOLE RUN, which is what the counter always claimed to count.
+
+    agents-pxzb: the delta's own wording is run-level - a `new` row that 'shares a location with a row
+    THIS SAME RUN booked Fixed' - but the implementation compared inside ONE station (the retirement set
+    is built from rows whose `agent` is the station's own). A pair whose twin ANOTHER station booked was
+    therefore invisible, and the nightly's own example has exactly that shape: docs/css/factory.css:192
+    is a `new` row under vuln-triage (`no-candidate-index`) and the Fixed twin is modern-web's
+    (`candidate-id`). The line is the first place that can see both halves, so the pairing is done here
+    as well.
+
+    THE RULE IS UNCHANGED, only its scope. Both sides must be prose-bound (`is_unanchored_finding`),
+    both need an exact usable line, and one retiring row explains exactly ONE appearance (agents-l3j1) -
+    so this can only count pairs the station-level pass could not see, never pairs it refused. Note what
+    that leaves out, because it is the nightly example's own shape: a twin whose identity is ANCHORED
+    (`candidate-id` is in IDENTITY_STABLE_SOURCES) is still refused, here as at the station, because the
+    soundness argument is that a stable anchor WOULD have matched this run's rows. Across stations that
+    argument is weaker than it sounds - a station only ever compares its OWN agent's rows, so an anchored
+    twin booked elsewhere was never offered to the appearance - but widening the rule is a soundness
+    decision, not a scope one, and it is recorded rather than taken here.
+    """
+    retiring: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in fixed:
+        if not is_unanchored_finding(row):
+            continue
+        line = usable_line_number(row.get("line_number"))
+        if line is None:
+            continue
+        retiring.setdefault((normalize_path(row.get("path")), line), []).append(row)
+    pairs = 0
+    for row in findings:
+        if (row.get("change") != "new" or row.get("false_positive")
+                or not is_unanchored_finding(row)):
+            continue
+        line = usable_line_number(row.get("line_number"))
+        if line is None:
+            continue
+        pool = retiring.get((normalize_path(row.get("path")), line))
+        if pool:
+            pool.pop(0)
+            pairs += 1
+    return pairs
+
+
 def write_line_report(target_name: str, line_name: str, stations: List[Dict[str, Any]],
                       findings_dir: Optional[Path] = None) -> Path:
     """Write the run's delta report from every station of one factory line (fleet-810).
@@ -1562,6 +1607,13 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
                     total[key] = total.get(key, 0) + value
                 elif value and key == "note":
                     total["note"] = "; ".join(filter(None, [total.get("note"), str(value)]))
+    # agents-pxzb: the summed station counters can only see pairs whose two halves were booked by the
+    # SAME station. The run-level count is what the counter has always documented, and it is never the
+    # smaller of the two (per location it is at least the sum of the stations' own pairs), so this can
+    # only add misses - and `max` keeps the summed value when a fragment cannot supply the rows the
+    # recomputation needs, so a fragment shape that lacks them cannot silently lower the count.
+    stats["possible_rekey"] = max(int(stats.get("possible_rekey", 0) or 0),
+                                  _run_level_possible_rekeys(findings, fixed))
     report = _dispatch_file(target_name, findings, stats, fixed, sink_results=sinks,
                             stations=stations, line_name=line_name, findings_dir=findings_dir)
     machine = report.with_name(f"{target_name}-line.json")
@@ -1696,7 +1748,9 @@ def _unanchored_new_note(stats: Dict[str, int]) -> List[str]:
     if paired > 0:
         note.append(
             f"> **Possibly re-keyed, not reclassified**: {paired} of them sit at an exact line a row "
-            "this run booked Fixed, which is what ONE finding moving key looks like - and also what a "
+            "this run booked Fixed - including rows another station of the line booked, since the "
+            "run-level pairing compares every appearance with every retiring row - which is what ONE "
+            "finding moving key looks like - and also what a "
             "new finding at a recycled line looks like. They are counted here and left in the "
             "actionable list, because a location cannot distinguish the two and guessing has hidden "
             "real findings. This is a floor: rows whose line the scanner could not name are not counted, "
