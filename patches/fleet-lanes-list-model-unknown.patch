@@ -1,5 +1,5 @@
 # patches/fleet-lanes-list-model-unknown.patch
-# remote/lanes.sh: lanes list reports state.json model before UNKNOWN when .model unrecorded (agents-oi00, agents-az5m).
+# remote/lanes.sh: lanes list reports state.json model before conf MODEL and UNKNOWN (agents-oi00, agents-az5m, agents-dpzu).
 # Base (MEASURED on this VM's deployed fleet copy):
 #   remote/lanes.sh         40537 bytes sha256 7f0be21489db73e4d18821c58e6e669d22ec54f5192bc00bf158b5b9d422e4aa
 #   tests/lanes.test.sh     64678 bytes sha256 bbe6c9339457e2144d63b59a612c7adb15443c84480b14919e7788f4abfa00d5
@@ -12,19 +12,19 @@
        ( source "$f"; st=$(lane_status "$l")
          m=$(cat "$LD/$l.model" 2>/dev/null || echo "")
 -        [ -z "$m" ] && m="${MODEL:-(default)}"
-+        [ -z "$m" ] && m="${MODEL:-}"
 +        [ -z "$m" ] && m=$(jq -r '.model // empty' "$LD/$l.state.json" 2>/dev/null)
++        [ -z "$m" ] && m="${MODEL:-}"
 +        [ -z "$m" ] && m="UNKNOWN"
          cs=$(checkout_state "$l"); [ -n "$cs" ] && cs="  [$cs]"
          printf '%-14s %-11s %-8s %s  %s%s\n' "$l" "$ROLE" "$st" "$m" "${WORKDIR:-}" "$cs" ); done ;;
    check)
 --- a/tests/lanes.test.sh
 +++ b/tests/lanes.test.sh
-@@ -1062,6 +1062,57 @@
+@@ -1062,6 +1062,70 @@
  lanes retire imp-live-rot >/dev/null 2>&1 || true
  echo '{}' > "$HOME/.fleet/model-cooldown.json"
  
-+echo "30. lanes list distinguishes unknown effective model from default and reports actual model from state/session (agents-oi00, agents-az5m)"
++echo "30. lanes list distinguishes unknown effective model from default and reports actual model from state/session (agents-oi00, agents-az5m, agents-dpzu)"
 +# 30a-30c: a lane with no .model file, empty MODEL in conf, and no runtime state must report UNKNOWN, not (default).
 +# A lane explicitly configured with MODEL='(default)' must report (default), ensuring the states are distinguishable.
 +printf 'ROLE=coord\nMODEL=\nWORKDIR=%s\nBEAD=\n' "$HOME/fleet-manager" > "$HOME/.fleet/lanes/coord-unk.conf"
@@ -69,11 +69,24 @@
 +has "$diff_row" "$eff_model" "30g lanes list reports effective model matching session record"
 +hasnt "$diff_row" "antigravity/claude-opus-5-5" "30h lanes list does not report requested model when effective model differs"
 +
++# 30i-30j: a lane whose conf has an explicit requested model and whose .model pointer is missing,
++# but whose runtime state.json records a different effective model (agents-dpzu - fallback model
++# must not be masked by requested conf MODEL), must report the effective model from state.json.
++printf 'ROLE=reviewer\nMODEL=zai/glm-5.3\nWORKDIR=%s\nBEAD=agents-oi00\n' "$HOME/fleet-manager" > "$HOME/.fleet/lanes/rev-repro.conf"
++rm -f "$HOME/.fleet/lanes/rev-repro.model"
++echo '{"lane":"rev-repro","model":"deepseek/deepseek-flash"}' > "$HOME/.fleet/lanes/rev-repro.state.json"
++
++repro_out=$(lanes list)
++repro_row=$(grep "^rev-repro " <<<"$repro_out")
++has "$repro_row" "deepseek/deepseek-flash" "30i lane rev-repro with explicit conf and missing .model reports runtime state model"
++hasnt "$repro_row" "zai/glm-5.3" "30j lane rev-repro with runtime state model does not report requested conf model"
++
 +rm -f "$HOME/.fleet/lanes/coord-unk.conf" "$HOME/.fleet/lanes/coord-unk.model" "$HOME/.fleet/lanes/coord-unk.state.json"
 +rm -f "$HOME/.fleet/lanes/imp-dflt.conf" "$HOME/.fleet/lanes/imp-dflt.model" "$HOME/.fleet/lanes/imp-dflt.state.json"
 +rm -f "$HOME/.fleet/lanes/coord-live.conf" "$HOME/.fleet/lanes/coord-live.model" "$HOME/.fleet/lanes/coord-live.state.json"
 +rm -f "$HOME/.fleet/lanes/rev-diff.conf" "$HOME/.fleet/lanes/rev-diff.model" "$HOME/.fleet/lanes/rev-diff.sid"
 +rm -f "$diff_session"
++rm -f "$HOME/.fleet/lanes/rev-repro.conf" "$HOME/.fleet/lanes/rev-repro.model" "$HOME/.fleet/lanes/rev-repro.state.json"
 +
  echo
  printf '%s passed, %s failed\n' "$PASS" "$FAIL"
