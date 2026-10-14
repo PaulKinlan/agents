@@ -97,14 +97,35 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         self.sock.connect(self._socket_path)
 
 
-def _unix_client_request(socket_path, method, path, headers=None, body=None):
-    conn = _UnixHTTPConnection(socket_path)
-    conn.request(method, path, body=body, headers=headers or {})
-    resp = conn.getresponse()
-    data = resp.read()
-    status, resp_headers = resp.status, dict(resp.getheaders())
-    conn.close()
-    return status, resp_headers, data
+def _unix_client_request(socket_path, method, path, headers=None, body=None, attempts=3):
+    """Drive the broker through its UNIX listener and return (status, headers, body).
+
+    agents-5q0w: the broker decides a rejected request from its path and headers WITHOUT reading the
+    body, answers 403, and closes. Under the gate's parallel shards the client can therefore still be
+    writing when that close lands, which surfaces as a BrokenPipeError inside conn.request - an ERROR in
+    the CLIENT's write, in a test whose subject is the answer the broker sent. That is how a transient
+    flake came to red a whole tree, and it is not evidence about the broker, so the round trip is retried
+    a bounded number of times against the persistent listener. The retry cannot turn a wrong answer into a
+    right one: a broker that really fails to answer still fails every assertion that uses this helper.
+    """
+    last = None
+    for _ in range(attempts):
+        conn = _UnixHTTPConnection(socket_path)
+        try:
+            conn.request(method, path, body=body, headers=headers or {})
+        except BrokenPipeError as exc:
+            last = exc
+            try:
+                conn.close()
+            except Exception:
+                pass
+            continue
+        resp = conn.getresponse()
+        data = resp.read()
+        status, resp_headers = resp.status, dict(resp.getheaders())
+        conn.close()
+        return status, resp_headers, data
+    raise last
 
 
 class BrokerTestBase(unittest.TestCase):
@@ -747,6 +768,31 @@ class TestUnixSocketMode(BrokerTestBase):
         self.assertEqual(status, 403)
         self.assertIn(b"not allowed for this run", body)
         self.assertEqual(_FakeHTTPSConnection.calls, [])
+
+    def test_a_client_side_broken_pipe_is_not_reported_as_the_brokers_failure(self):
+        """agents-5q0w: the broker answers without reading the body and then closes, so under the gate's
+        parallel shards the client's write can race that close and raise BrokenPipeError - an ERROR in the
+        client, in a test whose subject is the broker's answer. This drives the REMEDY deterministically
+        (the first attempt raises exactly the error the 244-log evidence shows) rather than trying to win a
+        race under load, and it still asserts the real answer, so a broker that failed to answer would fail
+        it. The occurrence of the flake itself is the merger's evidence, not this test's claim."""
+        broker, sock = self._start_unix({"anthropic": REAL["anthropic"]})
+        real_request = _UnixHTTPConnection.request
+        calls = {"n": 0}
+
+        def flaky_request(self, method, path, body=None, headers=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise BrokenPipeError(32, "Broken pipe (the server closed while the client was writing)")
+            return real_request(self, method, path, body=body, headers=headers)
+
+        with mock.patch.object(_UnixHTTPConnection, "request", flaky_request):
+            status, _, body = _unix_client_request(
+                sock, "POST", "/proxy/anthropic/v1/messages",
+                headers={"x-api-key": broker.placeholder, "content-length": "2"}, body=b"{}")
+        self.assertGreaterEqual(calls["n"], 2, "the helper must retry after a client-side broken pipe")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'{"ok": true}')
 
     def test_unix_mode_requires_child_port(self):
         d = tempfile.mkdtemp()
