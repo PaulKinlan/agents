@@ -1,0 +1,43 @@
+--- a/bin/bd
++++ b/bin/bd
+@@ -254,7 +254,39 @@
+ fi
+ 
+ export FLEET_BD_LOCKED=1
+-flock -w 300 "$HOME/.fleet/bd.lock" "$real" "$@"
++
++# ------------------------------------------------ agents-atom STEP ONE ------------------------------------------------
++# RECORD THE WAIT, AND ONLY THE WAIT. The 300s bound below is CHOSEN - nothing records how long a bd call waits for
++# the lock - so this records the observation a derivation would need. It changes NO number, NO threshold and NO
++# verdict: the bound stays 300, the payload still runs under the lock, the exit code is unchanged, and nested calls
++# still bypass via FLEET_BD_LOCKED.
++#
++# WHY THE LOCK IS TAKEN ON FD 9 INSTEAD OF `flock -w 300 <lockfile> <command>`: that form runs the COMMAND under the
++# lock, so a timer around it measures WAIT + PAYLOAD. Measured on the first attempt: a 150ms payload on an
++# uncontended lock recorded 155ms. A p99 built from that is a p99 of (wait + run) - the wrong population, and
++# plausible enough to be believed. Holding the lock on a descriptor makes the acquisition the only thing between the
++# two timestamps while guaranteeing exactly what the old line guaranteed.
++#
++# A sample is a WAIT sample only when the call ACQUIRED the lock: rc != 0 is a timeout and says nothing about how
++# long a successful acquisition took, so rc is recorded and derivations must filter on it.
++#
++# Cheap and fail-safe: two arithmetic expansions, one append, one bounded prune, all best-effort, so a broken log
++# can never break bd. bin/bd has no `set -e` today, but nothing here depends on that.
++exec 9>"$HOME/.fleet/bd.lock"
++_bd_t0="${EPOCHREALTIME:-}"
++flock -w 300 9
+ rc=$?
++if [ -n "${EPOCHREALTIME:-}" ] && [ -n "$_bd_t0" ]; then
++  _bd_ms=$(( ( ${EPOCHREALTIME/./} - ${_bd_t0/./} ) / 1000 ))
++  if [ "$_bd_ms" -ge 0 ] && [ "$_bd_ms" -lt 86400000 ]; then
++    _bd_log="$HOME/.fleet/bd-lock-wait.log"
++    printf '%s wait_ms=%s rc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_bd_ms" "$rc" >> "$_bd_log" 2>/dev/null || true
++    tail -n 1999 "$_bd_log" > "$_bd_log.tmp" 2>/dev/null && mv "$_bd_log.tmp" "$_bd_log" 2>/dev/null || true
++  fi
++fi
++if [ "$rc" -eq 0 ]; then
++  "$real" "$@"
++  rc=$?
++fi
+ check_push_failure "$rc" "$@"
+ exit "$rc"
