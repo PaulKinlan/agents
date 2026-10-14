@@ -1,0 +1,49 @@
+--- a/bin/fleet-gate
++++ b/bin/fleet-gate
+@@ -65,7 +65,15 @@
+     fi
+     body=$(jq -nc --arg to "$lane" --arg t "[gate] '\''$name'\'' finished: $ran_phrase$pre$( [ "$rc" = 124 ] || [ "$rc" = 137 ] || [ "$rc" = 143 ] && [ -z "$pre" ] && echo " (KILLED by the ${t}s bound: not a pass or fail)"). Log: $base.log. Tail:
+ $tail" '\''{to:$to,from_lane:"gate",text:$t}'\'')
+-    curl -s -m 20 -X POST -H "content-type: application/json" --data-binary "$body" "http://localhost:${FLEET_INBOX_PORT:-7777}/msg" >/dev/null
++    local wake_rc=0
++    curl -s -m 20 -X POST -H "content-type: application/json" --data-binary "$body" "http://localhost:${FLEET_INBOX_PORT:-7777}/msg" >/dev/null || wake_rc=$?
++    # agents-rirf: record that the wake was POSTED and how the POST went, so a lane can tell "no wake yet"
++    # (there is no record at all - the gate may still be running) from "the wake was never posted" (a record
++    # with no .wake). Inferring the second from not having seen the message is exactly the mistake this
++    # removes: the message can be in flight while the record already exists. Same shape as .ran - an OBSERVED
++    # fact rather than an inference from absence. Keep this comment and this line free of apostrophes: the
++    # inner half of this wrapper is one single-quoted string, and an apostrophe terminates it (see above).
++    printf "%s" "posted $(date +%s) rc=$wake_rc" > "$base.wake" 2>/dev/null || true
+   }
+ 
+   sweep_group() {
+--- a/tests/fleet-gate.test.sh
++++ b/tests/fleet-gate.test.sh
+@@ -30,7 +30,7 @@
+ run() {
+   local label=$1 shim=$2; shift 2
+   WORK=$(mktemp -d); export FLEET_GATE_MSG="$WORK/msg.json"; BASE="/tmp/wg7i-test-case-$label"   # the wrapper derives base from $lane-$name, and name is case-$label
+-  rm -f "$BASE.exit" "$BASE.ran" "$BASE.log"
++  rm -f "$BASE.exit" "$BASE.ran" "$BASE.log" "$BASE.wake"
+   printf '#!/usr/bin/env bash\n%s\n' "$shim" > "$SHIM/fleet-heavy"; chmod +x "$SHIM/fleet-heavy"
+   FLEET_LANE=wg7i-test PATH="$SHIM:$PATH" "$GATE" "case-$label" -t 30 -- "$@" >/dev/null 2>&1
+   local i=0
+@@ -67,6 +67,18 @@
+ run jclean 'exit 0' true
+ case "$MSG" in *"the job returned 0"*) ok "5d a clean return without starting is told apart from 143";; *) bad "5d expected 'the job returned 0'" "$MSG";; esac
+ 
++echo "6. the wake is OBSERVABLE: the record says whether the message was posted (agents-rirf)"
++run jwakeok 'exit 143' true
++[ -s "$BASE.wake" ] && ok "6a a completed run records that the wake was POSTED" || bad "6a expected $BASE.wake; without it the record cannot distinguish not-yet from never-posted"
++grep -q 'rc=0' "$BASE.wake" 2>/dev/null && ok "6b ... and that it was delivered" || bad "6b expected rc=0 in the marker" "$(cat "$BASE.wake" 2>/dev/null)"
++cat > "$SHIM/curl" <<'SH'
++#!/usr/bin/env bash
++exit 7
++SH
++chmod +x "$SHIM/curl"
++run jwakefail 'exit 143' true
++grep -q 'rc=7' "$BASE.wake" 2>/dev/null && ok "6c a wake that FAILED to post is recorded as failed, not left silent" || bad "6c expected rc=7 in the marker" "$(cat "$BASE.wake" 2>/dev/null)"
++
+ if [ "$FAIL" -gt 0 ]; then echo "Failed tests: $FAIL"; fi
+ printf '%s passed, %s failed\n' "$PASS" "$FAIL"
+ [ "$FAIL" = 0 ]
