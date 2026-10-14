@@ -1,4 +1,25 @@
 ## patches/fleet-check-rerun-failed-tree.patch
+
+### Documented limitation, and two faults found while driving
+
+**Each `<record>.N` names its own attribution** - the request that superseded that attempt, with its lane,
+time and required reason - because the rotation keeps one record per attempt. **A later request overwrites the
+earlier request\'s reason in the SAME record**, which only bites when two requests arrive with no intervening
+attempt. That is benign and is NOT worked around with a per-attempt array: the rotation already gives each
+attempt its own record, so the audit question "who asked for this and why" is answered without a new key. If a
+future reader needs per-request history, that is a separate bead.
+
+**Two faults of my own, found by driving rather than reading, and both are the class that passes review** - each
+looked correct exactly where I was looking:
+
+1. **The bound read `.reruns` from the CURRENT record.** A re-run writes a FRESH record that carries no `.reruns`
+   - the count lives in the rotated sibling - so the bound WOULD NEVER HAVE FIRED. It now reads the rotation
+   history and takes the maximum.
+2. **The attribution was written only in the FAIL arm.** An authorised third attempt on a RED tree - whose record
+   says PASS because the disagreement rule served RED without changing the stored state - silently failed to
+   record its authoriser. Worse: it also failed to RUN, leaving a record naming an attempt whose gate never
+   happened. There is now ONE write for both paths, before the rotation, and the PASS arm declines to serve the
+   cached verdict when a re-run is requested so the attempt genuinely runs.
 ## DRIVEN AND VERIFIED: all five of coord's cases pass, plus the authorised-purpose case the drive found broken.
 **A re-run can never make a tree green by itself** (coord, 2026-10-14): a pass that follows a recorded FAIL is
 served RED, and the only path from RED to landable is an explicit AUTHORISED decision, recorded with the lane
