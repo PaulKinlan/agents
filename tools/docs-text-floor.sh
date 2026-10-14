@@ -33,12 +33,31 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -d "$docs" ] || { echo "no docs dir: $docs" >&2; exit 2; }
+# A sweep that measures nothing cannot fail, so it must not report a verdict. Without this guard an empty
+# docs dir left the glob literal, the tool measured a file called "*.html", got no answer, and exited 0 -
+# a clean run for a tree it never looked at (measured while writing tests/test_docs_text_floor.py).
+# Builtin glob only: a guard written with `ls` misfires in exactly the environment where the tool is being
+# asked whether its PATH is usable - measured, with PATH emptied it reported "nothing to measure" for a docs
+# dir holding six pages. `set --` overwrites the positional parameters, which the option parsing above has
+# finished with.
+set -- "$docs"/*.html
+[ -e "$1" ] || { echo "no *.html pages in $docs: nothing to measure" >&2; exit 2; }
 chrome="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
 [ -n "$chrome" ] || { echo "no chrome/chromium on PATH" >&2; exit 2; }
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 cp -r "$docs"/. "$work"/
 if [ "$inject" = 1 ]; then
+  # The control patches the measured copy: a rule in css/factory.css and a label in index.html. If either target is
+  # absent the control CANNOT fire, and it has to say so. Measured before this guard existed, pointed at a tree
+  # without css/factory.css: "/tmp/.../css/factory.css: No such file or directory" and exit 1 with NO RESULT on
+  # every page - a control that reports nothing is the failure mode this tool exists to expose. The label is
+  # checked for AFTER the patch for the same reason: a page with no `</body>` takes no label, and the sweep would
+  # then have gone on to report a clean run for a control it never actually applied.
+  if [ ! -f "$work/css/factory.css" ] || [ ! -f "$work/index.html" ]; then
+    echo "CONTROL UNAVAILABLE: --inject-fifth-site patches docs/css/factory.css and docs/index.html; $docs lacks one of them" >&2
+    exit 2
+  fi
   printf '\n.__fifth_site { font-size: 11px; }\n' >> "$work/css/factory.css"
   python3 - "$work" <<'PY'
 import sys, pathlib
@@ -46,6 +65,10 @@ page = next(pathlib.Path(sys.argv[1]).glob("index.html"), None)
 if page:
     page.write_text(page.read_text().replace("</body>", '<p class="__fifth_site">synthetic fifth site</p></body>', 1))
 PY
+  if ! grep -q '__fifth_site' "$work/index.html"; then
+    echo "CONTROL UNAVAILABLE: the synthetic label did not reach the measured index.html (no </body> to patch)" >&2
+    exit 2
+  fi
 fi
 # The measuring script runs INSIDE each page and writes its verdict into the DOM, which --dump-dom then prints,
 # so this needs no CDP client and no library - only a browser.
