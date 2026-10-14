@@ -514,7 +514,7 @@ class TestFastGateMapping(unittest.TestCase):
                 self.assertIn("tests/test_sandbox.py", mapped, f"{path} must map to test_sandbox.py")
                 self.assertIn("tests/test_tool_pins.py", mapped, f"{path} must map to test_tool_pins.py")
 
-    def test_package_init_arm_covers_every_consumer_the_oracle_names(self):
+    def test_package_init_arm_covers_the_consumer_the_oracle_reported_omitted(self):
         """agents-96um: the sibling of the lib/containment.py pin above, for the other refactored shared
         helper. `tests/__init__.py` exports `tracked_test_paths`, and its 030 arm ran three consumers
         (test_hermetic_env, test_sandbox, test_tool_pins) while the fourth, tests/test_containment_shape.py,
@@ -550,14 +550,15 @@ class TestFastGateMapping(unittest.TestCase):
             # different change from this bead (which names one consumer) and is recorded on agents-96um.
             return
         importers = suites_importing("tests")
-        # Vacuity guards for the FALLBACK only, pinning the scanner's reach rather than a count: the
-        # omitted consumer uses `from tests import tracked_test_paths`, and the arm's namesake uses the
-        # module form, so a scan that saw neither would "pass" this pin by finding nothing.
+        # ONE vacuity guard for the FALLBACK, and it is the only one that is TRUE: it pins the scanner's
+        # reach rather than a count, because a scan that saw nothing would "pass" this pin by finding
+        # nothing. The arm's OTHER suites deliberately get no guard here - measured, tests/test_hermetic_env.py
+        # does not import `tests` at all (os, subprocess, sys, tempfile, unittest, pathlib, lib.tool_pins),
+        # so asserting it would fail on every runner without the fleet coverage oracle, for a reason that
+        # has nothing to do with any lane's change. That was a review finding on this test (agents-96um).
         self.assertIn("tests/test_containment_shape.py", importers,
                       "the import scan must see `from tests import tracked_test_paths`, which is how the "
                       "consumer agents-96um found omitted reaches the helper")
-        self.assertIn("tests/test_hermetic_env.py", importers,
-                      "the import scan must see the arm's namesake consumer")
         missing = sorted(importers - set(selected))
         self.assertNotIn("tests/test_containment_shape.py", missing, (
             "the tests/__init__.py arm (030-tests_init_py.sh) does not run tests/test_containment_shape.py, "
