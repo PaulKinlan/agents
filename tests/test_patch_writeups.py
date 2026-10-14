@@ -39,6 +39,19 @@ class TestPatchDirectoryShape(unittest.TestCase):
                 first = path.read_text(encoding="utf-8").split("\n", 1)[0]
                 self.assertTrue(first.startswith("## "), f"{path.name} does not start with a section heading")
 
+    def test_no_writeup_line_starts_with_a_backslash(self):
+        r"""An escape that survives into the file is not cosmetics. A heading reads
+        `\`artifact.patch\`` instead of naming the artifact cleanly, and a fence written as
+        `\`\`\`` is INERT: the fence-state check above counts markers with FENCE, so it sees zero
+        fences in such a file, passes, and leaves an unterminated code block in a write-up that a
+        reader greps. Authoring inside a quoted heredoc is what produces these - write the file with
+        no shell involved instead, which is how this was fixed."""
+        for path in _writeups():
+            with self.subTest(path.name):
+                for n, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+                    if line.startswith("\\"):
+                        self.fail(f"{path.name}:{n} starts with a backslash: {line[:60]!r}")
+
     def test_no_writeup_ends_inside_a_fence(self):
         """The fence-state check coord named, now per file. In the shared file an unclosed fence
         bled into the NEXT section, which is how two real defects were produced; here the worst
