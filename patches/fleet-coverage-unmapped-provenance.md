@@ -1,10 +1,9 @@
-# Fleet artifact: record WHERE each `unmapped` entry came from (agents-tpw5)
-
+## Fleet coverage provenance - `fleet-coverage-unmapped-provenance.patch` (agents-tpw5)
 Patch: `patches/fleet-coverage-unmapped-provenance.patch` (5 files, 7 hunks, 11.8 KB).
 Target: the hub's coverage reporter and every consumer of its state, which is why the rule and the
 reader re-pins land together rather than as a rider on the false-positive fix.
 
-## What changes, and what deliberately does not
+### What changes, and what deliberately does not
 
 `remote/check-coverage.py` already states the principle it half-implements. At the fleet-agch guard it says
 *"publishing the changed files as 'unmapped' then asserts something the log never said"* - and it enforces
@@ -24,7 +23,7 @@ its keys cannot drift from `.unmapped`. And the `UNKNOWN` branch, which clears t
 evidence must never be reported as a zero, now clears the map with it - a record naming sources for entries it
 does not publish is the same "claim not derived from the object" defect that branch exists to prevent.
 
-## Measured reproduction (installed reporter, before this patch)
+### Measured reproduction (installed reporter, before this patch)
 
 Synthetic repo (a `main` branch plus a change branch, so the reporter's merge-base..sha delta resolves), a
 log with a running/passed pair and deliberately **no** `fast-gate: unmapped:` marker:
@@ -40,7 +39,7 @@ The first row is the shape `agents-a3p9`'s stem fix would reach; **nothing in `a
 reach the second**. With the patch, both rows report `unmapped_source: {path: "inference"}`, the gate's own
 marker reports `"gate"`, and a no-evidence run reports `UNKNOWN` with `unmapped: []` and `unmapped_source: {}`.
 
-## Consumers whose meaning changes (all re-pinned here, deliberately)
+### Consumers whose meaning changes (all re-pinned here, deliberately)
 
 - `bin/fleet-check`, the **cached-record** reader (`~:284`): the PASS line's coverage note now says
   `" (N unplaced by the reporter, not named by the gate)"` when any entry is inference. In the RECORD the
@@ -57,7 +56,7 @@ marker reports `"gate"`, and a no-evidence run reports `UNKNOWN` with `unmapped:
   because whether that fixture's orphan is gate-marked or reporter-inferred depends on the template's arms -
   while "the map describes the list and nothing else" must hold either way.
 
-## Verification performed here, and what the hub must run
+### Verification performed here, and what the hub must run
 
 Run: `patch -p1 --fuzz=0 --dry-run` over all five files, no fuzz (rule 256). `python3 -m py_compile` on the
 reporter and `bash -n` on the other four. `tests/check-coverage.test.sh` **executed against the patched
@@ -70,29 +69,26 @@ Not run here, and they are the hub's to run on install: the new cases in `tests/
 they assert was measured against the patched tool by hand, so a failure there means an environment
 difference, not an unmeasured claim.
 
-## Ordering
+### Ordering
 
 Apply **after** `agents-0xm2`'s oracle-candidate patch and **after** `agents-a3p9`'s fix, both of which
 rewrite nearby lines in the same reporter. This patch's hunks are in the unmapped assembly, the result
 object, the two readers and the tests, so it does not restate their work - only the sequencing matters.
 
-## The alternative, for the hub's ratification
+### The alternative, for the hub's ratification
 
 Coord is sending a distinct-`UNKNOWN`-for-placement-failure variant to the hub in parallel. If the hub prefers
 that, only the spelling changes: the reporter's state machine gains a value, and the two readers and the tests
 above must be re-decided for it. The reproduction above is the evidence either way.
 
-## Strict preimages
+### Strict preimages
+
+SHA256 of the hub files this patch was cut against, so a reviewer can confirm the base rather than trust it:
+
 ```
-STRICT PREIMAGES (SHA256 of the files this patch was cut against, hub copy on this VM):
-```
-  remote/check-coverage.py           295a1ce47c4ff942
-```
-  bin/fleet-check                    455e3b05d2dc172c
-```
-  tests/check-coverage.test.sh       99406d19cf19f5b5
-```
-  tests/fleet-gate-check.test.sh     f3919068e04d9127
-```
-  tests/project-template.test.sh     0c82517f50aaa7fc
+remote/check-coverage.py           295a1ce47c4ff942
+bin/fleet-check                    455e3b05d2dc172c
+tests/check-coverage.test.sh       99406d19cf19f5b5
+tests/fleet-gate-check.test.sh     f3919068e04d9127
+tests/project-template.test.sh     0c82517f50aaa7fc
 ```
