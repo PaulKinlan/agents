@@ -65,6 +65,22 @@ def manifest(**overrides):
     return cfg
 
 from tests import containment_harness as harness
+from tests import tracked_paths
+
+
+def adapter_script_stems(root: Path = ROOT) -> set:
+    """The stems of the TRACKED adapter scripts in lib/adapters/ (agents-nder).
+
+    The census in test_the_adapters_agree_with_the_policy_table asks which engines the repository SHIPS,
+    so it reads the tree the gate witnesses. A filesystem walk answers a different, wider question: an
+    untracked stray in lib/adapters/ fails a green branch (machine state standing in for tracked state),
+    and a file that disappears between the walk and the read raises inside the sharded gate - the shape
+    agents-4ieg measured on tests/. `git ls-files` names lib/adapters/'s files, so the direct-child and
+    .sh filters below are what keep this to the four top-level adapter scripts.
+    """
+    return {p.stem for p in tracked_paths("lib/adapters", root=root)
+            if p.parent == root / "lib" / "adapters" and p.suffix == ".sh"}
+
 
 class TestAdapters(unittest.TestCase):
     ENGINE_BINARY = {"pi": "pi", "claude": "claude", "antigravity": "agentapi"}
@@ -634,6 +650,27 @@ class TestAdapters(unittest.TestCase):
                     self.assertIsNone(argv, "the engine must not start")
                     self.assertFalse((self.tmp / "run" / "model_output.txt").exists())
 
+    def test_an_untracked_adapter_script_is_not_part_of_the_census(self):
+        """The adapter census is about the tree that LANDS, so untracked debris must not reach it.
+
+        Red against the glob this replaces (agents-nder, the agents-4ieg shape): the glob in this test IS
+        the old instrument and it lists the decoy, while the tracked census must not, because the gate
+        does not witness untracked files. The decoy lives in a temp directory INSIDE the repository - a
+        root git can still answer for, relative to it - and never in lib/adapters/ itself, so a gate that
+        runs this probe cannot record STALE for a tree nobody touched (agents-fxg2).
+        """
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            probe = Path(tmp)
+            (probe / "lib" / "adapters").mkdir(parents=True)
+            (probe / "lib" / "adapters" / "zz_probe_tmp.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            globbed = {p.stem for p in (probe / "lib" / "adapters").glob("*.sh")}
+            self.assertEqual(globbed, {"zz_probe_tmp"},
+                             "the filesystem glob this replaces must see the untracked decoy")
+            self.assertEqual(adapter_script_stems(probe), set(),
+                             "the tracked census must not absorb a file git does not track")
+        # ...and on the real checkout it is exactly the shipped set.
+        self.assertEqual(adapter_script_stems(), set(ENGINE_TOOL_POLICIES))
+
     def test_the_adapters_agree_with_the_policy_table(self):
         """Drift guard: the adapters and ENGINE_TOOL_POLICIES agree, and every adapter on
         disk is in the table (the iteration source the third verdict confirmed sound).
@@ -655,8 +692,7 @@ class TestAdapters(unittest.TestCase):
           test_a_write_grant_reaches_the_engine_only_inside_the_sandbox_wrap and the
           bwrap-gated dispatcher write-agent e2e. No adapter verifies its own kernel
           boundary, and no assertion here claims one does."""
-        on_disk = {p.stem for p in (ROOT / "lib" / "adapters").glob("*.sh")}
-        self.assertEqual(on_disk, set(ENGINE_TOOL_POLICIES))
+        self.assertEqual(adapter_script_stems(), set(ENGINE_TOOL_POLICIES))
         for engine, supported in ENGINE_TOOL_POLICIES.items():
             for policy in GRANTABLE_POLICIES:
                 with self.subTest(engine=engine, policy=policy):
