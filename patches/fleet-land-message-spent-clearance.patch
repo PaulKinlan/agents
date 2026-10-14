@@ -1,0 +1,24 @@
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
+@@ -749,6 +749,21 @@
+   done
+ 
+   if [ "$rev_state" = "STALE" ] || [ "$rev_state" = "DIVERGED" ]; then
++    # A CLEARANCE CONSUMED BY LANDING CANNOT BE UN-CONSUMED BY A LATER TIP MOVE (agents-urh9). The tip-move rule
++    # exists to protect 'reviewed X, landing Y', which is impossible once Y is already the history of the default
++    # branch. Ask the one question that separates a spend from an invalidation BEFORE stripping: is the REVIEWED
++    # commit already an ancestor of the default branch? Asserted on the reviewed sha and never on the branch name
++    # (roles/lessons.md:1691), and deliberately NOT asked as 'is the reviewed commit an ancestor of the TIP' - a
++    # branch cut from main satisfies that without anything having landed, which a control drive confirmed.
++    # SELF-CONTAINED: the default branch is read here with the fleet's own idiom, so this fragment needs nothing
++    # that is not already in this file (this tool runs under `set -uo pipefail`, so an unset name would be fatal).
++    DFLT=$(cat "$HOME/.fleet/default-branch" 2>/dev/null || echo main)
++    if [ -n "$rev_sha" ] && git rev-parse -q --verify "$rev_sha^{commit}" >/dev/null 2>&1 \
++       && git merge-base --is-ancestor "$rev_sha" "refs/remotes/origin/$DFLT" 2>/dev/null; then
++      bdf comments add "$BEAD" "merge-queue clearance SPENT, not invalidated: reviewed commit $rev_sha is already an ancestor of origin/$DFLT, so this clearance was consumed by landing. The merge-queue and cleared: labels are LEFT IN PLACE, and the later tip move to $tip (+$rev_unreviewed unreviewed commit(s)) is refused below on its own merits." >/dev/null 2>&1 || true
++      echo "fleet-land-message: REFUSING the unreviewed delta: origin/$BRANCH tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)), BUT that clearance is SPENT - $rev_sha already landed on origin/$DFLT - so merge-queue and the cleared: labels are LEFT IN PLACE rather than stripped."
++      exit 1
++    fi
+     if [ ${#rm_labels[@]} -gt 0 ]; then
+       bdf update "$BEAD" "${rm_labels[@]}" >/dev/null 2>&1 || true
+       bdf comments add "$BEAD" "merge-queue clearance invalidated: branch tip $tip moved after review for $rev_sha (+$rev_unreviewed unreviewed commit(s)). Re-review required." >/dev/null 2>&1 || true
