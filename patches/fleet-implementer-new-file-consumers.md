@@ -41,6 +41,33 @@ identifier a second deliverer can collide with: no artifact in `patches/` has `r
 a file-section. `fleet-merger-refusal-stops-script.patch` mentions that path, but only in prose inside
 its `roles/merger.md` hunk, so the two artifacts are independent and either order applies.
 
+APPLICATION TEST - THIS IS THE ACCEPTANCE FOR THIS ARTIFACT, NOT THE HASH (coord, 2026-10-14: a
+`patches/*` artifact can pass every suite in the receiving repository while destroying the file it
+targets, because that file lives in ANOTHER repository that the receiving repository's tests never
+open, so a shape test is not a substitute for an application test):
+
+    mkdir -p /tmp/apptest/roles && cp ~/fleet/roles/implementer.md /tmp/apptest/roles/
+    cd /tmp/apptest
+    patch -p1 --dry-run < this.patch            # exit 0, "checking file roles/implementer.md"
+    patch -p1 -s < this.patch                   # applies
+    grep -c '^## Your role: IMPLEMENTER lane' roles/implementer.md   # 1  (header INTACT)
+    grep -c '^### On boot' roles/implementer.md                      # 1
+    grep -c '^### Loop'    roles/implementer.md                      # 1
+    sed -n '13p' roles/implementer.md | cmp - <(sed -n '13p' ~/fleet/roles/implementer.md)  # step 3 UNCHANGED
+    sed -n '14,19p' roles/implementer.md                        # the new paragraph FOLLOWS step 3
+    grep -c '^-[^-]' this.patch                # 0  (an insertion deletes nothing; the file header
+                                               #    "---" is excluded by the [^-] class)
+    sha256sum roles/implementer.md             # 2fa48684ad855cdfa4d61683e250d7adce2fd2e5683c7eaa799835873460f333
+                                               # - SUPPORTING FACT ONLY, never the test
+
+WHY THE HASH IS NOT THE TEST, AND ONE CHECK NOT TO USE: reproducing a hash proves the patch is
+DETERMINISTIC, not that its output is a valid document - the first cut of this artifact reproduced its
+own hash exactly while deleting the role header and welding a fragment of it onto the inserted
+paragraph. And "grep for the fragment `hat's empty`" does NOT discriminate: that string is a SUBSTRING
+of the legitimate header text `(if that's empty, ask coord).`, so it counts 1 in a correct document
+(line 4, intact) and 1 in the corrupted one (line 7, welded). Use the greps and the `cmp` above, which
+are zero-vs-nonzero on the defects they name.
+
 HOW TO APPLY: `cd <fleet repo> && patch -p1 < fleet-implementer-new-file-consumers.patch` (or `git
 apply`). Then confirm `grep -c 'consumer-coverage suite in the foreground' roles/implementer.md` is 1 and
 the file sha256 is the applied result above. This artifact is a HUB DELIVERY: nothing in the
