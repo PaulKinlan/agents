@@ -7,6 +7,9 @@ fast_gate_arms_040_factory() {
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
       mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_adapter_auth_failure.py tests/test_line_andon.py tests/test_prompt_exposure.py tests/test_transient_dirs.py"
+      # agents-rw6z: the opt-in payload context and absent-key byte-identity prompt contract
+      # are exercised through the real dispatcher and retained prompt, not a formatting stub.
+      mapped="$mapped tests/test_factory_context_channel.py"
       # agents-oq3j: the promotion child is built by a call in THIS file (the dispatcher's
       # promote path), and tests/test_promotion.py MOCKS that call and asserts its exact shape -
       # so the dispatcher was changed and the assertion went stale while the arm that owns the

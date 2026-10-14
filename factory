@@ -1588,6 +1588,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     candidates_snapshot: Optional[bytes] = None
     model_parse_succeeded = True
     system_directive_text = None  # agents-m2n: lifted from the payload, see below
+    context_block = ""  # agents-rw6z: absent context must preserve the old prompt byte-for-byte
 
     if prepass_cmd is not None:
         print(f"\n[Step 1/3] Running deterministic pre-pass ({prepass_script.name})...")
@@ -1656,6 +1657,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     and isinstance(cand_json.get("system_instruction"), str) \
                     and cand_json["system_instruction"].strip():
                 system_directive_text = cand_json.pop("system_instruction")
+            # ADR agents-3f4b: opt in by KEY PRESENCE, including JSON null/false/empty values.
+            # Context is model input, not identity evidence or a system-channel directive;
+            # never apply the 50-candidate slice to the station's declared context budget.
+            if isinstance(cand_json, dict) and "context" in cand_json:
+                context_block = f"\nStation Context:\n{json.dumps(cand_json['context'], indent=2)}\n"
             if isinstance(cand_json, dict) and "candidates" in cand_json:
                 candidates_data = cand_json["candidates"]
                 print(f"-> Deterministic scanner found {len(candidates_data)} candidate matches.")
@@ -1697,7 +1703,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             f"deterministic scanner in repository '{target_name}'. Follow your SKILL.md instructions, "
             f"triage each item, and output your structured JSON findings.\n\n"
             f"Scanner Data:\n{json.dumps(candidates_slice, indent=2)}\n"
-        )
+        ) + context_block
         # Carry the exact output contract in the prompt: a SKILL.md example with `"findings": []`
         # left the model to invent finding field names, and `"id"` for `rule_id` cost a whole
         # threat model (fleet-9wyi).
