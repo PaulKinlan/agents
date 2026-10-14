@@ -30,6 +30,41 @@ def _isolated_test_package(test_dir):
         shutil.copy2(ROOT / "tests" / name, test_dir / name)
 
 
+def _ambient_pins_probe(isolated):
+    """Use a real pin-sensitive child, not the host's file or a passing unrelated suite."""
+    tests = isolated / "tests"
+    _isolated_test_package(tests)
+    fakebin = isolated / "bin"
+    fakebin.mkdir()
+    fakepi = fakebin / "pi"
+    fakepi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fakepi.chmod(0o755)
+    pins = isolated / "synthetic-tools.pins.yaml"
+    pins.write_text("pi:\n  sha256: " + "0" * 64 + "\n", encoding="utf-8")
+    # The ambient-name fallback is reached only after configure_host_pins(None).
+    # Without that call, even an existing FACTORY_TOOL_PINS is ignored by fresh
+    # unittest children; the former test_sandbox.py discovery was not discriminating.
+    (tests / "test__ambient_pins_probe_tmp.py").write_text(
+        "import os, unittest\n"
+        "from lib.tool_pins import configure_host_pins, resolve_tool\n"
+        "configure_host_pins(None)\n"
+        "class TestAmbientPin(unittest.TestCase):\n"
+        "    def test_resolve(self):\n"
+        "        resolved = resolve_tool('pi')\n"
+        "        self.assertFalse('FACTORY_TOOL_PINS' in os.environ)\n"
+        "        self.assertEqual(os.environ.get('FACTORY_ALLOW_UNPINNED_TOOLS'), '1')\n"
+        f"        self.assertEqual(str(resolved), {str(fakepi)!r})\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["FACTORY_TOOL_PINS"] = str(pins)
+    env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
+    env["PATH"] = f"{fakebin}{os.pathsep}{env.get('PATH', '')}"
+    env["PYTHONPATH"] = os.pathsep.join((str(isolated), str(ROOT), env.get("PYTHONPATH", "")))
+    env["HOME"] = str(isolated)  # Do not consult another host pin through the default home.
+    return tests, env
+
+
 class TestHermeticEnvironmentDeclaration(unittest.TestCase):
     def test_package_init_isolates_operator_config(self):
         """tests/__init__.py must ensure FACTORY_TOOL_PINS is unset and FACTORY_ALLOW_UNPINNED_TOOLS=1."""
@@ -165,40 +200,41 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
                              f"Synthetic module failed under ambient pins:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
 
     def test_package_aware_discovery_under_ambient_host_pins(self):
-        """Full gate package-aware discovery (`-s tests -t .`) runs hermetically under host pins."""
-        host_pins = Path.home() / ".config" / "factory" / "tools.pins.yaml"
-        if not host_pins.exists():
-            self.skipTest(f"Host pins file {host_pins} not present on this VM")
-
-        env = dict(os.environ)
-        env["FACTORY_TOOL_PINS"] = str(host_pins)
-        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
-
-        res = subprocess.run([sys.executable, "-m", "unittest", "discover",
-                              "-s", "tests", "-t", ".", "-p", "test_sandbox.py"],
-                             cwd=ROOT, env=env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0,
-                         f"Package-aware discovery failed under ambient host pins:\nSTDERR:\n{res.stderr}")
+        """The real package-aware command scrubs a synthetic, mismatched ambient pin."""
+        with tempfile.TemporaryDirectory(prefix="ambient-pins-discovery-") as tmp:
+            isolated = Path(tmp)
+            tests, env = _ambient_pins_probe(isolated)
+            command = [sys.executable, "-m", "unittest", "discover",
+                       "-s", "tests", "-t", ".", "-p", "test__ambient_pins_probe_tmp.py"]
+            res = subprocess.run(command, cwd=isolated, env=env, capture_output=True,
+                                 text=True, timeout=30)
+            self.assertEqual(res.returncode, 0,
+                             f"Package-aware discovery failed under synthetic ambient pins:\nSTDERR:\n{res.stderr}")
+            # Prove it was the package declaration, not a tool that ignored the pin.
+            (tests / "__init__.py").write_text("# inert declaration\n", encoding="utf-8")
+            broken = subprocess.run(command, cwd=isolated, env=env, capture_output=True,
+                                    text=True, timeout=30)
+            self.assertNotEqual(broken.returncode, 0, "an inert package must expose the ambient pin")
+            self.assertIn("not the configured pin", broken.stderr)
 
     def test_full_gate_invocation_with_env_scrub_under_ambient_host_pins(self):
-        """Full-gate command declared for check.conf (`env -u FACTORY_TOOL_PINS FACTORY_ALLOW_UNPINNED_TOOLS=1 ...`)
-        succeeds even under discover -s tests without package awareness."""
-        host_pins = Path.home() / ".config" / "factory" / "tools.pins.yaml"
-        if not host_pins.exists():
-            self.skipTest(f"Host pins file {host_pins} not present on this VM")
-
-        env = dict(os.environ)
-        env["FACTORY_TOOL_PINS"] = str(host_pins)
-        env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
-
-        full_gate_cmd = (
-            f"env -u FACTORY_TOOL_PINS FACTORY_ALLOW_UNPINNED_TOOLS=1 "
-            f"{sys.executable} -m unittest discover -s tests -p test_sandbox.py"
-        )
-        res = subprocess.run(["bash", "-c", full_gate_cmd],
-                             cwd=ROOT, env=env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0,
-                         f"Full-gate command failed under ambient host pins:\nSTDERR:\n{res.stderr}")
+        """The real package-blind full-gate command scrubs a synthetic ambient pin."""
+        with tempfile.TemporaryDirectory(prefix="ambient-pins-full-gate-") as tmp:
+            isolated = Path(tmp)
+            _, env = _ambient_pins_probe(isolated)
+            command = [sys.executable, "-m", "unittest", "discover",
+                       "-s", "tests", "-p", "test__ambient_pins_probe_tmp.py"]
+            scrubbed = subprocess.run(["env", "-u", "FACTORY_TOOL_PINS",
+                                     "FACTORY_ALLOW_UNPINNED_TOOLS=1", *command],
+                                    cwd=isolated, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(scrubbed.returncode, 0,
+                             f"Full-gate command failed under synthetic ambient pins:\nSTDERR:\n{scrubbed.stderr}")
+            # Without the full gate's env -u, the package-blind invocation sees the
+            # mismatched ambient content pin even though the opt-out is set.
+            broken = subprocess.run(["env", "FACTORY_ALLOW_UNPINNED_TOOLS=1", *command],
+                                    cwd=isolated, env=env, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(broken.returncode, 0, "removing env -u must expose the ambient pin")
+            self.assertIn("not the configured pin", broken.stderr)
 
     def test_fast_gate_runner_unsets_host_pins_for_child_suites(self):
         """The real gate preserves ambient pins; its child test PACKAGE must scrub them.
@@ -226,10 +262,6 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
                 "        self.assertEqual(os.environ.get('FACTORY_ALLOW_UNPINNED_TOOLS'), '1')\n",
                 encoding="utf-8"
             )
-            for name in ("test_direct_run_completeness.py", "test_coverage_contract.py",
-                         "test_tree_guards.py", "test_fast_gate_consumer_coverage.py"):
-                (tests / name).write_text("import unittest\nclass Stub(unittest.TestCase):\n    def test_stub(self): pass\n",
-                                         encoding="utf-8")
             env = dict(os.environ)
             env["FACTORY_TOOL_PINS"] = str(isolated / "ambient-tools.pins.yaml")
             env.pop("FACTORY_ALLOW_UNPINNED_TOOLS", None)
@@ -237,11 +269,37 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
             env["FLEET_CHECKS_DIR"] = str(isolated / "checks")
             env["GIT_CHANGED"] = probe_name
 
+            # Ask the REAL copied gate which suites it will execute, then stub only
+            # suites absent from this tiny fixture. A new always-on tier or arm mapping
+            # must not require updating an unrelated environment-plumbing test.
+            dry_run = subprocess.run(["bash", "tools/fast-gate.sh"], cwd=isolated,
+                                     env={**env, "FAST_GATE_DRY_RUN": "1"},
+                                     capture_output=True, text=True, timeout=30)
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            resolved = dry_run.stdout.strip().splitlines()
+            self.assertIn(probe_name, resolved, "the real gate must select the environment probe")
+            self.assertEqual(sorted(set(resolved)), resolved, "the gate must return distinct, sorted suites")
+            for name in resolved:
+                self.assertRegex(name, r"^tests/(?:[A-Za-z0-9_]+/)*test_[A-Za-z0-9_]+\.py$",
+                                 "only test modules inside the isolated tree may be stubbed")
+                stub = isolated / name
+                if stub.is_file():
+                    continue  # Never overwrite a real suite, especially the environment probe.
+                parent = stub.parent
+                while parent != tests:
+                    parent.mkdir(parents=True, exist_ok=True)
+                    (parent / "__init__.py").touch(exist_ok=True)
+                    parent = parent.parent
+                stub.write_text("import unittest\nclass Stub(unittest.TestCase):\n    def test_stub(self): pass\n",
+                                encoding="utf-8")
+
             res = subprocess.run(["bash", "tools/fast-gate.sh"], cwd=isolated, env=env,
                                  capture_output=True, text=True, timeout=30)
             self.assertEqual(res.returncode, 0,
                              f"fast-gate.sh failed to execute child suite:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
-            self.assertIn(probe_name, res.stdout)
+            passed = [line.removeprefix("fast-gate: passed: ").split()
+                      for line in res.stdout.splitlines() if line.startswith("fast-gate: passed: ")]
+            self.assertEqual(passed, [resolved], "the real runner must report every resolved suite as passed")
 
             # Mutation control: if the package stops scrubbing, the gate itself
             # must not make the test green. No real source or host config is edited.
