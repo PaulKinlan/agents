@@ -93,3 +93,50 @@ cut, so the reviewer can confirm the base rather than trust it:
 | `tests/check-coverage.test.sh` | `99406d19cf19f5b5` | 15994 |
 | `tests/fleet-gate-check.test.sh` | `f3919068e04d9127` | 181092 |
 | `tests/project-template.test.sh` | `0c82517f50aaa7fc` | 29804 |
+
+### Re-cut 2026-10-14: the four runner-discovery assertions, and one commit that re-keys the suite
+
+Applied to canon, the first version of this artifact produced four failures in `tests/fleet-gate-check.test.sh` (385 PASSED):
+`14s2`, `14t`, `14u`, and a trailing `timeout waiting for check record`. All four are runner-discovery assertions, and all
+four come from one commit. The identification is by fingerprint: this artifact's test hunk is `@@ -760,7 +760,45 @@`, which
+lands on canon at line 823 with offset 63 - so this is the pair member the hub applied, not the partial-clause artifact.
+
+**The mechanism, stated for the next author.** A test block that COMMITS in the fixture repo re-keys every record lookup that
+is keyed on the tree, because the tree hash was computed before the commit. Here the inserted block creates and commits
+`tools/unplaced-probe.sh` in `$COV_REPO`, while the suite had already fixed `app_rec=$HOME/.fleet/checks/$app_tree.fast.json`.
+So after that commit: `14s2` is a `hasnt` and reads the STALE record written by the `14q`/`14r` block, which by `14r`'s own
+assertion CONTAINS `tests/auth.test.ts`; `14t` and `14u` read that same stale record while the suites the fake
+`CHECK_FAST_CMD` would have produced went to the PROBE tree's record; and the trailing timeout is the full-gate block, whose
+`full_rec` is the OLD tree's `.json` while the check now runs at the probe tree's HEAD, so that record is never written and
+`wait_check` - which returns only on a non-empty record carrying `.notified`, or `.done` with a dead pid - waits forever.
+This is the same shape as a control that changes the thing it measures, one level down: a FIXTURE that moves the ground under
+the assertions that follow it.
+
+**The fix in this re-cut.** The inserted block MOVES to after the runner-discovery blocks, so its commit can no longer
+re-key the lookups that precede it; it records `pre_probe_sha` before the commit and restores the repo with
+`git -C "$COV_REPO" reset --hard -q "$pre_probe_sha"` afterwards; and the five ids it re-used - `14s`, `14t`, `14u`, `14v`,
+`14w` - are renamed `14s-rp`, `14t-rp`, `14u-rp`, `14v-rp`, `14w-rp`. The duplicate ids were a real second defect and are
+fixed on their own merits: the originals assert runner results and the inserted ones assert provenance, so sharing a label
+made a report of "14u failed" ambiguous to the hub. NOTHING IS DELETED: `14s2`, `14t`, `14u` and `14r` are intact, and every
+id present in the preimage is still present.
+
+**THE FOUR ASSERTIONS STAY, AND WHY.** They guard a property that still holds and are not asserting old behaviour:
+`remote/check-coverage.py` has ZERO mentions of manifest - there is no manifest mechanism in this path - and `.suites` is
+built from the GATE LOG (published at `check-coverage.py:420` as `suites_list = sorted(list(suites))`, read by
+`is_suite_executed` at `:502`). Driven on the deployed oracle: a synthetic repo plus a gate log carrying exactly the three
+shapes returned `suites = [tests/test_cls.py, tests/vitest.test.ts]` - vitest captured, class-qualified pytest captured,
+zero-test deno line NOT captured, all three expectations in one run.
+
+**DRIVEN RED-FIRST (this host, real oracle for suite discovery).** A fixture repo, a stub that writes the deployed oracle's
+output as the record for the CURRENT tree, and the same predicates the four assertions use:
+PRE-FIX - `14s2=FAIL 14t=FAIL 14u=FAIL 14v=FAIL`, REDS 4 of 4, reproducing the hub's report exactly.
+POST-FIX - `14s2=PASS 14t=PASS 14u=PASS 14v=PASS`, REDS 0 of 4.
+The stub substitutes only the record WRITER; the tree-keying mechanism and the oracle's suite discovery are the real ones.
+
+**VERIFIED IN THIS TREE, AND THE BOUND STATED.** The test section is a single INSERT-ONLY hunk (it deletes nothing) and
+applies to the pinned preimage under `patch -p1 --fuzz=0` at rc 0 with zero rejects and zero offsets; `bash -n` is clean;
+`pre_probe_sha` and the restore are present; the probe block sits after the runner-discovery blocks and the restore before
+the full-gate block; every preimage id survives and no id gains a second assertion; and the other four file sections are
+byte-identical to the previous version. NOT driven here: the end-to-end `tests/fleet-gate-check.test.sh` run, which needs
+canon - this host has no copy at the pinned preimages for `bin/fleet-check` or `remote/check-coverage.py`. The hub should
+expect all four green.
