@@ -102,13 +102,22 @@ class TestValidate(unittest.TestCase):
         self.assertEqual(validate("anything", {"description": "d", "title": "t"}), [])
 
 
-def _tracked_report_schemas():
+def _tracked_report_schemas(root: Path = FACTORY_ROOT, *, require_nonempty: bool = True):
+    """The tracked station schemas under `root`, read from git's index rather than the filesystem.
+
+    `root` is a parameter so the debris probe can ask the SAME question about a root that is not the
+    checkout (agents-fxg2): a decoy written under `agents/` moves that directory's ctime, which the tracked
+    symlink `skills -> agents` turns into a witness change, and a gate that ran this suite then recorded
+    STALE for a tree nobody had touched. The probe now keeps its decoy outside the tracked station tree
+    while still failing against a filesystem-based implementation, because that implementation would be
+    asked about the same root and would find it.
+    """
     out = subprocess.run(
-        ["git", "-C", str(FACTORY_ROOT), "ls-files", "agents/*/report.schema.json"],
+        ["git", "-C", str(root), "ls-files", "agents/*/report.schema.json"],
         capture_output=True, text=True, check=True
     ).stdout.splitlines()
-    schemas = sorted(FACTORY_ROOT / p for p in out)
-    if not schemas:
+    schemas = sorted(root / p for p in out)
+    if require_nonempty and not schemas:
         raise RuntimeError("no tracked report schemas found")
     return schemas
 
@@ -119,15 +128,22 @@ class TestDeclaredSchema(unittest.TestCase):
 
         Untracked debris matching agents/*/report.schema.json must not be absorbed.
         """
-        debris = FACTORY_ROOT / "agents" / "zz_debris_probe_tmp"
-        debris.mkdir(parents=True, exist_ok=True)
-        (debris / "report.schema.json").write_text("{}", encoding="utf-8")
-        try:
-            schemas = _tracked_report_schemas()
+        # The decoy sits in a temp directory at the REPO ROOT, never directly under agents/: creating a
+        # directory inside a tracked directory (agents/ has the tracked symlink skills pointing at it)
+        # moves its ctime, and a gate that runs this suite then records STALE for an untouched tree
+        # (agents-fxg2). A temp dir at the root is invisible to that witness - only tracked files and
+        # symlink targets are stat'ed - and the assertion keeps its teeth: a filesystem-based
+        # implementation asked about THIS root would still find the decoy and fail.
+        with tempfile.TemporaryDirectory(dir=FACTORY_ROOT) as tmp:
+            root = Path(tmp)
+            debris = root / "agents" / "zz_debris_probe_tmp"
+            debris.mkdir(parents=True, exist_ok=True)
+            (debris / "report.schema.json").write_text("{}", encoding="utf-8")
+            schemas = _tracked_report_schemas(root, require_nonempty=False)
             self.assertNotIn(debris / "report.schema.json", schemas)
-            self.assertIn(FACTORY_ROOT / "agents" / "secret-scan" / "report.schema.json", schemas)
-        finally:
-            shutil.rmtree(debris, ignore_errors=True)
+            self.assertEqual(schemas, [], "the probe root has no tracked schemas; only the decoy is on disk")
+        # And the real checkout is still read correctly, so the assertion above is not just emptiness.
+        self.assertIn(FACTORY_ROOT / "agents" / "secret-scan" / "report.schema.json", _tracked_report_schemas())
 
     def test_undeclared_schema_returns_none(self):
         with tempfile.TemporaryDirectory() as tmpdir:

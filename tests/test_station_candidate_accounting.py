@@ -5,10 +5,13 @@ station's CONTRACT, on two facts that are actually checkable:
 
   1. the contract STATES the accounting rule - a candidate that was evaluated and rejected is recorded as a
      dismissal, not dropped;
-  2. the VOCABULARY the contract demonstrates is one the READER accepts - the dismissal example is parsed out
-     of the contract and handed to lib.embargo.is_false_positive() / reported_severity(), so a rename or a
-     tightened vocabulary in the reader fails HERE instead of quietly returning the station to zero-accounted
-     (a contract that tells the model to emit a flag nobody reads is a silently green station again).
+  2. the VOCABULARY the contract demonstrates is one the READER accepts - the dismissall example is parsed out
+     of the contract and handed to lib.embargo.is_false_positive() / reported_severity(). The tie is asserted in
+     BOTH directions and against the reader's whole dismissall vocabulary, because "a rename fails here" is a
+     claim that is only true where it is tested: the flag KEY, the flag being load-bearing (a record without it
+     is not a dismissall), the verdict VALUE vocabulary (which is how the brief words the migration - a dismissal
+     "with its verdict"), and a reader that stops discriminating at all. A contract that tells the model to
+     emit a dismissall nobody reads is a silently green station again.
 
 WHAT THIS DELIBERATELY CANNOT PIN: the model's compliance with its own contract. The acceptance evidence for
 that is a nightly run reading candidates_accounted == candidates_presented; a stub would only prove that a
@@ -76,6 +79,31 @@ class TestStationCandidateAccounting(unittest.TestCase):
                 self.assertTrue(is_false_positive(finding))
                 # And it must not read as work: a dismissal is reported at info severity, never routed.
                 self.assertEqual(reported_severity(finding), "info")
+
+    def test_the_reader_still_recognises_the_dismissal_vocabulary_the_contracts_rely_on(self):
+        """agents-f8dj, coord's pin check 3: the arm listing is only worth its 0.004s if a change to the
+        READER'S vocabulary actually fails a test here. Measured on a copy of the tree before this test
+        existed: removing the flag branch failed (3 failures) and renaming the flag KEY failed (3), but
+        renaming the accepted VERDICT VALUES or the VERDICT FIELD names failed NOTHING - so the binding was
+        narrower than the write-up claimed. These four assertions close that gap deliberately, one per
+        direction of silence:
+
+          * the flag the contracts mandate is accepted;
+          * the verdict shape the migration brief words ("list each dismissed candidate with its verdict") is
+            accepted, so losing _VERDICT_FIELDS or _FALSE_POSITIVE_VERDICTS breaks this;
+          * a record carrying NEITHER marker is NOT a dismissal, so a reader that starts accepting everything
+            (which would suppress real findings as evidence) breaks this;
+          * the demonstrated example is load-bearing - strip the flag and it stops being a dismissal.
+        """
+        self.assertTrue(is_false_positive({"severity": "info", "false_positive": True}))
+        self.assertTrue(is_false_positive({"severity": "info", "verdict": "false_positive"}),
+                        "the verdict vocabulary the migration brief names is no longer accepted")
+        self.assertFalse(is_false_positive({"severity": "info", "rule_id": "real-finding", "title": "Real"}),
+                         "a record with no dismissal marker must not read as a dismissal")
+        example = dismissal_example(contract("docs-drift"))
+        self.assertTrue(is_false_positive(example))
+        self.assertFalse(is_false_positive({k: v for k, v in example.items() if k != "false_positive"}),
+                         "the flag must be what carries the dismissal, not the record's shape")
 
     def test_a_dismissal_needs_the_fields_the_report_schema_requires(self):
         """The contract's shape must satisfy the schema the factory VALIDATES against, not just the reader."""
