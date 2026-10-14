@@ -42,7 +42,15 @@ TRACKED="$ROOT/tools/check.conf"
 # field is added or removed - the agents-p8lh defect, where the printed instruction stops matching the code. One
 # list, used by the validation AND by the message, with a test that ties it to the dispatch (the reader's plain
 # field query) so the two cannot drift apart unnoticed.
-FIELDS="CHECK_CMD CHECK_FAST_CMD CHECK_TIMEOUT CHECK_FAST_TIMEOUT"
+# agents-bf1f: THE READER'S FIELDS ARE NAMED IN ONE PLACE EACH FOR THE TWO THINGS THEY DO. A command field holds a
+# command whose 126/127 this diagnostic can explain; a bound field holds a timeout, and a timeout cannot exit 127,
+# so passing one here was answered with "CHECK_FAST_TIMEOUT exited 127 ... It names [60s (not on PATH)]" - a bound
+# accused of being a missing program. Typed copies of either list would be a repair instruction that names the wrong
+# thing the day a field changes (the agents-p8lh defect), so both lists live here and the tests derive their names
+# back out of the printed message.
+CMD_FIELDS="CHECK_CMD CHECK_FAST_CMD"
+BOUND_FIELDS="CHECK_TIMEOUT CHECK_FAST_TIMEOUT"
+FIELDS="$CMD_FIELDS $BOUND_FIELDS"
 # agents-0utp: WHERE --install WRITES IS ITS OWN DECISION, AND THE DEFAULT IS REPO-LOCAL. The header has always
 # described two lives for this file; the installer used to behave as if only one existed and wrote the
 # MACHINE-GLOBAL path by default - which is how installing from repo A silently gave repo B a gate command naming
@@ -127,6 +135,18 @@ config_provenance() {
   grep -m1 -E '^# Project: ' "$1" 2>/dev/null | sed -E 's/^# Project: //' || true
 }
 
+# agents-bf1f: EXACT MEMBERSHIP, NOT A SUBSTRING TEST. The first version of this fix validated the field with
+# `case " $CMD_FIELDS " in *" $field "*)`, which MATCHED a multi-token argument: " CHECK_CMD CHECK_FAST_CMD " is a
+# literal substring of " CHECK_CMD CHECK_FAST_CMD CHECK_TIMEOUT ...", so the argument passed validation, reached
+# ${!field}, and bash died with 'line 148: CHECK_CMD CHECK_FAST_CMD: invalid variable name', exit 1 - the same
+# broken contract, one door over, because the shape of the field was bounded but not its EXTENT. The field must
+# EQUAL one of the declared names.
+field_in() {
+  local want="$1" f
+  for f in $2; do [ "$f" = "$want" ] && return 0; done
+  return 1
+}
+
 # THE POST-FAILURE DIAGNOSTIC. $1 = the exit code the runner OBSERVED, $2 = the field (default CHECK_CMD).
 # Prints nothing at all unless the code is command-not-found class, so it is safe for a runner to call
 # unconditionally after every run, and it never changes the verdict - the gate has already failed or passed.
@@ -139,12 +159,16 @@ explain_failure() {
   # any run") for a CALLER-side typo, and `${!field-}` does not help - the name is the problem, not the value.
   # A tool is allowed to be loud about its OWN misuse while staying silent about gates, which is why this prints a
   # usage line rather than nothing: silence here would leave a runner believing it had asked a valid question.
-  case " $FIELDS " in
-    *" $field "*) ;;
-    *) printf 'check-cmd: --explain-failure: unknown field %s; expected one of %s. Nothing was explained, and this is not a verdict about any gate.\n' \
-         "${field:-<empty>}" "$FIELDS" >&2
-       return 0 ;;
-  esac
+  if field_in "$field" "$CMD_FIELDS"; then
+    :
+  elif field_in "$field" "$BOUND_FIELDS"; then
+    printf 'check-cmd: --explain-failure: %s is a BOUND, not a command, so a 126/127 cannot be about it. Pass one of %s. Nothing was explained, and this is not a verdict about any gate.\n' "$field" "$CMD_FIELDS" >&2
+    return 0
+  else
+    printf 'check-cmd: --explain-failure: unknown field %s; expected one of %s. Nothing was explained, and this is not a verdict about any gate.\n' \
+      "${field:-<empty>}" "$CMD_FIELDS" >&2
+    return 0
+  fi
   cmd="${!field:-}"
   [ -n "$cmd" ] || return 0
   for tok in $(printf '%s\n' "$cmd" | command_tokens | sort -u); do
