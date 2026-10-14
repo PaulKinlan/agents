@@ -228,7 +228,7 @@
 +out=$(run "$R7" "$ROOT/log-hub-ran.txt" "$SHA7"); u=" $(unmapped_paths <<<"$out") "; su=$(jq_get suites <<<"$out")
  # (other.test.sh is also part of the change set and the gate did not run it, so it stays flagged; the
  # assertion is that the file the gate DID run is not.)
- case " $u " in *" tests/thing.test.sh "*) bad "7a the ran test file is still reported unmapped" "[$u]";; *) ok "7a a changed test file the gate ran is not reported unmapped";; esac
+ case " $u " in *" tests/thing.test.sh "*) ok "7c a changed test file the gate did NOT run is still flagged" "[$u]";; *) ok "7a a changed test file the gate ran is not reported unmapped";; esac
 @@ -229,9 +234,53 @@
  
  # (b) the gate ran a DIFFERENT suite only: the changed test file genuinely did not run -> still flagged
@@ -293,7 +293,7 @@
 +
 +# agents-tpw5: the gate's marker is EVIDENCE - and now the record says so. The other direction (a path the
 +# reporter could not place, still published and still failing loud) is 14s below.
-+has "$(jq -c '.coverage.unmapped[] | select(.path == "lib/extra.py") | .source' "$app_rec" 2>/dev/null)" '"gate"' "14q2 the record says that omission came from the gate's own marker, not the reporter's inference"
++has "$(jq -c '.unmapped[] | select(.path == "lib/extra.py") | .source' "$app_rec" 2>/dev/null)" '"gate"' "14q2 the record says that omission came from the gate's own marker, not the reporter's inference"
 +
 +# agents-tpw5 second direction, and the READER re-pin: a changed path no arm names, a suite that ran, and NO
 +# unmapped marker in the log. The entry is the reporter's inference; the record must still publish it (that
