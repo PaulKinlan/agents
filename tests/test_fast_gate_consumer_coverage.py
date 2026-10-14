@@ -27,6 +27,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests import has_git_index, tracked_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # The independent oracle the mirror mirrors (agents-5z4e). It lives in the fleet tree, so it is NOT
@@ -297,7 +299,26 @@ def _selected_suites(module_path, root=None):
 
 
 def _lib_modules(root=None):
+    """The TRACKED direct-child modules of lib/ - the module set this mirror asks the gate about.
+
+    agents-37rj: this was a filesystem glob, the last walker of the agents-4ieg class in this module, and
+    its answer feeds BOTH the gate dry run in test_a_consumer_the_gate_does_not_select_must_be_allowlisted
+    AND the mirror-versus-oracle comparison (three call sites) - so an untracked file under lib/ widened
+    BOTH SIDES of a comparison whose whole value is that they are two independent views of one tree.
+    Measured: an untracked lib/zz37rj_probe.py took this from 21 modules to 22, while the two sides were
+    supposed to disagree only about what they can see of the SAME tree. Read git's index instead, which is
+    the set the gate witnesses.
+    """
     root = root or ROOT
+    if has_git_index(root):
+        # tracked_paths takes a GIT PATHSPEC, in which `*` crosses `/` - `lib/*.py` also matches
+        # lib/bench/runner.py (measured) - so ask for the directory and keep direct children here.
+        lib = root / "lib"
+        stems = {p.stem for p in tracked_paths("lib", root=root)
+                 if p.suffix == ".py" and len(p.relative_to(lib).parts) == 1}
+        return sorted(stem for stem in stems if stem != "__init__")
+    # A SYNTHETIC root built by a fixture is not inside a work tree, so there is no index to ask, and the
+    # filesystem is then the WHOLE tree rather than a second, wider notion of it (see has_git_index).
     return sorted(p.stem for p in (root / "lib").glob("*.py") if p.stem != "__init__")
 
 
