@@ -48,7 +48,24 @@ BASE, cut against the DEPLOYED tree as coord directed. Both files are EDITED, so
 - `tests/fleet-land-message.test.sh` — 91463 bytes, sha256 91dfa5c97995244b3733aca102d3c81e7846d95b632c67435901fef67ad15a77
 
 APPLIES: `patch -p1 --fuzz=0` -> **rc 0, no rejects, no `.orig`, no fuzz or offset messages**, and the patched
-result is **byte-identical** to the development tree, which then runs 303/0. NO COLLISION EXPECTED with the other
-two hub artifacts in flight — `agents-kq0r` creates `bin/fleet-fallback-guard` and hooks `sdk-host/host.mjs`, and
-`agents-ayqi` adds `bin/fleet-clear` and edits `roles/reviewer.md`; neither touches either file here — but the hub
-re-verifies against its own tree, as it does for every hub-delivery artifact.
+result is **byte-identical** to the development tree, which then runs 303/0.
+
+COLLISION — CORRECTED. The version of this paragraph that went to review claimed "NO COLLISION EXPECTED with the
+other two hub artifacts in flight", naming `agents-kq0r` (`bin/fleet-fallback-guard`, `sdk-host/host.mjs`) and
+`agents-ayqi` (`bin/fleet-clear`, `roles/reviewer.md`). Both of those descriptions are still accurate and neither
+of those two touches either file here — but they were not the whole set, and a third artifact does collide:
+`agents-ivp7`'s `patches/fleet-land-message-clearance-tree-identity.patch` (`agents-oa1e`) edits THE SAME TWO FILES,
+14 hunks, and it landed on main while this artifact was being built. So the "no collision" headline was false
+rather than merely incomplete, and this paragraph is the correction. The `.patch` beside it is UNCHANGED: this
+correction is documentation only, and the commit that carries it does not touch the patch at all.
+
+WHAT THE COLLISION MEANS FOR AN INSTALLER: the two artifacts are NOT redundant, and the install ORDER matters.
+ivp7 keys a clearance on the TREE, which fixes a commit that moves without changing its tree; a branch that GREW
+past its clearance has a different tree, which is the case the union-tree flag here exists for. If both are
+installed, the second must be RE-CUT against the first's result's hashes - the same pattern as `agents-w43q`'s
+re-cut onto `agents-bp6m`. Neither is installed as of this correction.
+
+NOTE ON THE SIBLING'S RECORDED BASE, for whoever installs both: that artifact's write-up records a base hash for
+`bin/fleet-land-message` that DIFFERS from the 64670-byte value above for the same deployed bytes. Applying that
+patch reproduces ITS recorded patched hash exactly, so its base value is a transcription error, not a different
+target - the two artifacts are cut against the same deployed file.
