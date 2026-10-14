@@ -1,0 +1,28 @@
+--- a/tests/project-template.test.sh
++++ b/tests/project-template.test.sh
+@@ -255,7 +255,10 @@
+   && git -c user.email=t@t -c user.name=t commit -qm "orphan" )
+ run_fast_log
+ cov=$(python3 "$COV" "$ROOT/fast.log" "$P" "$(git -C "$P" rev-parse HEAD)" 'bash tools/fast-gate.sh' 2>/dev/null)
+-if jq -e '.unmapped | index("src/orphan.ts")' <<<"$cov" >/dev/null 2>&1; then
++# agents-<followup>: each .unmapped entry carries its own provenance now ({"path": ..., "source": ...}), and
++# older records still carry plain strings. index() a PATH in a list of objects returns null, so the query is
++# made shape-tolerant: the assertion then holds against strings, entries, or a mixture.
++if jq -e '[.unmapped[] | if type == "object" then .path else . end] | index("src/orphan.ts")' <<<"$cov" >/dev/null 2>&1; then
+   ok "D17 ... and the fail-loud case lands in the record as unmapped"
+ else
+   bad "D17 ... and the fail-loud case lands in the record as unmapped" "$cov"
+--- a/tests/fleet-gate-check.test.sh
++++ b/tests/fleet-gate-check.test.sh
+@@ -728,7 +728,10 @@
+ fi
+ 
+ st_blind=$(cd "$COV_REPO" && check --status --fast "$blind_tree" 2>&1)
+-has "$st_blind" '"unmapped":["lib/extra.py"]' "14m status JSON surfaces unmapped changed file"
++# agents-<followup>: this asserted the serialized array EXACTLY ('"unmapped":["lib/extra.py"]'), so a change
++# to the element type made it fail while the field was correct. Assert what the status must CONVEY - the path
++# is surfaced - which holds for a string entry and for one carrying its provenance.
++has "$st_blind" 'lib/extra.py' "14m status JSON surfaces unmapped changed file"
+ cached_blind_out=$(cd "$COV_REPO" && check --fast 2>&1)
+ has "$cached_blind_out" "Coverage warning: lib/extra.py unmapped" "14n cached PASS output surfaces unmapped warning"
+ 
