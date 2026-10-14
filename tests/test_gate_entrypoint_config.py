@@ -1441,15 +1441,20 @@ class TestTheReaderRefusesACommandThatCannotRunHere(unittest.TestCase):
     described. Removing the guard makes every refusal assertion below fail.
     """
 
-    def _repo(self, tag, commands, stamp='# Project: agents-factory (/some/other/checkout)\n'):
+    def _repo(self, tag, commands, stamp='# Project: agents-factory (/some/other/checkout)\n', files=()):
         """A second repo that carries the reader (a copy of tools/check-cmd.sh + the tracked conf) and a HOME-level
         config describing commands that may or may not resolve in it - the shape of a lane worktree on a shared
-        host, which is where this defect is measured."""
+        host, which is where this defect is measured. `files` are extra repo paths to create."""
         home = Path(_registered_tmp_home(self, tag))
         repo = home / "repoB"
         (repo / "tools").mkdir(parents=True)
         for name in ("check-cmd.sh", "check.conf"):
             shutil.copy(ROOT / "tools" / name, repo / "tools" / name)
+        for rel in files:
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\nprintf ok\n", encoding="utf-8")
+            path.chmod(0o755)
         conf = home / ".fleet" / "check.conf"
         conf.parent.mkdir(parents=True, exist_ok=True)
         conf.write_text(stamp + "".join(f'{k}="{v}"\n' for k, v in commands.items()), encoding="utf-8")
@@ -1480,11 +1485,89 @@ class TestTheReaderRefusesACommandThatCannotRunHere(unittest.TestCase):
     def test_the_unittest_discovery_flag_is_checked_as_a_path(self):
         repo, env = self._repo("0r1c-suites-",
                                {"CHECK_CMD": "python3 -m unittest discover -s tests -t . -v",
-                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+                                "CHECK_FAST_CMD": "bash tools/check-cmd.sh --check"})
         r = self._read(repo, env)
         self.assertEqual(r.returncode, 2)
         self.assertIn("tests", r.stderr,
                       "-s tests names a directory, and a repo without it cannot run that command either")
+
+    # ---- agents-wisk and agents-jqc4: the first tokenizer broke in both directions, so the rule was
+    # ---- replaced by the property (a path the command must READ or EXECUTE), and both repros are pinned here.
+
+    def test_an_explicit_dot_slash_prefix_is_the_same_missing_path(self):
+        """agents-wisk (P2, FALSE NEGATIVE on feb946b2): `bash ./tools/fast-gate.sh` bypassed the refusal
+        entirely, because the old tokenizer's regex anchored the first character after the slash and a
+        leading `.` did not match. `./x` is not a different command - it is the same missing file spelled
+        differently - and the control below is the same command without the prefix."""
+        repo, env = self._repo("0r1c-dotslash-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                "CHECK_FAST_CMD": "bash ./tools/fast-gate.sh"})
+        r = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 2, "a ./ prefix must not buy the command a pass")
+        self.assertIn("tools/fast-gate.sh", r.stderr)
+        # CONTROL: the same command without the prefix was ALWAYS refused - if that stops being true, the
+        # assertion above is passing for a reason other than the prefix being normalised.
+        repo2, env2 = self._repo("0r1c-nodotslash-",
+                                 {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                  "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        self.assertEqual(self._read(repo2, env2, "CHECK_FAST_CMD").returncode, 2)
+
+        # ...and the bare form, where the missing path IS the command word.
+        repo3, env3 = self._repo("0r1c-dotslash-bare-",
+                                 {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                  "CHECK_FAST_CMD": "./tools/fast-gate.sh"})
+        self.assertEqual(self._read(repo3, env3, "CHECK_FAST_CMD").returncode, 2)
+
+    def test_an_output_redirection_target_is_not_a_command_path(self):
+        """agents-jqc4 (P2, FALSE POSITIVE on feb946b2): `bash tools/fast-gate.sh > logs/result.log` was
+        refused because logs/result.log did not exist - but that file is CREATED by the command, not read by
+        it, and running it by hand succeeds. Output paths are the case that made the first rule indefensible,
+        so ignoring them is the rule now, not an exception to it. The second half keeps the property: with the
+        SCRIPT missing, the same command is still refused."""
+        repo, env = self._repo("0r1c-redirect-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh > logs/result.log"},
+                               files=("tools/fast-gate.sh",))
+        r = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(r.returncode, 0,
+                         f"a command that only CREATES logs/result.log must not be refused: {r.stderr[:300]}")
+        self.assertIn("logs/result.log", r.stdout)
+        self.assertFalse((repo / "logs").exists(), "the reader must not create anything either")
+
+        (repo / "tools" / "fast-gate.sh").unlink()
+        rr = self._read(repo, env, "CHECK_FAST_CMD")
+        self.assertEqual(rr.returncode, 2, "the script the command RUNS is still checked, redirection or not")
+        self.assertIn("tools/fast-gate.sh", rr.stderr)
+
+    def test_a_read_redirection_target_must_exist(self):
+        """The other side of the same distinction: `<` names a file the command READS, so a missing one is
+        unrunnable, and it is the one redirection that stays in the candidate set."""
+        repo, env = self._repo("0r1c-read-",
+                               {"CHECK_CMD": "bash tools/check-cmd.sh --check < missing-input.txt",
+                                "CHECK_FAST_CMD": "bash tools/check-cmd.sh --check"})
+        r = self._read(repo, env, "CHECK_CMD")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("missing-input.txt", r.stderr)
+
+    def test_a_program_that_is_not_on_path_is_refused(self):
+        """The rule's other half, and it is evidence rather than guesswork: a bare command word that resolves
+        nowhere IS a 127, which is exactly the failure this guard exists to explain. Both directions are
+        pinned - a real program that does exist must never be refused (see the resolvable-config control)."""
+        repo, env = self._repo("0r1c-path-",
+                               {"CHECK_CMD": "definitely-not-a-program --flag",
+                                "CHECK_FAST_CMD": "bash tools/check-cmd.sh --check"})
+        r = self._read(repo, env, "CHECK_CMD")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("definitely-not-a-program", r.stderr)
+
+    def test_a_flag_that_is_not_unittest_discovery_is_not_a_path(self):
+        """`sort -t ,` is not a directory named by unittest, so the -s/-t rule is gated on the command line
+        actually mentioning unittest/discover. Without that gate this guard would refuse ordinary pipelines."""
+        repo, env = self._repo("0r1c-sortt-",
+                               {"CHECK_CMD": "printf x | sort -t , -k1",
+                                "CHECK_FAST_CMD": "bash tools/check-cmd.sh --check"})
+        r = self._read(repo, env, "CHECK_CMD")
+        self.assertEqual(r.returncode, 0, f"an unrelated -t must not be read as a path: {r.stderr[:300]}")
 
     def test_the_refusal_is_scoped_to_the_offending_field(self):
         repo, env = self._repo("0r1c-scoped-",
