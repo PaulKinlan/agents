@@ -371,6 +371,38 @@ fast_gate_arm_fragments() {
 # reason the loader states: stdout is the marker channel remote/check-coverage.py parses.
 fast_gate_report_ignored_arms() {
   local _ignored_arm
+  # fleet-6sgf: THE ARM SOURCE IS PART OF WHAT A RECEIPT CAN SUPPORT. Whether the arms were read from the
+  # index or from the filesystem fallback decides whether UNTRACKED files were read at all - in the fallback
+  # every *.sh in the registry is sourced - and until now a receipt claimed the identical thing in both states,
+  # which is FALSE in the direction that matters. This function is the ONE place the notice is emitted
+  # (agents-es0y), so it is the one place the machine-readable form is written; the caller names the
+  # destination in FLEET_GATE_SIGNAL_FILE, and a caller that names none gets no file, which is how a human run
+  # stays silent. A failure here must never fail the gate, so the write is atomic and its only visible effect
+  # is either the file or nothing.
+  # SPELLING: {"schema":"fleet-gate-signal/1","arms_source":"index"|"fallback"|"unknown",
+  # "arms_reason":"<the fallback text, empty when indexed>"}. "unknown" is emitted when the loader has not run
+  # at all, because claiming "index" there would be an overclaim and the consumer reads any unrecognised value
+  # as NO CLAIM (fleet-6sgf condition 2: absence must never mean witnessed).
+  if [ -n "${FLEET_GATE_SIGNAL_FILE:-}" ]; then
+    local _sig_tmp _sig_source _sig_rc
+    if [ -z "${FAST_GATE_ARM_FRAGMENTS+set}" ]; then _sig_source="unknown"
+    elif [ -n "${FAST_GATE_ARMS_FALLBACK:-}" ]; then _sig_source="fallback"
+    else _sig_source="index"; fi
+    _sig_tmp="${FLEET_GATE_SIGNAL_FILE}.$$.tmp"
+    # The python call MUST be an if-condition, not a plain command followed by a $? test: this script runs
+    # under set -e, so a plain failing command here would abort the GATE - measured, with the unwritable-path
+    # control exiting 1 before the $? was ever read. A signal that cannot be written must cost the gate nothing.
+    if python3 - "$_sig_source" "${FAST_GATE_ARMS_FALLBACK:-}" "$_sig_tmp" <<'FLEET_SIGNAL_EOF' 2>/dev/null
+import json, sys
+with open(sys.argv[3], "w", encoding="utf-8") as fh:
+    json.dump({"schema": "fleet-gate-signal/1", "arms_source": sys.argv[1], "arms_reason": sys.argv[2]}, fh)
+FLEET_SIGNAL_EOF
+    then
+      mv -f "$_sig_tmp" "$FLEET_GATE_SIGNAL_FILE" 2>/dev/null || true
+    else
+      rm -f "$_sig_tmp" 2>/dev/null || true
+    fi
+  fi
   if [ -n "${FAST_GATE_ARMS_FALLBACK:-}" ]; then
     echo "fast-gate: WARNING (agents-wzmj): arm fragments are read from the FILESYSTEM ($FAST_GATE_ARMS_FALLBACK), so UNTRACKED fragments in tools/fast-gate-arms.d/ WILL be sourced" >&2
   fi
