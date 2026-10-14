@@ -10,7 +10,9 @@
 #
 # Usage:  tools/check-cmd.sh [CHECK_CMD|CHECK_FAST_CMD|CHECK_TIMEOUT|CHECK_FAST_TIMEOUT]
 # With no argument it prints the whole resolved set. Values from the override win.
-#         tools/check-cmd.sh --install [--global]   writes the tracked values into the per-VM file.
+#         tools/check-cmd.sh --install [--global] [--force] writes the tracked values into the per-VM file.
+#                                        --force replaces a provably missing existing command; a timestamped
+#                                        backup is still made before any existing file is replaced.
 #                                        No flag: the repo-local default. --global: the host-wide
 #                                        file every repo on this machine reads by default.
 #         tools/check-cmd.sh --check     compares the per-VM file with the tracked one and names every
@@ -128,7 +130,7 @@ install_cmd_for() {
 # error directions are not equal: A FALSE REFUSAL BREAKS A WORKING GATE, while a MISS only fails to explain a
 # 127 that was going to happen anyway.)
 #
-# So this file no longer refuses anything. It ships a DIAGNOSTIC that a runner may call AFTER the command has
+# The reader no longer refuses on a prediction. It ships a DIAGNOSTIC that a runner may call AFTER the command has
 # already failed by itself, and it speaks only when the failure is command-not-found class. What it then says
 # is what is actually known: the config's own '# Project:' stamp (who installed it), the tokens the command
 # names that do not resolve here, and the one-line repair. An observed fact cannot false-refuse anything.
@@ -189,7 +191,7 @@ field_in() {
 # site "NO || true HERE EITHER ... this is the same error-masking shape". This is that defect one level up: in the
 # CONFIG that names the gate command.
 #
-# Nothing here refuses anything - the flag is information, and a verdict is never changed by it. Refusing would
+# Nothing in this reader warning refuses anything - the flag is information, and a verdict is never changed by it. Refusing would
 # turn a broken config into an un-runnable gate, which is the trap agents-0r1c deliberately kept open.
 # Prints the swallowing TAIL, or nothing.
 swallowing_tail() {
@@ -380,21 +382,26 @@ fi
 #
 # agents-r1o7: DO NOT SOURCE THE OVERRIDE BEFORE --install. If an existing per-VM file is
 # malformed, corrupted, or has syntax errors, an installer whose job is to replace it
-# with clean tracked defaults must NOT fail by sourcing the broken file first.
+# with clean tracked defaults must NOT fail by sourcing the broken file first. The installer
+# inspects only literal CHECK_CMD text and refuses only a positively missing simple command;
+# unknown shell constructs warn and proceed rather than resurrecting the reader's false refusals.
 if [ "${1:-}" = "--install" ]; then
+  force=0
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force) force=1 ;;
+      --global) INSTALL_GLOBAL=1 ;;
+      *) echo "check-cmd: unknown option '$1' (expected --global or --force)" >&2; exit 2 ;;
+    esac
+    shift
+  done
   # --global is the explicit opt-in for the host-wide file. Without it (and without FLEET_CHECK_CONF) the default
   # is the repo-local file, because writing the shared path is the claim that THIS repo's gate commands are the
   # host's - a claim that belongs to an operator, never to a default.
-  case "${2:-}" in
-    --global)
-      if [ -n "${FLEET_CHECK_CONF:-}" ]; then
-        echo "check-cmd: --global ignored: FLEET_CHECK_CONF=$FLEET_CHECK_CONF is explicit and wins" >&2
-      else
-        INSTALL_GLOBAL=1; OVERRIDE="$GLOBAL_CONF"
-      fi;;
-    "") ;;
-    *) echo "check-cmd: unknown option '$2' (expected --global, or nothing)" >&2; exit 2;;
-  esac
+  if [ "$INSTALL_GLOBAL" = 1 ] && [ -n "${FLEET_CHECK_CONF:-}" ]; then
+    echo "check-cmd: --global ignored: FLEET_CHECK_CONF=$FLEET_CHECK_CONF is explicit and wins" >&2
+  fi
   # Decide the destination ONCE, then classify it - the class is a function of the decision, not a parallel
   # computation that can disagree with it (the first version of this edit classified before deciding).
   if [ -n "${FLEET_CHECK_CONF:-}" ]; then
@@ -426,11 +433,91 @@ if [ "${1:-}" = "--install" ]; then
   dest="${OVERRIDE}"
   mkdir -p "$(dirname "$dest")"
 
-  # agents-f6no: ~/.fleet/check.conf is machine-global. Warn if replacing a file
-  # not stamped by agents-factory (e.g. another project on a shared-HOME host).
-  if [ -f "$dest" ] && ! grep -q "Project: agents-factory" "$dest" 2>/dev/null; then
-    echo "check-cmd: WARNING: overwriting $dest which was not stamped by agents-factory (shared-HOME host)" >&2
+  # BEGIN INSTALL_EXISTING_GUARD: only a simple command with a positively missing executable/script
+  # can block an install. Never source an existing (possibly broken) override to inspect it.
+  if [ -e "$dest" ]; then
+    previous_line="$(grep -m1 '^CHECK_CMD=' "$dest" 2>/dev/null || true)"
+    previous="${previous_line#CHECK_CMD=}"
+    case "$previous" in
+      \"*\") previous="${previous#\"}"; previous="${previous%\"}" ;;
+      \'*\') previous="${previous#\'}"; previous="${previous%\'}" ;;
+    esac
+    signature="$(grep -m1 '^# Written by ' "$dest" 2>/dev/null || true)"
+    project="$(config_provenance "$dest")"
+    printf 'check-cmd: current CHECK_CMD in %s: %s\n' "$dest" "${previous:-<empty or unset>}"
+    printf 'check-cmd: current source: %s; Project: %s\n' "${signature:-<no Written by signature>}" "${project:-<no Project signature>}"
+    if [[ "$project" != agents-factory* ]]; then
+      echo "check-cmd: WARNING: overwriting $dest which was not stamped by agents-factory (shared-HOME host)" >&2
+    fi
+    if [ -n "$previous" ]; then
+      # The signature records the original absolute repo path in parentheses. A global config
+      # without that path has no trustworthy relative base, so it cannot be refused on a guess.
+      base=""
+      project_path='\((/[^)]*)\)$'
+      if [[ "$project" =~ $project_path ]]; then
+        # A stamped but now-absent repo is not the caller's cwd. The missing script
+        # cannot be proved relative to an installation that is no longer present.
+        [ -d "${BASH_REMATCH[1]}" ] && base="${BASH_REMATCH[1]}"
+      elif [ "$dest" != "$GLOBAL_CONF" ]; then
+        base="$PWD"
+      fi
+      reason=""; missing=""
+      compound_chars='[|&;$`\\<>()]'
+      simple_words='^[[:space:]]*([[:alnum:]_./-]+)([[:space:]]+([[:alnum:]_./-]+))?[[:space:]]*$'
+      if [[ "$previous" =~ $compound_chars ]] || [[ "$previous" == *$'\n'* ]]; then
+        reason="compound or expanded command"
+      elif [[ ! "$previous" =~ $simple_words ]]; then
+        reason="command cannot be decomposed exactly"
+      else
+        program="${BASH_REMATCH[1]}"; arg="${BASH_REMATCH[3]:-}"
+        case "$program" in
+          bash|sh|python3|node)
+            if [ -z "$arg" ] || [[ "$arg" == -* ]]; then
+              reason="interpreter arguments cannot be decomposed exactly"
+            elif ! command -v "$program" >/dev/null 2>&1; then
+              missing="$program (not on PATH)"
+            elif [ -z "$base" ] && [[ "$arg" != /* ]]; then
+              reason="no trustworthy repo base for relative script"
+            else
+              script="$arg"
+              [[ "$script" == /* ]] || script="$base/$script"
+              [ -f "$script" ] && [ -r "$script" ] || missing="$script (missing or unreadable script)"
+            fi ;;
+          *)
+            if [ -n "$arg" ]; then
+              reason="command arguments cannot be decomposed exactly"
+            elif [[ "$program" == */* ]]; then
+              if [ -z "$base" ] && [[ "$program" != /* ]]; then
+                reason="no trustworthy repo base for relative executable"
+              else
+                executable="$program"
+                [[ "$executable" == /* ]] || executable="$base/$executable"
+                [ -f "$executable" ] && [ -x "$executable" ] || missing="$executable (missing or not executable)"
+              fi
+            elif ! command -v "$program" >/dev/null 2>&1; then
+              missing="$program (not on PATH)"
+            fi ;;
+        esac
+      fi
+      if [ -n "$reason" ]; then
+        echo "check-cmd: WARNING: cannot resolve current CHECK_CMD '$previous' statically ($reason); proceeding without a refusal." >&2
+      elif [ -n "$missing" ]; then
+        if [ "$force" -eq 0 ]; then
+          echo "check-cmd: REFUSING to overwrite current CHECK_CMD '$previous': $missing (checked relative to ${base:-<no repo base>}). Pass --force to proceed." >&2
+          exit 1
+        fi
+        echo "check-cmd: WARNING: --force replacing current CHECK_CMD '$previous': $missing" >&2
+      fi
+    fi
+    # A backup precedes replacement even when the old command is empty or resolves.
+    backup="${dest}.backup.$(date -u +%Y%m%dT%H%M%S%N).$$"
+    cp -p -- "$dest" "$backup"
+    echo "check-cmd: backup: $backup"
+  else
+    echo "check-cmd: current CHECK_CMD in $dest: <not installed>"
+    echo "check-cmd: current source: <not installed>"
   fi
+  # END INSTALL_EXISTING_GUARD
 
   # agents-0utp: NAME THE LIFE THIS COPY LEADS. The header used to assert MACHINE-GLOBAL whatever $dest was,
   # which is only true at the default path. When FLEET_CHECK_CONF names a per-repo override, a file that calls
