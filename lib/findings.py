@@ -115,7 +115,10 @@ DELTA_KEYS = ("new", "regressed", "fixed", "unchanged", "suppressed", "false_pos
               # a fail-closed tracker check) showed a location cannot distinguish a re-key from a
               # finding appearing where an old one retired, so the delta DISCLOSES the ambiguity and
               # changes nothing that a reader or a sink acts on.
-              "possible_rekey")
+              "possible_rekey",
+              # Model echoes are not scanner selection. Count invalid/unshown identities and
+              # contradictions with a fact-bound id without changing the fact binding (agents-hoxs).
+              "anchor_unknown", "anchor_disagreement")
 
 def normalize_text(text: Any) -> str:
     """Strip and collapse internal whitespace to make fingerprint resilient to reformatting.
@@ -239,6 +242,7 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
     # safer (agents-q0mt): identity becomes scanner-owned data, and the two-findings-one-path case
     # that the step-2 location fallback had to REFUSE is now resolvable, because each candidate
     # says which one it is.
+    ids_set: set[str] = set()  # every emitted id, even if its location cannot be indexed
     ids_at: Dict[Tuple[str, str, Any], str] = {}
     ids_in: Dict[Tuple[str, str], List[str]] = {}
     ids_by_path_at: Dict[Tuple[str, Any], List[str]] = {}
@@ -273,6 +277,8 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
             if raw_match not in raw_matches_in[key]:
                 raw_matches_in[key].append(raw_match)
         candidate_id = candidate.get("candidate_id")
+        if isinstance(candidate_id, str) and candidate_id.strip():
+            ids_set.add(candidate_id.strip())
         if isinstance(rule_id, str) and path and isinstance(candidate_id, str) and candidate_id.strip():
             cid = candidate_id.strip()
             key = (rule_id.strip(), path)
@@ -293,7 +299,7 @@ def load_candidate_index(candidates_file: Path) -> Optional[Dict[str, Any]]:
             "snippets_by_path_at": {k: v[0] for k, v in by_path_at.items() if len(set(v)) == 1},
             "snippets_by_path": {p: v[0] for p, v in by_path.items() if len(set(v)) == 1},
             "raw_matches_at": raw_matches_at, "raw_matches_in": raw_matches_in,
-            "ids_at": ids_at, "ids_in": ids_in,
+            "ids_set": ids_set, "ids_at": ids_at, "ids_in": ids_in,
             "ids_by_path_at": {k: v[0] for k, v in ids_by_path_at.items() if len(set(v)) == 1},
             "ids_by_path": {p: v[0] for p, v in ids_by_path.items() if len(set(v)) == 1},
             "severities": severities}
@@ -332,7 +338,8 @@ IDENTITY_SOURCES = (
     "candidate-similar-by-model-snippet",  # the candidate whose text the MODEL's snippet quotes
     "unmatched-rule-location-unique",  # rule label bound nothing; ONE candidate at (path, line)
     "unmatched-rule-path-unique",      # rule label bound nothing; ONE candidate at the path
-    "candidate-id",         # the candidate's own emitted id, used where a rule/location bound it
+    "candidate-id",         # the binder selected the emitted id from a rule/location fact
+    "candidate-id-by-model",  # the model echoed an emitted id where fact binding missed
     "model-snippet",        # a candidate set existed but nothing bound: identity IS model prose
     "no-candidate-index",   # no candidate set at all, so there was nothing to bind to
 )
@@ -357,7 +364,9 @@ IDENTITY_SOURCES = (
 # it is the identity the station assigned to that candidate at scan time, so it is copied rather
 # than re-derived. It is used only where a rule or a location already bound the candidate - the
 # prose-selected step keeps its own unstable name, because there the SELECTION is still the model's,
-# and a stable-sounding label would hide that.
+# and a stable-sounding label would hide that. The same distinction holds for candidate-id-by-model:
+# the id VALUE came from the scanner but the model CHOSE it, so it is NOT stable until the separate
+# two-run measurement in ADR agents-ltuf justifies a promotion.
 IDENTITY_STABLE_SOURCES = ("candidate-exact", "candidate-unique",
                            "unmatched-rule-location-unique", "unmatched-rule-path-unique",
                            "candidate-id")
@@ -419,6 +428,10 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
     refuse: two candidates at one path are two identities, so two findings there no longer share a
     key. The id is used at exactly the four STABLE steps and NOT at the prose-selected one, because
     there the selection itself is the model's - naming it stable would hide the mechanism.
+
+    STEP 4 (agents-hoxs): after all fact bindings but before a prose-similarity fallback, an
+    explicitly echoed emitted id may supply the key. Its name MUST say the model selected it.
+    Unknown echoes do not bind; process_run counts them and fact/echo disagreements separately.
     """
     model_snippet = item.get("snippet", "")
     if not candidate_index or not isinstance(rule_id, str):
@@ -464,6 +477,9 @@ def identity_snippet_binding(item: Dict[str, Any], rule_id: Any, path: Any,
         ids_by_path = candidate_index.get("ids_by_path", {})
         if norm_path in ids_by_path:
             return ids_by_path[norm_path], "candidate-id"
+    echo = item.get("anchor_candidate_id")
+    if isinstance(echo, str) and echo in candidate_index.get("ids_set", set()):
+        return echo, "candidate-id-by-model"
     wanted = normalize_text(model_snippet)
     if wanted:
         matching = [o for o in options if wanted in normalize_text(o) or normalize_text(o) in wanted]
@@ -998,6 +1014,15 @@ class FindingsStore:
             identity_snip, identity_source = identity_snippet_binding(
                 item, rule_id, path, candidate_index, path_unambiguous=path_unambiguous,
                 location_unambiguous=location_unambiguous)
+            if "anchor_candidate_id" in item:
+                echo = item["anchor_candidate_id"]
+                ids_set = candidate_index.get("ids_set", set()) if candidate_index else set()
+                if not isinstance(echo, str) or echo not in ids_set:
+                    delta_stats["anchor_unknown"] += 1
+                elif identity_source == "candidate-id" and echo != identity_snip:
+                    # This comparison is possible only when the fact-bound candidate has an id;
+                    # a snippet-only fact binding has no id to compare with the model's echo.
+                    delta_stats["anchor_disagreement"] += 1
             fp = compute_fingerprint(
                 agent=agent,
                 rule_id=rule_id,
@@ -1068,16 +1093,12 @@ class FindingsStore:
                 # vocabulary, never read out of `item`, so a report cannot claim provenance it
                 # does not have; see IDENTITY_SOURCES for the classification and the checklist.
                 "identity_source": identity_source,
-                # The scanner's own id for the candidate at this location, persisted so a
-                # SECOND-ORDER station that rebuilds records from the store can carry it forward
-                # instead of reconstructing what the scanner already knew (agents-p8og, coord
-                # ruling: PERSIST). Written only when the id IS the key this fingerprint used,
-                # because `identity_source` records which key that was and agents-q0mt deliberately
-                # does NOT use the id when the model's prose selected the candidate - so a field
-                # claiming otherwise would describe a binding that never happened. None when nothing
-                # bound: an invented id would look like provenance. Scanner-owned and never model
-                # input, so under the checklist it is copied VERBATIM (step 1) and deliberately NOT
-                # added to RENDERED_TEXT_FIELDS: nothing renders it.
+                # The emitted id that IS the key this fingerprint used, persisted for a
+                # SECOND-ORDER station (agents-p8og). `identity_source` distinguishes selection by
+                # rule/location (candidate-id) from selection by the model's echo
+                # (candidate-id-by-model). Neither a prose-similarity key nor an unrecognised echo
+                # can claim a scanner id here. The id is dropped on publication but kept at rest
+                # by redact_for_storage; it is not a rendered model string.
                 #
                 # ASYMMETRY, and it is a trap for a reader of the PERSISTED record: here the key is
                 # always PRESENT and None means "nothing bound". At rest the key is OMITTED for an
@@ -1085,7 +1106,8 @@ class FindingsStore:
                 # only when it is truthy - so `rec["candidate_id"]` raises KeyError on a loaded
                 # record, and `rec.get("candidate_id") is None` is the absent case, not a bound one
                 # (agents-7928).
-                "candidate_id": identity_snip if identity_source == "candidate-id" else None,
+                "candidate_id": (identity_snip if identity_source in
+                                 ("candidate-id", "candidate-id-by-model") else None),
                 "agent": agent,
                 "rule_id": rule_id,
                 # The model's own label, kept only when the store did not accept it as the rule
@@ -1953,6 +1975,21 @@ def _unanchored_new_note(stats: Dict[str, int]) -> List[str]:
     return note
 
 
+def _anchor_echo_note(stats: Dict[str, int]) -> List[str]:
+    """Disclose untrusted model echoes by count, never by copying their raw values to a report."""
+    unknown = int(stats.get("anchor_unknown", 0) or 0)
+    disagreement = int(stats.get("anchor_disagreement", 0) or 0)
+    if not unknown and not disagreement:
+        return []
+    return [
+        f"> **Anchor echo checks**: {unknown} unknown anchor id(s) not found in the candidate "
+        f"artefact; {disagreement} anchor disagreement(s) with a rule/location-bound id. "
+        "Unknown echoes fell back to normal binding; fact-bound ids took precedence over "
+        "disagreeing model echoes. Counts are diagnostic, not a clean verdict.",
+        "",
+    ]
+
+
 def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int],
                          fixed_items: List[Dict[str, Any]], *, step_summary: bool = False,
                          sink_results: Optional[Dict[str, Any]] = None,
@@ -2044,6 +2081,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     lines += _migration_note(stats)
     lines += _unanchored_fixed_note(stats)
     lines += _unanchored_new_note(stats)
+    lines += _anchor_echo_note(stats)
 
     if stations is not None:
         lines.append("## Stations")

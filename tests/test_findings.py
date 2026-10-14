@@ -1446,6 +1446,10 @@ class TestIdentityAttribution(unittest.TestCase):
             {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "snippet": "alpha"},
             {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "snippet": "beta gamma"},
         ])
+        echoed = self._index([
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 2, "candidate_id": "id-a"},
+            {"rule_id": "scanner-rule", "path": "a.py", "line_number": 40, "candidate_id": "id-b"},
+        ])
         observed = set()
         with tempfile.TemporaryDirectory() as td:
             cases = [
@@ -1455,6 +1459,7 @@ class TestIdentityAttribution(unittest.TestCase):
                 (self._finding(line_number=99, snippet="reads beta gamma"),
                  ambiguous),                                                # similar-by-model-snippet
                 (self._finding(line_number=99, snippet="nothing like it"), ambiguous),  # model-snippet
+                (self._finding(line_number=99, anchor_candidate_id="id-a"), echoed),  # id-by-model
                 (self._finding(), None),                                    # no-candidate-index
                 # The location fallbacks need a label that binds nothing, or the rule-keyed
                 # lookups answer first and these are unreachable.
@@ -1464,6 +1469,154 @@ class TestIdentityAttribution(unittest.TestCase):
             for item, index in cases:
                 observed.add(self._run(td, [item], index)[0][0]["identity_source"])
         self.assertEqual(observed, set(findings.IDENTITY_SOURCES), observed)
+
+
+class TestModelSelectedAnchor(unittest.TestCase):
+    """agents-hoxs: a model echo can select identity, but cannot claim stable provenance."""
+
+    def index(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "candidates.json"
+            path.write_text(json.dumps({"candidates": [
+                {"candidate_id": "id-a", "rule_id": "scanner-rule", "path": "a.py", "line_number": 2},
+                {"candidate_id": "id-b", "rule_id": "scanner-rule", "path": "a.py", "line_number": 40},
+            ]}), encoding="utf-8")
+            return findings.load_candidate_index(path)
+
+    def item(self, **overrides):
+        row = {"rule_id": "scanner-rule", "path": "a.py", "line_number": 99,
+               "snippet": "first prose", "title": "cause", "description": "linked", "severity": "high"}
+        row.update(overrides)
+        return row
+
+    def test_echo_binds_only_when_rule_and_location_miss_and_is_unstable(self):
+        index = self.index()
+        self.assertEqual(index["ids_set"], {"id-a", "id-b"})
+        with tempfile.TemporaryDirectory() as td:
+            store = FindingsStore("target", findings_dir=Path(td))
+            try:
+                first, first_stats, _ = store.process_run(
+                    "vuln-triage", [self.item(anchor_candidate_id="id-a")], candidate_index=index)
+                second, replay, _ = store.process_run(
+                    "vuln-triage", [self.item(snippet="entirely different prose", anchor_candidate_id="id-a")],
+                    candidate_index=index)
+            finally:
+                store.close()
+            self.assertEqual(first[0]["identity_source"], "candidate-id-by-model")
+            self.assertEqual(first[0]["fingerprint"], second[0]["fingerprint"])
+            self.assertEqual((replay["new"], replay["fixed"], replay["unchanged"]), (0, 0, 1))
+            self.assertEqual(first_stats["new_unanchored"], 1)
+            self.assertIn("reword-unstable", findings._render_delta_report(
+                "target", first, first_stats, []), "model-selected identity must be visibly graded")
+        self.assertIn("candidate-id-by-model", findings.IDENTITY_SOURCES)
+        self.assertNotIn("candidate-id-by-model", findings.IDENTITY_STABLE_SOURCES)
+        self.assertEqual(findings.IDENTITY_SCHEME, 3)
+
+    def test_echo_adoption_can_rekey_once_but_repeat_does_not(self):
+        """Synthetic migration control, not the ADR's after-landing live-store measurement."""
+        index = self.index()
+        with tempfile.TemporaryDirectory() as td:
+            store = FindingsStore("target", findings_dir=Path(td))
+            try:
+                store.process_run("vuln-triage", [self.item()], candidate_index=None)
+                adopted, wave, _ = store.process_run(
+                    "vuln-triage", [self.item(snippet="new prose", anchor_candidate_id="id-a")],
+                    candidate_index=index)
+                replayed, stable, _ = store.process_run(
+                    "vuln-triage", [self.item(snippet="new prose", anchor_candidate_id="id-a")],
+                    candidate_index=index)
+            finally:
+                store.close()
+        self.assertEqual((wave["new"], wave["fixed"]), (1, 1))
+        self.assertEqual((stable["new"], stable["fixed"]), (0, 0))
+        self.assertEqual(adopted[0]["fingerprint"], replayed[0]["fingerprint"])
+        self.assertEqual(adopted[0]["identity_source"], "candidate-id-by-model")
+
+    def test_fact_binding_wins_and_a_known_disagreement_is_counted_and_disclosed(self):
+        index = self.index()
+        with tempfile.TemporaryDirectory() as td:
+            store = FindingsStore("target", findings_dir=Path(td))
+            try:
+                rows, stats, _ = store.process_run(
+                    "vuln-triage", [self.item(line_number=2, anchor_candidate_id="id-b")],
+                    candidate_index=index)
+            finally:
+                store.close()
+            self.assertEqual((rows[0]["candidate_id"], rows[0]["identity_source"]),
+                             ("id-a", "candidate-id"))
+            self.assertEqual((stats["anchor_disagreement"], stats["anchor_unknown"]), (1, 0))
+            report = findings._render_delta_report("target", rows, stats, [])
+            self.assertIn("anchor disagreement", report.lower())
+            history = json.loads((Path(td) / "target-history.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(history["delta"]["anchor_disagreement"], 1)
+
+    def test_unknown_echo_falls_back_is_counted_and_named_without_echoing_input(self):
+        index = self.index()
+        with tempfile.TemporaryDirectory() as td:
+            store = FindingsStore("target", findings_dir=Path(td))
+            try:
+                rows, stats, _ = store.process_run(
+                    "vuln-triage", [self.item(anchor_candidate_id="secret-model-text")],
+                    candidate_index=index)
+            finally:
+                store.close()
+            self.assertEqual(rows[0]["identity_source"], "model-snippet")
+            self.assertIsNone(rows[0]["candidate_id"])
+            self.assertEqual((stats["anchor_unknown"], stats["anchor_disagreement"]), (1, 0))
+            report = findings._render_delta_report("target", rows, stats, [])
+            self.assertIn("unknown anchor", report.lower())
+            self.assertNotIn("secret-model-text", report)
+            history = json.loads((Path(td) / "target-history.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(history["delta"]["anchor_unknown"], 1)
+
+    def test_malformed_or_indexless_echo_is_named_unknown_without_binding(self):
+        for echo, index in (({"invalid": "shape"}, self.index()), ("id-a", None)):
+            with self.subTest(echo=echo, has_index=index is not None):
+                with tempfile.TemporaryDirectory() as td:
+                    store = FindingsStore("target", findings_dir=Path(td))
+                    try:
+                        rows, stats, _ = store.process_run(
+                            "vuln-triage", [self.item(anchor_candidate_id=echo)],
+                            candidate_index=index)
+                    finally:
+                        store.close()
+                self.assertEqual(stats["anchor_unknown"], 1)
+                self.assertEqual(rows[0]["identity_source"],
+                                 "model-snippet" if index else "no-candidate-index")
+
+    def test_line_report_keeps_echo_counters_and_names_both_outcomes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            station = root / "triage-fragment.json"
+            station.write_text(json.dumps({"stats": {
+                "anchor_unknown": 2, "anchor_disagreement": 1}}), encoding="utf-8")
+            path = findings.write_line_report(
+                "target", "audit", [{"station": "vuln-triage", "status": "PASS",
+                                     "findings_count": 0, "criticals": 0,
+                                     "fragment": str(station)}], findings_dir=root)
+            machine = json.loads((root / "target-line.json").read_text(encoding="utf-8"))
+            report = path.read_text(encoding="utf-8")
+        self.assertEqual((machine["stats"]["anchor_unknown"],
+                          machine["stats"]["anchor_disagreement"]), (2, 1))
+        self.assertIn("2 unknown anchor id(s)", report)
+        self.assertIn("1 anchor disagreement(s)", report)
+
+    def test_model_selected_id_is_the_persisted_key_but_not_published(self):
+        index = self.index()
+        with tempfile.TemporaryDirectory() as td:
+            store = FindingsStore("target", findings_dir=Path(td))
+            try:
+                rows, _, _ = store.process_run(
+                    "vuln-triage", [self.item(anchor_candidate_id="id-b")], candidate_index=index)
+            finally:
+                store.close()
+            self.assertEqual(rows[0]["candidate_id"], "id-b")
+            stored = json.loads((Path(td) / "target.json").read_text(encoding="utf-8"))
+            saved = next(iter(stored["findings"].values()))
+            self.assertEqual(saved["candidate_id"], "id-b")
+            self.assertEqual(saved["identity_source"], "candidate-id-by-model")
+            from lib.redaction import redact_finding
+            self.assertNotIn("candidate_id", redact_finding(rows[0]))
 
 
 class TestCandidateCoverage(unittest.TestCase):
