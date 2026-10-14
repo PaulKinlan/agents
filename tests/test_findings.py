@@ -1618,6 +1618,118 @@ class TestLineDeltaVerdictCounts(unittest.TestCase):
                          "PASS with missing counts is not evidence of a zero-findings scan")
         self.assertIn("INCOMPLETE", report)
 
+    # ---------------------------------------------------------------------------------------
+    # agents-pxzb: the possible-re-key pairing is run-level, and the line is where the run is
+    # visible. The counter's own sentence always said 'a row this run booked Fixed'.
+
+    def _pxzb_row(self, agent, source, state="fixed", change="fixed", line=192, path="docs/css/factory.css"):
+        return {"fingerprint": f"fp-{agent}-{source}", "agent": agent, "rule_id": "unclassified",
+                "path": path, "line_number": line, "snippet": "prose", "identity_source": source,
+                "severity": "medium", "title": "t", "description": "d", "remediation": "r",
+                "state": state, "change": change, "false_positive": False}
+
+    def _pxzb_line(self, root, stations_spec):
+        """Build one fragment per station and ask write_line_report for the aggregate."""
+        stations = []
+        for name, (new_rows, fixed_rows, station_pairs) in stations_spec:
+            frag = root / f"{name}.json"
+            frag.write_text(json.dumps({
+                "stats": {"new": len(new_rows), "fixed": len(fixed_rows),
+                          "possible_rekey": station_pairs},
+                "findings": new_rows, "fixed": fixed_rows, "sinks": {}}), encoding="utf-8")
+            stations.append({"station": name, "status": "ALERT",
+                             "findings_count": len(new_rows), "criticals": 0,
+                             "fragment": str(frag)})
+        findings.write_line_report("target", "factory", stations, findings_dir=root)
+        return json.loads((root / "target-line.json").read_text(encoding="utf-8"))["stats"]
+
+    def test_a_pair_split_across_two_stations_is_counted_at_the_line_level(self):
+        """THE agents-pxzb DEFECT, with the nightly's own shape: a `new` row under one station and the
+        Fixed twin of it booked by ANOTHER station. Both fragments report possible_rekey 0, so the summed
+        aggregate was 0 and the pair was invisible for the whole run - the appearance stayed a New row
+        every run with nothing saying its twin had retired elsewhere. Nothing is reclassified here either:
+        the row keeps `new` and only the counter moves."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new")], [], 0)),
+                ("modern-web", ([], [self._pxzb_row("modern-web", "no-candidate-index")], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey"], 1,
+                         "the two halves are in different stations, so only the line can pair them")
+        self.assertEqual((stats["new"], stats["fixed"]), (1, 1),
+                         "and nothing is reclassified: the appearance is still counted as new")
+
+    def test_a_same_station_pair_is_not_double_counted(self):
+        """The other direction, and the one that would make the counter useless: a pair inside ONE
+        station is already counted there, so the line must report 1 and not 2."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new")],
+                                 [self._pxzb_row("vuln-triage", "no-candidate-index")], 1)),
+            ])
+        self.assertEqual(stats["possible_rekey"], 1)
+
+    def test_an_anchored_twin_is_still_refused_when_another_station_booked_it(self):
+        """THE RULE IS DELIBERATELY NOT WIDENED, and this is the nightly's example, so the omission is
+        pinned rather than left to be rediscovered: `docs/css/factory.css:192` is a `new` row under
+        vuln-triage (`no-candidate-index`) whose Fixed twin modern-web booked with `candidate-id`, and
+        `candidate-id` is in IDENTITY_STABLE_SOURCES - so both the station and the line refuse the pair.
+        Soundness says a stable anchor WOULD have matched this run's rows, which is true only WITHIN a
+        station: a station compares its own agent's rows, so an anchored twin booked elsewhere was never
+        offered to this appearance. Widening that is a soundness decision (agents-wcki), not the scope
+        fix above, so it is recorded here and left to the owner of that argument."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new")], [], 0)),
+                ("modern-web", ([], [self._pxzb_row("modern-web", "candidate-id")], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey"], 0,
+                         "an anchored twin is refused at run level too - see this test's docstring")
+
+    def test_the_count_never_falls_below_the_summed_station_counters(self):
+        """The fail-safe direction: if a fragment cannot supply the rows the run-level recomputation
+        needs (an older shape, a trimmed fragment), the summed station value must SURVIVE rather than be
+        replaced by a smaller number computed from rows that are not there."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("quiet", ([], [], 2)),
+            ])
+        self.assertEqual(stats["possible_rekey"], 2)
+
+    def test_two_appearances_at_one_recycled_line_consume_one_retiring_row(self):
+        """One retiring row explains exactly ONE appearance (agents-l3j1), and the run-level pass has to
+        keep that: without the consume, two appearances at a recycled line would both be counted against a
+        single retired row."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new"),
+                                  self._pxzb_row("vuln-triage", "model-snippet", state="new",
+                                                 change="new")], [], 0)),
+                ("modern-web", ([], [self._pxzb_row("modern-web", "no-candidate-index")], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey"], 1)
+
+    def test_a_row_with_no_usable_line_is_never_paired(self):
+        """The floor rule (agents-yh0z) survives the move: rows whose line the scanner could not name are
+        not paired on a location neither of them has."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stats = self._pxzb_line(root, [
+                ("vuln-triage", ([self._pxzb_row("vuln-triage", "no-candidate-index", state="new",
+                                                 change="new", line=None)], [], 0)),
+                ("modern-web", ([], [self._pxzb_row("modern-web", "no-candidate-index", line=None)], 0)),
+            ])
+        self.assertEqual(stats["possible_rekey"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
