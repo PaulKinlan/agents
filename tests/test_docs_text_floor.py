@@ -169,10 +169,10 @@ class TestTheSummarySaysWhetherTheSweepWasComplete(DocsTextFloorBase):
     is per page, and a reader who sees a large count must not be able to read it as coverage of pages that produced
     no verdict at all - so the run ends with pages, verdicts and a status."""
 
-    def test_the_summary_reports_pages_verdicts_and_status(self):
+    def test_the_summary_reports_pages_verdicts_and_completeness(self):
         done = self.run_tool()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn(f"FLOOR_SUMMARY pages={len(PAGES)} verdicts={len(PAGES)} below_total=0 viewport=1280,900 status=OK",
+        self.assertIn(f"FLOOR_SUMMARY pages={len(PAGES)} verdicts={len(PAGES)} below_total=0 viewport=1280,900 complete=yes",
                       done.stdout, "the summary must state the viewport its counts are true for")
 
     def test_a_page_without_a_verdict_makes_the_run_incomplete(self):
@@ -182,14 +182,14 @@ class TestTheSummarySaysWhetherTheSweepWasComplete(DocsTextFloorBase):
         done = self.run_tool()
         self.assertEqual(done.returncode, 1)
         self.assertIn(f"pages={len(PAGES)} verdicts={len(PAGES) - 1}", done.stdout)
-        self.assertIn("status=INCOMPLETE", done.stdout)
+        self.assertIn("complete=no", done.stdout)
 
     def test_a_page_that_counted_nothing_also_makes_it_incomplete(self):
         (self.docs / "stations.html").write_text(
             "<!doctype html><body><!-- ZERO_COUNT --><p>text</p></body>\n", encoding="utf-8")
         done = self.run_tool()
         self.assertEqual(done.returncode, 1)
-        self.assertIn("status=INCOMPLETE", done.stdout)
+        self.assertIn("complete=no", done.stdout)
 
     def test_the_summary_below_total_adds_up_the_per_page_verdicts(self):
         done = self.run_tool()
@@ -200,6 +200,28 @@ class TestTheSummarySaysWhetherTheSweepWasComplete(DocsTextFloorBase):
         red = self.run_tool()
         self.assertIn(f"below_total={len(PAGES)}", red.stdout, "each page's below-count must reach the summary")
         self.assertEqual(red.returncode, 1)
+
+
+    def test_no_field_claims_the_sweep_was_clean(self):
+        """agents-w7t2 (coord): status=OK printed beside below_total=1 read as CLEAN to anyone scanning for a word -
+        the agents-lgdv shape, one field asked to carry completeness while its name claims quality. So the summary
+        must carry NO word that can be read as a verdict, and the completeness field must NOT move with the outcome:
+        a clean sweep and a below-floor sweep are told apart by below_total and the exit code alone."""
+        green = self.run_tool()
+        (self.docs / "index.html").write_text(
+            "<!doctype html><body><p class='__fifth_site'>x at the small size</p></body>\n", encoding="utf-8")
+        red = self.run_tool()
+        self.assertEqual(red.returncode, 1)
+        for done in (green, red):
+            summary = [l for l in done.stdout.splitlines() if "FLOOR_SUMMARY" in l][0]
+            for claim in ("status=", "OK", "CLEAN", "PASS", "DONE", "failed"):
+                self.assertNotIn(claim, summary, f"the summary must not claim {claim!r}: {summary}")
+            self.assertIn("complete=", summary)
+        self.assertIn("below_total=0", green.stdout)
+        self.assertIn("below_total=1", red.stdout)
+        # the field named for completeness says the same thing on both runs - it is not a verdict.
+        self.assertIn("complete=yes", green.stdout, "every page reached a verdict")
+        self.assertIn("complete=yes", red.stdout, "a below-floor run is still a complete sweep, and says so")
 
 
 class TestTheVerdictIsParsedFromTheFieldsNotFromTheRenderedLine(DocsTextFloorBase):
