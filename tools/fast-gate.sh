@@ -283,12 +283,41 @@ FAST_GATE_STAGE="mapping changed files"
 # The other obligation from agents-v8xv - a dead arm (a pattern matching no tracked path) must be
 # reported - lives in tests/test_fast_gate_mapping.py, where it costs the gate nothing: this file is on
 # the critical path of every run, including every dry run.
+# agents-es0y: THE FRAGMENT LIST COMES FROM GIT'S INDEX, NOT THE FILESYSTEM. The loader used to glob this
+# directory, so a *.sh that git does not track was SOURCED - untracked input reaching an interpreter, in the
+# process that decides what the gate runs - and the payload ran BEFORE the guards below validated the
+# fragment. A fragment named below 010 also took precedence by filename order, because first match wins. The
+# index is the same set the gate witnesses, and its order is the SAME filename order (measured identical over
+# the 33 fragments), so precedence does not move. Anything on disk that git does not track is REPORTED and
+# not sourced: an invisible skip is the same defect in a quieter voice. A root with no work tree - the
+# synthetic fixture trees two suites build with copytree - has no index to ask, so there the filesystem IS
+# the whole tree and the glob stays, the same rule tests/__init__.py states for has_git_index.
+fast_gate_arm_fragments() {
+  local _rel _rest _stray
+  if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%s\n' "$ROOT"/tools/fast-gate-arms.d/*.sh
+    return 0
+  fi
+  while IFS= read -r -d '' _rel; do
+    _rest="${_rel#tools/fast-gate-arms.d/}"
+    [ "$_rest" = "$_rel" ] && continue        # not under the arm registry
+    case "$_rest" in */*) continue ;; esac     # a nested path is not a fragment
+    case "$_rest" in *.sh) printf '%s\n' "$ROOT/$_rel" ;; esac
+  done < <(git -C "$ROOT" ls-files -z -- 'tools/fast-gate-arms.d')
+  for _stray in "$ROOT"/tools/fast-gate-arms.d/*.sh; do
+    [ -f "$_stray" ] || continue
+    _rel="${_stray#"$ROOT"/}"
+    [ -n "$(git -C "$ROOT" ls-files -- "$_rel")" ] || \
+      echo "fast-gate: WARNING: ignoring UNTRACKED arm fragment (not sourced): $_rel" >&2
+  done
+}
+
 fast_gate_arms_load() {
   local _frag _fn _pat _stage
   local _before _new
   local _seen_stages=$'\n' _seen_patterns=$'\n'
   FAST_GATE_ARM_STAGES=""
-  for _frag in "$ROOT"/tools/fast-gate-arms.d/*.sh; do
+  while IFS= read -r _frag; do
     [ -f "$_frag" ] || continue
     _stage="${_frag#"$ROOT"/}"
     _before="$FAST_GATE_ARM_STAGES"
@@ -329,7 +358,7 @@ fast_gate_arms_load() {
     # routinely contain parentheses (a rationale citing its bead). A comment read as a pattern would make
     # the duplicate guard fire on prose.
     done < <(sed -n '/# no arm in this fragment matched/!s/^    \([^ #)][^)]*\))\s*\(.*\)$/\1/p' "$_frag")
-  done
+  done < <(fast_gate_arm_fragments)
   case "$FAST_GATE_ARM_STAGES" in
     "") echo "fast-gate: FAIL: no arm stages were registered from tools/fast-gate-arms.d/" >&2; return 1 ;;
   esac
