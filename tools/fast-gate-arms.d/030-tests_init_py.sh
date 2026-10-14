@@ -12,7 +12,7 @@ fast_gate_arms_030_tests_init_py() {
       # helper's second consumer as OMITTED while this arm still exited 0 with coverage=PARTIAL - the
       # coverage contract REPORTS rather than FAILS, so an arm with an incomplete list is the
       # silent-green shape. Measured: the suite is 3 tests / 0.07s, and
-      # test_package_init_arm_covers_every_consumer_the_oracle_names fails without it.
+      # test_package_init_arm_covers_the_consumer_the_oracle_reported_omitted fails without it.
       mapped="$mapped tests/test_hermetic_env.py tests/test_sandbox.py tests/test_tool_pins.py tests/test_containment_shape.py"
       ;;
     tests/fixtures/*)
