@@ -435,6 +435,16 @@ fast_gate_arms_load() {
   return 0
 }
 
+# agents-71vj: THE LOADER'S OWN FAILURE IS ALSO A READER'S EXIT. A lane whose registry will not load is
+# looking at the fragment it just added, and the two things it needs are "a fragment refused to load" and "an
+# untracked fragment was never read". The ignored list is assembled by the ENUMERATION, which the loader only
+# reaches as its first statement - so this exit has to ask for it, otherwise it reports an empty list and
+# looks exactly like the defect. (Measured the hard way: reporting before the loader printed nothing, which is
+# why the enumeration is called here.) fast_gate_arm_fragments early-returns when it has already run, so the
+# loader's own call is untouched. warn-and-ignore stays non-fatal and this exit still fails for the loader's
+# own reason - these two calls only ADD a line.
+fast_gate_arm_fragments
+fast_gate_report_ignored_arms
 fast_gate_arms_load || exit 1
 
 # A REPO-WIDE INVARIANT IS INVISIBLE TO A PER-PATH ARM (agents-wsiv), WHICH IS WHY IT IS KEYED HERE RATHER
