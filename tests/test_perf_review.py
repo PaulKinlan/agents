@@ -1037,10 +1037,6 @@ class TestFactorySamplingParams(unittest.TestCase):
                 self.assertEqual(m["samplingParams"].get("temperature"), 0.1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestPerfReviewDeclaresItsContextChannel(unittest.TestCase):
     """agents-ufl3: the three inputs this station's SKILL names must reach the MODEL, not just the file.
 
@@ -1167,3 +1163,7 @@ class TestPerfReviewDeclaresItsContextChannel(unittest.TestCase):
         # absence here would be asserting something this channel never controlled. The first version
         # of this control did exactly that and went red, which is how the mistake was found.
         self.assertNotIn('"recent_diff_excerpt"', prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()
