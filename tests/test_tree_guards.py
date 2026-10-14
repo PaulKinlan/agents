@@ -519,23 +519,6 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                 return {statement.target.id: concatenated}
             return {}
 
-        def scope_bindings(statements: list[ast.stmt],
-                           outer: list[dict[str, list[str] | None]]) -> dict[str, list[str] | None]:
-            """name -> what it holds in THIS scope, or None for unreadable.
-
-            Every name the scope binds starts UNRESOLVABLE and becomes readable only when the statement that
-            binds it is reached, so a loop that runs BEFORE its own scope's binding is reported as unreadable
-            (when it stages lib modules by shape) instead of being read from an enclosing value - the
-            shadowing false green one step further out.
-            """
-            local: dict[str, list[str] | None] = {}
-            for statement in statements:
-                for name in store_names(statement):
-                    local.setdefault(name, None)
-            for statement in statements:
-                local.update(binding_values(statement, outer + [local]))
-            return local
-
         def function_parameters(node: ast.AST) -> set[str]:
             args = node.args
             names = {argument.arg for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
@@ -544,32 +527,49 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                     names.add(variadic.arg)
             return names
 
-        def collect_loops(node: ast.AST, scopes: list[dict[str, list[str] | None]],
-                          found: list[tuple[ast.For, list[dict[str, list[str] | None]]]]) -> None:
-            """Every `for` in this tree, paired with the scope chain IN EFFECT AT ITS POSITION.
+        def walk_statements(statements: list[ast.stmt], scopes: list[dict[str, list[str] | None]],
+                            found: list[tuple[ast.For, list[dict[str, list[str] | None]]]]) -> None:
+            """Walk ONE statement list IN ORDER, recording each loop with the bindings IN EFFECT AT ITS POSITION.
 
-            A function or class body opens a scope and its parameters shadow from the first line; a nested
-            loop inherits the chain of the scope it is written in. Without the position, a module-level const
-            is applied to a loop that has a local binding of the same name - agents-zsum.
+            THE AXIS IS POSITION, NOT SCOPE (agents-e340, round 4 of review). The previous version built a
+            scope's binding map over the whole statement list and then handed every loop in it the SAME final
+            value, so a function that re-bound the name AFTER the loop had its later, complete list read at the
+            earlier loop - and a missing module reported as covered. Recording a SNAPSHOT per position is what
+            makes "readable WHERE IT SITS" mean something; a name the scope binds but has not yet reached is
+            unresolvable at that point, which the loop header then reports rather than silently resolving.
+
+            Every name the statement list binds is pre-registered as unresolvable, so a binding that appears
+            LATER in the same scope still shadows an outer value at an earlier loop instead of falling through
+            to it; an assignment is applied when its statement is reached, and each statement's nested blocks
+            (bodies, orelse/finalbody, except handlers, match cases) are walked with the snapshot after it.
             """
-            for child in ast.iter_child_nodes(node):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    inner: dict[str, list[str] | None] = {name: None for name in function_parameters(child)}
-                    inner.update(scope_bindings(child.body, scopes + [inner]))
-                    collect_loops(child, scopes + [inner], found)
+            local: dict[str, list[str] | None] = {}
+            for statement in statements:
+                for name in store_names(statement):
+                    local.setdefault(name, None)
+            for statement in statements:
+                local.update(binding_values(statement, scopes + [local]))
+                here = scopes + [dict(local)]
+                if isinstance(statement, ast.For):
+                    found.append((statement, here))
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    parameters = {name: None for name in function_parameters(statement)}
+                    walk_statements(statement.body, here + [parameters], found)
                     continue
-                if isinstance(child, ast.Lambda):
-                    collect_loops(child, scopes + [{name: None for name in function_parameters(child)}], found)
+                if isinstance(statement, ast.ClassDef):
+                    walk_statements(statement.body, here, found)
                     continue
-                if isinstance(child, ast.ClassDef):
-                    collect_loops(child, scopes + [scope_bindings(child.body, scopes)], found)
-                    continue
-                if isinstance(child, ast.For):
-                    found.append((child, scopes))
-                collect_loops(child, scopes, found)
+                for field in ("body", "orelse", "finalbody"):
+                    block = getattr(statement, field, None)
+                    if isinstance(block, list) and block:
+                        walk_statements(block, here, found)
+                for handler in getattr(statement, "handlers", None) or []:
+                    walk_statements(handler.body, here, found)
+                for case in getattr(statement, "cases", None) or []:
+                    walk_statements(case.body, here, found)
 
         loops: list[tuple[ast.For, list[dict[str, list[str] | None]]]] = []
-        collect_loops(tree, [scope_bindings(tree.body, [])], loops)
+        walk_statements(tree.body, [], loops)
         for node, scopes in loops:
             names = literal_list(node.iter, scopes)
             body = ast.unparse(node)
@@ -577,17 +577,21 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                 continue
             if names is None:
                 # THE GUARD MUST SAY WHAT IT COULD NOT SEE (agents-n5e0). `if not names: continue` swallowed
-                # this case silently - and an EMPTY literal list with it - so a staging list built at runtime
-                # reported the same green as one that was READ AND CHECKED. The two classes above are handled
-                # first: an exhaustive lib-glob cannot be missing a module, so green is justified; anything
-                # else that stages lib modules by name is reported so the author can make it checkable.
+                # this case silently - and an EMPTY literal list with it - so a staging list that could not be
+                # read AT THIS POINT reported the same green as one that was READ AND CHECKED. The two classes
+                # above are handled first: an exhaustive lib-glob cannot be missing a module, so green is
+                # justified; anything else that stages lib modules by name is reported so the author can make it
+                # checkable. Since agents-e340 the wording names the POSITION rather than only "built at
+                # runtime", because a name bound later in the same scope, a shadowing local, a parameter and a
+                # genuinely dynamic expression all arrive here.
                 if stages_every_lib_py(node.iter) or not stages_lib_modules_by_variable(node):
                     continue
                 problems.append(
-                    f"{path.name}:{node.lineno}: this loop stages lib modules named by a list built at "
-                    "RUNTIME, so no requirement can be checked against it and a missing module would pass "
-                    "unnoticed; spell the list as a literal or a concatenation of literals, or stage every "
-                    "lib/*.py with a glob, so the modules the runtime imports can be checked"
+                    f"{path.name}:{node.lineno}: this loop stages lib modules named by a list this guard "
+                    f"cannot read at this point (it is dynamic, re-bound, shadowed, or not yet bound here), so "
+                    f"no requirement can be checked against it and a missing module would pass unnoticed; make "
+                    f"it a literal or a constant bound before the loop, or stage every lib/*.py with a glob, so "
+                    f"the modules the runtime imports can be checked"
                 )
                 continue
             staged = {n[:-3] if n.endswith(".py") else n for n in names}
@@ -716,7 +720,7 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
                          "an annotated literal is a binding like any other and must be READ, not refused")
 
         rebound = reported('MODULES = BASE + ("embargo.py",)\nMODULES = runtime_modules()\n')
-        self.assertIn("RUNTIME", rebound,
+        self.assertIn("cannot read at this point", rebound,
                       "a re-binding this rule cannot read is reported, not silently checked as its old value")
 
     def test_a_shadowing_binding_is_read_in_its_own_scope_not_the_outer_one(self):
@@ -747,15 +751,51 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         shadowed = reported('def build(root):\n    MODULES = ("findings.py", "embargo.py")\n' + copy_loop)
         self.assertIn("extra.py", shadowed,
                       "the LOCAL list is the one the loop iterates, so the missing module must be named")
-        self.assertNotIn("RUNTIME", shadowed,
+        self.assertNotIn("cannot read", shadowed,
                          "the local list is readable, so this is a missing module and not an unreadable list")
 
         self.assertEqual(reported("def build(root):\n" + copy_loop), "",
                          "with no local binding the module-level list applies, and it is complete")
 
         parameter = reported('def build(root, MODULES=("findings.py", "embargo.py")):\n' + copy_loop)
-        self.assertIn("RUNTIME", parameter,
+        self.assertIn("cannot read at this point", parameter,
                       "a parameter shadows too and its value is unreadable here: report it, do not resolve it")
+
+    def test_the_binding_read_is_the_one_in_effect_at_the_loop_not_the_scope_final_value(self):
+        """agents-e340, round 4 of review: the scope chain read the scope's FINAL binding at every loop.
+
+        A function that re-bound the name AFTER the loop had its later, COMPLETE list read at the earlier loop,
+        so the guard returned [] while findings.py imports lib/extra.py at module scope and the loop staged
+        neither - the false green again, through the wrong axis. A scope map built over the whole statement
+        list and then handed to every loop in it cannot see position at all.
+
+        Acceptance, run against the reviewed sha 9d44125e rather than asserted: [] there (the false green) and
+        extra.py here; the mirror case - the name first bound only AFTER the loop - is reported as unreadable at
+        that point rather than resolved from a binding that has not happened yet.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        module_prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + module_prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        reassigned = reported('def build(root):\n    MODULES = ("findings.py", "embargo.py")\n'
+                              + copy_loop + '    MODULES = ("findings.py", "embargo.py", "extra.py")\n')
+        self.assertIn("extra.py", reassigned,
+                      "the loop reads the binding in effect at ITS position, not the scope's final value")
+        self.assertNotIn("cannot read", reassigned,
+                         "the list at that point is readable, so the missing module is named rather than refused")
+
+        later_only = reported("def build(root):\n" + copy_loop
+                              + '    MODULES = ("findings.py", "embargo.py")\n')
+        self.assertIn("cannot read at this point", later_only,
+                      "a binding that has not been reached yet is reported, not read from a later position")
 
     def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
         """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
@@ -784,7 +824,7 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
         problems = staged_runtime_missing_modules(runtime_built)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("test_staged.py", problems[0])
-        self.assertIn("RUNTIME", problems[0],
+        self.assertIn("cannot read at this point", problems[0],
                       "an unreadable staging list must SAY SO rather than report the same green as a "
                       "list that was checked")
 
