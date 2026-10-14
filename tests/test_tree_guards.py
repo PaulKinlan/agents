@@ -473,13 +473,20 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
         # then module-level, then shadowing) and each fix leaves the next shape, so the closure is NOT "know
         # every shape" but "a name you cannot resolve is never read as some other scope's value".
         def store_names(statement: ast.stmt) -> set[str]:
-            """Names STORED anywhere inside a statement, excluding nested function/class bodies.
+            """Names this statement BINDS in the scope it is written in - the single source of that answer.
 
-            Their locals are not names in this scope, but an assignment target, a `for`/`with` target, an
-            import alias and a def or class name all are. Asking the AST which names it STORES, instead of
-            listing the statement forms this rule happens to model, is what makes a new binding shape shadow
-            an outer value rather than slipping past it as unbound (agents-zsum).
+            Three kinds of binding shape have to be found here, and each one was a measured miss before it was:
+            a Store/Del target (`x = ...`, `del x`, `for x in`, `with ... as x`, an import alias); a def or
+            class, which binds its own NAME here while the bindings inside its body belong to the scope
+            walk_statements opens for it (collecting them here made a NESTED helper that assigns or deletes
+            the same name refuse the OUTER loop - three measured false refusals); and the shapes the AST
+            carries as STRINGS rather than nodes - `except X as name`, which binds name in this scope and
+            deletes it at the end of the handler, and a match capture (`case name`). Both of those were read as
+            the module-level list at a later loop until this pass: measured, the first raises UnboundLocalError
+            and the second iterates the captured object, so a green there was an invented answer.
             """
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                return {statement.name}
             found: set[str] = set()
 
             def walk(current: ast.AST) -> None:
@@ -490,6 +497,15 @@ def staged_runtime_missing_modules(root: Path) -> list[str]:
                         found.add(child.id)
                     elif isinstance(child, ast.alias):
                         found.add((child.asname or child.name).split(".")[0])
+                    elif isinstance(child, ast.ExceptHandler):
+                        if child.name:
+                            found.add(child.name)
+                    elif isinstance(child, (ast.MatchAs, ast.MatchStar)):
+                        if child.name:
+                            found.add(child.name)
+                    elif isinstance(child, ast.MatchMapping):
+                        if child.rest:
+                            found.add(child.rest)
                     walk(child)
 
             walk(statement)
@@ -834,6 +850,73 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
                           "UnboundLocalError for both orders, so reading a value here would invent one")
         self.assertNotIn("extra.py", before,
                          "no module list is read at that loop, so none may be claimed missing from it")
+
+    def test_a_binding_inside_a_nested_scope_does_not_reach_the_outer_loop(self):
+        """A def or class binds its own NAME in this scope; the bindings inside its body belong to the inner one.
+
+        Collecting a nested body's bindings into the enclosing scope made an OUTER loop refuse when a helper
+        merely assigned or deleted the same name - three measured false refusals (nested assignment, nested
+        `del`, nested class body). A refusal sends a reader looking for a problem that does not exist, so the
+        controls below must stay GREEN: in every one of them the outer loop really does read the module-level
+        list at runtime.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        nested_assign = reported('def build(root):\n    def helper():\n        MODULES = ("findings.py",)\n'
+                                 '        return MODULES\n' + copy_loop)
+        self.assertEqual(nested_assign, "",
+                         "a nested function's own binding must not make the OUTER loop refuse")
+
+        nested_del = reported('def build(root):\n    def helper():\n        del MODULES\n' + copy_loop)
+        self.assertEqual(nested_del, "", "the same for a deletion inside the nested function")
+
+        nested_class = reported('def build(root):\n    class Inner:\n        MODULES = ("findings.py",)\n'
+                                + copy_loop)
+        self.assertEqual(nested_class, "", "the same for a nested class body")
+
+        lambda_default = reported('def build(root):\n    fn = lambda M=MODULES: M\n' + copy_loop)
+        self.assertEqual(lambda_default, "", "and a lambda default reads the outer name without binding it")
+
+    def test_the_binding_shapes_the_ast_carries_as_strings_are_bound_too(self):
+        """`except X as name` and a match capture bind the name - measured, neither is the module list.
+
+        The AST carries both names as STRINGS rather than Name(Store) nodes, so a sweep for stored Names missed
+        them and a loop after the construct read the module-level list and reported GREEN. Measured with
+        python3 rather than assumed: after `except ValueError as MODULES:` (raised or not) the name is local to
+        the function and deleted at the end of the handler, so the loop raises UnboundLocalError; and
+        `match 1: case MODULES:` leaves the name holding the captured object, so iterating it raises TypeError.
+        Both are now unresolvable at that loop, which is the guard refusing instead of inventing a value.
+        """
+        findings_source = "from lib.embargo import x\nfrom lib.extra import required\n"
+        prelude = 'MODULES = ("findings.py", "embargo.py", "extra.py")\n'
+        copy_loop = ('    for module in MODULES:\n'
+                     '        shutil.copyfile(ROOT / "lib" / module, root / "lib" / module)\n')
+
+        def reported(body: str) -> str:
+            tree = staged_tree(findings_source)
+            (tree / "tests" / "test_staged.py").write_text(
+                "import shutil\nfrom pathlib import Path\nROOT = Path(__file__).parent\n"
+                + prelude + body, encoding="utf-8")
+            return "\n".join(staged_runtime_missing_modules(tree))
+
+        handler = reported('def build(root):\n    try:\n        raise ValueError()\n'
+                           '    except ValueError as MODULES:\n        pass\n' + copy_loop)
+        self.assertIn("cannot read at this point", handler,
+                      "an `except ... as` name is deleted before the loop and must not be read")
+
+        capture = reported('def build(root):\n    match 1:\n        case MODULES:\n            pass\n' + copy_loop)
+        self.assertIn("cannot read at this point", capture,
+                      "a match capture holds the captured object, not the module list")
 
     def test_a_staging_list_built_at_runtime_is_reported_and_an_exhaustive_glob_is_not(self):
         """agents-n5e0: the silent skip is gone for the lists that cannot be resolved either.
