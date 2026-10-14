@@ -1734,6 +1734,33 @@ class TestLineDeltaVerdictCounts(unittest.TestCase):
         self.assertIn("| `quiet` | PASS | 0 | 0 |", report)
         self.assertIn("Clean Delta", report)
 
+    def test_partial_triage_top_row_is_unknown_but_clean_zero_and_alert_counts_survive(self):
+        partial = {"station": "perf-review", "status": "INCOMPLETE", "complete": False,
+                   "findings_count": 0, "criticals": 0, "candidates_presented": 49,
+                   "candidates_accounted": 8, "candidate_identity": "identity-matched",
+                   "note": "cited 8 of 49"}
+        unknown = self.report([partial])
+        self.assertEqual(self.top_row(unknown), self.DASH_ROW,
+                         "8/49 cited is not evidence of a clean zero-finding line")
+        self.assertIn("| `perf-review` | INCOMPLETE | — | — | cited 8 of 49 |", unknown)
+        self.assertIn("did not account for the candidates they were shown", unknown)
+        self.assertNotIn("Clean Delta", unknown)
+
+        complete = {"station": "perf-review", "status": "PASS", "complete": True,
+                    "findings_count": 0, "criticals": 0, "candidates_presented": 49,
+                    "candidates_accounted": 49, "candidate_identity": "identity-matched"}
+        clean = self.report([complete])
+        self.assertEqual(self.top_row(clean), self.ZERO_ROW,
+                         "49/49 clean must remain a genuine numeric zero")
+        self.assertIn("| `perf-review` | PASS | 0 (49/49, identity-matched) | 0 |", clean)
+        self.assertIn("Clean Delta", clean)
+
+        alarm = {**partial, "status": "ALERT", "findings_count": 1, "criticals": 1}
+        alerted = self.report([alarm])
+        self.assertEqual(self.top_row(alerted), self.DASH_ROW)
+        self.assertIn("| `perf-review` | ALERT | 1 (8/49, identity-matched) | 1 | cited 8 of 49 |", alerted,
+                      "an incomplete aggregate must not erase a real station alarm")
+
     def test_partial_verdict_keeps_its_counts_but_aggregate_is_unknown(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

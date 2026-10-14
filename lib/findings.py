@@ -2108,6 +2108,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     # its own banner. Both predicates are the shared ones, never a local re-derivation (agents-kve2, agents-pim5).
     no_verdict = [s for s in (stations or []) if not station_has_verdict(s)
                   and s.get("status") != "ENV_FAILURE" and not station_is_incomplete(s)]
+    partial_triage = [s for s in (stations or []) if station_is_incomplete(s)]
 
     lines = [
         f"# Software Factory Delta Report: {target_name}",
@@ -2121,7 +2122,7 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"Line: `{line_name or '?'}` — {len(stations)} station(s), "
                      f"{has_verdict_count} with a verdict.")
         lines.append("")
-    if env_failure or env_failed or no_verdict:
+    if env_failure or env_failed or no_verdict or partial_triage:
         lines += [
             f"| New | Regressed | Fixed | Unchanged | Suppressed | False positive |",
             f"|:---:|:---:|:---:|:---:|:---:|:---:|",
@@ -2147,7 +2148,6 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"> 🚨 **ENVIRONMENT FAILURE**: {len(env_failed)} station(s) failed due to adapter authentication/environment issues: {names}. "
                      "Findings for these stations are UNKNOWN (not zero). The stations could not run. This run is NOT clean.")
         lines.append("")
-    partial_triage = [s for s in (stations or []) if station_is_incomplete(s)]
     if partial_triage:
         names = ", ".join(
             f"`{s.get('station')}` ({s.get('candidates_accounted')} of {s.get('candidates_presented')} shown, "
