@@ -105,13 +105,20 @@ class Sandbox:
             encoding="utf-8")
         stub.chmod(0o755)
 
-    def agent(self, name, output, prepass=None, short_circuit=False):
+    def agent(self, name, output, prepass=None, short_circuit=False,
+              candidate_accounting=None, report_schema=None):
         directory = self.root / "agents" / name
         (directory / "scripts").mkdir(parents=True)
-        (directory / "agent.yaml").write_text(
-            f"name: {name}\nclass: observer\ncontainment: t0-readonly\n"
-            f"short_circuit_empty: {'true' if short_circuit else 'false'}\n"
-            "budget: {max_minutes: 1}\n", encoding="utf-8")
+        manifest = (f"name: {name}\nclass: observer\ncontainment: t0-readonly\n"
+                    f"short_circuit_empty: {'true' if short_circuit else 'false'}\n"
+                    "budget: {max_minutes: 1}\n")
+        if candidate_accounting is not None:
+            manifest += f"candidate_accounting: {candidate_accounting}\n"
+        if report_schema is not None:
+            manifest += "output:\n  schema: report.schema.json\n"
+        (directory / "agent.yaml").write_text(manifest, encoding="utf-8")
+        if report_schema is not None:
+            (directory / "report.schema.json").write_text(json.dumps(report_schema), encoding="utf-8")
         if prepass is not None:
             (directory / "scripts" / "prepass.py").write_text(prepass, encoding="utf-8")
         (self.root / "outputs" / f"{name}.txt").write_text(output, encoding="utf-8")
@@ -696,6 +703,108 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
         station = json.loads(self.box.findings("target-line.json"))["stations"][0]
         self.assertIsNone(station["candidates_presented"])
         self.assertIs(station["complete"], True)
+
+
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+class TestAggregateClaimedLineJudge(SandboxCase):
+    """agents-88cd: drive real station->line scores, not a hand-built scorecard."""
+
+    def station(self, output, *, mode="aggregate-claimed", schema=None, n=2):
+        directory = self.box.root / "agents" / "grouped"
+        if directory.exists():
+            (directory / "scripts" / "prepass.py").write_text(prepass(n), encoding="utf-8")
+            (self.box.root / "outputs" / "grouped.txt").write_text(output, encoding="utf-8")
+        else:
+            self.box.agent("grouped", output, prepass=prepass(n), candidate_accounting=mode,
+                           report_schema=schema)
+        self.box.line(["grouped"])
+        ok, out = self.box.run_line()
+        machine = json.loads(self.box.findings("target-line.json"))
+        return ok, out, machine["stations"][0]
+
+    def test_two_to_one_claim_passes_and_mapping_is_durable_not_verified_grouping(self):
+        row = finding(covered_candidate_ids=["c0", "c1"], anchor_candidate_id="c0")
+        ok, out, station = self.station(report(row))
+        self.assertTrue(ok, out)
+        self.assertEqual((station["status"], station["candidate_identity"],
+                          station["candidates_accounted"]), ("PASS", "identity-claimed-aggregate", 2))
+        self.assertEqual(station["candidate_claims"], [
+            {"row_index": 0, "covered_candidate_ids": ["c0", "c1"],
+             "anchor_candidate_id": "c0"}])
+        self.assertIn("(2/2, identity-claimed-aggregate)", self.box.findings("target-delta.md"))
+        run_dir = Path(station["run_dir"])
+        self.assertEqual(json.loads((run_dir / "report.json").read_text())["findings"][0]
+                         ["covered_candidate_ids"], ["c0", "c1"])
+
+    def test_dismissal_with_claimed_ids_and_no_echo_is_complete(self):
+        dismissed = finding(false_positive=True, severity="info", covered_candidate_ids=["c0", "c1"])
+        ok, out, station = self.station(report(dismissed))
+        self.assertTrue(ok, out)
+        self.assertEqual((station["status"], station["findings_count"],
+                          station["candidates_accounted"]), ("PASS", 0, 2))
+        self.assertIsNone(station["candidate_claims"][0]["anchor_candidate_id"])
+
+    def test_echo_alone_is_incomplete_and_an_alert_still_carries_incompleteness(self):
+        _, out, station = self.station(report(finding(anchor_candidate_id="c0")), n=1)
+        self.assertEqual((station["status"], station["complete"], station["candidates_accounted"]),
+                         ("INCOMPLETE", False, 0))
+        self.assertIn("covered_candidate_ids", station["note"])
+        self.assertNotIn("produced no verdict", out)
+        _, _, alert = self.station(report(finding(severity="critical", covered_candidate_ids=["c0"])))
+        self.assertEqual((alert["status"], alert["complete"]), ("ALERT", False))
+        self.assertIn("missing", alert["note"])
+
+    def test_unknown_manifest_declaration_refused_before_run(self):
+        ok, out, station = self.station(report(), mode="aggregate-claimd", n=1)
+        self.assertFalse(ok)
+        self.assertEqual(station["status"], "ERROR")
+        self.assertIn("unsupported candidate_accounting", station["error"])
+        self.assertNotIn("candidate_claims", station)
+        self.assertFalse((self.box.root / "runs").exists(), "refusal precedes any pre-pass or engine run")
+
+    def test_schema_invalid_is_no_verdict_not_coverage_incomplete(self):
+        schema = {"type": "object", "required": ["summary", "findings"],
+                  "properties": {"summary": {"type": "string"},
+                                 "findings": {"type": "array", "items": {"type": "object",
+                                     "properties": {"covered_candidate_ids": {"type": "array",
+                                                                         "items": {"type": "string"}}}}}}}
+        _, _, omitted = self.station(report(finding()), schema=schema, n=1)
+        self.assertEqual(omitted["status"], "INCOMPLETE", "schema-valid omission reaches coverage judge")
+        self.assertFalse(omitted["complete"])
+        self.assertIn("covered_candidate_ids", omitted["note"])
+        # The same declared field with the wrong shape is a schema failure on
+        # BOTH bounded attempts. A malformed report does not enter coverage.
+        _, _, invalid = self.station(report(finding(covered_candidate_ids="c0")), schema=schema, n=1)
+        self.assertEqual(invalid["status"], "ERROR")
+        self.assertIn("no verdict", invalid["error"])
+        self.assertNotIn("candidate_claims", invalid)
+
+    def test_non_object_report_row_is_not_an_empty_clean_aggregate(self):
+        ok, _, station = self.station(json.dumps({"summary": "s", "findings": ["not-a-row"]}), n=0)
+        self.assertFalse(ok)
+        self.assertEqual(station["status"], "INCOMPLETE")
+        self.assertIn("expected a finding object", station["note"])
+        self.assertFalse(json.loads(self.box.findings("target-line.json"))["complete"])
+
+    def test_old_row_mode_fixtures_keep_the_same_scores_and_no_claims_key(self):
+        ok, _, row = self.station(candidates(2), mode="row", n=2)
+        self.assertTrue(ok)
+        self.assertEqual((row["status"], row["candidate_identity"], row["candidates_accounted"]),
+                         ("PASS", "identity-matched", 2))
+        self.assertNotIn("candidate_claims", row)
+        # An old producer with no ids must still take the weaker count-only
+        # route and SAY that it did, not inherit the opt-in aggregate judge.
+        no_ids = ("import argparse,json\n"
+                  "p=argparse.ArgumentParser();p.add_argument('--target');p.add_argument('--output');a=p.parse_args()\n"
+                  "json.dump({'candidates':[{'rule_id':'r','path':'a.js','line_number':1}]},open(a.output,'w'))\n")
+        self.box.agent("legacy", report(finding()), prepass=no_ids)
+        self.box.line(["legacy"])
+        ok, _ = self.box.run_line()
+        self.assertTrue(ok)
+        legacy = json.loads(self.box.findings("target-line.json"))["stations"][0]
+        self.assertEqual((legacy["status"], legacy["candidate_identity"],
+                          legacy["candidates_accounted"]), ("PASS", "count-only", 1))
+        self.assertNotIn("candidate_claims", legacy)
 
 
 if __name__ == "__main__":

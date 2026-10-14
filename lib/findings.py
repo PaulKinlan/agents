@@ -1612,6 +1612,77 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
             "identity": identity}
 
 
+def candidate_accounting_mode(agent_cfg: Dict[str, Any]) -> str:
+    """The manifest's explicit accounting contract; unknown values never become row mode."""
+    mode = agent_cfg.get("candidate_accounting", "row")
+    if not isinstance(mode, str) or mode not in ("row", "aggregate-claimed"):
+        raise ValueError(f"unsupported candidate_accounting declaration {mode!r}: "
+                         "expected 'row' or 'aggregate-claimed'")
+    return mode
+
+
+def aggregate_candidate_coverage(candidates_in: Optional[int],
+                                 rows: List[Dict[str, Any]], *,
+                                 presented_ids: Optional[Iterable[str]],
+                                 slice_size: int = CANDIDATE_PROMPT_SLICE) -> Dict[str, Any]:
+    """Opt-in many-to-one accounting: model-CLAIMED dispositions, not verified grouping.
+
+    Row mode remains in candidate_coverage unchanged. Every aggregate row explicitly
+    names the distinct PRESENTED ids it disposes of; an anchor_candidate_id selects
+    primary identity only and cannot count toward this coverage. Return the claimed
+    ID-to-row mapping as report evidence, even when an invalid claim refuses PASS.
+    """
+    claims = [{"row_index": index,
+               "covered_candidate_ids": row.get("covered_candidate_ids") if isinstance(row, dict) else None,
+               "anchor_candidate_id": row.get("anchor_candidate_id") if isinstance(row, dict) else None}
+              for index, row in enumerate(rows)]
+    total = None if candidates_in is None else max(0, int(candidates_in))
+    presented = None if total is None else min(total, max(0, int(slice_size)))
+    raw_ids = list(presented_ids or [])
+    ids = raw_ids[:presented] if presented is not None else []
+    valid_ids = [value for value in ids if isinstance(value, str) and value.strip()]
+    presented_set = set(valid_ids)
+    problems: List[str] = []
+    if presented is None:
+        problems.append("aggregate mode requires a candidates pre-pass, not a count or an absent index")
+    elif len(ids) != presented or len(valid_ids) != presented or len(presented_set) != presented:
+        problems.append("aggregate mode requires unique presented candidate ids for every shown candidate")
+
+    claimed = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            problems.append(f"row {index}: expected a finding object with covered_candidate_ids")
+            continue
+        row_ids = row.get("covered_candidate_ids")
+        if not isinstance(row_ids, list) or not row_ids:
+            problems.append(f"row {index}: covered_candidate_ids absent or empty")
+            row_ids = []
+        valid_row_ids = []
+        for value in row_ids:
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"row {index}: covered_candidate_ids must contain nonempty string ids")
+                continue
+            valid_row_ids.append(value)
+        if len(valid_row_ids) != len(set(valid_row_ids)):
+            problems.append(f"row {index}: duplicate covered_candidate_ids within one row")
+        row_set = set(valid_row_ids)
+        if row_set & claimed:
+            problems.append(f"row {index}: duplicate covered_candidate_ids across rows")
+        claimed.update(row_set)
+        if row_set - presented_set:
+            problems.append(f"row {index}: unknown/unshown covered_candidate_ids")
+        if "anchor_candidate_id" in row:
+            anchor = row["anchor_candidate_id"]
+            if not isinstance(anchor, str) or not anchor.strip() or anchor not in row_set:
+                problems.append(f"row {index}: anchor_candidate_id is outside its own covered_candidate_ids")
+    if presented_set - claimed:
+        problems.append(f"missing {len(presented_set - claimed)} presented candidate id(s)")
+    return {"candidates_in": total, "candidates_presented": presented,
+            "candidates_accounted": len(presented_set & claimed),
+            "complete": not problems, "reason": "; ".join(problems),
+            "identity": "identity-claimed-aggregate", "candidate_claims": claims}
+
+
 def _run_level_possible_rekeys(findings: List[Dict[str, Any]],
                               fixed: List[Dict[str, Any]]) -> int:
     """The possible-re-key pairs over the WHOLE RUN, which is what the counter always claimed to count.
