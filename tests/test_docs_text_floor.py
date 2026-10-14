@@ -40,7 +40,16 @@ page="$(basename "$file")"
 if grep -q '__fifth_site' "$file" 2>/dev/null; then below=1; list=' [p.__fifth_site=11.00px]'; else below=0; list=''; fi
 if grep -q 'FIXTURE_MARKER' "$file" 2>/dev/null; then marker=1; else marker=0; fi
 [ -n "$STUB_CHROME_LOG" ] && printf '%s=%s\\n' "$marker" "$page" >> "$STUB_CHROME_LOG"
-echo '<div id="__floor_result">FLOOR_RESULT page='"$page"' floor=12px below='"$below""$list"'</div>'
+# Two shapes the tool must refuse: a page whose payload counted nothing, and a verdict that does not say how many
+# elements it counted at all.
+counted=3
+grep -q 'ZERO_COUNT' "$file" 2>/dev/null && counted=0
+grep -q 'NO_COUNT_FIELD' "$file" 2>/dev/null && counted=
+if [ -z "$counted" ]; then
+  echo '<div id="__floor_result">FLOOR_RESULT page='"$page"' floor=12px below='"$below"'</div>'
+else
+  echo '<div id="__floor_result">FLOOR_RESULT page='"$page"' floor=12px counted='"$counted"' below='"$below""$list"'</div>'
+fi
 exit 0
 """
 
@@ -123,6 +132,34 @@ class TestTheSweepVerdictAndItsControl(DocsTextFloorBase):
         done = self.run_tool()
         self.assertEqual(done.returncode, 1)
         self.assertIn("below=1", done.stdout)
+
+
+class TestAVerdictMustSayWhatItLookedAt(DocsTextFloorBase):
+
+    def test_a_verdict_that_counted_nothing_is_not_a_pass(self):
+        """The failure the reviewer named before it ran: a page whose payload silently counted no element used to
+        report below=0 and read as a clean sweep. A floor over nothing proves nothing."""
+        (self.docs / "index.html").write_text(
+            "<!doctype html><body><!-- ZERO_COUNT --><p>text</p></body>\n", encoding="utf-8")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("counted=0", done.stdout)
+        self.assertIn("proves nothing", done.stdout + done.stderr)
+
+    def test_a_verdict_that_does_not_report_its_count_is_not_a_pass(self):
+        """A clean sweep has to say what it looked at: a verdict with no counted= field cannot be told apart from
+        one that measured nothing, so it is a NO RESULT."""
+        (self.docs / "index.html").write_text(
+            "<!doctype html><body><!-- NO_COUNT_FIELD --><p>text</p></body>\n", encoding="utf-8")
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("did not report how many elements it counted", done.stdout + done.stderr)
+
+    def test_an_honest_verdict_reports_a_count(self):
+        done = self.run_tool()
+        self.assertEqual(done.returncode, 0)
+        for line in self.results(done.stdout):
+            self.assertIn("counted=", line)
 
 
 class TestTheSweepReadsTheDocsItResolved(DocsTextFloorBase):

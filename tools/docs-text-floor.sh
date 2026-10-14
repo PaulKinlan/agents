@@ -16,6 +16,8 @@
 # script the first time a page produced no result, before its own error branch could run (hence NO RESULT rather
 # than silence), and a placeholder substitution also matched the marker text it was printing. If an edit makes
 # every page print NO RESULT, suspect the injected JS first - that is the tool telling you it is broken.
+# Each verdict also reports counted=N, the number of text-bearing leaf elements it measured: a page whose
+# count is 0 is a NO RESULT rather than a pass, because a floor over nothing proves nothing.
 #
 # --inject-fifth-site is the CONTROL: it adds a synthetic label at 11px to a copy of one page, so the sweep has to
 # go red. A sweep that cannot fail proves nothing, and this flag is how you show it can.
@@ -72,7 +74,7 @@ PY
 fi
 # The measuring script runs INSIDE each page and writes its verdict into the DOM, which --dump-dom then prints,
 # so this needs no CDP client and no library - only a browser.
-payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], else_=0, SKIP={SCRIPT:1,STYLE:1,TITLE:1,META:1,LINK:1,HEAD:1,BASE:1,NOSCRIPT:1,TEMPLATE:1}; document.querySelectorAll("*").forEach(function(el){ if(SKIP[el.tagName]) return; if(el.children.length) return; if(!el.textContent.trim()) return; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result"; d.textContent="FLOOR_RESULT page="+location.pathname.split("/").pop()+" floor="+f+"px below="+out.length+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
+payload='<script>window.addEventListener("load",function(){var f=__FLOOR_PX__, out=[], n=0, SKIP={SCRIPT:1,STYLE:1,TITLE:1,META:1,LINK:1,HEAD:1,BASE:1,NOSCRIPT:1,TEMPLATE:1}; document.querySelectorAll("*").forEach(function(el){ if(SKIP[el.tagName]) return; if(el.children.length) return; if(!el.textContent.trim()) return; n++; var px=parseFloat(getComputedStyle(el).fontSize); if(px<f) out.push((el.tagName.toLowerCase())+"."+(el.className||"-")+"="+px.toFixed(2)+"px"); }); var d=document.createElement("div"); d.id="__floor_result"; d.textContent="FLOOR_RESULT page="+location.pathname.split("/").pop()+" floor="+f+"px counted="+n+" below="+out.length+(out.length?(" ["+out.slice(0,10).join(", ")+"]"):""); document.body.appendChild(d); });</script>'
 python3 - "$work" "$floor" "$payload" <<'PY'
 import sys, pathlib
 work, floor, payload = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -87,6 +89,18 @@ for page in "$work"/*.html; do
   # and keep `set -e` from killing the script when a page produces no result at all.
   line="$(printf '%s' "$dom" | grep -o '__floor_result">[^<]*' | tail -1 | sed 's/.*>//' || true)"
   [ -n "$line" ] || { echo "  $page: NO RESULT (page did not run the measuring script)" >&2; fail=1; continue; }
+  # A verdict must say HOW MANY elements it counted, and a floor over nothing is not a pass. Without this, a page
+  # whose injected payload silently counted no element reported below=0 and read as a clean sweep - the one failure
+  # the tool's three falsifications could not catch, named by the reviewer before it ran (rev-sweep, agents-sz8q).
+  case "$line" in
+    *counted=*) ;;
+    *) echo "  $page: NO RESULT (the verdict did not report how many elements it counted)" >&2; fail=1; continue;;
+  esac
+  case "$line" in
+    *counted=0*) echo "  $line"
+      echo "  $page: NO RESULT (counted=0: no text-bearing element was found, so this page proves nothing)" >&2
+      fail=1; continue;;
+  esac
   echo "  $line"
   case "$line" in *"below=0"*) ;; *) fail=1;; esac
 done
