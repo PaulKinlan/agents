@@ -1533,6 +1533,8 @@ class TestStationPredicates(unittest.TestCase):
         """agents-ekwm: None is unknown, not zero - the union clause xx9t's lighter predicate lacked."""
         self.assertFalse(station_has_verdict({"status": "PASS", "findings_count": None,
                                               "criticals": None}))
+        self.assertFalse(station_has_verdict({"status": "PASS", "findings_count": None,
+                                              "criticals": 0}))
         self.assertFalse(station_has_verdict({"status": "PASS", "findings_count": 0}))
         self.assertTrue(station_has_verdict({"status": "PASS", "findings_count": 0, "criticals": 0}))
         self.assertFalse(station_has_verdict(None))
