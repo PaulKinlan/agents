@@ -558,8 +558,14 @@ def prepass(n):
 
 
 def candidates(n):
-    """n distinct findings, one per candidate - what a COMPLETE triage of n candidates looks like."""
-    return report(*[finding(rule_id=f"r1", path=f"a{i}.js", line_number=i + 1, title=f"F{i}")
+    """n distinct findings, one per candidate - what a COMPLETE triage of n candidates looks like.
+
+    The rows CITE the ids the stub pre-pass emits (`c%d`, PREPASS_CANDIDATES): since agents-w9ni the check
+    compares candidate ids wherever the pre-pass supplies them, so a stub that listed n rows without naming
+    a candidate would be a fixture for an unaccounted report, not for a complete triage.
+    """
+    return report(*[finding(rule_id=f"r1", path=f"a{i}.js", line_number=i + 1, title=f"F{i}",
+                            candidate_id=f"c{i}")
                     for i in range(n)])
 
 
@@ -585,8 +591,8 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
         # Counts are unknown to the verdict machinery (INCOMPLETE is not in VERDICT_STATUSES), so the row keeps
         # the dash convention and the counts ride in the note and the banner.
         self.assertIn("| `partial` | INCOMPLETE | — | — |", delta)
-        self.assertIn("accounted for 8 of the 49 candidate(s) shown (49 found by the pre-pass)", delta)
-        self.assertIn("`partial` (8 of 49 shown)", delta)
+        self.assertIn("cited 8 of the 49 candidate id(s) shown (49 found by the pre-pass)", delta)
+        self.assertIn("`partial` (8 of 49 shown, identity-matched)", delta)
         self.assertIn("A partial triage is not a clean result", delta)
         self.assertNotIn("produced no verdict", delta)  # one banner, not two for one station
         self.assertNotIn("Clean Delta", delta)
@@ -636,7 +642,7 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
 
         delta = self.box.findings("target-delta.md")
         self.assertIn("did not account for the candidates they were shown", delta)
-        self.assertIn("`zero` (0 of 49 shown)", delta)
+        self.assertIn("`zero` (0 of 49 shown, identity-matched)", delta)
         self.assertNotIn("Clean Delta", delta)
         self.assertIn("1 station(s), 0 with a verdict", delta)
         self.assertNotIn("produced no verdict", delta)          # one banner per station, not two
@@ -653,7 +659,8 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
         self.assertIn("Clean Delta", self.box.findings("target-delta.md"))
 
         self.box.agent("noisy", report(*[finding(rule_id="r1", path=f"b{i}.js", line_number=i + 1,
-                                                title=f"F{i}", verdict="false_positive")
+                                                title=f"F{i}", verdict="false_positive",
+                                                candidate_id=f"c{i}")
                                         for i in range(3)]), prepass=prepass(3))
         self.box.line(["noisy"])
         _, _ = self.box.run_line()

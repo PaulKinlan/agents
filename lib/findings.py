@@ -19,7 +19,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 
@@ -1483,6 +1483,15 @@ def station_has_verdict(station: Any) -> bool:
                 and station.get("criticals") is not None)
 
 
+# The report-side name of the pre-pass identity field. It is a LITERAL, not `from lib.candidate_identity import
+# CANDIDATE_ID_FIELD`, because this module is STAGED STANDALONE into dispatch sandboxes through hand-maintained
+# module lists (tests/test_factory_truth.py LIB_MODULES is one), and an import that is not in every such list
+# turns a dispatch into ModuleNotFoundError - measured: adding the import made 3 dispatch tests error out with
+# `No module named 'lib.candidate_identity'`. The sibling vocabulary ("candidate-id" as an identity_source) is
+# already a literal in this file for the same reason; lib/candidate_identity.py remains the writer's owner.
+CANDIDATE_ID_FIELD = "candidate_id"
+
+
 def read_candidate_count(run_dir: Any) -> Optional[int]:
     """How many candidates the station's pre-pass produced, or None when it had no pre-pass.
 
@@ -1490,13 +1499,7 @@ def read_candidate_count(run_dir: Any) -> Optional[int]:
     cannot be asserted from it, so it is judged exactly as it was before. Zero means a pre-pass ran and
     found nothing, which is vacuously complete.
     """
-    if not run_dir:
-        return None
-    path = Path(run_dir) / "candidates.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    payload = _read_candidate_payload(run_dir)
     if isinstance(payload, dict):
         candidates = payload.get("candidates")
         if isinstance(candidates, list):
@@ -1507,8 +1510,58 @@ def read_candidate_count(run_dir: Any) -> Optional[int]:
     return None
 
 
+def _read_candidate_payload(run_dir: Any) -> Optional[Any]:
+    """The parsed `candidates.json` payload, or None when there is no usable one.
+
+    One reader for the two questions asked of it - how many candidates a pre-pass produced, and which of
+    them the prompt carried by id - so the two can never disagree about what a run was given.
+    """
+    if not run_dir:
+        return None
+    path = Path(run_dir) / "candidates.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def read_presented_candidate_ids(run_dir: Any,
+                                 slice_size: int = CANDIDATE_PROMPT_SLICE) -> Optional[List[str]]:
+    """The candidate_ids the prompt actually carried, or None when the station had no pre-pass.
+
+    THREE ANSWERS, and they are not interchangeable (agents-w9ni):
+
+      * None   - no `candidates.json`: there was no pre-pass, so identity cannot be asked for at all and the
+                 check is judged exactly as it was before;
+      * a list - the ids of the candidates the prompt carried, in presentation order (factory slices the
+                 first `slice_size`, factory:1692), which is the population a report must cite;
+      * []     - a pre-pass ran but its candidates carry no ids (an artefact from before the identity
+                 scheme, lib/candidate_identity.py), so the check must fall back to counting rows AND SAY
+                 that it did - a weaker check that cannot be told from the stronger one is the defect this
+                 reader exists to prevent.
+
+    Counting and identity are two different bounds. A count can be satisfied by the right NUMBER of rows
+    describing candidates the station was never shown; citing ids cannot.
+    """
+    payload = _read_candidate_payload(run_dir)
+    if payload is None:
+        return None
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        return []
+    ids: List[str] = []
+    for candidate in candidates[:max(0, int(slice_size))]:
+        value = candidate.get(CANDIDATE_ID_FIELD) if isinstance(candidate, dict) else None
+        if not isinstance(value, str) or not value:
+            return []           # partial ids are no ids: the whole presented population must be nameable
+        ids.append(value)
+    return ids
+
+
 def candidate_coverage(candidates_in: Optional[int], reported: int,
-                       slice_size: int = CANDIDATE_PROMPT_SLICE) -> Dict[str, Any]:
+                       slice_size: int = CANDIDATE_PROMPT_SLICE, *,
+                       presented_ids: Optional[Iterable[str]] = None,
+                       cited_ids: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Whether the report can show the station accounted for the candidates it was shown (agents-xx9t).
 
     OUTCOME AND VALIDITY ARE TWO FACTS. `status` says what the station found; this says whether its report
@@ -1518,19 +1571,45 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
     `reported` counts every finding the report carried BEFORE the false-positive filter, so a station that
     lists its dismissals with a verdict accounts for them and one that silently drops them does not. The
     bound is the slice the prompt carries, not the raw candidate count.
+
+    IDENTITY WHEN AVAILABLE, COUNT WHEN NOT (agents-w9ni). A count is satisfiable by the right NUMBER of rows
+    describing candidates the station was never shown - measured: 5 candidates presented and 5 invented rows
+    with no candidate_id read as "accounted 5 of 5". So when the presented candidates carry ids
+    (`presented_ids`), coverage counts the DISTINCT PRESENTED ids the report cites and a row that names no
+    presented candidate accounts for nothing. When they do not, the count stands and `identity` says
+    "count-only", which every surface must show: a weaker check indistinguishable from the stronger one is
+    the same blind spot one level down.
     """
     if candidates_in is None:
         return {"candidates_in": None, "candidates_presented": None,
-                "candidates_accounted": int(reported), "complete": True, "reason": ""}
+                "candidates_accounted": int(reported), "complete": True, "reason": "",
+                "identity": "not-applicable"}
     total = max(0, int(candidates_in))
     presented = min(total, max(0, int(slice_size)))
-    complete = presented == 0 or int(reported) >= presented
-    reason = "" if complete else (
-        f"accounted for {int(reported)} of the {presented} candidate(s) shown "
-        f"({total} found by the pre-pass): a partial triage is not a clean result; list a dismissed "
-        f"candidate with its verdict to account for it, as secret-scan does")
+    ids = [str(i) for i in (presented_ids or []) if i]
+    if ids:
+        identity = "identity-matched"
+        accounted = len(set(ids) & {str(i) for i in (cited_ids or []) if i})
+    else:
+        identity = "count-only"
+        accounted = int(reported)
+    complete = presented == 0 or accounted >= presented
+    if complete:
+        reason = ""
+    elif identity == "identity-matched":
+        reason = (
+            f"cited {accounted} of the {presented} candidate id(s) shown "
+            f"({total} found by the pre-pass): a partial triage is not a clean result; every row - confirmed "
+            f"or dismissed - must carry the candidate_id of the pre-pass candidate it answers")
+    else:
+        reason = (
+            f"accounted for {accounted} of the {presented} candidate(s) shown "
+            f"({total} found by the pre-pass): a partial triage is not a clean result; list a dismissed "
+            f"candidate with its verdict to account for it, as secret-scan does "
+            f"(count-only: these candidates carry no candidate_id to compare)")
     return {"candidates_in": total, "candidates_presented": presented,
-            "candidates_accounted": int(reported), "complete": complete, "reason": reason}
+            "candidates_accounted": accounted, "complete": complete, "reason": reason,
+            "identity": identity}
 
 
 def _run_level_possible_rekeys(findings: List[Dict[str, Any]],
@@ -1875,7 +1954,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     partial_triage = [s for s in (stations or []) if station_is_incomplete(s)]
     if partial_triage:
         names = ", ".join(
-            f"`{s.get('station')}` ({s.get('candidates_accounted')} of {s.get('candidates_presented')} shown)"
+            f"`{s.get('station')}` ({s.get('candidates_accounted')} of {s.get('candidates_presented')} shown, "
+            f"{s.get('candidate_identity') or 'count-only'})"
             for s in partial_triage)
         lines.append(f"> **INCOMPLETE**: {len(partial_triage)} station(s) did not account for the candidates they "
                      f"were shown: {names}. A partial triage is not a clean result; their counts are not a verdict.")
@@ -1903,9 +1983,13 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
             has_verdict = station_has_verdict(s)
             count = s.get("findings_count") if has_verdict else "—"
             crit = s.get("criticals") if has_verdict else "—"
-            if has_verdict and station_is_incomplete(s):
-                # The counts sit beside the status that depends on them, not only in the banner.
-                count = f"{count} ({s.get('candidates_accounted')}/{s.get('candidates_presented')})"
+            if has_verdict and s.get("candidates_presented") is not None:
+                # The counts sit beside the status that depends on them, not only in the banner - and HOW
+                # they were met is part of what they mean: identity-matched says the rows named the
+                # candidates shown, count-only says the station emitted the right NUMBER of rows and no
+                # more (agents-w9ni).
+                count = (f"{count} ({s.get('candidates_accounted')}/{s.get('candidates_presented')}, "
+                         f"{s.get('candidate_identity') or 'count-only'})")
             note = str(s.get("error") or "") or (str(s.get("note") or "") if station_is_incomplete(s) else "")
             note = note.replace("|", "/").replace("\n", " ")[:200]
             lines.append(f"| `{s.get('station')}` | {s.get('status')} | {count} | {crit} | {note} |")

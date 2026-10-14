@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
 from lib.embargo import is_false_positive, reported_severity
+from lib.findings import (CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS, candidate_coverage,
+                          read_candidate_count, read_presented_candidate_ids, write_line_report)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -129,6 +132,137 @@ class TestStationCandidateAccounting(unittest.TestCase):
                 self.assertEqual(items["properties"]["false_positive"]["type"], "boolean")
                 self.assertNotIn("false_positive", items.get("required", []),
                                  "a dismissal flag must stay optional: confirmed findings do not carry it")
+
+
+class TestCountAndIdentityAreTwoBounds(unittest.TestCase):
+    """agents-w9ni: the count bounds ROWS, identity bounds WHICH candidates they name.
+
+    MEASURED ON THE PRE-FIX TREE, which is the discriminator for this class: five candidates presented and
+    five invented rows (rule_id 'made-up', paths not-a-candidate-0..4.js, no candidate_id) read as
+    "accounted 5 of 5" and PASSed. The first test below is that exact population.
+    """
+
+    IDS = ["cand-0", "cand-1", "cand-2", "cand-3", "cand-4"]
+
+    def test_invented_rows_do_not_account_for_the_candidates_shown(self):
+        got = candidate_coverage(5, 5, presented_ids=self.IDS, cited_ids=[])
+        self.assertFalse(got["complete"],
+                         "the right NUMBER of rows describing the wrong candidates must not carry the check")
+        self.assertEqual(got["identity"], "identity-matched")
+        self.assertEqual(got["candidates_accounted"], 0)
+        self.assertIn("candidate_id", got["reason"])
+
+    def test_rows_that_name_the_presented_candidates_do_account(self):
+        got = candidate_coverage(5, 5, presented_ids=self.IDS, cited_ids=self.IDS)
+        self.assertTrue(got["complete"])
+        self.assertEqual(got["candidates_accounted"], 5)
+        self.assertEqual(got["reason"], "")
+
+    def test_an_id_the_station_was_never_shown_does_not_count(self):
+        got = candidate_coverage(3, 3, presented_ids=self.IDS[:3],
+                                 cited_ids=["cand-0", "made-up", "cand-9"])
+        self.assertEqual(got["candidates_accounted"], 1)
+        self.assertFalse(got["complete"], "only the intersection with what was presented may count")
+
+    def test_the_slice_bounds_the_population_on_both_sides(self):
+        ids = [f"cand-{i}" for i in range(120)]
+        got = candidate_coverage(120, CANDIDATE_PROMPT_SLICE,
+                                 presented_ids=ids[:CANDIDATE_PROMPT_SLICE],
+                                 cited_ids=ids[:CANDIDATE_PROMPT_SLICE])
+        self.assertEqual(got["candidates_presented"], CANDIDATE_PROMPT_SLICE)
+        self.assertTrue(got["complete"])
+
+    def test_pre_scheme_candidates_keep_the_count_and_say_it_was_only_a_count(self):
+        got = candidate_coverage(5, 5, presented_ids=[])
+        self.assertTrue(got["complete"], "a count is still the answer for candidates that carry no ids")
+        self.assertEqual(got["identity"], "count-only")
+        short = candidate_coverage(5, 2, presented_ids=[])
+        self.assertFalse(short["complete"])
+        self.assertIn("count-only", short["reason"], "the weaker check must name itself")
+        self.assertIn("a partial triage is not a clean result", short["reason"])
+
+    def test_no_prepass_still_asserts_nothing(self):
+        got = candidate_coverage(None, 7)
+        self.assertTrue(got["complete"])
+        self.assertEqual(got["identity"], "not-applicable")
+
+
+class TestPresentedIdsComeFromTheRun(unittest.TestCase):
+    def _run(self, candidates):
+        run = tempfile.mkdtemp()
+        (Path(run) / "candidates.json").write_text(json.dumps({"candidates": candidates}), encoding="utf-8")
+        return run
+
+    def test_ids_are_read_in_presentation_order(self):
+        run = self._run([{"candidate_id": "a"}, {"candidate_id": "b"}])
+        self.assertEqual(read_presented_candidate_ids(run), ["a", "b"])
+
+    def test_present_but_unnamed_is_empty_not_none(self):
+        self.assertEqual(read_presented_candidate_ids(self._run([{"rule_id": "r"}])), [])
+        self.assertEqual(read_presented_candidate_ids(self._run([{"candidate_id": "a"}, {"rule_id": "r"}])),
+                         [], "partial ids are no ids: the whole presented population must be nameable")
+
+    def test_no_candidates_json_is_none(self):
+        self.assertIsNone(read_presented_candidate_ids(tempfile.mkdtemp()))
+        self.assertIsNone(read_presented_candidate_ids(None))
+
+    def test_the_reader_agrees_with_the_count_reader_on_the_same_run(self):
+        run = self._run([{"candidate_id": f"c{i}", "rule_id": "r"} for i in range(120)])
+        self.assertEqual(len(read_presented_candidate_ids(run)), CANDIDATE_PROMPT_SLICE,
+                         "the ids must be the population the prompt carried, not the whole pre-pass")
+        self.assertEqual(read_candidate_count(run), 120)
+
+
+class TestIdentityIsVisibleWhereverTheCountIsShown(unittest.TestCase):
+    """A count-only check that reads like an identity check is the same blind spot one level down."""
+
+    def _report(self, station):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            return write_line_report("target", "project-audit", [station], findings_dir=root).read_text(
+                encoding="utf-8")
+
+    def _station(self, identity, complete=True):
+        return {"station": "quiet", "status": "PASS" if complete else INCOMPLETE_STATUS,
+                "findings_count": 5, "criticals": 0, "candidates_in": 5, "candidates_presented": 5,
+                "candidates_accounted": 5 if complete else 0, "candidate_identity": identity,
+                "complete": complete, "note": ""}
+
+    def test_count_only_is_named_in_the_station_table(self):
+        self.assertIn("(5/5, count-only)", self._report(self._station("count-only")))
+
+    def test_identity_matched_is_named_too(self):
+        self.assertIn("(5/5, identity-matched)", self._report(self._station("identity-matched")))
+
+    def test_an_incomplete_station_shows_which_bound_it_met(self):
+        report = self._report(self._station("identity-matched", complete=False))
+        # A station with no verdict renders a DASH in the table on purpose (its counts are not a verdict, see
+        # test_findings' dash-row tests): the banner is where the numbers and the bound are named.
+        self.assertIn("| `quiet` | INCOMPLETE | — | — |", report)
+        self.assertIn("0 of 5 shown, identity-matched", report,
+                      "the INCOMPLETE banner must say how the count was judged, not only how many")
+
+
+class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
+    def test_every_station_declares_candidate_id_so_the_prompt_carries_it(self):
+        """Same mechanism as the dismissal flag: the schema is embedded in the prompt, so a field it does not
+        declare reaches the model only as prose."""
+        for station in STATIONS:
+            with self.subTest(station=station):
+                items = json.loads((REPO / "agents" / station / "report.schema.json").read_text())[
+                    "properties"]["findings"]["items"]
+                self.assertEqual(items["properties"]["candidate_id"]["type"], "string")
+                self.assertNotIn("candidate_id", items.get("required", []),
+                                 "pre-scheme reports and stations without a pre-pass do not carry it")
+
+    def test_every_station_contract_asks_for_the_citation(self):
+        for station in STATIONS:
+            with self.subTest(station=station):
+                text = contract(station)
+                self.assertIn("candidate_id", text)
+                self.assertRegex(text, r"(?i)cite the candidate you are answering")
+                self.assertRegex(text, r"(?i)count-only",
+                                 "the contract must say what happens when no ids exist, so the weak path is known")
 
 
 if __name__ == "__main__":
