@@ -1,5 +1,22 @@
 ## patches/fleet-check-rerun-failed-tree.patch
 
+### The P1 this shipped with, and the drive that found it (agents-r5gp)
+
+The first version of this patch initialised `attempt_n` and `rerun_note` **inside the cached-PASS arm only**. The
+cached-FAIL arm names the attempt too, so under `set -uo pipefail` the **plain cached-FAIL read - the most common
+read this tool performs - crashed with `attempt_n: unbound variable`, exit 1**, for every lane not using `--rerun`.
+The init now sits **before** the verdict dispatch so both cached arms have it, and the jq read is copied verbatim
+from the site it replaces so the two cannot drift.
+
+**Why the drive missed it, and what the drive now covers.** My drive exercised the NEW behaviour thoroughly and
+never once read a cached FAIL plainly, so a regression in the UNCHANGED branch of the same dispatch went unseen:
+a feature added to a shared read path can silently break the exact behaviour it was added alongside. The drive now
+covers the unchanged arms as well - **plain cached FAIL (the crash), plain cached PASS, and no record at all** -
+plus `--status` with no record, and all four new behaviours re-driven after the move: the attempt number with its
+full attribution (lane, time, reason) still printed, the disagreement still RED with both attempts named, a bare
+`--rerun` still refused, a second unauthorised re-run still refused, and an authorised attempt still genuinely
+running. No `unbound variable` in any of them.
+
 ### Documented limitation, and two faults found while driving
 
 **Each `<record>.N` names its own attribution** - the request that superseded that attempt, with its lane,

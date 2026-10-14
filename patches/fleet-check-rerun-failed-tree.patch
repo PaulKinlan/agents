@@ -10,7 +10,7 @@
      *) _args+=("$_a") ;;
    esac
  done
-@@ -256,8 +259,43 @@
+@@ -256,8 +259,53 @@
  fi
  
  exec 9>"$C/$tree.lock"; flock 9
@@ -49,24 +49,29 @@
 +    '.rerun_reason = $r | .rerun_by = $b | .rerun_at = $t | .reruns = ((.reruns // 0) + 1) | if $ab != "" then .rerun_authorised_by = $ab else . end' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
 +  echo "fleet-check: re-running the gate for this tree at $lane's request (reason: $RERUN_REASON)${RERUN_AUTHORISED_BY:+ authorised by $RERUN_AUTHORISED_BY}. The prior verdict and this attribution are preserved at ${rec}.1, not replaced."
 +fi
++# agents-5q0w / agents-r5gp: the attempt number and the re-run note are read by BOTH cached arms - the cached-
++# FAIL line names the attempt too - so they are computed BEFORE the dispatch. As first delivered they lived only
++# inside the PASS arm, which crashed the plain cached-FAIL read with "attempt_n: unbound variable" under set -u:
++# the most common read this tool performs, broken for every lane not using --rerun. The jq read below is copied
++# verbatim from the site it replaces so the two cannot drift.
++attempt_n=$(( 1 + $(ls "$rec".[1-9] 2>/dev/null | wc -l) ))
++rerun_note=""
++if [ -f "${rec}.1" ]; then
++            rerun_note=$(jq -r 'if (.rerun_reason // "") != "" then " - re-run by \(.rerun_by) at \(.rerun_at) (reason: \(.rerun_reason))" + (if (.rerun_authorised_by // "") != "" then ", authorised by \(.rerun_authorised_by)" else "" end) else "" end' "${rec}.1" 2>/dev/null || echo "")
++fi
  case $(state) in
 -  PASS) if [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
 +  PASS) if [ -z "${RERUN_REASON:-}" ] && [ "$(jq -r .cmd "$rec")" = "$CHECK_CMD" ]; then
            # fleet-8pqa: a cached PASS is a verdict for the TREE it was produced against, so ask the artifact
            # before serving it (see record_identity). On a mismatch the gate runs instead of being skipped.
            record_identity "$rec" "$tree" "$GATE_KIND"
-@@ -297,17 +335,35 @@
+@@ -297,17 +345,30 @@
            # record with no count prints UNRECORDED, and the count says 'recorded' because it counts what the
            # record was able to write, not every re-serve that ever happened.
            jq --arg l "$lane" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.reserves = ((.reserves // 0) + 1) | .reserved_by = ((.reserved_by // {}) | .[$l] = ((.[$l] // 0) + 1)) | .reserved_last = {lane:$l, at:$t}' "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
 +          # agents-5q0w: name the attempt, and never present a re-run as a first-class pass. N is DERIVED from the
 +          # retention the rotation already gives (1 + the rotated siblings that exist), so no new field is needed, and
 +          # the attribution is read from <rec>.1 where it was written before the rotation.
-+          attempt_n=$(( 1 + $(ls "$rec".[1-9] 2>/dev/null | wc -l) ))
-+          rerun_note=""
-+          if [ -f "${rec}.1" ]; then
-+            rerun_note=$(jq -r 'if (.rerun_reason // "") != "" then " - re-run by \(.rerun_by) at \(.rerun_at) (reason: \(.rerun_reason))" + (if (.rerun_authorised_by // "") != "" then ", authorised by \(.rerun_authorised_by)" else "" end) else "" end' "${rec}.1" 2>/dev/null || echo "")
-+          fi
 +          if [ "$attempt_n" -gt 1 ]; then echo "fleet-check: attempt $attempt_n on this tree${rerun_note}"; fi
 +          # coord's ruling: a disagreement is not a vote. If this PASS is the result of a re-run after a recorded
 +          # FAIL, the tree is RED and the change stays unlanded - the failure is contextualised, never replaced.
