@@ -7,8 +7,20 @@
   tail is captured, so the note lands in the record's tail and in the `[check]` message exactly once.
 - **Baseline file hash (the live bytes this patch was generated against and applies to):**
   `455e3b05d2dc172c2d2149dd47b33ac4d77266b57d45765506d2e2b362c10498  bin/fleet-check`
-  (767 lines; patched result `200f5119d0043980b011cc7acfac5ebbabbe62a179a127225284a28678633d3f`)
-- **Revision:** THIRD shape, and the name changed with it — the patch is
+  (767 lines; patched result `43e15d9a714d091da61e04201f8425e01782b129a94ef2eb771daba319db26c3`)
+- **Revision (agents-e3aw):** the repair line now names only what the reader can see. The first revision of
+  this artifact printed *"Repair: give this repo its own config (bash tools/check-cmd.sh --install writes
+  $HOME/.fleet/<repo>-check.conf) and point the gate at it with FLEET_CHECK_CONF, or re-install the host-wide
+  file from the repo that should own it"* — which tells the reader to run an installer **in the repo the gate
+  ran from**, the one repo that may not have it and precisely the situation the note exists for, and then says
+  to fix the host-wide file "from the repo that should own it" **without naming it**, although the note had
+  already resolved that repo from the config's own stamp (`prov`, printed as "was installed by …" one line
+  above). Driven side by side on the same three inputs, the old text says that same sentence in every case,
+  including the case where `tools/check-cmd.sh` does not exist; the new text offers the installer only when it
+  is really there, and names the stamped repo by name or says plainly that the config carries no stamp. **Any
+  evidence predating this revision is void: the patched bytes changed** (the artifact is a delivery to the hub,
+  and has not been applied to any live `~/fleet`).
+- **Revision history:** THIRD shape, and the name changed with it — the patch is
   `fleet-check-explain-foreign-config.patch` (it was `fleet-check-refuse-foreign-config.patch`, which
   described a refusal that no longer exists; the old artifact and its write-up are deleted in the same
   commit, and the patch had never been handed to the hub). Rounds one and two of the refusal shape
@@ -100,8 +112,15 @@ the log and carried in the message.
   - **the real case** — a stamped foreign config (`# Project: agents-factory (/some/other/checkout)`)
     naming `bash tools/fast-gate.sh` in a repo where that script is absent: the command RUNS, fails 127
     by itself, and the lane's message carries `NOTE (agents-0r1c) … was installed by agents-factory
-    (/some/other/checkout) — it names [tools/fast-gate.sh], which do not resolve in <repo> … Repair: …
-    --install …` — **exactly once**, and `refusals=0`;
+    (/some/other/checkout) — it names [tools/fast-gate.sh], which do not resolve in <repo>` — **exactly
+    once**, `refusals=0`, followed by the repair lines below;
+  - **agents-e3aw (this revision), driven in three situations against the SAME extracted diagnostic, old
+    revision beside new**: (1) repo HAS `tools/check-cmd.sh` + stamped config → new text offers
+    `bash tools/check-cmd.sh --install`; (2) repo does NOT have it + stamped config → new text says there
+    is no installer to run here, and names the stamped repo (`agents-factory (/some/other/checkout)`) as
+    the owner of the host-wide file; (3) no stamp → says plainly that the config carries no stamp so the
+    note cannot name the repo. In all three the OLD text printed the same unrunnable instruction, which is
+    the defect this revision fixes;
   - **agents-v0ip, fixed:** `deno test` → runs; exit 1 from deno itself (no `deno.json`), no refusal;
   - **agents-biz8, fixed:** `timeout -k 30 60s bash tools/fast-gate.sh` → runs; `PASS`, exit 0, and no
     note (nothing failed, so there is nothing to explain);

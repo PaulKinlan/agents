@@ -1,8 +1,8 @@
 diff --git a/bin/fleet-check b/bin/fleet-check
-index 6c72b58..20b7012 100755
+index 6c72b58..11cbf15 100755
 --- a/bin/fleet-check
 +++ b/bin/fleet-check
-@@ -380,6 +380,72 @@ log_after_marker_empty() {
+@@ -380,6 +380,89 @@ log_after_marker_empty() {
    ! awk "/^=== fleet-check gate started/ { active=1; found=0; next } active && /[^[:space:]]/ { found=1 } END { exit (found ? 0 : 1) }" "$log" 2>/dev/null
  }
  
@@ -64,8 +64,25 @@ index 6c72b58..20b7012 100755
 +  who="carries no 'Project:' stamp"; prov="$(_fc_provenance "$conf")"
 +  [ -n "$prov" ] && who="was installed by $prov"
 +  if [ -n "$missing" ]; then
-+    printf 'NOTE (agents-0r1c): this run exited %s and %s %s - it names [%s], which do not resolve in %s. That is what a foreign config looks like from here (a missing path reads as a MISSING TOOL). Repair: give this repo its own config (bash tools/check-cmd.sh --install writes $HOME/.fleet/<repo>-check.conf) and point the gate at it with FLEET_CHECK_CONF, or re-install the host-wide file from the repo that should own it.\n' \
++    printf 'NOTE (agents-0r1c): this run exited %s and %s %s - it names [%s], which do not resolve in %s. That is what a foreign config looks like from here (a missing path reads as a MISSING TOOL).\n' \
 +      "$rc" "${conf:-the config}" "$who" "$missing" "${top:-this worktree}"
++    # agents-e3aw: THE REPAIR MUST BE RUNNABLE WHERE IT IS PRINTED. The first revision told the reader to run
++    # `bash tools/check-cmd.sh --install` IN THE REPO THE GATE RAN FROM - which is the one repo that may not have
++    # it, and precisely the situation this note exists for - and then said to fix the host-wide file "from the
++    # repo that should own it" without naming it, although the note had ALREADY resolved that repo from the
++    # config's own stamp (`prov`, printed as "was installed by ..." one line above). Both branches now name only
++    # what this reader can actually see: the installer when it is really here, and the stamped repo by name when
++    # there is a stamp to name.
++    if [ -f "${top:-.}/tools/check-cmd.sh" ]; then
++      printf '  Repair: this repo carries tools/check-cmd.sh, so `bash tools/check-cmd.sh --install` gives it its own config, and FLEET_CHECK_CONF=<that file> points the gate at it.\n'
++    else
++      printf '  Repair: this repo carries NO tools/check-cmd.sh, so there is no installer to run here - it needs the host-wide config corrected or a config named by FLEET_CHECK_CONF.\n'
++    fi
++    if [ -n "$prov" ]; then
++      printf '  The host-wide config belongs to the repo whose stamp is printed above: %s\n' "$prov"
++    else
++      printf '  The host-wide config carries no stamp, so this note cannot name the repo it belongs to.\n'
++    fi
 +  else
 +    printf 'NOTE (agents-0r1c): this run exited %s and %s %s, but every token it names DOES resolve in %s - so the %s came from another cause and must not be blamed on the config.\n' \
 +      "$rc" "${conf:-the config}" "$who" "${top:-this worktree}" "$rc"
@@ -75,7 +92,7 @@ index 6c72b58..20b7012 100755
  finish() {
    [ "${finished:-0}" -eq 1 ] && return 0
    [ "${in_finish:-0}" -eq 1 ] && return 0
-@@ -483,6 +549,18 @@ finish() {
+@@ -483,6 +566,18 @@ finish() {
      cov_err=$(printf "%s" "$cov_err" | tail -c 400 | tr "\n" " ")
    fi
  
