@@ -35,7 +35,9 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.egress_proxy import EgressProxy
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
-    from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
+    from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
+                             candidate_coverage, read_candidate_count,
+                             dispatch_env_failure_report, write_line_report)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -62,7 +64,9 @@ except ImportError:
     from lib.egress_proxy import EgressProxy
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
-    from lib.findings import VERDICT_STATUSES, dispatch_env_failure_report, write_line_report
+    from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
+                             candidate_coverage, read_candidate_count,
+                             dispatch_env_failure_report, write_line_report)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -1682,7 +1686,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             sys.stderr.write(f"Engine adapter script not found: {adapter_script}\n")
             sys.exit(1)
 
-        candidates_slice = candidates_data[:50] if isinstance(candidates_data, list) else candidates_data
+        candidates_slice = (candidates_data[:CANDIDATE_PROMPT_SLICE]
+                            if isinstance(candidates_data, list) else candidates_data)
 
         prompt = (
             f"You are the {agent_name} agent. Examine the following context and candidate issues discovered by the "
@@ -2454,15 +2459,34 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                                                  model_arg=model_arg, visibility_arg=visibility_arg,
                                                  budget_minutes=st_budget)
             report = res.get("report", {}) if res else {}
-            findings = [f for f in report.get("findings", []) if isinstance(f, dict) and not is_false_positive(f)]
+            # `reported` is every finding the report carried BEFORE the false-positive filter, because a
+            # station that lists a dismissal with its verdict has accounted for that candidate and one that
+            # silently drops it has not (agents-xx9t).
+            reported = [f for f in report.get("findings", []) if isinstance(f, dict)]
+            findings = [f for f in reported if not is_false_positive(f)]
             criticals = count_criticals(findings)
+            coverage = candidate_coverage(read_candidate_count(res.get("run_dir") if res else None),
+                                          len(reported))
 
-            status = "PASS" if not criticals else "ALERT"
+            # Outcome and validity are two facts (agents-xx9t). The alarm still wins the status, but a run
+            # that cannot show it triaged what it was given never reads as PASS: it is INCOMPLETE, which is
+            # not in VERDICT_STATUSES, so the line is incomplete too.
+            if criticals:
+                status = "ALERT"
+            elif coverage["complete"]:
+                status = "PASS"
+            else:
+                status = INCOMPLETE_STATUS
             scorecard.append({
                 "station": st_agent,
                 "status": status,
                 "findings_count": len(findings),
                 "criticals": criticals,
+                "candidates_in": coverage["candidates_in"],
+                "candidates_presented": coverage["candidates_presented"],
+                "candidates_accounted": coverage["candidates_accounted"],
+                "complete": coverage["complete"],
+                "note": coverage["reason"],
                 "fragment": res.get("fragment") if res else None,
                 "run_dir": str(res.get("run_dir")) if res else None,
             })
@@ -2570,6 +2594,12 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
         if env_fails:
             print(f"🚨 {len(env_fails)} station(s) encountered ENVIRONMENT FAILURE (adapter auth): "
                   f"{', '.join(sc['station'] for sc in env_fails)}.\n")
+        partial = [sc for sc in scorecard if sc.get("complete") is False]
+        if partial:
+            print(f"🚧 {len(partial)} station(s) did not account for the candidates they were shown: "
+                  + ", ".join(f"'{sc['station']}' ({sc.get('candidates_accounted')} of "
+                              f"{sc.get('candidates_presented')})" for sc in partial)
+                  + ". A partial triage is not a clean result.\n")
         timeouts = [sc for sc in scorecard if sc["status"] == "TIMEOUT"]
         if timeouts:
             print(f"⏱️  {len(timeouts)} station(s) TIMED OUT: "

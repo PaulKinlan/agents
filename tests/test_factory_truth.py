@@ -538,5 +538,119 @@ class TestSkillsInstallHelpCount(unittest.TestCase):
                       res.stdout)
 
 
+# A pre-pass that writes __N__ candidates, so the prompt slice and the triage count are real.
+PREPASS_CANDIDATES = (
+    "import argparse, json\n"
+    "p = argparse.ArgumentParser()\n"
+    "p.add_argument('--target'); p.add_argument('--output'); p.add_argument('--target-name', dest='tn')\n"
+    "a = p.parse_args()\n"
+    "c = [{'candidate_id': 'c%d' % i, 'rule_id': 'r1', 'path': 'a%d.js' % i,\n"
+    "      'line_number': i + 1, 'snippet': 'x = 1'} for i in range(__N__)]\n"
+    "json.dump({'candidate_id_scheme': 1, 'candidate_count': len(c), 'candidates': c},\n"
+    "          open(a.output, 'w'))\n"
+)
+
+
+def prepass(n):
+    return PREPASS_CANDIDATES.replace("__N__", str(n))
+
+
+def candidates(n):
+    """n distinct findings, one per candidate - what a COMPLETE triage of n candidates looks like."""
+    return report(*[finding(rule_id=f"r1", path=f"a{i}.js", line_number=i + 1, title=f"F{i}")
+                    for i in range(n)])
+
+
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+class TestPartialTriageIsNotACleanResult(SandboxCase):
+    """agents-xx9t: PASS required only the absence of criticals, so a repair-retry that triaged 8 of 49
+    candidates printed `perf-review PASS 8 0`, set complete: true in the line JSON and wrote a PASS row in
+    the delta report. Outcome (what the station found) and validity (whether it looked at what it was given)
+    are two facts, and one field cannot carry both.
+
+    Both directions are driven, because a fix that makes every run INCOMPLETE is the same defect mirrored.
+    """
+
+    def test_a_partial_triage_renders_incomplete_with_its_counts(self):
+        self.box.agent("partial", candidates(8), prepass=prepass(49))
+        self.box.line(["partial"])
+        ok, out = self.box.run_line()
+
+        self.assertFalse(ok, "a station that triaged 8 of 49 candidates must not report a clean line")
+        self.assertIn("INCOMPLETE", out)
+        self.assertIn("8 of 49", out)
+        delta = self.box.findings("target-delta.md")
+        # Counts are unknown to the verdict machinery (INCOMPLETE is not in VERDICT_STATUSES), so the row keeps
+        # the dash convention and the counts ride in the note and the banner.
+        self.assertIn("| `partial` | INCOMPLETE | — | — |", delta)
+        self.assertIn("accounted for 8 of the 49 candidate(s) shown (49 found by the pre-pass)", delta)
+        self.assertIn("`partial` (8 of 49 shown)", delta)
+        self.assertIn("A partial triage is not a clean result", delta)
+        self.assertNotIn("produced no verdict", delta)  # one banner, not two for one station
+        self.assertNotIn("Clean Delta", delta)
+        machine = json.loads(self.box.findings("target-line.json"))
+        self.assertFalse(machine["complete"])
+        station = machine["stations"][0]
+        self.assertEqual(station["candidates_in"], 49)
+        self.assertEqual(station["candidates_presented"], 49)
+        self.assertEqual(station["candidates_accounted"], 8)
+        self.assertIs(station["complete"], False)
+
+    def test_a_complete_triage_of_the_same_input_still_reads_pass(self):
+        self.box.agent("whole", candidates(49), prepass=prepass(49))
+        self.box.line(["whole"])
+        ok, out = self.box.run_line()
+
+        self.assertTrue(ok, "a complete triage with no criticals must still pass")
+        self.assertNotIn("INCOMPLETE", out)
+        delta = self.box.findings("target-delta.md")
+        self.assertIn("`whole` | PASS | 49", delta)
+        self.assertNotIn("partial triage", delta)
+        machine = json.loads(self.box.findings("target-line.json"))
+        self.assertTrue(machine["complete"])
+        self.assertIs(machine["stations"][0]["complete"], True)
+
+    def test_a_station_is_judged_on_the_candidates_it_was_shown_not_the_tail(self):
+        """The prompt carries CANDIDATE_PROMPT_SLICE candidates (factory:1683). A station whose pre-pass
+        found more than that cannot be marked incomplete for the tail it never received."""
+        self.box.agent("sliced", candidates(50), prepass=prepass(77))
+        self.box.line(["sliced"])
+        ok, out = self.box.run_line()
+
+        self.assertTrue(ok, "triaging everything it was shown is a complete triage")
+        machine = json.loads(self.box.findings("target-line.json"))
+        station = machine["stations"][0]
+        self.assertEqual((station["candidates_in"], station["candidates_presented"],
+                          station["candidates_accounted"]), (77, 50, 50))
+        self.assertIs(station["complete"], True)
+
+    def test_a_critical_still_alerts_when_the_triage_is_partial(self):
+        """The alarm is the outcome and must not be softened by the coverage fact - but the coverage is
+        still recorded, so the reader sees both."""
+        self.box.agent("bad", report(finding(severity="critical", title="Real RCE")),
+                       prepass=prepass(49))
+        self.box.line(["bad"])
+        _, out = self.box.run_line()
+
+        delta = self.box.findings("target-delta.md")
+        self.assertIn("`bad` | ALERT |", delta)
+        machine = json.loads(self.box.findings("target-line.json"))
+        station = machine["stations"][0]
+        self.assertEqual(station["status"], "ALERT")
+        self.assertIs(station["complete"], False)
+        self.assertIn("49", out)
+
+    def test_a_station_without_a_pre_pass_is_judged_exactly_as_before(self):
+        """No candidates.json is not zero candidates: completeness cannot be asserted, so nothing changes."""
+        self.box.agent("noprepass", candidates(2))
+        self.box.line(["noprepass"])
+        ok, _ = self.box.run_line()
+
+        self.assertTrue(ok)
+        station = json.loads(self.box.findings("target-line.json"))["stations"][0]
+        self.assertIsNone(station["candidates_presented"])
+        self.assertIs(station["complete"], True)
+
+
 if __name__ == "__main__":
     unittest.main()

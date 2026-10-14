@@ -1440,6 +1440,67 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
 VERDICT_STATUSES = frozenset({"PASS", "ALERT"})
 
 
+# How many deterministic candidates a station's prompt carries (factory:1683). ONE definition, because the
+# completeness fact below is measured against the same slice the model was actually SHOWN: a station whose
+# pre-pass found more candidates than the prompt carries is judged on what it could see, not on the tail it
+# never received (agents-xx9t).
+CANDIDATE_PROMPT_SLICE = 50
+
+# NOT a verdict, deliberately: VERDICT_STATUSES stays {PASS, ALERT}, so a line containing this status is
+# INCOMPLETE by the existing machinery instead of reading as a green (agents-xx9t).
+INCOMPLETE_STATUS = "INCOMPLETE"
+
+
+def read_candidate_count(run_dir: Any) -> Optional[int]:
+    """How many candidates the station's pre-pass produced, or None when it had no pre-pass.
+
+    None is not zero. No candidates.json means the station had no deterministic pre-pass and completeness
+    cannot be asserted from it, so it is judged exactly as it was before. Zero means a pre-pass ran and
+    found nothing, which is vacuously complete.
+    """
+    if not run_dir:
+        return None
+    path = Path(run_dir) / "candidates.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(payload, dict):
+        candidates = payload.get("candidates")
+        if isinstance(candidates, list):
+            return len(candidates)
+        count = payload.get("candidate_count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            return max(0, count)
+    return None
+
+
+def candidate_coverage(candidates_in: Optional[int], reported: int,
+                       slice_size: int = CANDIDATE_PROMPT_SLICE) -> Dict[str, Any]:
+    """Whether the report can show the station accounted for the candidates it was shown (agents-xx9t).
+
+    OUTCOME AND VALIDITY ARE TWO FACTS. `status` says what the station found; this says whether its report
+    can show it looked at what it was given. A repair-retry that triaged 8 of 49 candidates PASSed because
+    the only question asked of it was "were there criticals" - and nothing in the report contradicted that.
+
+    `reported` counts every finding the report carried BEFORE the false-positive filter, so a station that
+    lists its dismissals with a verdict accounts for them and one that silently drops them does not. The
+    bound is the slice the prompt carries, not the raw candidate count.
+    """
+    if candidates_in is None:
+        return {"candidates_in": None, "candidates_presented": None,
+                "candidates_accounted": int(reported), "complete": True, "reason": ""}
+    total = max(0, int(candidates_in))
+    presented = min(total, max(0, int(slice_size)))
+    complete = presented == 0 or int(reported) >= presented
+    reason = "" if complete else (
+        f"accounted for {int(reported)} of the {presented} candidate(s) shown "
+        f"({total} found by the pre-pass): a partial triage is not a clean result; list a dismissed "
+        f"candidate with its verdict to account for it, as secret-scan does")
+    return {"candidates_in": total, "candidates_presented": presented,
+            "candidates_accounted": int(reported), "complete": complete, "reason": reason}
+
+
 def write_line_report(target_name: str, line_name: str, stations: List[Dict[str, Any]],
                       findings_dir: Optional[Path] = None) -> Path:
     """Write the run's delta report from every station of one factory line (fleet-810).
@@ -1476,7 +1537,11 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
         "target": target_name,
         "line": line_name,
         "generated": datetime.now(timezone.utc).isoformat(),
-        "complete": all(s.get("status") in VERDICT_STATUSES for s in stations),
+        # A station that did not account for the candidates it was shown is not a verdict either
+        # (agents-xx9t): the line is not complete on the strength of a partial triage. A station that never
+        # computed coverage has no key, and defaults to complete, so older callers are unaffected.
+        "complete": all(s.get("status") in VERDICT_STATUSES and s.get("complete", True) is not False
+                        for s in stations),
         "stats": stats,
         "sinks": sinks,
         "stations": [{k: v for k, v in s.items() if k != "fragment"} for s in stations],
@@ -1634,7 +1699,10 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     suppressed = [f for f in live if f["state"] == "wontfix"]
     withheld = [f for f in findings if reduced(f)]
     env_failed = [s for s in (stations or []) if s.get("status") == "ENV_FAILURE"]
-    no_verdict = [s for s in (stations or []) if s.get("status") not in VERDICT_STATUSES and s.get("status") != "ENV_FAILURE"]
+    # A coverage-partial station is named by the banner below with its own counts; it DID produce a report,
+    # so it must not also be listed as a station that produced no verdict (agents-xx9t).
+    no_verdict = [s for s in (stations or []) if s.get("status") not in VERDICT_STATUSES
+                  and s.get("status") != "ENV_FAILURE" and s.get("complete") is not False]
 
     lines = [
         f"# Software Factory Delta Report: {target_name}",
@@ -1672,6 +1740,14 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
         lines.append(f"> 🚨 **ENVIRONMENT FAILURE**: {len(env_failed)} station(s) failed due to adapter authentication/environment issues: {names}. "
                      "Findings for these stations are UNKNOWN (not zero). The stations could not run. This run is NOT clean.")
         lines.append("")
+    partial_triage = [s for s in (stations or []) if s.get("complete") is False]
+    if partial_triage:
+        names = ", ".join(
+            f"`{s.get('station')}` ({s.get('candidates_accounted')} of {s.get('candidates_presented')} shown)"
+            for s in partial_triage)
+        lines.append(f"> **INCOMPLETE**: {len(partial_triage)} station(s) did not account for the candidates they "
+                     f"were shown: {names}. A partial triage is not a clean result; their counts are not a verdict.")
+        lines.append("")
     if no_verdict:
         names = ", ".join(f"`{s.get('station')}` ({s.get('status')})" for s in no_verdict)
         lines.append(f"> **INCOMPLETE**: {len(no_verdict)} station(s) produced no verdict: {names}. "
@@ -1694,7 +1770,11 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
             has_verdict = s.get("status") in VERDICT_STATUSES
             count = s.get("findings_count") if has_verdict else "—"
             crit = s.get("criticals") if has_verdict else "—"
-            note = str(s.get("error") or "").replace("|", "/").replace("\n", " ")[:200]
+            if has_verdict and s.get("complete") is False:
+                # The counts sit beside the status that depends on them, not only in the banner.
+                count = f"{count} ({s.get('candidates_accounted')}/{s.get('candidates_presented')})"
+            note = str(s.get("error") or "") or (str(s.get("note") or "") if s.get("complete") is False else "")
+            note = note.replace("|", "/").replace("\n", " ")[:200]
             lines.append(f"| `{s.get('station')}` | {s.get('status')} | {count} | {crit} | {note} |")
         lines.append("")
 

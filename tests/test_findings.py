@@ -21,7 +21,8 @@ from unittest import mock
 
 from lib import findings
 from lib.candidate_identity import assign_candidate_ids
-from lib.findings import FindingsStore, StoreFileError, bind_severity
+from lib.findings import (FindingsStore, StoreFileError, bind_severity, CANDIDATE_PROMPT_SLICE,
+                          candidate_coverage, read_candidate_count)
 from lib.redaction import redact_finding, redact_for_storage
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
@@ -1462,6 +1463,43 @@ class TestIdentityAttribution(unittest.TestCase):
             for item, index in cases:
                 observed.add(self._run(td, [item], index)[0][0]["identity_source"])
         self.assertEqual(observed, set(findings.IDENTITY_SOURCES), observed)
+
+
+class TestCandidateCoverage(unittest.TestCase):
+    """agents-xx9t: the completeness fact PASS now requires - candidates in versus accounted for."""
+
+    def test_a_station_with_no_pre_pass_cannot_be_called_partial(self):
+        """No candidates.json is not zero candidates: completeness is unknowable, so nothing changes."""
+        self.assertIsNone(read_candidate_count(None))
+        self.assertTrue(candidate_coverage(None, 0)["complete"])
+        self.assertTrue(candidate_coverage(None, 7)["complete"])
+        self.assertIsNone(candidate_coverage(None, 0)["candidates_presented"])
+
+    def test_an_empty_pre_pass_is_vacuously_complete(self):
+        self.assertTrue(candidate_coverage(0, 0)["complete"])
+
+    def test_a_partial_triage_is_not_complete_and_names_its_counts(self):
+        got = candidate_coverage(49, 8)
+        self.assertEqual((got["candidates_in"], got["candidates_presented"],
+                          got["candidates_accounted"]), (49, 49, 8))
+        self.assertFalse(got["complete"])
+        self.assertIn("8 of the 49", got["reason"])
+
+    def test_a_complete_triage_is_complete_including_its_dismissals(self):
+        self.assertTrue(candidate_coverage(49, 49)["complete"])
+
+    def test_the_bound_is_the_prompt_slice_not_the_raw_candidate_count(self):
+        """A pre-pass that found more candidates than the prompt carries cannot make the run partial for
+        the tail the model never received - that is the same defect mirrored."""
+        got = candidate_coverage(389, CANDIDATE_PROMPT_SLICE)
+        self.assertEqual(got["candidates_in"], 389)
+        self.assertEqual(got["candidates_presented"], 50)
+        self.assertTrue(got["complete"])
+        self.assertFalse(candidate_coverage(389, CANDIDATE_PROMPT_SLICE - 1)["complete"])
+
+    def test_one_candidate_short_of_the_slice_is_incomplete(self):
+        self.assertFalse(candidate_coverage(1, 0)["complete"])
+        self.assertTrue(candidate_coverage(1, 1)["complete"])
 
 
 if __name__ == "__main__":
