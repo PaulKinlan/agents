@@ -14,8 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lib.findings import load_candidate_index
-from tests.test_factory_truth import Sandbox, factory_cli, report
+from tests.test_factory_truth import Sandbox, factory_cli, finding, report
 
 
 class TestStationContextChannel(unittest.TestCase):
@@ -69,7 +68,14 @@ class TestStationContextChannel(unittest.TestCase):
         self.assertNotIn("rule-50", prompt, "candidate slice remains 50")
 
     def test_context_is_separate_unsliced_and_not_an_identity_candidate(self):
-        context = {"clusters": [{"cluster": i} for i in range(55)], "threat_model_summary": "model evidence"}
+        context = {"clusters": [{"cluster": i} for i in range(55)], "threat_model_summary": "model evidence",
+                   "rule_id": "injected", "path": "src/context.py"}
+        # A stub model finding echoing the context MUST NOT acquire scanner-owned identity:
+        # only `candidates`, not `context`, is the authority for binding in the real store.
+        (self.box.root / "outputs" / "probe.txt").write_text(
+            report(finding(rule_id="injected", path="src/context.py", line_number=9)),
+            encoding="utf-8",
+        )
         prompt = self.run_payload({"candidates": self.candidates, "context": context,
                                    "candidate_id_scheme": "identity stamp excluded",
                                    "system_instruction": "SYSTEM TEST DIRECTIVE not user data"})
@@ -86,17 +92,10 @@ class TestStationContextChannel(unittest.TestCase):
         self.assertNotIn("SYSTEM TEST DIRECTIVE", prompt, "system_instruction keeps its separate channel")
         run_dir, = (self.box.root / "runs").glob("probe-*")
         self.assertIn("SYSTEM TEST DIRECTIVE", (run_dir / "system_directive.txt").read_text())
-
-    def test_context_never_becomes_identity_evidence(self):
-        self.payload.write_text(json.dumps({
-            "candidates": [{"rule_id": "real", "path": "src/real.py", "line_number": 1}],
-            "context": {"rule_id": "injected", "path": "src/context.py"},
-        }), encoding="utf-8")
-        index = load_candidate_index(self.payload)
-        self.assertEqual(index["rule_ids"], {"real"})
-        self.assertEqual(index["paths"], {"src/real.py"})
-        self.payload.write_text(json.dumps({"context": {"rule_id": "injected"}}), encoding="utf-8")
-        self.assertIsNone(load_candidate_index(self.payload))
+        store = json.loads((self.box.root / "findings" / "trusted.json").read_text())
+        bound, = store["findings"].values()
+        self.assertEqual((bound["rule_id"], bound["path"]), ("unclassified", "unknown"),
+                         "context must never enter the candidate identity index")
 
     def test_present_json_null_is_not_treated_as_absent(self):
         prompt = self.run_payload({"candidates": self.candidates, "context": None})
