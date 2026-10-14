@@ -1731,6 +1731,72 @@ class TestLineDeltaVerdictCounts(unittest.TestCase):
         self.assertEqual(stats["possible_rekey"], 0)
 
 
+class TestFixedRowsNameTheLinesThatAreContradicted(unittest.TestCase):
+    """agents-x9my: the Fixed section warns in GENERAL that a disappearance is not proof; these pin the
+    per-row marker that names the specific lines a live row sits on, so nothing needs cross-referencing by
+    hand. It is disclosure only: no reclassification, no identity change, and it does not touch the pairing
+    `possible_rekey` counts."""
+
+    def _row(self, **over):
+        row = {"fingerprint": "fp", "agent": "vuln-triage", "rule_id": "unclassified", "path": "a.py",
+               "line_number": 7, "snippet": "prose", "identity_source": "no-candidate-index",
+               "severity": "low", "title": "t", "description": "d", "remediation": "r",
+               "state": "fixed", "change": "fixed", "false_positive": False}
+        row.update(over)
+        return row
+
+    def _report(self, findings_rows, fixed_rows):
+        stats = {key: 0 for key in findings.DELTA_KEYS}
+        stats["new"] = sum(1 for r in findings_rows if r.get("change") == "new")
+        stats["fixed"] = len(fixed_rows)
+        return findings._render_delta_report("target", findings_rows, stats, fixed_rows)
+
+    def test_a_fixed_row_is_marked_when_a_new_row_sits_on_its_exact_line(self):
+        report = self._report([self._row(state="new", change="new")], [self._row()])
+        self.assertIn("contradicted here", report)
+        self.assertIn("1 NEW finding", report)
+        self.assertIn("read that row before closing anything on this line", report)
+
+    def test_the_same_fixed_row_is_silent_when_the_new_row_is_on_another_line(self):
+        """The control that makes the marker mean something: a live row elsewhere in the same file must not
+        mark this line, or every Fixed row in a busy file would be flagged."""
+        report = self._report([self._row(state="new", change="new", line_number=8)], [self._row()])
+        self.assertIn("## Resolved in this Run (Fixed)", report)
+        self.assertNotIn("contradicted here", report)
+
+    def test_a_false_positive_at_the_line_does_not_mark_the_fixed_row(self):
+        """A dismissed row is not a live finding, so it is not a contradiction of anything."""
+        report = self._report([self._row(state="new", change="new", false_positive=True)], [self._row()])
+        self.assertNotIn("contradicted here", report)
+
+    def test_an_unchanged_row_at_the_line_does_not_mark_the_fixed_row(self):
+        report = self._report([self._row(state="new", change="unchanged")], [self._row()])
+        self.assertNotIn("contradicted here", report)
+
+    def test_a_row_with_no_usable_line_is_never_marked(self):
+        """The agents-yh0z floor survives: an unnamed line cannot be paired with another unnamed line."""
+        report = self._report([self._row(state="new", change="new", line_number=None)], [self._row(line_number=None)])
+        self.assertNotIn("contradicted here", report)
+
+    def test_the_marker_does_not_depend_on_either_side_s_identity_source(self):
+        """Deliberately ANCHORED on both sides, which is the agents-u2xe question, and deliberately still
+        marked: naming the line a live row occupies is a coincidence the report can observe, whereas whether
+        an anchored twin may be PAIRED into the possible_rekey count is that decision's, not this one's."""
+        report = self._report(
+            [self._row(state="new", change="new", identity_source="candidate-id")],
+            [self._row(identity_source="candidate-id")],
+        )
+        self.assertIn("contradicted here", report)
+
+    def test_two_new_rows_on_the_line_are_counted_in_the_marker(self):
+        report = self._report(
+            [self._row(state="new", change="new", fingerprint="fp1"),
+             self._row(state="new", change="new", fingerprint="fp2")],
+            [self._row()],
+        )
+        self.assertIn("2 NEW findings", report)
+
+
 if __name__ == "__main__":
     unittest.main()
 

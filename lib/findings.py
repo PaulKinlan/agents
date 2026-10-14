@@ -1665,6 +1665,49 @@ def _identity_grade(f: Dict[str, Any]) -> str:
     return ""
 
 
+def _new_row_locations(findings: List[Dict[str, Any]]) -> Dict[tuple, int]:
+    """Exact locations THIS RUN reports a `new` finding at, for the Fixed side's own warning (agents-x9my).
+
+    The Fixed section's header warning is GENERAL - "a row is also booked fixed when a later run drifts its
+    label or line, or omits it entirely" - and a general warning leaves the reader to cross-reference
+    locations by hand, which is why the hub's report of this defect arrived as the phrase "rows both new and
+    Fixed in one run" with no named rows. So this records the locations a New row occupies, and every Fixed
+    row sitting on one is marked explicitly: the warning becomes an instruction that can be acted on row by
+    row. A false positive is not a live row and does not count, and a row whose line the scanner could not
+    name is left out rather than paired on a location it does not have (the agents-yh0z floor).
+
+    THIS IS A COINCIDENCE OF LOCATION, NOT A RE-KEY CLAIM. It deliberately does not look at either row's
+    identity source, and it does not touch the pairing `possible_rekey` counts - whose run-level scope is
+    agents-pxzb's and whose rule (may an ANCHORED twin be paired at all) is agents-u2xe's open question.
+    Naming the line and calling it a re-key are different statements, and only the first is a thing this
+    report can observe.
+    """
+    located: Dict[tuple, int] = {}
+    for row in findings:
+        if row.get("change") != "new" or row.get("false_positive"):
+            continue
+        line = usable_line_number(row.get("line_number"))
+        if line is None:
+            continue
+        loc = (normalize_path(row.get("path")), line)
+        located[loc] = located.get(loc, 0) + 1
+    return located
+
+
+def _contradiction_note(f: Dict[str, Any], new_at: Dict[tuple, int]) -> str:
+    """The marker appended to a Fixed row that a New row in this same run sits on (agents-x9my)."""
+    line = usable_line_number(f.get("line_number"))
+    if line is None:
+        return ""
+    count = new_at.get((normalize_path(f.get("path")), line))
+    if not count:
+        return ""
+    plural = "findings" if count > 1 else "finding"
+    return (f" - ⚠ **contradicted here**: this run also reports {count} NEW {plural} at this exact "
+            "line, so this Fixed booking is not evidence the finding is gone - read that row before "
+            "closing anything on this line (agents-x9my)")
+
+
 def _identity_note(f: Dict[str, Any]) -> str:
     """` — identity: `x`` plus its grading, naming the key that produced this fingerprint.
 
@@ -1936,11 +1979,15 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
                      "verified: a row is also booked fixed when a later run drifts its label or line, "
                      "or omits it entirely.")
         lines.append("")
+        # agents-x9my: name the SPECIFIC lines a live row sits on, so the general warning above becomes an
+        # instruction a reader can act on row by row. Computed once for the whole section.
+        new_at = _new_row_locations(findings)
         for f in fixed_items:
+            note = _contradiction_note(f, new_at)
             if reduced(f):
-                lines.append(f"- **`{f.get('rule_id')}`** (`{f.get('path')}:{f.get('line_number', '?')}`){_identity_note(f)}")
+                lines.append(f"- **`{f.get('rule_id')}`** (`{f.get('path')}:{f.get('line_number', '?')}`){_identity_note(f)}{note}")
                 continue
-            lines.append(f"- **`{f.get('rule_id')}`**: {f.get('title')} (`{f.get('path')}:{f.get('line_number', '?')}`){_identity_note(f)}")
+            lines.append(f"- **`{f.get('rule_id')}`**: {f.get('title')} (`{f.get('path')}:{f.get('line_number', '?')}`){_identity_note(f)}{note}")
         lines.append("")
 
     if unchanged:
