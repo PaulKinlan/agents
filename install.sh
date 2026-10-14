@@ -203,7 +203,11 @@ if [[ -f "$FACTORY_DIR/tools/check-cmd.sh" ]]; then
     echo "  ! this host's gate command config did not match the tracked one; provisioning is replacing it:"
     printf '%s\n' "$drift_report" | sed 's/^/    /'
   fi
-  bash "$FACTORY_DIR/tools/check-cmd.sh" --install
+  # agents-0utp: --install now DEFAULTS TO A REPO-LOCAL destination, so provisioning - whose whole purpose here
+  # is to give the MACHINE's deployed gate a command - must ask for the host-wide file EXPLICITLY rather than
+  # inheriting it from a default. This line is the one place that claim belongs: an operator/installer writing the
+  # shared path on purpose, not a convenience that silently makes every repo on the host read this repo's gate.
+  bash "$FACTORY_DIR/tools/check-cmd.sh" --install --global
   # The post-install half is stronger than the pre-install half: it catches the failure mode where
   # the installer believes it wrote the config but the host did not keep it (a read-only or
   # wrong-HOME destination), which previously would have been reported as a successful install.

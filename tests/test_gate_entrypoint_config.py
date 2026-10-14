@@ -33,6 +33,7 @@ change, and the tracked file stays the source of truth a PR can review.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -113,7 +114,7 @@ def _entrypoint_env(home: str) -> dict:
     env = dict(os.environ)
     env["HOME"] = home
     env["FLEET_LANE"] = "merger"
-    env.pop("FLEET_CHECK_CONF", None)
+    env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
     return env
 
 
@@ -523,8 +524,9 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     suite non-hermetic and turn it red on every host that has not run --install, which is the
     machine-state pathology the fleet's speed guidance names. What a divergent live file does in
     practice: the deployed entrypoint SOURCES it, so the live command is what runs until someone
-    repairs it, and the repair is the documented `bash tools/check-cmd.sh --install` (or editing
-    tools/check.conf and re-running it). A stale PASS record cannot quietly hide that: the cache-hit
+    repairs it, and the repair is the install command that WRITES THAT FILE, which since agents-0utp is
+    `bash tools/check-cmd.sh --install --global` (the bare form now writes a repo-local file the deployed
+    gate does not read by default) - or editing tools/check.conf and re-running it). A stale PASS record cannot quietly hide that: the cache-hit
     path requires a record whose `.cmd` equals the command actually resolved, which
     TestTheEntrypointResolvesTheInstalledCommand pins. Drift between the TRACKED file and CI is
     guarded by tests/test_check_conf_consistency.py, not here.
@@ -533,14 +535,15 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
     override and a STALE INSTALL are the same bytes. There is no marker that distinguishes "I
     meant this locally" from "the tracked file moved on". So --install refuses to guess and
     overwrites both, which is what the repair tests below measure; the documented way to update or
-    tune is editing tools/check.conf and re-running `bash tools/check-cmd.sh --install`.
+    tune is editing tools/check.conf and re-running the install command that writes the file you mean
+    (`--install --global` for the host-wide config the deployed gate reads).
     """
 
     def test_install_is_idempotent_and_matches_the_tracked_command(self):
         home = _registered_tmp_home(self, "ia3p-drift-")
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         for _ in range(2):  # idempotent: installing twice must not compound anything
             r = subprocess.run(["bash", str(RESOLVER), "--install"],
                                capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -561,11 +564,80 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         # never reads the live file). The two facts the header may state are pinned here: the file
         # is machine-global, and it names the repair. The negative assertion is what makes the
         # false promise unable to come back - it is the falsifiable half of this bead.
-        self.assertIn("MACHINE-GLOBAL", installed)
+        #
+        # agents-0utp: AND IT MUST NAME WHICH LIFE THIS COPY LEADS, not assert the global one
+        # whatever the destination was. At the default path the global claim is true; the
+        # discriminating case is the next test, where FLEET_CHECK_CONF points at a per-repo
+        # override and the same header would have told its reader that --install maintains it -
+        # while --install without the variable replaces the host's shared file instead.
+        self.assertIn("THIS COPY IS MACHINE-GLOBAL", installed)
+        self.assertIn("BY DEFAULT for any repo invoked", installed)
+        # agents-0utp FOLLOW-UP: the GLOBAL life's repair command must be the one that WRITES THIS FILE, and
+        # after the default moved that is --global. The assertion that used to stand here pinned the bare form
+        # and justified it with "it rewrites this very file" - which stopped being true the moment --install
+        # defaulted to a repo-local destination. So the test was pinning a repair that writes somewhere else
+        # and leaves this file stale: agents-d081's failure mode, a fix that cannot reach the copy that runs.
+        self.assertIn("--install --global", installed)
+        self.assertNotIn("re-run: bash tools/check-cmd.sh --install", installed,
+                         "the machine-global copy must not be told to run the bare form: that writes the "
+                         "repo-local default instead and leaves this file, which fleet-check reads, stale")
         self.assertIn("--install", installed)
         self.assertNotIn("fails on any divergence", installed,
                          "the emitted header must not promise a guard no test performs "
                          "(agents-024z): nothing in this suite reads the live per-VM file")
+
+    def test_header_names_a_per_repo_override_as_repo_local_rather_than_machine_global(self):
+        """agents-0utp, the discriminating half of the pair above: with FLEET_CHECK_CONF pointing at a
+        per-repo path, the SAME generator must not write a header that calls the file machine-global.
+
+        The defect this pins: the header asserted MACHINE-GLOBAL whatever $dest was, so a repo-local override
+        described itself as the host's shared config and named a repair that does not write it. agents-0utp
+        FOLLOW-UP (this revision): the previous wording of this test also pinned a sentence that had gone stale
+        in the OPPOSITE direction - "running --install WITHOUT it set replaces the machine-global
+        ~/.fleet/check.conf" - which was true before the default moved and false after, so the header kept
+        warning about a trap the tool no longer sets. The trap now is that a bare --install writes a DIFFERENT
+        file than the one in front of the reader, and that is what is asserted below.
+        """
+        home = _registered_tmp_home(self, "0utp-lives-")
+        dest = Path(home) / "repo-override" / "agents-factory-check.conf"
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["FLEET_CHECK_CONF"] = str(dest)
+        r = subprocess.run(["bash", str(RESOLVER), "--install"],
+                           capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+
+        installed = dest.read_text(encoding="utf-8")
+        self.assertIn("THIS COPY IS AN EXPLICIT OVERRIDE", installed)
+        self.assertIn(str(dest), installed,
+                      "an override must name the path it is read from, or the reader cannot tell "
+                      "which file FLEET_CHECK_CONF has to name")
+        self.assertNotIn("THIS COPY IS MACHINE-GLOBAL", installed,
+                         "with FLEET_CHECK_CONF set this file is NOT the host's shared config; a header "
+                         "that says it is tells the reader that --install maintains it (agents-0utp)")
+        self.assertIn("NOT machine-global", installed,
+                      "the header must state the negative too: an override is neither the host-wide file nor "
+                      "the repo-local default, and a reader who assumes either runs the wrong repair")
+        repo_default = Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
+        self.assertIn(str(repo_default), installed,
+                      "an explicit override must name the file a bare --install WOULD write (agents-0utp "
+                      "follow-up): the old header said a bare install replaces the host's shared config, which "
+                      "stopped being true when the default moved, and a reader who believes it cannot see that "
+                      "the obvious repair targets a different file")
+        self.assertNotIn("replaces the machine-global", installed,
+                         "the override header must not describe the pre-default-move behaviour of a bare "
+                         "--install (agents-0utp follow-up)")
+        # agents-mnvd, the review finding on the first attempt: the header warned that a bare --install replaces
+        # the host's shared config and then, four lines later, instructed the reader to run exactly that. The
+        # tune instruction must select THIS file. Both assertions below fail on tip 31582544.
+        tail = installed[installed.index("To tune"):]
+        self.assertIn("FLEET_CHECK_CONF=", tail,
+                      "an override's tune instruction must name the variable, or it hands the reader the bare "
+                      "command the header just warned about (agents-mnvd)")
+        self.assertNotIn("re-run: bash tools/check-cmd.sh --install", tail,
+                         "the override header must not carry the unqualified install command at all")
+        self.assertFalse((Path(home) / ".fleet" / "check.conf").exists(),
+                         "installing to an override must NOT also write the machine-global path")
 
     def test_install_overwrites_stale_per_vm_config_with_tracked_values(self):
         """When an existing per-VM check.conf carries a stale command (e.g. without -t .),
@@ -577,7 +649,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
 
         r = subprocess.run(["bash", str(RESOLVER), "--install"],
                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -598,7 +670,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
 
         r = subprocess.run(["bash", str(RESOLVER), "--install"],
                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -620,7 +692,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
 
         r = subprocess.run(["bash", str(RESOLVER), "--install"],
                            capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
@@ -630,7 +702,7 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
 
         installed = conf.read_text(encoding="utf-8")
         self.assertIn("# Project: agents-factory", installed)
-        self.assertIn("# WARNING: This file is MACHINE-GLOBAL", installed)
+        self.assertIn("# THIS COPY IS MACHINE-GLOBAL", installed)
 
         # Idempotent second install should NOT warn
         r2 = subprocess.run(["bash", str(RESOLVER), "--install"],
@@ -639,6 +711,9 @@ class TestInstalledConfigDoesNotDrift(unittest.TestCase):
         self.assertNotIn("WARNING", r2.stderr)
 
 
+# agents-0utp: --install DEFAULTS TO A REPO-LOCAL DESTINATION (tools/check-cmd.sh). Every case below is ABOUT the
+# host-wide file - its subject is the per-VM config the whole machine reads - so each one now asks for it
+# EXPLICITLY with --global. That is the intent-preserving change: the default moved, the subject did not.
 class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
     """agents-d081: --check is the detector this suite cannot be, and the reason is the same one
     agents-024z recorded for the docstring above - the drift lives in a MACHINE-GLOBAL file, so a test
@@ -656,7 +731,7 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
     def _run(self, *args, home):
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         return subprocess.run(["bash", str(RESOLVER), *args], capture_output=True, text=True,
                               timeout=60, env=env, cwd=str(ROOT))
 
@@ -733,7 +808,11 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
         r = self._run("--check", home=home)
         self.assertEqual(r.returncode, 1, r.stderr[:300])
         self.assertIn("DRIFT keys: CHECK_TIMEOUT", r.stderr)
-        self.assertIn("repair with: bash tools/check-cmd.sh --install", r.stderr)
+        # agents-p8lh: this assertion used to pin the BARE install command, and that is exactly what was wrong -
+        # this class drifts the HOST-WIDE file (FLEET_CHECK_CONF is pointed at ~/.fleet/check.conf), and since
+        # agents-0utp the bare form writes the repo-local default instead. The next class runs the printed
+        # command and proves it repairs the file it names; here the shape is pinned for this destination.
+        self.assertIn("repair with: bash tools/check-cmd.sh --install --global", r.stderr)
 
 
 class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
@@ -754,7 +833,7 @@ class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
     def _run_gate(self, home, changed=".beads/metadata.json"):
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         env["GIT_CHANGED"] = changed
         env["FAST_GATE_DRY_RUN"] = "1"
         return subprocess.run(["bash", str(ROOT / "tools" / "fast-gate.sh")], capture_output=True,
@@ -763,7 +842,7 @@ class TestTheFastGateWarnsAboutPerVmDriftAtThePointOfUse(unittest.TestCase):
     def _install_into(self, home):
         env = dict(os.environ)
         env["HOME"] = home
-        env.pop("FLEET_CHECK_CONF", None)
+        env["FLEET_CHECK_CONF"] = str(Path(home) / ".fleet" / "check.conf")  # agents-0utp: name the host-wide file explicitly; it is no longer the default
         return subprocess.run(["bash", str(RESOLVER), "--install"], capture_output=True, text=True,
                               timeout=60, env=env, cwd=str(ROOT))
 
@@ -1179,5 +1258,171 @@ class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
             self.assertNotIn("FAILURE CLASS: remote-auth-denied", output,
                              "a name that does not resolve is not a credential problem")
 
+class TestTheDefaultInstallDestinationIsRepoLocal(unittest.TestCase):
+    """agents-0utp ACCEPTANCE, which coord named and which nobody had run: INSTALL IN REPO A, GATE IN REPO B,
+    GLOBAL UNTOUCHED - with the host-wide file's HASH UNCHANGED before and after, because 'untouched' is a claim
+    about bytes and not about a command's exit code.
+
+    Why the hash and not just existence: the hazard this bead was filed for is a repo's install OVERWRITING the
+    shared config that other repos read, so an assertion that the file does not exist would pass on a machine
+    where it never existed and say nothing about the overwrite. Here a foreign global config is created first,
+    and the test asks the filesystem what it holds afterwards.
+    """
+
+    def test_default_install_writes_repo_local_and_leaves_the_host_wide_hash_unchanged(self):
+        home = _registered_tmp_home(self, "0utp-abi-")
+        global_conf = Path(home) / ".fleet" / "check.conf"
+        global_conf.parent.mkdir(parents=True, exist_ok=True)
+        pre = ('# Project: agents-factory (/some/other/repo)\n'
+               'CHECK_CMD="bash tools/full-gate.sh"\n'
+               'CHECK_FAST_CMD="bash tools/fast-gate.sh"\n')
+        global_conf.write_text(pre, encoding="utf-8")
+        before = hashlib.sha256(global_conf.read_bytes()).hexdigest()
+
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        r = subprocess.run(["bash", str(RESOLVER), "--install"],
+                           capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+
+        self.assertEqual(hashlib.sha256(global_conf.read_bytes()).hexdigest(), before,
+                         "a DEFAULT --install must not write the host-wide config that every repo on this "
+                         "machine reads (agents-0utp); the hash is the claim, the exit code is not")
+        self.assertEqual(global_conf.read_text(encoding="utf-8"), pre,
+                         "the host-wide file must be byte-identical afterwards")
+
+        repo_conf = Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
+        self.assertTrue(repo_conf.exists(),
+                        f"the default destination is the repo-local file, expected {repo_conf}")
+        repo_text = repo_conf.read_text(encoding="utf-8")
+        self.assertIn("THIS COPY IS THE REPO-LOCAL DEFAULT", repo_text,
+                      "the file a bare --install writes must SAY it is the repo-local default: the header used "
+                      "to call every destination machine-global, and after the default moved the more damaging "
+                      "half of that was the repair it named (agents-0utp)")
+        self.assertNotIn("THIS COPY IS MACHINE-GLOBAL", repo_text)
+        self.assertIn("bash tools/check-cmd.sh --install", repo_text,
+                      "in THIS life the bare form does write this file, so it is the correct repair to name")
+
+    def test_global_flag_is_the_explicit_opt_in_for_the_host_wide_file(self):
+        """The escape hatch has to work, or the default is a cage: provisioning (install.sh) claims the machine's
+        config on purpose, and it does so by asking."""
+        home = _registered_tmp_home(self, "0utp-global-")
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        r = subprocess.run(["bash", str(RESOLVER), "--install", "--global"],
+                           capture_output=True, text=True, timeout=60, env=env, cwd=str(ROOT))
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+        global_conf = Path(home) / ".fleet" / "check.conf"
+        self.assertTrue(global_conf.exists(), "--global must still reach the host-wide path")
+        self.assertIn("THIS COPY IS MACHINE-GLOBAL", global_conf.read_text(encoding="utf-8"))
+
+
+class TestThePrintedRepairRepairsTheFileItNames(unittest.TestCase):
+    """agents-p8lh (review finding on agents-0utp @ 4bcb1b48): --check's repair line named a command that
+    writes a DIFFERENT file than the one it had just reported drift in, so a reader who followed the
+    instruction kept the stale gate command running while believing it had repaired it. That is agents-d081's
+    failure mode - a repair that cannot reach the copy that runs - and it is the fleet's most repeated defect
+    shape: THE INSTRUCTION IS THE DEFECT.
+
+    These tests assert the PROPERTY, not the wording: read the command the tool printed, RUN IT, ASK AGAIN,
+    and the drift must be gone. That is what makes them the control coord asked for - a grep would have passed
+    on the broken tip, because the broken tip printed a perfectly well-formed command that simply wrote a
+    different file. Every destination --check can report on is covered, because the three cases answer with
+    three different commands (--install --global / the bare form / FLEET_CHECK_CONF=<dest>).
+    """
+
+    def _write_drifting(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('# Project: agents-factory (/somewhere/else)\n'
+                        'CHECK_CMD="bash tools/full-gate.sh"\n'
+                        'CHECK_FAST_CMD="bash tools/fast-gate.sh"\n'
+                        'CHECK_TIMEOUT=1\nCHECK_FAST_TIMEOUT=2\n', encoding="utf-8")
+
+    def _env(self, home, extra=None):
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.pop("FLEET_CHECK_CONF", None)
+        if extra:
+            env.update(extra)
+        return env
+
+    def _check(self, env):
+        return subprocess.run(["bash", str(RESOLVER), "--check"], capture_output=True, text=True,
+                              timeout=60, env=env, cwd=str(ROOT))
+
+    @staticmethod
+    def _printed_repair(stderr):
+        for line in stderr.splitlines():
+            if "repair with:" in line:
+                return line.split("repair with:", 1)[1].split("   (rewrites", 1)[0].strip()
+        return ""
+
+    def _assert_repair_reaches(self, home, extra, dest, expect_in_command):
+        env = self._env(home, extra)
+        first = self._check(env)
+        self.assertEqual(first.returncode, 1, f"expected drift to be reported: {first.stderr[:300]}")
+        self.assertIn(str(dest), first.stderr,
+                      "the report must name the file it is about, or a reader cannot tell what is stale")
+        repair = self._printed_repair(first.stderr)
+        self.assertTrue(repair, f"--check must print the repair: {first.stderr[:300]}")
+        self.assertIn(expect_in_command, repair,
+                      f"the repair for {dest} must be the command that writes IT; got: {repair}")
+
+        # THE PROPERTY: run exactly what it printed, then ask again. Through a shell, because that is what a
+        # reader does with a printed command line - and because the FLEET_CHECK_CONF form is a shell assignment
+        # prefix, not a program name.
+        ran = subprocess.run(["bash", "-c", repair], capture_output=True, text=True, timeout=60,
+                             env=env, cwd=str(ROOT))
+        self.assertEqual(ran.returncode, 0, f"the printed repair must succeed: {ran.stderr[:300]}")
+        second = self._check(env)
+        self.assertEqual(second.returncode, 0,
+                         "following the printed repair must REMOVE the drift it reported - on the tip before "
+                         f"agents-p8lh this fails, because the command wrote a different file: {second.stderr[:300]}")
+
+    def test_the_repair_for_the_host_wide_file_writes_the_host_wide_file(self):
+        home = _registered_tmp_home(self, "p8lh-global-")
+        self._write_drifting(Path(home) / ".fleet" / "check.conf")
+        self._assert_repair_reaches(home, None, Path(home) / ".fleet" / "check.conf", "--install --global")
+
+    def test_the_repair_for_an_explicit_override_writes_that_override(self):
+        home = _registered_tmp_home(self, "p8lh-explicit-")
+        dest = Path(home) / "elsewhere" / "team.conf"
+        self._write_drifting(dest)
+        self._assert_repair_reaches(home, {"FLEET_CHECK_CONF": str(dest)}, dest,
+                                    f"FLEET_CHECK_CONF={dest}")
+
+    def test_the_repair_for_the_repo_local_default_is_the_bare_form(self):
+        home = _registered_tmp_home(self, "p8lh-repo-default-")
+        dest = Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
+        self._write_drifting(dest)
+        # A lane reaches the repo-local default exactly this way - the install NOTE tells it to set the variable
+        # to the path it just wrote - and for THIS destination the bare form is the correct repair.
+        self._assert_repair_reaches(home, {"FLEET_CHECK_CONF": str(dest)}, dest,
+                                    "bash tools/check-cmd.sh --install")
+        self.assertNotIn("--global", self._printed_repair(self._check(self._env(home, {"FLEET_CHECK_CONF": str(dest)})).stderr),
+                         "the bare form writes this file; naming --global would write the host-wide one instead")
+
+    def test_the_point_of_use_warning_names_the_same_repair(self):
+        """tools/fast-gate.sh warns about drift on every gate, and it used to carry its own copy of the repair
+        command - which is how it went on naming the pre-move one. It now asks the tool that owns the rule, so
+        the warning and --check cannot disagree."""
+        home = _registered_tmp_home(self, "p8lh-point-of-use-")
+        self._write_drifting(Path(home) / ".fleet" / "check.conf")
+        env = self._env(home)
+        env["GIT_CHANGED"] = ".beads/metadata.json"
+        env["FAST_GATE_DRY_RUN"] = "1"
+        r = subprocess.run(["bash", str(ROOT / "tools" / "fast-gate.sh")], capture_output=True, text=True,
+                           timeout=120, env=env, cwd=str(ROOT))
+        self.assertIn("WARNING (agents-d081)", r.stderr)
+        self.assertIn("repair: bash tools/check-cmd.sh --install --global", r.stderr,
+                      "the point-of-use warning must name the command that writes the drifting file")
+        self.assertNotIn("repair: bash tools/check-cmd.sh --install - ", r.stderr,
+                         "and must not offer the form that writes a different file")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
