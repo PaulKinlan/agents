@@ -1,0 +1,225 @@
+--- a/bin/fleet-land-message
++++ b/bin/fleet-land-message
+@@ -57,7 +57,10 @@
+     *) ARGS+=("$1"); shift ;;
+   esac
+ done
+-[ ${#ARGS[@]} -ge 2 ] || { sed -n 2,20p "$0" | sed 's/^# \{0,1\}//'; exit 2; }
++# agents-p1c2 (round 2): the USAGE text is a failure message, so it goes to STDERR like every other refusal
++# in this file. It was the ONLY non-message exit that wrote to stdout (measured: 1316 bytes, rc 2), and the
++# property the callers' redirect relies on is 'stdout carries the message or nothing'.
++[ ${#ARGS[@]} -ge 2 ] || { sed -n 2,20p "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+ BEAD=${ARGS[0]}; BRANCH=${ARGS[1]}; EXTRA=("${ARGS[@]:2}")
+ D=$(cat "$HOME/.fleet/default-branch" 2>/dev/null || echo main)
+ if [ -n "$REPO_DIR" ]; then
+@@ -860,7 +863,13 @@
+   elif [ -n "$target_ref_tree" ] && matched_c=$(commit_has_tree "$gate_commit" "$target_ref_tree"); then
+     gate_identity="tree identity: $target_ref_tree (rebased: tree unchanged, matches merged commit ${matched_c:0:7})"
+   else
++    # NAME HOW THE BRANCH MOVED (agents-p1c2). The operator's next action differs between "this branch was
++    # never in the gate commit" and "the branch moved while the gate ran", and the old message left them to
++    # discover which by hand. The count is what the branch holds that the gate commit does not, read from the
++    # same refs the decision above used: it is the difference between re-gating the merged tree and re-pinning
++    # the review to the new tip.
+     echo "fleet-land-message: REFUSING: --gate $GATE_SHA does not contain $BRANCH ($target_ref)" >&2
++    echo "  branch tip now $(git log -1 --format='%h %s' "$target_ref" 2>/dev/null | cut -c1-100); $(git rev-list --count "$gate_commit..$target_ref" 2>/dev/null || echo 0) commit(s) the gate commit does not contain - if the branch moved after the gate ran, the merged tree needs re-gating" >&2
+     exit 1
+   fi
+   target_tree=$(git rev-parse --verify -q "${gate_commit}^{tree}" 2>/dev/null || echo "")
+@@ -999,6 +1008,18 @@
+   exit 0
+ fi
+ 
++# ---------- emit, ATOMICALLY (agents-p1c2) ----------
++# The text is assembled into a temp file and flushed in ONE write at the end, the "temp path and rename" shape
++# for a tool that only prints. WHY: the shell's `>` opens with O_TRUNC, so a caller that reuses one message file
++# - the merge message first, then the gate record - has the COMPLETE message destroyed by the shell BEFORE the
++# helper runs, and if the caller ignores the refusal the amend commits the remains: a truncated body that is
++# indistinguishable from a complete one to every later reader. Emitting nothing until the whole message exists
++# makes that a property of THIS code path rather than of the order today's refusal checks happen to run in, and
++# it is what roles/merger.md step 1 and 2 now rely on. A refusal above exits before a byte is written; a
++# refusal added below leaves the temp file unemitted and removes it.
++msg_out=$(mktemp) || { echo "fleet-land-message: cannot create the message file" >&2; exit 2; }
++trap 'rm -f "$msg_out"' EXIT
++{
+ printf '%s\n\n' "$subj"
+ printf 'BEAD\n%s - %s\n' "$BEAD" "${title:0:180}"
+ printf 'BRANCH %s (tip %s, %s commit(s), %s)\n' "$BRANCH" "$tip" "${ncommits:-?}" "${stat:-delta unknown}"
+@@ -1032,11 +1053,11 @@
+   [ -n "$gate_identity" ] && printf 'Identity %s\n' "$gate_identity"
+ elif [ -n "$target_tree" ]; then
+   printf 'GATE\nno cached verdict for tree %s (commit %s) yet: NOT a pass. The batch gate result goes in this\nsection with\n' "${target_tree:0:12}" "${gatesha:-this commit}"
+-  printf '  git commit --amend -F <(fleet-land-message --gate <merged-sha> %s %s)\n' "$BEAD" "$BRANCH"
++  printf '  msg=$(mktemp) && fleet-land-message --gate <merged-sha> %s %s > "$msg" && git commit --amend -F "$msg" && git push\n' "$BEAD" "$BRANCH"
+   [ -n "$gate_identity" ] && printf 'Identity %s\n' "$gate_identity"
+ else
+   printf 'GATE\nno cached verdict yet (merge tree pending: NOT a pass). The batch gate result goes in this\nsection with\n'
+-  printf '  git commit --amend -F <(fleet-land-message --gate <merged-sha> %s %s)\n' "$BEAD" "$BRANCH"
++  printf '  msg=$(mktemp) && fleet-land-message --gate <merged-sha> %s %s > "$msg" && git commit --amend -F "$msg" && git push\n' "$BEAD" "$BRANCH"
+ fi
+ if [ -n "$budget" ]; then printf '\nPROMPT BUDGET\n%s\n' "$budget"; fi
+ if [ -n "$spun" ]; then printf '\nSPUN OUT OF REVIEW\n%s\n' "$spun"; fi
+@@ -1049,3 +1070,6 @@
+   fi
+   printf ')\n'
+ fi
++} > "$msg_out"
++cat "$msg_out"
++rm -f "$msg_out"
+--- a/roles/merger.md
++++ b/roles/merger.md
+@@ -26,14 +26,37 @@
+   - **Do not abandon the batch:** an invalid, unreviewed, or conflicting queue entry must not abort unrelated cleared landings ahead of or behind it.
+ 
+ ### Landing: the whole procedure
+-1. **Merge.** Run `git fetch origin && git checkout --detach origin/${FLEET_DEFAULT_BRANCH} && msg="$(bash ~/fleet/bin/fleet-land-message <bead> fleet/<x>)" && git merge --no-ff -m "$msg" origin/fleet/<x>`.
++1. **Merge.** Run `git fetch origin && git checkout --detach origin/${FLEET_DEFAULT_BRANCH}`, then the
++   message and the merge in ONE refusal-checked block - **do not put the push, or the gate-record amend, in a
++   separate step from the rc they depend on** (agents-qngy, refreshed by agents-p1c2):
++   ```sh
++   msg=$(mktemp) || exit 1
++   if bash ~/fleet/bin/fleet-land-message <bead> fleet/<x> > "$msg"; then
++       git merge --no-ff -F "$msg" origin/fleet/<x>
++   else
++       echo "landing message refused: NOT merging, NOT amending, NOT pushing" >&2; exit 1
++   fi
++   ```
+    - **The message is not optional and `Merge fleet/<x> (<bead>)` on its own is not enough.** Paul cannot read
+      the history today: the helper emits the bead id and title, WHY, WHAT changed, the user-visible effect, the
+      delta and the beads spun out of the review. It reads those from the bead's `LAND-SUMMARY` comment, so the
+      author writes them at hand-off (`roles/implementer.md`) and you never invent them from a diff.
+-   - **After the gate passes, amend the message with the gate record** (one command, no extra step in the
+-     procedure): `git commit --amend -F <(bash ~/fleet/bin/fleet-land-message --gate <merged-sha> <bead> fleet/<x>)`
+-     then push. That is how the commit body gets the gate result instead of a claim that a gate ran. **The helper
++   - **After the gate passes, amend the message with the gate record - in a block that CHAINS the refusal**
++     (one block, no extra step in the procedure):
++     ```sh
++     msg=$(mktemp) || exit 1
++     if bash ~/fleet/bin/fleet-land-message --gate <merged-sha> <bead> fleet/<x> > "$msg"; then
++         git commit --amend -F "$msg" && git push origin HEAD:"${FLEET_DEFAULT_BRANCH}"
++     else
++         echo "gate record refused: NOT amending and NOT pushing" >&2; exit 1
++     fi
++     ```
++     **Never `git commit --amend -F <(fleet-land-message ...)`, and never `bash fleet-land-message ... > <a file
++     that already holds a message>`.** The shell's `>` opens with O_TRUNC, so the second form destroys the
++     previous, complete message BEFORE the helper runs and a caller that ignores the refusal commits the remains
++     (agents-p1c2: merge `2eb0ae20` landed with a truncated body). The helper emits NOTHING on every refusal, so
++     the chained block above is the shape that leaves the message that existed before the attempt exactly as it
++     was. **The helper
+      records the TREE as well as the commit sha**, because `fleet-check` caches by tree and the amend itself
+      changes the sha: the tree is the object the gate actually measured, and it is what a later reader can
+      re-check with `fleet-check --status <sha>`.
+--- a/tests/fleet-land-message.test.sh
++++ b/tests/fleet-land-message.test.sh
+@@ -19,6 +19,12 @@
+ # before/after for fleet-e8op was produced: `git show <old-sha>:bin/fleet-land-message > /tmp/old
+ # && LM_OVERRIDE=/tmp/old bash tests/fleet-land-message.test.sh`.
+ LM="${LM_OVERRIDE:-$HERE/bin/fleet-land-message}"
++# agents-p1c2 (round 2): LM_OVERRIDE is the PATH TO THE TOOL FILE, and a DIRECTORY is the natural mistake
++# (reading 'another revision' as 'another tree'). `bash <directory>` is what happens then, and the only trace
++# is one line per fixture: measured, 65 passed / 248 failed, IDENTICALLY against a patched and an unpatched
++# tool - a red that says nothing about either one while still printing a summary line that looks like a
++# verdict. Fail loudly and say which shape is wanted, so a red/green measurement cannot be silently wrong.
++[ -f "$LM" ] || { echo "fleet-land-message.test.sh: LM_OVERRIDE must be the path to the TOOL (a file), not a directory: [$LM]" >&2; exit 2; }
+ PASS=0; FAIL=0
+ FAILED_TESTS=()
+ ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
+@@ -252,6 +258,12 @@
+ out_merged=$(run --allow-stale tk-1 fleet/b1)
+ hasnt "$out_merged" "PASS (full gate)" "10c merge commit does not quote b1 tip PASS when merge tree differs"
+ has   "$out_merged" "no cached verdict for tree" "10d reports no cached verdict for merged tree"
++# 10d1/10d2: the guidance the tool PRINTS must teach the refusal-checked shape (agents-p1c2). The instruction
++# was `git commit --amend -F <(fleet-land-message ...)` - process substitution hides the refusal and hands the
++# amend whatever was printed before it, which is how a partial body is born. A printed instruction is a
++# behaviour of this tool, so it gets an assertion rather than a comment.
++hasnt "$out_merged" "commit --amend -F <(" "10d1 the printed guidance does NOT teach the refusal-hiding process substitution"
++has   "$out_merged" 'msg=$(mktemp)' "10d2 ...and teaches the chained, rc-checked form instead"
+ 
+ # 10e/10f: When the merge union tree is gated and --gate is passed, it carries the verified PASS
+ jq --arg t "$m1_tree" --arg s "$m1_sha" '.tree=$t | .sha=$s' "$ROOT/fix/gate.json" > "$ROOT/fix/gate.tmp" && mv "$ROOT/fix/gate.tmp" "$ROOT/fix/gate.json"
+@@ -1331,6 +1343,84 @@
+ has "$(jq -r '.review.disagreement' <<<"$j_dis")" "two verdicts on the SAME tip disagree" "35q ...and the disagreement is stated, not silently resolved"
+ has "$out" "FAIL" "35r ...and the conservative verdict is the one reported"
+ 
++# =====================================================================================================
++# 40. A REFUSAL MUST NOT BE ABLE TO LEAVE A PARTIAL LANDING MESSAGE (agents-p1c2)
++#
++# MEASURED DEFECT, 2026-10-14: a landing was in flight (main aa8c8b43, branch tip 07605704, gate running) and
++# origin/fleet/impl-guard moved to 6dc64986 underneath it. `fleet-land-message --gate` refused on ancestry -
++# correctly - and the CALLER carried on: the landed merge commit 2eb0ae20 carried a TRUNCATED body. The commit
++# body on the default branch is the durable account of what landed and why, and a truncated one is
++# indistinguishable from a complete one to every later reader.
++#
++# TWO HALVES, and this file pins both. (1) The helper emits NOTHING on a refusal - the existing 10y3/10za3
++# assertions cover one gate refusal; 40a4 and 40d1 generalise that to every refusal shape, because "a refusal
++# emits nothing" has to be a property of the code path rather than of one branch of it. (2) The SEQUENCE must
++# leave a message that already exists exactly as it was, which is what 40a1 measures - and 40b is the negative
++# control that makes 40a1 a measurement: the naive redirect really does destroy the file.
++msgsave="$ROOT/fix/landmsg.txt"
++mv_err="$ROOT/fix/landmsg.err"
++printf 'Merge fleet/delta1 (tk-1): complete message\nBEAD\ntk-1 - something\n' > "$msgsave"
++before_hash=$(sha256sum "$msgsave" | cut -d' ' -f1)
++before_bytes=$(wc -c < "$msgsave")
++gate_rc=0
++msg=$(mktemp)
++GATE_FIXTURE="$ROOT/fix/gate.json" timeout 60 bash "$LM" --repo "$ROOT/repo" --allow-stale --gate "$rebase_merge_sha" tk-1 fleet/rebased > "$msg" 2>"$mv_err" || gate_rc=$?
++# the documented sequence: amend ONLY on a zero rc (40a3 proves the rc the sequence depends on exists)
++if [ "$gate_rc" = 0 ]; then git -C "$ROOT/repo" commit --amend -F "$msg"; fi
++[ "$gate_rc" != 0 ] && ok "40a1 the refusing --gate returns a non-zero the sequence can act on" || bad "40a1 expected rc != 0" "rc=$gate_rc"
++[ "$(sha256sum "$msgsave" | cut -d' ' -f1)" = "$before_hash" ] && ok "40a2 a refusing --gate leaves an existing message file BYTE-IDENTICAL" || bad "40a2 the message file CHANGED on a refusal"
++[ "$(wc -c < "$msgsave")" = "$before_bytes" ] && ok "40a3 ...and its size is unchanged ($before_bytes bytes)" || bad "40a3 size changed"
++[ "$(wc -c < "$msg")" -eq 0 ] && ok "40a4 the helper wrote NOTHING into the message file (0 bytes)" || bad "40a4 the helper wrote $(wc -c < "$msg") bytes on a refusal"
++rm -f "$msg"
++
++# 40b: NEGATIVE CONTROL - reuse the file with a plain shell redirect, which is the shape the procedure used to
++# teach, and the complete message is destroyed by the SHELL before the helper runs. Without this, 40a2 could be
++# passing because nothing was ever at risk.
++printf 'Merge fleet/delta1 (tk-1): complete message\nBEAD\ntk-1 - something\n' > "$msgsave"
++gate_rc2=0
++GATE_FIXTURE="$ROOT/fix/gate.json" timeout 60 bash "$LM" --repo "$ROOT/repo" --allow-stale --gate "$rebase_merge_sha" tk-1 fleet/rebased > "$msgsave" 2>/dev/null || gate_rc2=$?
++[ "$gate_rc2" != 0 ] && ok "40b1 the naive redirect refuses too (rc != 0)" || bad "40b1 expected rc != 0" "rc=$gate_rc2"
++[ ! -s "$msgsave" ] && ok "40b2 ...and TRUNCATED the complete message to 0 bytes - the hazard the block above exists to remove" || bad "40b2 expected truncation" "$(wc -c < "$msgsave") bytes"
++
++# 40c: the refusal says HOW the branch moved, so the operator decides instead of discovering (agents-p1c2 fix c)
++has "$(cat "$mv_err")" "REFUSING: --gate $rebase_merge_sha does not contain fleet/rebased" "40c1 the ancestry refusal still names the branch it refused (existing 10y2 contract)"
++has "$(cat "$mv_err")" "branch tip now" "40c2 the refusal names the branch tip as it is NOW"
++has "$(cat "$mv_err")" "commit(s) the gate commit does not contain" "40c3 ...and how many commits the gate commit does not contain"
++
++# 40d: a DIFFERENT refusal shape (an unresolvable --gate) must emit nothing either.
++GATE_FIXTURE="$ROOT/fix/gate.json" timeout 60 bash "$LM" --repo "$ROOT/repo" --allow-stale --gate deadbeefdeadbeefdeadbeefdeadbeefdeadbeef tk-1 fleet/rebased >"$ROOT/fix/notcommit.out" 2>/dev/null || rc_notcommit=$?
++[ "${rc_notcommit:-0}" != 0 ] && ok "40d1 an unresolvable --gate is refused (rc != 0)" || bad "40d1 expected rc != 0"
++[ "$(wc -c < "$ROOT/fix/notcommit.out")" -eq 0 ] && ok "40d2 ...and it emits 0 stdout bytes, like every other refusal" || bad "40d2 stdout not empty" "$(wc -c < "$ROOT/fix/notcommit.out") bytes"
++
++# 40e: THE WHOLE FAMILY, NOT TWO BRANCHES OF IT. Round 1's clearance said the class claim in the commit body
++# ("every non-message exit writes 0 bytes to stdout") was falsified as written by the USAGE path, and that is
++# the one exit in this file that wrote to stdout: bin/fleet-land-message:60 printed 19 lines of usage to stdout
++# and exited 2 (measured: 1316 bytes stdout, 0 bytes stderr), so a caller whose invocation was mistyped had its
++# message file CREATED AND FILLED WITH USAGE TEXT, which `git commit --amend -F` would record as the body.
++# The tool now sends usage to stderr like every other failure, and these assertions pin the PROPERTY for the
++# family - rc non-zero AND stdout empty AND a diagnostic on stderr - rather than for the two paths round 1
++# happened to measure. The bead-lookup failure is drivable here without a live beads DB because the harness
++# stubs `bd` from $FIX: an empty show.json IS the lookup failure.
++usage_out="$ROOT/fix/usage.out"; usage_err="$ROOT/fix/usage.err"
++rc_usage=0
++timeout 60 bash "$LM" --repo "$ROOT/repo" only-one-positional-arg >"$usage_out" 2>"$usage_err" || rc_usage=$?
++[ "${rc_usage:-0}" != 0 ] && ok "40e1 the usage failure returns non-zero (rc=$rc_usage)" || bad "40e1 expected rc != 0"
++[ "$(wc -c < "$usage_out")" -eq 0 ] && ok "40e2 ...and writes 0 bytes to STDOUT - the property the caller's redirect relies on" || bad "40e2 usage went to stdout" "$(wc -c < "$usage_out") bytes"
++[ -s "$usage_err" ] && ok "40e3 ...with the usage text on STDERR instead" || bad "40e3 stderr was empty"
++
++unknown_out="$ROOT/fix/unknown.out"; unknown_err="$ROOT/fix/unknown.err"
++rc_unknown=0
++timeout 60 bash "$LM" --definitely-not-a-flag >"$unknown_out" 2>"$unknown_err" || rc_unknown=$?
++[ "${rc_unknown:-0}" != 0 ] && ok "40e4 an unknown flag is refused non-zero" || bad "40e4 expected rc != 0"
++[ "$(wc -c < "$unknown_out")" -eq 0 ] && ok "40e5 ...and also writes 0 bytes to stdout" || bad "40e5 stdout not empty" "$(wc -c < "$unknown_out") bytes"
++
++lookup_out="$ROOT/fix/lookup.out"; lookup_err="$ROOT/fix/lookup.err"; mkdir -p "$ROOT/fix/nobead"
++rc_lookup=0
++FIX="$ROOT/fix/nobead" timeout 60 bash "$LM" --repo "$ROOT/repo" tk-no-such-bead fleet/whatever >"$lookup_out" 2>"$lookup_err" || rc_lookup=$?
++[ "${rc_lookup:-0}" != 0 ] && ok "40e6 a bead that cannot be resolved is refused non-zero" || bad "40e6 expected rc != 0"
++[ "$(wc -c < "$lookup_out")" -eq 0 ] && ok "40e7 ...and writes 0 bytes to stdout (the reviewer's P3 note: this path had no assertion)" || bad "40e7 stdout not empty" "$(wc -c < "$lookup_out") bytes"
++has "$(cat "$lookup_err")" "no bead" "40e8 ...naming the bead it could not read"
++
+ if [ "$FAIL" -gt 0 ]; then
+   echo "Failed tests ($FAIL):"
+   for f in "${FAILED_TESTS[@]}"; do
