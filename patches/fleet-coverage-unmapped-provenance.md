@@ -93,3 +93,34 @@ cut, so the reviewer can confirm the base rather than trust it:
 | `tests/check-coverage.test.sh` | `99406d19cf19f5b5` | 15994 |
 | `tests/fleet-gate-check.test.sh` | `f3919068e04d9127` | 181092 |
 | `tests/project-template.test.sh` | `0c82517f50aaa7fc` | 29804 |
+
+### Re-cut 2026-10-14: the four runner-discovery assertions (agents-tpw5)
+
+Applied to canon, the first version of this artifact produced 4 failures in `tests/fleet-gate-check.test.sh` (385 PASSED):
+`14s2`, `14t`, `14u`, and a trailing `timeout waiting for check record`. All four are runner-discovery assertions, and all
+four come from one cause inside this artifact's own inserted block.
+
+**The cause.** The block creates `tools/unplaced-probe.sh` and COMMITS it in `$COV_REPO`. Every record lookup in that suite
+is keyed on the tree - `app_rec` is `$HOME/.fleet/checks/$app_tree.fast.json`, computed before that commit - so from then on
+the suite reads a STALE record. `14s2` is a `hasnt` assertion, and the stale record is the one `14q`/`14r` wrote, which by
+`14r`'s own assertion CONTAINS `tests/auth.test.ts`, so it fails. `14t` and `14u` read that same record, and the fake
+`CHECK_FAST_CMD` that would have produced the vitest and class-qualified pytest suites was applied to the probe tree's
+record instead. The trailing timeout is the later full-gate block, whose `full_rec` is the OLD tree's `.json` and is
+therefore never written. Four reds, one commit.
+
+**The fix in this re-cut.** The inserted block stays at the same anchor (one hunk, same insertion point). It now records
+`pre_probe_sha` before the commit and restores the repo with `git -C "$COV_REPO" reset --hard -q "$pre_probe_sha"`
+immediately before the next block that reads `app_rec`. The five ids the inserted block re-used - `14s`, `14t`, `14u`,
+`14v`, `14w` - are renamed `14s-rp2`, `14t-rp2`, `14u-rp2`, `14v-rp2`, `14w-rp2`: the originals assert runner results and
+the inserted ones assert provenance, so sharing an id made a report of "14u failed" ambiguous.
+
+**Verified here (measured, not asserted).** The test section applies to the pinned preimage under `patch -p1 --fuzz=0` at
+rc 0 with zero rejects and zero offsets; `bash -n` is clean; `pre_probe_sha` and the restore are present; every id present in
+the preimage is still present (nothing lost), no id gains a second assertion, and only `14q2` plus the five renamed ids are
+new. The other four file sections are byte-identical to the previous version of this artifact.
+
+**Not verified here, stated rather than implied.** The end-to-end `tests/fleet-gate-check.test.sh` run needs canon: this host
+has no copy of it at the pinned preimage for `bin/fleet-check` or `remote/check-coverage.py`. The hub should apply this
+artifact to the same tree and expect all four green with nothing deleted. Those four assertions guard a property that still
+holds: `remote/check-coverage.py` has no manifest concept at all (no occurrence of the word), and `.suites` is built from the
+gate log - published at `suites_list = sorted(list(suites))`, with `is_suite_executed` reading that same list.
