@@ -1537,6 +1537,170 @@ class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(unittest.TestCa
         self.assertIn("tools/fast-gate.sh", r.stderr, "and the token that does not resolve here")
         self.assertIn("--install", r.stderr, "and the repair")
 
+    def test_a_malformed_field_name_cannot_break_the_always_exit_0_contract(self):
+        """agents-bf1f: the diagnostic's contract is "always exit 0, so a runner may call it unconditionally after
+        any run". A CALLER-side typo used to break it: `--explain-failure 127 "not a field"` reached
+        `cmd="${!field:-}"`, bash rejected the malformed NAME before any default could apply, and the command died
+        with "invalid variable name" and exit 1 - a tool failing the caller that mistyped its own interface. The
+        field is now validated first, and the answer is a usage line rather than silence, because a runner that
+        asked an invalid question must not be left believing it asked a valid one."""
+        repo, env = self._repo("0r1c-badfield-",
+                               {"CHECK_CMD": "definitely-not-a-program --flag",
+                                "CHECK_FAST_CMD": "bash tools/fast-gate.sh"})
+        for field in ("not a field", "CHECK_CMD;echo", "-v", "1"):
+            with self.subTest(field=field):
+                r = self._read(repo, env, "--explain-failure", "127", field)
+                self.assertEqual(r.returncode, 0, f"a malformed field must not fail the caller: {r.stderr[:200]}")
+                self.assertIn("unknown field", r.stderr)
+                self.assertNotIn("NOTE (agents-0r1c)", r.stdout + r.stderr,
+                                 "a usage error is not a verdict about a gate")
+        # The MESSAGE never leaves a runner guessing: it names the fields that exist.
+        for name in ("CHECK_CMD", "CHECK_FAST_CMD"):
+            self.assertIn(name, self._read(repo, env, "--explain-failure", "127", "x").stderr)
+        # ...and a valid field still explains, so the validation did not disable the diagnostic.
+        ok = self._read(repo, env, "--explain-failure", "127", "CHECK_CMD")
+        self.assertEqual(ok.returncode, 0)
+        self.assertIn("NOTE (agents-0r1c)", ok.stderr)
+        self.assertIn("definitely-not-a-program", ok.stderr)
+
+    def test_the_accepted_field_list_is_derived_and_matches_the_reader(self):
+        """THE LIST IN THE MESSAGE IS PART OF THE COMPLAINT, SO IT MUST NOT GO STALE (agents-p8lh's class: a
+        printed instruction that stops naming what the code does). This test DERIVES the names from the message the
+        diagnostic prints - it does not hardcode them - and then asks the reader about every one of them, twice: the
+        diagnostic must accept it, and the plain field query must report it. Adding or removing a field without
+        updating the single list therefore fails here instead of producing a repair hint that names the wrong
+        thing."""
+        repo, env = self._repo("0r1c-fields-",
+                               {"CHECK_CMD": "echo hi", "CHECK_FAST_CMD": "echo hi"})
+        r = self._read(repo, env, "--explain-failure", "127", "not-a-field")
+        self.assertEqual(r.returncode, 0)
+        message = r.stderr
+        self.assertIn("expected one of", message)
+        names = re.findall(r"CHECK_[A-Z_]+", message.split("expected one of", 1)[1])
+        self.assertTrue(names, f"the usage line names no fields: {message!r}")
+        for name in names:
+            with self.subTest(field=name):
+                accepted = self._read(repo, env, "--explain-failure", "127", name)
+                self.assertEqual(accepted.returncode, 0)
+                self.assertNotIn("unknown field", accepted.stderr,
+                                 f"{name} is offered by the message but refused by the diagnostic")
+                reported = self._read(repo, env, name)
+                self.assertEqual(reported.returncode, 0,
+                                 f"{name} is offered by the message but the reader cannot report it: {reported.stderr[:120]}")
+                self.assertNotIn("unknown field", reported.stderr)
+
+    def test_a_bound_field_is_refused_by_the_diagnostic_and_still_reported_by_the_reader(self):
+        """THE ACCEPTED SET WAS TOO WIDE (found while re-reading my own change under review). Accepting all four
+        reader fields made the usage line bless the two the diagnostic can never explain, and the answer was two
+        false statements in one breath:
+
+            check-cmd: NOTE (agents-0r1c): CHECK_FAST_TIMEOUT exited 127, ...
+            check-cmd:   It names [60s (not on PATH)]; ...
+
+        A bound did not "exit 127", and a timeout value is not a missing program. The classification is now
+        explicit - command fields are explained, bound fields are refused WITH A REASON - and the plain field query
+        keeps reporting bounds, because that path really does report them. The last two assertions are what stop
+        the fix from becoming over-refusal."""
+        repo, env = self._repo("0r1c-boundfield-",
+                               {"CHECK_CMD": "definitely-not-a-program --flag",
+                                "CHECK_TIMEOUT": "180",
+                                "CHECK_FAST_TIMEOUT": "60s"})
+        for field, bound in (("CHECK_TIMEOUT", "180"), ("CHECK_FAST_TIMEOUT", "60s")):
+            with self.subTest(field=field):
+                r = self._read(repo, env, "--explain-failure", "127", field)
+                self.assertEqual(r.returncode, 0)
+                text = r.stdout + r.stderr
+                self.assertIn("BOUND", text, f"{field} must be refused with a reason, not explained")
+                self.assertNotIn("exited 127", text, "a bound cannot exit 127")
+                self.assertNotIn("not on PATH", text, f"a bound value must never be accused of being a program")
+                self.assertNotIn(bound, text.split("BOUND", 1)[1] if "BOUND" in text else "",
+                                 "the bound's value is not the subject of the complaint")
+        # OVER-REFUSAL GUARD: the reader's plain query reports bounds, and it must keep working.
+        for field, bound in (("CHECK_TIMEOUT", "180"), ("CHECK_FAST_TIMEOUT", "60s")):
+            with self.subTest(field=field):
+                q = self._read(repo, env, field)
+                self.assertEqual(q.returncode, 0)
+                self.assertIn(bound, q.stdout)
+                self.assertNotIn("unknown field", q.stderr + q.stdout)
+
+    def test_the_declared_field_lists_match_what_the_reader_does(self):
+        """agents-p8lh's class, one level up: the names are DECLARED in the script and the behaviour lives in the
+        dispatch, so this test PARSES THE DECLARATIONS OUT OF THE SOURCE and drives each name - it does not carry
+        its own typed list. Every declared name must be reportable by the reader (so a list cannot name something
+        the reader does not implement), the two lists must be disjoint (so a field is classified exactly once, not
+        explainable and refused at the same time), and every COMMAND name must really be explained while every
+        BOUND name must really be refused.
+
+        THE BOUND OF THIS GUARD, measured rather than assumed: it catches a list that NAMES SOMETHING THE READER DOES
+        NOT IMPLEMENT, and it catches the same field appearing in both lists. It does NOT catch a field simply
+        REMOVED from both lists - control run: deleting CHECK_FAST_TIMEOUT from BOUND_FIELDS leaves this test GREEN,
+        because the names are derived from the declarations themselves and a name that is gone is never asked about.
+        Closing that would need the reader's dispatch parsed as the source of truth, a fragile parse of a case
+        statement; the failure mode it leaves is bounded and safe (the field is refused as "unknown field" rather
+        than as a BOUND - still exit 0, still no false accusation), so it is published here instead of papered over
+        with a second typed list, which would reintroduce the defect this test exists to prevent."""
+        source = (ROOT / "tools" / "check-cmd.sh").read_text()
+        declared = dict(re.findall(r"^(CMD_FIELDS|BOUND_FIELDS)=\"([^\"]*)\"", source, re.M))
+        self.assertEqual(set(declared), {"CMD_FIELDS", "BOUND_FIELDS"},
+                         "the script must declare exactly these two lists")
+        cmd_fields = declared["CMD_FIELDS"].split()
+        bound_fields = declared["BOUND_FIELDS"].split()
+        self.assertTrue(cmd_fields and bound_fields)
+        self.assertEqual(set(cmd_fields) & set(bound_fields), set(),
+                         "a field cannot be both a command and a bound")
+        repo, env = self._repo("0r1c-fieldsdecl-",
+                               {"CHECK_CMD": "definitely-not-a-program --flag",
+                                "CHECK_TIMEOUT": "180", "CHECK_FAST_TIMEOUT": "60s"})
+        for name in cmd_fields + bound_fields:
+            with self.subTest(field=name):
+                reported = self._read(repo, env, name)
+                self.assertEqual(reported.returncode, 0,
+                                 f"{name} is declared but the reader cannot report it: {reported.stderr[:120]}")
+                self.assertNotIn("unknown field", reported.stderr + reported.stdout)
+                explained = self._read(repo, env, "--explain-failure", "127", name)
+                self.assertEqual(explained.returncode, 0)
+                text = explained.stdout + explained.stderr
+                if name in cmd_fields:
+                    self.assertIn("NOTE (agents-0r1c)", text, f"{name} is a command and must be explained")
+                    # It must really have looked at THAT field's value (the fixture gives CHECK_CMD and
+                    # CHECK_FAST_CMD different values on purpose, so a diagnostic reading the wrong field shows up).
+                    self.assertIn("It names [", text)
+                else:
+                    self.assertIn("BOUND", text, f"{name} is a bound and must be refused")
+                    self.assertNotIn("exited 127", text)
+
+    def test_a_field_is_matched_exactly_and_a_multi_token_argument_is_not_a_field(self):
+        """agents-i6qn (review finding on the FIRST fix, same class one door over): my validation bounded the SHAPE
+        of the field but not its EXTENT. `case " $FIELDS " in *" $field "*)` matched a MULTI-TOKEN argument, because
+        ' CHECK_CMD CHECK_FAST_CMD ' is a literal substring of the field list, so the argument passed validation,
+        reached ${!field}, and bash died with
+
+            tools/check-cmd.sh: line 148: CHECK_CMD CHECK_FAST_CMD: invalid variable name
+
+        and exit 1 - the same broken contract as the malformed NAME, reached through a different door. The field now
+        has to EQUAL one of the declared names. Red-first: this test is what fails if the membership test goes back
+        to a substring match (control run - the substring version returns exit 1 here)."""
+        repo, env = self._repo("0r1c-multitoken-", {"CHECK_CMD": "definitely-not-a-program"})
+        for field in ("CHECK_CMD CHECK_FAST_CMD",                    # the reviewer's exact case
+                      "CHECK_CMD CHECK_FAST_CMD CHECK_TIMEOUT CHECK_FAST_TIMEOUT",   # the whole list as one word
+                      "CHECK_FAST_CMD CHECK_CMD",                     # same tokens, other order
+                      "CHECK_CMD ", " CHECK_CMD",                     # whitespace is not membership
+                      "CHECK_CMD	CHECK_FAST_CMD"):
+            with self.subTest(field=field):
+                r = self._read(repo, env, "--explain-failure", "127", field)
+                self.assertEqual(r.returncode, 0,
+                                 f"a multi-token field must not fail the caller: {r.stderr[:200]}")
+                self.assertNotIn("invalid variable name", r.stderr, "the expansion must never be reached")
+                self.assertIn("unknown field", r.stderr)
+                self.assertNotIn("NOTE (agents-0r1c)", r.stdout + r.stderr,
+                                 "a multi-token argument is not a field, so there is nothing to explain")
+        # The exact single-token names still work, so exactness did not become rejection.
+        for field in ("CHECK_CMD", "CHECK_FAST_CMD"):
+            with self.subTest(field=field):
+                ok = self._read(repo, env, "--explain-failure", "127", field)
+                self.assertEqual(ok.returncode, 0)
+                self.assertIn("NOTE (agents-0r1c)", ok.stderr)
+
     def test_a_not_on_path_command_word_is_named_too(self):
         repo, env = self._repo("0r1c-explain-path-",
                                {"CHECK_CMD": "definitely-not-a-program --flag",
