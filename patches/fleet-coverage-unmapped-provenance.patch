@@ -286,10 +286,10 @@
  [ "$FAIL" = 0 ]
 --- a/tests/fleet-gate-check.test.sh
 +++ b/tests/fleet-gate-check.test.sh
-@@ -760,7 +760,52 @@
- ( cd "$COV_REPO" && check --fast )
+@@ -784,6 +784,53 @@
  wait_check "$app_rec"
- has "$(jq -c .unmapped "$app_rec" 2>/dev/null)" "lib/extra.py" "14q explicit unmapped file captured in record"
+ has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/vitest.test.ts" "14t vitest checkmark output captured in suites"
+ has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/test_cls.py" "14u class-qualified pytest output captured in suites"
 +
 +# agents-tpw5: the gate's marker is EVIDENCE - and now the record says so. The other direction (a path the
 +# reporter could not place, still published and still failing loud) is 14s below.
@@ -310,17 +310,10 @@
 +SH
 +( cd "$COV_REPO" && check --fast )
 +wait_check "$probe_rec"
-+has "$(jq -c .unmapped "$probe_rec" 2>/dev/null)" "tools/unplaced-probe.sh" "14s-rp2 an unplaced changed path is still published (fail-loud unchanged)"
-+has "$(jq -r '.coverage.unmapped[] | select(.path == "tools/unplaced-probe.sh") | .source' "$probe_rec" 2>/dev/null)" "inference" "14t-rp2 the record says that omission is the reporter's inference, not the gate's marker"
++has "$(jq -c .unmapped "$probe_rec" 2>/dev/null)" "tools/unplaced-probe.sh" "14s-rp an unplaced changed path is still published (fail-loud unchanged)"
++has "$(jq -r '.coverage.unmapped[] | select(.path == "tools/unplaced-probe.sh") | .source' "$probe_rec" 2>/dev/null)" "inference" "14t-rp the record says that omission is the reporter's inference, not the gate's marker"
 +probe_out=$(cd "$COV_REPO" && check --fast 2>&1)
-+has "$probe_out" "unplaced by the reporter" "14u-rp2 the cached PASS output tells the reader which entries are inference"
-+
-+# agents-tpw5: the probe above COMMITS a file, which moves the repo HEAD - and every record lookup in this
-+# suite is keyed on the tree. Put the repo back where the next blocks expect it: without this, the blocks
-+# below read a STALE record (14s2's hasnt saw tests/auth.test.ts from 14r's own record, and 14t/14u read a
-+# record the fake conf never wrote), and the full-gate wait further down never sees a record for its tree.
-+git -C "$COV_REPO" reset --hard -q "$pre_probe_sha"
- has "$(jq -c .suites "$app_rec" 2>/dev/null)" "tests/auth.test.ts" "14r deno test line captured in suites"
++has "$probe_out" "unplaced by the reporter" "14u-rp the cached PASS output tells the reader which entries are inference"
 +
 +# agents-tpw5 (hub refinement): a PRE-FIX record has plain strings where the entries now carry their source,
 +# and the reader must say UNRECORDED rather than nothing - an entry that can silently lack provenance is how
@@ -334,11 +327,19 @@
 +jq -c '.unmapped = ["lib/pre-fix.py"]' "$pre_bak" > "$probe_rec"
 +pre_out=$(cd "$COV_REPO" && check --fast 2>&1)
 +mv "$pre_bak" "$probe_rec"
-+has "$pre_out" "UNRECORDED" "14v-rp2 a pre-fix record (plain strings) is read as UNRECORDED, not as absent"
-+has "$pre_out" "lib/pre-fix.py" "14w-rp2 ... and the path is still named, so the fail-loud half is unchanged"
- if wait_curl "COVERAGE WARNING"; then
-   has "$(cat "$CURL_LOG" 2>/dev/null)" "COVERAGE WARNING" "14s explicit unmapped produces COVERAGE WARNING notification"
- fi
++has "$pre_out" "UNRECORDED" "14v-rp a pre-fix record (plain strings) is read as UNRECORDED, not as absent"
++has "$pre_out" "lib/pre-fix.py" "14w-rp ... and the path is still named, so the fail-loud half is unchanged"
++
++# agents-tpw5: keep the repo where the surrounding blocks expect it. This block COMMITS a file, which
++# moves $COV_REPO s HEAD, and every record lookup in this suite is keyed on the TREE (app_rec is
++# $HOME/.fleet/checks/$app_tree.fast.json, computed before that commit). A test block that commits in the
++# fixture repo therefore re-keys every lookup keyed on the tree: without this restore, the blocks after it
++# read a STALE record (14s2's hasnt saw tests/auth.test.ts from 14q/14r's own record and 14t/14u read a
++# record the fake conf never wrote to), and the full-gate wait below blocks on the OLD tree s json forever.
++git -C "$COV_REPO" reset --hard -q "$pre_probe_sha"
+ wait_curl "[check] FAST gate for"
+ 
+ # Full check does NOT run coverage extractor or warn on coverage
 --- a/tests/project-template.test.sh
 +++ b/tests/project-template.test.sh
 @@ -260,6 +260,16 @@
@@ -358,4 +359,3 @@
  
  # The generated constraint file is the deliverable, not decoration: spot-check that it carries the rule set
  # and the citations, because that file is what every future lane reads first.
-
