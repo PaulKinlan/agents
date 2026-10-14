@@ -1,0 +1,26 @@
+--- a/inbox/beads.mjs
++++ b/inbox/beads.mjs
+@@ -585,6 +585,23 @@
+   if (unpark) delete p[b];
+   else {
+     if (!String(reason || "").trim()) return { ok: false, error: "reason required" };
++    // REFUSE RATHER THAN SILENTLY TRUNCATE (agents-x1ij). This used to be `String(reason).slice(0, 500)`:
++    // 800 characters went in, exactly 500 were stored, and the call still returned ok:true. The fields most
++    // likely to sit at the END of a long justification are the release condition and the unpark trigger, so a
++    // silent cut preferentially destroys the part that says when a hold ends - and a park whose trigger is gone
++    // is indistinguishable from a park nobody intends to lift. A write that fails in the direction of looking
++    // successful is worse than a write that fails, so fail here and let the caller choose what to cut: the
++    // refusal is returned as ok:false, which server.mjs:327 turns into HTTP 400, which fleet-park:36 turns into
++    // a non-zero exit. Nothing is written on this path.
++    if (String(reason).length > 500) {
++      const reasonStr = String(reason);
++      return {
++        ok: false,
++        error: `reason is ${reasonStr.length} characters, over the 500-character limit (nothing was parked). ` +
++          `Shorten it by at least ${reasonStr.length - 500} character(s). The tail that would have been dropped began: ` +
++          JSON.stringify(reasonStr.slice(500, 560)),
++      };
++    }
+     p[b] = {
+       reason: String(reason).slice(0, 500),
+       bead: bead ? String(bead).slice(0, 80) : null,
