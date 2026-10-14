@@ -84,3 +84,29 @@ is not.
   file and the intended behaviour on the patched one, plus section `25a`–`25h` in `tests/fleet-gate-check.test.sh`
   driving the real path. The fleet suite's verdict for that section is still outstanding and will be run **once,
   alone**, so it does not contend for the single heavy slot.
+
+## RE-CUT r2: the guard read a name the worker never binds (agents-6sgf, 2026-10-14)
+
+The r1 artifact was RED on its own section 25: five assertions failed, and the cause was one guard in the
+consumer. At the decision point the code read:
+
+    if [ -n "${FAST:-}" ]; then   # WRONG in the worker: FAST is the SUPERVISOR's variable
+
+The worker binds its arguments at `rec=$1; ...; fast=$8; ...`, so inside the heredoc the mode variable is
+lowercase `fast`; uppercase `FAST` appears at that one line and nowhere else (the supervisor sets FAST=1 and
+passes it as ${FAST:-}, which arrives correctly as $8 and is simply never bound under that name). A guard on a
+name that is never bound does not fail - it silently dead-codes the whole region behind it, and ${VAR:-} hides
+it because the empty-default form never errors. Every finish write therefore published the static sentence.
+
+The fix: `if [ -n "${fast:-}" ]`, the read is skipped when the signal is unreadable, and it carries `|| true`
+so absence can never abort the region (absence must read as the NO CLAIM default, per the ratified schema
+index | fallback | unknown with absent/unreadable/unrecognised resolving to NOT RECORDED ... NO CLAIM).
+
+Verified by real invocation (no tree argument, from inside the repo, .witnessed read back):
+  - the fast COMMAND writes a fallback signal DURING the run -> .witnessed carries FILESYSTEM FALLBACK and
+    UNTRACKED ARM FILES WERE WITNESSED;
+  - no signal at all -> .witnessed carries NOT RECORDED and NO CLAIM about untracked files.
+
+Base/applied hashes for this r2: bin/fleet-check 455e3b05d2dc172c2d2149dd47b33ac4d77266b57d45765506d2e2b362c10498 -> aa7d7656893da3e5aad79925520905be2d204190b776361222000ea0fff5e180; tests/fleet-gate-check.test.sh
+f3919068e04d91279cae093471ba7bf870146a8530bb8b304e0a2dedc31a56a0 -> d06c8d9f28922fb16daef66654ff69dded2a6a86a9465aaa003156612e131625 (the test file is UNCHANGED from r1: section 25 was already correct, and its stub writes
+the signal to $FLEET_GATE_SIGNAL_FILE in all five states).
