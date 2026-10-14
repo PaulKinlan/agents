@@ -5,7 +5,7 @@ Covers all required acceptance criteria:
 (a) The fleet cases including temporal-plaindate, anchor-positioning, dialog-closedby.
 (b) '/*' inside a string and inside a '//' comment (must NOT disable scanning).
 (c) url(https://...) and JS strings containing '//' (candidates preserved).
-(d) Real-corpus candidate parity: scanner over /home/exedev/fleet loses ZERO candidates vs base.
+(d) Real-corpus candidate parity: scanner over FACTORY_MODERN_WEB_CORPUS loses ZERO candidates vs base.
 (e) String literals containing 'TODO(baseline/...)' are not treated as annotations.
 (f) Fallback window boundaries protect against distant line suppression.
 (g) Pinned canonical IDs prevent cross-rule over-suppression.
@@ -145,14 +145,15 @@ function diff(a, b) {
         self.assertIn("legacy-date-math-instead-of-temporal", rules)
 
     def test_real_corpus_candidate_parity(self):
-        """[Acceptance 5d] Real-corpus candidate parity: scanning /home/exedev/fleet must lose
+        """[Acceptance 5d] Real-corpus candidate parity: scanning FACTORY_MODERN_WEB_CORPUS must lose
         zero candidates vs base."""
-        fleet_dir = Path("/home/exedev/fleet")
-        if not fleet_dir.exists():
-            self.skipTest("/home/exedev/fleet does not exist on this environment")
+        corpus_path = os.environ.get("FACTORY_MODERN_WEB_CORPUS")
+        fleet_dir = Path(corpus_path) if corpus_path else None
+        if not fleet_dir or not fleet_dir.is_dir():
+            self.skipTest("FACTORY_MODERN_WEB_CORPUS not configured or directory does not exist")
 
         result = self.mod.scan_repository(fleet_dir, retrieve_guides=False)
-        # On base origin/main, /home/exedev/fleet produces exactly 14 candidates
+        # On base origin/main, the corpus produces exactly 14 candidates
         candidates = result["candidates"]
         self.assertGreaterEqual(len(candidates), 14, f"Lost candidates on real corpus: got {len(candidates)}")
 

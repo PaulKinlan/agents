@@ -305,7 +305,7 @@ from a project branch.)
 chained after a pipe whose status came from `tail -1`. Capture the helper's status
 **directly**, and reach the push only on explicit success:
 
-    if ! msg=$(fleet-land-message --gate "$sha" "$bead" "fleet/$branch"); then
+    if ! msg=$(<landing-message-tool> --gate "$sha" "$bead" "$branch"); then
       echo "landing aborted: message step failed" >&2
       exit 1
     fi

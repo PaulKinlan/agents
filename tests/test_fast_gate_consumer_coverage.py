@@ -48,7 +48,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # The independent oracle the mirror mirrors (agents-5z4e). It lives in the fleet tree, so it is NOT
 # available to this repo's CI - which is exactly why the mirror is the always-on assertion and this
 # cross-check is optional rather than the other way round.
-_FLEET_ORACLE = Path("/home/exedev/fleet/remote/check-coverage.py")
+_FLEET_ORACLE = Path(os.environ.get("FACTORY_COVERAGE_ORACLE") or "check-coverage.py")
 
 
 # ---------------------------------------------------------------------------------------------------

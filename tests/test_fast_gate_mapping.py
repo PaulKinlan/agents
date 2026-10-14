@@ -148,7 +148,7 @@ def arm_patterns() -> list[str]:
 # suite reaches it the same way - tests/test_coverage_contract.py, agents-1kzf), so the pin below asks
 # THE ORACLE what a changed file's consumers are rather than defining a second notion that could
 # disagree with it (agents-oj5s).
-ORACLE_SCRIPT = Path("/home/exedev/fleet/remote/check-coverage.py")
+ORACLE_SCRIPT = Path(os.environ.get("FACTORY_COVERAGE_ORACLE") or "check-coverage.py")
 
 
 def oracle_coverage_for(changed_files: list[str], executed_suites: list[str]):
@@ -377,7 +377,7 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_patches_patch_artifacts_are_ignored(self):
         """patches/*.patch diff artifacts are consumed hub-side and ignored in fast gate (agents-g1je)."""
-        mapped = resolve_fast_gate(["patches/fleet-land-message-tree-identity.patch"])
+        mapped = resolve_fast_gate(["patches/red-first-pre-fix-tree-not-commit-object.patch"])
         self.assertEqual(mapped, [], "patch diff artifact should be claimed by ignore arm")
 
     def test_tests_fixtures_map_to_the_containment_suite(self):
@@ -1146,7 +1146,7 @@ class TestFastGateMapping(unittest.TestCase):
     def test_fast_gate_execution_emits_single_line_marker_naming_all_suites(self):
         """agents-gttt: when multiple suites run, tools/fast-gate.sh must emit exactly ONE
         'fast-gate: passed:' line naming every executed suite, so the line-by-line coverage
-        parser (/home/exedev/fleet/remote/check-coverage.py) does not silently drop suites."""
+        parser (the coverage oracle check-coverage.py) does not silently drop suites."""
         probe_a = ROOT / "tests" / "test_multi_a_probe_tmp.py"
         probe_b = ROOT / "tests" / "test_multi_b_probe_tmp.py"
         try:
@@ -1535,7 +1535,7 @@ class TestArmSourceSignal(unittest.TestCase):
     """fleet-6sgf: the gate reports which arm source it used, in the one machine-readable form a receipt can
     carry, so fleet-check can stop claiming the same thing about untracked files in both states.
 
-    WHY THIS EXISTS: agents-6sgf found bin/fleet-check setting a STATIC .witnessed with every terminal state.
+    WHY THIS EXISTS: agents-6sgf found the deployed check tool setting a STATIC .witnessed with every terminal state.
     In the filesystem fallback every *.sh in the registry is sourced, so UNTRACKED arm files are read - and a
     receipt said "NOT witnessed: untracked files" anyway. The consumer half cannot tell the states apart from
     a log, so the producer half names the state here. Two properties matter beyond the happy path, and both are

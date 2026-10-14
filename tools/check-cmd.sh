@@ -369,7 +369,7 @@ if [ "${1:-}" = "--check" ]; then
 fi
 
 # agents-ia3p (C): INSTALL this project's resolved command into the per-VM config, so the
-# DEPLOYED entrypoint (~/fleet/bin/fleet-check) reads the TRACKED command through the
+# DEPLOYED entrypoint reads the TRACKED command through the
 # mechanism it already uses. fleet-check sources ${FLEET_CHECK_CONF:-$HOME/.fleet/check.conf},
 # auto-detects deno.json or package.json and NOTHING ELSE (:155-159), and exits 2 when it
 # finds neither (:161) - so a Python project has NO PATH through the deployed gate on a

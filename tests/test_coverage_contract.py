@@ -21,6 +21,7 @@ The remedy is a declarative contract in tests/coverage-contract.json. This suite
 from tests import tracked_test_paths
 import ast
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -29,7 +30,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = ROOT / "tests" / "coverage-contract.json"
-ORACLE_SCRIPT = Path("/home/exedev/fleet/remote/check-coverage.py")
+ORACLE_SCRIPT = Path(os.environ.get("FACTORY_COVERAGE_ORACLE") or "check-coverage.py")
 
 
 def _copy_gate_registry(dest: Path) -> None:

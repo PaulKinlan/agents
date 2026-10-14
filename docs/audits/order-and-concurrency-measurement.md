@@ -200,7 +200,7 @@ import threading
 import time
 from pathlib import Path
 
-WT = Path(os.environ.get("IMPL_TDOT_WT", "/home/exedev/worktrees/agents-factory-impl-tdot"))
+WT = Path(os.environ.get("IMPL_TDOT_WT", "/tmp/agents-factory-impl-tdot"))
 OUT = Path(os.environ.get("IMPL_TDOT_ORDER", "/tmp/impl-tdot-order"))
 OUT.mkdir(exist_ok=True)
 CHECK_CHANGED = "docs/audits/gate-speed-measurement.md"   # docs arm: 5 suites, ~10s of work alone

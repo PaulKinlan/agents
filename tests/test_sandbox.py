@@ -1325,12 +1325,12 @@ class TestIsBroadRoot(unittest.TestCase):
             self.assertTrue(_is_broad_root(notes, str(home)))
 
         # Also assert against live host path if present on this host
-        if Path("/home/exedev/.local/pi/pi").is_file():
-            self.assertFalse(_is_broad_root(Path("/home/exedev/.local/pi"), "/home/exedev"))
-            self.assertTrue(_is_broad_root(Path("/home/exedev/.local/state"), "/home/exedev"))
-            self.assertTrue(_is_broad_root(Path("/home/exedev/.local/share"), "/home/exedev"))
-            self.assertTrue(_is_broad_root(Path("/home/exedev/.local/bin"), "/home/exedev"))
-            self.assertTrue(_is_broad_root(Path("/home/exedev/work/proj"), "/home/exedev"))
+        if (Path.home() / ".local/pi/pi").is_file():
+            self.assertFalse(_is_broad_root(Path.home() / ".local/pi", str(Path.home())))
+            self.assertTrue(_is_broad_root(Path.home() / ".local/state", str(Path.home())))
+            self.assertTrue(_is_broad_root(Path.home() / ".local/share", str(Path.home())))
+            self.assertTrue(_is_broad_root(Path.home() / ".local/bin", str(Path.home())))
+            self.assertTrue(_is_broad_root(Path.home() / "work/proj", str(Path.home())))
 
     def test_hidden_prefix_tool_install_tree_requires_executable_role(self):
         """agents-yfqg: test the hidden-prefix arm of _is_tool_install_root. A depth-2 directory

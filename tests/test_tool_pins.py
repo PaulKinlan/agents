@@ -793,7 +793,7 @@ class LookupPathContractTests(unittest.TestCase):
 
     THE FLAG IS IN THIS REPO EVEN THOUGH THE CALLER IS NOT. provision.sh regenerates the host
     pins file and must pass --lookup-path for dirs holding trusted tools that live outside the
-    generator's confined system dirs (the bd case: /home/exedev/fleet/bin). If --lookup-path's
+    generator's confined system dirs (the bd case: a confined private deployment's bin directory). If --lookup-path's
     semantics ever change or the flag is removed, that one-liner silently stops working and
     NOTHING IN THIS REPO WOULD NOTICE. That is the failure these two arms guard.
 
