@@ -59,7 +59,8 @@ to reconstruct the target by hand. This re-cut has `--- a/bin/fleet-heavy` / `++
 * artifact: `fleet-heavy-holder-identity.patch`, 3143 bytes, sha256 `cba88a95267cc5335dd9f4b06a5bbd3ff310a17f50ecdc78752b8fa04618d929`, hunk `@@ -53,14 +53,22 @@`
 * base, unchanged from the original write-up: `bin/fleet-heavy` 14378 bytes, sha256
   `33ecf140e615852a...` - present in the integration copy (`~/fleet-copy/bin/fleet-heavy`). It applies
-  on top of the base file PLUS the two patches above applied in order.
+  on top of the base file PLUS the two other re-cut artifacts applied first and in this order:
+  `fleet-heavy-jobend-holder-attribution.patch`, then `fleet-heavy-reclaim-live-pid-vs-holder.patch`.
 * **ACCEPTANCE, run against a COPY of that base** (not the deployed file - see the caveat below):
   `patch -p1 -F0 --dry-run` exits 0 with no fuzz and no offset, and the hunk lands at `@@ -53,14 +53,22 @@`.
 * **The re-cut cannot be a different change:** the three originals applied in order to the base produce
