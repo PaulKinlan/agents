@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +17,7 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(FACTORY_ROOT) not in sys.path:
     sys.path.insert(0, str(FACTORY_ROOT))
 
+from lib.candidate_identity import artefact_scheme_fields, candidate_identity  # noqa: E402
 from lib.line_numbers import usable_line_number  # noqa: E402
 
 def load_threat_model(target_name: str, target_dir: Path, output_file: Optional[Path] = None) -> Tuple[str, str]:
@@ -162,6 +164,58 @@ def cluster_deterministic(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
     return clusters
 
+
+def _first_seen(item: Dict[str, Any]) -> datetime:
+    """Oldest active finding is the anchor; undated/malformed timestamps sort last."""
+    raw = item.get("first_seen")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            seen = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            if seen.tzinfo is None:
+                seen = seen.replace(tzinfo=timezone.utc)
+            return seen.astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            pass
+    return datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _anchor_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
+    line = usable_line_number(item.get("line_number"))
+    return (_first_seen(item), line if line is not None else float("inf"),
+            str(item.get("rule_id") or ""), str(item.get("fingerprint") or ""),
+            str(item.get("title") or ""), str(item.get("candidate_id") or ""))
+
+
+def cluster_candidates(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One identity per cluster, tied to its oldest member rather than positional C1..Cn.
+
+    The source's persisted candidate_id wins. A legacy row without it uses its
+    stored fingerprint, never its redacted snippet or scanner severity. Reject
+    duplicate identities: the opt-in line judge requires every presented ID to
+    name one distinct cluster and cannot repair an ambiguous pre-pass.
+    """
+    candidates: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for cluster in clusters:
+        if not cluster["items"]:
+            raise ValueError("vuln-triage: empty cluster has no anchor")
+        anchor = min(cluster["items"], key=_anchor_key)
+        rule_id = anchor.get("rule_id") or ""
+        path = anchor.get("path") or cluster["file"]
+        stored_id = anchor.get("candidate_id")
+        cid = (stored_id if isinstance(stored_id, str) and stored_id.strip()
+               else candidate_identity(rule_id, path, match_text=str(anchor.get("fingerprint") or "")))
+        if cid != cid.strip() or cid in seen_ids:
+            raise ValueError(f"vuln-triage: duplicate candidate_id or malformed source identity: {cid!r}")
+        seen_ids.add(cid)
+        # The report schema accepts an integer or null, not source strings like
+        # "42"/"?". Normalize both sides of the location binder to the same
+        # numeric/unknown representation; do not turn an unknown line into 0.
+        candidates.append({"candidate_id": cid, "rule_id": rule_id,
+                           "path": path, "line_number": usable_line_number(anchor.get("line_number"))})
+    return candidates
+
+
 def main():
     parser = argparse.ArgumentParser(description="Vuln Triage Pre-pass")
     parser.add_argument("--target", required=True, help="Path to target directory")
@@ -192,11 +246,26 @@ def main():
 
     payload = {
         "target": target_name,
+        **artefact_scheme_fields(),
+        "candidates": cluster_candidates(clusters),
+        # Keep the existing raw pre-pass artefact contract for other readers.
+        # Once candidates exist, the factory prompts with only candidates and
+        # context; these top-level legacy fields alone would disappear.
         "total_active_findings": len(active_findings),
         "cluster_count": len(clusters),
         "threat_model_summary": threat_model_summary,
         "threat_model_file": tm_path or None,
-        "clusters": clusters
+        "clusters": clusters,
+        # The factory shows the first 50 candidates as scanner data. The full
+        # cluster bodies and threat model are separate model context, not
+        # candidate identity inputs, and are not silently dropped or sliced.
+        "context": {
+            "total_active_findings": len(active_findings),
+            "cluster_count": len(clusters),
+            "threat_model_summary": threat_model_summary,
+            "threat_model_file": tm_path or None,
+            "clusters": clusters,
+        },
     }
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
