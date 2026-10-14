@@ -1,0 +1,61 @@
+--- a/bin/fleet-check
++++ b/bin/fleet-check
+@@ -512,6 +512,30 @@
+   [ "$st" = KILLED ] && note=" - NOT a verdict (never started, bound/timeout or signal): nothing cached, run fleet-check again"
+   [ "$st" = UNKNOWN ] && note=" - NOT a verdict (${state_reason:-no reason recorded}): nothing cached, run fleet-check again"
+   [ "$st" = INCONCLUSIVE ] && note=" - NOT a verdict (worktree vanished or inconclusive exit): not cached, run fleet-check again"
++  # agents-o7b8: A CONFIG THAT SWALLOWS ITS OWN FAILURE CAN STILL BE RECORDED AS PASS. The information is not
++  # hidden, it is GONE - `cmd || true` discards the status before any runner can observe it, and a trailing
++  # `echo`/`printf` also PRINTS, which is what makes a doomed gate look like one that ran. This is a NOTE: it
++  # refuses nothing and moves no state, exactly like the in-repo reader half in tools/check-cmd.sh (agents-xxgk),
++  # whose swallowing_tail() this is ported from. SELF-CONTAINED ON PURPOSE: finish() is extracted and run in
++  # isolation by an arm, and a dependency on anything outside this fragment is the defect that family finds.
++  local swallow_note="" _gate_cmd _st_tail _st_first _st_rest
++  _gate_cmd=$(jq -r '.cmd // ""' "$rec" 2>/dev/null || echo "")
++  if [ -n "$_gate_cmd" ]; then
++    _gate_cmd="${_gate_cmd%"${_gate_cmd##*[![:space:]]}"}"     # trailing whitespace would hide the tail
++    _st_tail="$_gate_cmd"
++    case "$_st_tail" in *'|| '*) _st_tail="${_st_tail##*|| }" ;; esac      # ## is greedy: the LAST one wins
++    case "$_st_tail" in *'; '*) _st_rest="${_st_tail##*; }"; [ -n "$_st_rest" ] && _st_tail="$_st_rest" ;; esac
++    _st_first="${_st_tail%% *}"; _st_rest="${_st_tail#"$_st_first"}"; _st_rest="${_st_rest# }"
++    case "$_st_first" in
++      true|:|/bin/true) ;;                                      # discards the status, says nothing
++      exit)             [ "${_st_rest% }" = "0" ] || _st_tail="" ;;   # exit 0 discards it explicitly
++      echo|printf)      ;;                                      # prints a plausible line AND succeeds
++      *)                _st_tail="" ;;                          # not a swallowing shape: stay silent
++    esac
++    if [ -n "$_st_tail" ]; then
++      swallow_note=" [SWALLOWING CONFIG: the gate command ends with '$_st_tail', which DISCARDS the failure of what precedes it, so a PASS here may be unfounded - agents-o7b8]"
++    fi
++  fi
+   local cov_note=""
+   local num_suites=0 num_unmapped=0 num_omitted=0 is_indeterminate=false
+   local unmapped_list="" suites_list="" omitted_list=""
+@@ -586,14 +610,14 @@
+   local witnessed="commit tree; tracked file content; and tracked files' identity INCLUDING SYMLINK TARGETS (size + nsec ctime). NOT witnessed: untracked files, or anything the gate's own command touches outside the repository."
+   # Persist final verdict state BEFORE POST so any lane woken immediately sees the final verdict, not RUNNING (fleet-5bzu review P1)
+   if [ "$cov_ok" = 1 ]; then
+-    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson rc "$rc" --argjson s "$secs" --slurpfile cov "$cov_out" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
++    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --arg swnote "$swallow_note" --argjson rc "$rc" --argjson s "$secs" --slurpfile cov "$cov_out" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
+       --argjson covatt "$cov_attempted" --argjson covrc "$cov_rc" --argjson covbytes "$cov_bytes" --arg coverr "$cov_err" \
+-      '.state=$st | .witnessed=$witnessed | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .coverage_verified=($cov[0].indeterminate != true) | .coverage=$cov[0] | .suites=$cov[0].suites | .unmapped=$cov[0].unmapped | .omitted=$cov[0].omitted | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
++      '.state=$st | .witnessed=$witnessed | .swallow_note=$swnote | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .coverage_verified=($cov[0].indeterminate != true) | .coverage=$cov[0] | .suites=$cov[0].suites | .unmapped=$cov[0].unmapped | .omitted=$cov[0].omitted | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
+       "$rec" > "$rec.finish.$$.tmp" 2>/dev/null && mv -f "$rec.finish.$$.tmp" "$rec"
+   else
+-    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --argjson rc "$rc" --argjson s "$secs" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
++    jq --arg st "$st" --arg sreason "$state_reason" --arg witnessed "$witnessed" --arg swnote "$swallow_note" --argjson rc "$rc" --argjson s "$secs" --arg tail "$tail" --argjson run "$run" --argjson ws "$wait_json" --argjson wu "$wu_bool" \
+       --argjson covatt "$cov_attempted" --argjson covrc "$cov_rc" --argjson covbytes "$cov_bytes" --arg coverr "$cov_err" \
+-      '.state=$st | .witnessed=$witnessed | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
++      '.state=$st | .witnessed=$witnessed | .swallow_note=$swnote | .state_reason=$sreason | .rc=$rc | .secs=$s | .run_s=$run | .wait_s=$ws | .wait_unknown=$wu | .extraction={attempted:($covatt==1), exit_code:$covrc, log_bytes:$covbytes} + (if $coverr == "" then {} else {stderr:$coverr} end) | .tail=$tail' \
+       "$rec" > "$rec.finish.$$.tmp" 2>/dev/null && mv -f "$rec.finish.$$.tmp" "$rec"
+   fi
+   rm -f "$cov_out"
+@@ -618,7 +642,7 @@
+       local all_ok=1
+       for w in $waiters; do
+         local body
+-        body=$(jq -nc --arg to "$w" --arg cid "$client_id" --arg t "[check] $([ -n "$fast" ] && echo fast || echo full) gate for $notif_sha (asked by $asking_lane, job $job_id) : $st (exit $rc, $timing)$prev_log_note$note$cov_note. Log: $log. Tail:
++        body=$(jq -nc --arg to "$w" --arg cid "$client_id" --arg t "[check] $([ -n "$fast" ] && echo fast || echo full) gate for $notif_sha (asked by $asking_lane, job $job_id) : $st (exit $rc, $timing)$prev_log_note$note$swallow_note$cov_note. Log: $log. Tail:
+ $tail
+ witnessed: $witnessed" '{to:$to,from_lane:"gate",text:$t,client_id:$cid}')
+         curl -s -f -m 20 -X POST -H "content-type: application/json" --data-binary "$body" "http://localhost:${FLEET_INBOX_PORT:-7777}/msg" >/dev/null 2>&1 || all_ok=0
