@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 from lib.yaml_mini import load_yaml
+from tests import has_git_index, tracked_paths
 
 ROOT = Path(__file__).resolve().parent.parent
 ACTION = ROOT / ".github" / "actions" / "factory" / "action.yml"
@@ -53,7 +54,22 @@ UNTRUSTED_RUN_EXPRESSION = re.compile(r"\$\{\{\s*(?:github|matrix|inputs)\b", re
 
 
 def action_files(root: Path = ROOT):
-    """Every composite-action definition under .github/actions/**."""
+    """Every composite-action definition under .github/actions/**.
+
+    Read from git's index where there is one (agents-4ieg's rule, applied here by agents-nder): the gate
+    witnesses tracked files only, so a walker that rglobs the filesystem has a second, wider notion of the
+    tree - an untracked stray joins the scan, and the listing can be changed under the read by a parallel
+    shard's probe.
+
+    WHERE THE IDIOM DOES NOT FIT, and why this has two arms instead of one: the guard fixtures in this
+    file pass a SYNTHETIC temp root (see _assert_guard_flags), which is not inside any work tree, so there
+    is no index to ask and tracked_paths would raise. There the filesystem IS the whole tree, so the
+    fallback is the honest instrument rather than a silent downgrade. has_git_index decides which of the
+    two cases a caller is in.
+    """
+    if has_git_index(root):
+        return sorted(p for p in tracked_paths(".github/actions", root=root)
+                      if p.suffix in (".yml", ".yaml"))
     actions = root / ".github" / "actions"
     return sorted(list(actions.rglob("*.yml")) + list(actions.rglob("*.yaml")))
 
@@ -243,6 +259,38 @@ class TestExpressionInjectionGuard(unittest.TestCase):
 
     actionlint is not vendored in this repo, so the scan below is the guard.
     """
+
+    def test_the_scan_reads_the_index_and_falls_back_only_where_there_is_none(self):
+        """The scan asks which actions the repository SHIPS, so it reads git's index where one exists.
+
+        agents-nder, the agents-4ieg shape: an untracked stray under .github/actions/ must not join a scan
+        of the tracked tree. The decoy is a temp root INSIDE the repository (a root git answers for,
+        relative to it), never .github/actions/ itself, so no tracked directory's identity moves and a gate
+        running this probe cannot record STALE (agents-fxg2).
+        """
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            probe = Path(tmp)
+            stray = probe / ".github" / "actions" / "zz_probe_tmp" / "action.yml"
+            stray.parent.mkdir(parents=True)
+            stray.write_text("name: probe\nruns:\n  using: composite\n  steps: []\n", encoding="utf-8")
+            self.assertEqual(action_files(probe), [],
+                             "a tracked-tree reader must not absorb a file git does not track")
+            self.assertNotIn(stray, action_files(probe))
+
+    def test_a_synthetic_root_without_an_index_is_read_from_the_filesystem(self):
+        """The other half of the same rule, and the reason the fallback exists (agents-nder).
+
+        The guard fixtures above build a temp root OUTSIDE the repository, where "tracked" is not a defined
+        question and the filesystem is the only tree there is - the fallback must find the synthetic action
+        rather than refusing it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            action = root / ".github" / "actions" / "probe" / "action.yml"
+            action.parent.mkdir(parents=True)
+            action.write_text("name: probe\n", encoding="utf-8")
+            self.assertFalse(has_git_index(root))
+            self.assertEqual(action_files(root), [action])
 
     def _assert_guard_flags(self, run_body: str):
         """The scan must report a violation for this run: body, and the narrow
