@@ -1,3 +1,5 @@
+## UNVERIFIED WORK IN PROGRESS - implements coord's ruling of 2026-10-14 (attempt-N attribution, one-re-run bound, disagreement is RED). The three ruled behaviours are IMPLEMENTED and bash -n clean, but the drive that proves them is INCOMPLETE: the stubbed gate queues behind the real heavy slot, so the record was still RUNNING when each assertion ran. Do NOT land this in place of the pre-ruling patch without re-running the drive with FLEET_HEAVY_DIR pointed at a private directory.
+
 ## patches/fleet-check-rerun-failed-tree.patch
 
 **agents-5q0w (second half): a deliberate, recorded re-run of a FAILED tree.**
