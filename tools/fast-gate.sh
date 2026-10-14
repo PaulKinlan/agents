@@ -381,7 +381,7 @@ fast_gate_report_ignored_arms() {
   done <<< "$FAST_GATE_IGNORED_ARMS"
 }
 
-fast_gate_arms_load() {
+_fast_gate_arms_load() {
   local _frag _fn _pat _stage
   local _before _new
   local _seen_stages=$'\n' _seen_patterns=$'\n'
@@ -435,6 +435,22 @@ fast_gate_arms_load() {
   return 0
 }
 
+# agents-71vj: THE WRAPPER THAT REPORTS ON THE LOADER'S OWN FAILURE. A lane whose registry will not load is
+# looking at the fragment it just added, and the two things it needs are "a fragment refused to load" (the
+# loader prints that) and "an untracked fragment was never read" (otherwise silently true). It reports ONLY
+# when the loader failed, because reporting unconditionally before the loader also ran on the HEALTHY path,
+# where every exit that already reports emitted the same warning a second time - agents-zmaz, found by
+# agents-factory-rev-m784 reviewing this change and measured at the dry-run, normal-run and unmapped-failure
+# exits. What a lane depends on is the COUNT of warnings, not their presence, which is why the regression test
+# asserts exactly one per exit. It lives here rather than on a rewritten call line because the caller's
+# guard - this function's name, then `||`, then the exit - is itself a contract this suite pins by
+# spelling (one loader call per run, agents-ywb5). Note the pin counts a STRING, so naming the call form
+# in a comment inflates it just as quoting it once satisfied an older one (agents-undf): the only
+# occurrence in this file is the real call below. The load happens once per run either way.
+fast_gate_arms_load() {
+  _fast_gate_arms_load "$@" || { local rc=$?; fast_gate_report_ignored_arms; return "$rc"; }
+}
+
 # agents-71vj: THE LOADER'S OWN FAILURE IS ALSO A READER'S EXIT. A lane whose registry will not load is
 # looking at the fragment it just added, and the two things it needs are "a fragment refused to load" and "an
 # untracked fragment was never read" - only the first was printed. The ignored list is already populated by
@@ -445,7 +461,7 @@ fast_gate_arms_load() {
 # so every exit that already reported emitted the warning a second time - measured at the dry-run exit, the
 # normal-run exit and the unmapped-failure exit. What a lane depends on here is a COUNT, not mere presence,
 # which is why the regression test asserts exactly one warning per exit.
-fast_gate_arms_load || { fast_gate_report_ignored_arms; exit 1; }
+fast_gate_arms_load || exit 1
 
 # A REPO-WIDE INVARIANT IS INVISIBLE TO A PER-PATH ARM (agents-wsiv), WHICH IS WHY IT IS KEYED HERE RATHER
 # THAN IN THE REGISTRY. Arms are first-match-wins, so no fragment can express "this path ALSO needs suite X":
