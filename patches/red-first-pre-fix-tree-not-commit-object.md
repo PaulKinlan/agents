@@ -3,8 +3,12 @@
 REPO WORK for `tools/red-first.sh`, answering `agents-erft` (P2, driven by impl-f6du in a read-only sweep and handed
 over rather than patched). Tooth 2's marker derivation queried the wrong revision object.
 
-**STATE OF THIS DELIVERY: the FIX is verified and driven both ways; the DISCRIMINATING TEST is not yet written, and
-this write-up says why rather than implying coverage it does not have.**
+**STATE OF THIS DELIVERY: the FIX is verified and driven both ways, AND the DISCRIMINATING TEST is written and
+already driven three ways - it is in `tests/test_red_first.py`, and the section "The discriminating test IS included,
+and it was driven three ways" below records the drive. This line previously read "the DISCRIMINATING TEST is not yet
+written", which was true mid-delivery and false once the test landed (agents-7mp1); a stale "not yet written" sends a
+reader away from the very evidence this artifact is built on, so it now states what was delivered rather than what
+was still outstanding.**
 
 ## The defect, confirmed at the line
 
