@@ -937,5 +937,82 @@ class TestStationStdoutChannelIsStructural(unittest.TestCase):
                             f"Expected guard to flag {expected_marker!r} in snippet:\n{snippet}\nGot: {sites}")
 
 
+
+class RuleLabelShapeTest(unittest.TestCase):
+    """agents-uubs: the rule-label shape must accept the form the documentation prescribes.
+
+    RED-FIRST: every assertion below fails against the pre-fix shape, because `/` was not in
+    the character class and a documented label came back as the fail-closed placeholder
+    "unclassified" - which is why 56 of 56 stored rows of this label family read as
+    unclassified. The shape check's actual job is to refuse a smuggled opaque run, and that
+    job is done by OPAQUE_RUN, so accepting the delimiter does not weaken it; the third test
+    pins that, including for a value that carries BOTH a slash and an opaque run.
+    """
+
+    # The documentation these come from, so the shape is tied to the docs rather than to a
+    # literal that could drift out of step with them.
+    DOCS = (
+        ("agents/log-check/SKILL.md", "rule_id"),
+        ("agents/test-gap/SKILL.md", "rule_id"),
+    )
+
+    def _documented_rule_ids(self):
+        """The `rule_id` examples each skill actually writes down, read from the file."""
+        import json
+        import re
+
+        found = []
+        for rel, field in self.DOCS:
+            text = (ROOT / rel).read_text()
+            # a JSON example carries the field; take the first string value after it
+            for m in re.finditer(r'"%s"\s*:\s*"([^"]+)"' % field, text):
+                found.append((rel, m.group(1)))
+                break
+        return found
+
+    def test_documented_rule_id_survives_the_shape(self):
+        from lib.redaction import sanitise_identity
+
+        pairs = self._documented_rule_ids()
+        self.assertEqual(len(pairs), len(self.DOCS),
+                         f"expected a rule_id example in each of {[d for d, _ in self.DOCS]}, got {pairs}")
+        for rel, value in pairs:
+            self.assertEqual(sanitise_identity(value, "rule"), value,
+                             f"the shape must accept the rule_id its own documentation prescribes ({rel}: {value!r})")
+
+    def test_documented_rule_id_survives_redaction_end_to_end(self):
+        """The defect was at the publish boundary, so assert it there and not only in the helper."""
+        from lib.redaction import redact_finding
+
+        finding = {
+            "rule_id": "log-check/error-signature-id",
+            "path": "src/app.js",
+            "line_number": 12,
+            "severity": "P3",
+            "title": "An error signature repeats",
+            "description": "Same signature across handlers.",
+            "agent": "log-check",          # not a credential agent, so the field is kept
+        }
+        published = redact_finding(finding)
+        self.assertEqual(published.get("rule_id"), "log-check/error-signature-id",
+                         "a documented rule label must reach the published finding, not 'unclassified'")
+
+    def test_the_purpose_survives_an_opaque_run_is_still_refused(self):
+        from lib.redaction import sanitise_identity
+
+        for value in ("A" * 40,                 # an opaque run, no slash
+                      "a/b" + "c" * 40,         # BOTH a slash and an opaque run
+                      "log-check/" + "d" * 40):
+            self.assertEqual(sanitise_identity(value, "rule"), "unclassified",
+                             f"an opaque run is still not a rule id: {value[:18]!r}...")
+
+    def test_the_shape_is_still_fail_closed_for_a_non_string(self):
+        from lib.redaction import sanitise_identity
+
+        for value in (None, 17, {"rule": "x"}, ["log-check/error-signature-id"]):
+            self.assertNotEqual(sanitise_identity(value, "rule"), "log-check/error-signature-id",
+                               f"only a string can be a rule label: {value!r}")
+
+
 if __name__ == "__main__":
     unittest.main()
