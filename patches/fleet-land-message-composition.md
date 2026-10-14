@@ -17,14 +17,30 @@ A fixture discriminates only on the axis where red and green actually differ. Th
 
 The single patch targets four files and must be applied **once** to an exact prior bundle, *not* blindly to the currently installed helper:
 
-| Path | Required input SHA-256 | Result SHA-256 |
+| Path | Required input bytes and SHA-256 | Result SHA-256 |
 |---|---|---|
-| `bin/fleet-land-message` | `980899b73c2cbd87774d45d96c326364cfc322d11e190f197fec6d06c1838716` | `86c07477b1daa8010ab54f31982263226b898d72dd9f7e75a0dcf00356838848` |
-| `bin/fleet-verdict-words.sh` | `b28dde10d67426316c9809fb314f26673c19fcbc15b5cbe402340b5f2416852b` | `1ca7d346439fd67da090e0029d75b65deda36a5878661197253efdc3e89c3702` |
-| `tests/fleet-land-message.test.sh` | `647694f31286dce3da614b100a6b7178c90b07ca834fb7b6c7dc4b400dd3b2fa` | `c83940149dc4d84f8477423ab7680a49ddc97535db1cb80e8eabbe5f5bcc8059` |
-| `tests/fleet-verdict-transcribed-run.test.sh` | absent | `b8d252d7e3ad77f0b23fab4de45b3d536b6abc2bdf820c2aacff293c1e713a57` |
+| `bin/fleet-land-message` | **61,286 bytes**; `980899b73c2cbd87774d45d96c326364cfc322d11e190f197fec6d06c1838716` | `86c07477b1daa8010ab54f31982263226b898d72dd9f7e75a0dcf00356838848` |
+| `bin/fleet-verdict-words.sh` | **6,384 bytes**; `b28dde10d67426316c9809fb314f26673c19fcbc15b5cbe402340b5f2416852b` | `1ca7d346439fd67da090e0029d75b65deda36a5878661197253efdc3e89c3702` |
+| `tests/fleet-land-message.test.sh` | **88,074 bytes**; `647694f31286dce3da614b100a6b7178c90b07ca834fb7b6c7dc4b400dd3b2fa` | `c83940149dc4d84f8477423ab7680a49ddc97535db1cb80e8eabbe5f5bcc8059` |
+| `tests/fleet-verdict-transcribed-run.test.sh` | **absent (0 bytes; no file)** | `b8d252d7e3ad77f0b23fab4de45b3d536b6abc2bdf820c2aacff293c1e713a57` |
 
 Patch SHA-256: `069be1d13ebe5ae1bd9234bbd81779bdc7c25bafaf0e78a1e2e7c41e7bbffffa`. In a fresh copy of the pinned base, `patch -p1 --fuzz=0 --dry-run` and then `patch -p1 --fuzz=0` applied all four files without offsets, fuzz or rejects. Every resulting file compared **byte-for-byte** with the green control image. The live helper was observed at SHA-256 `f6de093900f6b059af938c2bfc9613d9b66cdcbad8ad5195eb752a7d712be3ee`, **not** the required input hash; the hub must reconcile its executable generation first and cannot claim this artifact was applied directly.
+
+**Four-field hub delivery identity (agents-69wa shape):**
+
+| Artifact hash | Exact base shape expected | Does the hub have that shape installed? | Prerequisite / action before apply |
+|---|---|---|---|
+| `fleet-land-message-composition.patch` SHA-256 `069be1d13ebe5ae1bd9234bbd81779bdc7c25bafaf0e78a1e2e7c41e7bbffffa` | **OLD base bundle**, 61,286-byte helper `980899b7…` + 6,384-byte words `b28dde10…` + 88,074-byte suite `647694f3…` + absent unit test (full hashes above) | **No.** At observation, installed hub helper was **64,670 bytes** / `f6de0939…`, suite **91,463 bytes** / `91dfa5c9…`; words alone matched. A timer hard-resets the hub checkout, so this observation is not an installation guarantee. | On EXACT old base: no earlier patch is required; this one already folds the old stack and wwss re-cut. On currently installed hub: **do not apply directly** or apply the old stack first; choose and pin one generation, manually reconcile the integrated correction into it, then rerun the actual suite and capture the installed file hashes. |
+
+### RUN-line provenance (independently checkable)
+
+This is an **integrated diff from the old base**, which contained no RUN-UUID fixture rows, so unchanged historical rows appear with `+` in this delivery. Against the *pre-correction composed suite* `/tmp/ozmt/C2/tests/fleet-land-message.test.sh` (SHA-256 `6bf71af53c6a83f551d184abc58341d0d70b24ef25851da47512062f5158be0d`), the current patch has **22 added fixture rows containing a RUN UUID**:
+
+- **17 exact historical rows** (the full row already existed in C2) at artifact lines **775, 856, 933, 960, 977, 1008, 1074, 1098, 1115, 1193, 1218, 1219, 1234, 1246, 1401, 1402, 1412**.
+- **5 reprinted rows with an existing UUID but a repaired actor/VM world** at lines **826, 877, 894, 911** (branch-author/fixture actor) and **1411** (second VM's actor). The UUID on each of these five rows occurs in the pinned C2 suite; no new run value was invented to clear a fixture. No RUN line was added to either 38q's two-candidate ranking control or 38r's no-RUN policy guard.
+- **Zero newly invented RUN-associated UUIDs:** the nine distinct RUN-associated UUID values in the resulting suite equal the nine in C2, and the same nine are present in the immutable prior composition artifact (`git show f7190c0c:patches/fleet-land-message-composition.patch`, SHA-256 `884cdb089a998ca5115c38d584eb5e9864e7d18c53a7470bd8f766b9f84b52f3`). A reviewer can compare the UUID sets rather than trusting this claim, and can compare each of the 22 added rows with C2 (or the previous patch object). In particular 38r1 has **no RUN field** and asserts `transcribed-unverified` **AND** `cleared=true` together. The helper still reports an unresolvable run reason but does **not** gate clearance on it.
+
+`38q4` and `38r1` are guards, **not** two more red discriminators. The six red discriminators remain exactly `37a`, `38k`, `38q2`, `38q3`, `39a`, `39b`.
 
 ### Acceptance at this revision (scratch control, not the commit gate)
 
