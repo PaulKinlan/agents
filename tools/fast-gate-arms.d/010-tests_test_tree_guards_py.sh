@@ -16,7 +16,9 @@ fast_gate_arms_010_tests_test_tree_guards_py() {
       # the generic tests/test_*.py arm cannot cover it either: that arm adds direct_run_completeness and
       # coverage_contract, neither of which reads this file - measured, exactly ONE suite names it.
       # Cost, measured: 9.2s for the suite, 10.4s for the pinned delta, paid only on tier-file changes.
-      run="$run $f"
+      # Same existence guard as the generic arm below, for the same reason: a deleted path has no
+      # module to import, and the registry cannot express that with an arm of its own.
+      if [ -e "$f" ]; then run="$run $f"; fi
       mapped="$mapped tests/test_fast_gate_mapping.py tests/test_direct_run_completeness.py tests/test_coverage_contract.py"
       ;;
     tests/test_*.py)
