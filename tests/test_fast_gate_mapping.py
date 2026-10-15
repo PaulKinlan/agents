@@ -884,18 +884,24 @@ class TestFastGateMapping(unittest.TestCase):
                       "(agents-ah03); ignoring it also suppressed the smoke fallback")
 
     def test_walked_but_unpinned_markdown_fails_loudly(self):
-        """Markdown the scanner walks but no assertion pins must NOT be silently ignored (agents-9nir P0).
+        """Unpinned markdown must refuse even when a NEW file appears under targets/ (agents-9nir P0).
 
-        The docs-drift scanner walks every committed .md outside IGNORE_DIRS, so "prose, no
-        consumer" is an unverifiable reason for walked markdown: neither ignore (a canvas
-        with a false reason) nor map (a suite whose assertions cannot fail on the file) is
-        honest, so the deliberate behaviour is the loud failure.
+        The docs-drift scanner would walk a committed .md there. The fixture is intentionally
+        absent today: a new Markdown file without a content assertion must fail loudly rather
+        than acquiring an ignore or a suite that cannot fail on its content.
         """
-        for path in ("agents/vuln-verify/README.md", "targets/README.md"):
-            with self.subTest(path=path):
-                res = run_fast_gate([path])
-                self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
-                self.assertIn(path, res.stderr, f"{path}: the failure must name the file (agents-9nir)")
+        path = "targets/undocumented.md"
+        self.assertFalse((ROOT / path).exists(), "probe must remain a future, unmatched document")
+        res = run_fast_gate([path])
+        self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
+        self.assertIn(path, res.stderr, f"{path}: the failure must name the file (agents-9nir)")
+
+    def test_targets_readme_maps_to_its_inventory_content_assertion(self):
+        suite = "tests/test_target_readme_inventory.py"
+        mapped = resolve_fast_gate(["targets/README.md"])
+        self.assertIn(suite, mapped)
+        self.assertNotIn("tests/test_schedules.py", mapped, "README is not a target YAML manifest")
+        self.assertIn(suite, resolve_fast_gate([suite]), "a change to the pin must run the pin")
 
     def test_install_sh_maps_to_the_gate_entrypoint_suite(self):
         """agents-3xqa: install.sh is the provisioning entrypoint and the CALLER of the gate's
@@ -920,12 +926,12 @@ class TestFastGateMapping(unittest.TestCase):
     def test_unmatched_file_fails_loudly_naming_the_file(self):
         """A changed file matching neither a mapping arm nor the ignore list must fail and name itself.
 
-        agents-l80j: the fixture paths are `targets/README.md` (walked markdown, deliberately loud -
-        see test_walked_but_unpinned_markdown_fails_loudly) and `package.json`. The second used to be
-        `.agents/skills/beads/SKILL.md`, which is now covered by a documented ignore arm, so what is
-        pinned here is the BEHAVIOUR (loud failure that names the file) rather than that one path.
+        `package.json` is tracked and genuinely unmatched. `targets/undocumented.md` is an
+        intentionally absent future Markdown path, not a claim about a currently walked file.
+        An older fixture was `.agents/skills/beads/SKILL.md`, now covered by a documented
+        ignore arm; this pins the BEHAVIOUR (loud failure naming the file), not that path.
         """
-        for path in ("package.json", "targets/README.md"):
+        for path in ("package.json", "targets/undocumented.md"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0, f"{path}: unmatched file must fail loudly (agents-9nir)")
@@ -971,15 +977,15 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_unmatched_file_fails_even_when_other_files_map(self):
         """A mapped sibling must not mask the unmatched file (the no-fallback hole, agents-9nir)."""
-        res = run_fast_gate(["lib/sandbox.py", "targets/README.md"])
+        res = run_fast_gate(["lib/sandbox.py", "package.json"])
         self.assertNotEqual(res.returncode, 0, "unmatched file masked by a mapped sibling (agents-9nir)")
-        self.assertIn("targets/README.md", res.stderr, "the failure must name the unmatched file")
+        self.assertIn("package.json", res.stderr, "the failure must name the unmatched file")
         self.assertNotIn("lib/sandbox.py", res.stderr, "the mapped file must not be named as unmatched")
 
     def test_agent_config_and_data_paths_are_claimed_or_deliberately_loud(self):
-        """agents-l80j: of the nine tracked paths that no arm claimed, seven are now claimed - six by a
-        documented ignore arm and one (the modern-web guidance catalogue) by a real suite mapping -
-        while the two whose loud failure is DELIBERATE keep failing.
+        """agents-l80j: of nine formerly unclaimed tracked paths, eight are now claimed:
+        six via documented ignore arms, one by the modern-web catalogue's real suite and one
+        by the target inventory's new content assertion. Tracked package.json remains loud.
 
         DISCRIMINATOR: on the revision before this change all seven aborted with "match no mapping
         arm and no ignore-list arm", so this test is red against the revision it replaces rather
@@ -1010,9 +1016,9 @@ class TestFastGateMapping(unittest.TestCase):
                       f"{catalogue} is asserted against all 146 guides at "
                       "tests/test_factory_core.py:1029, so a lost guide must be able to fail the gate")
 
-        # Deliberate loud failures stay loud: walked markdown (agents-9nir P0) and the npm manifest,
-        # which no suite reads (searched repo-wide; the gate's own suites use their own fixtures).
-        for path in ("package.json", "targets/README.md"):
+        # Tracked package.json and a future unpinned Markdown document both refuse loudly.
+        # The future path is only a simulated changed-path probe, not a current tracked file.
+        for path in ("package.json", "targets/undocumented.md"):
             with self.subTest(path=path):
                 res = run_fast_gate([path])
                 self.assertNotEqual(res.returncode, 0,
