@@ -27,6 +27,10 @@ sys.path.insert(0, str(ROOT))
 from lib import credential_broker as cb  # noqa: E402
 from lib.child_env import child_environment  # noqa: E402
 
+# The negative fixture control temporarily restores this class, but a socket guard must
+# refuse its upstream connection before any POST can leave the process.
+_REAL_HTTPS_CONNECTION = http.client.HTTPSConnection
+
 REAL = {
     "anthropic": "sk-ant-REAL-DO-NOT-LEAK",
     "openai": "sk-REAL-DO-NOT-LEAK",
@@ -133,6 +137,21 @@ class BrokerTestBase(unittest.TestCase):
         _FakeHTTPSConnection.calls = []
         _FakeHTTPSConnection.response = _FakeUpstreamResponse(
             200, "OK", [("Content-Type", "application/json")], [b'{"ok": true}'])
+        # Even if the upstream fake is accidentally removed, no test in this fixture
+        # may connect to an external host. Refuse BEFORE DNS/socket I/O; the loopback
+        # client can still POST to the local broker for the simulated round trip.
+        original_dial = socket.create_connection
+        self.blocked_nonlocal = []
+
+        def loopback_only(address, *args, **kwargs):
+            if address[0] not in ("127.0.0.1", "::1"):
+                self.blocked_nonlocal.append(address)
+                raise OSError("fixture refused outbound POST")
+            return original_dial(address, *args, **kwargs)
+
+        self._socket_patcher = mock.patch.object(socket, "create_connection", side_effect=loopback_only)
+        self._socket_patcher.start()
+        self.addCleanup(self._socket_patcher.stop)
         self._patcher = mock.patch.object(http.client, "HTTPSConnection", _FakeHTTPSConnection)
         self._patcher.start()
         self.addCleanup(self._patcher.stop)
@@ -152,6 +171,60 @@ class BrokerTestBase(unittest.TestCase):
 
 
 class TestRoutingAndInjection(BrokerTestBase):
+    def test_fixture_may_simulate_a_post_but_must_never_deliver_one(self):
+        """A fixture POST may reach the local broker, never a real upstream.
+
+        A missing fake connection must make this test FAIL without sending the POST:
+        the independent socket guard rejects non-loopback dial attempts first.
+        """
+        # Independent probes beneath the fixture's create_connection guard make a
+        # missing/late guard safe to test too: neither DNS nor socket.connect may reach
+        # a non-loopback address. Both probes are installed BEFORE the real-class swap.
+        original_lookup = socket.getaddrinfo
+        original_connect = socket.socket.connect
+        lookups = []
+        outbound_dials = []
+
+        def local_lookup(host, *args, **kwargs):
+            lookups.append(host)
+            if host not in ("127.0.0.1", "::1"):
+                raise OSError("fixture refused external DNS")
+            return original_lookup(host, *args, **kwargs)
+
+        def local_connect(sock, address):
+            if isinstance(address, tuple) and address[0] not in ("127.0.0.1", "::1"):
+                outbound_dials.append(address)
+                raise OSError("fixture refused external socket dial")
+            return original_connect(sock, address)
+
+        broker = self.start_broker({"anthropic": REAL["anthropic"]})
+        headers = {"x-api-key": broker.placeholder, "anthropic-version": "2023-06-01",
+                   "content-type": "application/json", "content-length": "2"}
+        path = "/proxy/anthropic/v1/messages"
+        with mock.patch.object(socket, "getaddrinfo", side_effect=local_lookup), \
+                mock.patch.object(socket.socket, "connect", local_connect):
+            status, _, body = _client_request(broker.port, "POST", path,
+                                              headers=headers, body=b"{}")
+            self.assertEqual((status, body), (200, b'{"ok": true}'))
+            self.assertEqual(len(_FakeHTTPSConnection.calls), 1)
+            self.assertEqual(_FakeHTTPSConnection.calls[0]["method"], "POST")
+            self.assertEqual(self.blocked_nonlocal, [])
+            self.assertEqual(outbound_dials, [], "allowed simulation must not dial upstream")
+
+            # Forbidden posture: remove the fake upstream with ALL refusal probes active.
+            # A 502 alone could have other causes; the blocked dial AND absent external
+            # DNS/socket calls prove the fixture guard refused it before delivery.
+            before = len(lookups)
+            with mock.patch.object(http.client, "HTTPSConnection", _REAL_HTTPS_CONNECTION):
+                refused, _, _ = _client_request(broker.port, "POST", path,
+                                                headers=headers, body=b"{}")
+            self.assertEqual(refused, 502)
+            self.assertEqual(len(self.blocked_nonlocal), 1, "primary guard must refuse the outbound attempt")
+            self.assertEqual(lookups[before:], ["127.0.0.1"], "only the local client may resolve")
+            self.assertEqual(outbound_dials, [], "no non-loopback socket.connect is permitted")
+            self.assertEqual(len(_FakeHTTPSConnection.calls), 1,
+                             "refused delivery must not be mistaken for a second simulated POST")
+
     def test_anthropic_prefix_is_stripped_and_the_real_key_injected(self):
         broker = self.start_broker({"anthropic": REAL["anthropic"]})
         status, headers, body = _client_request(
