@@ -208,11 +208,65 @@ def run_fast_gate_with_base(base: str) -> subprocess.CompletedProcess:
     return subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
 
 
+class UnmappedPathError(subprocess.CalledProcessError):
+    """Raised when tools/fast-gate.sh refuses changed files because one or more have no mapping arm (agents-ub3k)."""
+    pass
+
+
 def resolve_fast_gate(changed_files: list[str]) -> list[str]:
-    """Execute tools/fast-gate.sh with simulated changed files and extract mapped suites."""
+    """Execute tools/fast-gate.sh with simulated changed files and extract mapped suites.
+
+    NOTE (agents-ub3k): resolve_fast_gate() returning [] means the path is mapped to DELIBERATELY
+    EMPTY (e.g. patches/*.patch). It raises UnmappedPathError (a CalledProcessError subclass) when
+    a path has NO matching arm at all. To distinguish 'deliberate_empty' from 'unmapped' and 'mapped'
+    with status inspection, use resolve_path_status() or resolve_paths_mapping().
+    """
     res = run_fast_gate(changed_files)
-    res.check_returncode()
+    if res.returncode != 0:
+        raise UnmappedPathError(res.returncode, res.args, output=res.stdout, stderr=res.stderr)
     return res.stdout.strip().split()
+
+
+def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
+    """Execute tools/fast-gate.sh in FAST_GATE_RESOLVE_PATHS mode to resolve mapping status for multiple paths (agents-ub3k).
+
+    Returns a dict mapping each path to a tuple (status, suites):
+      - ("mapped", [suite, ...]): an arm matched and selected suites
+      - ("deliberate_empty", []): an arm matched and deliberately selected no suites
+      - ("unmapped", []): no arm matched the path (gate would fail with exit 1)
+    """
+    env = os.environ.copy()
+    env["GIT_CHANGED"] = "\n".join(paths)
+    env["FAST_GATE_RESOLVE_PATHS"] = "1"
+    env["FAST_GATE_DRY_RUN"] = "1"
+    proc = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+    out = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith(":always\t"):
+            continue
+        if line.startswith("!"):
+            p = line[1:].strip()
+            out[p] = ("unmapped", [])
+        elif "\t" in line:
+            p, suites_str = line.split("\t", 1)
+            p = p.strip()
+            suites = [s for s in suites_str.split() if s]
+            if suites:
+                out[p] = ("mapped", suites)
+            else:
+                out[p] = ("deliberate_empty", [])
+    for p in paths:
+        if p not in out:
+            out[p] = ("unmapped", [])
+    return out
+
+
+def resolve_path_status(path: str) -> tuple[str, list[str]]:
+    """Determine the mapping status and suites for a single path (agents-ub3k).
+
+    Returns (status, suites) where status is "mapped", "deliberate_empty", or "unmapped".
+    """
+    return resolve_paths_mapping([path])[path]
 
 
 def suites_importing(dotted: str) -> set[str]:
@@ -435,11 +489,50 @@ class TestFastGateMapping(unittest.TestCase):
         """The DELIBERATE-EMPTY mapping survives where it is still right (agents-pgv9, agents-g1je):
         an artifact no suite consumes must not invent a consumer, and must not be run itself.
 
-        This is the half of the old assertion that is still true, and it is the one that keeps the fix
-        from becoming 'run everything whenever patches/ moves'.
+        agents-ub3k: assert that 'deliberate_empty' is distinguishable from an unmapped path.
         """
-        mapped = resolve_fast_gate(["patches/no-such-artifact-anyone-reads.patch"])
+        patch_path = "patches/no-such-artifact-anyone-reads.patch"
+        mapped = resolve_fast_gate([patch_path])
         self.assertEqual(mapped, [], "a path no suite reads or names must map to nothing")
+
+        status, suites = resolve_path_status(patch_path)
+        self.assertEqual(status, "deliberate_empty", "matched patch arm must be deliberate_empty")
+        self.assertEqual(suites, [])
+
+        # Negative control: a path with NO arm at all must be 'unmapped', not 'deliberate_empty'
+        unmapped_path = "unmapped/definitely_no_arm_matches_this.xyz"
+        unmapped_status, unmapped_suites = resolve_path_status(unmapped_path)
+        self.assertEqual(unmapped_status, "unmapped")
+        self.assertEqual(unmapped_suites, [])
+        with self.assertRaises(UnmappedPathError):
+            resolve_fast_gate([unmapped_path])
+
+        # Positive control: a mapped path must be 'mapped'
+        mapped_status, mapped_suites = resolve_path_status("tools/red-first.sh")
+        self.assertEqual(mapped_status, "mapped")
+        self.assertIn("tests/test_red_first.py", mapped_suites)
+
+    def test_resolve_path_status_distinguishes_deliberate_empty_from_unmapped_and_mapped(self):
+        """agents-ub3k: resolve_paths_mapping distinguishes deliberate empty mappings from unmapped paths and mapped paths."""
+        batch = resolve_paths_mapping([
+            "patches/no-such-artifact-anyone-reads.patch",
+            "unmapped/completely_unknown_file.xyz",
+            "lib/child_env.py",
+        ])
+        # 1. Deliberate empty: an arm matched and selected no suites
+        delib_status, delib_suites = batch["patches/no-such-artifact-anyone-reads.patch"]
+        self.assertEqual(delib_status, "deliberate_empty")
+        self.assertEqual(delib_suites, [])
+
+        # 2. Unmapped: no arm matched (leading '!' on resolve channel)
+        unmapped_status, unmapped_suites = batch["unmapped/completely_unknown_file.xyz"]
+        self.assertEqual(unmapped_status, "unmapped")
+        self.assertEqual(unmapped_suites, [])
+
+        # 3. Mapped: an arm matched and selected suites
+        mapped_status, mapped_suites = batch["lib/child_env.py"]
+        self.assertEqual(mapped_status, "mapped")
+        self.assertIn("tests/test_child_env.py", mapped_suites)
 
     def test_an_ordinary_change_is_unaffected_by_the_patch_artifact_arm(self):
         """A change with NO patches/ involvement selects exactly what it selected before
