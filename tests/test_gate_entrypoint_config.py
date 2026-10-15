@@ -1967,10 +1967,6 @@ class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(_ReaderHarness)
                          "the note must not attribute a file nobody stamped to a repo")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTheFleetSubjectTestsCannotRunAgainstTheWrongProgram(unittest.TestCase):
     """agents-nfpqn: the seven conditional tests must never run against a program that is not their subject.
 
@@ -2012,3 +2008,7 @@ class TestTheFleetSubjectTestsCannotRunAgainstTheWrongProgram(unittest.TestCase)
             "FACTORY_GATE_ENTRYPOINT must decide which program these tests drive, so that pointing them at "
             "the wrong one is a deliberate act with a name rather than an accident",
         )
+
+
+if __name__ == "__main__":
+    unittest.main()
