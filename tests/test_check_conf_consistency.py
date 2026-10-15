@@ -20,6 +20,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# agents-vkti: this suite OWNS the parser of the tracked config, because it is the product-local one.
+# Both it and tests/test_gate_entrypoint_config.py read tools/check.conf, and that module is the wrong
+# owner: its subject is the DEPLOYED entrypoint, which is fleet tooling.
+from tests import tracked_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
 TRACKED = ROOT / "tools" / "check.conf"
@@ -27,6 +32,18 @@ TRACKED = ROOT / "tools" / "check.conf"
 
 def _tracked_fields(text: str | None = None) -> dict:
     """Parse NAME=value lines from the tracked config, or from `text` when one is supplied.
+
+    THE SINGLE PARSER OF tools/check.conf IN THIS TREE (agents-vkti). It used to exist twice, here and
+    in tests/test_gate_entrypoint_config.py, and the copies drifted: one grammar accepted only a quoted
+    value, so on the real tools/check.conf it returned the two command fields and silently omitted
+    CHECK_TIMEOUT and CHECK_FAST_TIMEOUT, which are unquoted shell integers (agents-1i7v). AGREEMENT
+    BETWEEN TWO COPIES IS A MAINTENANCE CLAIM, NOT A PROPERTY - the pin watching the pair was green
+    while they disagreed on VALUES too (agents-ju3g: CHECK_TIMEOUT 2400 vs 24000, measured by a review)
+    - so the fix is one definition, and the pin now asserts there is exactly one.
+
+    The grammar accepts both forms on purpose, and each has a reason: the commands are quoted strings
+    that may contain spaces and inner quotes, and the bounds are bare integers. The [A-Z_]+ name and the
+    end-of-line anchor are what reject comments, fragments and trailing junk.
 
     The optional argument exists so a test can drive the REAL parser with a sample
     (agents-4eg2): the pinning test used to re-implement this loop with a verbatim copy of the
@@ -335,30 +352,34 @@ class TestTrackedCheckConfig(unittest.TestCase):
         self.assertEqual(fields["CHECK_TIMEOUT"], "2400")
         self.assertEqual(fields["CHECK_FAST_TIMEOUT"], "180")
 
-    def test_every_parser_of_the_tracked_file_agrees_on_its_fields(self):
-        """agents-1i7v: two test modules parse tools/check.conf; they must not disagree silently.
+    def test_the_tracked_file_has_exactly_one_parser_in_the_tree(self):
+        """agents-vkti: ONE definition, and this fails if a second appears.
 
-        tests/test_gate_entrypoint_config.py parsed only NAME="value", so on the real file it
-        returned the two command fields and silently dropped the two unquoted bound fields. No
-        assertion noticed, because its callers read CHECK_CMD only - so any future pin built on
-        that parser would have been blind to a field the file defines, and 'which fields exist'
-        depended on which module you asked. The grammars are unified now, and this test fails if
-        they diverge again, which is what makes the drop impossible rather than merely fixed.
+        The history this replaces, kept because it is the argument for the shape: two modules parsed
+        tools/check.conf, one accepted only NAME="value" and so silently dropped the two unquoted bound
+        fields on the real file (agents-1i7v), and after the grammars were unified the copies drifted in
+        VALUES while a keys-only comparison stayed green (agents-ju3g: CHECK_TIMEOUT 2400 vs 24000,
+        measured by a review). Each round found the next disagreement, so the property is not that two
+        copies agree - it is that there is one parser. A second copy under ANY name fails here.
+
+        SCOPE, because a negative is a claim: this scans TRACKED python files in tests/, lib/ and tools/
+        for the grammar's literal pattern. A re-implementation that expresses the same grammar a
+        different way (another regex, a hand-rolled split) is NOT seen; what it catches is the copy this
+        repository actually keeps making, which is verbatim.
         """
-        from tests.test_gate_entrypoint_config import _tracked_fields as parsed_there
-
-        here, there = _tracked_fields(), parsed_there()
-        # agents-ju3g: compare the WHOLE dicts, not just the key sets. The keys-only form was
-        # green while the two copies returned DIFFERENT VALUES for the same file - the review
-        # measured CHECK_TIMEOUT 2400 vs 24000 with this test passing - so it pinned half of
-        # what the docstring above claims and a value-semantics drift stayed invisible. The
-        # commands have another consumer (tests/test_gate_entrypoint_config.py compares
-        # CHECK_CMD against the installed config); the BOUNDS parsed by that copy have none,
-        # so nothing else would have caught the drift either.
-        self.assertEqual(
-            there, here,
-            "the two parsers of tools/check.conf disagree about its fields or their values",
+        grammar = r'[A-Z_]+)=(?:"(.*)"|(\S+))'
+        holders = sorted(
+            str(path.relative_to(ROOT))
+            for area in ("tests", "lib", "tools")
+            for path in tracked_paths(area)
+            if path.suffix == ".py" and grammar in path.read_text(encoding="utf-8")
         )
+        self.assertEqual(
+            holders, ["tests/test_check_conf_consistency.py"],
+            "tools/check.conf must have exactly one parser definition (agents-vkti); a second copy is "
+            "how the two copies drifted twice",
+        )
+        here = _tracked_fields()
         # The value forms the shared grammar exists to accept: bounds are bare integers, and the
         # command fields stay quoted single strings (agents-j1te keeps them one string per line).
         for bound in ("CHECK_TIMEOUT", "CHECK_FAST_TIMEOUT"):
