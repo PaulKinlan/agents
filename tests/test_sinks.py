@@ -762,5 +762,70 @@ class TestGithubIssuesPinBoundary(unittest.TestCase):
         self.assertFalse(self.fake_log.exists())
 
 
+class TestTheFixtureSimulatesAPostRatherThanDeliveringOne(SinkFixture, unittest.TestCase):
+    """agents-kzk3: a fixture may SIMULATE a POST, it must never DELIVER one.
+
+    That sentence was the docstring of tests/test_fleet_check_tree_stability_inbox.py, which went with the
+    fleet's delivery artifacts because its subject was a patch belonging to ANOTHER repo - it decoded a
+    curl stand-in out of the diff text and drove that. The INVARIANT is not fleet-specific though: it is
+    the same rule this file's own docstring states (no token, no network, no shared findings directory, no
+    real issue), and HERE it is enforced by the fixture rather than carried as prose, which is what makes
+    it pinnable. The seam is three mechanisms, and this class asserts each against the FIXTURE rather than
+    against what the sinks do:
+
+      1. PATH holds the stub directory ALONE, so no real gh/bd/curl is reachable from a fixture at all.
+      2. The fixture carries no tracker credential, so nothing could authenticate a delivery even if one
+         were attempted.
+      3. The recorder REFUSES a gh invocation that does not name the public host explicitly - its own
+         guard, whose comment names the private hostname a default would pick up. This is the behavioural
+         half: it drives the stub rather than reading it.
+
+    WHY PIN A FIXTURE AT ALL: this is one line in a setUp that a later lane can widen for convenience - a
+    test that wants a system binary, say - and widening PATH is exactly how a fixture stops being UNABLE
+    to deliver and becomes merely unlikely to. Each test below was shown able to fail; the demonstration
+    is in the bead's hand-off.
+    """
+
+    def test_path_reaches_only_the_stub_directory(self):
+        """The mechanism that makes delivery impossible rather than improbable."""
+        entries = [p for p in self.env["PATH"].split(os.pathsep) if p]
+        self.assertEqual(
+            entries, [str(self.bin)],
+            "the fixture's PATH must be the stub directory ALONE: any other entry can supply a real tool",
+        )
+        for tool in ("gh", "bd"):
+            resolved = shutil.which(tool, path=self.env["PATH"])
+            self.assertIsNotNone(resolved, f"the sink code invokes {tool}, so the fixture must stub it")
+            self.assertTrue(
+                Path(resolved).resolve().is_relative_to(self.bin.resolve()),
+                f"{tool} must resolve INSIDE the stub directory, not to a real binary at {resolved}",
+            )
+
+    def test_the_fixture_carries_no_tracker_credential(self):
+        """A credential in the environment is what would let an accidental delivery succeed."""
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "TRACKER_TOKEN", "GH_HOST", "GITHUB_API_URL"):
+            self.assertNotIn(name, self.env,
+                             f"{name} in a fixture environment is a real credential or a real host")
+
+    def test_the_recorder_refuses_a_gh_call_that_does_not_name_the_public_host(self):
+        """The behavioural half: the stub must reject what a real gh would silently accept.
+
+        The CONTROL is the second invocation - the same endpoint WITH --hostname github.com - so a
+        recorder that had simply stopped working could not pass this test.
+        """
+        escaped = subprocess.run([str(self.bin / "gh"), "api", f"repos/{REPO}"],
+                                 env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(
+            escaped.returncode, 0,
+            "gh without --hostname github.com uses the host's default hostname, which on a fleet VM is a "
+            "private host - the stub must refuse that rather than answer it",
+        )
+        allowed = subprocess.run([str(self.bin / "gh"), "api", "--hostname", "github.com",
+                                  f"repos/{REPO}"],
+                                 env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(allowed.returncode, 0, f"the control invocation must succeed: {allowed.stderr}")
+        self.assertIn(REPO, allowed.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
