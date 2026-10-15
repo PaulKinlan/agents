@@ -12,7 +12,7 @@ GitHub issues are the place for **public input**, not findings: the `issue-triag
 reads issues the public raises in `repo: OWNER/REPO`, and `factory promote` is the explicit,
 human-approved issue -> bead link. `visibility: public` still matters — missing visibility
 withholds high/critical from the synced beads tracker — and it authorises promotion. Do not
-derive `repo:` from a checkout remote (which may be github.int.exe.xyz).
+derive `repo:` from a checkout remote (which may point to an internal Git mirror).
 
 ### Declaring visibility
 
