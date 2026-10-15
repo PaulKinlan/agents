@@ -420,8 +420,8 @@ class TestFullGateSharding(unittest.TestCase):
         costs_at = ns["costs_at"]
 
         table = self.root / "checks" / "full-gate-module-costs.json"
-        # 1. Full-gate baseline measurement with 2 modules
-        save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0}, {"tree": "real", "modules": 2})
+        # 1. Full-gate baseline measurement with 2 modules and valid 40-char git tree sha
+        save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0}, {"tree": "a" * 40, "modules": 2})
         # 2. Foreign/partial run measuring only 1 module with a stub timing
         save_costs(table, {"tests.test_heavy": 0.2}, {"tree": "fixture", "modules": 1})
         # 3. Full-gate sharding query must still preserve the full-gate baseline cost
@@ -430,11 +430,11 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertEqual(costs["tests.test_light"], 1.0)
         # And identity retains full suite provenance
         data = json.loads(table.read_text(encoding="utf-8"))
-        self.assertEqual(data["identity"]["tree"], "real")
+        self.assertEqual(data["identity"]["tree"], "a" * 40)
         self.assertEqual(data["identity"]["modules"], 2)
 
     def test_equal_count_fixture_run_does_not_overwrite_baseline_costs(self):
-        """agents-tktak: equal-count small fixture runs (< 50 modules) cannot overwrite existing baseline costs."""
+        """agents-tktak: foreign mock fixtures cannot overwrite existing baseline costs."""
         import ast
         src = (self.root / "tools" / "full-gate.sh").read_text(encoding="utf-8")
         py_lines = []
@@ -458,9 +458,9 @@ class TestFullGateSharding(unittest.TestCase):
         costs_at = ns["costs_at"]
 
         table = self.root / "checks" / "full-gate-module-costs.json"
-        # 1. Baseline measurement with 2 modules
-        save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0}, {"tree": "real", "modules": 2})
-        # 2. Equal-count foreign fixture run with 2 modules (< 50 modules floor)
+        # 1. Baseline measurement with 2 modules and valid 40-char git tree sha
+        save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0}, {"tree": "a" * 40, "modules": 2})
+        # 2. Foreign mock fixture run with tree="fixture"
         save_costs(table, {"tests.test_heavy": 0.2, "tests.test_fixture": 0.1}, {"tree": "fixture", "modules": 2})
         # 3. Baseline cost must be preserved, new fixture module added, and real identity retained
         costs = costs_at(table, {"tests.test_heavy": ["heavy"], "tests.test_light": ["light"]})
@@ -469,14 +469,15 @@ class TestFullGateSharding(unittest.TestCase):
         data = json.loads(table.read_text(encoding="utf-8"))
         self.assertEqual(data["seconds"]["tests.test_heavy"], 140.0)
         self.assertEqual(data["seconds"]["tests.test_fixture"], 0.1)
-        self.assertEqual(data["identity"]["tree"], "real")
+        self.assertEqual(data["identity"]["tree"], "a" * 40)
 
-        # 4. A comprehensive run (>= 20 modules) updates costs and provenance on any new commit tree
-        save_costs(table, dict({f"tests.test_{i}": 10.0 for i in range(25)}, **{"tests.test_heavy": 135.0}),
-                   {"tree": "real_v2", "modules": 25})
+        # 4. A full repository run on a new commit tree (40-char hex) updates costs and provenance
+        save_costs(table, {"tests.test_heavy": 135.0, "tests.test_light": 0.9, "tests.test_fixture": 0.1},
+                   {"tree": "b" * 40, "modules": 3})
         data2 = json.loads(table.read_text(encoding="utf-8"))
         self.assertEqual(data2["seconds"]["tests.test_heavy"], 135.0)
-        self.assertEqual(data2["identity"]["tree"], "real_v2")
+        self.assertEqual(data2["seconds"]["tests.test_light"], 0.9)
+        self.assertEqual(data2["identity"]["tree"], "b" * 40)
 
 
 if __name__ == "__main__":

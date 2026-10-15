@@ -226,15 +226,17 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            # Coordinator final settlement (agents-2e2ca):
-            # A run is considered a comprehensive full-suite run if it measures at least 20 modules
-            # and at least half the size of the existing baseline. Only comprehensive runs (or an
-            # initial run against an unpopulated table) can update existing module timings and
-            # replace provenance. Any partial or small scratch/fixture run (< 20 modules) is
-            # strictly additive: it may register new modules, but never overwrites baseline timings
-            # or replaces provenance.
-            is_comprehensive = len(measured) >= 20 and len(measured) >= (len(existing) // 2)
-            can_overwrite = is_comprehensive or not existing
+            # Coordinator architectural settlement (agents-2e2ca):
+            # A run is a legitimate repository full gate if:
+            # 1. It measures at least 90% of the existing modules (or table is empty); AND
+            # 2. It has a real git tree SHA (40-char hex), or empty existing provenance.
+            # Foreign mock fixtures (tree="fixture") or partial runs (< 90% coverage) are strictly
+            # additive: they may register new modules, but never overwrite baseline timings or provenance.
+            current_provenance = identity or {}
+            existing_provenance = existing_identity or {}
+            is_full_coverage = not existing or (len(set(measured.keys()) & set(existing.keys())) >= len(existing) * 0.9)
+            is_git_tree = bool(re.match(r'^[0-9a-f]{40}$', str(current_provenance.get("tree", ""))))
+            can_overwrite = not existing or (is_full_coverage and (is_git_tree or not existing_provenance.get("tree")))
 
             if can_overwrite:
                 merged_seconds = dict(existing, **measured)
