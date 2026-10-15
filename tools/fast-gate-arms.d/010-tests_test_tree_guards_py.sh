@@ -16,7 +16,9 @@ fast_gate_arms_010_tests_test_tree_guards_py() {
       # the generic tests/test_*.py arm cannot cover it either: that arm adds direct_run_completeness and
       # coverage_contract, neither of which reads this file - measured, exactly ONE suite names it.
       # Cost, measured: 9.2s for the suite, 10.4s for the pinned delta, paid only on tier-file changes.
-      run="$run $f"
+      # Same existence guard as the generic arm below, for the same reason: a deleted path has no
+      # module to import, and the registry cannot express that with an arm of its own.
+      if [ -e "$f" ]; then run="$run $f"; fi
       mapped="$mapped tests/test_fast_gate_mapping.py tests/test_direct_run_completeness.py tests/test_coverage_contract.py"
       ;;
     tests/test_*.py)
@@ -26,7 +28,15 @@ fast_gate_arms_010_tests_test_tree_guards_py() {
       # precisely what a change to a test file is - and the file still passes under discovery, so
       # without this the fast gate is blind to it and only the merger's full gate would see it.
       # Measured cost: 0.67s for the suite (3 tests; the AST walk over 71 modules is 0.62s of it).
-      run="$run $f"
+      # agents-gp7y: A DELETED tests/test_*.py HAS NO MODULE TO IMPORT, and the registry cannot express
+      # that with an arm of its own - a pattern naming a deleted path is a DEAD pattern
+      # (test_no_arm_pattern_is_dead), and naming the gone module as a suite fails
+      # test_every_suite_named_in_the_registry_exists. Both guards live in
+      # tests/test_fast_gate_mapping.py and both are right: the mapping below still covers what a
+      # change to this path means, so only the SELF-RUN is skipped, which is exactly what the path
+      # being gone means. Until this guard, deleting a test file turned the whole fast gate red with
+      # ModuleNotFoundError - a branch unexercised until the first such deletion in this repo.
+      if [ -e "$f" ]; then run="$run $f"; fi
       mapped="$mapped tests/test_direct_run_completeness.py"
       # agents-vim1: newly added or modified test files must audit the cross-module mock coverage contract
       mapped="$mapped tests/test_coverage_contract.py"

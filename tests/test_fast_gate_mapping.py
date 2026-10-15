@@ -737,10 +737,24 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_child_env.py", mapped, "fail-closed probe reads the committed tools.yaml (agents-9nir)")
 
     def test_test_file_change_selects_coverage_contract_audit(self):
-        """agents-vim1: newly added or modified test files must audit the cross-module mock contract."""
-        mapped = resolve_fast_gate(["tests/test_new_feature.py"])
+        """agents-vim1: newly added or modified test files must audit the cross-module mock contract.
+
+        The fixture is a REAL test file because that is what the arm keys on: a changed test that
+        EXISTS is self-run as well as mapped to the audit, which is the contract being asserted.
+        A path with no file is a DELETION, and a deleted test can only be mapped, never self-run -
+        there is no module to import (agents-gp7y)."""
+        mapped = resolve_fast_gate(["tests/test_schedules.py"])
         self.assertIn("tests/test_coverage_contract.py", mapped)
-        self.assertIn("tests/test_new_feature.py", mapped)
+        self.assertIn("tests/test_schedules.py", mapped)
+        # The deletion case, asserted rather than left to a fixture that cannot exist on disk: a
+        # removed test file still selects the audit, but is not self-run. Before agents-gp7y the
+        # arm added it to the run list unconditionally and the shard loader then failed with
+        # ModuleNotFoundError, so the FIRST deletion of a test file in this repo turned the whole
+        # fast gate red. The name below is deliberately synthetic: naming a real deleted path here
+        # would be a dangling citation.
+        deleted = resolve_fast_gate(["tests/test_removed_by_an_earlier_change.py"])
+        self.assertIn("tests/test_coverage_contract.py", deleted)
+        self.assertNotIn("tests/test_removed_by_an_earlier_change.py", deleted)
 
     def test_coverage_contract_mapping(self):
         """tests/coverage-contract.json maps to test_coverage_contract and test_fast_gate_mapping (agents-1kzf)."""
