@@ -361,6 +361,40 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertNotIn("cost fallback", second.stdout)
 
+    def test_concurrent_save_costs_calls_preserve_both_measurements(self):
+        """agents-2c06k: concurrent save_costs calls must not overwrite each other via stale snapshots."""
+        import ast, concurrent.futures
+        src = (self.root / "tools" / "full-gate.sh").read_text(encoding="utf-8")
+        py_lines = []
+        in_py = False
+        for line in src.splitlines():
+            if not in_py and "<<'PY'" in line:
+                in_py = True
+                continue
+            if in_py and line == "PY":
+                break
+            if in_py:
+                py_lines.append(line)
+        tree = ast.parse("\n".join(py_lines))
+        nodes = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        nodes.extend([n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "save_costs"])
+        mod = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(mod)
+        ns = {}
+        exec(compile(mod, "full-gate.sh", "exec"), ns)
+        save_costs = ns["save_costs"]
+
+        table = self.root / "checks" / "full-gate-module-costs.json"
+        table.write_text(json.dumps({"seconds": {}}), encoding="utf-8")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(save_costs, table, {f"tests.test_{i}": float(i)}) for i in range(1, 11)]
+            for f in futures:
+                f.result()
+        data = json.loads(table.read_text(encoding="utf-8"))["seconds"]
+        for i in range(1, 11):
+            self.assertIn(f"tests.test_{i}", data)
+            self.assertEqual(data[f"tests.test_{i}"], float(i))
+
 
 if __name__ == "__main__":
     unittest.main()

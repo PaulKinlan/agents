@@ -13,6 +13,7 @@ printf 'full-gate run: tree=%s sha=%s lane=%s started=%s pid=%s cwd=%s\n' \
 # tee APPENDS to retain the identity header. pipefail propagates a failed shard/coverage/budget.
 python3 -u - "$@" 2>&1 <<'PY' | tee -a "$summary_file"
 import concurrent.futures
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -195,28 +196,38 @@ def save_costs(path, measured, identity=None):
     122s wall on one run and a 350s wall on the next. Merging makes a stray entry harmless: an
     unknown key is simply never looked up. It removes the damage without needing to identify
     the run that writes such a table, which after the fact could not be identified at all.
+
+    CONCURRENCY (agents-2c06k): concurrent save_costs calls take an exclusive file lock on
+    {path}.lock while reading the prior snapshot, merging, and replacing the table, so
+    overlapping writes cannot lose a measured module to a stale read snapshot.
     """
-    existing = {}
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        prior = loaded.get("seconds") if isinstance(loaded, dict) else None
-        if isinstance(prior, dict):
-            existing = {k: v for k, v in prior.items()
-                        if isinstance(v, (int, float)) and 0 < v < 3600}
-    except (OSError, ValueError, TypeError, AttributeError):
-        existing = {}
-    document = {"seconds": dict(existing, **measured)}
-    if identity is not None:
-        document["identity"] = identity
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="full-gate-costs-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump(document, out, sort_keys=True)
-            out.write("\n")
-        os.replace(tmp, path)
-    finally:
-        Path(tmp).unlink(missing_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = {}
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                prior = loaded.get("seconds") if isinstance(loaded, dict) else None
+                if isinstance(prior, dict):
+                    existing = {k: v for k, v in prior.items()
+                                if isinstance(v, (int, float)) and 0 < v < 3600}
+            except (OSError, ValueError, TypeError, AttributeError):
+                existing = {}
+            document = {"seconds": dict(existing, **measured)}
+            if identity is not None:
+                document["identity"] = identity
+            fd, tmp = tempfile.mkstemp(prefix="full-gate-costs-", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as out:
+                    json.dump(document, out, sort_keys=True)
+                    out.write("\n")
+                os.replace(tmp, path)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def main():
