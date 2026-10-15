@@ -216,33 +216,46 @@ class UnmappedPathError(subprocess.CalledProcessError):
 def resolve_fast_gate(changed_files: list[str]) -> list[str]:
     """Execute tools/fast-gate.sh with simulated changed files and extract mapped suites.
 
-    NOTE (agents-ub3k): resolve_fast_gate() returning [] means the path is mapped to DELIBERATELY
-    EMPTY (e.g. patches/*.patch). It raises UnmappedPathError (a CalledProcessError subclass) when
-    a path has NO matching arm at all. To distinguish 'deliberate_empty' from 'unmapped' and 'mapped'
-    with status inspection, use resolve_path_status() or resolve_paths_mapping().
+    NOTE (agents-ub3k, agents-cuugh): resolve_fast_gate() returning [] means the path is mapped to
+    DELIBERATELY EMPTY (e.g. patches/*.patch). It raises UnmappedPathError (a CalledProcessError subclass)
+    when tools/fast-gate.sh refuses changed files because they match no mapping arm. Any other gate
+    execution failure raises standard subprocess.CalledProcessError. To distinguish 'deliberate_empty'
+    from 'unmapped' and 'mapped' with status inspection, use resolve_path_status() or resolve_paths_mapping().
     """
     res = run_fast_gate(changed_files)
     if res.returncode != 0:
-        raise UnmappedPathError(res.returncode, res.args, output=res.stdout, stderr=res.stderr)
+        if "match no mapping arm" in res.stderr:
+            raise UnmappedPathError(res.returncode, res.args, output=res.stdout, stderr=res.stderr)
+        res.check_returncode()
     return res.stdout.strip().split()
 
 
 def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
-    """Execute tools/fast-gate.sh in FAST_GATE_RESOLVE_PATHS mode to resolve mapping status for multiple paths (agents-ub3k).
+    """Execute tools/fast-gate.sh in FAST_GATE_RESOLVE_PATHS mode to resolve mapping status for multiple paths (agents-ub3k, agents-cuugh).
 
     Returns a dict mapping each path to a tuple (status, suites):
       - ("mapped", [suite, ...]): an arm matched and selected suites
       - ("deliberate_empty", []): an arm matched and deliberately selected no suites
-      - ("unmapped", []): no arm matched the path (gate would fail with exit 1)
+      - ("unmapped", []): no arm matched the path (gate refused with no-arm failure)
+
+    Raises subprocess.CalledProcessError if the gate exits with an execution error, or if
+    the batch was unanswered (absence of :always sentinel on clean runs, or missing path records).
     """
     env = os.environ.copy()
     env["GIT_CHANGED"] = "\n".join(paths)
     env["FAST_GATE_RESOLVE_PATHS"] = "1"
     env["FAST_GATE_DRY_RUN"] = "1"
     proc = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+
+    has_unmapped_refusal = "match no mapping arm" in proc.stderr
+    if proc.returncode != 0 and not has_unmapped_refusal:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+
+    always_seen = False
     out = {}
     for line in proc.stdout.splitlines():
         if line.startswith(":always\t"):
+            always_seen = True
             continue
         if line.startswith("!"):
             p = line[1:].strip()
@@ -255,9 +268,14 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
                 out[p] = ("mapped", suites)
             else:
                 out[p] = ("deliberate_empty", [])
+
+    if proc.returncode == 0 and not always_seen:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+
     for p in paths:
         if p not in out:
-            out[p] = ("unmapped", [])
+            raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+
     return out
 
 
@@ -533,6 +551,33 @@ class TestFastGateMapping(unittest.TestCase):
         mapped_status, mapped_suites = batch["lib/child_env.py"]
         self.assertEqual(mapped_status, "mapped")
         self.assertIn("tests/test_child_env.py", mapped_suites)
+
+    def test_gate_execution_error_propagates_distinctly_from_unmapped_refusal(self):
+        """agents-cuugh: gate execution errors must propagate as CalledProcessError rather than UnmappedPathError or ('unmapped', [])."""
+        from unittest.mock import patch
+
+        p = "patches/no-such-artifact-anyone-reads.patch"
+        crashed_proc = subprocess.CompletedProcess(
+            ["bash", "tools/fast-gate.sh"], 1, "", "fast-gate: FAIL: could not load arms"
+        )
+        with patch("tests.test_fast_gate_mapping.subprocess.run", return_value=crashed_proc):
+            # 1. resolve_path_status must raise CalledProcessError, NOT return ('unmapped', [])
+            with self.assertRaises(subprocess.CalledProcessError) as cm_status:
+                resolve_path_status(p)
+            self.assertNotIsInstance(cm_status.exception, UnmappedPathError)
+
+            # 2. resolve_fast_gate must raise CalledProcessError, NOT UnmappedPathError
+            with self.assertRaises(subprocess.CalledProcessError) as cm_gate:
+                resolve_fast_gate([p])
+            self.assertNotIsInstance(cm_gate.exception, UnmappedPathError)
+
+        # 3. A gate failure after printing output without :always is an unanswered batch
+        partial_proc = subprocess.CompletedProcess(
+            ["bash", "tools/fast-gate.sh"], 1, f"{p}\t\n", "fast-gate: FAIL: pipeline crashed"
+        )
+        with patch("tests.test_fast_gate_mapping.subprocess.run", return_value=partial_proc):
+            with self.assertRaises(subprocess.CalledProcessError):
+                resolve_path_status(p)
 
     def test_an_ordinary_change_is_unaffected_by_the_patch_artifact_arm(self):
         """A change with NO patches/ involvement selects exactly what it selected before

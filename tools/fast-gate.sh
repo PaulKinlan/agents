@@ -692,23 +692,6 @@ tree_guards="tests/test_tree_guards.py"
 # not selected is the same as no pin (the merger's check, and the gap that let agents-pdth be born red).
 consumer_coverage="tests/test_fast_gate_consumer_coverage.py"
 
-# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
-# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
-if [ -z "$run" ] && [ -z "$mapped" ]; then
-  if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
-    FAST_GATE_TERMINATED=1
-    fast_gate_report_ignored_arms
-    exit 0
-  fi
-  mapped="tests/test_factory_core.py"
-fi
-
-if ! files="$(printf '%s\n' $run $mapped $tree_guards $consumer_coverage $inventory | awk 'NF && !seen[$0]++' | sort)"; then
-  echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
-  echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
-  exit 1
-fi
-
 # agents-wzmj (F1): PER-PATH RESOLVE MODE, and it is checked BEFORE the union dry run so it takes
 # precedence when a caller sets both (it IS a dry run - one that answers per path instead of as a union).
 #
@@ -727,6 +710,23 @@ if [ -n "${FAST_GATE_RESOLVE_PATHS:-}" ]; then
   fast_gate_report_ignored_arms
   printf ':always\t%s\n' "$(printf '%s\n' $run $tree_guards $consumer_coverage | awk 'NF && !seen[$0]++' | sort | tr '\n' ' ')"
   exit 0
+fi
+
+# Fall back to a bounded smoke subset when nothing maps (an all-ignored docs/config-only
+# change, or no delta at all). Unmatched files never reach here - they fail loudly above.
+if [ -z "$run" ] && [ -z "$mapped" ]; then
+  if [ -n "${FAST_GATE_DRY_RUN:-}" ]; then
+    FAST_GATE_TERMINATED=1
+    fast_gate_report_ignored_arms
+    exit 0
+  fi
+  mapped="tests/test_factory_core.py"
+fi
+
+if ! files="$(printf '%s\n' $run $mapped $tree_guards $consumer_coverage $inventory | awk 'NF && !seen[$0]++' | sort)"; then
+  echo "fast-gate: FAIL: could not compute the suite list (the dedupe pipeline failed)." >&2
+  echo "fast-gate: the suites that were mapped are UNKNOWN, not empty - refusing to fall back to the smoke subset." >&2
+  exit 1
 fi
 
 # Dry-run support for testing mapping resolution without invoking unittest.
