@@ -16,6 +16,7 @@ import ast
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -606,6 +607,102 @@ class TestConfigIsResolvedLoudly(unittest.TestCase):
                          "tools/check.conf header must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
         self.assertNotIn("sources ONLY $HOME/.fleet/check.conf", cmd_header,
                          "tools/check-cmd.sh header must not claim fleet-check sources ONLY $HOME/.fleet/check.conf")
+
+
+class TestInstallDestinationsAreThisProductsOwnDecision(unittest.TestCase):
+    """agents-g5ox: WHERE an install writes is THIS repo's own decision, and this is the product-side
+    statement of it (agents-0utp's ruling). The fleet-shaped suite next door states the same shape
+    against the deployed fleet binary, which is why it carried a private path into the public repo;
+    the product claim needs no fleet binary - only tools/check-cmd.sh and a temp HOME.
+
+    The distinction matters because the two destinations have opposite blast radii: the repo-local
+    default reaches one repo after an install, while the host-wide file is read by every repo invoked
+    on the machine. Installing from repo A must not hand repo B a gate command it never chose.
+    """
+
+    def _install(self, args, home, extra_env=None):
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env.pop("FLEET_CHECK_CONF", None)
+        env.update(extra_env or {})
+        return subprocess.run(["bash", str(ROOT / "tools" / "check-cmd.sh"), "--install", *args],
+                              capture_output=True, text=True, timeout=60, env=env)
+
+    @staticmethod
+    def _host_wide(home: Path) -> Path:
+        return Path(home) / ".fleet" / "check.conf"
+
+    @staticmethod
+    def _repo_local(home: Path) -> Path:
+        # Named for the CHECKOUT, exactly as tools/check-cmd.sh derives it, so the assertion does not
+        # assume the directory this repo was cloned into.
+        return Path(home) / ".fleet" / f"{ROOT.name}-check.conf"
+
+    def test_a_bare_install_writes_the_repo_local_file_and_leaves_the_host_wide_one_alone(self):
+        """The default destination is repo-local, and it is OFF the checkout so a reset cannot take it."""
+        with tempfile.TemporaryDirectory() as tmp_home:
+            home = Path(tmp_home)
+            res = self._install([], home)
+            self.assertEqual(res.returncode, 0, f"--install failed: {res.stderr}")
+            self.assertTrue(self._repo_local(home).is_file(),
+                            "a bare --install must write the repo-local file")
+            self.assertFalse(self._host_wide(home).exists(),
+                             "a bare --install must NOT write the file every repo on the host reads")
+
+    def test_install_global_is_the_explicit_opt_in_for_the_host_wide_file(self):
+        """The host-wide file is written only when an installer asks for it by name."""
+        with tempfile.TemporaryDirectory() as tmp_home:
+            home = Path(tmp_home)
+            res = self._install(["--global"], home)
+            self.assertEqual(res.returncode, 0, f"--install --global failed: {res.stderr}")
+            self.assertTrue(self._host_wide(home).is_file(), "--global writes the host-wide file")
+            self.assertIn(str(self._host_wide(home)), res.stdout,
+                          "install must report the destination it actually wrote")
+
+    def test_the_override_wins_over_global(self):
+        """FLEET_CHECK_CONF names the destination, in the same order the reader's repair command uses."""
+        with tempfile.TemporaryDirectory() as tmp_home, tempfile.TemporaryDirectory() as tmp_dest:
+            home = Path(tmp_home)
+            target = Path(tmp_dest) / "chosen.conf"
+            res = self._install(["--global"], home, {"FLEET_CHECK_CONF": str(target)})
+            self.assertEqual(res.returncode, 0, f"install failed: {res.stderr}")
+            self.assertTrue(target.is_file(), "FLEET_CHECK_CONF names the destination")
+            self.assertFalse(self._host_wide(home).exists(), "the override wins over --global")
+
+    def test_the_installed_file_carries_the_tracked_values(self):
+        """Whichever destination is written, its content is the TRACKED file's - that is the point of
+        installing from the tree rather than editing the deployed copy by hand."""
+        with tempfile.TemporaryDirectory() as tmp_home:
+            home = Path(tmp_home)
+            res = self._install([], home)
+            self.assertEqual(res.returncode, 0, f"--install failed: {res.stderr}")
+            written = self._repo_local(home).read_text(encoding="utf-8")
+            self.assertEqual(_tracked_fields(written), _tracked_fields(),
+                             "the installed file must carry the tracked values")
+
+    def test_every_declared_field_is_one_line_and_one_command(self):
+        """The reader's contract with this file, in tools/check.conf's own words: ONE COMMAND PER LINE,
+        AS A SINGLE STRING. A field continued onto a second line, or a command carrying an embedded
+        newline, would reach the gate as something other than the single command this file declares -
+        and the gate would then run a command nobody chose.
+        """
+        declared = {}
+        for line in TRACKED.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"([A-Z][A-Z0-9_]*)=?(.*)$", line)
+            if match and "=" in line and not line.lstrip().startswith("#"):
+                declared[match.group(1)] = match.group(2)
+        self.assertEqual(set(declared),
+                         {"CHECK_CMD", "CHECK_FAST_CMD", "CHECK_TIMEOUT", "CHECK_FAST_TIMEOUT"},
+                         "the declared field set is what the reader parses")
+        for name in ("CHECK_CMD", "CHECK_FAST_CMD"):
+            value = declared[name]
+            self.assertFalse(value.endswith("\\"), f"{name} must not continue onto the next line")
+            self.assertNotIn("\n", value, f"{name} must be a single line")
+            self.assertTrue(value.startswith('"') and value.endswith('"'),
+                            f"{name} must be one quoted command string")
+        for name in ("CHECK_TIMEOUT", "CHECK_FAST_TIMEOUT"):
+            self.assertTrue(declared[name].isdigit() and int(declared[name]) > 0,
+                            f"{name} must be a positive integer bound")
 
 
 if __name__ == "__main__":
