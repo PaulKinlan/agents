@@ -55,6 +55,32 @@ from tests.test_check_conf_consistency import _tracked_fields
 ROOT = Path(__file__).resolve().parent.parent
 RESOLVER = ROOT / "tools" / "check-cmd.sh"
 TRACKED = ROOT / "tools" / "check.conf"
+# agents-nfpqn: WHY SEVEN TESTS IN THIS SUITE SKIP, AND WHY NO FIXTURE BELONGS HERE.
+#
+# FLEET_CHECK below (careful: NOT FLEET_CHECK_CONF, which is this repository's own config path) is the
+# DEPLOYED fleet entrypoint - another repository's program. The tests that drive it are conditional BY
+# DESIGN: point FACTORY_GATE_ENTRYPOINT at a real deployed entrypoint on a fleet VM and they run; anywhere
+# else they skip, and the sentinel is chosen so they skip rather than quietly run against a stand-in. The
+# SEVEN that do this, as reported by the unittest result object rather than by -v prose:
+#
+#   test_a_fresh_home_has_no_per_vm_config
+#   test_no_args_is_the_mode_that_reaches_the_config
+#   test_the_entrypoint_refuses_on_a_fresh_home
+#   test_command_mismatch_fails_cleanly_without_spawning_real_gate
+#   test_the_entrypoint_resolves_the_installed_tracked_command
+#   test_every_anchor_this_suite_depends_on_is_still_present      <- subject is the fleet
+#   test_the_anchor_check_fires_when_an_anchor_is_missing        <- bundle's anchors, one layer out
+#
+# THE DECISION, recorded because the alternative was attempted and refused (agents-nfpqn, agents-gp7y):
+# these cannot be re-pointed at a product-local fixture. Their subject is not in this repository, so a
+# fixture would only FABRICATE the program under test - the re-derivation the boundary pass rejected when
+# it removed this project's fleet-shaped artifacts. A product-local stand-in would be worse than useless:
+# it would assert another repository's contract against a program that is not its subject, and pass.
+#
+# WHAT COVERS THE PRODUCT INSTEAD: the other 41 tests in this file, which drive THIS repository's own
+# tools/fast-gate.sh (through _run_gate) and tools/check-cmd.sh - install, drift, foreign-config,
+# malformed-field and always-exit-0 behaviour. Nothing here is a coverage gap waiting for a fixture; these
+# seven are the fleet's own contract, exercised where the fleet is deployed.
 FLEET_CHECK = Path(os.environ.get("FACTORY_GATE_ENTRYPOINT") or "/nonexistent/deployed-entrypoint")
 
 # THE FLEET-BUNDLE INTERFACE THIS SUITE DRIVES, ASSERTED RATHER THAN ASSUMED (agents-o8jd).
