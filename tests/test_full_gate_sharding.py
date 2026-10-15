@@ -323,6 +323,40 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("FULL_GATE_SHARDS must be a positive integer", res.stdout)
 
+    def test_a_run_merges_its_costs_instead_of_deleting_another_trees_entries(self):
+        """agents-2e2ca: save_costs REPLACED the table, so a stray entry could delete 101 modules."""
+        self.module("here", " def test_one(self): pass\n")
+        table = self.root / "checks" / "full-gate-module-costs.json"
+        table.write_text(json.dumps({"seconds": {"tests.test_elsewhere": 42.0,
+                                                  "test_oom_two": 0.2}}), encoding="utf-8")
+        res = self.run_gate()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        document = json.loads(table.read_text(encoding="utf-8"))
+        # THE CONTROL, without which "the table is intact" is satisfiable by a merge that records
+        # nothing at all: this run must have recorded its own cost.
+        self.assertIn("tests.test_here", document["seconds"])
+        # and the other tree's entries survive - including the one no module here answers to, which
+        # is the exact shape that destroyed the real table on 2026-10-15.
+        self.assertEqual(document["seconds"]["tests.test_elsewhere"], 42.0)
+        self.assertEqual(document["seconds"]["test_oom_two"], 0.2)
+        # a table now says which tree it was measured on, so a foreign one is detectable
+        self.assertEqual(document["identity"]["tree"],
+                         subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.root,
+                                        capture_output=True, text=True, check=True).stdout.strip())
+
+    def test_the_fallback_to_test_count_is_visible_rather_than_silent(self):
+        """agents-2e2ca: the silent fallback is why a replaced table sharded on test count."""
+        self.module("a", " def test_one(self): pass\n")
+        first = self.run_gate()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn("cost fallback", first.stderr)
+        self.assertIn("ordering those by test COUNT", first.stderr)
+        # once the table carries this fixture's module the fallback is gone, so the line is about
+        # the missing entry and not something the gate prints unconditionally.
+        second = self.run_gate()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertNotIn("cost fallback", second.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

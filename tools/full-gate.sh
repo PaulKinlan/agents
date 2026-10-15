@@ -122,6 +122,15 @@ def costs_at(path, modules):
             raise ValueError("not a cost table")
     except (OSError, ValueError, KeyError, TypeError):
         values = {}
+    # A module with no usable entry is ordered by TEST COUNT, which is not its cost: measured here,
+    # tests.test_pins_audit has 12 ids and 122-158s of CPU, so the fallback moves it from rank 2 by
+    # cost to rank 42 by count. That fallback used to be silent, which is why a table that had been
+    # replaced sharded a whole run on test count before anyone could see it (agents-2e2ca).
+    missing = [m for m in modules
+               if not (isinstance(values.get(m), (int, float)) and 0 < values[m] < 3600)]
+    if missing:
+        print(f"full-gate: cost fallback for {len(missing)} of {len(modules)} module(s) with no usable "
+              f"entry in {path.name}; ordering those by test COUNT", file=sys.stderr, flush=True)
     return {m: float(values[m]) if isinstance(values.get(m), (int, float))
             and 0 < values[m] < 3600 else float(len(ids))
             for m, ids in modules.items()}
@@ -162,12 +171,48 @@ def run_module(module):
     return module, rc, time.monotonic() - start, output, TEST_LINE.findall(output)
 
 
-def save_costs(path, measured):
+def git_identity():
+    """The tree this table was measured on, recorded so a foreign table is detectable.
+
+    On 2026-10-15 a 42-byte table naming a module that exists in no tree on this machine replaced
+    a 101-module table, and nothing in the file said where it had come from (agents-2e2ca).
+    """
+    def run(*args):
+        try:
+            return subprocess.run(["git", *args], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+    return {"commit": run("rev-parse", "HEAD"), "tree": run("rev-parse", "HEAD^{tree}")}
+
+
+def save_costs(path, measured, identity=None):
+    """MERGE this run's measurements in; never delete entries another run paid to measure.
+
+    REPLACING was the defect (agents-2e2ca): a stray one-entry table replaced a 101-module one,
+    after which costs_at fell back to test COUNT for every real module - and that proxy moves 56
+    of 103 modules by 20 or more rank places, which is how the same tree-class ends up with a
+    122s wall on one run and a 350s wall on the next. Merging makes a stray entry harmless: an
+    unknown key is simply never looked up. It removes the damage without needing to identify
+    the run that writes such a table, which after the fact could not be identified at all.
+    """
+    existing = {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        prior = loaded.get("seconds") if isinstance(loaded, dict) else None
+        if isinstance(prior, dict):
+            existing = {k: v for k, v in prior.items()
+                        if isinstance(v, (int, float)) and 0 < v < 3600}
+    except (OSError, ValueError, TypeError, AttributeError):
+        existing = {}
+    document = {"seconds": dict(existing, **measured)}
+    if identity is not None:
+        document["identity"] = identity
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="full-gate-costs-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump({"seconds": measured}, out, sort_keys=True)
+            json.dump(document, out, sort_keys=True)
             out.write("\n")
         os.replace(tmp, path)
     finally:
@@ -220,7 +265,9 @@ def main():
         actual.extend(ids)
         if rc or set(ids) != expected[module] or len(ids) != len(expected[module]):
             failed.append(module)
-    save_costs(cost_path, measured)
+    save_costs(cost_path, measured,
+               dict(git_identity(), modules=len(measured),
+                    at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
     unknown_set = set(unknown)
     known = [m for m in sorted(expected) if m not in unknown_set]
     expected_all = set().union(*[expected[m] for m in known]) if known else set()
