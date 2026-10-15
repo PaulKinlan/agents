@@ -232,23 +232,24 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            # Coordinator explicit and final ruling (agents-2e2ca):
-            # A run is a legitimate repository full gate eligible to update baseline timings and
-            # replace provenance if:
-            # 1. It measures at least 90% of the existing modules (or table is empty); AND
+            # Coordinator extreme simplification & final ruling (agents-2e2ca):
+            # A run is eligible to update baseline costs and provenance IF AND ONLY IF:
+            # 1. It measured 100% of the existing modules: set(measured) >= set(existing); AND
             # 2. Its remote.origin.url matches the existing provenance remote (or existing has none).
-            # Foreign mock fixtures (tree="fixture", running in /tmp without repo remote) or partial runs
-            # (< 90% coverage) are strictly additive: they may register new modules, but never overwrite
-            # baseline timings or provenance. A real repository full gate across commits in this repo
-            # (sharing the same remote.origin.url and measuring all modules) updates costs cleanly.
+            # If even a single existing module is missing from the run (partial run, single test,
+            # or fixture), it is strictly additive: it may register new modules, but NEVER overwrites
+            # existing baseline timings or provenance. A real repository full gate measuring all
+            # modules updates costs and provenance cleanly.
             current_provenance = identity or {}
             existing_provenance = existing_identity or {}
-            is_full_coverage = not existing or (len(set(measured.keys()) & set(existing.keys())) >= len(existing) * 0.9)
-            is_matching_remote = bool(
-                current_provenance.get("remote")
-                and current_provenance.get("remote") == existing_provenance.get("remote")
+            is_complete = not existing or (set(measured.keys()) >= set(existing.keys()))
+            can_overwrite = is_complete and (
+                not existing
+                or (
+                    current_provenance.get("remote")
+                    and current_provenance.get("remote") == existing_provenance.get("remote")
+                )
             )
-            can_overwrite = not existing or (is_full_coverage and (is_matching_remote or not existing_provenance.get("remote")))
 
             if can_overwrite:
                 merged_seconds = dict(existing, **measured)
