@@ -28,6 +28,40 @@ class GateError(Exception):
     pass
 
 
+# The NORMALISED exit codes a killed child can carry. All of them mean one thing - THE MODULE NEVER
+# REACHED A VERDICT - and that is the fact this gate must not confuse with a content failure
+# (agents-vuvrm). It is not evidence about the tree, so it must not read as a FAILING module and
+# must not contribute its ids as MISSING. The facts this came from, measured by the merger while
+# landing agents-nfpqn: a full gate went red on tests.test_fast_gate_mapping with 'ID SET MISMATCH
+# missing=[101 ids]' and 'OVER BUDGET 398.8s > 300s' while the explaining line was
+# 'module=... wall=240.015s rc=124 ids=0' - killed at its own bound, no ids produced, and THE LOG
+# HAD ZERO ASSERTION FAILURES. The same module alone on the same tree was rc=0, OK, 201s.
+#
+# TWO SPELLINGS, TWO MECHANISMS, and they are NOT interchangeable. A reader who assumes a shell
+# will get this wrong - we did:
+#   * 124 - the per-module bound. run_module drives the module through subprocess.run(timeout=...)
+#     WITHOUT a shell and Python's own TimeoutExpired path sets this code explicitly; it never
+#     comes from a shell.
+#   * 137 / 143 - a child killed by SIGKILL / SIGTERM (the OOM and reaper paths). With no shell,
+#     subprocess reports the NEGATIVE SIGNAL NUMBER, so these arrive as -9 and -15, and the shell
+#     spelling (128 + N) exists only after normalisation. That is what killed_rc() is for.
+# Accepting only the shell spelling was agents-2xq02 (found by rev-vuvrm on b6cd3f23): a
+# signal-killed module missed the membership test, landed in `failed`, and had its ids reported as
+# MISSING - the same costume as the bound kill, reached through the other door.
+KILLED_RCS = frozenset({124, 137, 143})
+
+
+def killed_rc(rc):
+    """Normalise a module's return code to the shell spelling (128 + N) when a signal killed it.
+
+    subprocess.run without a shell reports a signal-killed child as the NEGATIVE signal number
+    (-9 SIGKILL, -15 SIGTERM), so 128 - rc is the shell spelling (128 - -9 = 137, 128 - -15 = 143).
+    Both spellings are the same fact, so they are collapsed here into one state rather than one
+    being accepted and the other silently falling through to `failed` (agents-2xq02).
+    """
+    return 128 - rc if rc < 0 else rc
+
+
 def positive_int(name, default):
     try:
         value = int(os.environ.get(name, default))
@@ -169,17 +203,27 @@ def main():
                 results[module] = (module, 1, 0.0, f"{module}: runner error: {exc}", [])
     actual = []
     failed = []
+    unknown = []
     measured = {}
     for module in sorted(expected):
         _, rc, secs, output, ids = results[module]
         measured[module] = round(secs, 3)
-        actual.extend(ids)
         print(f"full-gate: module={module} wall={secs:.3f}s rc={rc} ids={len(ids)}", flush=True)
         print(output, flush=True)
+        if killed_rc(rc) in KILLED_RCS:
+            # Killed, not failed: the suite never reached a verdict. Its wall is still recorded
+            # above (the cost cache is what the shard order is built from), but neither its ids
+            # nor its absence is evidence about anything, so it is excluded from the id-set
+            # accounting on BOTH sides rather than reported as a failing module (agents-vuvrm).
+            unknown.append(module)
+            continue
+        actual.extend(ids)
         if rc or set(ids) != expected[module] or len(ids) != len(expected[module]):
             failed.append(module)
     save_costs(cost_path, measured)
-    expected_all = set().union(*expected.values())
+    unknown_set = set(unknown)
+    known = [m for m in sorted(expected) if m not in unknown_set]
+    expected_all = set().union(*[expected[m] for m in known]) if known else set()
     actual_all = set(actual)
     missing, extra = sorted(expected_all - actual_all), sorted(actual_all - expected_all)
     duplicates = len(actual) - len(actual_all)
@@ -190,11 +234,40 @@ def main():
         print(f"full-gate: ID SET MISMATCH missing={missing} extra={extra} duplicates={duplicates}")
     if failed:
         print("full-gate: failing modules: " + ", ".join(failed))
-    if elapsed > budget:
+    if unknown:
+        print("full-gate: unknown modules (killed at the per-module bound, no verdict): "
+              + ", ".join(unknown))
+        print("full-gate: a killed module is not evidence - it is excluded from the id set on both "
+              "sides, so it neither fails nor counts its ids as missing")
+    over_budget = elapsed > budget
+    if over_budget:
         print(f"full-gate: OVER BUDGET {elapsed:.3f}s > {budget}s")
-    if failed or missing or extra or duplicates or elapsed > budget:
+        if not (failed or missing or extra or duplicates or unknown):
+            # The second costume of the same defect (agents-vuvrm), measured while landing
+            # agents-nfpqn: attempt 2 on the same tree reported 'executed ids=1880 expected=1880
+            # missing=0 extra=0 duplicate=0' with 'OVER BUDGET 350.483s > 300s' and exit 1, and NO
+            # failing-modules line, because nothing failed - every id ran and the module that the
+            # first attempt killed at its bound ran and passed. A complete green run over the wall
+            # is a machine-state fact, not a content regression, and the next action differs (park
+            # and wait, versus fix something), so it gets its own state and its own exit code.
+            print("full-gate: the run was COMPLETE - every expected id executed and no module "
+                  "failed - so this is the WALL, not a content regression: nothing is contradicted "
+                  "and there is no assertion to fix. Re-run when the box is quieter, or see "
+                  "docs/speed.md for the terms this budget belongs to.")
+    if failed or missing or extra or duplicates:
         print("full-gate: failed")
         return 1
+    if unknown:
+        # Distinct from both passed and failed, and this is deliberate: a suite that never ran
+        # cannot be reported as having passed, and reporting it as a content failure is what this
+        # bead exists to stop. The caller can tell 'not fully verified' from 'broken'.
+        print("full-gate: unknown")
+        return 2
+    if over_budget:
+        # Complete, green, and over the wall: not a pass (nothing here says the tree was verified
+        # within its budget) and not a failure (nothing was contradicted). Exit 3 is that reading.
+        print("full-gate: over budget")
+        return 3
     print("full-gate: passed")
     return 0
 
