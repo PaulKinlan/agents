@@ -216,9 +216,22 @@ def main():
               + ", ".join(unknown))
         print("full-gate: a killed module is not evidence - it is excluded from the id set on both "
               "sides, so it neither fails nor counts its ids as missing")
-    if elapsed > budget:
+    over_budget = elapsed > budget
+    if over_budget:
         print(f"full-gate: OVER BUDGET {elapsed:.3f}s > {budget}s")
-    if failed or missing or extra or duplicates or elapsed > budget:
+        if not (failed or missing or extra or duplicates or unknown):
+            # The second costume of the same defect (agents-vuvrm), measured while landing
+            # agents-nfpqn: attempt 2 on the same tree reported 'executed ids=1880 expected=1880
+            # missing=0 extra=0 duplicate=0' with 'OVER BUDGET 350.483s > 300s' and exit 1, and NO
+            # failing-modules line, because nothing failed - every id ran and the module that the
+            # first attempt killed at its bound ran and passed. A complete green run over the wall
+            # is a machine-state fact, not a content regression, and the next action differs (park
+            # and wait, versus fix something), so it gets its own state and its own exit code.
+            print("full-gate: the run was COMPLETE - every expected id executed and no module "
+                  "failed - so this is the WALL, not a content regression: nothing is contradicted "
+                  "and there is no assertion to fix. Re-run when the box is quieter, or see "
+                  "docs/speed.md for the terms this budget belongs to.")
+    if failed or missing or extra or duplicates:
         print("full-gate: failed")
         return 1
     if unknown:
@@ -227,6 +240,11 @@ def main():
         # bead exists to stop. The caller can tell 'not fully verified' from 'broken'.
         print("full-gate: unknown")
         return 2
+    if over_budget:
+        # Complete, green, and over the wall: not a pass (nothing here says the tree was verified
+        # within its budget) and not a failure (nothing was contradicted). Exit 3 is that reading.
+        print("full-gate: over budget")
+        return 3
     print("full-gate: passed")
     return 0
 

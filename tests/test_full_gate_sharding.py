@@ -147,11 +147,53 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertNotIn("test_zz_debris_probe_tmp", res.stdout)
 
     def test_over_budget_is_not_a_pass(self):
+        """RE-PINNED BY agents-vuvrm, deliberately and loudly: this case's subject is still
+        'an over-budget run is not a pass', and its two load-bearing assertions are UNCHANGED -
+        the exit status is non-zero, and the gate still says OVER BUDGET. What changed is the
+        RENDERING it used to pin: 'full-gate: failed'. That reading is the defect agents-vuvrm
+        fixes, because an over-budget run with expected==executed and zero failures is a
+        machine-state fact, not a content regression, and calling it 'failed' sends the reader to
+        look for an assertion that does not exist. A complete run over the wall is now its own
+        state with its own exit code (3), so the second assertion is inverted rather than dropped.
+        """
         self.module("slow", " def test_one(self): time.sleep(1.1)\n")
         res = self.run_gate(FULL_GATE_BUDGET_S="1")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("OVER BUDGET", res.stdout)
-        self.assertIn("full-gate: failed", res.stdout)
+        self.assertIn("executed ids=1 expected=1 missing=0 extra=0 duplicate=0", res.stdout)
+        self.assertNotIn(
+            "full-gate: failed", res.stdout,
+            "a complete run over the wall was reported as a content FAILURE:\n" + res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 3,
+            "a complete green run over the wall must be its own outcome, not failure (1):\n"
+            + res.stdout + res.stderr)
+
+    def test_a_complete_run_over_the_wall_is_not_a_content_failure(self):
+        """agents-vuvrm acceptance 2, from the merger's attempt 2 while landing agents-nfpqn.
+
+        Attempt 2 on the same tree reported 'executed ids=1880 expected=1880 missing=0 extra=0
+        duplicate=0' with 'OVER BUDGET 350.483s > 300s' and exit 1 - and NO failing-modules line,
+        because nothing failed: all 1880 ids ran, zero assertion failures, and the module attempt 1
+        had killed at its 240s bound ran and passed. SO A COMPLETE GREEN RUN OVER THE WALL WAS
+        INDISTINGUISHABLE FROM A CONTENT REGRESSION, and the right next action differs: park and
+        wait, versus fix something. This pins that an over-the-wall run which is complete is
+        reported as the wall, with its accounting beside it and no failure claimed.
+        """
+        self.module("slow", " def test_one(self): time.sleep(1.1)\n")
+        res = self.run_gate(FULL_GATE_BUDGET_S="1")
+        self.assertIn("executed ids=1 expected=1 missing=0 extra=0 duplicate=0", res.stdout)
+        self.assertIn("OVER BUDGET", res.stdout)
+        self.assertIn("COMPLETE", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn("failing modules", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn("ID SET MISMATCH", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn(
+            "full-gate: failed", res.stdout,
+            "a complete run over the wall was reported as a content failure:\n" + res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 3,
+            "complete-but-over-wall is its own state: failed=1, unknown=2, over budget=3:\n"
+            + res.stdout + res.stderr)
 
     def test_killed_module_is_unknown_and_not_a_failing_module(self):
         """A module killed at its own bound is not evidence about the tree (agents-vuvrm).
