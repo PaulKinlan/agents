@@ -422,9 +422,12 @@ class TestFullGateSharding(unittest.TestCase):
         table = self.root / "checks" / "full-gate-module-costs.json"
         # 1. Full-gate baseline measurement with 2 modules and valid 40-char git tree sha
         save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0},
-                   {"tree": "a" * 40, "remote": "origin", "modules": 2})
+                   {"tree": "a" * 40, "remote": "origin", "modules": 2},
+                   expected_keys=["tests.test_heavy", "tests.test_light"])
         # 2. Foreign/partial run measuring only 1 module with a stub timing
-        save_costs(table, {"tests.test_heavy": 0.2}, {"tree": "fixture", "remote": "", "modules": 1})
+        save_costs(table, {"tests.test_heavy": 0.2},
+                   {"tree": "b" * 40, "remote": "origin", "modules": 1},
+                   expected_keys=["tests.test_heavy", "tests.test_light"])
         # 3. Full-gate sharding query must still preserve the full-gate baseline cost
         costs = costs_at(table, {"tests.test_heavy": ["heavy"], "tests.test_light": ["light"]})
         self.assertEqual(costs["tests.test_heavy"], 140.0)
@@ -462,10 +465,12 @@ class TestFullGateSharding(unittest.TestCase):
         table = self.root / "checks" / "full-gate-module-costs.json"
         # 1. Baseline measurement with 2 modules and valid 40-char git tree sha
         save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0},
-                   {"tree": "a" * 40, "remote": "origin", "modules": 2})
+                   {"tree": "a" * 40, "remote": "origin", "modules": 2},
+                   expected_keys=["tests.test_heavy", "tests.test_light"])
         # 2. Foreign mock fixture run with tree="fixture" and no matching remote
         save_costs(table, {"tests.test_heavy": 0.2, "tests.test_fixture": 0.1},
-                   {"tree": "fixture", "remote": "", "modules": 2})
+                   {"tree": "fixture", "remote": "", "modules": 2},
+                   expected_keys=["tests.test_heavy", "tests.test_fixture"])
         # 3. Baseline cost must be preserved, foreign run rejected without pollution, and real identity retained
         costs = costs_at(table, {"tests.test_heavy": ["heavy"], "tests.test_light": ["light"]})
         self.assertEqual(costs["tests.test_heavy"], 140.0)
@@ -479,7 +484,8 @@ class TestFullGateSharding(unittest.TestCase):
 
         # 4. A full repository run on a new commit tree with matching remote updates costs and provenance
         save_costs(table, {"tests.test_heavy": 135.0, "tests.test_light": 0.9, "tests.test_new": 0.5},
-                   {"tree": "b" * 40, "remote": "origin", "modules": 3})
+                   {"tree": "b" * 40, "remote": "origin", "modules": 3},
+                   expected_keys=["tests.test_heavy", "tests.test_light", "tests.test_new"])
         data2 = json.loads(table.read_text(encoding="utf-8"))
         self.assertEqual(data2["seconds"]["tests.test_heavy"], 135.0)
         self.assertEqual(data2["seconds"]["tests.test_light"], 0.9)

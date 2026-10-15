@@ -193,7 +193,7 @@ def git_identity():
     }
 
 
-def save_costs(path, measured, identity=None):
+def save_costs(path, measured, identity=None, expected_keys=None):
     """MERGE this run's measurements in; never delete entries another run paid to measure.
 
     REPLACING was the defect (agents-2e2ca): a stray one-entry table replaced a 101-module one,
@@ -207,11 +207,12 @@ def save_costs(path, measured, identity=None):
     {path}.lock while reading the prior snapshot, merging, and replacing the table, so
     overlapping writes cannot lose a measured module to a stale read snapshot.
 
-    PARTIAL RUN PROVENANCE (agents-ia6mp): when a partial or foreign run measures a smaller
-    subset of modules (e.g. a 1-module fixture run), overlapping module costs are preserved
-    from the larger/full-gate baseline rather than overwritten with stub timings, and the
-    full suite's identity block is retained.
+    COMPLETENESS & PROVENANCE: partial runs (missing expected modules) and foreign runs
+    (non-matching remote.origin.url) do not write to the full-gate cost table.
     """
+    if expected_keys and not (set(measured.keys()) >= set(expected_keys)):
+        return
+
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
     with open(lock_path, "a", encoding="utf-8") as lock_file:
@@ -232,31 +233,16 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            # Coordinator final and definitive architectural ruling (agents-2e2ca):
-            # 1. Foreign runs (different remote.origin.url, e.g. scratch trees, /tmp fixtures,
-            #    or unit test mocks) must never pollute or touch the shared repository cost table.
+            # Foreign runs (different remote.origin.url) never touch the shared cost table:
             current_remote = (identity or {}).get("remote", "")
             existing_remote = (existing_identity or {}).get("remote", "")
             if existing_remote and current_remote != existing_remote:
                 return
 
-            # 2. Is this a complete full gate of the repository (measures 100% of existing modules)?
-            is_full_gate = not existing or (set(measured.keys()) >= set(existing.keys()))
+            merged_seconds = dict(existing, **measured)
+            merged_identity = identity or existing_identity
 
-            if is_full_gate:
-                # Full gate: updates all measured module durations and updates provenance:
-                existing.update(measured)
-                merged_identity = identity or existing_identity
-            else:
-                # Partial run: strictly additive!
-                # Can ONLY add new modules that do not exist yet.
-                # CAN NEVER OVERWRITE ANY EXISTING MODULE DURATION (e.g. cannot overwrite 140s with 0.2s).
-                for mod, dur in measured.items():
-                    if mod not in existing:
-                        existing[mod] = dur
-                merged_identity = existing_identity or identity
-
-            document = {"seconds": existing}
+            document = {"seconds": merged_seconds}
             if merged_identity:
                 document["identity"] = merged_identity
 
@@ -320,7 +306,8 @@ def main():
             failed.append(module)
     save_costs(cost_path, measured,
                dict(git_identity(), modules=len(measured),
-                    at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
+                    at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+               expected_keys=expected.keys())
     unknown_set = set(unknown)
     known = [m for m in sorted(expected) if m not in unknown_set]
     expected_all = set().union(*[expected[m] for m in known]) if known else set()
