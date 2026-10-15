@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import subprocess
 import sys
 import tempfile
@@ -111,8 +112,19 @@ def shard_order(modules, costs, workers):
 TEST_LINE = re.compile(r"^\S+ \((tests\.[^()]+)\)(?= \.\.\.|[ \t]*$)", re.MULTILINE)
 
 
+def _children_cpu(before):
+    """Children-CPU consumed since `before`, in seconds."""
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return (after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)
+
+
 def run_module(module):
     start = time.monotonic()
+    # Wall time alone cannot separate a module that WORKED from one that WAITED, which is the
+    # question the fleet keeps asking of this gate (agents-c3cil): a module with 122s of wall and
+    # 130s of CPU is working, one with 122s of wall and 12s of CPU is waiting. Per-module CPU is
+    # only attributable when one module runs at a time, so the summary states whether it was.
+    children_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
         child_env = dict(os.environ, FULL_GATE_SHARD_CHILD="1")
         result = subprocess.run([sys.executable, "-u", "-m", "unittest", module, "-v"],
@@ -125,7 +137,8 @@ def run_module(module):
         output = (exc.stdout or b"").decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         output += f"\n{module}: timed out\n"
         rc = 124
-    return module, rc, time.monotonic() - start, output, TEST_LINE.findall(output)
+    return (module, rc, time.monotonic() - start, output, TEST_LINE.findall(output),
+            _children_cpu(children_before))
 
 
 def save_costs(path, measured):
@@ -159,6 +172,7 @@ def main():
     for i, lane in enumerate(lanes):
         print(f"full-gate: shard {i + 1}: {', '.join(lane)}", flush=True)
     results = {}
+    children_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(run_module, module): module for module in order}
         for future in concurrent.futures.as_completed(futures):
@@ -166,15 +180,16 @@ def main():
             try:
                 results[module] = future.result()
             except Exception as exc:
-                results[module] = (module, 1, 0.0, f"{module}: runner error: {exc}", [])
+                results[module] = (module, 1, 0.0, f"{module}: runner error: {exc}", [], 0.0)
+    children_cpu = _children_cpu(children_before)
     actual = []
     failed = []
     measured = {}
     for module in sorted(expected):
-        _, rc, secs, output, ids = results[module]
+        _, rc, secs, output, ids, cpu = results[module]
         measured[module] = round(secs, 3)
         actual.extend(ids)
-        print(f"full-gate: module={module} wall={secs:.3f}s rc={rc} ids={len(ids)}", flush=True)
+        print(f"full-gate: module={module} wall={secs:.3f}s cpu={cpu:.3f}s rc={rc} ids={len(ids)}", flush=True)
         print(output, flush=True)
         if rc or set(ids) != expected[module] or len(ids) != len(expected[module]):
             failed.append(module)
@@ -185,7 +200,9 @@ def main():
     duplicates = len(actual) - len(actual_all)
     elapsed = time.monotonic() - started
     print(f"full-gate: executed ids={len(actual_all)} expected={len(expected_all)} "
-          f"missing={len(missing)} extra={len(extra)} duplicate={duplicates} wall={elapsed:.3f}s")
+          f"missing={len(missing)} extra={len(extra)} duplicate={duplicates} wall={elapsed:.3f}s "
+          f"children_cpu={children_cpu:.3f}s "
+          f"cpu_attributable={'true' if workers == 1 else 'false'}")
     if missing or extra or duplicates:
         print(f"full-gate: ID SET MISMATCH missing={missing} extra={extra} duplicates={duplicates}")
     if failed:
