@@ -886,12 +886,15 @@ class TestFastGateMapping(unittest.TestCase):
     def test_walked_but_unpinned_markdown_fails_loudly(self):
         """Unpinned markdown must refuse even when a NEW file appears under targets/ (agents-9nir P0).
 
-        The docs-drift scanner would walk a committed .md there. The fixture is intentionally
-        absent today: a new Markdown file without a content assertion must fail loudly rather
-        than acquiring an ignore or a suite that cannot fail on its content.
+        This is a synthetic path, deliberately absent today: the docs-drift scanner would
+        walk it if committed, yet no assertion pins its content. A new Markdown file must
+        refuse loudly rather than gain an ignore or a suite that cannot fail on its content.
+        If this path becomes tracked, MOVE the fixture to another absent Markdown path;
+        do not delete the loud-refusal assertion.
         """
         path = "targets/undocumented.md"
-        self.assertFalse((ROOT / path).exists(), "probe must remain a future, unmatched document")
+        self.assertFalse((ROOT / path).exists(),
+                         "synthetic future Markdown path is now present; move the fixture, do not drop refusal")
         res = run_fast_gate([path])
         self.assertNotEqual(res.returncode, 0, f"{path}: walked markdown must not be silently ignored (agents-9nir)")
         self.assertIn(path, res.stderr, f"{path}: the failure must name the file (agents-9nir)")
