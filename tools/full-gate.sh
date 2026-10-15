@@ -28,6 +28,17 @@ class GateError(Exception):
     pass
 
 
+# The exit codes a killed child can carry. A per-module bound hit (124), or a SIGKILL/SIGTERM
+# from the OOM path (137/143), means the module never reached a verdict: it is not evidence about
+# the tree, so it must not read as a FAILING module and must not contribute its ids as MISSING
+# (agents-vuvrm). The facts this fixes, measured by the merger while landing agents-nfpqn: a full
+# gate went red on tests.test_fast_gate_mapping with 'ID SET MISMATCH missing=[101 ids]' and
+# 'OVER BUDGET 398.8s > 300s' while the explaining line was 'module=... wall=240.015s rc=124 ids=0'
+# - the module was killed at its own bound and produced no ids, and THE LOG HAD ZERO ASSERTION
+# FAILURES. The same module alone on the same tree was rc=0, OK, 201s.
+KILLED_RCS = frozenset({124, 137, 143})
+
+
 def positive_int(name, default):
     try:
         value = int(os.environ.get(name, default))
@@ -169,17 +180,27 @@ def main():
                 results[module] = (module, 1, 0.0, f"{module}: runner error: {exc}", [])
     actual = []
     failed = []
+    unknown = []
     measured = {}
     for module in sorted(expected):
         _, rc, secs, output, ids = results[module]
         measured[module] = round(secs, 3)
-        actual.extend(ids)
         print(f"full-gate: module={module} wall={secs:.3f}s rc={rc} ids={len(ids)}", flush=True)
         print(output, flush=True)
+        if rc in KILLED_RCS:
+            # Killed, not failed: the suite never reached a verdict. Its wall is still recorded
+            # above (the cost cache is what the shard order is built from), but neither its ids
+            # nor its absence is evidence about anything, so it is excluded from the id-set
+            # accounting on BOTH sides rather than reported as a failing module (agents-vuvrm).
+            unknown.append(module)
+            continue
+        actual.extend(ids)
         if rc or set(ids) != expected[module] or len(ids) != len(expected[module]):
             failed.append(module)
     save_costs(cost_path, measured)
-    expected_all = set().union(*expected.values())
+    unknown_set = set(unknown)
+    known = [m for m in sorted(expected) if m not in unknown_set]
+    expected_all = set().union(*[expected[m] for m in known]) if known else set()
     actual_all = set(actual)
     missing, extra = sorted(expected_all - actual_all), sorted(actual_all - expected_all)
     duplicates = len(actual) - len(actual_all)
@@ -190,11 +211,22 @@ def main():
         print(f"full-gate: ID SET MISMATCH missing={missing} extra={extra} duplicates={duplicates}")
     if failed:
         print("full-gate: failing modules: " + ", ".join(failed))
+    if unknown:
+        print("full-gate: unknown modules (killed at the per-module bound, no verdict): "
+              + ", ".join(unknown))
+        print("full-gate: a killed module is not evidence - it is excluded from the id set on both "
+              "sides, so it neither fails nor counts its ids as missing")
     if elapsed > budget:
         print(f"full-gate: OVER BUDGET {elapsed:.3f}s > {budget}s")
     if failed or missing or extra or duplicates or elapsed > budget:
         print("full-gate: failed")
         return 1
+    if unknown:
+        # Distinct from both passed and failed, and this is deliberate: a suite that never ran
+        # cannot be reported as having passed, and reporting it as a content failure is what this
+        # bead exists to stop. The caller can tell 'not fully verified' from 'broken'.
+        print("full-gate: unknown")
+        return 2
     print("full-gate: passed")
     return 0
 

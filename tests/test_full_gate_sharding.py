@@ -153,6 +153,58 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertIn("OVER BUDGET", res.stdout)
         self.assertIn("full-gate: failed", res.stdout)
 
+    def test_killed_module_is_unknown_and_not_a_failing_module(self):
+        """A module killed at its own bound is not evidence about the tree (agents-vuvrm).
+
+        The defect this pins: rc=124 with ids=0 was reported as a FAILING module whose ids were
+        MISSING, so a per-module timeout reddened the gate and read as though the suite had
+        asserted something and lost. The measured facts come from the merger's full gate on tree
+        c5d3dbb3 - ZERO assertion failures in the whole log, 'ID SET MISMATCH missing=[101 ids]',
+        and the one line that explains it: 'module=tests.test_fast_gate_mapping wall=240.015s
+        rc=124 ids=0'. The same module alone on the same tree was rc=0, OK, 201s.
+
+        Killed and failed must be DISTINGUISHABLE, in the scorecard and in the id-set accounting:
+        a suite that never ran cannot be reported as having failed, and cannot be reported as
+        having passed either.
+        """
+        # Two ids, so a pre-fix run contributes both of them to `missing` rather than one.
+        self.module("hangs", " def test_slow(self): time.sleep(5)\n"
+                             " def test_never_reached(self): pass\n")
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1")
+        self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
+        self.assertIn("tests.test_hangs", res.stdout)
+        self.assertNotIn(
+            "failing modules: tests.test_hangs", res.stdout,
+            "a module killed at its bound was reported as FAILING - that is the defect:\n"
+            + res.stdout + res.stderr)
+        self.assertNotIn(
+            "ID SET MISMATCH", res.stdout,
+            "the killed module's own ids were counted as MISSING, which is the second half of the "
+            "defect - a suite that never ran is not evidence:\n" + res.stdout + res.stderr)
+        self.assertIn("missing=0", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn(
+            "full-gate: passed", res.stdout,
+            "the gate claimed a PASS while a module never reached a verdict, so the tree was not "
+            "fully verified:\n" + res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 2,
+            "killed must be its own outcome, distinct from failed (1) and passed (0):\n"
+            + res.stdout + res.stderr)
+
+    def test_a_killed_module_does_not_mask_a_genuinely_failing_one(self):
+        """The distinction must survive the mixture: a real failure still fails, and is named."""
+        self.module("hangs", " def test_slow(self): time.sleep(5)\n")
+        self.module("broken", " def test_bad(self): self.assertTrue(False, 'real failure')\n")
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1")
+        self.assertIn("failing modules: tests.test_broken", res.stdout, res.stdout + res.stderr)
+        self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn("failing modules: tests.test_hangs", res.stdout, res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 1,
+            "a genuine assertion failure must still fail the gate, even beside a killed module:\n"
+            + res.stdout + res.stderr)
+
+
     def test_invalid_cost_cache_cannot_make_a_false_green(self):
         self.module("a", " def test_one(self): pass\n")
         (self.root / "checks" / "full-gate-module-costs.json").write_text("not json")
