@@ -212,6 +212,49 @@ class TestFastGateShardsItsSelection(unittest.TestCase):
             "shared VM runs seven lanes and the gate itself has one heavy slot",
         )
 
+    def test_costs_reads_module_timings_from_nested_seconds_map(self):
+        """agents-pdl1m: costs() reads module timings from nested 'seconds' map in cost cache."""
+        import ast, json
+        src = (self.root / "tools" / "fast-gate.sh").read_text(encoding="utf-8")
+        py_lines = []
+        in_py = False
+        for line in src.splitlines():
+            if not in_py and "<<'PY'" in line:
+                in_py = True
+                continue
+            if in_py and line == "PY":
+                break
+            if in_py:
+                py_lines.append(line)
+        tree = ast.parse("\n".join(py_lines))
+        nodes = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        nodes.extend([n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "costs"])
+        mod = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(mod)
+
+        with tempfile.TemporaryDirectory() as td:
+            table = Path(td) / "full-gate-module-costs.json"
+            # 1. Standard full gate cache format with nested 'seconds' and 'identity'
+            table.write_text(json.dumps({
+                "seconds": {"tests.test_alpha": 42.0, "tests.test_beta": 1.5},
+                "identity": {"commit": "abc", "tree": "def", "modules": 2}
+            }), encoding="utf-8")
+            ns = {
+                "cache": str(table),
+                "modules": ["tests.test_alpha", "tests.test_beta", "tests.test_unmeasured"],
+            }
+            exec(compile(mod, "fast-gate.sh", "exec"), ns)
+            costs_map = ns["costs"]()
+            self.assertEqual(costs_map["tests.test_alpha"], 42.0)
+            self.assertEqual(costs_map["tests.test_beta"], 1.5)
+            self.assertEqual(costs_map["tests.test_unmeasured"], 1.0)
+
+            # 2. Legacy flat dictionary format compatibility
+            table.write_text(json.dumps({"tests.test_alpha": 33.0}), encoding="utf-8")
+            costs_map_flat = ns["costs"]()
+            self.assertEqual(costs_map_flat["tests.test_alpha"], 33.0)
+            self.assertEqual(costs_map_flat["tests.test_unmeasured"], 1.0)
+
     def _run_custom(self, selection, overrides, **settings):
         """Run with a chosen module failing or empty, every other selected suite passing."""
         for rel in selection:
