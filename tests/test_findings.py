@@ -1655,6 +1655,27 @@ class TestCandidateCoverage(unittest.TestCase):
         self.assertFalse(candidate_coverage(1, 0)["complete"])
         self.assertTrue(candidate_coverage(1, 1)["complete"])
 
+    def test_zero_of_n_shown_candidate_ids_fails_and_cites_accounts(self):
+        """agents-11aq5: a station that cites 0 of N shown IDs must fail, and citing accounts."""
+        ids = [f"cand-{i}" for i in range(50)]
+        refused = candidate_coverage(50, 50, presented_ids=ids, cited_ids=[])
+        self.assertFalse(refused["complete"])
+        self.assertEqual(refused["candidates_accounted"], 0)
+        self.assertEqual(refused["candidates_presented"], 50)
+        self.assertEqual(refused["identity"], "identity-matched")
+        self.assertIn("a partial triage is not a clean result", refused["reason"])
+        self.assertEqual(
+            refused["reason"],
+            "cited 0 of the 50 candidate id(s) shown (50 found by the pre-pass): a partial triage is not a clean "
+            "result; every row - confirmed or dismissed - must carry the candidate_id of the pre-pass candidate "
+            "it answers"
+        )
+
+        accounted = candidate_coverage(50, 50, presented_ids=ids, cited_ids=ids)
+        self.assertTrue(accounted["complete"])
+        self.assertEqual(accounted["candidates_accounted"], 50)
+        self.assertEqual(accounted["reason"], "")
+
 
 class TestStationPredicates(unittest.TestCase):
     """agents-kve2, agents-pim5: one predicate pair, and the two facts stay independent.
