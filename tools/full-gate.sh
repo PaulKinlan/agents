@@ -28,15 +28,38 @@ class GateError(Exception):
     pass
 
 
-# The exit codes a killed child can carry. A per-module bound hit (124), or a SIGKILL/SIGTERM
-# from the OOM path (137/143), means the module never reached a verdict: it is not evidence about
-# the tree, so it must not read as a FAILING module and must not contribute its ids as MISSING
-# (agents-vuvrm). The facts this fixes, measured by the merger while landing agents-nfpqn: a full
-# gate went red on tests.test_fast_gate_mapping with 'ID SET MISMATCH missing=[101 ids]' and
-# 'OVER BUDGET 398.8s > 300s' while the explaining line was 'module=... wall=240.015s rc=124 ids=0'
-# - the module was killed at its own bound and produced no ids, and THE LOG HAD ZERO ASSERTION
-# FAILURES. The same module alone on the same tree was rc=0, OK, 201s.
+# The NORMALISED exit codes a killed child can carry. All of them mean one thing - THE MODULE NEVER
+# REACHED A VERDICT - and that is the fact this gate must not confuse with a content failure
+# (agents-vuvrm). It is not evidence about the tree, so it must not read as a FAILING module and
+# must not contribute its ids as MISSING. The facts this came from, measured by the merger while
+# landing agents-nfpqn: a full gate went red on tests.test_fast_gate_mapping with 'ID SET MISMATCH
+# missing=[101 ids]' and 'OVER BUDGET 398.8s > 300s' while the explaining line was
+# 'module=... wall=240.015s rc=124 ids=0' - killed at its own bound, no ids produced, and THE LOG
+# HAD ZERO ASSERTION FAILURES. The same module alone on the same tree was rc=0, OK, 201s.
+#
+# TWO SPELLINGS, TWO MECHANISMS, and they are NOT interchangeable. A reader who assumes a shell
+# will get this wrong - we did:
+#   * 124 - the per-module bound. run_module drives the module through subprocess.run(timeout=...)
+#     WITHOUT a shell and Python's own TimeoutExpired path sets this code explicitly; it never
+#     comes from a shell.
+#   * 137 / 143 - a child killed by SIGKILL / SIGTERM (the OOM and reaper paths). With no shell,
+#     subprocess reports the NEGATIVE SIGNAL NUMBER, so these arrive as -9 and -15, and the shell
+#     spelling (128 + N) exists only after normalisation. That is what killed_rc() is for.
+# Accepting only the shell spelling was agents-2xq02 (found by rev-vuvrm on b6cd3f23): a
+# signal-killed module missed the membership test, landed in `failed`, and had its ids reported as
+# MISSING - the same costume as the bound kill, reached through the other door.
 KILLED_RCS = frozenset({124, 137, 143})
+
+
+def killed_rc(rc):
+    """Normalise a module's return code to the shell spelling (128 + N) when a signal killed it.
+
+    subprocess.run without a shell reports a signal-killed child as the NEGATIVE signal number
+    (-9 SIGKILL, -15 SIGTERM), so 128 - rc is the shell spelling (128 - -9 = 137, 128 - -15 = 143).
+    Both spellings are the same fact, so they are collapsed here into one state rather than one
+    being accepted and the other silently falling through to `failed` (agents-2xq02).
+    """
+    return 128 - rc if rc < 0 else rc
 
 
 def positive_int(name, default):
@@ -187,7 +210,7 @@ def main():
         measured[module] = round(secs, 3)
         print(f"full-gate: module={module} wall={secs:.3f}s rc={rc} ids={len(ids)}", flush=True)
         print(output, flush=True)
-        if rc in KILLED_RCS:
+        if killed_rc(rc) in KILLED_RCS:
             # Killed, not failed: the suite never reached a verdict. Its wall is still recorded
             # above (the cost cache is what the shard order is built from), but neither its ids
             # nor its absence is evidence about anything, so it is excluded from the id-set

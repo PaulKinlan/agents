@@ -247,6 +247,62 @@ class TestFullGateSharding(unittest.TestCase):
             + res.stdout + res.stderr)
 
 
+    def test_signal_killed_modules_are_unknown_like_the_bound(self):
+        """agents-2xq02, found by rev-vuvrm on b6cd3f23: the same costume, through the other door.
+
+        tools/full-gate.sh first accepted only the SHELL spelling of a killed child (128+N). But
+        run_module drives a module through subprocess.run WITHOUT a shell, where a signal-killed
+        child comes back as the NEGATIVE SIGNAL NUMBER - measured on this VM: SIGKILL -> -9,
+        SIGTERM -> -15, while the per-module bound is 124 synthesised by Python's own
+        TimeoutExpired path. `rc in {124, 137, 143}` was therefore FALSE for a signal kill, so it
+        was added to `failed`, its ids were reported as MISSING, and the gate exited 1 - exactly
+        the reading the bead exists to remove. All three spellings must reach the SAME state, with
+        the same id accounting, so this drives every mechanism rather than the one that was
+        demonstrated.
+
+        (The harness's module preamble imports os, so the deaths use raw signal numbers: 9 is
+        SIGKILL and 15 is SIGTERM. A module is its own subprocess, so killing it here kills the
+        child, not the gate.)
+        """
+        self.module("killed", " def test_sigkill(self): os.kill(os.getpid(), 9)\n")
+        self.module("termed", " def test_sigterm(self): os.kill(os.getpid(), 15)\n")
+        self.module("hangs", " def test_slow(self): time.sleep(5)\n")
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1")
+        for module in ("tests.test_killed", "tests.test_termed", "tests.test_hangs"):
+            self.assertIn(module, res.stdout, res.stdout + res.stderr)
+        self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn(
+            "failing modules", res.stdout,
+            "a signal-killed module was reported as FAILING - that is agents-2xq02:\n"
+            + res.stdout + res.stderr)
+        self.assertNotIn(
+            "ID SET MISMATCH", res.stdout,
+            "a signal-killed module's ids were counted as MISSING, which is the same costume:\n"
+            + res.stdout + res.stderr)
+        self.assertIn(
+            "executed ids=0 expected=0 missing=0 extra=0 duplicate=0", res.stdout,
+            "the three killed modules' ids must be excluded from BOTH sides, leaving an empty and "
+            "therefore consistent accounting:\n" + res.stdout + res.stderr)
+        self.assertNotIn("full-gate: failed", res.stdout, res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 2,
+            "all three kill spellings must report unknown (2), not a content failure (1):\n"
+            + res.stdout + res.stderr)
+
+    def test_a_signal_kill_does_not_mask_a_genuinely_failing_module(self):
+        """The precedence must keep holding through the newly covered path, not just the bound."""
+        self.module("killed", " def test_sigkill(self): os.kill(os.getpid(), 9)\n")
+        self.module("broken", " def test_bad(self): self.assertTrue(False, 'real failure')\n")
+        res = self.run_gate()
+        self.assertIn("failing modules: tests.test_broken", res.stdout, res.stdout + res.stderr)
+        self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn("failing modules: tests.test_killed", res.stdout, res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 1,
+            "a content failure must still dominate a SIGKILLed module (agents-2xq02):\n"
+            + res.stdout + res.stderr)
+
+
     def test_invalid_cost_cache_cannot_make_a_false_green(self):
         self.module("a", " def test_one(self): pass\n")
         (self.root / "checks" / "full-gate-module-costs.json").write_text("not json")
