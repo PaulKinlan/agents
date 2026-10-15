@@ -224,7 +224,7 @@ def resolve_fast_gate(changed_files: list[str]) -> list[str]:
     """
     res = run_fast_gate(changed_files)
     if res.returncode != 0:
-        if "match no mapping arm" in res.stderr:
+        if "match no mapping arm" in res.stderr and any(f"fast-gate:   {p}" in res.stderr for p in changed_files):
             raise UnmappedPathError(res.returncode, res.args, output=res.stdout, stderr=res.stderr)
         res.check_returncode()
     return res.stdout.strip().split()
@@ -248,14 +248,17 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
     proc = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
 
     has_unmapped_refusal = "match no mapping arm" in proc.stderr
+    lines = proc.stdout.splitlines()
+    unmapped_lines = {ln[1:].strip() for ln in lines if ln.startswith("!")}
+
     if proc.returncode != 0:
-        if has_unmapped_refusal:
+        if has_unmapped_refusal and unmapped_lines:
             raise UnmappedPathError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
         raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
 
     always_seen = False
     out = {}
-    for line in proc.stdout.splitlines():
+    for line in lines:
         if line.startswith(":always\t"):
             always_seen = True
             continue
@@ -284,13 +287,33 @@ def resolve_path_status(path: str) -> tuple[str, list[str]]:
     """Determine the mapping status and suites for a single path (agents-ub3k, agents-cuugh).
 
     Returns (status, suites) where status is "mapped", "deliberate_empty", or "unmapped".
-    Raises subprocess.CalledProcessError on gate execution errors.
+    Raises subprocess.CalledProcessError on gate execution errors or incomplete runs.
     """
-    try:
-        mapping = resolve_paths_mapping([path])
-        return mapping[path]
-    except UnmappedPathError:
-        return ("unmapped", [])
+    env = os.environ.copy()
+    env["GIT_CHANGED"] = path
+    env["FAST_GATE_RESOLVE_PATHS"] = "1"
+    env["FAST_GATE_DRY_RUN"] = "1"
+    proc = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
+
+    if proc.returncode != 0:
+        if f"!{path}" in proc.stdout.splitlines() and "match no mapping arm" in proc.stderr:
+            return ("unmapped", [])
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+
+    lines = proc.stdout.splitlines()
+    always_seen = any(ln.startswith(":always\t") for ln in lines)
+    if not always_seen:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+
+    for line in lines:
+        if line.startswith(f"{path}\t"):
+            suites_str = line.split("\t", 1)[1]
+            suites = [s for s in suites_str.split() if s]
+            if suites:
+                return ("mapped", suites)
+            return ("deliberate_empty", [])
+
+    raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
 
 
 def suites_importing(dotted: str) -> set[str]:
@@ -586,8 +609,19 @@ class TestFastGateMapping(unittest.TestCase):
             ["bash", "tools/fast-gate.sh"], 1, f"{p}\t\n", "fast-gate: FAIL: changed file(s) match no mapping arm"
         )
         with patch("tests.test_fast_gate_mapping.subprocess.run", return_value=interrupted_proc):
-            with self.assertRaises(UnmappedPathError):
-                resolve_paths_mapping([p])
+            with self.assertRaises(subprocess.CalledProcessError) as cm_int:
+                resolve_path_status(p)
+            self.assertNotIsInstance(cm_int.exception, UnmappedPathError)
+
+        # 4. Reviewer round 2 repro: nonzero exit with no-arm phrase in stderr but partial prefix stdout raises CalledProcessError on resolve_path_status
+        interrupted_partial = subprocess.CompletedProcess(
+            ["bash", "tools/fast-gate.sh"], 1, f"{p}\t\n",
+            "fast-gate: FAIL: changed file(s) match no mapping arm and no ignore-list arm:\nfast-gate: FAIL: pipeline crashed"
+        )
+        with patch("tests.test_fast_gate_mapping.subprocess.run", return_value=interrupted_partial):
+            with self.assertRaises(subprocess.CalledProcessError) as cm_partial:
+                resolve_path_status(p)
+            self.assertNotIsInstance(cm_partial.exception, UnmappedPathError)
 
     def test_an_ordinary_change_is_unaffected_by_the_patch_artifact_arm(self):
         """A change with NO patches/ involvement selects exactly what it selected before
