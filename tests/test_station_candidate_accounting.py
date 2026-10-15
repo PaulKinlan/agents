@@ -379,6 +379,18 @@ class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
                                  "pre-scheme reports and stations without a pre-pass do not carry it")
 
     def test_every_station_contract_asks_for_the_citation(self):
+        # Reader control for the contracts below: the raw pre-pass has one extra id,
+        # but only the first 50 reach Scanner Data and can account for a report row.
+        self.assertEqual(CANDIDATE_PROMPT_SLICE, 50, "update the seven contracts if the prompt limit changes")
+        shown = [f"shown-{i}" for i in range(CANDIDATE_PROMPT_SLICE)]
+        unshown = "unshown-50"
+        refused = candidate_coverage(51, 50, presented_ids=shown, cited_ids=[unshown])
+        self.assertFalse(refused["complete"], "an unshown id cannot satisfy the citation contract")
+        self.assertEqual(refused["candidates_accounted"], 0)
+        self.assertIn("cited 0 of the 50 candidate id(s) shown", refused["reason"])
+        accepted = candidate_coverage(51, 50, presented_ids=shown, cited_ids=shown)
+        self.assertTrue(accepted["complete"])
+        self.assertEqual(accepted["candidates_accounted"], 50)
         for station in CANDIDATE_ID_STATIONS:
             with self.subTest(station=station):
                 text = contract(station)
@@ -386,6 +398,14 @@ class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
                 self.assertRegex(text, r"(?i)cite the candidate you are answering")
                 self.assertRegex(text, r"(?i)count-only",
                                  "the contract must say what happens when no ids exist, so the weak path is known")
+                self.assertTrue("candidates.json" in text,
+                                f"{station}: name the runner's deterministic candidate artefact")
+                self.assertTrue("Scanner Data" in text and re.search(r"first 50", text, re.I),
+                                f"{station}: identify the model-visible first-50 slice")
+                self.assertTrue(re.search(r"only from candidates shown in\s+`Scanner Data`", text, re.I),
+                                f"{station}: never take ids from the raw file or extra context")
+                self.assertTrue(re.search(r"never cite an unshown", text, re.I),
+                                f"{station}: refuse citations from unpresented pre-pass records")
 
 
 class TestCandidateAccountingRefusalAndResolution(unittest.TestCase):

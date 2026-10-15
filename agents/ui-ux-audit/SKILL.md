@@ -37,6 +37,11 @@ The deterministic pre-pass (`scripts/scan_ui_ux.py`) hands you a candidate list,
 
 **Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers (`scripts/scan_ui_ux.py`). The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
 
+The factory writes the deterministic pre-pass to `candidates.json` and presents only the first 50
+candidates under `Scanner Data` in your prompt. Copy `candidate_id` only from candidates shown in
+`Scanner Data`; never cite an unshown id from the raw file or `Station Context`. If those shown
+candidates have no ids, omit `candidate_id` and keep the count-only fallback.
+
 ## Output Contract
 
 Respond ONLY with valid JSON matching `report.schema.json`:
