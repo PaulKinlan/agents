@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,6 +56,32 @@ from tests.test_check_conf_consistency import _tracked_fields
 ROOT = Path(__file__).resolve().parent.parent
 RESOLVER = ROOT / "tools" / "check-cmd.sh"
 TRACKED = ROOT / "tools" / "check.conf"
+# agents-nfpqn: WHY SEVEN TESTS IN THIS SUITE SKIP, AND WHY NO FIXTURE BELONGS HERE.
+#
+# FLEET_CHECK below (careful: NOT FLEET_CHECK_CONF, which is this repository's own config path) is the
+# DEPLOYED fleet entrypoint - another repository's program. The tests that drive it are conditional BY
+# DESIGN: point FACTORY_GATE_ENTRYPOINT at a real deployed entrypoint on a fleet VM and they run; anywhere
+# else they skip, and the sentinel is chosen so they skip rather than quietly run against a stand-in. The
+# SEVEN that do this, as reported by the unittest result object rather than by -v prose:
+#
+#   test_a_fresh_home_has_no_per_vm_config
+#   test_no_args_is_the_mode_that_reaches_the_config
+#   test_the_entrypoint_refuses_on_a_fresh_home
+#   test_command_mismatch_fails_cleanly_without_spawning_real_gate
+#   test_the_entrypoint_resolves_the_installed_tracked_command
+#   test_every_anchor_this_suite_depends_on_is_still_present      <- subject is the fleet
+#   test_the_anchor_check_fires_when_an_anchor_is_missing        <- bundle's anchors, one layer out
+#
+# THE DECISION, recorded because the alternative was attempted and refused (agents-nfpqn, agents-gp7y):
+# these cannot be re-pointed at a product-local fixture. Their subject is not in this repository, so a
+# fixture would only FABRICATE the program under test - the re-derivation the boundary pass rejected when
+# it removed this project's fleet-shaped artifacts. A product-local stand-in would be worse than useless:
+# it would assert another repository's contract against a program that is not its subject, and pass.
+#
+# WHAT COVERS THE PRODUCT INSTEAD: the other 41 tests in this file, which drive THIS repository's own
+# tools/fast-gate.sh (through _run_gate) and tools/check-cmd.sh - install, drift, foreign-config,
+# malformed-field and always-exit-0 behaviour. Nothing here is a coverage gap waiting for a fixture; these
+# seven are the fleet's own contract, exercised where the fleet is deployed.
 FLEET_CHECK = Path(os.environ.get("FACTORY_GATE_ENTRYPOINT") or "/nonexistent/deployed-entrypoint")
 
 # THE FLEET-BUNDLE INTERFACE THIS SUITE DRIVES, ASSERTED RATHER THAN ASSUMED (agents-o8jd).
@@ -1938,6 +1965,49 @@ class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(_ReaderHarness)
         self.assertIn("no 'Project:' stamp", r.stderr)
         self.assertNotIn("was installed by", r.stderr,
                          "the note must not attribute a file nobody stamped to a repo")
+
+
+class TestTheFleetSubjectTestsCannotRunAgainstTheWrongProgram(unittest.TestCase):
+    """agents-nfpqn: the seven conditional tests must never run against a program that is not their subject.
+
+    The guard resolves the deployed entrypoint as
+    `os.environ.get("FACTORY_GATE_ENTRYPOINT") or <sentinel>`. The tempting change - and the one a lane
+    wanting to "make the tests run here" would reach for - is to point that default at something in THIS
+    repository. That does not make the seven pass; it makes them assert another repository's contract
+    against a program that is not its subject, and the tests only check that a path is a file, so nothing
+    else here would notice. These two assertions notice, at the place where the reason is legible.
+    """
+
+    def test_with_no_override_the_entrypoint_is_a_path_that_cannot_be_this_repo(self):
+        """Unsatisfiable on a product runner, so the seven skip, and never a path inside this checkout."""
+        if os.environ.get("FACTORY_GATE_ENTRYPOINT"):
+            self.skipTest("a deployed entrypoint is configured in this environment")
+        self.assertFalse(
+            FLEET_CHECK.exists(),
+            f"the default entrypoint ({FLEET_CHECK}) must be a path that cannot exist, so the fleet-subject "
+            "tests skip rather than silently run against a stand-in",
+        )
+        self.assertFalse(
+            FLEET_CHECK.is_relative_to(ROOT),
+            f"the default entrypoint ({FLEET_CHECK}) must not be a path inside this repository: this repo's "
+            "own tools/check-cmd.sh is NOT the deployed fleet entrypoint and these tests do not test it",
+        )
+
+    def test_the_override_decides_the_entrypoint_rather_than_a_hardcoded_path(self):
+        """The other side of the same pin: the guard keys on the environment, not on a baked-in path."""
+        target = "/tmp/agents-nfpqn-not-a-program"
+        env = dict(os.environ, FACTORY_GATE_ENTRYPOINT=target)
+        resolved = subprocess.run(
+            [sys.executable, "-c",
+             "from tests.test_gate_entrypoint_config import FLEET_CHECK; print(FLEET_CHECK)"],
+            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        self.assertEqual(
+            resolved.stdout.strip(), target,
+            "FACTORY_GATE_ENTRYPOINT must decide which program these tests drive, so that pointing them at "
+            "the wrong one is a deliberate act with a name rather than an accident",
+        )
 
 
 if __name__ == "__main__":
