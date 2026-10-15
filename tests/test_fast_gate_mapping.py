@@ -236,10 +236,10 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
     Returns a dict mapping each path to a tuple (status, suites):
       - ("mapped", [suite, ...]): an arm matched and selected suites
       - ("deliberate_empty", []): an arm matched and deliberately selected no suites
-      - ("unmapped", []): no arm matched the path (gate refused with no-arm failure)
 
+    Raises UnmappedPathError if any path in the batch matches no mapping arm.
     Raises subprocess.CalledProcessError if the gate exits with an execution error, or if
-    the batch was unanswered (absence of :always sentinel on clean runs, or missing path records).
+    the batch was unanswered (absence of :always sentinel or missing path records).
     """
     env = os.environ.copy()
     env["GIT_CHANGED"] = "\n".join(paths)
@@ -248,7 +248,9 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
     proc = subprocess.run(["bash", str(FAST_GATE)], cwd=ROOT, env=env, capture_output=True, text=True)
 
     has_unmapped_refusal = "match no mapping arm" in proc.stderr
-    if proc.returncode != 0 and not has_unmapped_refusal:
+    if proc.returncode != 0:
+        if has_unmapped_refusal:
+            raise UnmappedPathError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
         raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
 
     always_seen = False
@@ -258,8 +260,7 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
             always_seen = True
             continue
         if line.startswith("!"):
-            p = line[1:].strip()
-            out[p] = ("unmapped", [])
+            raise UnmappedPathError(1, proc.args, output=proc.stdout, stderr=proc.stderr)
         elif "\t" in line:
             p, suites_str = line.split("\t", 1)
             p = p.strip()
@@ -269,7 +270,7 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
             else:
                 out[p] = ("deliberate_empty", [])
 
-    if proc.returncode == 0 and not always_seen:
+    if not always_seen:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
 
     for p in paths:
@@ -280,11 +281,16 @@ def resolve_paths_mapping(paths: list[str]) -> dict[str, tuple[str, list[str]]]:
 
 
 def resolve_path_status(path: str) -> tuple[str, list[str]]:
-    """Determine the mapping status and suites for a single path (agents-ub3k).
+    """Determine the mapping status and suites for a single path (agents-ub3k, agents-cuugh).
 
     Returns (status, suites) where status is "mapped", "deliberate_empty", or "unmapped".
+    Raises subprocess.CalledProcessError on gate execution errors.
     """
-    return resolve_paths_mapping([path])[path]
+    try:
+        mapping = resolve_paths_mapping([path])
+        return mapping[path]
+    except UnmappedPathError:
+        return ("unmapped", [])
 
 
 def suites_importing(dotted: str) -> set[str]:
@@ -531,26 +537,30 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_red_first.py", mapped_suites)
 
     def test_resolve_path_status_distinguishes_deliberate_empty_from_unmapped_and_mapped(self):
-        """agents-ub3k: resolve_paths_mapping distinguishes deliberate empty mappings from unmapped paths and mapped paths."""
-        batch = resolve_paths_mapping([
-            "patches/no-such-artifact-anyone-reads.patch",
-            "unmapped/completely_unknown_file.xyz",
-            "lib/child_env.py",
-        ])
+        """agents-ub3k, agents-cuugh: resolve_path_status distinguishes deliberate empty mappings from unmapped paths and mapped paths."""
         # 1. Deliberate empty: an arm matched and selected no suites
-        delib_status, delib_suites = batch["patches/no-such-artifact-anyone-reads.patch"]
+        delib_status, delib_suites = resolve_path_status("patches/no-such-artifact-anyone-reads.patch")
         self.assertEqual(delib_status, "deliberate_empty")
         self.assertEqual(delib_suites, [])
 
-        # 2. Unmapped: no arm matched (leading '!' on resolve channel)
-        unmapped_status, unmapped_suites = batch["unmapped/completely_unknown_file.xyz"]
+        # 2. Unmapped: no arm matched (leading '!' on resolve channel; gate fails with exit 1)
+        unmapped_status, unmapped_suites = resolve_path_status("unmapped/completely_unknown_file.xyz")
         self.assertEqual(unmapped_status, "unmapped")
         self.assertEqual(unmapped_suites, [])
 
         # 3. Mapped: an arm matched and selected suites
-        mapped_status, mapped_suites = batch["lib/child_env.py"]
+        mapped_status, mapped_suites = resolve_path_status("lib/child_env.py")
         self.assertEqual(mapped_status, "mapped")
         self.assertIn("tests/test_child_env.py", mapped_suites)
+
+        # 4. Batch resolution for valid paths returns full mapping
+        batch = resolve_paths_mapping(["patches/no-such-artifact-anyone-reads.patch", "lib/child_env.py"])
+        self.assertEqual(batch["patches/no-such-artifact-anyone-reads.patch"][0], "deliberate_empty")
+        self.assertEqual(batch["lib/child_env.py"][0], "mapped")
+
+        # 5. Mixed batch containing an unmapped path refuses with UnmappedPathError (agents-cuugh)
+        with self.assertRaises(UnmappedPathError):
+            resolve_paths_mapping(["patches/no-such-artifact-anyone-reads.patch", "unmapped/completely_unknown_file.xyz"])
 
     def test_gate_execution_error_propagates_distinctly_from_unmapped_refusal(self):
         """agents-cuugh: gate execution errors must propagate as CalledProcessError rather than UnmappedPathError or ('unmapped', [])."""
@@ -571,13 +581,13 @@ class TestFastGateMapping(unittest.TestCase):
                 resolve_fast_gate([p])
             self.assertNotIsInstance(cm_gate.exception, UnmappedPathError)
 
-        # 3. A gate failure after printing output without :always is an unanswered batch
-        partial_proc = subprocess.CompletedProcess(
-            ["bash", "tools/fast-gate.sh"], 1, f"{p}\t\n", "fast-gate: FAIL: pipeline crashed"
+        # 3. An interrupted nonzero exit with no-arm phrase in stderr and no sentinel raises UnmappedPathError, not deliberate_empty
+        interrupted_proc = subprocess.CompletedProcess(
+            ["bash", "tools/fast-gate.sh"], 1, f"{p}\t\n", "fast-gate: FAIL: changed file(s) match no mapping arm"
         )
-        with patch("tests.test_fast_gate_mapping.subprocess.run", return_value=partial_proc):
-            with self.assertRaises(subprocess.CalledProcessError):
-                resolve_path_status(p)
+        with patch("tests.test_fast_gate_mapping.subprocess.run", return_value=interrupted_proc):
+            with self.assertRaises(UnmappedPathError):
+                resolve_paths_mapping([p])
 
     def test_an_ordinary_change_is_unaffected_by_the_patch_artifact_arm(self):
         """A change with NO patches/ involvement selects exactly what it selected before
