@@ -375,10 +375,81 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_docs_drift.py", mapped,
                       "walker suite omitted for walked patches markdown (agents-g1je)")
 
-    def test_patches_patch_artifacts_are_ignored(self):
-        """patches/*.patch diff artifacts are consumed hub-side and ignored in fast gate (agents-g1je)."""
-        mapped = resolve_fast_gate(["patches/red-first-pre-fix-tree-not-commit-object.patch"])
-        self.assertEqual(mapped, [], "patch diff artifact should be claimed by ignore arm")
+    def test_patches_patch_artifacts_are_not_self_run(self):
+        """patches/*.patch diff artifacts are NOT run as suites (agents-g1je): they are diffs delivered
+        to the hub, not executable tests.
+
+        agents-pgv9 keeps this HALF of the old assertion and drops the other. The old test said the
+        artifact maps to NOTHING, and those two properties stopped being the same thing the moment a
+        boundary branch deleted 173 artifacts: the fast gate returned PASS on the same frozen tree where
+        two of this repo's own suites failed, because a deleted patches/ path selected nothing at all.
+        The artifact is still never self-run - what changes is that the suites which READ OR NAME it are
+        selected, which is what makes the deletion visible instead of silent.
+        """
+        artifact = "patches/red-first-pre-fix-tree-not-commit-object.patch"
+        mapped = resolve_fast_gate([artifact])
+        self.assertNotIn(artifact, mapped, "a diff artifact must never be run as a suite")
+        for entry in mapped:
+            self.assertTrue(entry.startswith("tests/test_"), f"only suites may be selected, got {entry}")
+
+    def test_patches_patch_artifact_selects_the_suite_that_pins_it(self):
+        """A changed or DELETED patches/*.patch path must bring in the suite that pins it (agents-pgv9).
+
+        Measured before this arm: resolve_fast_gate([this path]) == [], so the deletion selected nothing.
+        The suite to bring in is tests/test_patch_writeups.py, and the reason is the one ADR 0001 gives
+        for the assertion-consumer class: it is the suite whose assertion is ABOUT THIS FILE. It pins the
+        write-up<->artifact pairing in both directions - every artifact must be named by a write-up, and
+        every artifact a write-up names must still exist (agents-pgv9 added that second direction, which
+        is what lets it fail on the deletion this arm selects it for).
+
+        NOT tests/test_fast_gate_mapping.py, and that is a deliberate cost decision rather than an
+        oversight: it NAMES this path, but only inside an assertion about the MAPPING, so it cannot move
+        when the artifact changes, and selecting it would add its measured 50.1s to every patches/ change
+        (tools/fast-gate.sh's own comments call a permanent 0.50s tax a design smell). A suite that cannot
+        fail for the path it is selected by is the defect this whole change is about, one layer up.
+        """
+        artifact = "patches/red-first-pre-fix-tree-not-commit-object.patch"
+        mapped = resolve_fast_gate([artifact])
+        self.assertIn("tests/test_patch_writeups.py", mapped,
+                      "the pin on the write-up<->artifact pairing must run when an artifact changes")
+
+    def test_every_tracked_patch_artifact_selects_the_suite_that_pins_it(self):
+        """THE EXPECTATION IS DERIVED FROM THE TREE, so this pin fails for the NEXT artifact rather than
+        only for this one (agents-pgv9).
+
+        Every tracked patches/*.patch is pinned by tests/test_patch_writeups.py - it asserts that each
+        artifact is named by a write-up, so an artifact with no write-up fails it - and therefore every
+        tracked artifact's change must select it. Restating today's single answer as a literal would pin
+        today and let a new artifact be invisible to the gate, which is the failure this change is about.
+
+        `tracked_paths` rather than a filesystem walk, for the reason tests/__init__.py gives: the gate
+        witnesses TRACKED files, and a walker can read a probe file that has already been deleted.
+        """
+        artifacts = [str(p.relative_to(ROOT)) for p in tracked_paths("patches") if p.suffix == ".patch"]
+        self.assertTrue(artifacts, "no tracked patch artifacts - this pin would be vacuous")
+        for artifact in artifacts:
+            self.assertIn("tests/test_patch_writeups.py", resolve_fast_gate([artifact]),
+                          f"the pin on {artifact} was not selected: deleting it would stay silent")
+
+    def test_a_patch_path_no_suite_reads_or_names_selects_nothing(self):
+        """The DELIBERATE-EMPTY mapping survives where it is still right (agents-pgv9, agents-g1je):
+        an artifact no suite consumes must not invent a consumer, and must not be run itself.
+
+        This is the half of the old assertion that is still true, and it is the one that keeps the fix
+        from becoming 'run everything whenever patches/ moves'.
+        """
+        mapped = resolve_fast_gate(["patches/no-such-artifact-anyone-reads.patch"])
+        self.assertEqual(mapped, [], "a path no suite reads or names must map to nothing")
+
+    def test_an_ordinary_change_is_unaffected_by_the_patch_artifact_arm(self):
+        """A change with NO patches/ involvement selects exactly what it selected before
+        (agents-pgv9): the new arm is confined to patches/*.patch paths, so it cannot slow or widen any
+        other class of change.
+        """
+        mapped = resolve_fast_gate(["tools/red-first.sh"])
+        self.assertIn("tests/test_red_first.py", mapped)
+        self.assertNotIn("tests/test_patch_writeups.py", mapped,
+                         "a non-patches change must not drag in the patches directory pin")
 
     def test_tests_fixtures_map_to_the_containment_suite(self):
         """tests/fixtures/ holds the checked-in attack payloads (agents-28nn round 5):

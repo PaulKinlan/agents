@@ -80,6 +80,27 @@ class TestPatchDirectoryShape(unittest.TestCase):
         self.assertTrue(artifacts, "no patch artifacts found - this test would be vacuous")
         self.assertEqual(artifacts - named, set(), "artifacts with no write-up naming them")
 
+    def test_each_writeup_names_an_artifact_that_is_there(self):
+        """The pairing is TWO-WAY (agents-pgv9), and the second direction is what gives the fast gate
+        something that can actually fail.
+
+        The test above asks that every artifact has a write-up. This one asks that every artifact a
+        write-up names still EXISTS. Without it, a write-up whose diff was deleted is a broken pair that
+        no suite notices - and the arm that now selects this suite for a patches/*.patch change would be
+        selecting a suite that cannot fail, which is the same defect one layer up. The directory's whole
+        point is that the diff and its reasoning sit together; a name with nothing behind it breaks that
+        exactly as a diff with no reasoning does.
+
+        Only the HEADING is read, matching the convention of the reachability test above: prose inside a
+        write-up may name other artifacts, and only the heading claims the pair.
+        """
+        missing = []
+        for path in _writeups():
+            heading = path.read_text(encoding="utf-8").split("\n", 1)[0]
+            missing += [f"{path.name} names {name}" for name in ARTIFACT.findall(heading)
+                        if not (PATCHES / name).exists()]
+        self.assertEqual(missing, [], "write-ups naming an artifact that is not in patches/")
+
     def test_the_readme_points_at_the_directory_and_names_no_individual_patch(self):
         """The README is the one shared file left, so it must not creep back into being an index:
         an index is the append point this split exists to remove. It says how to find a write-up
