@@ -226,26 +226,22 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            existing_mod_count = existing_identity.get("modules", len(existing))
-            incoming_mod_count = (identity or {}).get("modules", len(measured))
+            # Coordinator final directive (agents-2e2ca):
+            # A run only updates existing module timings and provenance when it is a complete
+            # superset (set(measured) >= set(existing)). Any partial or foreign run (which does
+            # not cover the full existing baseline) is strictly additive: it may register new
+            # modules, but never overwrites existing baseline timings or replaces provenance.
+            is_superset = set(measured.keys()) >= set(existing.keys())
 
-            # Coordinator directive (agents-2e2ca, agents-tktak):
-            # Only a run with incoming_mod_count >= 50 can replace baseline costs or update
-            # full-gate identity. When an existing baseline exists, any small scratch/fixture
-            # run (< 50 modules) is strictly additive: it may add missing entries, but never
-            # overwrites existing module costs or replaces full-gate identity.
-            has_existing = bool(existing or existing_identity)
-            is_partial = has_existing and (incoming_mod_count < 50 or incoming_mod_count < existing_mod_count)
-
-            if is_partial:
+            if is_superset:
+                merged_seconds = dict(existing, **measured)
+                merged_identity = identity or existing_identity
+            else:
                 merged_seconds = dict(existing)
                 for k, v in measured.items():
                     if k not in merged_seconds:
                         merged_seconds[k] = v
                 merged_identity = existing_identity or identity
-            else:
-                merged_seconds = dict(existing, **measured)
-                merged_identity = identity or existing_identity
 
             document = {"seconds": merged_seconds}
             if merged_identity:

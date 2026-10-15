@@ -471,6 +471,14 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertEqual(data["seconds"]["tests.test_fixture"], 0.1)
         self.assertEqual(data["identity"]["tree"], "real")
 
+        # 4. A full superset run covering all existing modules updates costs and provenance
+        save_costs(table, {"tests.test_heavy": 135.0, "tests.test_light": 0.9, "tests.test_fixture": 0.1},
+                   {"tree": "real_updated", "modules": 3})
+        data2 = json.loads(table.read_text(encoding="utf-8"))
+        self.assertEqual(data2["seconds"]["tests.test_heavy"], 135.0)
+        self.assertEqual(data2["seconds"]["tests.test_light"], 0.9)
+        self.assertEqual(data2["identity"]["tree"], "real_updated")
+
 
 if __name__ == "__main__":
     unittest.main()
