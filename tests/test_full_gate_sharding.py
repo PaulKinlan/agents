@@ -247,6 +247,66 @@ class TestFullGateSharding(unittest.TestCase):
             + res.stdout + res.stderr)
 
 
+    def test_an_over_wall_run_beside_a_content_failure_still_fails(self):
+        """agents-vuvrm case B, measured there but deliberately NOT pinned (agents-mzqfs).
+
+        The disclosure this pins was honest coverage, not a gap: agents-vuvrm landed case A (a kill
+        beside a content failure) as a test, and left cases B and C measured-but-unpinned because
+        pinning them needs a commit, which would have changed the tree under review and voided the
+        receipt. This is that commit, on a successor branch.
+
+        THE RISK THIS GUARDS: a change that makes the WALL non-fatal can hide a real failure if it
+        swallows the content-failure path. Precedence is the property, not each state alone - exit 1
+        must win, and the failing module must still be named.
+        """
+        self.module("slow", " def test_slow(self): time.sleep(1.1)\n")
+        self.module("broken", " def test_bad(self): self.assertTrue(False, 'real failure')\n")
+        res = self.run_gate(FULL_GATE_BUDGET_S="1")
+        self.assertIn("executed ids=2 expected=2 missing=0 extra=0 duplicate=0", res.stdout,
+                      res.stdout + res.stderr)
+        self.assertIn("failing modules: tests.test_broken", res.stdout, res.stdout + res.stderr)
+        self.assertIn("OVER BUDGET", res.stdout, res.stdout + res.stderr)
+        self.assertIn(
+            "full-gate: failed", res.stdout,
+            "a content failure beside an over-wall run must still report failure:\n" + res.stdout + res.stderr)
+        self.assertNotIn(
+            "full-gate: over budget", res.stdout,
+            "the wall was reported as its own state while a module genuinely FAILED, so the content "
+            "failure was swallowed:\n" + res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 1,
+            "the content failure must dominate the wall (failed=1, unknown=2, over budget=3):\n"
+            + res.stdout + res.stderr)
+
+    def test_a_kill_beside_a_content_failure_and_the_wall_still_fails(self):
+        """agents-vuvrm case C, the three-way mixture, measured but not pinned (agents-mzqfs).
+
+        This is the strongest of the three: a killed module, an over-wall run AND a genuine content
+        failure in one gate. Content must win (exit 1) and be named, the kill must still be reported
+        as unknown rather than as a failure, and the killed module's ids must stay excluded from BOTH
+        sides of the id-set check - so 'executed ids=1 expected=1 missing=0' is the accounting that
+        proves the kill neither reddens via missing ids nor hides the real failure.
+        """
+        self.module("hangs", " def test_slow(self): time.sleep(5)\n")
+        self.module("broken", " def test_bad(self): self.assertTrue(False, 'real failure')\n")
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1", FULL_GATE_BUDGET_S="1")
+        self.assertIn(
+            "executed ids=1 expected=1 missing=0 extra=0 duplicate=0", res.stdout,
+            "the killed module's ids must be excluded from BOTH sides even beside a real failure, "
+            "leaving only the failing module's id counted:\n" + res.stdout + res.stderr)
+        self.assertIn("failing modules: tests.test_broken", res.stdout, res.stdout + res.stderr)
+        self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
+        self.assertIn("OVER BUDGET", res.stdout, res.stdout + res.stderr)
+        self.assertNotIn(
+            "failing modules: tests.test_hangs", res.stdout,
+            "the killed module was reported as FAILING while a real failure sat beside it:\n"
+            + res.stdout + res.stderr)
+        self.assertNotIn("ID SET MISMATCH", res.stdout, res.stdout + res.stderr)
+        self.assertEqual(
+            res.returncode, 1,
+            "content failure must dominate BOTH the kill and the wall:\n" + res.stdout + res.stderr)
+
+
     def test_signal_killed_modules_are_unknown_like_the_bound(self):
         """agents-2xq02, found by rev-vuvrm on b6cd3f23: the same costume, through the other door.
 
