@@ -226,17 +226,15 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            # Coordinator architectural ruling (agents-2e2ca):
-            # A run only overwrites existing module timings and provenance if it is a complete
-            # superset of existing modules AND shares the same git tree identity (or initializes
-            # an un-stamped table). A foreign fixture tree (tree != existing_tree) or partial run
-            # is strictly additive: it may register new modules, but never overwrites baseline
-            # timings or replaces provenance.
-            existing_tree = existing_identity.get("tree")
-            incoming_tree = (identity or {}).get("tree")
-            is_same_tree = bool(incoming_tree and existing_tree and incoming_tree == existing_tree)
-            is_superset = set(measured.keys()) >= set(existing.keys())
-            can_overwrite = is_superset and (is_same_tree or not existing or not existing_tree)
+            # Coordinator final settlement (agents-2e2ca):
+            # A run is considered a comprehensive full-suite run if it measures at least 20 modules
+            # and at least half the size of the existing baseline. Only comprehensive runs (or an
+            # initial run against an unpopulated table) can update existing module timings and
+            # replace provenance. Any partial or small scratch/fixture run (< 20 modules) is
+            # strictly additive: it may register new modules, but never overwrites baseline timings
+            # or replaces provenance.
+            is_comprehensive = len(measured) >= 20 and len(measured) >= (len(existing) // 2)
+            can_overwrite = is_comprehensive or not existing
 
             if can_overwrite:
                 merged_seconds = dict(existing, **measured)
