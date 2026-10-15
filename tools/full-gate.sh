@@ -177,6 +177,8 @@ def git_identity():
 
     On 2026-10-15 a 42-byte table naming a module that exists in no tree on this machine replaced
     a 101-module table, and nothing in the file said where it had come from (agents-2e2ca).
+    Stamping the remote URL ensures that foreign trees (scratch trees, /tmp fixtures) cannot
+    overwrite the repository baseline.
     """
     def run(*args):
         try:
@@ -184,7 +186,11 @@ def git_identity():
                                   check=True).stdout.strip()
         except (OSError, subprocess.CalledProcessError):
             return ""
-    return {"commit": run("rev-parse", "HEAD"), "tree": run("rev-parse", "HEAD^{tree}")}
+    return {
+        "commit": run("rev-parse", "HEAD"),
+        "tree": run("rev-parse", "HEAD^{tree}"),
+        "remote": run("config", "--get", "remote.origin.url"),
+    }
 
 
 def save_costs(path, measured, identity=None):
@@ -226,17 +232,23 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            # Coordinator architectural settlement (agents-2e2ca):
-            # A run is a legitimate repository full gate if:
+            # Coordinator explicit and final ruling (agents-2e2ca):
+            # A run is a legitimate repository full gate eligible to update baseline timings and
+            # replace provenance if:
             # 1. It measures at least 90% of the existing modules (or table is empty); AND
-            # 2. It has a real git tree SHA (40-char hex), or empty existing provenance.
-            # Foreign mock fixtures (tree="fixture") or partial runs (< 90% coverage) are strictly
-            # additive: they may register new modules, but never overwrite baseline timings or provenance.
+            # 2. Its remote.origin.url matches the existing provenance remote (or existing has none).
+            # Foreign mock fixtures (tree="fixture", running in /tmp without repo remote) or partial runs
+            # (< 90% coverage) are strictly additive: they may register new modules, but never overwrite
+            # baseline timings or provenance. A real repository full gate across commits in this repo
+            # (sharing the same remote.origin.url and measuring all modules) updates costs cleanly.
             current_provenance = identity or {}
             existing_provenance = existing_identity or {}
             is_full_coverage = not existing or (len(set(measured.keys()) & set(existing.keys())) >= len(existing) * 0.9)
-            is_git_tree = bool(re.match(r'^[0-9a-f]{40}$', str(current_provenance.get("tree", ""))))
-            can_overwrite = not existing or (is_full_coverage and (is_git_tree or not existing_provenance.get("tree")))
+            is_matching_remote = bool(
+                current_provenance.get("remote")
+                and current_provenance.get("remote") == existing_provenance.get("remote")
+            )
+            can_overwrite = not existing or (is_full_coverage and (is_matching_remote or not existing_provenance.get("remote")))
 
             if can_overwrite:
                 merged_seconds = dict(existing, **measured)
