@@ -200,6 +200,11 @@ def save_costs(path, measured, identity=None):
     CONCURRENCY (agents-2c06k): concurrent save_costs calls take an exclusive file lock on
     {path}.lock while reading the prior snapshot, merging, and replacing the table, so
     overlapping writes cannot lose a measured module to a stale read snapshot.
+
+    PARTIAL RUN PROVENANCE (agents-ia6mp): when a partial or foreign run measures a smaller
+    subset of modules (e.g. a 1-module fixture run), overlapping module costs are preserved
+    from the larger/full-gate baseline rather than overwritten with stub timings, and the
+    full suite's identity block is retained.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
@@ -207,17 +212,38 @@ def save_costs(path, measured, identity=None):
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             existing = {}
+            existing_identity = {}
             try:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
-                prior = loaded.get("seconds") if isinstance(loaded, dict) else None
-                if isinstance(prior, dict):
-                    existing = {k: v for k, v in prior.items()
-                                if isinstance(v, (int, float)) and 0 < v < 3600}
+                if isinstance(loaded, dict):
+                    prior = loaded.get("seconds")
+                    if isinstance(prior, dict):
+                        existing = {k: v for k, v in prior.items()
+                                    if isinstance(v, (int, float)) and 0 < v < 3600}
+                    if isinstance(loaded.get("identity"), dict):
+                        existing_identity = loaded["identity"]
             except (OSError, ValueError, TypeError, AttributeError):
                 existing = {}
-            document = {"seconds": dict(existing, **measured)}
-            if identity is not None:
-                document["identity"] = identity
+                existing_identity = {}
+
+            existing_mod_count = existing_identity.get("modules", len(existing))
+            incoming_mod_count = (identity or {}).get("modules", len(measured))
+            is_partial = existing_mod_count > 0 and incoming_mod_count < existing_mod_count
+
+            if is_partial:
+                merged_seconds = dict(existing)
+                for k, v in measured.items():
+                    if k not in merged_seconds:
+                        merged_seconds[k] = v
+                merged_identity = existing_identity or identity
+            else:
+                merged_seconds = dict(existing, **measured)
+                merged_identity = identity or existing_identity
+
+            document = {"seconds": merged_seconds}
+            if merged_identity:
+                document["identity"] = merged_identity
+
             fd, tmp = tempfile.mkstemp(prefix="full-gate-costs-", dir=path.parent)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as out:
