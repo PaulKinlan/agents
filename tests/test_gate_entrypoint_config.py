@@ -42,6 +42,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# agents-vkti: THE PARSER OF THE TRACKED CONFIG IS OWNED BY THE PRODUCT-LOCAL SUITE, and this module
+# imports it rather than keeping a second copy. The direction is the point: this suite's subject is the
+# DEPLOYED entrypoint, which is fleet tooling, so a product test importing from here would make the
+# product's own file depend on the fleet. The two copies had already drifted twice (agents-1i7v: one
+# grammar silently omitted the two unquoted bound fields; agents-ju3g: they then disagreed on VALUES
+# while a keys-only pin stayed green), and one definition removes the failure mode instead of re-detecting
+# it. The pin that used to compare the pair is now
+# tests/test_check_conf_consistency.py::test_the_tracked_file_has_exactly_one_parser_in_the_tree.
+from tests.test_check_conf_consistency import _tracked_fields
+
 ROOT = Path(__file__).resolve().parent.parent
 RESOLVER = ROOT / "tools" / "check-cmd.sh"
 TRACKED = ROOT / "tools" / "check.conf"
@@ -142,23 +152,10 @@ def _prevent_real_gate(env: dict, home: str) -> Path:
     return marker
 
 
-def _tracked_fields() -> dict:
-    fields = {}
-    for line in TRACKED.read_text(encoding="utf-8").splitlines():
-        # agents-1i7v: this grammar used to be `NAME="value"` only, so on the real
-        # tools/check.conf it returned CHECK_CMD and CHECK_FAST_CMD and SILENTLY omitted
-        # CHECK_TIMEOUT and CHECK_FAST_TIMEOUT, which are unquoted shell integers. A field that
-        # exists in the file and not in the parse is a pin that cannot fail for what it names,
-        # and it made "which fields exist" depend on which test module you asked. The grammar
-        # below is the same one tests/test_check_conf_consistency.py uses: a quoted value (for a
-        # command string, which may contain inner quotes and spaces) or a single bare token (for
-        # a numeric bound). Anchoring, the [A-Z_]+ name and the end-of-line anchor are unchanged,
-        # so comments, fragments and trailing junk are still rejected - the narrowness this
-        # regex had was incidental to its purpose, not the protection it provided.
-        m = re.match(r'^([A-Z_]+)=(?:"(.*)"|(\S+))\s*$', line.strip())
-        if m:
-            fields[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
-    return fields
+# _tracked_fields USED TO BE DEFINED HERE. It moved to tests/test_check_conf_consistency.py (agents-vkti)
+# because this module is fleet-shaped and that one is product-local; the callers below import it. Do not
+# re-add a copy: a second parser of tools/check.conf fails
+# tests/test_check_conf_consistency.py::test_the_tracked_file_has_exactly_one_parser_in_the_tree.
 
 
 # agents-825v: every temp HOME this suite creates is REGISTERED, so a test that leaks a detached
