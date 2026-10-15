@@ -866,7 +866,8 @@ def costs():
         with open(cache, encoding="utf-8") as fh:
             loaded = json.load(fh)
         if isinstance(loaded, dict):
-            data = loaded
+            prior = loaded.get("seconds")
+            data = prior if isinstance(prior, dict) else loaded
     except (OSError, ValueError):
         data = {}
     out = {}
