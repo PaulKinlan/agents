@@ -386,6 +386,14 @@ class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
                 self.assertRegex(text, r"(?i)cite the candidate you are answering")
                 self.assertRegex(text, r"(?i)count-only",
                                  "the contract must say what happens when no ids exist, so the weak path is known")
+                self.assertTrue("candidates.json" in text,
+                                f"{station}: name the runner's deterministic candidate artefact")
+                self.assertTrue("Scanner Data" in text and re.search(r"first 50", text, re.I),
+                                f"{station}: identify the model-visible first-50 slice")
+                self.assertTrue(re.search(r"only from candidates shown in\s+`Scanner Data`", text, re.I),
+                                f"{station}: never take ids from the raw file or extra context")
+                self.assertTrue(re.search(r"never cite an unshown", text, re.I),
+                                f"{station}: refuse citations from unpresented pre-pass records")
 
 
 class TestCandidateAccountingRefusalAndResolution(unittest.TestCase):

@@ -31,6 +31,10 @@ rows and is reported as count-only.
  Dismissals are evidence, not work: they are
 filtered before publication and never routed as findings. `drift_count` counts CONFIRMED drift only; a dismissal must not inflate it
 
+The factory writes the deterministic pre-pass to `candidates.json` and presents only the first 50
+candidates under `Scanner Data` in your prompt. Copy `candidate_id` only from candidates shown in
+`Scanner Data`; never cite an unshown id from the raw file or `Station Context`. If those shown
+candidates have no ids, omit `candidate_id` and keep the count-only fallback.
 
 The shape of one dismissal:
 
