@@ -38,10 +38,12 @@ REPO = Path(__file__).resolve().parent.parent
 # (docs-drift x2, modern-web x2, vuln-discovery x2 in the runs measured for agents-xx9t).
 STATIONS = ("docs-drift", "modern-web", "vuln-discovery")
 
-# Candidate-fed stations whose contracts and schemas must declare candidate_id (agents-11aq5).
+# Candidate-fed stations whose contracts and schemas must declare candidate_id (agents-11aq5, agents-huxil).
 CANDIDATE_ID_STATIONS = (
     "docs-drift", "modern-web", "vuln-discovery",
     "secret-scan", "vuln-verify", "deps-supply-chain", "qa-station",
+    "accessibility", "memory-profile", "perf-review", "resilience",
+    "test-gap", "ui-ux-audit", "pr-fixer",
 )
 
 
@@ -387,11 +389,15 @@ class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
 
 
 class TestCandidateAccountingRefusalAndResolution(unittest.TestCase):
-    """agents-11aq5: driven test proving the refusal is alive for zero-of-N shown IDs and accounts when cited."""
+    """agents-11aq5, agents-huxil: driven test proving the refusal is alive for zero-of-N shown IDs and accounts when cited."""
 
     FAILING_FOUR = ("secret-scan", "vuln-verify", "deps-supply-chain", "qa-station")
+    SEVEN_STATIONS = (
+        "accessibility", "memory-profile", "perf-review", "resilience",
+        "test-gap", "ui-ux-audit", "pr-fixer",
+    )
     CLEAN_STATIONS_WITHOUT_CANDIDATES = (
-        "accessibility", "log-check", "issue-triage", "perf-review", "pr-fixer", "ui-ux-audit",
+        "log-check", "issue-triage", "bundle-size", "release-notes",
     )
 
     def _render(self, station):
@@ -403,6 +409,72 @@ class TestCandidateAccountingRefusalAndResolution(unittest.TestCase):
     def test_each_of_the_four_stations_refuses_zero_of_n_and_accounts_when_cited(self):
         ids = [f"cand-{i}" for i in range(50)]
         for station_name in self.FAILING_FOUR:
+            with self.subTest(station=station_name):
+                # Before: station reports 50 findings without candidate_id (0 of 50 accounted)
+                cov_before = candidate_coverage(50, 50, presented_ids=ids, cited_ids=[])
+                self.assertFalse(cov_before["complete"])
+                self.assertEqual(cov_before["candidates_in"], 50)
+                self.assertEqual(cov_before["candidates_presented"], 50)
+                self.assertEqual(cov_before["candidates_accounted"], 0)
+                self.assertEqual(cov_before["identity"], "identity-matched")
+                self.assertIn("a partial triage is not a clean result", cov_before["reason"])
+                self.assertIn("cited 0 of the 50 candidate id(s) shown", cov_before["reason"])
+                self.assertEqual(
+                    cov_before["reason"],
+                    "cited 0 of the 50 candidate id(s) shown (50 found by the pre-pass): a partial triage is not a clean "
+                    "result; every row - confirmed or dismissed - must carry the candidate_id of the pre-pass candidate "
+                    "it answers"
+                )
+
+                st_before = {
+                    "station": station_name,
+                    "status": "PASS" if cov_before["complete"] else INCOMPLETE_STATUS,
+                    "findings_count": 50,
+                    "criticals": 0,
+                    "candidates_in": cov_before["candidates_in"],
+                    "candidates_presented": cov_before["candidates_presented"],
+                    "candidates_accounted": cov_before["candidates_accounted"],
+                    "candidate_identity": cov_before["identity"],
+                    "complete": cov_before["complete"],
+                    "note": cov_before["reason"]
+                }
+                self.assertTrue(station_is_incomplete(st_before))
+                self.assertFalse(station_has_verdict(st_before))
+                report_before = self._render(st_before)
+                self.assertIn(f"`{station_name}` (0 of 50 shown, identity-matched)", report_before)
+                self.assertIn("> **INCOMPLETE**: 1 station(s) did not account for the candidates they were shown", report_before)
+                self.assertNotIn("> **Clean Delta**", report_before)
+
+                # After: station reports findings with candidate_ids matching what was presented (50 of 50 accounted)
+                cov_after = candidate_coverage(50, 50, presented_ids=ids, cited_ids=ids)
+                self.assertTrue(cov_after["complete"])
+                self.assertEqual(cov_after["candidates_in"], 50)
+                self.assertEqual(cov_after["candidates_presented"], 50)
+                self.assertEqual(cov_after["candidates_accounted"], 50)
+                self.assertEqual(cov_after["identity"], "identity-matched")
+                self.assertEqual(cov_after["reason"], "")
+
+                st_after = {
+                    "station": station_name,
+                    "status": "PASS" if cov_after["complete"] else INCOMPLETE_STATUS,
+                    "findings_count": 0,
+                    "criticals": 0,
+                    "candidates_in": cov_after["candidates_in"],
+                    "candidates_presented": cov_after["candidates_presented"],
+                    "candidates_accounted": cov_after["candidates_accounted"],
+                    "candidate_identity": cov_after["identity"],
+                    "complete": cov_after["complete"],
+                    "note": cov_after["reason"]
+                }
+                self.assertFalse(station_is_incomplete(st_after))
+                self.assertTrue(station_has_verdict(st_after))
+                report_after = self._render(st_after)
+                self.assertNotIn("INCOMPLETE", report_after)
+                self.assertIn("> **Clean Delta**: No new, regressed, or resolved findings in this run.", report_after)
+
+    def test_each_of_the_seven_stations_refuses_zero_of_n_and_accounts_when_cited(self):
+        ids = [f"cand-{i}" for i in range(50)]
+        for station_name in self.SEVEN_STATIONS:
             with self.subTest(station=station_name):
                 # Before: station reports 50 findings without candidate_id (0 of 50 accounted)
                 cov_before = candidate_coverage(50, 50, presented_ids=ids, cited_ids=[])

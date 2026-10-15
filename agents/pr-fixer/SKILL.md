@@ -16,6 +16,12 @@ Remember Non-Negotiable Rule #6 & #7:
 2. **Preserve Existing Conventions**: Match indentation, quote style, and error-handling idioms of the surrounding file.
 3. **Include Verification Command**: Every proposed patch must specify a `verification_cmd` (e.g. unit test command or deterministic scanner command) that proves the fix resolves the finding.
 
+## Candidate Accounting
+
+The deterministic pre-pass (`scripts/collect_failures.py`) hands you a candidate list, and the factory checks that the report accounts for all of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj).
+
+**Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers (`scripts/collect_failures.py`). The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
+
 ## Output Contract
 
 Respond ONLY with valid JSON matching `report.schema.json`:
@@ -30,6 +36,7 @@ Respond ONLY with valid JSON matching `report.schema.json`:
     {
       "path": "pages/warning.html",
       "finding_rule_id": "missing-lang-attribute",
+      "candidate_id": "cand-pr-123",
       "requires_human_design": false,
       "unified_diff": "--- a/pages/warning.html\n+++ b/pages/warning.html\n@@ -1,3 +1,3 @@\n <!DOCTYPE html>\n-<html>\n+<html lang=\"en\">",
       "verification_cmd": "python3 agents/accessibility/scripts/audit_a11y.py --target /path/to/fauxmium"
@@ -42,6 +49,7 @@ Respond ONLY with valid JSON matching `report.schema.json`:
       "line_number": 2,
       "snippet": "<html> -> <html lang=\"en\">",
       "severity": "low",
+      "candidate_id": "cand-pr-123",
       "title": "PR Patch Ready: Fix Missing lang Attribute in warning.html",
       "description": "Minimal 1-line patch prepared on branch factory/fix-a11y-and-fetch.",
       "remediation": "Apply the unified_diff in proposed_patches[0] and open PR."

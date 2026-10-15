@@ -16,6 +16,12 @@ You combine static retention-path analysis (`scripts/scan_memory_leaks.py`) with
 2. **Unbounded Caches (`memory-unbounded-collection-cache`)**:
    - Module-level `Map`, `Set`, or plain objects storing keyed entries by URL, tab ID, or request ID without an LRU cap, TTL, or `tab.onRemoved` cleanup will leak indefinitely. Recommend `WeakMap` (when keys are objects) or bounded LRU eviction.
 
+## Candidate Accounting
+
+The deterministic pre-pass (`scripts/scan_memory_leaks.py`) hands you a candidate list, and the factory checks that the report accounts for all of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj).
+
+**Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers (`scripts/scan_memory_leaks.py`). The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
+
 ## Output Contract
 
 Respond ONLY with valid JSON matching `report.schema.json`:
@@ -33,6 +39,7 @@ Respond ONLY with valid JSON matching `report.schema.json`:
       "line_number": 15,
       "snippet": "const tabState = new Map();",
       "severity": "medium",
+      "candidate_id": "cand-mem-123",
       "title": "Evict Closed Tabs from background.js tabState Map",
       "description": "Entries added per tabId are never deleted when tabs close, causing steady memory growth over long browser sessions.",
       "remediation": "Register `chrome.tabs.onRemoved.addListener((tabId) => tabState.delete(tabId));` and cap map size."

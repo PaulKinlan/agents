@@ -20,6 +20,12 @@ You integrate the **`web-resilience-audit`** and **`web-resilience-fix`** skills
 4. **Tab Backgrounding, Discard & Crash Recovery (`lifecycle-state-loss`)**:
    - Persist draft user input on `visibilitychange` (`document.visibilityState === 'hidden'`) and `pagehide` so mobile/desktop tab discarding never destroys user work.
 
+## Candidate Accounting
+
+The deterministic pre-pass (`scripts/scan_resilience.py`) hands you a candidate list, and the factory checks that the report accounts for all of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj).
+
+**Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers (`scripts/scan_resilience.py`). The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
+
 ## Output Contract
 
 Respond ONLY with valid JSON matching `report.schema.json`:
@@ -38,6 +44,7 @@ Respond ONLY with valid JSON matching `report.schema.json`:
       "line_number": 42,
       "snippet": "const res = await fetch(endpointUrl);",
       "severity": "high",
+      "candidate_id": "cand-res-123",
       "title": "Add AbortSignal.timeout() to Background Endpoint Fetch",
       "description": "Unbounded fetch() call hangs indefinitely on degraded or blackholed networks, blocking fallback execution.",
       "remediation": "Pass `{ signal: AbortSignal.timeout(5000) }` to `fetch(endpointUrl, { signal: AbortSignal.timeout(5000) })` and handle `TimeoutError` in catch."
