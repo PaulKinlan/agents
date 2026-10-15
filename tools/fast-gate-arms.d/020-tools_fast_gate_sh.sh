@@ -52,7 +52,8 @@ fast_gate_arms_020_tools_fast_gate_sh() {
       # selected it, so the regression was invisible to the lane that caused it and was caught only by the
       # reviewer's own run. A change to the runner command is exactly the change this suite exists to
       # police, so the omission is the defect and the suite is the cheap closure: 3 tests, measured 0.006 s.
-      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py tests/test_coverage_contract.py tests/test_gate_entrypoint_config.py tests/test_summary_identity.py"
+      # agents-8ibx: tests/test_fast_gate_sharding.py pins the gate's shard execution.
+      mapped="$mapped tests/test_fast_gate_mapping.py tests/test_hermetic_env.py tests/test_coverage_contract.py tests/test_gate_entrypoint_config.py tests/test_summary_identity.py tests/test_fast_gate_sharding.py"
       ;;
     tools/fast-gate-arms.d/*.sh)
       # agents-hr6q: THE REGISTRY'S OWN FILES NEEDED AN ARM, AND THE GATE SAID SO ITSELF. The first run of
