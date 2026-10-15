@@ -13,6 +13,7 @@ printf 'full-gate run: tree=%s sha=%s lane=%s started=%s pid=%s cwd=%s\n' \
 # tee APPENDS to retain the identity header. pipefail propagates a failed shard/coverage/budget.
 python3 -u - "$@" 2>&1 <<'PY' | tee -a "$summary_file"
 import concurrent.futures
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -122,6 +123,15 @@ def costs_at(path, modules):
             raise ValueError("not a cost table")
     except (OSError, ValueError, KeyError, TypeError):
         values = {}
+    # A module with no usable entry is ordered by TEST COUNT, which is not its cost: measured here,
+    # tests.test_pins_audit has 12 ids and 122-158s of CPU, so the fallback moves it from rank 2 by
+    # cost to rank 42 by count. That fallback used to be silent, which is why a table that had been
+    # replaced sharded a whole run on test count before anyone could see it (agents-2e2ca).
+    missing = [m for m in modules
+               if not (isinstance(values.get(m), (int, float)) and 0 < values[m] < 3600)]
+    if missing:
+        print(f"full-gate: cost fallback for {len(missing)} of {len(modules)} module(s) with no usable "
+              f"entry in {path.name}; ordering those by test COUNT", file=sys.stderr, flush=True)
     return {m: float(values[m]) if isinstance(values.get(m), (int, float))
             and 0 < values[m] < 3600 else float(len(ids))
             for m, ids in modules.items()}
@@ -162,16 +172,90 @@ def run_module(module):
     return module, rc, time.monotonic() - start, output, TEST_LINE.findall(output)
 
 
-def save_costs(path, measured):
+def git_identity():
+    """The tree this table was measured on, recorded so a foreign table is detectable.
+
+    On 2026-10-15 a 42-byte table naming a module that exists in no tree on this machine replaced
+    a 101-module table, and nothing in the file said where it had come from (agents-2e2ca).
+    Stamping the remote URL ensures that foreign trees (scratch trees, /tmp fixtures) cannot
+    overwrite the repository baseline.
+    """
+    def run(*args):
+        try:
+            return subprocess.run(["git", *args], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+    return {
+        "commit": run("rev-parse", "HEAD"),
+        "tree": run("rev-parse", "HEAD^{tree}"),
+        "remote": run("config", "--get", "remote.origin.url"),
+    }
+
+
+def save_costs(path, measured, identity=None, expected_keys=None):
+    """MERGE this run's measurements in; never delete entries another run paid to measure.
+
+    REPLACING was the defect (agents-2e2ca): a stray one-entry table replaced a 101-module one,
+    after which costs_at fell back to test COUNT for every real module - and that proxy moves 56
+    of 103 modules by 20 or more rank places, which is how the same tree-class ends up with a
+    122s wall on one run and a 350s wall on the next. Merging makes a stray entry harmless: an
+    unknown key is simply never looked up. It removes the damage without needing to identify
+    the run that writes such a table, which after the fact could not be identified at all.
+
+    CONCURRENCY (agents-2c06k): concurrent save_costs calls take an exclusive file lock on
+    {path}.lock while reading the prior snapshot, merging, and replacing the table, so
+    overlapping writes cannot lose a measured module to a stale read snapshot.
+
+    COMPLETENESS & PROVENANCE: partial runs (missing expected modules) and foreign runs
+    (non-matching remote.origin.url) do not write to the full-gate cost table.
+    """
+    if expected_keys and not (set(measured.keys()) >= set(expected_keys)):
+        return
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="full-gate-costs-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump({"seconds": measured}, out, sort_keys=True)
-            out.write("\n")
-        os.replace(tmp, path)
-    finally:
-        Path(tmp).unlink(missing_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = {}
+            existing_identity = {}
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    prior = loaded.get("seconds")
+                    if isinstance(prior, dict):
+                        existing = {k: v for k, v in prior.items()
+                                    if isinstance(v, (int, float)) and 0 < v < 3600}
+                    if isinstance(loaded.get("identity"), dict):
+                        existing_identity = loaded["identity"]
+            except (OSError, ValueError, TypeError, AttributeError):
+                existing = {}
+                existing_identity = {}
+
+            # Foreign runs (different remote.origin.url) never touch the shared cost table:
+            current_remote = (identity or {}).get("remote", "")
+            existing_remote = (existing_identity or {}).get("remote", "")
+            if existing_remote and current_remote != existing_remote:
+                return
+
+            merged_seconds = dict(existing, **measured)
+            merged_identity = identity or existing_identity
+
+            document = {"seconds": merged_seconds}
+            if merged_identity:
+                document["identity"] = merged_identity
+
+            fd, tmp = tempfile.mkstemp(prefix="full-gate-costs-", dir=path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as out:
+                    json.dump(document, out, sort_keys=True)
+                    out.write("\n")
+                os.replace(tmp, path)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def main():
@@ -220,7 +304,10 @@ def main():
         actual.extend(ids)
         if rc or set(ids) != expected[module] or len(ids) != len(expected[module]):
             failed.append(module)
-    save_costs(cost_path, measured)
+    save_costs(cost_path, measured,
+               dict(git_identity(), modules=len(measured),
+                    at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+               expected_keys=expected.keys())
     unknown_set = set(unknown)
     known = [m for m in sorted(expected) if m not in unknown_set]
     expected_all = set().union(*[expected[m] for m in known]) if known else set()

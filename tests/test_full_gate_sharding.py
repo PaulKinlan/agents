@@ -323,6 +323,176 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("FULL_GATE_SHARDS must be a positive integer", res.stdout)
 
+    def test_a_run_merges_its_costs_instead_of_deleting_another_trees_entries(self):
+        """agents-2e2ca: save_costs REPLACED the table, so a stray entry could delete 101 modules."""
+        self.module("here", " def test_one(self): pass\n")
+        table = self.root / "checks" / "full-gate-module-costs.json"
+        table.write_text(json.dumps({"seconds": {"tests.test_elsewhere": 42.0,
+                                                  "test_oom_two": 0.2}}), encoding="utf-8")
+        res = self.run_gate()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        document = json.loads(table.read_text(encoding="utf-8"))
+        # THE CONTROL, without which "the table is intact" is satisfiable by a merge that records
+        # nothing at all: this run must have recorded its own cost.
+        self.assertIn("tests.test_here", document["seconds"])
+        # and the other tree's entries survive - including the one no module here answers to, which
+        # is the exact shape that destroyed the real table on 2026-10-15.
+        self.assertEqual(document["seconds"]["tests.test_elsewhere"], 42.0)
+        self.assertEqual(document["seconds"]["test_oom_two"], 0.2)
+        # a table now says which tree it was measured on, so a foreign one is detectable. The
+        # fixture has no commit, so the sha and tree are empty by design (the gate's own header
+        # uses `|| echo unknown` for exactly this reason); the module count is the measured fact.
+        self.assertIn("identity", document)
+        self.assertEqual(document["identity"]["modules"], 1)
+
+    def test_the_fallback_to_test_count_is_visible_rather_than_silent(self):
+        """agents-2e2ca: the silent fallback is why a replaced table sharded on test count."""
+        self.module("a", " def test_one(self): pass\n")
+        first = self.run_gate()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        # ON STDOUT, NOT STDERR, AND THAT IS MEASURED RATHER THAN ASSUMED: the gate wraps its
+        # python in `2>&1 | tee`, so a line written to sys.stderr arrives on the caller's stdout,
+        # and res.stderr is empty. Asserting on stderr was the first version of this test.
+        self.assertIn("cost fallback", first.stdout)
+        self.assertIn("ordering those by test COUNT", first.stdout)
+        # once the table carries this fixture's module the fallback is gone, so the line is about
+        # the missing entry and not something the gate prints unconditionally.
+        second = self.run_gate()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertNotIn("cost fallback", second.stdout)
+
+    def test_concurrent_save_costs_calls_preserve_both_measurements(self):
+        """agents-2c06k: concurrent save_costs calls must not overwrite each other via stale snapshots."""
+        import ast, concurrent.futures
+        src = (self.root / "tools" / "full-gate.sh").read_text(encoding="utf-8")
+        py_lines = []
+        in_py = False
+        for line in src.splitlines():
+            if not in_py and "<<'PY'" in line:
+                in_py = True
+                continue
+            if in_py and line == "PY":
+                break
+            if in_py:
+                py_lines.append(line)
+        tree = ast.parse("\n".join(py_lines))
+        nodes = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        nodes.extend([n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "save_costs"])
+        mod = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(mod)
+        ns = {}
+        exec(compile(mod, "full-gate.sh", "exec"), ns)
+        save_costs = ns["save_costs"]
+
+        table = self.root / "checks" / "full-gate-module-costs.json"
+        table.write_text(json.dumps({"seconds": {}}), encoding="utf-8")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(save_costs, table, {f"tests.test_{i}": float(i)}) for i in range(1, 11)]
+            for f in futures:
+                f.result()
+        data = json.loads(table.read_text(encoding="utf-8"))["seconds"]
+        for i in range(1, 11):
+            self.assertIn(f"tests.test_{i}", data)
+            self.assertEqual(data[f"tests.test_{i}"], float(i))
+
+    def test_partial_run_does_not_overwrite_full_gate_module_costs(self):
+        """agents-ia6mp: a partial/fixture run must not overwrite existing full-gate costs for overlapping modules."""
+        import ast
+        src = (self.root / "tools" / "full-gate.sh").read_text(encoding="utf-8")
+        py_lines = []
+        in_py = False
+        for line in src.splitlines():
+            if not in_py and "<<'PY'" in line:
+                in_py = True
+                continue
+            if in_py and line == "PY":
+                break
+            if in_py:
+                py_lines.append(line)
+        tree = ast.parse("\n".join(py_lines))
+        nodes = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        nodes.extend([n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("save_costs", "costs_at")])
+        mod = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(mod)
+        ns = {}
+        exec(compile(mod, "full-gate.sh", "exec"), ns)
+        save_costs = ns["save_costs"]
+        costs_at = ns["costs_at"]
+
+        table = self.root / "checks" / "full-gate-module-costs.json"
+        # 1. Full-gate baseline measurement with 2 modules and valid 40-char git tree sha
+        save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0},
+                   {"tree": "a" * 40, "remote": "origin", "modules": 2},
+                   expected_keys=["tests.test_heavy", "tests.test_light"])
+        # 2. Foreign/partial run measuring only 1 module with a stub timing
+        save_costs(table, {"tests.test_heavy": 0.2},
+                   {"tree": "b" * 40, "remote": "origin", "modules": 1},
+                   expected_keys=["tests.test_heavy", "tests.test_light"])
+        # 3. Full-gate sharding query must still preserve the full-gate baseline cost
+        costs = costs_at(table, {"tests.test_heavy": ["heavy"], "tests.test_light": ["light"]})
+        self.assertEqual(costs["tests.test_heavy"], 140.0)
+        self.assertEqual(costs["tests.test_light"], 1.0)
+        # And identity retains full suite provenance
+        data = json.loads(table.read_text(encoding="utf-8"))
+        self.assertEqual(data["identity"]["tree"], "a" * 40)
+        self.assertEqual(data["identity"]["remote"], "origin")
+        self.assertEqual(data["identity"]["modules"], 2)
+
+    def test_equal_count_fixture_run_does_not_overwrite_baseline_costs(self):
+        """agents-tktak: foreign mock fixtures cannot overwrite existing baseline costs."""
+        import ast
+        src = (self.root / "tools" / "full-gate.sh").read_text(encoding="utf-8")
+        py_lines = []
+        in_py = False
+        for line in src.splitlines():
+            if not in_py and "<<'PY'" in line:
+                in_py = True
+                continue
+            if in_py and line == "PY":
+                break
+            if in_py:
+                py_lines.append(line)
+        tree = ast.parse("\n".join(py_lines))
+        nodes = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        nodes.extend([n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("save_costs", "costs_at")])
+        mod = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(mod)
+        ns = {}
+        exec(compile(mod, "full-gate.sh", "exec"), ns)
+        save_costs = ns["save_costs"]
+        costs_at = ns["costs_at"]
+
+        table = self.root / "checks" / "full-gate-module-costs.json"
+        # 1. Baseline measurement with 2 modules and valid 40-char git tree sha
+        save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0},
+                   {"tree": "a" * 40, "remote": "origin", "modules": 2},
+                   expected_keys=["tests.test_heavy", "tests.test_light"])
+        # 2. Foreign mock fixture run with tree="fixture" and no matching remote
+        save_costs(table, {"tests.test_heavy": 0.2, "tests.test_fixture": 0.1},
+                   {"tree": "fixture", "remote": "", "modules": 2},
+                   expected_keys=["tests.test_heavy", "tests.test_fixture"])
+        # 3. Baseline cost must be preserved, foreign run rejected without pollution, and real identity retained
+        costs = costs_at(table, {"tests.test_heavy": ["heavy"], "tests.test_light": ["light"]})
+        self.assertEqual(costs["tests.test_heavy"], 140.0)
+        self.assertEqual(costs["tests.test_light"], 1.0)
+        data = json.loads(table.read_text(encoding="utf-8"))
+        self.assertEqual(data["seconds"]["tests.test_heavy"], 140.0)
+        self.assertEqual(data["seconds"]["tests.test_light"], 1.0)
+        self.assertNotIn("tests.test_fixture", data["seconds"])
+        self.assertEqual(data["identity"]["tree"], "a" * 40)
+        self.assertEqual(data["identity"]["remote"], "origin")
+
+        # 4. A full repository run on a new commit tree with matching remote updates costs and provenance
+        save_costs(table, {"tests.test_heavy": 135.0, "tests.test_light": 0.9, "tests.test_new": 0.5},
+                   {"tree": "b" * 40, "remote": "origin", "modules": 3},
+                   expected_keys=["tests.test_heavy", "tests.test_light", "tests.test_new"])
+        data2 = json.loads(table.read_text(encoding="utf-8"))
+        self.assertEqual(data2["seconds"]["tests.test_heavy"], 135.0)
+        self.assertEqual(data2["seconds"]["tests.test_light"], 0.9)
+        self.assertEqual(data2["seconds"]["tests.test_new"], 0.5)
+        self.assertEqual(data2["identity"]["tree"], "b" * 40)
+        self.assertEqual(data2["identity"]["remote"], "origin")
+
 
 if __name__ == "__main__":
     unittest.main()
