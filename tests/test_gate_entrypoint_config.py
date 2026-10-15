@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1968,3 +1969,46 @@ class TestTheReaderNeverRefusesACommandAndExplainsA127Afterwards(_ReaderHarness)
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheFleetSubjectTestsCannotRunAgainstTheWrongProgram(unittest.TestCase):
+    """agents-nfpqn: the seven conditional tests must never run against a program that is not their subject.
+
+    The guard resolves the deployed entrypoint as
+    `os.environ.get("FACTORY_GATE_ENTRYPOINT") or <sentinel>`. The tempting change - and the one a lane
+    wanting to "make the tests run here" would reach for - is to point that default at something in THIS
+    repository. That does not make the seven pass; it makes them assert another repository's contract
+    against a program that is not its subject, and the tests only check that a path is a file, so nothing
+    else here would notice. These two assertions notice, at the place where the reason is legible.
+    """
+
+    def test_with_no_override_the_entrypoint_is_a_path_that_cannot_be_this_repo(self):
+        """Unsatisfiable on a product runner, so the seven skip, and never a path inside this checkout."""
+        if os.environ.get("FACTORY_GATE_ENTRYPOINT"):
+            self.skipTest("a deployed entrypoint is configured in this environment")
+        self.assertFalse(
+            FLEET_CHECK.exists(),
+            f"the default entrypoint ({FLEET_CHECK}) must be a path that cannot exist, so the fleet-subject "
+            "tests skip rather than silently run against a stand-in",
+        )
+        self.assertFalse(
+            FLEET_CHECK.is_relative_to(ROOT),
+            f"the default entrypoint ({FLEET_CHECK}) must not be a path inside this repository: this repo's "
+            "own tools/check-cmd.sh is NOT the deployed fleet entrypoint and these tests do not test it",
+        )
+
+    def test_the_override_decides_the_entrypoint_rather_than_a_hardcoded_path(self):
+        """The other side of the same pin: the guard keys on the environment, not on a baked-in path."""
+        target = "/tmp/agents-nfpqn-not-a-program"
+        env = dict(os.environ, FACTORY_GATE_ENTRYPOINT=target)
+        resolved = subprocess.run(
+            [sys.executable, "-c",
+             "from tests.test_gate_entrypoint_config import FLEET_CHECK; print(FLEET_CHECK)"],
+            cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        self.assertEqual(
+            resolved.stdout.strip(), target,
+            "FACTORY_GATE_ENTRYPOINT must decide which program these tests drive, so that pointing them at "
+            "the wrong one is a deliberate act with a name rather than an accident",
+        )
