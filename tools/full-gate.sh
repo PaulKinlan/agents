@@ -232,7 +232,7 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            # Coordinator architectural unblock (agents-2e2ca):
+            # Coordinator final and definitive architectural ruling (agents-2e2ca):
             # 1. Foreign runs (different remote.origin.url, e.g. scratch trees, /tmp fixtures,
             #    or unit test mocks) must never pollute or touch the shared repository cost table.
             current_remote = (identity or {}).get("remote", "")
@@ -240,16 +240,21 @@ def save_costs(path, measured, identity=None):
             if existing_remote and current_remote != existing_remote:
                 return
 
-            # 2. Within the same repository: measured modules update their timings in place;
-            #    unmeasured modules are preserved so partial runs never delete prior measurements.
-            existing.update(measured)
+            # 2. Is this a complete full gate of the repository (measures 100% of existing modules)?
+            is_full_gate = not existing or (set(measured.keys()) >= set(existing.keys()))
 
-            # 3. Provenance is updated when a complete full gate runs (measured >= existing)
-            #    or on initial table population; partial runs never replace full-suite provenance.
-            if not existing_identity or (set(measured.keys()) >= set(existing.keys())):
+            if is_full_gate:
+                # Full gate: updates all measured module durations and updates provenance:
+                existing.update(measured)
                 merged_identity = identity or existing_identity
             else:
-                merged_identity = existing_identity
+                # Partial run: strictly additive!
+                # Can ONLY add new modules that do not exist yet.
+                # CAN NEVER OVERWRITE ANY EXISTING MODULE DURATION (e.g. cannot overwrite 140s with 0.2s).
+                for mod, dur in measured.items():
+                    if mod not in existing:
+                        existing[mod] = dur
+                merged_identity = existing_identity or identity
 
             document = {"seconds": existing}
             if merged_identity:
