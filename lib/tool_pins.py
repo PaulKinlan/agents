@@ -448,8 +448,8 @@ def _env_named_fallback() -> Optional[Path]:
     """THE ONE PLACE an environment name may still select a host pins file (agents-uekw deletes it).
 
     Kept deliberately single and named so the enforcement flip is a small honest diff rather than a
-    hunt: when the fleet bundle passes --tool-pins (~/fleet/remote/factory-nightly.sh:112,
-    remote/provision.sh:1092-1093 and the test that asserts that export), this function and its one
+    hunt: when the nightly bundle passes --tool-pins (factory-nightly.sh,
+    the VM provisioning script (and the test that asserts that export), this function and its one
     call site below are deleted, and nothing else in the repo changes.
 
     The warning names the ROUTE, not just the variable: someone reading a nightly log has to be able
@@ -466,8 +466,8 @@ def _env_named_fallback() -> Optional[Path]:
             f"factory: no --tool-pins argument, so the ENVIRONMENT NAME {HOST_PINS_ENV} selected "
             f"the host pins file {fallback} for this run (invoked as: {invoked}). The routes that "
             "still export that name are the fleet's nightly runner "
-            "(~/fleet/remote/factory-nightly.sh:112) and every lane's environment "
-            "(~/.fleet/local.conf, written by remote/provision.sh:1092); both are being migrated "
+            "(factory-nightly.sh) and every lane's environment "
+            "(~/.fleet/local.conf, written by the VM provisioning script); both are being migrated "
             "to pass --tool-pins, after which this fallback is REMOVED and an environment name "
             "selects nothing (agents-uekw). Pass --tool-pins explicitly to migrate now.\n")
     return fallback

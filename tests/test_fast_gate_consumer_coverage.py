@@ -48,7 +48,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # The independent oracle the mirror mirrors (agents-5z4e). It lives in the fleet tree, so it is NOT
 # available to this repo's CI - which is exactly why the mirror is the always-on assertion and this
 # cross-check is optional rather than the other way round.
-_FLEET_ORACLE = Path("/home/exedev/fleet/remote/check-coverage.py")
+_FLEET_ORACLE = Path(os.environ.get("FACTORY_COVERAGE_ORACLE") or "check-coverage.py")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -61,7 +61,7 @@ _FLEET_ORACLE = Path("/home/exedev/fleet/remote/check-coverage.py")
 # coverage.
 #
 # THE ORACLE'S RULE, MIRRORED RATHER THAN IMPORTED, AND WHY: the independent oracle is
-# ~/fleet/remote/check-coverage.py (has_import_reference), which lives in the fleet tree and is not
+# the fleet's coverage oracle (has_import_reference), which lives in the fleet tree and is not
 # available to this repo's CI - so it cannot be imported here. What is mirrored is its consumer rule:
 # a suite CONSUMES a module when an import statement or a `from` import names the module's stem. It is
 # deliberately Python-only, because every suite in this repo is Python; the fleet oracle also covers

@@ -147,7 +147,7 @@ the gate instead of in the package.
 
 **Measured on the current tree, and reported because it limits the above rather than confirming
 it:** the pin-sensitive modules also import `tests.hermetic_env` themselves, so they scrub
-independently of discovery. With `FACTORY_TOOL_PINS` exported (`/home/exedev/.config/factory/tools.pins.yaml`),
+independently of discovery. With `FACTORY_TOOL_PINS` exported (`$HOME/.config/factory/tools.pins.yaml`),
 `tests/test_sandbox.py` — the module the `hermetic_env` docstring names — is
 **OK (skipped=1) under both forms**: 68 tests in 3.65s flat,
 68 tests in 3.65s package-aware. So on this tree the flag is defence
@@ -404,7 +404,7 @@ than a property of one delivery:
 * `agents-kq0r` increment 1: 14 added assertions -> 13 DISCRIMINATORS + 1 invariant (`11n`, satisfied
   by the old tool already). "Fourteen new tests pin this fix" would have overstated by one; the one
   was named instead.
-* `patches/fleet-land-message-author-identity.patch`: 21 added assertions -> 16 DISCRIMINATORS + 6 GUARDS
+* an earlier landing-message change: 21 added assertions -> 16 discriminators + 6 guards
   (`38g`, `38h`, `38j`, `38l`, `38p`, `38q5`). `38q5` asserts the defect's own headline property while
   passing on BOTH revisions, so the property is covered by real discriminators while that assertion
   cannot fail alone.

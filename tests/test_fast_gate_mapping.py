@@ -148,7 +148,7 @@ def arm_patterns() -> list[str]:
 # suite reaches it the same way - tests/test_coverage_contract.py, agents-1kzf), so the pin below asks
 # THE ORACLE what a changed file's consumers are rather than defining a second notion that could
 # disagree with it (agents-oj5s).
-ORACLE_SCRIPT = Path("/home/exedev/fleet/remote/check-coverage.py")
+ORACLE_SCRIPT = Path(os.environ.get("FACTORY_COVERAGE_ORACLE") or "check-coverage.py")
 
 
 def oracle_coverage_for(changed_files: list[str], executed_suites: list[str]):
@@ -377,7 +377,7 @@ class TestFastGateMapping(unittest.TestCase):
 
     def test_patches_patch_artifacts_are_ignored(self):
         """patches/*.patch diff artifacts are consumed hub-side and ignored in fast gate (agents-g1je)."""
-        mapped = resolve_fast_gate(["patches/fleet-land-message-tree-identity.patch"])
+        mapped = resolve_fast_gate(["patches/red-first-pre-fix-tree-not-commit-object.patch"])
         self.assertEqual(mapped, [], "patch diff artifact should be claimed by ignore arm")
 
     def test_tests_fixtures_map_to_the_containment_suite(self):
@@ -737,10 +737,24 @@ class TestFastGateMapping(unittest.TestCase):
         self.assertIn("tests/test_child_env.py", mapped, "fail-closed probe reads the committed tools.yaml (agents-9nir)")
 
     def test_test_file_change_selects_coverage_contract_audit(self):
-        """agents-vim1: newly added or modified test files must audit the cross-module mock contract."""
-        mapped = resolve_fast_gate(["tests/test_new_feature.py"])
+        """agents-vim1: newly added or modified test files must audit the cross-module mock contract.
+
+        The fixture is a REAL test file because that is what the arm keys on: a changed test that
+        EXISTS is self-run as well as mapped to the audit, which is the contract being asserted.
+        A path with no file is a DELETION, and a deleted test can only be mapped, never self-run -
+        there is no module to import (agents-gp7y)."""
+        mapped = resolve_fast_gate(["tests/test_schedules.py"])
         self.assertIn("tests/test_coverage_contract.py", mapped)
-        self.assertIn("tests/test_new_feature.py", mapped)
+        self.assertIn("tests/test_schedules.py", mapped)
+        # The deletion case, asserted rather than left to a fixture that cannot exist on disk: a
+        # removed test file still selects the audit, but is not self-run. Before agents-gp7y the
+        # arm added it to the run list unconditionally and the shard loader then failed with
+        # ModuleNotFoundError, so the FIRST deletion of a test file in this repo turned the whole
+        # fast gate red. The name below is deliberately synthetic: naming a real deleted path here
+        # would be a dangling citation.
+        deleted = resolve_fast_gate(["tests/test_removed_by_an_earlier_change.py"])
+        self.assertIn("tests/test_coverage_contract.py", deleted)
+        self.assertNotIn("tests/test_removed_by_an_earlier_change.py", deleted)
 
     def test_coverage_contract_mapping(self):
         """tests/coverage-contract.json maps to test_coverage_contract and test_fast_gate_mapping (agents-1kzf)."""
@@ -1146,7 +1160,7 @@ class TestFastGateMapping(unittest.TestCase):
     def test_fast_gate_execution_emits_single_line_marker_naming_all_suites(self):
         """agents-gttt: when multiple suites run, tools/fast-gate.sh must emit exactly ONE
         'fast-gate: passed:' line naming every executed suite, so the line-by-line coverage
-        parser (/home/exedev/fleet/remote/check-coverage.py) does not silently drop suites."""
+        parser (the coverage oracle check-coverage.py) does not silently drop suites."""
         probe_a = ROOT / "tests" / "test_multi_a_probe_tmp.py"
         probe_b = ROOT / "tests" / "test_multi_b_probe_tmp.py"
         try:
@@ -1191,7 +1205,7 @@ class TestFastGateMapping(unittest.TestCase):
 
         agents-lgdv: AND THE SIGNAL'S PAYLOAD MUST BE THE SUITES IT NAMES. The coverage reader takes every
         whitespace token after `fast-gate: failed:` as a suite name - that is the vocabulary in fleet's
-        remote/check-coverage.py, pinned on its own side by tests/check-coverage.test.sh:161
+        the external coverage oracle, pinned on its own side by its own tests
         (`fast-gate: failed: tests/thing_test.ts`). The old payload `exit $rc (modules: ...)` therefore
         published `exit`, `1` and `modules:` as three phantom suites ahead of the real module names: a fast
         gate record held 13 entries for a 10-module run. The assertion below is against the run's OWN
@@ -1535,7 +1549,7 @@ class TestArmSourceSignal(unittest.TestCase):
     """fleet-6sgf: the gate reports which arm source it used, in the one machine-readable form a receipt can
     carry, so fleet-check can stop claiming the same thing about untracked files in both states.
 
-    WHY THIS EXISTS: agents-6sgf found bin/fleet-check setting a STATIC .witnessed with every terminal state.
+    WHY THIS EXISTS: an earlier gate investigation found the deployed check tool setting a STATIC .witnessed with every terminal state.
     In the filesystem fallback every *.sh in the registry is sourced, so UNTRACKED arm files are read - and a
     receipt said "NOT witnessed: untracked files" anyway. The consumer half cannot tell the states apart from
     a log, so the producer half names the state here. Two properties matter beyond the happy path, and both are
@@ -1916,7 +1930,7 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
         self.assertIn("WILL be sourced", res.stderr)
         self.assertNotIn("agents-wzmj", res.stdout,
                          "the notice must not touch stdout: it is the marker channel "
-                         "remote/check-coverage.py parses")
+                         "the external coverage oracle parses")
 
     def test_a_normal_tracked_run_says_nothing_about_the_fallback(self):
         """The other direction, and what makes the first a measurement rather than a decoration: a notice

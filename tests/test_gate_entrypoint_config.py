@@ -5,14 +5,14 @@ tests MY resolver in isolation, and an isolated exercise of the resolver is exac
 let the original P1 through. The reviewer's finding was that the tracked config is read
 only by the resolver and its test - THE THING BUILT TO END "A FIX IN A PLACE THE DEPLOYED
 INVOCATION DOES NOT READ" WAS ITSELF IN A PLACE THE DEPLOYED INVOCATION DOES NOT READ. So
-the evidence here comes from the real entrypoint, ~/fleet/bin/fleet-check, with a TEMP HOME
+the evidence here comes from the real entrypoint, the deployed gate entrypoint, with a TEMP HOME
 that has no .fleet/check.conf - which is what a fresh VM looks like.
 
-THE DEFECT, AT THE SOURCE (read, not assumed): fleet-check:149 is
+THE DEFECT, AT THE SOURCE (read, not assumed): the deployed entrypoint's line 149 is
     [ -f "$HOME/.fleet/check.conf" ] && source "$HOME/.fleet/check.conf"
 :156-159 auto-detect a command it can actually run - deno.json WITH .tasks.check, or
 package.json WITH .scripts.test - and :160 exits 2 with "no CHECK_CMD in
-~/.fleet/check.conf and nothing to auto-detect; ask coord to set it".
+~/.fleet/check.conf and nothing to auto-detect; ask the operator to set it".
 THIS REPO MATCHES NEITHER PREDICATE (agents-3q1e, MEASURED 2026-10-12): deno.json does not
 exist, and package.json EXISTS but declares no scripts.test, so `jq -e '.scripts.test'
 package.json` exits 1 and the auto-detect falls through. On a fresh VM the gate therefore does
@@ -27,7 +27,7 @@ the ones I read: the predicates span :156-159 and the exit 2 is at :160, not :16
 
 THE FIX SHAPE (C): tools/check-cmd.sh --install writes THIS PROJECT'S resolved command into
 $HOME/.fleet/check.conf from the tracked tools/check.conf. The deployed entrypoint then
-reads the tracked command through the mechanism it already uses, with no fleet-bundle
+reads the tracked command through the mechanism it already uses, with no bundled entrypoint
 change, and the tracked file stays the source of truth a PR can review.
 """
 
@@ -45,16 +45,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 RESOLVER = ROOT / "tools" / "check-cmd.sh"
 TRACKED = ROOT / "tools" / "check.conf"
-FLEET_CHECK = Path.home() / "fleet" / "bin" / "fleet-check"
+FLEET_CHECK = Path(os.environ.get("FACTORY_GATE_ENTRYPOINT") or "/nonexistent/deployed-entrypoint")
 
 # THE FLEET-BUNDLE INTERFACE THIS SUITE DRIVES, ASSERTED RATHER THAN ASSUMED (agents-o8jd).
 #
-# This file's subject is ~/fleet/bin/fleet-check - a file in ANOTHER repo, with no version pin
+# This file's subject is the deployed gate entrypoint - a file in ANOTHER repo, with no version pin
 # here and no signal when it changes. On 2026-10-11 the bundle grew a lane guard
 # (`if [ -z "$FAST" ] && [ -z "$FORCE_FULL" ] && [ "${FLEET_LANE:-}" != merger ]`, so a full-gate
 # attempt from a non-merger lane exits 2) and this suite went RED for every implementer lane
 # while passing for a merger lane - and the failure read as `'PASS (cached)' not found`, which
-# names a string rather than the fleet-side change that caused it. agents-3xqa pinned the suite's
+# names a string rather than the deployment-side change that caused it. agents-3xqa pinned the suite's
 # own environment; this map closes the remaining half: the anchors below are what this suite
 # actually depends on, so losing one fails HERE, in one message that names the bundle, the
 # anchor, and the assertion that needs it.
@@ -438,7 +438,7 @@ class TestAFailedUpdateIsNotSwallowed(unittest.TestCase):
     """agents-yow5: install.sh's `git pull --ff-only --quiet || true` swallowed a failed
     update, so a VM continued with STALE stations, printed its success lines and EXITED 0.
 
-    That is worse than a visible failure: the caller (remote/provision.sh:970) runs this
+    That is worse than a visible failure: the caller (the VM provisioning script) runs this
     installer with ALL OUTPUT SUPPRESSED, so the exit code is the only signal that survives,
     and the thing that certifies the VM looks correctly provisioned could not tell a fresh
     install from a silent one.
@@ -1035,7 +1035,7 @@ class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
     """agents-a1ko: the installer must CLASSIFY a failed update, not merely fail.
 
     WHY A CLASS AND NOT ONLY A FAILURE (agents-yow5 made the failure loud). The caller
-    (remote/provision.sh:970) runs this installer with all output suppressed, so what an operator
+    (the VM provisioning script) runs this installer with all output suppressed, so what an operator
     actually sees is a non-zero exit and nothing else - and a transient NETWORK outage and a
     DIVERGED checkout are the same exit code with OPPOSITE responses: retry later, versus
     investigate the checkout on the host. Naming the class in the installer's own output is the only

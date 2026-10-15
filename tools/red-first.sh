@@ -46,7 +46,7 @@
 #
 # TWO INSTANCES, cited as evidence it is a process finding rather than one delivery:
 #   agents-kq0r increment 1: 14 added assertions -> 13 discriminators + 1 invariant (11n, passes on both revisions);
-#   patches/fleet-land-message-author-identity.patch: 21 added -> 16 discriminators + 6 guards, one of which
+#   an earlier landing-message change: 21 added -> 16 discriminators + 6 guards, one of which
 #   (38q5) asserts the defect's own headline property while passing on both revisions.
 set -euo pipefail
 

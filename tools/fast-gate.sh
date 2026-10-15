@@ -314,7 +314,7 @@ FAST_GATE_STAGE="mapping changed files"
 # The caller must keep those lists: the ignored ones are REPEATED at the end of the gate, because the
 # loader runs long before any suite and a receipt shows only the tail - a warning emitted here is invisible
 # to exactly the lane it is for. stdout is not an option for it: stdout is the marker channel that
-# remote/check-coverage.py parses.
+# the external coverage oracle parses.
 fast_gate_arm_fragments() {
   local _rel _rest _frag _stray
   FAST_GATE_ARM_FRAGMENTS=""
@@ -368,7 +368,7 @@ fast_gate_arm_fragments() {
 # agents-wzmj: the FILESYSTEM fallback is a notice on the same footing, not a second reporting
 # convention. It matters because in that state every *.sh in the registry is sourced, so an UNTRACKED
 # fragment is executed and the run otherwise looks exactly like a protected one. stderr only, for the
-# reason the loader states: stdout is the marker channel remote/check-coverage.py parses.
+# reason the loader states: stdout is the marker channel the external coverage oracle parses.
 fast_gate_report_ignored_arms() {
   local _ignored_arm
   # fleet-6sgf: THE ARM SOURCE IS PART OF WHAT A RECEIPT CAN SUPPORT. Whether the arms were read from the
@@ -805,7 +805,7 @@ fi
 # serial discovery pass: the fast path cannot afford a second traverse of the suite, so this checks that
 # every selected module RAN SOMETHING (and reports the total), not that it ran an expected exact set.
 #
-# STDOUT IS NOT USED HERE, DELIBERATELY: it is the marker channel remote/check-coverage.py parses, and the
+# STDOUT IS NOT USED HERE, DELIBERATELY: it is the marker channel the external coverage oracle parses, and the
 # dry run above prints the suite list on it. Every line below goes to stderr, which the caller pipes through
 # `tee -a` into the summary file, so the dry run's stdout stays byte-identical - which is asserted, not assumed.
 # The name matters beyond clarity: tests/test_summary_identity.py finds a writer's runner command by shape,
@@ -973,7 +973,7 @@ FAST_GATE_TERMINATED=1
 # invisible to exactly the lane it is for. Keep warn-and-ignore rather than fatal: not sourcing the fragment
 # already removes the execution path, so failing the gate would add no safety while turning a lane's
 # transient mid-write into a fleet-wide landing outage. stdout is deliberately not used - it is the marker
-# channel remote/check-coverage.py parses.
+# channel the external coverage oracle parses.
 fast_gate_report_ignored_arms
 
 if [ "$rc" -eq 0 ]; then
@@ -983,7 +983,7 @@ if [ "$rc" -eq 0 ]; then
 else
   # A MARKER'S PAYLOAD IS THE THING IT NAMES (agents-lgdv). The coverage reader matches this marker at
   # line start and takes EVERY whitespace token after it as a suite name - that is the vocabulary fleet's
-  # remote/check-coverage.py parses, pinned by its own tests/check-coverage.test.sh:161
+  # the external coverage oracle parses, pinned by its own tests on the oracle's side
   # (`fast-gate: failed: tests/thing_test.ts`). The old payload `exit $rc (modules: $modules)` therefore
   # published three phantom "suites" - `exit`, `1` and `modules:` - ahead of the real module names: a fast
   # gate record held 13 entries for a 10-module run, and a reader counting suites counted the prose. The

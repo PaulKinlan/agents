@@ -72,13 +72,13 @@ else
     # claimed the caller runs the installer with all output suppressed, and that is no longer true:
     # fleet-24zj made provision.sh print, and provision.log is where that output lands). This pull
     # runs for the DOCUMENTED one-liner when the target directory already exists and the script is
-    # not itself inside a checkout. IT DOES NOT RUN FOR PROVISIONING: remote/provision.sh:988 pulls
+    # not itself inside a checkout. IT DOES NOT RUN FOR PROVISIONING: the VM provisioning script pulls
     # ~/agents itself and :995 then invokes this installer from INSIDE the checkout, where the
     # shortcut above takes FACTORY_DIR=$SCRIPT_DIR and no pull happens at all. A reviewer measured
     # exactly that on a clone whose bare origin had been deleted: outside the checkout rc=1 with a
     # class, the way provisioning invokes it rc=0 with none. Provisioning's own pull failure is
-    # classified by agents_pull_failure_class in remote/provision.sh.
-    #   patches/provision-failed-pull-names-its-class.patch (agents-rn78).
+    # classified by the provisioning script's pull-failure classifier.
+    #   the provision-failed-pull change (bead agents-rn78) (agents-rn78).
     #
     # agents-a1ko: AND IT MUST NAME THE CLASS OF FAILURE, because a bare exit code forces the
     # operator to guess between a transient NETWORK outage and a DIVERGED checkout, and those want
@@ -180,7 +180,7 @@ ln -sfn "$FACTORY_DIR/factory" "$LOCAL_BIN/factory"
 echo "  ✓ CLI binary: linked -> $LOCAL_BIN/factory"
 
 # Gate configuration (agents-l2xb): THIS IS THE CALLER THE TRACKED CONFIG WAS MISSING.
-# The DEPLOYED gate on a fleet VM is ~/fleet/bin/fleet-check, and it reads the per-VM
+# The DEPLOYED gate reads the per-VM
 # ~/.fleet/check.conf ONLY: it has no project-local lookup, and this repo has neither a
 # deno.json nor a package.json, so with no per-VM file it refuses outright (rc 2) rather
 # than falling back to a wrong command. The TRACKED tools/check.conf therefore reaches the

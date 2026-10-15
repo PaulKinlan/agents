@@ -58,7 +58,19 @@ def _imports_module(path, module):
 
 class TestImporterShapedBoundaries(unittest.TestCase):
     def test_the_fixture_is_not_a_suite_so_it_must_never_join_a_suite_running_arm(self):
-        oracle = _load_oracle()
+        try:
+            oracle = _load_oracle()
+        except FileNotFoundError:
+            # The oracle is an external tool this repo CONTRACTS with, and the sibling suites that
+            # consume it (test_coverage_contract, test_fast_gate_consumer_coverage,
+            # test_fast_gate_mapping) already SKIP when it is absent rather than erroring. This
+            # suite read it unguarded, so on a machine without it the whole module failed with
+            # FileNotFoundError the moment an arm-registry change selected it (agents-gp7y). The
+            # message names the fix, the way the other three do.
+            self.skipTest(
+                "the external coverage oracle is not available in this environment: set "
+                "FACTORY_COVERAGE_ORACLE to its path to run this contract"
+            )
         self.assertFalse(
             oracle.is_test_filename(HARNESS),
             f"{HARNESS} is a fixture, not a suite. If this ever becomes True it will be collected "
