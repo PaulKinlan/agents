@@ -137,5 +137,33 @@ class TestPatchDirectoryShape(unittest.TestCase):
         self.assertGreaterEqual(len(_writeups()), EXPECTED_MINIMUM_WRITEUPS)
 
 
+#: Paths owned by the fleet (the hub's ~/fleet checkout), not by this repository. Paul, 2026-10-15:
+#: this repo carried 86 patches against them, delivered to the hub as messages, which cost both
+#: sides a great deal of tokens and gave the fleet's code two owners. Fleet defects are filed with
+#: `fleet-defect` instead (patches/README.md).
+FLEET_OWNED = ("bin/fleet", "remote/", "roles/", "inbox/", "watchdog/", "sdk-host/", "dashboard/",
+               "systemd/", "fleet.conf")
+DIFF_PATH = re.compile(r"^(?:---|\+\+\+) (?:[ab]/)?(\S+)", re.M)
+
+
+class TestNoFleetDeliveries(unittest.TestCase):
+    def test_no_patch_touches_a_fleet_path(self):
+        bad = []
+        for path in PATCHES.glob("*.patch"):
+            for target in DIFF_PATH.findall(path.read_text(encoding="utf-8", errors="replace")):
+                if target != "/dev/null" and target.startswith(FLEET_OWNED):
+                    bad.append(f"{path.name}: {target}")
+        self.assertEqual(bad, [], "patches against fleet tooling: file them with fleet-defect instead")
+
+    def test_every_patch_targets_this_repository(self):
+        root = PATCHES.parent
+        bad = []
+        for path in PATCHES.glob("*.patch"):
+            for target in DIFF_PATH.findall(path.read_text(encoding="utf-8", errors="replace")):
+                if target != "/dev/null" and not (root / target.split("/", 1)[0]).exists():
+                    bad.append(f"{path.name}: {target}")
+        self.assertEqual(bad, [], "patches whose targets are not in this repository")
+
+
 if __name__ == "__main__":
     unittest.main()

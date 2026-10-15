@@ -1,22 +1,19 @@
-# Fleet Patches
+# Patches
 
-This directory holds patches for deployment-side infrastructure and tooling, which are delivered to
-the deployment repository rather than applied here, because that repository is not checked out with
-push credentials on this host.
-
-## Finding a patch
-
-Each patch has its own write-up, named after the `.patch` artifact it belongs to, so the artifact
-and its explanation sit next to each other:
+This directory holds patches to **this repository's own files** only, each next to its write-up:
 
     patches/<artifact>.patch   the diff
     patches/<artifact>.md      why it exists, what it changes, how it was verified
 
-`ls patches/` is the index. There is deliberately no list of files here: a list would be the same
-shared append point this split exists to remove, and it would go stale the first time someone
-forgot to update it. A delivery adds its `.patch` and its `.md` and edits nothing that another
-delivery is also editing.
+`ls patches/` is the index.
 
-(One write-up can cover more than one artifact when they were delivered together as a single
-change; the filename then joins the artifact names with `+`.)
+## Fleet tooling is not delivered from here
 
+The fleet's tooling (`~/fleet`: `bin/fleet-*`, `remote/`, `roles/`, `inbox/`, `watchdog/`, ...) has one
+owner, the hub. Do not write patches, branches or long messages for it from this repository. When a
+fleet tool gets in your way, file it in one line and carry on with this repo's work:
+
+    fleet-defect "<what is wrong>" --where <file:line>
+
+That files a deduplicated bead in the fleet's tracker without waking anyone. The inbox rejects diffs
+sent to the hub. `tests/test_patch_writeups.py` fails if a patch here touches a fleet path.
