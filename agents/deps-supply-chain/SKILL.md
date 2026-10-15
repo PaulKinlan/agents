@@ -68,6 +68,12 @@ Deterministic scanners flag every vulnerability in the entire dependency tree. Y
   - `low`: Transitive vulnerability with dormant call paths, or low-impact advisory.
   - `info`: Harmless devDependency advisory, benign test fixture, or informational note.
 
+## Candidate Accounting
+
+The deterministic pre-pass hands you a candidate list, and the factory checks that the report accounts for all of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj).
+
+**Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers. The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
+
 ## Output Contract
 
 Your response MUST be a valid JSON object matching `report.schema.json`:
@@ -87,6 +93,7 @@ Your response MUST be a valid JSON object matching `report.schema.json`:
     {
       "package": "basic-ftp",
       "advisory_id": "GHSA-5rq4-664w-9x2c",
+      "candidate_id": "cand-dep-456",
       "severity": "low",
       "is_direct": false,
       "reachability": "unreachable_dormant",
@@ -101,6 +108,7 @@ Your response MUST be a valid JSON object matching `report.schema.json`:
       "line_number": 31,
       "snippet": "\"puppeteer\": \"*\"",
       "severity": "medium",
+      "candidate_id": "cand-dep-123",
       "title": "Unpinned Wildcard Dependency 'puppeteer': '*'",
       "description": "The puppeteer dependency is declared with a wildcard '*', allowing upstream version updates without verification and exposing builds to supply chain disruption.",
       "remediation": "Pin puppeteer to an explicit version constraint, e.g. ^24.4.0."

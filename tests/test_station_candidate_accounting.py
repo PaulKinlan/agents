@@ -29,13 +29,20 @@ from pathlib import Path
 from lib.embargo import is_false_positive, reported_severity
 from lib.findings import (CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS, aggregate_candidate_coverage,
                           candidate_accounting_mode, candidate_coverage, read_candidate_count,
-                          read_presented_candidate_ids, write_line_report)
+                          read_presented_candidate_ids, station_has_verdict, station_is_incomplete,
+                          write_line_report)
 
 REPO = Path(__file__).resolve().parent.parent
 
 # The three stations whose pre-pass found candidates while their report listed none of them
 # (docs-drift x2, modern-web x2, vuln-discovery x2 in the runs measured for agents-xx9t).
 STATIONS = ("docs-drift", "modern-web", "vuln-discovery")
+
+# Candidate-fed stations whose contracts and schemas must declare candidate_id (agents-11aq5).
+CANDIDATE_ID_STATIONS = (
+    "docs-drift", "modern-web", "vuln-discovery",
+    "secret-scan", "vuln-verify", "deps-supply-chain", "qa-station",
+)
 
 
 def contract(station: str) -> str:
@@ -361,7 +368,7 @@ class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
     def test_every_station_declares_candidate_id_so_the_prompt_carries_it(self):
         """Same mechanism as the dismissal flag: the schema is embedded in the prompt, so a field it does not
         declare reaches the model only as prose."""
-        for station in STATIONS:
+        for station in CANDIDATE_ID_STATIONS:
             with self.subTest(station=station):
                 items = json.loads((REPO / "agents" / station / "report.schema.json").read_text())[
                     "properties"]["findings"]["items"]
@@ -370,13 +377,121 @@ class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
                                  "pre-scheme reports and stations without a pre-pass do not carry it")
 
     def test_every_station_contract_asks_for_the_citation(self):
-        for station in STATIONS:
+        for station in CANDIDATE_ID_STATIONS:
             with self.subTest(station=station):
                 text = contract(station)
                 self.assertIn("candidate_id", text)
                 self.assertRegex(text, r"(?i)cite the candidate you are answering")
                 self.assertRegex(text, r"(?i)count-only",
                                  "the contract must say what happens when no ids exist, so the weak path is known")
+
+
+class TestCandidateAccountingRefusalAndResolution(unittest.TestCase):
+    """agents-11aq5: driven test proving the refusal is alive for zero-of-N shown IDs and accounts when cited."""
+
+    FAILING_FOUR = ("secret-scan", "vuln-verify", "deps-supply-chain", "qa-station")
+    CLEAN_STATIONS_WITHOUT_CANDIDATES = (
+        "accessibility", "log-check", "issue-triage", "perf-review", "pr-fixer", "ui-ux-audit",
+    )
+
+    def _render(self, station):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            return write_line_report("target", "project-audit", [station], findings_dir=root).read_text(
+                encoding="utf-8")
+
+    def test_each_of_the_four_stations_refuses_zero_of_n_and_accounts_when_cited(self):
+        ids = [f"cand-{i}" for i in range(50)]
+        for station_name in self.FAILING_FOUR:
+            with self.subTest(station=station_name):
+                # Before: station reports 50 findings without candidate_id (0 of 50 accounted)
+                cov_before = candidate_coverage(50, 50, presented_ids=ids, cited_ids=[])
+                self.assertFalse(cov_before["complete"])
+                self.assertEqual(cov_before["candidates_in"], 50)
+                self.assertEqual(cov_before["candidates_presented"], 50)
+                self.assertEqual(cov_before["candidates_accounted"], 0)
+                self.assertEqual(cov_before["identity"], "identity-matched")
+                self.assertIn("a partial triage is not a clean result", cov_before["reason"])
+                self.assertIn("cited 0 of the 50 candidate id(s) shown", cov_before["reason"])
+                self.assertEqual(
+                    cov_before["reason"],
+                    "cited 0 of the 50 candidate id(s) shown (50 found by the pre-pass): a partial triage is not a clean "
+                    "result; every row - confirmed or dismissed - must carry the candidate_id of the pre-pass candidate "
+                    "it answers"
+                )
+
+                st_before = {
+                    "station": station_name,
+                    "status": "PASS" if cov_before["complete"] else INCOMPLETE_STATUS,
+                    "findings_count": 50,
+                    "criticals": 0,
+                    "candidates_in": cov_before["candidates_in"],
+                    "candidates_presented": cov_before["candidates_presented"],
+                    "candidates_accounted": cov_before["candidates_accounted"],
+                    "candidate_identity": cov_before["identity"],
+                    "complete": cov_before["complete"],
+                    "note": cov_before["reason"]
+                }
+                self.assertTrue(station_is_incomplete(st_before))
+                self.assertFalse(station_has_verdict(st_before))
+                report_before = self._render(st_before)
+                self.assertIn(f"`{station_name}` (0 of 50 shown, identity-matched)", report_before)
+                self.assertIn("> **INCOMPLETE**: 1 station(s) did not account for the candidates they were shown", report_before)
+                self.assertNotIn("> **Clean Delta**", report_before)
+
+                # After: station reports findings with candidate_ids matching what was presented (50 of 50 accounted)
+                cov_after = candidate_coverage(50, 50, presented_ids=ids, cited_ids=ids)
+                self.assertTrue(cov_after["complete"])
+                self.assertEqual(cov_after["candidates_in"], 50)
+                self.assertEqual(cov_after["candidates_presented"], 50)
+                self.assertEqual(cov_after["candidates_accounted"], 50)
+                self.assertEqual(cov_after["identity"], "identity-matched")
+                self.assertEqual(cov_after["reason"], "")
+
+                st_after = {
+                    "station": station_name,
+                    "status": "PASS" if cov_after["complete"] else INCOMPLETE_STATUS,
+                    "findings_count": 0,
+                    "criticals": 0,
+                    "candidates_in": cov_after["candidates_in"],
+                    "candidates_presented": cov_after["candidates_presented"],
+                    "candidates_accounted": cov_after["candidates_accounted"],
+                    "candidate_identity": cov_after["identity"],
+                    "complete": cov_after["complete"],
+                    "note": cov_after["reason"]
+                }
+                self.assertFalse(station_is_incomplete(st_after))
+                self.assertTrue(station_has_verdict(st_after))
+                report_after = self._render(st_after)
+                self.assertNotIn("INCOMPLETE", report_after)
+                self.assertIn("> **Clean Delta**: No new, regressed, or resolved findings in this run.", report_after)
+
+    def test_stations_without_candidates_still_do_not_fail(self):
+        """Clean stations with no pre-pass or 0 candidates still produce a clean verdict."""
+        for station_name in self.CLEAN_STATIONS_WITHOUT_CANDIDATES:
+            with self.subTest(station=station_name):
+                # No prepass (None)
+                cov_none = candidate_coverage(None, 0)
+                self.assertTrue(cov_none["complete"])
+                self.assertEqual(cov_none["identity"], "not-applicable")
+                st_none = {
+                    "station": station_name, "status": "PASS", "findings_count": 0, "criticals": 0,
+                    "candidates_in": None, "candidates_presented": None, "candidates_accounted": 0,
+                    "candidate_identity": cov_none["identity"], "complete": True, "note": ""
+                }
+                self.assertFalse(station_is_incomplete(st_none))
+                self.assertTrue(station_has_verdict(st_none))
+
+                # Empty prepass (0 candidates)
+                cov_zero = candidate_coverage(0, 0, presented_ids=[], cited_ids=[])
+                self.assertTrue(cov_zero["complete"])
+                st_zero = {
+                    "station": station_name, "status": "PASS", "findings_count": 0, "criticals": 0,
+                    "candidates_in": 0, "candidates_presented": 0, "candidates_accounted": 0,
+                    "candidate_identity": cov_zero["identity"], "complete": True, "note": ""
+                }
+                self.assertFalse(station_is_incomplete(st_zero))
+                self.assertTrue(station_has_verdict(st_zero))
 
 
 if __name__ == "__main__":

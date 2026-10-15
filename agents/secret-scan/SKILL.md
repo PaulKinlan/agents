@@ -27,6 +27,12 @@ You will be given:
    - `medium`: Suspicious high-entropy secrets that appear real but whose scope is limited or ambiguous.
    - `low` / `info`: Benign test fixtures, dummy test seeds, or mock journey credentials that might confuse standard scanners.
 
+## Candidate Accounting
+
+The deterministic pre-pass hands you a candidate list, and the factory checks that the report accounts for all of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj).
+
+**Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers. The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
+
 3. **Output Contract**:
    Your final response MUST be a valid JSON object matching `report.schema.json`:
    ```json
@@ -40,6 +46,7 @@ You will be given:
          "line_number": 123,
          "snippet": "const apiKey = 'sk-test-placeholder';",
          "severity": "info",
+         "candidate_id": "cand-secret-123",
          "false_positive": true,
          "title": "Benign Test Fixture Credential",
          "description": "Mock API key used in test probe to verify secret redaction logic.",
