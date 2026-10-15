@@ -1,8 +1,8 @@
 # Fleet Patches
 
-This directory holds patches for fleet-level infrastructure and tooling that cannot be committed
-directly to `PaulKinlan/fleet` from this project VM because `~/fleet` is a synced, read-only copy
-without git remote push credentials on project VMs.
+This directory holds patches for deployment-side infrastructure and tooling, which are delivered to
+the deployment repository rather than applied here, because that repository is not checked out with
+push credentials on this host.
 
 ## Finding a patch
 
