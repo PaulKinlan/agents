@@ -1205,7 +1205,7 @@ class TestFastGateMapping(unittest.TestCase):
 
         agents-lgdv: AND THE SIGNAL'S PAYLOAD MUST BE THE SUITES IT NAMES. The coverage reader takes every
         whitespace token after `fast-gate: failed:` as a suite name - that is the vocabulary in fleet's
-        remote/check-coverage.py, pinned on its own side by tests/check-coverage.test.sh:161
+        the external coverage oracle, pinned on its own side by its own tests
         (`fast-gate: failed: tests/thing_test.ts`). The old payload `exit $rc (modules: ...)` therefore
         published `exit`, `1` and `modules:` as three phantom suites ahead of the real module names: a fast
         gate record held 13 entries for a 10-module run. The assertion below is against the run's OWN
@@ -1930,7 +1930,7 @@ class TestArmRegistryIsAFragmentDirectory(unittest.TestCase):
         self.assertIn("WILL be sourced", res.stderr)
         self.assertNotIn("agents-wzmj", res.stdout,
                          "the notice must not touch stdout: it is the marker channel "
-                         "remote/check-coverage.py parses")
+                         "the external coverage oracle parses")
 
     def test_a_normal_tracked_run_says_nothing_about_the_fallback(self):
         """The other direction, and what makes the first a measurement rather than a decoration: a notice

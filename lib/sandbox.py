@@ -597,7 +597,7 @@ def _is_tool_install_root(p: Path, home: Path) -> bool:
 
 
 def _is_broad_root(pkg: Path, home: Optional[str]) -> bool:
-    """A package root that is really a top-level user prefix (~/.local, ~/fleet, ~/fleet/sdk-host):
+    """A package root that is really a top-level user prefix (~/.local, ~/.pi, a shared toolchain root):
     binding it whole would expose far more than the one tool. Detected when the root itself,
     its parent, or its grandparent is the user's home or a hidden root (/home, /root),
     or when the root is an ancestor of the user's home or a hidden root, so we fall back
@@ -778,7 +778,7 @@ def _executable_binds(plan: _BindPlan, names: Iterable[str], path_env: str,
                     continue
                 # Bind the package's REAL content AT the path the launcher references, not at
                 # its resolved location. A symlinked bundle (pi: ~/.pi/agent/npm/... ->
-                # ~/fleet/sdk-host/...) must be reachable at the hardcoded path node opens,
+                # a shared toolchain root/...) must be reachable at the hardcoded path node opens,
                 # or the entry still fails MODULE_NOT_FOUND even though the resolved tree is
                 # bound. ro_bind(dest=) mounts the real content at the symlink path (bwrap
                 # creates missing parents); for a non-symlinked package dest == source.

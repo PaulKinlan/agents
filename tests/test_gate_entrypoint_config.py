@@ -438,7 +438,7 @@ class TestAFailedUpdateIsNotSwallowed(unittest.TestCase):
     """agents-yow5: install.sh's `git pull --ff-only --quiet || true` swallowed a failed
     update, so a VM continued with STALE stations, printed its success lines and EXITED 0.
 
-    That is worse than a visible failure: the caller (remote/provision.sh:970) runs this
+    That is worse than a visible failure: the caller (the VM provisioning script) runs this
     installer with ALL OUTPUT SUPPRESSED, so the exit code is the only signal that survives,
     and the thing that certifies the VM looks correctly provisioned could not tell a fresh
     install from a silent one.
@@ -1035,7 +1035,7 @@ class TestAFailedUpdateNamesItsFailureClass(unittest.TestCase):
     """agents-a1ko: the installer must CLASSIFY a failed update, not merely fail.
 
     WHY A CLASS AND NOT ONLY A FAILURE (agents-yow5 made the failure loud). The caller
-    (remote/provision.sh:970) runs this installer with all output suppressed, so what an operator
+    (the VM provisioning script) runs this installer with all output suppressed, so what an operator
     actually sees is a non-zero exit and nothing else - and a transient NETWORK outage and a
     DIVERGED checkout are the same exit code with OPPOSITE responses: retry later, versus
     investigate the checkout on the host. Naming the class in the installer's own output is the only

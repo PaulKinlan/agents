@@ -61,7 +61,7 @@ _FLEET_ORACLE = Path(os.environ.get("FACTORY_COVERAGE_ORACLE") or "check-coverag
 # coverage.
 #
 # THE ORACLE'S RULE, MIRRORED RATHER THAN IMPORTED, AND WHY: the independent oracle is
-# ~/fleet/remote/check-coverage.py (has_import_reference), which lives in the fleet tree and is not
+# the fleet's coverage oracle (has_import_reference), which lives in the fleet tree and is not
 # available to this repo's CI - so it cannot be imported here. What is mirrored is its consumer rule:
 # a suite CONSUMES a module when an import statement or a `from` import names the module's stem. It is
 # deliberately Python-only, because every suite in this repo is Python; the fleet oracle also covers

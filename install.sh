@@ -72,12 +72,12 @@ else
     # claimed the caller runs the installer with all output suppressed, and that is no longer true:
     # fleet-24zj made provision.sh print, and provision.log is where that output lands). This pull
     # runs for the DOCUMENTED one-liner when the target directory already exists and the script is
-    # not itself inside a checkout. IT DOES NOT RUN FOR PROVISIONING: remote/provision.sh:988 pulls
+    # not itself inside a checkout. IT DOES NOT RUN FOR PROVISIONING: the VM provisioning script pulls
     # ~/agents itself and :995 then invokes this installer from INSIDE the checkout, where the
     # shortcut above takes FACTORY_DIR=$SCRIPT_DIR and no pull happens at all. A reviewer measured
     # exactly that on a clone whose bare origin had been deleted: outside the checkout rc=1 with a
     # class, the way provisioning invokes it rc=0 with none. Provisioning's own pull failure is
-    # classified by agents_pull_failure_class in remote/provision.sh.
+    # classified by the provisioning script's pull-failure classifier.
     #   the provision-failed-pull change (bead agents-rn78) (agents-rn78).
     #
     # agents-a1ko: AND IT MUST NAME THE CLASS OF FAILURE, because a bare exit code forces the

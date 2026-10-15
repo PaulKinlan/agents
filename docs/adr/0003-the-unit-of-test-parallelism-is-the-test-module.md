@@ -9,7 +9,7 @@
 
 ## 1. Context and Problem Statement
 
-The fleet standard (`~/fleet/docs/speed.md`, R5 lever 1, quoted in `agents-5fy0`) requires that *"independent suites run in parallel processes, not sequentially inside one process. A test file is the unit of parallelism"*. This repository had adopted it in neither gate.
+The fleet's own speed standard (its R5 lever 1, quoted in an earlier investigation) requires that *"independent suites run in parallel processes, not sequentially inside one process. A test file is the unit of parallelism"*. This repository had adopted it in neither gate.
 
 **The full gate was one process.** `python3 -m unittest discover -s tests -t . -v` — 1541 tests across 85 modules — measured on this VM at **418 s** (sha `4dfb031`) and **441 s** (sha `37dc6f2`), against a fleet target of ≤180 s. The identical command was the deployed CI invocation, so CI paid it on every push and pull request.
 

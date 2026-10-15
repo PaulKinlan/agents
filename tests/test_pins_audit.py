@@ -60,7 +60,7 @@ def run_cli(args, env_extra=None, clear_pins_env=True):
             env.pop(name, None)
     env.update(env_extra or {})
     # THE LITERAL PATH IS DELIBERATE, NOT A STYLE CHOICE (agents-5vun). The fleet's coverage
-    # oracle (remote/check-coverage.py) relates a changed file to a suite by looking for the
+    # oracle (the external coverage oracle) relates a changed file to a suite by looking for the
     # file's path, basename or stem INSIDE a subprocess/exec call in the test source; a
     # `str(CLI)` indirection hides it, and a .sh source can never be matched by test-name
     # stem either, because its are_extensions_compatible() is `ext1 == ext2` - so before this

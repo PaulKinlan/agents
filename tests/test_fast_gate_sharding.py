@@ -14,7 +14,7 @@ with the same 597 tests at rc=0.
 WHAT IS PINNED HERE. Each case is a way the change could be WRONG rather than merely slow:
 
   * the DRY RUN's stdout is byte-identical at any shard width. That stream is the marker channel
-    remote/check-coverage.py parses, and two assertions in test_fast_gate_mapping.py pin it to exactly the
+    the external coverage oracle parses, and two assertions in test_fast_gate_mapping.py pin it to exactly the
     suite list - so a runner that leaks one line onto stdout breaks the coverage reader, not just a test.
   * every selected module actually RUNS, and the total is reported. The evidence rule is that an id count
     of 0 fails the run whatever the child's exit code: measured on this toolchain an empty module is caught
@@ -113,7 +113,7 @@ class TestFastGateShardsItsSelection(unittest.TestCase):
         four = self._run(FAST_GATE_SHARDS=4).stdout
         self.assertEqual(
             one, default,
-            "the dry run's stdout is what remote/check-coverage.py parses and what "
+            "the dry run's stdout is what the external coverage oracle parses and what "
             "test_fast_gate_mapping.py pins to exactly the suite list: sharding must not reach it",
         )
         self.assertEqual(one, four, "the shard width must not change the dry run's stdout either")
