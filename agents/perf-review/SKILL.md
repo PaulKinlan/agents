@@ -52,6 +52,12 @@ Severity must be assigned deterministically based on rule classification, the sc
 2. **Test Fixtures & Mocks**: If candidate code is part of a unit test, mock, or benchmark fixture, classify as `severity: "info"`.
 3. **Deterministic Output Order**: Do not reorder findings to reflect your own priority; the dispatcher sorts the stored findings deterministically (by path, then line number, then rule id) after validation.
 
+## Candidate Accounting
+
+The deterministic pre-pass (`scripts/scan_perf_changes.py`) hands you a candidate list, and the factory checks that the report accounts for all of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj).
+
+**Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers (`scripts/scan_perf_changes.py`). The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
+
 ## Output Contract
 
 Respond ONLY with valid JSON matching `report.schema.json`:
@@ -77,6 +83,7 @@ finding also provide `proposed_fix_diff` as described above, and withhold it for
       "touched_in_recent_commits": true,
       "snippet": "<script src=\"popup.js\"></script>",
       "severity": "high",
+      "candidate_id": "cand-perf-123",
       "category": "LCP / FCP",
       "title": "Defer Render-Blocking Script in popup.html",
       "description": "Synchronous script execution blocks HTML parsing and delays First Contentful Paint.",

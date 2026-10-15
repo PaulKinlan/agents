@@ -29,7 +29,15 @@
           },
           "title": { "type": "string" },
           "description": { "type": "string" },
-          "remediation": { "type": "string" }
+          "remediation": { "type": "string" },
+          "candidate_id": {
+            "type": "string",
+            "description": "The candidate_id of the pre-pass candidate this row answers - confirmed or dismissed. Copy it verbatim: the factory compares the ids a report cites with the ids it presented, so a row that names no presented candidate accounts for nothing (agents-w9ni). Omit only when the pre-pass supplied no ids, where the check falls back to counting rows and is reported as count-only."
+          },
+          "false_positive": {
+            "type": "boolean",
+            "description": "True when this candidate was evaluated and REJECTED (a dismissal recorded as evidence, not work). Every candidate the pre-pass supplied must appear in findings, either as a confirmed issue or as a dismissal (agents-f8dj)."
+          }
         }
       }
     }
