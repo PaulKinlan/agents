@@ -228,7 +228,14 @@ def save_costs(path, measured, identity=None):
 
             existing_mod_count = existing_identity.get("modules", len(existing))
             incoming_mod_count = (identity or {}).get("modules", len(measured))
-            is_partial = existing_mod_count > 0 and incoming_mod_count < existing_mod_count
+
+            # Coordinator directive (agents-2e2ca, agents-tktak):
+            # Only a run with incoming_mod_count >= 50 can replace baseline costs or update
+            # full-gate identity. When an existing baseline exists, any small scratch/fixture
+            # run (< 50 modules) is strictly additive: it may add missing entries, but never
+            # overwrites existing module costs or replaces full-gate identity.
+            has_existing = bool(existing or existing_identity)
+            is_partial = has_existing and (incoming_mod_count < 50 or incoming_mod_count < existing_mod_count)
 
             if is_partial:
                 merged_seconds = dict(existing)

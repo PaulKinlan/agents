@@ -433,6 +433,44 @@ class TestFullGateSharding(unittest.TestCase):
         self.assertEqual(data["identity"]["tree"], "real")
         self.assertEqual(data["identity"]["modules"], 2)
 
+    def test_equal_count_fixture_run_does_not_overwrite_baseline_costs(self):
+        """agents-tktak: equal-count small fixture runs (< 50 modules) cannot overwrite existing baseline costs."""
+        import ast
+        src = (self.root / "tools" / "full-gate.sh").read_text(encoding="utf-8")
+        py_lines = []
+        in_py = False
+        for line in src.splitlines():
+            if not in_py and "<<'PY'" in line:
+                in_py = True
+                continue
+            if in_py and line == "PY":
+                break
+            if in_py:
+                py_lines.append(line)
+        tree = ast.parse("\n".join(py_lines))
+        nodes = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        nodes.extend([n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("save_costs", "costs_at")])
+        mod = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(mod)
+        ns = {}
+        exec(compile(mod, "full-gate.sh", "exec"), ns)
+        save_costs = ns["save_costs"]
+        costs_at = ns["costs_at"]
+
+        table = self.root / "checks" / "full-gate-module-costs.json"
+        # 1. Baseline measurement with 2 modules
+        save_costs(table, {"tests.test_heavy": 140.0, "tests.test_light": 1.0}, {"tree": "real", "modules": 2})
+        # 2. Equal-count foreign fixture run with 2 modules (< 50 modules floor)
+        save_costs(table, {"tests.test_heavy": 0.2, "tests.test_fixture": 0.1}, {"tree": "fixture", "modules": 2})
+        # 3. Baseline cost must be preserved, new fixture module added, and real identity retained
+        costs = costs_at(table, {"tests.test_heavy": ["heavy"], "tests.test_light": ["light"]})
+        self.assertEqual(costs["tests.test_heavy"], 140.0)
+        self.assertEqual(costs["tests.test_light"], 1.0)
+        data = json.loads(table.read_text(encoding="utf-8"))
+        self.assertEqual(data["seconds"]["tests.test_heavy"], 140.0)
+        self.assertEqual(data["seconds"]["tests.test_fixture"], 0.1)
+        self.assertEqual(data["identity"]["tree"], "real")
+
 
 if __name__ == "__main__":
     unittest.main()
