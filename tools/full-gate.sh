@@ -232,36 +232,26 @@ def save_costs(path, measured, identity=None):
                 existing = {}
                 existing_identity = {}
 
-            # Coordinator extreme simplification & final ruling (agents-2e2ca):
-            # A run is eligible to update baseline costs and provenance IF AND ONLY IF:
-            # 1. It measured 100% of the existing modules: set(measured) >= set(existing); AND
-            # 2. Its remote.origin.url matches the existing provenance remote (or existing has none).
-            # If even a single existing module is missing from the run (partial run, single test,
-            # or fixture), it is strictly additive: it may register new modules, but NEVER overwrites
-            # existing baseline timings or provenance. A real repository full gate measuring all
-            # modules updates costs and provenance cleanly.
-            current_provenance = identity or {}
-            existing_provenance = existing_identity or {}
-            is_complete = not existing or (set(measured.keys()) >= set(existing.keys()))
-            can_overwrite = is_complete and (
-                not existing
-                or (
-                    current_provenance.get("remote")
-                    and current_provenance.get("remote") == existing_provenance.get("remote")
-                )
-            )
+            # Coordinator architectural unblock (agents-2e2ca):
+            # 1. Foreign runs (different remote.origin.url, e.g. scratch trees, /tmp fixtures,
+            #    or unit test mocks) must never pollute or touch the shared repository cost table.
+            current_remote = (identity or {}).get("remote", "")
+            existing_remote = (existing_identity or {}).get("remote", "")
+            if existing_remote and current_remote != existing_remote:
+                return
 
-            if can_overwrite:
-                merged_seconds = dict(existing, **measured)
+            # 2. Within the same repository: measured modules update their timings in place;
+            #    unmeasured modules are preserved so partial runs never delete prior measurements.
+            existing.update(measured)
+
+            # 3. Provenance is updated when a complete full gate runs (measured >= existing)
+            #    or on initial table population; partial runs never replace full-suite provenance.
+            if not existing_identity or (set(measured.keys()) >= set(existing.keys())):
                 merged_identity = identity or existing_identity
             else:
-                merged_seconds = dict(existing)
-                for k, v in measured.items():
-                    if k not in merged_seconds:
-                        merged_seconds[k] = v
-                merged_identity = existing_identity or identity
+                merged_identity = existing_identity
 
-            document = {"seconds": merged_seconds}
+            document = {"seconds": existing}
             if merged_identity:
                 document["identity"] = merged_identity
 

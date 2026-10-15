@@ -466,22 +466,24 @@ class TestFullGateSharding(unittest.TestCase):
         # 2. Foreign mock fixture run with tree="fixture" and no matching remote
         save_costs(table, {"tests.test_heavy": 0.2, "tests.test_fixture": 0.1},
                    {"tree": "fixture", "remote": "", "modules": 2})
-        # 3. Baseline cost must be preserved, new fixture module added, and real identity retained
+        # 3. Baseline cost must be preserved, foreign run rejected without pollution, and real identity retained
         costs = costs_at(table, {"tests.test_heavy": ["heavy"], "tests.test_light": ["light"]})
         self.assertEqual(costs["tests.test_heavy"], 140.0)
         self.assertEqual(costs["tests.test_light"], 1.0)
         data = json.loads(table.read_text(encoding="utf-8"))
         self.assertEqual(data["seconds"]["tests.test_heavy"], 140.0)
-        self.assertEqual(data["seconds"]["tests.test_fixture"], 0.1)
+        self.assertEqual(data["seconds"]["tests.test_light"], 1.0)
+        self.assertNotIn("tests.test_fixture", data["seconds"])
         self.assertEqual(data["identity"]["tree"], "a" * 40)
         self.assertEqual(data["identity"]["remote"], "origin")
 
         # 4. A full repository run on a new commit tree with matching remote updates costs and provenance
-        save_costs(table, {"tests.test_heavy": 135.0, "tests.test_light": 0.9, "tests.test_fixture": 0.1},
+        save_costs(table, {"tests.test_heavy": 135.0, "tests.test_light": 0.9, "tests.test_new": 0.5},
                    {"tree": "b" * 40, "remote": "origin", "modules": 3})
         data2 = json.loads(table.read_text(encoding="utf-8"))
         self.assertEqual(data2["seconds"]["tests.test_heavy"], 135.0)
         self.assertEqual(data2["seconds"]["tests.test_light"], 0.9)
+        self.assertEqual(data2["seconds"]["tests.test_new"], 0.5)
         self.assertEqual(data2["identity"]["tree"], "b" * 40)
         self.assertEqual(data2["identity"]["remote"], "origin")
 
