@@ -281,9 +281,10 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     **dismissal,
                 }
                 report = {"summary": "Dismissed waterfall", "target": "sample-target", "findings": [finding]}
+                original_remediation = finding["remediation"]
                 self.assertFalse(is_concurrency_recommendation(finding))
                 self.assertEqual(normalize_report(report), [])
-                self.assertEqual(report["findings"][0]["remediation"], finding["remediation"])
+                self.assertEqual(report["findings"][0]["remediation"], original_remediation)
                 self.assertEqual(unpreconditioned_concurrency_findings(report), [])
                 self.assertEqual(validate_agent_report(
                     ROOT / "agents" / "perf-review",
