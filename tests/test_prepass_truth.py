@@ -410,6 +410,53 @@ class TestPrepassFixes(unittest.TestCase):
                 self.assertEqual(len(candidates), 1, f"Snippet should not have counted as coverage: {snippet}")
                 self.assertEqual(candidates[0]["path"], "style.css")
 
+    def test_scan_ui_ux_supports_feature_query_does_not_exempt(self):
+        """[agents-6l1qw] @supports selector(:focus-visible) is a feature query, not a focus ring.
+
+        The matcher's boundary set accepts `)`, so the prelude of an @supports block satisfied it and
+        a stylesheet that only ASKS whether :focus-visible is supported was exempted from the
+        missing-focus-visible-state rule. MEASURED before the fix: the first snippet below produced
+        no candidate, and the same file without the @supports line produced
+        [(missing-focus-visible-state, style.css)].
+        """
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        supports_cases = [
+            "@supports selector(:focus-visible) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@supports not selector(:focus-visible) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@supports (selector(:focus-visible)) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@supports NOT SELECTOR(:FOCUS-VISIBLE) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@media (min-width: 40rem) {\n  @supports selector(:focus-visible) {\n    .btn { color: red; }\n  }\n}\n.btn:hover { color: red; }",
+        ]
+        for snippet in supports_cases:
+            with self.subTest(snippet=snippet):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / "style.css").write_text(snippet, encoding="utf-8")
+                    res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                         capture_output=True, text=True, check=True)
+                    candidates = [c for c in json.loads(res.stdout)["candidates"]
+                                  if c["rule_id"] == "missing-focus-visible-state"]
+                self.assertEqual(
+                    [(c["rule_id"], c["path"]) for c in candidates],
+                    [("missing-focus-visible-state", "style.css")],
+                    f"A feature query must not exempt the file: {snippet}")
+
+    def test_scan_ui_ux_counts_a_real_rule_inside_a_supports_block(self):
+        """Control for the test above: the @supports PRELUDE is removed, the payload is untouched."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        real_rules = [
+            "@supports selector(:focus-visible) {\n  .btn:focus-visible { outline: 2px solid blue; }\n}\n.btn:hover { color: red; }",
+            "@supports selector(:focus-visible) {\n  :is(a, button:focus-visible) { outline: 2px solid blue; }\n}\n.btn:hover { color: red; }",
+        ]
+        for snippet in real_rules:
+            with self.subTest(snippet=snippet):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / "style.css").write_text(snippet, encoding="utf-8")
+                    res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                         capture_output=True, text=True, check=True)
+                    focus = [c for c in json.loads(res.stdout)["candidates"]
+                             if c["rule_id"] == "missing-focus-visible-state"]
+                self.assertEqual(focus, [], f"A real rule inside the block is coverage: {snippet}")
+
     def test_scan_ui_ux_recognizes_chained_and_combinator_focus_visible_selectors(self):
         """[agents-ifv / agents-vml] scan_ui_ux recognizes chained pseudo-classes, combinators, and pseudo-elements
         on :focus-visible selectors (.card:focus-visible:hover, .btn:focus-visible::after, :is(...))."""

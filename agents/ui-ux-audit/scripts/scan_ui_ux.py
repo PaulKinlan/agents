@@ -130,6 +130,13 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
         # Strip :not(:focus-visible) reset idioms including selector lists like :not(:focus-visible, .kb),
         # bounding characters within the :not() argument to avoid crossing statement/rule boundaries.
         clean_text = re.sub(r':not\([^){};]*:focus-visible[^){};]*\)', '', clean_text, flags=re.IGNORECASE)
+        # Strip an @supports PRELUDE and keep its PAYLOAD (agents-6l1qw). A feature query is not a
+        # focus ring, but the boundary set below accepts `)`, so `@supports selector(:focus-visible) {`
+        # satisfied the matcher and exempted the whole file - MEASURED: a stylesheet whose only
+        # mention was that idiom plus a hover-only rule produced no candidate, and deleting the line
+        # made the candidate appear. The prelude goes, the block stays, so a REAL rule inside it still
+        # counts (that case is a positive control beside the pin in tests/test_prepass_truth.py).
+        clean_text = re.sub(r'@supports[^{]*\{', '{', clean_text, flags=re.IGNORECASE)
         # Match :focus-visible followed by a selector boundary leading to a rule block {
         return bool(re.search(r':focus-visible(?=[\s,{:.\[>+~)#]|$)(?=[^;{}]*\{)', clean_text, flags=re.IGNORECASE))
 
