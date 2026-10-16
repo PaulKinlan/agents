@@ -1041,6 +1041,32 @@ class FindingsStore:
                 path=path,
                 snippet=identity_snip
             )
+            # A SECOND key the register may still be written under, and it is TIGHTER than the
+            # model-snippet bridge below (agents-z3v9p): before step 3 put the emitted candidate id
+            # into the key, an unambiguous candidate was fingerprinted on the PRE-PASS's own snippet
+            # for its location, and every row the register wrote then is keyed that way. Once the id
+            # took precedence those rows went INERT - measured on this repository: 21 of the 76
+            # candidates the pre-pass emits are covered by a register row ONLY under this shape, so
+            # 21 REVIEWED dismissals were silently re-entering triage every night (20 of the 21
+            # rows say "Prose-bound identity" in their own reason, which is the misdiagnosis this
+            # measurement replaces: the row's key was the pre-pass's line, not the model's prose).
+            # The lookup text is scanner-owned and exact per (rule id, path, line), so it absorbs
+            # nothing a register row did not already name.
+            candidate_exact_fp = None
+            if candidate_index and isinstance(rule_id, str):
+                scanner_snip = candidate_index.get("snippets_at", {}).get(
+                    (rule_id.strip(), normalize_path(path), _hashable_line(item.get("line_number"))))
+                if isinstance(scanner_snip, str) and scanner_snip.strip():
+                    candidate_exact_fp = compute_fingerprint(
+                        agent=agent, rule_id=rule_id, path=path, snippet=scanner_snip)
+            if (candidate_exact_fp is not None and candidate_exact_fp != fp
+                    and candidate_exact_fp in self.suppressions
+                    and candidate_exact_fp not in self.data["findings"]
+                    and fp not in self.data["findings"] and fp not in self.suppressions):
+                fp = candidate_exact_fp
+                # Named for what bound the row: `candidate-exact` IS "the scanner candidate at
+                # (rule id, path, line)", the closed vocabulary's own definition of this key.
+                identity_source = "candidate-exact"
             # A store or register written before the scanner snippet was the identity holds
             # the model-snippet fingerprint. Honour it once, instead of booking every finding
             # new and its old record fixed on the upgrade run (fleet-oed).

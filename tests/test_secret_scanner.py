@@ -23,6 +23,7 @@ FACTORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.redaction import BARE_PATTERNS, BLOCK_PATTERNS, PATTERNS as REDACTION_PATTERNS  # noqa: E402
+from lib.findings import SUPPRESSIONS_FILENAME, compute_fingerprint  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader(
     "secret_scan", str(FACTORY_ROOT / "agents" / "secret-scan" / "scripts" / "scan.py")
@@ -152,6 +153,126 @@ class TestScannerCoverage(unittest.TestCase):
         (self.tree / "sample.js").write_text('api_key = "your_api_key_placeholder_000000";\n')
 
         self.assertEqual(self.scan(), [])
+
+
+class TestTheRegisterStopsReviewedFixturesReachingTheModel(unittest.TestCase):
+    """A register row is a REVIEWED dismissal, so the pre-pass must stop presenting the literal.
+
+    agents-z3v9p: before this, the register was consulted only after a run, so every nightly still
+    spent model calls re-dismissing the same test literals and the QA station counted them as the
+    station's own noise. The filter is scoped to TEST paths on purpose, and the two controls below
+    are what keep it from becoming a coverage hole: an unregistered credential in a test path, and a
+    registered literal outside one, must both still be presented.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="factory-secret-scan-register-")
+        self.addCleanup(temporary.cleanup)
+        self.tree = Path(temporary.name)
+        # Unique per test: a shared /tmp/candidates.json leaked a previous test's record into the
+        # "no record is left behind" assertion below (and would do the same in any future one).
+        self.output = self.tree.parent / f"candidates-{self.tree.name}.json"
+        (self.tree / "tests").mkdir()
+        empty_path = self.tree / "empty-path"
+        empty_path.mkdir()
+        self.env = {**os.environ, "PATH": str(empty_path)}
+
+    def scan(self, *extra):
+        result = subprocess.run(
+            [sys.executable, str(FACTORY_ROOT / "agents" / "secret-scan" / "scripts" / "scan.py"),
+             "--target", str(self.tree), "--output", str(self.output), *extra],
+            capture_output=True, text=True, timeout=60, env=self.env,
+        )
+        return result, (json.loads(self.output.read_text()) if self.output.exists() else None)
+
+    def write_register(self, rows):
+        findings = self.tree / "findings"
+        findings.mkdir(exist_ok=True)
+        (findings / SUPPRESSIONS_FILENAME).write_text(
+            "".join(f"{fp}:\n  reason: {reason}\n" for fp, reason in rows), encoding="utf-8")
+
+    def test_a_registered_test_fixture_is_not_presented(self):
+        """The whole point: the reviewed literal never reaches the model again."""
+        fixture = "sk-" + "ant-" + "REGISTERED-do-not-present"
+        (self.tree / "tests" / "test_fixture.py").write_text(
+            f'real_key = "{fixture}"\n', encoding="utf-8")
+        _, unfiltered = self.scan("--no-register-filter")
+        self.assertEqual(len(unfiltered["candidates"]), 1, unfiltered)
+        emitted = unfiltered["candidates"][0]
+        self.write_register([
+            (compute_fingerprint(secret_scan.STATION_NAME, emitted["rule_id"],
+                                 emitted["path"], emitted["candidate_id"]),
+             "fixture"),
+        ])
+
+        result, record = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record["candidates"], [])
+        self.assertEqual(record["candidate_count"], 0)
+        # A removal is REPORTED, never left to be inferred from a count that changed.
+        self.assertEqual(record["register_filter"]["pre_filtered"], 1)
+        self.assertEqual(record["register_filter"]["pre_filtered_locations"],
+                         [f"{emitted['path']}:{emitted['line_number']}"])
+
+    def test_an_unregistered_credential_in_a_test_path_is_still_presented(self):
+        """Control: the filter must not blind the scan in test paths."""
+        fixture = "sk-" + "ant-" + "REGISTERED-do-not-present"
+        (self.tree / "tests" / "test_fixture.py").write_text(
+            f'real_key = "{fixture}"\n', encoding="utf-8")
+        self.write_register([("0" * 64, "a row for something that is not in this tree")])
+
+        result, record = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c["rule_id"] for c in record["candidates"]], ["openai-key"])
+        self.assertEqual(record["register_filter"]["pre_filtered"], 0)
+
+    def test_a_registered_literal_outside_a_test_path_is_still_presented(self):
+        """Control, and the documented scope: this filter is a TEST-path filter.
+
+        A row's review is written about a test fixture; hiding the same literal in shipped code is a
+        coverage decision nobody took, so it stays presented - the store still suppresses it later.
+        """
+        fixture = "sk-" + "ant-" + "REGISTERED-do-not-present"
+        (self.tree / "tools").mkdir()
+        (self.tree / "tools" / "gen.py").write_text(f'real_key = "{fixture}"\n', encoding="utf-8")
+        _, unfiltered = self.scan("--no-register-filter")
+        emitted = unfiltered["candidates"][0]
+        self.write_register([
+            (compute_fingerprint(secret_scan.STATION_NAME, emitted["rule_id"],
+                                 emitted["path"], emitted["candidate_id"]),
+             "fixture"),
+        ])
+
+        result, record = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(record["candidates"]), 1)
+        self.assertEqual(record["register_filter"]["pre_filtered"], 0)
+
+    def test_a_malformed_register_stops_the_scan(self):
+        """A register typo must not read as 'nothing is dismissed' - nor as 'everything is'."""
+        (self.tree / "tests" / "test_fixture.py").write_text(
+            'real_key = "sk-' + 'ant-' + 'REGISTERED-do-not-present"\n', encoding="utf-8")
+        findings = self.tree / "findings"
+        findings.mkdir()
+        (findings / SUPPRESSIONS_FILENAME).write_text(": broken\n", encoding="utf-8")
+
+        result, record = self.scan()
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("suppressions register", result.stderr)
+        self.assertIsNone(record, "a refused register must not leave a candidates record behind")
+
+    def test_the_station_name_is_the_agent_yaml_name(self):
+        """A register is keyed on the agent name: a station reading it under another name filters
+        nothing, silently. Pin the constant against the manifest the factory dispatches on."""
+        manifest = FACTORY_ROOT / "agents" / "secret-scan" / "agent.yaml"
+        name = [line.split(":", 1)[1].strip()
+                for line in manifest.read_text(encoding="utf-8").splitlines()
+                if line.startswith("name:")][0]
+        self.assertEqual(secret_scan.STATION_NAME, name)
 
 
 if __name__ == "__main__":
