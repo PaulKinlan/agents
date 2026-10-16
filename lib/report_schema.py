@@ -232,9 +232,14 @@ _ADVOCATES_SERIAL_PATTERN = re.compile(
 
 _WATERFALL_DISMISSAL_PATTERN = re.compile(
     r"^\s*(?:no\s+change\s+needed:\s*)?(?:serial|sequential)(?:\s+execution)?\s+is\s+"
-    r"(?:intentional|required|necessary|by\s+design)(?:\s+(?:here\s+)?for\s+ordering)?\s*[.!]?\s*$"
+    r"(?:intentional|required|necessary|by\s+design)\b"
     r"|^\s*out\s+of\s+scope:\s*(?:this\s+candidate\s+is\s+in\s+)?dev(?:eloper)?\s+tool(?:ing|s)?\b",
     re.IGNORECASE,
+)
+
+_WATERFALL_BATCH_ADVICE_PATTERN = re.compile(r"\bbatch(?:es|ing|ed)?\b", re.IGNORECASE)
+_NEGATED_BATCH_ADVICE_PATTERN = re.compile(
+    r"\b(?:do\s+not|don't|never|avoid)\s+batch(?:es|ing|ed)?\b", re.IGNORECASE,
 )
 
 
@@ -285,7 +290,12 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     # Exempt explicit dismissal language only after checking for affirmative concurrency advice
     # and added concurrency diff lines, which must still be guarded and withheld.
     if rule_id == "sequential-await-waterfall":
-        return not bool(_WATERFALL_DISMISSAL_PATTERN.search(remediation))
+        # A dismissal may explain its reasoning in another clause or line. Do not treat
+        # that explanation as dismissal of any separate, terse batching recommendation.
+        batch_advice = _NEGATED_BATCH_ADVICE_PATTERN.sub(" ", stripped_remediation)
+        return not bool(_WATERFALL_DISMISSAL_PATTERN.search(remediation)) or bool(
+            _WATERFALL_BATCH_ADVICE_PATTERN.search(batch_advice)
+        )
 
     # Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above.
     if rule_id == "render-blocking-head-asset":

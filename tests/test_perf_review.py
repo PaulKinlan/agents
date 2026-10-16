@@ -287,6 +287,36 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                 "rule_id": "sequential-await-waterfall",
                 "path": "src/runner.ts",
                 "line_number": 12,
+                "remediation": "Serial execution is required for correctness.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "remediation": "Sequential execution is required by design.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "remediation": "Serial execution is intentional here to preserve ordering.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "remediation": "Serial execution is intentional.\nVerified against the backend contract.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "remediation": "Serial execution is intentional; do not batch the fetches.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
                 "remediation": "Out of scope: this candidate is in dev tooling, not shipped production code.",
             },
         ):
@@ -328,6 +358,8 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
             "The loop's serial execution is intentional by design, yet batch the independent fetches.",
             "Serial execution is intentional only because of a stale comment; batch the independent fetches.",
             "The stale comment claiming serial execution is intentional should be ignored; batch the independent fetches.",
+            "Serial execution is intentional.\nBatch the independent fetches.",
+            "No change needed: serial execution is intentional for ordering; batch the fetches.",
         ):
             with self.subTest(remediation=remediation):
                 finding = {"rule_id": "sequential-await-waterfall", "remediation": remediation}
