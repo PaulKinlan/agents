@@ -304,6 +304,18 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     report,
                 ), [])
 
+    def test_scope_words_do_not_hide_terse_waterfall_recommendations(self):
+        for remediation in (
+            "This is not out of scope: batch the independent fetches here.",
+            "Out of scope for the guard: batch the independent fetches in this loop.",
+        ):
+            with self.subTest(remediation=remediation):
+                finding = {"rule_id": "sequential-await-waterfall", "remediation": remediation}
+                self.assertTrue(is_concurrency_recommendation(finding))
+                self.assertTrue(unpreconditioned_concurrency_findings({"findings": [finding]}))
+                self.assertIsNotNone(guard_concurrency_finding(finding, 0))
+                self.assertIn("Precondition: Verify backend reentrancy", finding["remediation"])
+
     def test_dismissal_language_does_not_hide_a_concurrency_patch(self):
         finding = {
             "rule_id": "sequential-await-waterfall",
