@@ -1280,14 +1280,19 @@ class TestFastGateMapping(unittest.TestCase):
         test staging list in tests/ must copy the modules the runtime it builds imports at module scope,
         read from the source rather than enumerated. It belongs in this tier and not in a unit suite
         because the property is about the tree as a whole - a new import in lib/findings.py makes OTHER
-        files wrong, and the change that broke five of them touched none of them."""
+        files wrong, and the change that broke five of them touched none of them.
+        TestPatchArtifactsAreNotRotted (agents-e4lba) enforces a repo-wide tree property of the same shape:
+        every tracked patches/*.patch must still apply to HEAD's content or reverse-apply (already
+        installed), and the artifacts whose tree has moved past them are exactly the ones no fast-gate arm
+        can select a suite for, because the change that rots them is a change to a file the patch touches
+        rather than to patches/ itself."""
         tree_guards_path = ROOT / "tests" / "test_tree_guards.py"
         self.assertTrue(tree_guards_path.is_file(), "tests/test_tree_guards.py must exist")
         import ast
         tree = ast.parse(tree_guards_path.read_text(encoding="utf-8"))
         classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
         self.assertEqual(classes, ["TestNoUnboundedSubprocess", "TestWorktreeBeadsDecoyGuard",
-                                   "TestStagedRuntimeCarriesItsImports"],
+                                   "TestStagedRuntimeCarriesItsImports", "TestPatchArtifactsAreNotRotted"],
                          "tests/test_tree_guards.py must contain exactly the pinned tree-guard classes")
 
     def test_a_tier_file_delta_selects_the_suite_that_guards_its_contents(self):

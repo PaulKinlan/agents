@@ -10,6 +10,7 @@ lib file is introduced without an explicit budget.py mapping (closing agents-c04
 """
 
 import ast
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -1746,6 +1747,107 @@ class TestStagedRuntimeCarriesItsImports(unittest.TestCase):
             "if TYPE_CHECKING or __debug__:\n    from lib.extra import required\n"))
         self.assertIn("extra.py", missing(disjunction),
                       "`TYPE_CHECKING or X` can run at import time, so the import is required")
+
+
+def patch_apply_state(patch: Path, root: Path) -> str:
+    """'applies', 'installed' or 'neither' for one patch artifact (agents-e4lba).
+
+    Decided against HEAD's CONTENT - through a temporary index seeded from HEAD - and never against the
+    worktree. A lane that is mid-edit in a file the artifact touches would otherwise move this verdict, and
+    a guard that can fail for what happens to be on disk while it ran is the machine-state pathology
+    docs/speed.md names: it would turn an unrelated lane's change red while saying nothing about the
+    artifact. `git apply --cached --check` modifies nothing, and the temporary index dies with the temp dir.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        seeded = subprocess.run(["git", "-C", str(root), "read-tree", "HEAD"],
+                                env=env, capture_output=True, text=True)
+        if seeded.returncode != 0:
+            raise RuntimeError(f"could not seed a temp index from HEAD in {root}: {seeded.stderr.strip()}")
+
+        def applies(*flags: str) -> bool:
+            return subprocess.run(
+                ["git", "-C", str(root), "apply", "--cached", "--check", *flags, str(patch)],
+                env=env, capture_output=True).returncode == 0
+
+        if applies():
+            return "applies"
+        if applies("--reverse"):
+            return "installed"
+        return "neither"
+
+
+class TestPatchArtifactsAreNotRotted(unittest.TestCase):
+    """agents-e4lba (Paul, rerouted from fleet-0vz8o): a patch against a repository that moves has a shelf
+    life measured in hours, and nothing looked at the artifacts as they rotted.
+
+    A patch is a PLAN with an expiry, not a deliverable, so two live states are legitimate: it still applies
+    to the current tree (a plan someone can install), or it reverse-applies (the change it carries is
+    already in the tree, so the artifact is a record of what was delivered). The state refused here is
+    NEITHER - the tree has moved past it, nothing can install it, nothing can reverse it, and it can never
+    be used again. That is the measured instance this guard comes from: 13 of 14 artifacts in the agents
+    repository's fleet delivery folder were in exactly that state, and a human reading the folder found
+    them, because no part of the pipeline ever applied one.
+
+    ADR 0001's criterion puts it in this tier rather than beside the pairing pin in
+    tests/test_patch_writeups.py: the domain that can rot an artifact is every file a patch touches, and
+    those paths are resolved by the fast gate WITHOUT selecting the patch suites - a change to
+    tools/red-first.sh can rot a patches/ artifact while patches/ itself is untouched. The pairing of
+    artifact and write-up stays where it is; this is the artifact's own applicability.
+    """
+
+    def test_every_tracked_patch_applies_or_is_already_installed(self):
+        artifacts = [p for p in tracked_paths("patches") if p.suffix == ".patch"]
+        # Vacuity check, stated plainly: an empty enumeration would make this whole guard pass on nothing.
+        # tests/test_patch_writeups.py requires at least one write-up in the directory, so an empty answer
+        # here means the ENUMERATION failed - not that the repository has no artifacts to police.
+        self.assertTrue(artifacts, "no tracked patches/*.patch were enumerated - nothing was checked")
+        states = {p.name: patch_apply_state(p, ROOT) for p in artifacts}
+        self.assertTrue(set(states.values()) <= {"applies", "installed", "neither"},
+                        f"the instrument returned a state outside its vocabulary: {states}")
+        rotted = sorted(name for name, state in states.items() if state == "neither")
+        self.assertEqual(rotted, [], (
+            "these patch artifacts apply in NEITHER direction, so the tree has moved past them and they can "
+            "never be used again: " + ", ".join(rotted) + ". A patch is a plan with an expiry: either "
+            "regenerate it against the current tree (and say in its write-up which base it expects), or "
+            "delete the artifact with its write-up and record the closure on its bead. A queue that only "
+            "grows is not a queue - do not leave it to be found by a human reading the folder."))
+
+    def test_the_verdict_reads_head_not_the_dirty_worktree(self):
+        """CONTROL: the instrument ignores the worktree, so an unrelated lane's mid-edit cannot move it."""
+        root, patch = self._throwaway_repo_with_a_live_patch()
+        (root / "f.txt").write_text("one\nDIRTY\nthree\n", encoding="utf-8")
+        self.assertEqual(patch_apply_state(patch, root), "applies",
+                         "the verdict followed the DIRTY WORKTREE, so any lane editing a file an artifact "
+                         "touches could turn this guard red for its own unrelated change")
+
+    def test_a_patch_the_tree_has_moved_past_is_reported_as_neither(self):
+        """CONTROL: the guard's own failure mode - the exact state it exists to refuse is reachable."""
+        root, patch = self._throwaway_repo_with_a_live_patch()
+        (root / "f.txt").write_text("one\nmoved\nthree\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=guard", "-c", "user.email=g@example.invalid",
+                        "commit", "-qam", "move past the artifact"], check=True, capture_output=True)
+        self.assertEqual(patch_apply_state(patch, root), "neither",
+                         "an artifact the tree has moved past must be refused, not reported as live")
+
+    def _throwaway_repo_with_a_live_patch(self) -> tuple[Path, Path]:
+        """A throwaway repo whose HEAD a generated patch applies to, plus that patch on disk."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        identity = ["-c", "user.name=guard", "-c", "user.email=g@example.invalid"]
+        run = lambda *args: subprocess.run(["git", "-C", str(root), *identity, *args],
+                                           check=True, capture_output=True, text=True)
+        run("init", "-q")
+        (root / "f.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+        run("add", "f.txt")
+        run("commit", "-qm", "the base the artifact is written against")
+        (root / "f.txt").write_text("one\nTWO\nthree\n", encoding="utf-8")
+        patch = root / "artifact.patch"
+        patch.write_text(run("diff").stdout, encoding="utf-8")
+        run("checkout", "--", "f.txt")
+        self.assertTrue(patch.read_text(encoding="utf-8").strip(), "the fixture generated an empty patch")
+        return root, patch
 
 
 if __name__ == "__main__":
