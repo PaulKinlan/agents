@@ -59,6 +59,28 @@ def _tracked_fields(text: str | None = None) -> dict:
     return fields
 
 
+# agents-vy4g6: the constants the speed contract documents live in two files, so the pin that compares the
+# contract with the code reads both. The gate's own bounds are `positive_int("NAME", DEFAULT)` calls in
+# tools/full-gate.sh; the runner's hard bounds are CHECK_TIMEOUT / CHECK_FAST_TIMEOUT in tools/check.conf,
+# which _tracked_fields above is already the single parser of (agents-vkti).
+SPEED_DOC = ROOT / "docs" / "speed.md"
+FULL_GATE = ROOT / "tools" / "full-gate.sh"
+_POSITIVE_INT_DEFAULT = re.compile(r'positive_int\(\s*"([A-Z_]+)"\s*,\s*(\d+)\s*\)')
+
+
+def _enforced_budget_constants() -> dict:
+    """The budgets the code actually enforces, as {name: default-or-None}, read from the two files that declare them."""
+    fields = _tracked_fields()
+    declared = {match.group(1): match.group(2)
+                for match in _POSITIVE_INT_DEFAULT.finditer(FULL_GATE.read_text(encoding="utf-8"))}
+    return {
+        "FULL_GATE_BUDGET_S": declared.get("FULL_GATE_BUDGET_S"),
+        "FULL_GATE_MODULE_TIMEOUT_S": declared.get("FULL_GATE_MODULE_TIMEOUT_S"),
+        "CHECK_TIMEOUT": fields.get("CHECK_TIMEOUT"),
+        "CHECK_FAST_TIMEOUT": fields.get("CHECK_FAST_TIMEOUT"),
+    }
+
+
 def _discovery_commands() -> list[str]:
     """The core full gate and every additional unittest discovery in deployed CI."""
     commands = []
@@ -509,6 +531,39 @@ class TestTrackedCheckConfig(unittest.TestCase):
             check_ci_and_tracked_config_consistency(ci_cmds, tracked)
         self.assertIn("['foo', 'bar']", str(cm.exception))
         self.assertIn("diverges from tracked CHECK_CMD", str(cm.exception))
+
+
+class TestTheSpeedContractStatesTheEnforcedBudgets(unittest.TestCase):
+    """agents-vy4g6: docs/speed.md is the contract tools/full-gate.sh cites, and it must agree with the code.
+
+    The gate sends an over-budget reader to "docs/speed.md for the terms this budget belongs to", and that
+    file did not exist (`git log --all -- docs/speed.md` was empty) while three call sites cited it - which
+    is why the same speed premise was filed three times (agents-9iyf, agents-62ia, agents-vy4g6) instead of
+    being read. A contract that can silently state a budget the code does not enforce is the same defect one
+    level up from the missing file, so the NUMBERS are compared here, not the file's existence alone.
+    """
+
+    def test_the_doc_the_gate_cites_exists(self):
+        self.assertIn("docs/speed.md", FULL_GATE.read_text(encoding="utf-8"),
+                      "the over-budget message must keep naming the file it sends its reader to")
+        self.assertTrue(SPEED_DOC.is_file(),
+                        f"the speed contract tools/full-gate.sh cites is missing: {SPEED_DOC}")
+
+    def test_every_enforced_budget_is_stated_as_name_equals_value(self):
+        enforced = _enforced_budget_constants()
+        # A reader that resolves nothing must not be able to pass this test: the four constants are read
+        # from two files, and any of them going missing is a parser/rename defect, not agreement.
+        self.assertEqual({name for name, value in enforced.items() if value is not None}, set(enforced),
+                         f"a budget constant could not be read from the code: {enforced}")
+        stated = {}
+        for line in SPEED_DOC.read_text(encoding="utf-8").splitlines():
+            match = re.fullmatch(r"([A-Z_]+)=(\d+)", line.strip())
+            if match:
+                stated[match.group(1)] = match.group(2)
+        disagree = {name: {"code": value, "docs/speed.md": stated.get(name)}
+                    for name, value in enforced.items() if stated.get(name) != value}
+        self.assertEqual(disagree, {},
+                         f"docs/speed.md and the code disagree on the enforced budgets: {disagree}")
 
 
 class TestConfigIsResolvedLoudly(unittest.TestCase):
