@@ -127,8 +127,19 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
     def defines_focus_visible_rule(css_text: str) -> bool:
         # Strip comments so comments like /* TODO: add :focus-visible rings */ don't match
         clean_text = re.sub(r'/\*.*?\*/', '', css_text, flags=re.DOTALL)
+        # Strip quoted STRINGS: a string cannot hold a selector, and a literal inside one must not be
+        # read as an at-rule. This is the layer that stops `const re = new RegExp("@supports
+        # (selector(:focus-visible))")` in a .vue <script> from consuming the real rule in the <style>
+        # below it. MEASURED: removing these two lines fails exactly the no-semicolon.vue case of
+        # test_scan_ui_ux_literal_supports_before_a_real_rule, which reports missing-focus-visible-
+        # state for a file that defines the rule. An earlier version of this fix dropped them after
+        # ONE mutation stayed green on the simpler shapes - a wrong generalisation, measured here.
+        clean_text = re.sub(r'"(?:\\.|[^"\\])*"', '""', clean_text)
+        clean_text = re.sub(r"'(?:\\.|[^'\\])*'", "''", clean_text)
         # Strip :not(:focus-visible) reset idioms including selector lists like :not(:focus-visible, .kb),
         # bounding characters within the :not() argument to avoid crossing statement/rule boundaries.
+        # An edit that dropped these two lines while adding the string strip above was caught by
+        # test_scan_ui_ux_focus_not_focus_visible_does_not_exempt, which is what that test is for.
         clean_text = re.sub(r':not\([^){};]*:focus-visible[^){};]*\)', '', clean_text, flags=re.IGNORECASE)
         # Strip an @supports PRELUDE and keep its PAYLOAD (agents-6l1qw). A feature query is not a
         # focus ring, but the boundary set below accepts `)`, so `@supports selector(:focus-visible) {`
@@ -136,7 +147,19 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
         # mention was that idiom plus a hover-only rule produced no candidate, and deleting the line
         # made the candidate appear. The prelude goes, the block stays, so a REAL rule inside it still
         # counts (that case is a positive control beside the pin in tests/test_prepass_truth.py).
-        clean_text = re.sub(r'@supports[^{]*\{', '{', clean_text, flags=re.IGNORECASE)
+        #
+        # agents-u96dl, raised by rev-6l1qw against the first version of this strip, which was
+        # `@supports[^{]*\{`: a LITERAL `@supports` consumed text up to the next real rule's opening
+        # brace and deleted that rule's selector, so a file that DID define `.btn:focus-visible` was
+        # reported as missing it. What the two remaining constraints are measured to do:
+        #   * `[(\w]` - a real prelude starts with a condition, never `]`/`=`/`"`. Removing it fails
+        #     exactly the bare-before-rule.css case: `[data-y=@supports] .btn:focus-visible { ... }`
+        #     then reports its own real rule as missing (measured).
+        #   * `[^{};]` - bounds how far a false literal can consume (never past a statement or block
+        #     boundary). No case in the pin fails without it (measured), so it is kept as a bound and
+        #     NOT claimed as a fix.
+        # The non-word lookbehind an earlier version carried was dropped: no measured case needs it.
+        clean_text = re.sub(r'@supports\b\s*[(\w][^{};]*\{', '{', clean_text, flags=re.IGNORECASE)
         # Match :focus-visible followed by a selector boundary leading to a rule block {
         return bool(re.search(r':focus-visible(?=[\s,{:.\[>+~)#]|$)(?=[^;{}]*\{)', clean_text, flags=re.IGNORECASE))
 
