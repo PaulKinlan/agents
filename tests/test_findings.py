@@ -286,6 +286,84 @@ class TestSeverityBaselineClamp(unittest.TestCase):
                 store.close()
 
 
+class TestCrossStationCandidateIdsStaySeparate(unittest.TestCase):
+    """agents-g3vnf, MEASURED: two stations may share a candidate_id, and their rows must stay TWO.
+
+    A `candidate_id` names a CANDIDATE, not a finding: lib/candidate_identity builds it from
+    (rule_id, path, match_text, ordinal) with no station in the inputs, and ADR agents-ltuf goes
+    further - vuln-triage COPIES the anchor row's persisted id on purpose. So a shared id across
+    stations is the design, not a collision. A finding's identity is
+    sha256(agent:rule_id:path:snippet) and the retire sweep is agent-scoped, so "collapsing" two
+    stations' rows would corrupt every per-station delta and every per-station QA scorecard. This
+    test is here because a bead asked for that collapse (agents-g3vnf) and the answer is no, with the
+    behaviour measured rather than argued - the mutation that fails it is deduplicating on
+    candidate_id.
+
+    The second assertion is the falsified half of the same bead: the critical routing of the
+    security-sensitive row is NOT caused by the shared id. It is the fail-closed policy for an
+    unverifiable rule label (agents-94f), and a row carrying no candidate id at all routes the same
+    way.
+    """
+
+    CANDIDATE_ID = "b937944bf90b5d3c"  # the id the nightly reported on both stations
+
+    def _index(self, d):
+        path = Path(d) / "candidates.json"
+        path.write_text(json.dumps({"candidate_id_scheme": 1, "candidates": [{
+            "rule_id": "qa-agent-high-wontfix-noise", "path": "agents/secret-scan/SKILL.md",
+            "line_number": 52, "snippet": "wontfix_rate: 0.35",
+            "raw_match": "wontfix_rate: 0.35", "candidate_id": self.CANDIDATE_ID,
+        }]}), encoding="utf-8")
+        return findings.load_candidate_index(path)
+
+    def _item(self, rule_id):
+        return {"rule_id": rule_id, "path": "agents/secret-scan/SKILL.md", "line_number": 52,
+                "snippet": "wontfix_rate: 0.35", "severity": "medium", "title": "t",
+                "description": "d", "anchor_candidate_id": self.CANDIDATE_ID}
+
+    def test_two_stations_sharing_a_candidate_id_keep_two_rows_and_two_deltas(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = FindingsStore("t", findings_dir=Path(d))
+            try:
+                index = self._index(d)
+                qa, qa_stats, _ = store.process_run(
+                    "qa-station", [self._item("qa-agent-high-wontfix-noise")], candidate_index=index)
+                vt, vt_stats, _ = store.process_run(
+                    "vuln-triage", [self._item("vuln-triage-shared-anchor")], candidate_index=index)
+
+                # Two identities, both bound to the SAME emitted id, both new: the shared id does
+                # not merge them - only the fingerprint decides identity, and `agent` is in it.
+                self.assertNotEqual(qa[0]["fingerprint"], vt[0]["fingerprint"])
+                self.assertEqual(qa[0]["candidate_id"], vt[0]["candidate_id"])
+                self.assertEqual((qa_stats["new"], vt_stats["new"]), (1, 1))
+                self.assertEqual(len(store.data["findings"]), 2)
+
+                # And a second identical run books nothing new for either station: anchored rows
+                # are stable, which is why the nightly's one-off wave was the ANNOUNCED re-key
+                # (agents-pb02), not a recurring false-new.
+                _, qa_again, _ = store.process_run(
+                    "qa-station", [self._item("qa-agent-high-wontfix-noise")], candidate_index=index)
+                _, vt_again, _ = store.process_run(
+                    "vuln-triage", [self._item("vuln-triage-shared-anchor")], candidate_index=index)
+                self.assertEqual((qa_again["new"], vt_again["new"]), (0, 0))
+                self.assertEqual((qa_again["unchanged"], vt_again["unchanged"]), (1, 1))
+            finally:
+                store.close()
+
+    def test_the_critical_routing_is_the_agent_class_not_the_shared_id(self):
+        """The falsified causal claim: remove the id and the security row still routes critical."""
+        with tempfile.TemporaryDirectory() as d:
+            store = FindingsStore("t", findings_dir=Path(d))
+            try:
+                without_id = {k: v for k, v in self._item("vuln-triage-shared-anchor").items()
+                              if k != "anchor_candidate_id"}
+                processed, _, _ = store.process_run("vuln-triage", [without_id])
+                self.assertIsNone(processed[0].get("candidate_id"))
+                self.assertEqual(processed[0]["routing_severity"], "critical")
+            finally:
+                store.close()
+
+
 class TestRawMatchBinding(unittest.TestCase):
     """The scanner's raw_match is indexed and bound for deterministic dummy detection (agents-3r7)."""
 

@@ -50,6 +50,14 @@ fast_gate_arms_050_lib_sinks_py() {
       # oracle reports. Its embargo-side claim (the dismissal vocabulary) stays mapped in
       # 140-lib_budget_py.sh, where agents-f8dj put it; one suite can belong to two arms.
       mapped="$mapped tests/test_station_candidate_accounting.py"
+      # agents-z3v9p: tests/test_secret_scanner.py now imports this module too - compute_fingerprint,
+      # parse_suppressions_yaml, SUPPRESSIONS_FILENAME - because the pre-pass reads the target's
+      # committed register and a test cannot write a register row the store would recognise without
+      # the store's own key function. The consumer relation was MEASURED before this line was added:
+      # tightening parse_suppressions_yaml so an entry must declare an author turns this suite RED
+      # (3 failures), so it is a real consumer and not just an import. Costs one more module in this
+      # arm: tests.test_secret_scanner is 12 tests / ~1.5 s at this commit.
+      mapped="$mapped tests/test_secret_scanner.py"
       ;;
     lib/candidate_identity.py)
       # Candidate identity generator (agents-rdyb) and pre-pass emission assertion (agents-vt7w).

@@ -32,13 +32,22 @@
 # engine over that live candidate set booked the registered rows `wontfix` with change="suppressed" -
 # the numbers are in the bead. So the effect is verified on this tree rather than argued from the format.
 #
-# HOW LONG AN ENTRY LASTS, stated because it differs per row:
-#   - an entry whose finding was recognised by the scanner's own candidate id (55 rows here) is stable:
-#     the same literal at the same place keeps the same fingerprint, so the entry keeps working.
-#   - an entry whose identity rested on the MODEL'S PROSE (46 rows here, marked in its reason) stops
-#     matching the moment that wording changes. It is kept because it is harmless - an unmatched entry
-#     suppresses nothing and is silent - but such a row can reappear as a fresh false positive. Closing
-#     that gap for good is the identity work, not this register.
+# HOW LONG AN ENTRY LASTS, and a CORRECTION to what this header said before (agents-z3v9p):
+#   - an entry keyed on the scanner's own candidate id is stable: the same literal at the same place
+#     keeps the same fingerprint, so the entry keeps working.
+#   - the 46 rows this file used to call "identity rested on the MODEL'S PROSE" are not prose-bound at
+#     all. MEASURED on this tree: re-deriving every fingerprint the current pre-pass emits shows those
+#     rows hold the key the pre-pass wrote BEFORE step 3 put the emitted candidate id into it - the
+#     candidate's own line, not the model's wording. Once the id took precedence those rows went inert,
+#     so 21 of them had been silently re-entering triage every night while the register looked intact.
+#     lib/findings.py now honours that key as well (the pre-id bridge), so the rows work again.
+#
+# WHAT ELSE READS THIS FILE, stated because it was not obvious (agents-z3v9p): the deterministic
+# pre-pass too. agents/secret-scan/scripts/scan.py loads the register of the target it is scanning and
+# does not PRESENT a test-path candidate that a row already dismisses (its run record reports the
+# count and locations under `register_filter`; `--no-register-filter` presents everything). That is
+# what makes the promise two paragraphs up literal - a reviewed fixture literal no longer reaches the
+# model at all, instead of being dismissed by it again every night.
 #
 
 db34a26660aeeb1ff569b46dd5a6b5d6a2e4529310e0515b73280a0f5a61c0cf:
@@ -453,3 +462,53 @@ eda70bbe0d159bdd4dbbcb44cf35f0d230ec463071fe0000ffaf6ef967c88101:
   reason: "BY DESIGN, confirmed in paul-kinlan-me-dpr: the serial `await enqueueItem(...)` chain is the output contract of the ReadableStream that api/ask-paul.ts hands to `new Response` (api/ask-paul.ts:57, :95), so chunk order IS the byte order of a response body. Measured on this tree: a value that resolves later is still emitted in template order, arrays and nested streams land byte-exact with falsy values skipped, and a naive parallel control that enqueues as each value settles reorders the document - so a concurrent form needs order re-assembly, which is what the scanner's own remediation asks for. The contract is pinned in the target's fast gate by tests/whatwg-flora-order.test.mjs (mutation-checked), which is what makes this suppression safe. Evidence harness: /tmp/dpr-evidence/flora-order.mjs."
   author: "paul-kinlan-me-hugo-guess"
   date: "2026-10-13"
+
+# ADDED agents-z3v9p (2026-10-16): the fixture literals this tree's pre-pass emitted with NO row
+# covering them, so the triage re-decided them from scratch every night. Each was read at its
+# location and confirmed a deliberate fixture; keys are the emitted candidate ids, the stable
+# shape, so they also pre-filter in agents/secret-scan/scripts/scan.py.
+
+33e907236ea5619ffe8cee60710bdfaa6ee75502b3a3e2600021aec2f52159ba:
+  reason: "openai-key match in a test fixture at tests/test_containment_broker.py:106 - a host stub key the broker test asserts is NOT leaked through the sandbox's shared host network. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on e464e7df3ef81cad.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+767aa6f96cc82d1dcba667315ad0d2b9b5d781a96e89b975f02c99454bc43b0f:
+  reason: "openai-key match in a test fixture at tests/test_containment_broker.py:195 - the unsandboxed variant of the same broker stub key, asserted not to be brokered. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on a477fa6b39736fc4.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+4ab8ab2a716f9b2790074d9f13c0489b3f866cbde498b4ffe1a879d234f8c845:
+  reason: "openai-key match in a test fixture at tests/test_embargo.py:168 - a dummy credential the embargo test passes through reported_severity() and asserts reports info. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 6840afe84f1c7cd5.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+0b973074911140023ce125ea4d56ff5807220cdc9d70903fbd0d8ba43ec063ee:
+  reason: "openai-key match in a test fixture at tests/test_containment_write_grants.py:215 - the ANTHROPIC_API_KEY stub value the containment tests set to satisfy claude.sh's deterministic presence check; the engine is stubbed and never calls the API. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 2fc2a57cf54cfdcd.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+ec28a593de2325b266e5ddfc2b3c7d13558a9914056e98ebcdcf852085d2a10d:
+  reason: "openai-key match in a test fixture at tests/test_containment_write_grants.py:285 - the same stub - present so claude.sh's presence check passes; the engine is stubbed. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 20defdc11df33724.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+3e614385b91476ecdc621b7d6894d8e25e3ac1fae2e9b7e5ed9b533e93ffb9ab:
+  reason: "openai-key match in a test fixture at tests/test_containment_write_grants.py:321 - the same stub, in the refusal case (expected rc=3). Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 18ad8f3ce941698e.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+423ed06293bf46cba9c28f7a0c03b2354b2bdd305f7e20c6972823dd666c692a:
+  reason: "openai-key match in a test fixture at tests/test_containment_write_grants.py:341 - the same stub, public-target case. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 15005259f81e7934.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+5d055041c03f234f8c40016a2523b229afba9988b8b1d25c49b5aff86d8f8ae2:
+  reason: "openai-key match in a test fixture at tests/test_containment_write_grants.py:363 - the same stub, trusted-target case. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 2984a834c2e5f352.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+a895a4004ca6bbf1cc338fbb64df0a17e1437715f0a2c802433252a23e04bc30:
+  reason: "openai-key match in a test fixture at tests/test_factory_truth.py:443 - the candidate snippet in the report the factory-truth test feeds to the store. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 705931e824efa596.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+a60d0a420fce3b983ef07a0a6da8baf618f69b1419f751f3346d9076ea13cf8e:
+  reason: "openai-key match in a test fixture at tests/test_factory_truth.py:453 - the same fixture re-quoted with a mask in the second run, asserted NOT to be new+fixed. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on de6886849f5fefa2.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"
+b7fdf40aa7abdafb7f70ce378ab6cfe39fb05cf21cfe3bfd1fcd1b1d78030792:
+  reason: "generic-api-key match in a test fixture at tests/test_hermetic_env.py:138 - fake_secret, the value the hermetic-environment test asserts is never formatted into a failure message. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 8b9086f63286b9e8.)"
+  author: "agents-factory-impl-vy4"
+  date: "2026-10-16"

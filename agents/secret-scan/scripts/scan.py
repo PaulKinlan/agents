@@ -23,8 +23,25 @@ sys.path.insert(0, str(FACTORY_ROOT))
 
 from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields  # noqa: E402
 
+from lib.findings import (  # noqa: E402
+    SUPPRESSIONS_FILENAME,
+    SuppressionFileError,
+    compute_fingerprint,
+    parse_suppressions_yaml,
+)
 from lib.redaction import emit_station_result  # noqa: E402
 from lib.tool_pins import ToolPinError, prepass_tool  # noqa: E402
+
+# The agent name the store fingerprints a finding under. It MUST be the `name` in this station's
+# agent.yaml, because a register row is keyed `sha256(agent + rule_id + path + snippet)` - a station
+# that reads its own register under any other name filters nothing and silently presents the whole
+# fixture class again. Pinned against agent.yaml by tests/test_secret_scanner.py.
+STATION_NAME = "secret-scan"
+
+# Which paths count as the target's TEST tree. The register filter below is scoped to these on
+# purpose: the register's credential-shaped rows are test literals, and a literal found OUTSIDE a
+# test tree is never hidden by them - not even when a row happens to hash the same.
+TEST_PATH_DIRS = ("tests", "test")
 
 
 def _gitleaks_binary() -> Optional[str]:
@@ -97,6 +114,60 @@ IGNORE_EXTENSIONS = {
 }
 
 GITLEAKS_TIMEOUT_SECONDS = 150
+
+
+def is_test_path(rel_path: str) -> bool:
+    """True for a path inside the target's test tree (a `tests/`/`test/` segment, or a test file)."""
+    parts = [p for p in rel_path.replace(os.sep, "/").split("/") if p and p != "."]
+    if not parts:
+        return False
+    if any(part in TEST_PATH_DIRS for part in parts[:-1]):
+        return True
+    name = parts[-1]
+    return name.startswith("test_") or name.endswith(("_test.py", "_test.js", "_test.ts"))
+
+
+def load_registered_fingerprints(target_dir: Path):
+    """The fingerprints the target's own committed register already dismisses, and its path.
+
+    AGENTS.md's noise-control contract puts a reviewed credential-shaped false positive in a
+    committed suppressions file, and the register's own header states its purpose as stopping that
+    class RE-ENTERING TRIAGE every night. It did not: the register was consulted only after a run,
+    so every nightly still spent model calls re-dismissing the same literals. Reading it here is
+    what makes the pre-pass honour the review instead of re-deriving it (agents-z3v9p).
+
+    No register is the normal case for a target with no dismissals yet, so it returns an empty set.
+    A MALFORMED register is not: it raises out of `parse_suppressions_yaml` and this exits 2, so a
+    register typo cannot silently present (or silently drop) the whole class.
+    """
+    register = target_dir / "findings" / SUPPRESSIONS_FILENAME
+    if not register.is_file():
+        return set(), None
+    try:
+        rows = parse_suppressions_yaml(register.read_text(encoding="utf-8"), str(register))
+    except SuppressionFileError as e:
+        sys.stderr.write(f"Error: the committed suppressions register cannot be read: {e}\n")
+        sys.exit(2)
+    return set(rows), register
+
+
+def register_covers(candidate: dict, registered) -> bool:
+    """Whether the target's register already dismisses THIS candidate.
+
+    Every key shape the register has ever been written with is tried, so a row written before the
+    scanner emitted candidate ids is honoured rather than going inert: the emitted id (the current
+    shape), the pre-pass's snippet for the line, and its raw match. All three are scanner-owned
+    text, so matching on them cannot be moved by anything the model writes.
+    """
+    rule_id = candidate.get("rule_id")
+    path = candidate.get("path")
+    if not isinstance(rule_id, str) or not isinstance(path, str):
+        return False
+    for text in (candidate.get("candidate_id"), candidate.get("snippet"), candidate.get("raw_match")):
+        if isinstance(text, str) and text.strip():
+            if compute_fingerprint(STATION_NAME, rule_id, path, text) in registered:
+                return True
+    return False
 
 
 def scan_with_gitleaks(target_dir: Path) -> Optional[list]:
@@ -202,6 +273,9 @@ def main():
     parser.add_argument("pos_target", nargs="?", help="Optional positional target directory")
     parser.add_argument("--target", help="Target directory to scan")
     parser.add_argument("--output", help="Path to write the raw local JSON record to (default: stdout, which redacts matched values)")
+    parser.add_argument("--no-register-filter", action="store_true",
+                        help="Present every candidate, including the test-path literals the target's "
+                             "committed suppressions register already dismisses")
     args = parser.parse_args()
 
     raw_target = args.target or args.pos_target
@@ -222,14 +296,41 @@ def main():
         scanner = "builtin-regex"
 
     # Every candidate gets a deterministic identity at scan time (agents-rdyb), so a consumer can
-    # COPY it rather than reconstruct identity from the model's label and prose.
+    # COPY it rather than reconstruct identity from the model's label and prose. Identity is
+    # assigned BEFORE the register filter below, so filtering moves no surviving candidate's id.
     assign_candidate_ids(candidates)
+
+    registered = set()
+    register_path = None
+    pre_filtered = []
+    if not args.no_register_filter:
+        registered, register_path = load_registered_fingerprints(target_dir)
+        if registered:
+            presented = []
+            for candidate in candidates:
+                if (is_test_path(str(candidate.get("path", "")))
+                        and register_covers(candidate, registered)):
+                    pre_filtered.append(candidate)
+                else:
+                    presented.append(candidate)
+            candidates = presented
 
     result = {
         **artefact_scheme_fields(),
         "target": str(target_dir),
         "scanner": scanner,
         "candidate_count": len(candidates),
+        # A filter that REMOVES candidates is reported, never left to be inferred from a count that
+        # quietly changed: the run record has to say which reviewed literals were not presented.
+        "register_filter": {
+            "register": str(register_path) if register_path else None,
+            "registered_fingerprints": len(registered),
+            "pre_filtered": len(pre_filtered),
+            "pre_filtered_locations": [
+                f"{c.get('path')}:{c.get('line_number')}" for c in pre_filtered
+            ],
+            "pre_filtered_rule_ids": sorted({str(c.get("rule_id")) for c in pre_filtered}),
+        },
         "candidates": candidates
     }
 
