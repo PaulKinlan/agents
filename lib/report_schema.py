@@ -230,6 +230,12 @@ _ADVOCATES_SERIAL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+_WATERFALL_DISMISSAL_PATTERN = re.compile(
+    r"\b(?:serial|sequential)(?:\s+execution)?\s+is\s+(?:intentional|required|necessary|by\s+design)\b"
+    r"|^\s*out\s+of\s+scope:\s*(?:this\s+candidate\s+is\s+in\s+)?dev(?:eloper)?\s+tool(?:ing|s)?\b",
+    re.IGNORECASE,
+)
+
 
 def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     """Return True if a finding proposes concurrent / parallel / overlapping execution."""
@@ -274,10 +280,11 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     if has_serial_direction:
         return False
 
-    # A terse waterfall recommendation may not name a concurrency primitive (e.g. "Batch items"),
-    # but explicit serial advice or a dismissed candidate above is not a recommendation.
+    # A terse waterfall recommendation may not name a concurrency primitive (e.g. "Batch items").
+    # Exempt explicit dismissal language only after checking for affirmative concurrency advice
+    # and added concurrency diff lines, which must still be guarded and withheld.
     if rule_id == "sequential-await-waterfall":
-        return True
+        return not bool(_WATERFALL_DISMISSAL_PATTERN.search(remediation))
 
     # Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above.
     if rule_id == "render-blocking-head-asset":

@@ -271,6 +271,18 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                 "line_number": 12,
                 "remediation": "Keep serial execution; the order is intentional.",
             },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "remediation": "No change needed: serial execution is intentional here for ordering.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "remediation": "Out of scope: this candidate is in dev tooling, not shipped production code.",
+            },
         ):
             with self.subTest(false_positive=dismissal.get("false_positive")):
                 finding = {
@@ -291,6 +303,29 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     {"output": {"schema": "report.schema.json"}},
                     report,
                 ), [])
+
+    def test_scope_words_do_not_hide_terse_waterfall_recommendations(self):
+        for remediation in (
+            "This is not out of scope: batch the independent fetches here.",
+            "Out of scope for the guard: batch the independent fetches in this loop.",
+        ):
+            with self.subTest(remediation=remediation):
+                finding = {"rule_id": "sequential-await-waterfall", "remediation": remediation}
+                self.assertTrue(is_concurrency_recommendation(finding))
+                self.assertTrue(unpreconditioned_concurrency_findings({"findings": [finding]}))
+                self.assertIsNotNone(guard_concurrency_finding(finding, 0))
+                self.assertIn("Precondition: Verify backend reentrancy", finding["remediation"])
+
+    def test_dismissal_language_does_not_hide_a_concurrency_patch(self):
+        finding = {
+            "rule_id": "sequential-await-waterfall",
+            "remediation": "Out of scope: this candidate is in dev tooling.",
+            "proposed_fix_diff": "--- a/src/runner.ts\n+++ b/src/runner.ts\n@@ -1 +1 @@\n- await run(item);\n+ await Promise.all(items.map(run));",
+        }
+        self.assertTrue(is_concurrency_recommendation(finding))
+        self.assertEqual(len(unpreconditioned_concurrency_findings({"findings": [finding]})), 2)
+        self.assertIsNotNone(guard_concurrency_finding(finding, 0))
+        self.assertNotIn("proposed_fix_diff", finding)
 
     def test_detects_reentrancy_precondition_or_evidence(self):
         """Identify whether finding already carries backend evidence or precondition."""
