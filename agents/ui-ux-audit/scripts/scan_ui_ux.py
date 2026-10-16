@@ -61,22 +61,29 @@ def scan_ui_ux(target_dir: Path) -> Dict[str, Any]:
                 except Exception:
                     continue
 
-    # Discover HTML files for mapping stylesheet links
-    # (search inside target_dir, or check target_dir.parent if target_dir is a subfolder like css/)
+    # Discover HTML files for mapping stylesheet links. THE TARGET ONLY: `discovered_files` above is
+    # the walk of target_dir, and nothing outside it is read.
+    #
+    # WHAT USED TO BE HERE, and why it is gone (agents-4655r, measured 2026-10-16): when the target
+    # contained no HTML this block globbed *.html/*.htm in target_dir.parent, and the mere EXISTENCE
+    # of such a file flipped has_focus_visible_coverage from the target-local sibling fallback (rule
+    # 4) to "HTML pages exist, so do not assume unlinked siblings share coverage" (rule 3). Three runs
+    # over ONE target, changing only its parent directory:
+    #   A no parent HTML           -> 0 candidates
+    #   B parent page.html exists  -> 1 missing-focus-visible-state for style.css
+    #   C parent page removed      -> 0 candidates
+    # So the candidate set was a function of a file that is not in the audit scope. Under the
+    # factory's own sandbox this was ALSO a divergence from production: the target is bound read-only
+    # at its own path and the parent is not visible (lib/sandbox.py mount plan), so the same station
+    # on the same target resolved to A/C when sandboxed and to B when not.
+    #
+    # WHAT IS LOST, stated rather than implied: page-derived coverage evidence from pages outside the
+    # target. A CSS-only target still gets the target-local sibling fallback (rule 4), which is the
+    # inference agents-p9u asserted for a directly-scanned CSS directory in
+    # tests/test_prepass_truth.py (part 2 of its co-loading test, which passes either way). For
+    # page-aware analysis across directories, point --target at the directory that holds the pages -
+    # which is what part 1 of that same test does.
     html_files = [p for p in discovered_files if p.suffix.lower() in {".html", ".htm"}]
-    if not html_files and target_dir.parent != target_dir:
-        for f in target_dir.parent.glob("*.html"):
-            try:
-                file_contents[f] = f.read_text(encoding="utf-8", errors="ignore")
-                html_files.append(f)
-            except Exception:
-                pass
-        for f in target_dir.parent.glob("*.htm"):
-            try:
-                file_contents[f] = f.read_text(encoding="utf-8", errors="ignore")
-                html_files.append(f)
-            except Exception:
-                pass
 
     css_files = [p for p in discovered_files if p.suffix.lower() in {".css", ".scss"}]
     all_css_files = set(css_files)
