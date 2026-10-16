@@ -231,7 +231,8 @@ _ADVOCATES_SERIAL_PATTERN = re.compile(
 )
 
 _WATERFALL_DISMISSAL_PATTERN = re.compile(
-    r"\b(?:serial|sequential)(?:\s+execution)?\s+is\s+(?:intentional|required|necessary|by\s+design)\b"
+    r"^\s*(?:no\s+change\s+needed:\s*)?(?:serial|sequential)(?:\s+execution)?\s+is\s+"
+    r"(?:intentional|required|necessary|by\s+design)(?:\s+(?:here\s+)?for\s+ordering)?\s*[.!]?\s*$"
     r"|^\s*out\s+of\s+scope:\s*(?:this\s+candidate\s+is\s+in\s+)?dev(?:eloper)?\s+tool(?:ing|s)?\b",
     re.IGNORECASE,
 )
