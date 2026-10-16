@@ -410,6 +410,122 @@ class TestPrepassFixes(unittest.TestCase):
                 self.assertEqual(len(candidates), 1, f"Snippet should not have counted as coverage: {snippet}")
                 self.assertEqual(candidates[0]["path"], "style.css")
 
+    def test_scan_ui_ux_supports_feature_query_does_not_exempt(self):
+        """[agents-6l1qw] @supports selector(:focus-visible) is a feature query, not a focus ring.
+
+        The matcher's boundary set accepts `)`, so the prelude of an @supports block satisfied it and
+        a stylesheet that only ASKS whether :focus-visible is supported was exempted from the
+        missing-focus-visible-state rule. MEASURED before the fix: the first snippet below produced
+        no candidate, and the same file without the @supports line produced
+        [(missing-focus-visible-state, style.css)].
+        """
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        supports_cases = [
+            "@supports selector(:focus-visible) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@supports not selector(:focus-visible) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@supports (selector(:focus-visible)) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@supports NOT SELECTOR(:FOCUS-VISIBLE) {\n  .btn { color: red; }\n}\n.btn:hover { color: red; }",
+            "@media (min-width: 40rem) {\n  @supports selector(:focus-visible) {\n    .btn { color: red; }\n  }\n}\n.btn:hover { color: red; }",
+        ]
+        for snippet in supports_cases:
+            with self.subTest(snippet=snippet):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / "style.css").write_text(snippet, encoding="utf-8")
+                    res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                         capture_output=True, text=True, check=True)
+                    candidates = [c for c in json.loads(res.stdout)["candidates"]
+                                  if c["rule_id"] == "missing-focus-visible-state"]
+                self.assertEqual(
+                    [(c["rule_id"], c["path"]) for c in candidates],
+                    [("missing-focus-visible-state", "style.css")],
+                    f"A feature query must not exempt the file: {snippet}")
+
+    def test_scan_ui_ux_literal_supports_before_a_real_rule(self):
+        """[agents-u96dl] A literal `@supports` in a string is not an at-rule prelude.
+
+        Raised by rev-6l1qw against the first version of the @supports strip: `@supports[^{]*{`
+        matched the literal inside `content: "@supports";` and consumed text up to the NEXT real
+        rule's opening brace, deleting that rule's selector - so a file that DID define
+        `.btn:focus-visible` was reported as missing it (base 0782039a emitted no candidate). The
+        scanner now removes quoted strings, which cannot hold a selector, before the prelude strip.
+        """
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        real_rule_after_literal = {
+            "style.css": '.btn { content: "@supports"; }\n'
+                         '.btn:focus-visible { outline: 2px solid; }\n.btn:hover { color: red; }\n',
+            "style-quoted.css": ".btn::after { content: '@supports'; }\n"
+                                ".btn:focus-visible { outline: 2px solid; }\n.btn:hover { color: red; }\n",
+            "app.vue": '<template><button>x</button></template>\n'
+                       '<script>const tag = "@supports";</script>\n<style>\n'
+                       ".btn:focus-visible { outline: 2px solid; }\n.btn:hover { color: red; }\n"
+                       '</style>\n',
+            # What pins the quoted-string strip: no `;` between the literal and the real rule, so the
+            # prelude regex would otherwise consume the rule's selector. Measured red before the strip.
+            "no-semicolon.vue": '<template><button>x</button></template>\n'
+                                '<script>const re = new RegExp("@supports (selector(:focus-visible))")'
+                                '</script>\n<style>\n'
+                                ".btn:focus-visible { outline: 2px solid; }\n.btn:hover { color: red; }\n"
+                                '</style>\n',
+            # What pins `[(\w]`: an HTML attribute literal, which is not a string as far as CSS is
+            # concerned. Measured red without that constraint.
+            "page.html": '<html><head></head><body><div data-x="@supports">hi</div><style>'
+                         '.btn:focus-visible { outline: 2px solid; } .btn:hover { color: red; }'
+                         '</style></body></html>\n',
+            "unquoted.css": '[data-x=@supports] { color: red; }\n'
+                            '.btn:focus-visible { outline: 2px solid; }\n.btn:hover { color: red; }\n',
+            # What pins the two constraints ON THE PRELUDE PATTERN, now the string strip handles
+            # quoted literals: a BARE mention (not in a string) directly in front of a real rule, so a
+            # pattern that only stops at `{` would consume that rule's selector. MEASURED per
+            # constraint: removing `[(\w]` fails bare-before-rule.css; removing the string strip
+            # fails no-semicolon.vue; the `[^{};]` bound in the pattern is not pinned by any case here
+            # and is documented as a bound, not as a fix.
+            "bare-before-rule.css": "[data-y=@supports] .btn:focus-visible { outline: 2px solid; }\n"
+                                    ".btn:hover { color: red; }\n",
+            "bare-statement.vue": '<template><button>x</button></template>\n'
+                                  '<script>const a = @supports;</script>\n<style>\n'
+                                  ".btn:focus-visible { outline: 2px solid; }\n"
+                                  ".btn:hover { color: red; }\n</style>\n",
+        }
+        for name, snippet in real_rule_after_literal.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / name).write_text(snippet, encoding="utf-8")
+                    res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                         capture_output=True, text=True, check=True)
+                    focus = [c for c in json.loads(res.stdout)["candidates"]
+                             if c["rule_id"] == "missing-focus-visible-state"]
+                self.assertEqual(
+                    focus, [],
+                    f"{name} does define a focus-visible rule; a quoted literal must not hide it")
+
+        # Control: dropping the strings must not exempt the file either - with only a hover rule left,
+        # the candidate returns.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "style.css").write_text(
+                '.btn { content: "@supports"; }\n.btn:hover { color: red; }\n', encoding="utf-8")
+            res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                 capture_output=True, text=True, check=True)
+            focus = [(c["rule_id"], c["path"]) for c in json.loads(res.stdout)["candidates"]
+                     if c["rule_id"] == "missing-focus-visible-state"]
+        self.assertEqual(focus, [("missing-focus-visible-state", "style.css")])
+
+    def test_scan_ui_ux_counts_a_real_rule_inside_a_supports_block(self):
+        """Control for the test above: the @supports PRELUDE is removed, the payload is untouched."""
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        real_rules = [
+            "@supports selector(:focus-visible) {\n  .btn:focus-visible { outline: 2px solid blue; }\n}\n.btn:hover { color: red; }",
+            "@supports selector(:focus-visible) {\n  :is(a, button:focus-visible) { outline: 2px solid blue; }\n}\n.btn:hover { color: red; }",
+        ]
+        for snippet in real_rules:
+            with self.subTest(snippet=snippet):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / "style.css").write_text(snippet, encoding="utf-8")
+                    res = subprocess.run([sys.executable, str(script), "--target", tmp],
+                                         capture_output=True, text=True, check=True)
+                    focus = [c for c in json.loads(res.stdout)["candidates"]
+                             if c["rule_id"] == "missing-focus-visible-state"]
+                self.assertEqual(focus, [], f"A real rule inside the block is coverage: {snippet}")
+
     def test_scan_ui_ux_recognizes_chained_and_combinator_focus_visible_selectors(self):
         """[agents-ifv / agents-vml] scan_ui_ux recognizes chained pseudo-classes, combinators, and pseudo-elements
         on :focus-visible selectors (.card:focus-visible:hover, .btn:focus-visible::after, :is(...))."""
