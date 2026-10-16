@@ -390,6 +390,26 @@ class TestBannerAndRecord(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("factory repo and system dirs read-only", text)
         self.assertNotIn("everything else invisible", text)
+        self.assertIn("engine and pre-pass — target read-only", text)
+
+    def test_prepass_only_banner_attributes_mounts_to_the_prepass(self):
+        """An unconfined engine must not inherit the pre-pass's read-only/$HOME claims."""
+        policy = load_policy("probe", manifest())
+        lines = banner_lines(policy, "claude", sandbox={
+            "tool": "bubblewrap",
+            "engine_sandboxed": False,
+            "prepass_sandboxed": True,
+            "engine_read_scope": None,
+            "network_egress_filtered": False,
+        })
+        read_scope = next(line for line in lines if line.strip().startswith("Read scope:"))
+        sandbox_line = next(line for line in lines if line.strip().startswith("Sandbox:"))
+        self.assertIn("NOT kernel-confined", read_scope)
+        self.assertIn("the engine session itself is NOT confined", sandbox_line)
+        self.assertIn("— for the pre-pass only: target read-only,", sandbox_line)
+        self.assertIn("$HOME hidden", sandbox_line)
+        self.assertIn("private PID namespace", sandbox_line)
+        self.assertNotIn("NOT confined — target read-only", sandbox_line)
 
     def test_the_record_lists_what_is_not_enforced(self):
         policy = load_policy("probe", manifest(budget={"max_minutes": 5, "max_usd": 0.5}))
