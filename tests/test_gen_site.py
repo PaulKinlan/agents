@@ -7,9 +7,11 @@ from html.parser import HTMLParser
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 
+from tests import tracked_paths
 from tools.gen_site import (
     ROOT,
     DOCS,
@@ -23,6 +25,44 @@ from tools.gen_site import (
     replace_region,
     validate_safety,
 )
+
+#: Kept out of a copied tree for the same reason the old copytree ignore list had them: run artifacts,
+#: the findings store, and the git directory the caller copies itself when the generated site needs it.
+_UNCOPIED_TREE_PARTS = frozenset({".git", "runs", "findings"})
+
+
+def copy_repository_tree(dest: Path, root: Path | None = None) -> None:
+    """Copy the TRACKED repository tree to `dest` (agents-0yika).
+
+    Not `shutil.copytree(ROOT, dest, ignore=...)`: tests/ is not frozen during a run, so a filesystem copy
+    lists a file that another module deletes before the copy opens it. MEASURED on the merger's full gate
+    for tree 188ef587: `shutil.Error: [.../tests/test_zz_untracked_debris_substance_probe_tmp.py, ...
+    [Errno 2] No such file or directory]` - the probe is written and unlinked by
+    tests/test_check_conf_consistency.py while this copy walked the same tree, so a landing candidate was
+    reddened by a foreign module's temporary file. Enumerating git's index instead is the idiom this
+    repository already uses for the same pathology (agents-4ieg; see tests.tracked_paths for the full
+    account and the measured full-gate failure that produced it), and it makes the copy immune to EVERY
+    untracked probe rather than to the one pattern that happened to be observed.
+
+    A tracked path can still be swapped under the copy by another module; what is gone is skipped rather
+    than raising, because "a file vanished while I read it" is machine state, not a verdict about the tree.
+    A tracked SYMLINK is recreated as a link, not dereferenced: git tracks the link, and this repository's
+    two links are relative and point inside the tree (`CLAUDE.md -> AGENTS.md`, `skills -> agents`), so the
+    copy resolves them itself. The copytree this replaced dereferenced them, which duplicated the whole
+    `agents/` tree into every copy.
+    """
+    source = ROOT if root is None else Path(root)
+    for src in tracked_paths(".", root=source):
+        rel = src.relative_to(source)
+        if not rel.parts or rel.parts[0] in _UNCOPIED_TREE_PARTS:
+            continue
+        dst = dest / rel
+        if src.is_symlink():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(os.readlink(src), dst)
+        elif src.is_file():  # gone, or a link whose target is gone: machine state, not content
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
 
 class SimpleHTMLParser(HTMLParser):
@@ -164,11 +204,54 @@ class GenSiteTest(unittest.TestCase):
                 "Generator modified or destroyed human editorial text outside markers",
             )
 
+    def test_the_repository_copy_is_immune_to_untracked_debris(self):
+        """[agents-0yika] An untracked file in tests/ must not reach a copied tree; a tracked one must.
+
+        Built on a SYNTHETIC repository on purpose: the pin must not itself write debris into the shared
+        tree, which is the hazard it is about. Fails against the copytree this replaced, which copied the
+        debris (and would fail the same way on any future probe rather than only the measured one). The
+        tracked-content and excluded-directory assertions are controls, so a helper that copied nothing -
+        or that widened the exclusions - cannot pass.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            src = Path(tmp_dir) / "src"
+            (src / "tests").mkdir(parents=True)
+            (src / "runs").mkdir()
+            (src / "findings").mkdir()
+            (src / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            (src / "tests" / "test_kept.py").write_text("import unittest\n", encoding="utf-8")
+            (src / "runs" / "artifact.txt").write_text("run artifact\n", encoding="utf-8")
+            (src / "findings" / "store.yaml").write_text("k: v\n", encoding="utf-8")
+            (src / "link.txt").symlink_to("tracked.txt")  # git tracks the link, so the copy must hold one
+            subprocess.run(["git", "init", "-q", str(src)], check=True)
+            subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(src), "-c", "user.email=test@example.invalid",
+                            "-c", "user.name=test", "commit", "-qm", "seed"], check=True)
+            # The debris the real tree also holds while the gate runs: untracked, malformed, transient.
+            (src / "tests" / "test_zz_debris_probe_tmp.py").write_text(
+                "this is a syntax error !!!", encoding="utf-8")
+
+            dest = Path(tmp_dir) / "dest"
+            copy_repository_tree(dest, src)
+
+            # INSIDE the context: asserting after it would test a directory that no longer exists, and the
+            # debris assertion would pass vacuously. (That mistake was made in the first version of this
+            # pin; the tracked-content control below is what caught it.)
+            self.assertFalse((dest / "tests" / "test_zz_debris_probe_tmp.py").exists(),
+                             "untracked debris was copied into the tree under test")
+            self.assertTrue((dest / "tracked.txt").is_file(), "a tracked file must be copied")
+            self.assertTrue((dest / "tests" / "test_kept.py").is_file(),
+                            "a tracked test module must be copied")
+            self.assertTrue((dest / "link.txt").is_symlink(),
+                            "a tracked symlink must stay a link, not be dereferenced into a copy")
+            self.assertFalse((dest / "runs").exists(), "runs/ stays out, as the ignore list had it")
+            self.assertFalse((dest / "findings").exists(), "findings/ stays out, as the ignore list had it")
+
     def test_no_html_injection_from_hostile_input(self):
         """Hostile strings in manifests must be properly escaped and never injected as raw HTML."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             fake_root = Path(tmp_dir) / "repo"
-            shutil.copytree(ROOT, fake_root, ignore=shutil.ignore_patterns(".git", "runs", "findings"))
+            copy_repository_tree(fake_root, ROOT)
 
             # Create a mock agent with hostile characters in its summary
             if (ROOT / ".git").is_file():
