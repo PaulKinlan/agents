@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import has_git_index, tracked_paths
 
@@ -332,7 +333,7 @@ def suites_importing(dotted: str) -> set[str]:
     oracle path is the one that matters.
     """
     found = set()
-    for path in sorted((ROOT / "tests").glob("test_*.py")):
+    for path in tracked_paths("tests/test_*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == dotted:
@@ -394,6 +395,19 @@ class TestFastGateMapping(unittest.TestCase):
             self.assertFalse(leftover.exists(), "the leftover must be gone after the cleanup runs")
         finally:
             leftover.unlink(missing_ok=True)
+
+    def test_suites_importing_ignores_a_probe_vanishing_mid_walk(self):
+        """agents-t2k4a: the fallback reads tracked modules, never transient filesystem probes.
+
+        Simulate a glob returning a probe already deleted by another shard without writing a real
+        scratch file into tests/ (which would itself race another suite's copytree).
+        """
+        vanished = ROOT / "tests" / "test_vanished_probe_tmp.py"
+        with mock.patch.object(Path, "glob", return_value=iter([vanished])) as glob:
+            importers = suites_importing("lib.containment")
+        glob.assert_not_called()
+        self.assertIn("tests/test_containment.py", importers,
+                      "the fallback must still read real tracked importers")
 
     def test_findings_py_maps_to_security_and_suppression_contracts(self):
         """lib/findings.py must run redaction (security), suppressions (register) and the store's own
