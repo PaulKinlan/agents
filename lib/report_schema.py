@@ -233,11 +233,9 @@ _ADVOCATES_SERIAL_PATTERN = re.compile(
 
 def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     """Return True if a finding proposes concurrent / parallel / overlapping execution."""
-    if not isinstance(finding, dict):
+    if not isinstance(finding, dict) or finding.get("false_positive") is True:
         return False
     rule_id = str(finding.get("rule_id", "")).strip().lower()
-    if rule_id == "sequential-await-waterfall":
-        return True
 
     remediation = str(finding.get("remediation", ""))
     diff = str(finding.get("proposed_fix_diff", ""))
@@ -275,6 +273,11 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     has_serial_direction = bool(_STOP_CONCURRENCY_PATTERN.search(remediation) or _ADVOCATES_SERIAL_PATTERN.search(remediation))
     if has_serial_direction:
         return False
+
+    # A terse waterfall recommendation may not name a concurrency primitive (e.g. "Batch items"),
+    # but explicit serial advice or a dismissed candidate above is not a recommendation.
+    if rule_id == "sequential-await-waterfall":
+        return True
 
     # Pure asset loading rules are excluded unless they explicitly recommended execution concurrency above.
     if rule_id == "render-blocking-head-asset":
