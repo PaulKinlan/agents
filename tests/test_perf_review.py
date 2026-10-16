@@ -253,6 +253,44 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertTrue(is_concurrency_recommendation(f10))
 
+    def test_dismissed_waterfall_does_not_require_concurrency_precondition(self):
+        """Dismissals and explicit serial advice are not concurrency recommendations."""
+        for dismissal in (
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "severity": "info",
+                "false_positive": True,
+                "description": "Serial execution is required by the backend contract.",
+                "remediation": "Keep serial execution; the order is intentional.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
+                "remediation": "Keep serial execution; the order is intentional.",
+            },
+        ):
+            with self.subTest(false_positive=dismissal.get("false_positive")):
+                finding = {
+                    "snippet": "for (const item of items) await run(item);",
+                    "severity": "info",
+                    "title": "Intentional serial execution",
+                    "description": "Order is required by the backend contract.",
+                    **dismissal,
+                }
+                report = {"summary": "Dismissed waterfall", "target": "sample-target", "findings": [finding]}
+                self.assertFalse(is_concurrency_recommendation(finding))
+                self.assertEqual(normalize_report(report), [])
+                self.assertEqual(report["findings"][0]["remediation"], finding["remediation"])
+                self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+                self.assertEqual(validate_agent_report(
+                    ROOT / "agents" / "perf-review",
+                    {"output": {"schema": "report.schema.json"}},
+                    report,
+                ), [])
+
     def test_detects_reentrancy_precondition_or_evidence(self):
         """Identify whether finding already carries backend evidence or precondition."""
         without_precondition = {"remediation": "Replace loop with Promise.all"}
