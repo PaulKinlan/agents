@@ -281,6 +281,12 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                 "rule_id": "sequential-await-waterfall",
                 "path": "src/runner.ts",
                 "line_number": 12,
+                "remediation": "Serial execution is intentional.",
+            },
+            {
+                "rule_id": "sequential-await-waterfall",
+                "path": "src/runner.ts",
+                "line_number": 12,
                 "remediation": "Out of scope: this candidate is in dev tooling, not shipped production code.",
             },
         ):
@@ -308,6 +314,20 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         for remediation in (
             "This is not out of scope: batch the independent fetches here.",
             "Out of scope for the guard: batch the independent fetches in this loop.",
+        ):
+            with self.subTest(remediation=remediation):
+                finding = {"rule_id": "sequential-await-waterfall", "remediation": remediation}
+                self.assertTrue(is_concurrency_recommendation(finding))
+                self.assertTrue(unpreconditioned_concurrency_findings({"findings": [finding]}))
+                self.assertIsNotNone(guard_concurrency_finding(finding, 0))
+                self.assertIn("Precondition: Verify backend reentrancy", finding["remediation"])
+
+    def test_serial_rationale_does_not_hide_terse_batching_advice(self):
+        for remediation in (
+            "Serial execution is required for determinism in one path, but batch the independent fetches in this loop.",
+            "The loop's serial execution is intentional by design, yet batch the independent fetches.",
+            "Serial execution is intentional only because of a stale comment; batch the independent fetches.",
+            "The stale comment claiming serial execution is intentional should be ignored; batch the independent fetches.",
         ):
             with self.subTest(remediation=remediation):
                 finding = {"rule_id": "sequential-await-waterfall", "remediation": remediation}
