@@ -29,10 +29,16 @@ from lib.findings import load_candidate_index  # noqa: E402
 
 FINGERPRINT = "a" * 64  # shape-valid sha256 key; content need not match a real finding
 
+# Assembled FROM PARTS, so this file stays clean under the repository's own deterministic pre-pass:
+# the scanner reads source text, and a credential-shaped literal written out here would be a candidate
+# of its own - which is how the reviewer of agents-z3v9p caught three extra candidates on this tree
+# (the same convention tests/test_secret_scanner.py states at its own fixtures).
+FIXTURE_TOKEN = "sk-" + "ant-" + "fixture-token-" + "000000000"
+
 # What the MODEL reports for the same line: masked and re-quoted, the way a run actually arrives.
 # Kept different from the candidate's own snippet so the EXISTING model-snippet bridge cannot match
 # and the pre-id bridge is the only thing under test (mutation-checked by disabling it).
-MASKED_SNIPPET = 'real_key = "sk-ant-fixture-token-***[masked]"' 
+MASKED_SNIPPET = 'real_key = "' + FIXTURE_TOKEN + '-***[masked]"' 
 
 
 def finding(**overrides):
@@ -144,8 +150,8 @@ class TestThePreCandidateIdRegisterKeyIsHonoured(unittest.TestCase):
         "rule_id": "openai-key",
         "path": "tests/x.py",
         "line_number": 62,
-        "snippet": 'real_key = "sk-ant-fixture-token-000000000"',
-        "raw_match": "sk-ant-fixture-token-000000000",
+        "snippet": 'real_key = "' + FIXTURE_TOKEN + '"',
+        "raw_match": FIXTURE_TOKEN,
         "candidate_id": "abc123def456abcd",
     }
 
