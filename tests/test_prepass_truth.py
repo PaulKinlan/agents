@@ -242,6 +242,75 @@ class TestPrepassFixes(unittest.TestCase):
             self.assertEqual(len(focus_candidates_css), 0,
                              f"Expected 0 false missing-focus-visible-state candidates for sibling bundle, got: {focus_candidates_css}")
 
+    def test_scan_ui_ux_candidate_set_does_not_depend_on_the_parent_directory(self):
+        """[agents-4655r] Measured: the verdict used to change when a page appeared OUTSIDE the target.
+
+        The pre-pass globbed *.html in target_dir.parent whenever the target had no HTML of its own,
+        and the mere existence of such a file flipped has_focus_visible_coverage from the
+        target-local sibling fallback to "HTML pages exist, so do not assume unlinked siblings share
+        coverage". A/B/C below are the same target with only the parent directory changing - and the
+        third run is the same tree the factory's own sandbox sees, since the sandbox binds the target
+        read-only and never the parent.
+        """
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            target.mkdir()
+            # Identical target content for all three runs; only the parent changes.
+            (target / "style.css").write_text(".btn:hover { color: red; }\n", encoding="utf-8")
+            (target / "sibling.css").write_text(
+                ".g:focus-visible { outline: 2px solid blue; }\n", encoding="utf-8")
+            (target / "other.css").write_text(
+                ".u:focus-visible { outline: 1px solid red; }\n", encoding="utf-8")
+
+            def focus_candidates():
+                res = subprocess.run([sys.executable, str(script), "--target", str(target)],
+                                     capture_output=True, text=True, check=True)
+                return [(c["rule_id"], c["path"]) for c in json.loads(res.stdout)["candidates"]
+                        if c["rule_id"] == "missing-focus-visible-state"]
+
+            without_parent_page = focus_candidates()  # A
+            page = root / "page.html"
+            page.write_text('<html><head><link rel="stylesheet" href="target/other.css"></head></html>\n',
+                            encoding="utf-8")
+            with_parent_page = focus_candidates()  # B
+            page.unlink()
+            after_removing_it = focus_candidates()  # C
+
+            # The target's own sibling stylesheet defines :focus-visible, so the target-local
+            # fallback finds coverage and the run is clean - which is also what the sandbox sees.
+            self.assertEqual(without_parent_page, [])
+            self.assertEqual(after_removing_it, without_parent_page)
+            self.assertEqual(
+                with_parent_page, without_parent_page,
+                "a page in the PARENT changed this target's candidate set: "
+                f"A={without_parent_page} B={with_parent_page} C={after_removing_it}")
+
+    def test_scan_ui_ux_still_uses_pages_inside_the_target_for_coverage(self):
+        """Control for the test above, so removing the parent read cannot have disabled rule 3.
+
+        With the page INSIDE the target and linked only to the stylesheet that lacks coverage, the
+        page-derived rule must still fire: a page exists, and this stylesheet is not co-loaded with
+        anything that defines :focus-visible.
+        """
+        script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "site"
+            target.mkdir()
+            (target / "style.css").write_text(".btn:hover { color: red; }\n", encoding="utf-8")
+            (target / "sibling.css").write_text(
+                ".g:focus-visible { outline: 2px solid blue; }\n", encoding="utf-8")
+            (target / "index.html").write_text(
+                '<html><head><link rel="stylesheet" href="style.css"></head></html>\n', encoding="utf-8")
+
+            res = subprocess.run([sys.executable, str(script), "--target", str(target)],
+                                 capture_output=True, text=True, check=True)
+            focus = [(c["rule_id"], c["path"]) for c in json.loads(res.stdout)["candidates"]
+                     if c["rule_id"] == "missing-focus-visible-state"]
+
+        self.assertEqual(focus, [("missing-focus-visible-state", "style.css")])
+
     def test_scan_ui_ux_flags_genuinely_missing_focus_visible_state(self):
         """[agents-p9u] scan_ui_ux emits missing-focus-visible-state when no stylesheet defines :focus-visible."""
         script = ROOT / "agents" / "ui-ux-audit" / "scripts" / "scan_ui_ux.py"
