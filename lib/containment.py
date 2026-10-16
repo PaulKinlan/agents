@@ -436,7 +436,8 @@ def banner_lines(policy: Policy, engine: str, sandbox: Optional[Dict[str, Any]] 
                     else f"pre-pass only{SANDBOX_PARTIAL_NOTE}")
         egress = ("network egress NOT filtered"
                   if not sandbox.get("network_egress_filtered") else "egress filtered")
-        lines.append(f"  Sandbox:     enforced ({tool}): {coverage} — target read-only, "
+        mount_scope = "" if engine_sandboxed else "for the pre-pass only: "
+        lines.append(f"  Sandbox:     enforced ({tool}): {coverage} — {mount_scope}target read-only, "
                      f"factory repo and system dirs read-only, $HOME hidden (auth via env only), "
                      f"private PID namespace (host /proc invisible); {egress}")
     if unpinned_note:
