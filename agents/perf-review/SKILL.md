@@ -27,8 +27,8 @@ Your mission is to examine recent code changes (`recent_commits`, `recently_chan
      - If the code operates on ML model sessions, WASM modules, GPU queues, hardware handles, or database transactions, default to preserving serial execution unless concurrent support is explicitly proven.
      - **Withhold Code Patches for Concurrency**: Do NOT provide `proposed_fix_diff` for concurrency recommendations. Concurrency transformations (`Promise.all`, `asyncio.gather`) require manual verification of runtime reentrancy and binding safety (e.g. ensuring `fetch` is not shadowed or operating on non-reentrant state). Provide the conditional remediation with its serial fallback without an automated code patch.
 
-3. **Always Provide Concrete Fixes**:
-   - Do not just describe the issue. For every finding, write a concrete `remediation` AND a `proposed_fix_diff` (unified diff or exact replacement block) that resolves the bottleneck without altering functional behavior (except for concurrency recommendations, where `proposed_fix_diff` must be withheld pending manual verification of runtime reentrancy).
+3. **Always Provide Concrete Fixes for Confirmed Hazards**:
+   - Do not just describe a confirmed issue. For each confirmed finding, write a concrete `remediation` AND a `proposed_fix_diff` (unified diff or exact replacement block) that resolves the bottleneck without altering functional behavior (except for concurrency recommendations, where `proposed_fix_diff` must be withheld pending manual verification of runtime reentrancy). Dismissals are not fix proposals.
 
 ## Severity Assignment & Triage Rules
 
@@ -57,6 +57,14 @@ Severity must be assigned deterministically based on rule classification, the sc
 The deterministic pre-pass (`scripts/scan_perf_changes.py`) hands you a candidate list, and the factory checks that the report accounts for all of it. A candidate you evaluate and REJECT is **recorded as a dismissal, never dropped**: include it in `findings` with `"severity": "info"`, `"false_positive": true`, and the reason in `description`. Only candidates you confirm keep their real severity. A report that lists only the survivors cannot be told apart from one that triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj).
 
 **Cite the candidate you are answering (agents-w9ni).** Every row you emit - confirmed or dismissed - carries the `candidate_id`, copied verbatim from the pre-pass candidate it answers (`scripts/scan_perf_changes.py`). The factory compares the ids your report cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting rows and is reported as count-only. Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
+
+**Keep the JSON bounded when the scanner presents many rows.** Emit exactly one row per shown
+candidate, but for a dismissal make `title`, `description`, and `remediation` one short sentence
+each (the `description` must name the specific reason this candidate is not a hazard). Copy all
+schema-required fields exactly from the shown candidate, including its `candidate_id`. Do not add
+a `proposed_fix_diff` or extended investigation narrative to dismissals. Spend
+explanation and code-diff space on confirmed hazards only. A partial JSON object is NO VERDICT,
+not a shorter report: never truncate the candidate list to fit the response.
 
 The factory writes the deterministic pre-pass to `candidates.json` and presents only the first 50
 candidates under `Scanner Data` in your prompt. Copy `candidate_id` only from candidates shown in

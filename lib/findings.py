@@ -74,10 +74,10 @@ def _lock_holder_description(lock_path: Path) -> str:
     return raw
 
 try:  # imported as lib.findings (root on sys.path), or run as a script (lib/ on it)
-    from lib.redaction import redact_finding, redact_for_storage
+    from lib.redaction import redact_finding, redact_for_storage, redact_verification_for_storage
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
-    from lib.redaction import redact_finding, redact_for_storage
+    from lib.redaction import redact_finding, redact_for_storage, redact_verification_for_storage
 
 # Redaction removes the value from published text; the embargo decides whether a finding is
 # routed to a tracker at all. It is a separate module so the policy has one home and one test.
@@ -879,6 +879,13 @@ class FindingsStore:
             fp: (redact_for_storage(record) if isinstance(record, dict) else record)
             for fp, record in data["findings"].items()
         }
+        if "verifications" in data:
+            rows = data["verifications"]
+            data["verifications"] = {
+                key: clean for key, record in (rows.items() if isinstance(rows, dict) else ())
+                if isinstance(key, str) and isinstance(record, dict)
+                if (clean := redact_verification_for_storage(record))
+            }
         return data
 
     def _load_suppressions(self) -> Dict[str, Any]:
@@ -911,13 +918,46 @@ class FindingsStore:
         findings = self.data.get("findings")
         if not isinstance(findings, dict):
             return self.data
+        verifications = self.data.get("verifications")
         return {
             **self.data,
             "findings": {
                 fp: (redact_for_storage(record) if isinstance(record, dict) else record)
                 for fp, record in findings.items()
             },
+            **({"verifications": {
+                key: clean for key, record in verifications.items()
+                if isinstance(key, str) and isinstance(record, dict)
+                if (clean := redact_verification_for_storage(record))
+            }} if isinstance(verifications, dict) else
+               {"verifications": {}} if "verifications" in self.data else {}),
         }
+
+    def record_verifications(self, agent: str, rows: List[Dict[str, Any]]) -> None:
+        """Stage bounded verifier dispositions for process_run's single atomic save.
+
+        Not findings: they never enter the lifecycle, delta counts, or publication sinks.
+        Last verdict wins per candidate identity, with a location fallback for legacy no-id rows.
+        """
+        if agent != "vuln-verify":
+            return
+        stored = self.data.setdefault("verifications", {})
+        if not isinstance(stored, dict):
+            stored = self.data["verifications"] = {}
+        now = datetime.now(timezone.utc).isoformat()
+        for raw in rows:
+            row = redact_verification_for_storage(raw)
+            if not row:
+                continue
+            identity = ("id", row["candidate_id"]) if row.get("candidate_id") else (
+                "location", row.get("rule_id"), row.get("path"), row.get("line_number"))
+            key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+            stored[key] = {**row, "last_seen": now}
+        # Protected target JSON is never pruned, so the verifier ledger caps its own footprint.
+        if len(stored) > 500:
+            self.data["verifications"] = dict(sorted(
+                stored.items(), key=lambda entry: (entry[1].get("last_seen", ""), entry[0]),
+                reverse=True)[:500])
 
     def save(self):
         """Atomically persist the store: temp file + fsync + os.replace (agents-3ls).
@@ -2403,6 +2443,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(2)
     try:
         candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
+        if args.agent == "vuln-verify" and isinstance(raw_data, dict):
+            rows = raw_data.get("verifications")
+            if isinstance(rows, list):
+                store.record_verifications(args.agent, rows)
         processed, stats, fixed_items = store.process_run(
             agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
             target_dir=Path(args.target_dir).resolve(),

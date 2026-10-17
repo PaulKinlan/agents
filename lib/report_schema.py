@@ -21,6 +21,7 @@ from collections.abc import Mapping as MappingABC
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from lib.embargo import is_false_positive
 from lib.findings import path_resolves_in_target
 
 _TYPE_CHECKS = {
@@ -157,6 +158,37 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
                 f"$.verifications[{i}].verdict: {verdict!r} is not available for a record with "
                 f"no resolvable location (path={raw_path!r}); the only honest verdict is "
                 f"'unverifiable' - cite a location inside the target or ask for one"
+            )
+    return violations
+
+
+def unpublished_verified_verdicts(report: Any) -> List[str]:
+    """A verified vuln-verify verdict needs a publishable finding with the same candidate ID.
+
+    Verification rows account for every candidate, including disproved ones. Findings alone drive
+    the store and critical alerts, so a verified row without a surviving finding must be rejected
+    before either the store or Line coverage sees the report (agents-t6fut).
+    """
+    if not isinstance(report, dict):
+        return []
+    verifications = report.get("verifications")
+    findings = report.get("findings")
+    if not isinstance(verifications, list) or not isinstance(findings, list):
+        return []  # The declared schema rejects malformed/missing arrays.
+    published_ids = {
+        finding.get("candidate_id") for finding in findings
+        if isinstance(finding, dict) and isinstance(finding.get("candidate_id"), str)
+        and finding["candidate_id"].strip() and not is_false_positive(finding)
+    }
+    violations = []
+    for i, verification in enumerate(verifications):
+        if not isinstance(verification, dict) or verification.get("verdict") != "verified":
+            continue
+        candidate_id = verification.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id.strip() or candidate_id not in published_ids:
+            violations.append(
+                f"$.verifications[{i}].candidate_id: verified verdict requires a surviving "
+                f"non-false-positive finding with matching candidate_id ({candidate_id!r})"
             )
     return violations
 
@@ -661,6 +693,7 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
 
     Cross-field rules the schema cannot express are applied on top:
     - a verdict about a location must have a location (agents-0tl)
+    - a vuln-verify verified verdict must have a matching publishable finding (agents-t6fut)
     - a concurrency recommendation must carry its reentrancy precondition or cite backend evidence (agents-vorw)
     """
     try:
@@ -672,6 +705,7 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
     return (
         validate(report, schema)
         + unlocatable_verdicts(report, target_dir)
+        + (unpublished_verified_verdicts(report) if agent_dir.name == "vuln-verify" else [])
         + unpreconditioned_concurrency_findings(report)
     )
 

@@ -19,7 +19,7 @@
     },
     "verifications": {
       "type": "array",
-      "description": "Adversarial evaluation results for all inspected candidate findings.",
+      "description": "Candidate accounting: one verification verdict per presented candidate, including disproved and unverifiable candidates. Each verified verdict must have a publishable finding with matching candidate_id.",
       "items": {
         "type": "object",
         "required": [
@@ -78,14 +78,14 @@
           },
           "candidate_id": {
             "type": "string",
-            "description": "The candidate_id of the pre-pass candidate this row answers - confirmed or dismissed. Copy it verbatim: the factory compares the ids a report cites with the ids it presented, so a row that names no presented candidate accounts for nothing (agents-w9ni). Omit only when the pre-pass supplied no ids, where the check falls back to counting rows and is reported as count-only."
+            "description": "The candidate_id of the pre-pass candidate this verification answers. Copy it verbatim: the factory compares verification ids with presented ids (agents-w9ni). Omit for disproved/unverifiable rows only when the pre-pass supplied no ids (count-only fallback); a verified row must carry an ID matching a publishable finding (agents-t6fut)."
           }
         }
       }
     },
     "findings": {
       "type": "array",
-      "description": "Verified findings that survived adversarial testing.",
+      "description": "Publishable verified vulnerabilities only; disproved and unverifiable candidates remain in verifications[] without findings[].",
       "items": {
         "type": "object",
         "required": [
@@ -143,11 +143,11 @@
           },
           "candidate_id": {
             "type": "string",
-            "description": "The candidate_id of the pre-pass candidate this row answers - confirmed or dismissed. Copy it verbatim: the factory compares the ids a report cites with the ids it presented, so a row that names no presented candidate accounts for nothing (agents-w9ni). Omit only when the pre-pass supplied no ids, where the check falls back to counting rows and is reported as count-only."
+            "description": "Copy the candidate_id of the matching verified verification verbatim. Every verified verdict must have a surviving finding with this same ID (agents-t6fut)."
           },
           "false_positive": {
             "type": "boolean",
-            "description": "True when this candidate was evaluated and REJECTED (a dismissal recorded as evidence, not work). Every candidate the pre-pass supplied must appear in findings, either as a confirmed issue or as a dismissal (agents-f8dj)."
+            "description": "A true value marks a dismissed, non-publishable row. Disproved/unverifiable candidates belong in verifications[] instead; a verified verdict must link to a finding that survives the false-positive filter (agents-t6fut)."
           }
         }
       }
