@@ -162,7 +162,63 @@ def cluster_deterministic(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]
             })
             cluster_id += 1
 
-    return clusters
+    return _fold_shared_candidate_clusters(clusters)
+
+
+def _stored_candidate_id(item: Dict[str, Any]) -> str:
+    """The scanner-owned candidate id this row carries, or "" for a legacy row (agents-np8dl)."""
+    value = item.get("candidate_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _fold_shared_candidate_clusters(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One cluster per STORED candidate_id (agents-np8dl).
+
+    A candidate_id names a CANDIDATE, not a finding: lib/candidate_identity.py builds it from scanner-
+    owned (rule id, path, match text, ordinal) and never from the agent, so two stations flagging one
+    location share it by design - the same property agents-g3vnf measured for the findings ledger. The
+    factory's own store shows both shapes at once: in findings/agents-factory-factory.json the ids
+    50a8a7c8990e463f (THREAT_MODEL.md:1) and effe7026c6ffc948 (lib/budget.py:142) each carry a
+    vuln-discovery row AND a vuln-verify row.
+
+    Proximity clustering is line-based, so when those rows' line metadata disagrees - a stale line, or
+    one of them unknown - the pair splits across clusters, both anchors present the same id, and
+    cluster_candidates' duplicate-id guard (which exists for the line judge) killed the whole pre-pass.
+    Measured reproduction: two rows, one candidate_id, lines 10 and 100 -> ValueError from a run that
+    has nothing malformed in it.
+
+    Folding is the honest resolution for this station, not merely the cheapest: vuln-triage declares
+    `candidate_accounting: aggregate-claimed` (agents-htyb), so one candidate must be claimed once. Two
+    rows of one candidate are one candidate; presenting them as two clusters asks the line judge to
+    choose between two names for the same location.
+
+    Legacy rows are NOT folded by their derived identity here: an id without the ordinal cannot tell two
+    occurrences apart (see _legacy_occurrence_ranks), so folding on it would destroy proximity clustering
+    for rows that genuinely are two places in one file.
+    """
+    folded: List[Dict[str, Any]] = []
+    owner: Dict[str, int] = {}
+    for cluster in clusters:
+        items = list(cluster["items"])
+        anchor = min(items, key=_anchor_key) if items else None
+        stored = _stored_candidate_id(anchor) if anchor else ""
+        if stored and stored in owner:
+            target = folded[owner[stored]]
+            target["items"] = list(target["items"]) + items
+            target["count"] = len(target["items"])
+            continue
+        if stored:
+            owner[stored] = len(folded)
+        folded.append({**cluster, "items": items, "count": len(items)})
+
+    # Dense, deterministic ids again after any fold, and a `file` that matches the anchor actually
+    # presented (a fold can land a row from a differently-pathed cluster in this one).
+    for index, cluster in enumerate(folded, start=1):
+        cluster["cluster_id"] = f"C{index}"
+        if cluster["items"]:
+            anchor = min(cluster["items"], key=_anchor_key)
+            cluster["file"] = anchor.get("path") or cluster["file"]
+    return folded
 
 
 def _first_seen(item: Dict[str, Any]) -> datetime:
@@ -186,16 +242,55 @@ def _anchor_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
             str(item.get("title") or ""), str(item.get("candidate_id") or ""))
 
 
+def _legacy_occurrence_ranks(clusters: List[Dict[str, Any]]) -> Dict[int, int]:
+    """Occurrence rank (1-based, per rule+path+fingerprint) for every row WITHOUT a stored id.
+
+    candidate_identity's `ordinal` input exists so two identical matches in one file get distinct ids
+    instead of silently sharing one (lib/candidate_identity.py). The pre-pass passed the DEFAULT 1 for
+    every legacy row, so two rows of the same rule/path/fingerprint computed the SAME id and the
+    duplicate guard killed the run - a collision manufactured by this file, with no malformed input at
+    all (agents-np8dl). The factory store carries 7 such rows in one target, 19 in another and 53 in a
+    third, so the shape is ordinary, not hypothetical.
+
+    Ranked over EVERY row in the pre-pass (not per cluster) and ordered by _anchor_key, so a row's id
+    does not depend on how proximity happened to cluster it, and the group's anchor - min by
+    _anchor_key - is always occurrence 1.
+    """
+    groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    for cluster in clusters:
+        for item in cluster["items"]:
+            if _stored_candidate_id(item):
+                continue
+            key = (
+                str(item.get("rule_id") or "").strip(),
+                str(item.get("path") or cluster["file"] or "").strip(),
+                str(item.get("fingerprint") or ""),
+            )
+            groups.setdefault(key, []).append(item)
+    return {id(item): rank
+            for items in groups.values()
+            for rank, item in enumerate(sorted(items, key=_anchor_key), start=1)}
+
+
 def cluster_candidates(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """One identity per cluster, tied to its oldest member rather than positional C1..Cn.
 
     The source's persisted candidate_id wins. A legacy row without it uses its
-    stored fingerprint, never its redacted snippet or scanner severity. Reject
-    duplicate identities: the opt-in line judge requires every presented ID to
-    name one distinct cluster and cannot repair an ambiguous pre-pass.
+    stored fingerprint, never its redacted snippet or scanner severity, plus its
+    real occurrence rank (see _legacy_occurrence_ranks). Reject duplicate
+    identities: the opt-in line judge requires every presented ID to name one
+    distinct cluster and cannot repair an ambiguous pre-pass.
+
+    Legitimate data can no longer produce that duplicate: a stored id shared by two
+    stations' rows of ONE candidate is folded into one cluster by
+    _fold_shared_candidate_clusters, and legacy rows get distinct occurrences
+    (agents-np8dl). The guard below therefore only fires on input that really is
+    malformed - a padded id, or clusters handed to this function directly - which
+    is what the line-judge invariant needs it for.
     """
     candidates: List[Dict[str, Any]] = []
     seen_ids = set()
+    ranks = _legacy_occurrence_ranks(clusters)
     for cluster in clusters:
         if not cluster["items"]:
             raise ValueError("vuln-triage: empty cluster has no anchor")
@@ -204,7 +299,8 @@ def cluster_candidates(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         path = anchor.get("path") or cluster["file"]
         stored_id = anchor.get("candidate_id")
         cid = (stored_id if isinstance(stored_id, str) and stored_id.strip()
-               else candidate_identity(rule_id, path, match_text=str(anchor.get("fingerprint") or "")))
+               else candidate_identity(rule_id, path, match_text=str(anchor.get("fingerprint") or ""),
+                                       ordinal=ranks.get(id(anchor), 1)))
         if cid != cid.strip() or cid in seen_ids:
             raise ValueError(f"vuln-triage: duplicate candidate_id or malformed source identity: {cid!r}")
         seen_ids.add(cid)
