@@ -71,6 +71,30 @@ def gather_findings(target_name: str) -> List[Dict[str, Any]]:
     return findings
 
 
+def gather_prior_verifications(target_name: str) -> List[Dict[str, Any]]:
+    """Read non-published verifier dispositions from the durable target store (agents-b5ec7).
+
+    This is evidence in Station Context, never a synthetic finding or an automatic dismissal.
+    Older stores lack the key; a malformed optional ledger must not hide real findings.
+    """
+    store_file = FACTORY_ROOT / "findings" / f"{target_name}.json"
+    try:
+        data = json.loads(store_file.read_text(encoding="utf-8"))
+        rows = data.get("verifications") if isinstance(data, dict) else None
+        if not isinstance(rows, dict):
+            return []
+        allowed = ("candidate_id", "rule_id", "path", "line_number", "verdict",
+                   "confidence", "disproving_factors", "last_seen")
+        prior = [{key: row[key] for key in allowed if key in row}
+                 for row in rows.values()
+                 if isinstance(row, dict) and row.get("agent") == "vuln-verify"
+                 and row.get("verdict") in ("disproved", "unverifiable")]
+        # Even a legacy/tampered store must not inject free-text reasoning into the prompt.
+        return sorted(prior, key=lambda row: str(row.get("last_seen", "")), reverse=True)[:50]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
 def cluster_deterministic(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Groups findings by file and proximity (lines within 15).
 
@@ -353,6 +377,7 @@ def main():
 
     threat_model_text, tm_path = load_threat_model(target_name, target_path, output_file=output_path)
     active_findings = gather_findings(target_name)
+    prior_verifications = gather_prior_verifications(target_name)
     clusters = cluster_deterministic(active_findings)
 
     MAX_TM_SUMMARY_BYTES = 3000
@@ -390,6 +415,7 @@ def main():
             "threat_model_summary": threat_model_summary,
             "threat_model_file": tm_path or None,
             "clusters": clusters,
+            **({"prior_verifications": prior_verifications} if prior_verifications else {}),
         },
     }
 

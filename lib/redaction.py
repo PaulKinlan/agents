@@ -468,6 +468,42 @@ def redact_for_storage(finding: Dict[str, Any]) -> Dict[str, Any]:
     return stored
 
 
+def redact_verification_for_storage(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep bounded, non-prose verifier dispositions in the local store (agents-b5ec7).
+
+    Security-agent reasoning can quote an unrecognised secret. It remains in the bounded run
+    artifact only; downstream triage gets a verdict and closed-vocabulary factors, not model prose.
+    An allowlist prevents extra model fields from becoming a new at-rest disclosure channel.
+    """
+    if not isinstance(row, dict):
+        return {}
+    verdict = row.get("verdict")
+    if verdict not in ("verified", "disproved", "unverifiable"):
+        return {}
+    stored = {"agent": "vuln-verify", "verdict": verdict}
+    if row.get("confidence") in ("high", "medium", "low"):
+        stored["confidence"] = row["confidence"]
+    candidate_id = row.get("candidate_id")
+    if isinstance(candidate_id, str) and candidate_id.strip() and len(candidate_id) <= 256:
+        stored["candidate_id"] = candidate_id
+    for field, kind in (("rule_id", "rule"), ("path", "path")):
+        value = row.get(field)
+        if isinstance(value, str):
+            stored[field] = sanitise_identity(mask_text(value), kind)
+    line = publishable_line_number(row.get("line_number"))
+    stored["line_number"] = line if isinstance(line, int) else None
+    factors = row.get("disproving_factors")
+    if isinstance(factors, list):
+        allowed = {"upstream_sanitizer", "auth_gate", "framework_protection",
+                   "unreachable_code", "explicitly_trusted", "safe_context"}
+        stored["disproving_factors"] = [f for f in factors[:16] if isinstance(f, str) and f in allowed]
+    # last_seen is written by the store, not supplied by the model; preserve only our timestamp shape.
+    seen = row.get("last_seen")
+    if isinstance(seen, str) and len(seen) <= 40 and re.fullmatch(r"[0-9TZ:+.\-]+", seen):
+        stored["last_seen"] = seen
+    return stored
+
+
 def redact_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [redact_finding(f) for f in findings]
 

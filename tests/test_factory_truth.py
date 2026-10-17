@@ -663,6 +663,12 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
                 self.assertEqual(station["candidates_accounted"], accounted)
                 self.assertEqual(station["candidate_identity"], "identity-matched")
                 self.assertEqual(ok, expected_status == "PASS")
+                if expected_status == "PASS":
+                    stored = json.loads(self.box.findings("target.json"))
+                    self.assertEqual(len(stored["verifications"]), 50,
+                                     "verification dispositions must outlive run-dir pruning")
+                    self.assertEqual(stored["findings"], {},
+                                     "do not invent dismissal findings to make triage durable")
 
     def test_vuln_verify_linked_critical_verdict_still_alerts(self):
         schema = json.loads((ROOT / "agents" / "vuln-verify" / "report.schema.json").read_text())

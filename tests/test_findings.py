@@ -97,6 +97,51 @@ class TestStoreLoadCorruption(unittest.TestCase):
                 FindingsStore("target", findings_dir=findings_dir)
 
 
+class TestDurableVerificationDispositions(unittest.TestCase):
+    """agents-b5ec7: verdict evidence survives the run directory without becoming a finding."""
+
+    def test_verified_metadata_is_bounded_scrubbed_and_upserted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            store = FindingsStore("target", findings_dir=directory)
+            row = {"candidate_id": "c0", "rule_id": "r1", "path": "a.js",
+                   "line_number": 7, "verdict": "disproved", "confidence": "high",
+                   "disproving_factors": ["auth_gate"], "reasoning": "SECRET unrecognised model prose",
+                   "extra": "do not persist me"}
+            store.record_verifications("vuln-verify", [row])
+            store.process_run("vuln-verify", [])
+            stored = json.loads((directory / "target.json").read_text())
+            self.assertEqual(stored["findings"], {})
+            self.assertEqual(len(stored["verifications"]), 1)
+            self.assertNotIn("SECRET", json.dumps(stored))
+            self.assertNotIn("do not persist me", json.dumps(stored))
+            recorded = next(iter(stored["verifications"].values()))
+            self.assertEqual((recorded["verdict"], recorded["disproving_factors"]),
+                             ("disproved", ["auth_gate"]))
+            store.close()
+
+            reopened = FindingsStore("target", findings_dir=directory)
+            reopened.record_verifications("vuln-verify", [{**row, "verdict": "verified"}])
+            reopened.process_run("vuln-verify", [])
+            updated = json.loads((directory / "target.json").read_text())
+            self.assertEqual(len(updated["verifications"]), 1,
+                             "a changed verdict must update the candidate's one durable record")
+            self.assertEqual(next(iter(updated["verifications"].values()))["verdict"], "verified")
+            reopened.close()
+
+    def test_protected_store_caps_verifications_without_fabricating_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FindingsStore("target", findings_dir=Path(tmp))
+            store.record_verifications("vuln-verify", [
+                {"candidate_id": f"c{i}", "verdict": "disproved", "confidence": "low"}
+                for i in range(505)])
+            store.process_run("vuln-verify", [])
+            data = json.loads((Path(tmp) / "target.json").read_text())
+            self.assertEqual(len(data["verifications"]), 500)
+            self.assertEqual(data["findings"], {})
+            store.close()
+
+
 class TestFindingRecordShape(unittest.TestCase):
     def test_findings_do_not_track_github_lifecycle_events(self):
         """agents-eyo: findings no longer publish to public GitHub issues, so the per-finding

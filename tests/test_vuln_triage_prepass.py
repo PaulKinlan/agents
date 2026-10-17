@@ -299,7 +299,43 @@ class TestVulnTriageClustering(unittest.TestCase):
             self.assertEqual(payload["total_active_findings"], 4)
             self.assertEqual(payload["context"]["total_active_findings"], 4)
             self.assertEqual(payload["context"]["clusters"], payload["clusters"])
+            self.assertNotIn("prior_verifications", payload["context"],
+                             "legacy stores have no verification ledger")
             self.assertIn("4 findings grouped into", result.stdout)
+
+    def test_prior_verdicts_reach_context_without_changing_candidate_identities(self):
+        """agents-b5ec7: downstream triage can weigh a disproved verdict after run-dir pruning."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir)
+            root = base / "mock_root"
+            script = copy_station_script(root, ROOT / "agents/vuln-triage/scripts/triage.py",
+                                         "agents/vuln-triage/scripts/triage.py")
+            (root / "findings").mkdir(parents=True)
+            (root / "findings/target.json").write_text(json.dumps({
+                "findings": {"discovery": {"agent": "vuln-discovery", "state": "new",
+                                           "candidate_id": "c0", "rule_id": "r1", "path": "a.py",
+                                           "line_number": 7}},
+                "verifications": {"v0": {"agent": "vuln-verify", "candidate_id": "c0",
+                                          "verdict": "disproved", "confidence": "high",
+                                          "disproving_factors": ["auth_gate"],
+                                          "reasoning": "do not inject legacy raw prose",
+                                          "last_seen": "2026-10-17T05:00:00+00:00"}},
+            }), encoding="utf-8")
+            target = base / "target"
+            target.mkdir()
+            output = base / "result.json"
+            subprocess.run([sys.executable, str(script), "--target", str(target),
+                            "--output", str(output)], capture_output=True, text=True, check=True,
+                           timeout=15)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["candidates"], [
+                {"candidate_id": "c0", "rule_id": "r1", "path": "a.py", "line_number": 7}])
+            self.assertEqual(payload["context"]["prior_verifications"][0]["verdict"], "disproved")
+            self.assertEqual(payload["context"]["prior_verifications"][0]["disproving_factors"],
+                             ["auth_gate"])
+            self.assertNotIn("reasoning", payload["context"]["prior_verifications"][0])
+            self.assertEqual(payload["cluster_count"], 1,
+                             "verdict evidence is not a synthetic finding/cluster")
 
 
 class TestAnchoredClusterCandidates(unittest.TestCase):
