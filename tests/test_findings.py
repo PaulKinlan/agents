@@ -8,6 +8,7 @@ other's findings via last-writer-wins read-modify-write.
 
 import gc
 import hashlib
+import io
 import json
 import os
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
@@ -140,6 +141,79 @@ class TestDurableVerificationDispositions(unittest.TestCase):
             self.assertEqual(len(data["verifications"]), 500)
             self.assertEqual(data["findings"], {})
             store.close()
+
+
+class TestVerificationDispositionReports(unittest.TestCase):
+    """agents-xwzct: show verifier work without relabeling dispositions as findings."""
+
+    def test_all_disproved_cli_and_line_report_keep_counts_separate_from_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            target.mkdir()
+            (target / "a.js").write_text("x = 1\n", encoding="utf-8")
+            raw = root / "report.json"
+            raw.write_text(json.dumps({"summary": "verified", "findings": [], "verifications": [
+                {"candidate_id": f"c{i}", "rule_id": "r1", "path": "a.js",
+                 "line_number": i + 1, "verdict": "disproved", "confidence": "high",
+                 "reasoning": "SECRET unrecognised prose"} for i in range(3)]}), encoding="utf-8")
+            fragment = root / "delta.json"
+            with mock.patch.object(findings, "FACTORY_ROOT", root), \
+                 mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                findings.main(["--target", "target", "--agent", "vuln-verify",
+                               "--input", str(raw), "--sink", "file", "--target-dir", str(target),
+                               "--station-only", "--fragment", str(fragment)])
+            station_delta = (root / "findings/target-vuln-verify-delta.md").read_text()
+            summary = (root / "findings/target-vuln-verify-summary.md").read_text()
+            self.assertIn("3 candidate disposition(s)", output.getvalue())
+            self.assertIn("3 candidate disposition(s)", station_delta)
+            self.assertIn("3 candidate disposition(s)", summary)
+            self.assertIn("3 disproved", station_delta)
+            self.assertIn("not false-positive findings", station_delta)
+            self.assertIn("Clean Delta", station_delta)
+            self.assertIn("| **0** | **0** | **0** | 0 | 0 | 0 |", station_delta)
+            self.assertNotIn("SECRET", station_delta + summary + output.getvalue())
+            stored = json.loads((root / "findings/target.json").read_text())
+            self.assertEqual(stored["findings"], {})
+            self.assertEqual(len(stored["verifications"]), 3)
+            self.assertEqual(json.loads(fragment.read_text())["verification_counts"],
+                             {"disproved": 3, "unverifiable": 0, "verified": 0})
+
+            station = {"station": "vuln-verify", "status": "PASS", "findings_count": 0,
+                       "criticals": 0, "candidates_presented": 3, "candidates_accounted": 3,
+                       "candidate_identity": "identity-matched", "complete": True,
+                       "fragment": str(fragment)}
+            findings.write_line_report("target", "audit", [station], findings_dir=root / "findings")
+            line_delta = (root / "findings/target-delta.md").read_text()
+            self.assertIn("3 candidate disposition(s)", line_delta)
+            self.assertIn("Clean Delta", line_delta)
+            self.assertEqual(json.loads((root / "findings/target-line.json").read_text())[
+                "verification_counts"]["disproved"], 3)
+
+    def test_duplicate_candidate_counts_only_its_last_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with FindingsStore("target", findings_dir=Path(tmp)) as store:
+                counts = store.record_verifications("vuln-verify", [
+                    {"candidate_id": "c0", "verdict": "disproved"},
+                    {"candidate_id": "c0", "verdict": "unverifiable"}])
+                self.assertEqual(counts, {"disproved": 0, "unverifiable": 1, "verified": 0})
+
+    def test_non_verifier_and_legacy_fragment_do_not_invent_disposition_counts(self):
+        stats = {key: 0 for key in findings.DELTA_KEYS}
+        report = findings._render_delta_report("target", [], stats, [], verification_counts=None)
+        self.assertNotIn("candidate disposition(s)", report)
+        self.assertNotIn("candidate disposition(s)", findings._render_delta_report(
+            "target", [], stats, [], verification_counts={}))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fragment = root / "legacy.json"
+            fragment.write_text(json.dumps({"stats": stats, "findings": [], "fixed": [],
+                                            "sinks": {}}), encoding="utf-8")
+            findings.write_line_report("target", "audit", [
+                {"station": "legacy", "status": "PASS", "fragment": str(fragment)}],
+                findings_dir=root)
+            self.assertNotIn("verification_counts", json.loads((root / "target-line.json").read_text()))
+            self.assertNotIn("candidate disposition(s)", (root / "target-delta.md").read_text())
 
 
 class TestFindingRecordShape(unittest.TestCase):
