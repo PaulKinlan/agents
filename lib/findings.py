@@ -933,18 +933,19 @@ class FindingsStore:
                {"verifications": {}} if "verifications" in self.data else {}),
         }
 
-    def record_verifications(self, agent: str, rows: List[Dict[str, Any]]) -> None:
+    def record_verifications(self, agent: str, rows: List[Dict[str, Any]]) -> Dict[str, int]:
         """Stage bounded verifier dispositions for process_run's single atomic save.
 
         Not findings: they never enter the lifecycle, delta counts, or publication sinks.
         Last verdict wins per candidate identity, with a location fallback for legacy no-id rows.
         """
         if agent != "vuln-verify":
-            return
+            return {}
         stored = self.data.setdefault("verifications", {})
         if not isinstance(stored, dict):
             stored = self.data["verifications"] = {}
         now = datetime.now(timezone.utc).isoformat()
+        touched: Dict[str, str] = {}
         for raw in rows:
             row = redact_verification_for_storage(raw)
             if not row:
@@ -953,11 +954,16 @@ class FindingsStore:
                 "location", row.get("rule_id"), row.get("path"), row.get("line_number"))
             key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
             stored[key] = {**row, "last_seen": now}
+            touched[key] = row["verdict"]
+        # Count distinct identities in THIS run, not the cumulative/capped target ledger.
+        counts = {verdict: sum(value == verdict for value in touched.values())
+                  for verdict in ("disproved", "unverifiable", "verified")}
         # Protected target JSON is never pruned, so the verifier ledger caps its own footprint.
         if len(stored) > 500:
             self.data["verifications"] = dict(sorted(
                 stored.items(), key=lambda entry: (entry[1].get("last_seen", ""), entry[0]),
                 reverse=True)[:500])
+        return counts if touched else {}
 
     def save(self):
         """Atomically persist the store: temp file + fsync + os.replace (agents-3ls).
@@ -1399,7 +1405,7 @@ def _partition_for_sink(sink: str, findings: List[Dict[str, Any]], visibility: A
     return publishable, held
 
 
-def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = None, agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, repo: Optional[str] = None, beads_dir: Optional[Path] = None, sink_options: Optional[Dict[str, Any]] = None, run_dir: Optional[Path] = None) -> Dict[str, Any]:
+def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]] = None, visibility: Any = None, agent: Optional[str] = None, station_only: bool = False, fragment: Optional[Path] = None, repo: Optional[str] = None, beads_dir: Optional[Path] = None, sink_options: Optional[Dict[str, Any]] = None, run_dir: Optional[Path] = None, verification_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """Dispatch findings, mutating their successful-delivery receipts.
 
     The caller must save its FindingsStore after dispatch to persist those receipts.
@@ -1417,6 +1423,11 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     Returns the per-sink delivery accounting.
     """
     print(f"\n[Findings Store] Target: {target_name} | Delta: {stats['new']} new, {stats['regressed']} regressed, {stats['fixed']} fixed, {stats['unchanged']} unchanged, {stats['suppressed']} suppressed, {stats.get('false_positive', 0)} triaged false positive")
+    if verification_counts and sum(verification_counts.values()):
+        print(f"[Verifications] {sum(verification_counts.values())} candidate disposition(s) in this run "
+              f"({verification_counts.get('disproved', 0)} disproved, "
+              f"{verification_counts.get('unverifiable', 0)} unverifiable, "
+              f"{verification_counts.get('verified', 0)} verified); not findings or published work")
 
     names = sinks.expand(sink)
     # Public issues are reserved for human-approved public input, not automatic findings.
@@ -1471,7 +1482,8 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
     # Always write the local factory delta report. It is the complete evidence trail, so it
     # deliberately includes findings the publication embargo withholds from a tracker sink.
     _dispatch_file(target_name, processed_findings, stats, fixed_items or [],
-                   agent=agent if station_only else None, sink_results=sink_results)
+                   agent=agent if station_only else None, sink_results=sink_results,
+                   verification_counts=verification_counts)
 
     if fragment is not None:
         # agents-5bn P0: the fragment lives in the run directory, which a write-granted session
@@ -1485,6 +1497,7 @@ def dispatch_to_sink(sink: str, target_name: str, target_dir: Path, processed_fi
             "findings": processed_findings,
             "fixed": fixed_items or [],
             "sinks": sink_results,
+            **({"verification_counts": verification_counts} if verification_counts is not None else {}),
         }, indent=2), encoding="utf-8")
     return sink_results
 
@@ -1504,7 +1517,7 @@ def dispatch_env_failure_report(target_name: str, agent: str, engine: str, reaso
     )
 
 
-def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]], agent: Optional[str] = None, sink_results: Optional[Dict[str, Any]] = None, stations: Optional[List[Dict[str, Any]]] = None, line_name: Optional[str] = None, findings_dir: Optional[Path] = None, env_failure: Optional[str] = None):
+def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict[str, int], fixed_items: List[Dict[str, Any]], agent: Optional[str] = None, sink_results: Optional[Dict[str, Any]] = None, stations: Optional[List[Dict[str, Any]]] = None, line_name: Optional[str] = None, findings_dir: Optional[Path] = None, env_failure: Optional[str] = None, verification_counts: Optional[Dict[str, int]] = None):
     """Write the delta report trio (full, `-latest` alias, step-summary variant).
 
     With `agent` set, the trio is the station's own (`<target>-<agent>-delta.md` ...), never
@@ -1520,7 +1533,8 @@ def _dispatch_file(target_name: str, findings: List[Dict[str, Any]], stats: Dict
     fixed_items = [redact_finding(f) for f in fixed_items]
 
     title = f"{target_name} / {agent}" if agent else target_name
-    kwargs = dict(sink_results=sink_results, stations=stations, line_name=line_name, env_failure=env_failure)
+    kwargs = dict(sink_results=sink_results, stations=stations, line_name=line_name,
+                  env_failure=env_failure, verification_counts=verification_counts)
     report = _render_delta_report(title, findings, stats, fixed_items, **kwargs)
     report_file.write_text(report, encoding="utf-8")
     # Preserve the original path for existing consumers.
@@ -1894,6 +1908,8 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
     fixed: List[Dict[str, Any]] = []
     stats = {key: 0 for key in DELTA_KEYS}
     sinks: Dict[str, Dict[str, Any]] = {}
+    verification_counts: Dict[str, int] = {}
+    has_verification_counts = False
     for station in stations:
         fragment = station.get("fragment")
         if not fragment or not Path(fragment).exists():
@@ -1903,6 +1919,13 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
         fixed.extend(data.get("fixed", []))
         for key in DELTA_KEYS:
             stats[key] += int(data.get("stats", {}).get(key, 0) or 0)
+        station_counts = data.get("verification_counts")
+        if isinstance(station_counts, dict):
+            has_verification_counts = True
+            for verdict in ("disproved", "unverifiable", "verified"):
+                count = station_counts.get(verdict)
+                if type(count) is int and count >= 0:
+                    verification_counts[verdict] = verification_counts.get(verdict, 0) + count
         for sink, result in (data.get("sinks") or {}).items():
             total = sinks.setdefault(sink, {})
             for key, value in result.items():
@@ -1923,7 +1946,8 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
     stats["possible_rekey_anchored"] = max(int(stats.get("possible_rekey_anchored", 0) or 0),
                                            _run_level_anchored_cross_station_pairs(findings, fixed))
     report = _dispatch_file(target_name, findings, stats, fixed, sink_results=sinks,
-                            stations=stations, line_name=line_name, findings_dir=findings_dir)
+                            stations=stations, line_name=line_name, findings_dir=findings_dir,
+                            verification_counts=verification_counts if has_verification_counts else None)
     machine = report.with_name(f"{target_name}-line.json")
     machine.write_text(json.dumps({
         "target": target_name,
@@ -1936,6 +1960,7 @@ def write_line_report(target_name: str, line_name: str, stations: List[Dict[str,
                         for s in stations),
         "stats": stats,
         "sinks": sinks,
+        **({"verification_counts": verification_counts} if has_verification_counts else {}),
         "stations": [{k: v for k, v in s.items() if k != "fragment"} for s in stations],
     }, indent=2), encoding="utf-8")
     return report
@@ -2149,7 +2174,8 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
                          sink_results: Optional[Dict[str, Any]] = None,
                          stations: Optional[List[Dict[str, Any]]] = None,
                          line_name: Optional[str] = None,
-                         env_failure: Optional[str] = None) -> str:
+                         env_failure: Optional[str] = None,
+                         verification_counts: Optional[Dict[str, int]] = None) -> str:
     """Render the delta report; with step_summary=True, high/critical finding prose is reduced.
 
     effective_severity decides the band, matching the embargo: an understated or absent
@@ -2230,6 +2256,17 @@ def _render_delta_report(target_name: str, findings: List[Dict[str, Any]], stats
     elif not env_failure and not env_failed and not partial_triage \
             and stats["new"] == 0 and stats["regressed"] == 0 and stats["fixed"] == 0:
         lines.append("> **Clean Delta**: No new, regressed, or resolved findings in this run.")
+        lines.append("")
+
+    if verification_counts and sum(verification_counts.values()):
+        lines.append("> **Verifier dispositions (not findings)**: "
+                     f"{sum(verification_counts.values())} candidate disposition(s) in this run — "
+                     f"{verification_counts.get('disproved', 0)} disproved, "
+                     f"{verification_counts.get('unverifiable', 0)} unverifiable, "
+                     f"{verification_counts.get('verified', 0)} verified. "
+                     "These are not false-positive findings, never published, and do not enter "
+                     "the finding lifecycle or the counts above. False positive 0 does not mean "
+                     "no verifier candidates were dismissed.")
         lines.append("")
 
     lines += _migration_note(stats)
@@ -2443,10 +2480,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(2)
     try:
         candidate_index = load_candidate_index(Path(args.candidates)) if args.candidates else None
+        verification_counts = None
         if args.agent == "vuln-verify" and isinstance(raw_data, dict):
             rows = raw_data.get("verifications")
             if isinstance(rows, list):
-                store.record_verifications(args.agent, rows)
+                verification_counts = store.record_verifications(args.agent, rows)
         processed, stats, fixed_items = store.process_run(
             agent=args.agent, raw_findings=findings_list, candidate_index=candidate_index,
             target_dir=Path(args.target_dir).resolve(),
@@ -2467,6 +2505,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 beads_dir=Path(args.beads_dir) if args.beads_dir else None,
                 sink_options=sink_options,
                 run_dir=Path(args.run_dir) if args.run_dir else None,
+                verification_counts=verification_counts,
             )
         finally:
             store.save()
