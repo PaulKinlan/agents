@@ -351,11 +351,106 @@ class TestAnchoredClusterCandidates(unittest.TestCase):
             self.assertNotIn("snippet", candidate)
             self.assertNotIn("severity", candidate)
 
-    def test_distinct_clusters_cannot_emit_a_duplicate_candidate_id(self):
-        a = self.finding(20, "2026-10-01", "a", candidate_id="shared")
-        b = self.finding(80, "2026-10-01", "b", candidate_id="shared")
+    def test_two_stations_rows_of_one_candidate_are_one_cluster(self):
+        """[agents-np8dl] A candidate_id names a CANDIDATE, so two agents' rows of it are one cluster.
+
+        MEASURED in the factory's own store: in findings/agents-factory-factory.json the ids
+        50a8a7c8990e463f and effe7026c6ffc948 each carry a vuln-discovery row and a vuln-verify row.
+        Proximity clustering is line-based, so a stale or unknown line put such a pair in two clusters,
+        both anchors presented the same id, and the duplicate guard killed the whole pre-pass. This
+        replaces the earlier contract (that shape raised), because the raise was the crash: one
+        candidate has to be claimed once (the station declares candidate_accounting: aggregate-claimed).
+        """
+        a = self.finding(20, "2026-10-01", "discovery", candidate_id="shared", agent="vuln-discovery")
+        b = self.finding(80, "2026-10-02", "verify", candidate_id="shared", agent="vuln-verify")
+        clusters = triage.cluster_deterministic([a, b])
+        self.assertEqual(len(clusters), 1, "two rows of one candidate must not be presented twice")
+        self.assertEqual(clusters[0]["count"], 2)
+        self.assertEqual(clusters[0]["cluster_id"], "C1")
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual([c["candidate_id"] for c in emitted], ["shared"])
+        # The anchor is still the deterministic one: the OLDER row (line 20) wins over line order.
+        self.assertEqual(emitted[0]["line_number"], 20)
+
+    def test_an_unknown_line_row_folds_into_its_candidate_cluster(self):
+        """[agents-np8dl] The '?' shape of the same collision: unknown-line rows are their own cluster."""
+        numeric = self.finding(10, "2026-10-01", "discovery", candidate_id="shared")
+        unknown = {**self.finding("?", "2026-10-02", "verify", candidate_id="shared"),
+                   "path": "lib/sandbox.py"}
+        clusters = triage.cluster_deterministic([numeric, unknown])
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0]["candidate_id"], "shared")
+        self.assertEqual(emitted[0]["line_number"], 10, "the known line is the anchor's, not None")
+
+    def test_legacy_rows_of_one_rule_get_distinct_occurrence_ids(self):
+        """[agents-np8dl] Two legacy rows (no stored id) must not compute the same identity.
+
+        candidate_identity's ordinal exists for exactly this, but the pre-pass passed the default 1, so
+        two rows of one rule+path+fingerprint collided with each other and killed the run. The store
+        carries 7/19/53 such rows across three targets, so this is ordinary data.
+        """
+        first = self.finding(10, "2026-10-01", "same-fingerprint")
+        second = self.finding(100, "2026-10-02", "same-fingerprint")
+        clusters = triage.cluster_deterministic([first, second])
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual(len(clusters), 2, "legacy rows keep their proximity clusters")
+        ids = [c["candidate_id"] for c in emitted]
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(len(set(ids)), 2, f"two occurrences must not share one id: {ids}")
+
+    def test_a_stored_id_and_a_legacy_row_that_share_an_ordinal_are_one_candidate(self):
+        """[agents-yn00b, found by rev-np8dl] A stored id and a derived one can name the same ordinal.
+
+        A station that writes candidate_identity(..., ordinal=1) is indistinguishable from a legacy row
+        that happens to be occurrence 1 of the same rule+path+fingerprint, so counting occurrences over
+        LEGACY ROWS ONLY (the first version of the agents-np8dl fix) left this mixed-version case
+        colliding and the pre-pass still crashing. Stored rows therefore occupy their ordinal, and one
+        resolution of identity feeds both the fold and the projector.
+        """
+        from lib.candidate_identity import candidate_identity
+        stored = candidate_identity("same-rule", "lib/sandbox.py", "same-fingerprint", 1)
+        with_id = self.finding(100, "2026-10-01", "same-fingerprint", candidate_id=stored)
+        legacy = self.finding(10, "2026-10-02", "same-fingerprint")
+        clusters = triage.cluster_deterministic([with_id, legacy])
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual(len(clusters), 1, "one candidate by the scheme's own identity, so one cluster")
+        self.assertEqual(clusters[0]["count"], 2)
+        self.assertEqual([c["candidate_id"] for c in emitted], [stored])
+
+    def test_occurrences_are_counted_over_stored_rows_too(self):
+        """A stored row OCCUPIES its ordinal, so a legacy row after it is a different occurrence.
+
+        The mirror of the test above, and the one that pins the counting rule itself: with a stored id at
+        line 10 (the station's occurrence 1) and a legacy row at line 100, the legacy row is occurrence 2
+        and must keep its own identity. Counting only legacy rows would derive occurrence 1 for it, equal
+        the stored id, and collapse two real occurrences into one candidate.
+        """
+        from lib.candidate_identity import candidate_identity
+        stored = candidate_identity("same-rule", "lib/sandbox.py", "same-fingerprint", 1)
+        with_id = self.finding(10, "2026-10-01", "same-fingerprint", candidate_id=stored)
+        legacy = self.finding(100, "2026-10-02", "same-fingerprint")
+        clusters = triage.cluster_deterministic([with_id, legacy])
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual(len(clusters), 2, "two occurrences in file order are two candidates")
+        ids = [c["candidate_id"] for c in emitted]
+        self.assertEqual(len(set(ids)), 2, f"occurrences must not collapse onto one id: {ids}")
+        self.assertIn(stored, ids)
+
+    def test_the_guard_still_refuses_duplicate_and_malformed_ids(self):
+        """The line judge's invariant still has teeth: the guard fires on input that really is bad."""
+        row = self.finding(1, "2026-10-01", "fp", candidate_id="dup")
         with self.assertRaisesRegex(ValueError, "duplicate candidate_id"):
-            triage.cluster_candidates(triage.cluster_deterministic([a, b]))
+            triage.cluster_candidates([
+                {"cluster_id": "C1", "file": "lib/sandbox.py", "count": 1, "items": [row]},
+                {"cluster_id": "C2", "file": "lib/sandbox.py", "count": 1,
+                 "items": [{**row, "line_number": 200}]},
+            ])
+        padded = self.finding(1, "2026-10-01", "fp", candidate_id=" padded ")
+        with self.assertRaisesRegex(ValueError, "malformed source identity"):
+            triage.cluster_candidates([{"cluster_id": "C1", "file": "lib/sandbox.py",
+                                         "count": 1, "items": [padded]}])
 
     def test_context_keeps_more_clusters_than_the_shown_candidate_slice(self):
         source = [{**self.finding(1, "2026-10-01", f"fp-{i}"), "path": f"p{i:02}.py"}
