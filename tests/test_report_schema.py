@@ -634,6 +634,50 @@ class TestUnknownLineIsRepresentable(unittest.TestCase):
             validate_agent_report(FACTORY_ROOT / "agents" / "vuln-verify", cfg, report), [])
 
 
+class TestVulnVerifyRequiresPublishedVerifiedFindings(unittest.TestCase):
+    """agents-t6fut: reject orphan verified verdicts before the findings store is updated."""
+
+    def _report(self, verdict="verified", candidate_id="c0", findings=None):
+        return {
+            "summary": "verified candidates", "target": "sample",
+            "verifications": [{"rule_id": "r1", "path": "src/app.js", "line_number": 7,
+                               "candidate_id": candidate_id, "verdict": verdict,
+                               "confidence": "high", "reasoning": "Checked source"}],
+            "findings": [] if findings is None else findings,
+        }
+
+    def _finding(self, candidate_id="c0", **extra):
+        return {"rule_id": "r1", "path": "src/app.js", "line_number": 7,
+                "candidate_id": candidate_id, "snippet": "danger()", "severity": "critical",
+                "title": "Reachable exploit", "description": "Confirmed", "remediation": "Fix",
+                **extra}
+
+    def _errors(self, report):
+        cfg = {"output": {"schema": "report.schema.json"}}
+        return validate_agent_report(FACTORY_ROOT / "agents" / "vuln-verify", cfg, report)
+
+    def test_verified_without_a_finding_is_rejected(self):
+        errors = self._errors(self._report())
+        self.assertTrue(any("matching candidate_id" in e for e in errors), errors)
+
+    def test_verified_with_a_mismatched_or_dismissed_finding_is_rejected(self):
+        for findings in ([self._finding("c1")], [self._finding(false_positive=True)]):
+            with self.subTest(findings=findings):
+                errors = self._errors(self._report(findings=findings))
+                self.assertTrue(any("matching candidate_id" in e for e in errors), errors)
+
+    def test_verified_without_an_id_cannot_link_to_a_finding(self):
+        report = self._report(findings=[self._finding()])
+        del report["verifications"][0]["candidate_id"]
+        errors = self._errors(report)
+        self.assertTrue(any("matching candidate_id" in e for e in errors), errors)
+
+    def test_linked_verified_and_unpublished_disproved_are_valid(self):
+        self.assertEqual(self._errors(self._report(findings=[self._finding()])), [])
+        self.assertEqual(self._errors(self._report(verdict="disproved")), [])
+        self.assertEqual(self._errors(self._report(verdict="unverifiable")), [])
+
+
 class TestThreatModelSchemaBound(unittest.TestCase):
     """agents-uhru: threat-model report schema bounds threat_model_markdown to <= 16384 chars."""
 

@@ -2476,10 +2476,15 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
                                                  model_arg=model_arg, visibility_arg=visibility_arg,
                                                  budget_minutes=st_budget)
             report = res.get("report", {}) if res else {}
-            # `reported` is every finding the report carried BEFORE the false-positive filter, because a
-            # station that lists a dismissal with its verdict has accounted for that candidate and one that
-            # silently drops it has not (agents-xx9t).
+            # Findings drive publication/alerts, but vuln-verify accounts for candidates in
+            # verifications[]: disproved hypotheses correctly produce no findings at all.
+            # Keep the accounting rows separate so a clean verification is not read as 0/N.
             reported = [f for f in report.get("findings", []) if isinstance(f, dict)]
+            # The verifier's rejected candidates live in verifications[], not publishable findings.
+            # A schema-invalid report is refused before the store; guard the stub/no-schema path too.
+            raw_verifications = report.get("verifications")
+            verification_rows = ([v for v in raw_verifications if isinstance(v, dict)]
+                                 if isinstance(raw_verifications, list) else [])
             findings = [f for f in reported if not is_false_positive(f)]
             criticals = count_criticals(findings)
             run_dir = res.get("run_dir") if res else None
@@ -2489,14 +2494,15 @@ def run_line(line_name: str, target_arg: str, engine_arg: str = "auto", explicit
             mode = candidate_accounting_mode(
                 {"candidate_accounting": res.get("candidate_accounting", "row") if res else "row"})
             if mode == "aggregate-claimed":
+                # Aggregate rows claim covered_candidate_ids; verifier rows do not use that contract.
                 coverage = aggregate_candidate_coverage(read_candidate_count(run_dir),
                                                         report.get("findings", []),
                                                         presented_ids=read_presented_candidate_ids(run_dir))
             else:
-                # The row-mode judge is untouched, including its legacy count-only fallback.
-                coverage = candidate_coverage(read_candidate_count(run_dir), len(reported),
+                accounting_rows = verification_rows if st_agent == "vuln-verify" else reported
+                coverage = candidate_coverage(read_candidate_count(run_dir), len(accounting_rows),
                                               presented_ids=read_presented_candidate_ids(run_dir),
-                                              cited_ids=[f.get("candidate_id") for f in reported])
+                                              cited_ids=[f.get("candidate_id") for f in accounting_rows])
 
             # Outcome and validity are two facts (agents-xx9t). The alarm still wins the status, but a run
             # that cannot show it triaged what it was given never reads as PASS: it is INCOMPLETE, which is

@@ -639,6 +639,68 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
                           station["candidates_accounted"]), (77, 50, 50))
         self.assertIs(station["complete"], True)
 
+    def test_vuln_verify_accounts_for_verifications_not_only_published_findings(self):
+        """Disproved candidates belong to verifications[], not findings[].
+
+        A fabricated 50-row findings[] list must not substitute for 50 actual
+        verification verdicts; a missing verification must remain incomplete.
+        """
+        rows = [{"candidate_id": f"c{i}", "verdict": "disproved"} for i in range(50)]
+        self.box.agent("vuln-verify", report(), prepass=prepass(50))
+        self.box.line(["vuln-verify"])
+        for verifications, findings, expected_status, accounted in (
+            (rows, [], "PASS", 50),
+            (rows[:-1], [], "INCOMPLETE", 49),
+            ([], [finding(candidate_id=f"c{i}") for i in range(50)], "INCOMPLETE", 0),
+        ):
+            with self.subTest(expected_status=expected_status, accounted=accounted):
+                output = json.dumps({"summary": "verified", "verifications": verifications,
+                                     "findings": findings})
+                (self.box.root / "outputs" / "vuln-verify.txt").write_text(output, encoding="utf-8")
+                ok, _ = self.box.run_line()
+                station = json.loads(self.box.findings("target-line.json"))["stations"][0]
+                self.assertEqual(station["status"], expected_status)
+                self.assertEqual(station["candidates_accounted"], accounted)
+                self.assertEqual(station["candidate_identity"], "identity-matched")
+                self.assertEqual(ok, expected_status == "PASS")
+
+    def test_vuln_verify_linked_critical_verdict_still_alerts(self):
+        schema = json.loads((ROOT / "agents" / "vuln-verify" / "report.schema.json").read_text())
+        (self.box.target / "a.js").write_text("x = 1\n", encoding="utf-8")
+        output = {"summary": "verified", "target": "target",
+                  "verifications": [{"rule_id": "r1", "path": "a.js", "line_number": 1,
+                                     "candidate_id": "c0", "verdict": "verified",
+                                     "confidence": "high", "reasoning": "Reachable"}],
+                  "findings": [finding(candidate_id="c0", severity="critical")]}
+        self.box.agent("vuln-verify", json.dumps(output), prepass=prepass(1), report_schema=schema)
+        self.box.line(["vuln-verify"])
+        ok, _ = self.box.run_line()
+        station = json.loads(self.box.findings("target-line.json"))["stations"][0]
+        self.assertTrue(ok, "ALERT is a complete verdict, not an incomplete line")
+        self.assertEqual((station["status"], station["criticals"], station["candidates_accounted"]),
+                         ("ALERT", 1, 1))
+
+    def test_vuln_verify_orphan_verified_verdict_never_changes_the_store(self):
+        """A schema-valid orphan verdict is rejected before it can fix an existing finding."""
+        schema = json.loads((ROOT / "agents" / "vuln-verify" / "report.schema.json").read_text())
+        (self.box.target / "a.js").write_text("x = 1\n", encoding="utf-8")
+        verified = {"rule_id": "r1", "path": "a.js", "line_number": 1,
+                    "candidate_id": "c0", "verdict": "verified", "confidence": "high",
+                    "reasoning": "Reachable"}
+        good = {"summary": "verified", "target": "target", "verifications": [verified],
+                "findings": [finding(candidate_id="c0")]}
+        self.box.agent("vuln-verify", json.dumps(good), prepass=prepass(1), report_schema=schema)
+        self.box.run_agent("vuln-verify")
+        store = self.box.root / "findings" / "target.json"
+        before = store.read_text(encoding="utf-8")
+
+        bad = {**good, "findings": []}
+        (self.box.root / "outputs" / "vuln-verify.txt").write_text(json.dumps(bad), encoding="utf-8")
+        with self.assertRaisesRegex(factory_cli.NoVerdictError, "matching candidate_id"):
+            self.box.run_agent("vuln-verify")
+        self.assertEqual(store.read_text(encoding="utf-8"), before,
+                         "a rejected report must not mark a confirmed finding fixed")
+
     def test_a_partial_triage_with_nothing_new_never_claims_a_clean_delta(self):
         """agents-kve2: the exact shape of the six runs - 49 shown, 0 accounted, nothing new. The Clean
         Delta branch was an elif of the no-verdict banner with no coverage check, so the report said both
