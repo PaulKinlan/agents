@@ -61,7 +61,14 @@ fast_gate_arms_050_lib_sinks_py() {
       ;;
     lib/candidate_identity.py)
       # Candidate identity generator (agents-rdyb) and pre-pass emission assertion (agents-vt7w).
-      mapped="$mapped tests/test_candidate_identity.py tests/test_candidate_id_emission.py"
+      # tests/test_vuln_triage_prepass.py is here because the pre-pass's clustering IS the consumer of
+      # the scheme's ordinal (agents-np8dl/agents-yn00b): its fold and its duplicate guard both resolve
+      # identity through candidate_identity, so a signature change breaks it - MEASURED by dropping the
+      # `ordinal` parameter, which turns 4 tests in that module red. A change to the digest PAYLOAD alone
+      # does not redden it, because those tests compare ids against the same function instead of hardcoding
+      # digests; that is deliberate, so the mapped relation is the signature-and-behaviour one. Cost: one
+      # more module in this arm, tests.test_vuln_triage_prepass = 25 tests / ~0.2 s at this commit.
+      mapped="$mapped tests/test_candidate_identity.py tests/test_candidate_id_emission.py tests/test_vuln_triage_prepass.py"
       ;;
     lib/credential_broker.py)
       # Credential broker plus end-to-end keyless broker test (agents-vt7w).
