@@ -163,11 +163,12 @@ def unlocatable_verdicts(report: Any, target_dir: Optional[Path] = None) -> List
 
 
 def unpublished_verified_verdicts(report: Any) -> List[str]:
-    """A verified vuln-verify verdict needs a publishable finding with the same candidate ID.
+    """Link verified verdicts and publishable findings in both directions by candidate ID.
 
     Verification rows account for every candidate, including disproved ones. Findings alone drive
-    the store and critical alerts, so a verified row without a surviving finding must be rejected
-    before either the store or Line coverage sees the report (agents-t6fut).
+    the store and critical alerts, so either an orphan verified row or an unverified publishable
+    finding must be rejected before the store or Line coverage sees the report (agents-t6fut,
+    agents-led6d).
     """
     if not isinstance(report, dict):
         return []
@@ -181,14 +182,32 @@ def unpublished_verified_verdicts(report: Any) -> List[str]:
         and finding["candidate_id"].strip() and not is_false_positive(finding)
     }
     violations = []
+    verified_ids = set()
+    contradicted_ids = set()
     for i, verification in enumerate(verifications):
-        if not isinstance(verification, dict) or verification.get("verdict") != "verified":
+        if not isinstance(verification, dict):
             continue
         candidate_id = verification.get("candidate_id")
-        if not isinstance(candidate_id, str) or not candidate_id.strip() or candidate_id not in published_ids:
+        if verification.get("verdict") == "verified":
+            if isinstance(candidate_id, str) and candidate_id.strip():
+                verified_ids.add(candidate_id)
+            if not isinstance(candidate_id, str) or not candidate_id.strip() or candidate_id not in published_ids:
+                violations.append(
+                    f"$.verifications[{i}].candidate_id: verified verdict requires a surviving "
+                    f"non-false-positive finding with matching candidate_id ({candidate_id!r})"
+                )
+        elif isinstance(candidate_id, str) and candidate_id.strip():
+            contradicted_ids.add(candidate_id)
+    for i, finding in enumerate(findings):
+        if not isinstance(finding, dict) or is_false_positive(finding):
+            continue
+        candidate_id = finding.get("candidate_id")
+        if (not isinstance(candidate_id, str) or not candidate_id.strip()
+                or candidate_id not in verified_ids or candidate_id in contradicted_ids):
             violations.append(
-                f"$.verifications[{i}].candidate_id: verified verdict requires a surviving "
-                f"non-false-positive finding with matching candidate_id ({candidate_id!r})"
+                f"$.findings[{i}].candidate_id: publishable finding requires an uncontradicted "
+                f"matching 'verified' verdict in verifications[] ({candidate_id!r}); "
+                f"a disproved, unverifiable or missing verdict must not publish"
             )
     return violations
 
@@ -693,7 +712,7 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
 
     Cross-field rules the schema cannot express are applied on top:
     - a verdict about a location must have a location (agents-0tl)
-    - a vuln-verify verified verdict must have a matching publishable finding (agents-t6fut)
+    - vuln-verify verified verdicts and publishable findings must match both ways (agents-t6fut, agents-led6d)
     - a concurrency recommendation must carry its reentrancy precondition or cite backend evidence (agents-vorw)
     """
     try:

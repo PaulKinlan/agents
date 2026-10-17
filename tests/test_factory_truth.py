@@ -707,6 +707,27 @@ class TestPartialTriageIsNotACleanResult(SandboxCase):
         self.assertEqual(store.read_text(encoding="utf-8"), before,
                          "a rejected report must not mark a confirmed finding fixed")
 
+    def test_vuln_verify_disproved_critical_finding_is_rejected_before_store(self):
+        """agents-led6d: a critical finding cannot publish against a disproved verdict."""
+        schema = json.loads((ROOT / "agents" / "vuln-verify" / "report.schema.json").read_text())
+        (self.box.target / "a.js").write_text("x = 1\n", encoding="utf-8")
+        verification = {"rule_id": "r1", "path": "a.js", "line_number": 1,
+                        "candidate_id": "c0", "verdict": "verified", "confidence": "high",
+                        "reasoning": "Reachable"}
+        good = {"summary": "verified", "target": "target", "verifications": [verification],
+                "findings": [finding(candidate_id="c0", severity="critical")]}
+        self.box.agent("vuln-verify", json.dumps(good), prepass=prepass(1), report_schema=schema)
+        self.box.run_agent("vuln-verify")
+        store = self.box.root / "findings" / "target.json"
+        before = store.read_text(encoding="utf-8")
+
+        bad = {**good, "verifications": [{**verification, "verdict": "disproved"}]}
+        (self.box.root / "outputs" / "vuln-verify.txt").write_text(json.dumps(bad), encoding="utf-8")
+        with self.assertRaisesRegex(factory_cli.NoVerdictError, "matching 'verified' verdict"):
+            self.box.run_agent("vuln-verify")
+        self.assertEqual(store.read_text(encoding="utf-8"), before,
+                         "a contradictory report must not publish or transition findings")
+
     def test_a_partial_triage_with_nothing_new_never_claims_a_clean_delta(self):
         """agents-kve2: the exact shape of the six runs - 49 shown, 0 accounted, nothing new. The Clean
         Delta branch was an elif of the no-verdict banner with no coverage check, so the report said both

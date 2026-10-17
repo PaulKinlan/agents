@@ -85,7 +85,7 @@
     },
     "findings": {
       "type": "array",
-      "description": "Publishable verified vulnerabilities only; disproved and unverifiable candidates remain in verifications[] without findings[].",
+      "description": "Publishable verified vulnerabilities only. Every publishable finding must have a matching, uncontradicted verified verdict by candidate_id; disproved and unverifiable candidates remain in verifications[] without findings[].",
       "items": {
         "type": "object",
         "required": [
@@ -143,7 +143,7 @@
           },
           "candidate_id": {
             "type": "string",
-            "description": "Copy the candidate_id of the matching verified verification verbatim. Every verified verdict must have a surviving finding with this same ID (agents-t6fut)."
+            "description": "Copy the candidate_id of the matching verified verification verbatim. Every publishable finding needs an uncontradicted verified verdict with this ID and every verified verdict needs a surviving finding (agents-t6fut, agents-led6d)."
           },
           "false_positive": {
             "type": "boolean",

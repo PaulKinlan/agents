@@ -623,10 +623,14 @@ class TestUnknownLineIsRepresentable(unittest.TestCase):
 
     def test_a_null_line_in_the_findings_array_is_accepted(self):
         report = {
-            "summary": "s", "target": "t", "verifications": [],
+            "summary": "s", "target": "t",
+            "verifications": [{"rule_id": "r", "path": "src/app.js", "line_number": None,
+                               "candidate_id": "c0", "verdict": "verified",
+                               "confidence": "high", "reasoning": "Located by path"}],
             "findings": [{
                 "rule_id": "r", "path": "src/app.js", "line_number": None, "snippet": "s",
                 "severity": "high", "title": "t", "description": "d", "remediation": "r",
+                "candidate_id": "c0",
             }],
         }
         cfg = {"output": {"schema": "report.schema.json"}}
@@ -676,6 +680,31 @@ class TestVulnVerifyRequiresPublishedVerifiedFindings(unittest.TestCase):
         self.assertEqual(self._errors(self._report(findings=[self._finding()])), [])
         self.assertEqual(self._errors(self._report(verdict="disproved")), [])
         self.assertEqual(self._errors(self._report(verdict="unverifiable")), [])
+
+    def test_disproved_or_unverifiable_finding_cannot_publish(self):
+        for verdict in ("disproved", "unverifiable"):
+            with self.subTest(verdict=verdict):
+                errors = self._errors(self._report(verdict=verdict, findings=[self._finding()]))
+                self.assertTrue(any("matching 'verified' verdict" in e for e in errors), errors)
+
+    def test_missing_or_idless_verification_cannot_publish_a_finding(self):
+        for report in (self._report(findings=[self._finding(candidate_id="c1")]),
+                       self._report(findings=[self._finding(candidate_id="")]),
+                       self._report(findings=[self._finding(candidate_id="c0")])):
+            with self.subTest(report=report):
+                report["verifications"] = []
+                errors = self._errors(report)
+                self.assertTrue(any("$.findings[0].candidate_id" in e for e in errors), errors)
+
+    def test_a_contradictory_second_verdict_cannot_hide_a_disproof(self):
+        report = self._report(findings=[self._finding()])
+        report["verifications"].append({**report["verifications"][0], "verdict": "disproved"})
+        errors = self._errors(report)
+        self.assertTrue(any("matching 'verified' verdict" in e for e in errors), errors)
+
+    def test_dismissal_evidence_requires_no_verified_verdict(self):
+        report = self._report(verdict="disproved", findings=[self._finding(false_positive=True)])
+        self.assertEqual(self._errors(report), [])
 
 
 class TestThreatModelSchemaBound(unittest.TestCase):
