@@ -400,6 +400,44 @@ class TestAnchoredClusterCandidates(unittest.TestCase):
         self.assertEqual(len(ids), 2)
         self.assertEqual(len(set(ids)), 2, f"two occurrences must not share one id: {ids}")
 
+    def test_a_stored_id_and_a_legacy_row_that_share_an_ordinal_are_one_candidate(self):
+        """[agents-yn00b, found by rev-np8dl] A stored id and a derived one can name the same ordinal.
+
+        A station that writes candidate_identity(..., ordinal=1) is indistinguishable from a legacy row
+        that happens to be occurrence 1 of the same rule+path+fingerprint, so counting occurrences over
+        LEGACY ROWS ONLY (the first version of the agents-np8dl fix) left this mixed-version case
+        colliding and the pre-pass still crashing. Stored rows therefore occupy their ordinal, and one
+        resolution of identity feeds both the fold and the projector.
+        """
+        from lib.candidate_identity import candidate_identity
+        stored = candidate_identity("same-rule", "lib/sandbox.py", "same-fingerprint", 1)
+        with_id = self.finding(100, "2026-10-01", "same-fingerprint", candidate_id=stored)
+        legacy = self.finding(10, "2026-10-02", "same-fingerprint")
+        clusters = triage.cluster_deterministic([with_id, legacy])
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual(len(clusters), 1, "one candidate by the scheme's own identity, so one cluster")
+        self.assertEqual(clusters[0]["count"], 2)
+        self.assertEqual([c["candidate_id"] for c in emitted], [stored])
+
+    def test_occurrences_are_counted_over_stored_rows_too(self):
+        """A stored row OCCUPIES its ordinal, so a legacy row after it is a different occurrence.
+
+        The mirror of the test above, and the one that pins the counting rule itself: with a stored id at
+        line 10 (the station's occurrence 1) and a legacy row at line 100, the legacy row is occurrence 2
+        and must keep its own identity. Counting only legacy rows would derive occurrence 1 for it, equal
+        the stored id, and collapse two real occurrences into one candidate.
+        """
+        from lib.candidate_identity import candidate_identity
+        stored = candidate_identity("same-rule", "lib/sandbox.py", "same-fingerprint", 1)
+        with_id = self.finding(10, "2026-10-01", "same-fingerprint", candidate_id=stored)
+        legacy = self.finding(100, "2026-10-02", "same-fingerprint")
+        clusters = triage.cluster_deterministic([with_id, legacy])
+        emitted = triage.cluster_candidates(clusters)
+        self.assertEqual(len(clusters), 2, "two occurrences in file order are two candidates")
+        ids = [c["candidate_id"] for c in emitted]
+        self.assertEqual(len(set(ids)), 2, f"occurrences must not collapse onto one id: {ids}")
+        self.assertIn(stored, ids)
+
     def test_the_guard_still_refuses_duplicate_and_malformed_ids(self):
         """The line judge's invariant still has teeth: the guard fires on input that really is bad."""
         row = self.finding(1, "2026-10-01", "fp", candidate_id="dup")

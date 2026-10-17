@@ -192,23 +192,28 @@ def _fold_shared_candidate_clusters(clusters: List[Dict[str, Any]]) -> List[Dict
     rows of one candidate are one candidate; presenting them as two clusters asks the line judge to
     choose between two names for the same location.
 
-    Legacy rows are NOT folded by their derived identity here: an id without the ordinal cannot tell two
-    occurrences apart (see _legacy_occurrence_ranks), so folding on it would destroy proximity clustering
-    for rows that genuinely are two places in one file.
+    Legacy rows are NOT folded by a GUESSED identity: the ordinal counted here is the occurrence in file
+    order (lib/candidate_identity.py's definition), and rows carrying a stored id occupy their ordinal
+    even though their id is read off the row. That is what makes the mixed stored/derived case fold
+    instead of colliding (agents-yn00b): a station's `ordinal=1` id and a legacy row that happens to be
+    occurrence 1 ARE the same candidate by the scheme, so they become one cluster rather than two names
+    for one location.
     """
     folded: List[Dict[str, Any]] = []
     owner: Dict[str, int] = {}
+    ordinals = _occurrence_ordinals(clusters)
     for cluster in clusters:
         items = list(cluster["items"])
         anchor = min(items, key=_anchor_key) if items else None
-        stored = _stored_candidate_id(anchor) if anchor else ""
-        if stored and stored in owner:
-            target = folded[owner[stored]]
+        identity = (_anchor_identity(anchor, cluster["file"], ordinals).strip()
+                    if anchor else "")
+        if identity and identity in owner:
+            target = folded[owner[identity]]
             target["items"] = list(target["items"]) + items
             target["count"] = len(target["items"])
             continue
-        if stored:
-            owner[stored] = len(folded)
+        if identity:
+            owner[identity] = len(folded)
         folded.append({**cluster, "items": items, "count": len(items)})
 
     # Dense, deterministic ids again after any fold, and a `file` that matches the anchor actually
@@ -242,34 +247,62 @@ def _anchor_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
             str(item.get("title") or ""), str(item.get("candidate_id") or ""))
 
 
-def _legacy_occurrence_ranks(clusters: List[Dict[str, Any]]) -> Dict[int, int]:
-    """Occurrence rank (1-based, per rule+path+fingerprint) for every row WITHOUT a stored id.
+def _occurrence_ordinals(clusters: List[Dict[str, Any]]) -> Dict[int, int]:
+    """Occurrence ordinal (1-based, per rule+path+fingerprint, IN FILE ORDER) for EVERY row.
 
     candidate_identity's `ordinal` input exists so two identical matches in one file get distinct ids
-    instead of silently sharing one (lib/candidate_identity.py). The pre-pass passed the DEFAULT 1 for
-    every legacy row, so two rows of the same rule/path/fingerprint computed the SAME id and the
-    duplicate guard killed the run - a collision manufactured by this file, with no malformed input at
-    all (agents-np8dl). The factory store carries 7 such rows in one target, 19 in another and 53 in a
-    third, so the shape is ordinary, not hypothetical.
+    instead of silently sharing one (lib/candidate_identity.py), and it is defined as the occurrence
+    IN FILE ORDER - so a row's ordinal does not depend on which side of a cluster boundary it fell.
 
-    Ranked over EVERY row in the pre-pass (not per cluster) and ordered by _anchor_key, so a row's id
-    does not depend on how proximity happened to cluster it, and the group's anchor - min by
-    _anchor_key - is always occurrence 1.
+    Two things about this were wrong before, and both crashed the nightly pre-pass:
+      * the pre-pass passed the DEFAULT ordinal 1 for legacy rows, so two rows of one
+        rule+path+fingerprint computed the SAME id (agents-np8dl);
+      * a STORED id and a DERIVED one can name the same ordinal - a station writing
+        candidate_identity(..., ordinal=1) is indistinguishable from a legacy row that happens to be
+        occurrence 1 - so counting only legacy rows left the mixed-version case colliding
+        (agents-yn00b, found by rev-np8dl). Rows carrying a stored id therefore OCCUPY their ordinal
+        here even though their id is read off the row rather than derived.
     """
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
     for cluster in clusters:
         for item in cluster["items"]:
-            if _stored_candidate_id(item):
-                continue
             key = (
                 str(item.get("rule_id") or "").strip(),
                 str(item.get("path") or cluster["file"] or "").strip(),
                 str(item.get("fingerprint") or ""),
             )
             groups.setdefault(key, []).append(item)
-    return {id(item): rank
+    return {id(item): ordinal
             for items in groups.values()
-            for rank, item in enumerate(sorted(items, key=_anchor_key), start=1)}
+            for ordinal, item in enumerate(sorted(items, key=_file_order_key), start=1)}
+
+
+def _file_order_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
+    """File order for occurrence counting: line first, then a deterministic tiebreak for equal lines."""
+    line = usable_line_number(item.get("line_number"))
+    return (line if line is not None else float("inf"),
+            str(item.get("rule_id") or ""), str(item.get("fingerprint") or ""),
+            str(item.get("title") or ""), str(item.get("agent") or ""),
+            str(item.get("candidate_id") or ""))
+
+
+def _anchor_identity(item: Dict[str, Any], file_fallback: Any,
+                    ordinals: Dict[int, int]) -> str:
+    """The identity a row presents: the stored id when it has one, else the scheme's derived id.
+
+    One resolution, used by BOTH the fold and the projector, so clustering and the guard cannot disagree
+    about what a candidate is (agents-yn00b).
+
+    The STORED value is returned EXACTLY AS STORED, whitespace included: cluster_candidates' guard is
+    what reports a padded id as malformed, and stripping here would hide it from the only check that
+    looks for it. Callers that need a key use .strip() on the result.
+    """
+    raw = item.get("candidate_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return candidate_identity(item.get("rule_id") or "", item.get("path") or file_fallback,
+                              match_text=str(item.get("fingerprint") or ""),
+                              ordinal=ordinals.get(id(item), 1))
 
 
 def cluster_candidates(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -281,26 +314,22 @@ def cluster_candidates(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     identities: the opt-in line judge requires every presented ID to name one
     distinct cluster and cannot repair an ambiguous pre-pass.
 
-    Legitimate data can no longer produce that duplicate: a stored id shared by two
-    stations' rows of ONE candidate is folded into one cluster by
-    _fold_shared_candidate_clusters, and legacy rows get distinct occurrences
-    (agents-np8dl). The guard below therefore only fires on input that really is
-    malformed - a padded id, or clusters handed to this function directly - which
+    Legitimate data can no longer produce that duplicate: one candidate's rows - whether they carry a
+    stored id or derive one from the occurrence scheme - are folded into one cluster by
+    _fold_shared_candidate_clusters (agents-np8dl, agents-yn00b). The guard below therefore only fires on
+    input that really is malformed - a padded id, or clusters handed to this function directly - which
     is what the line-judge invariant needs it for.
     """
     candidates: List[Dict[str, Any]] = []
     seen_ids = set()
-    ranks = _legacy_occurrence_ranks(clusters)
+    ordinals = _occurrence_ordinals(clusters)
     for cluster in clusters:
         if not cluster["items"]:
             raise ValueError("vuln-triage: empty cluster has no anchor")
         anchor = min(cluster["items"], key=_anchor_key)
         rule_id = anchor.get("rule_id") or ""
         path = anchor.get("path") or cluster["file"]
-        stored_id = anchor.get("candidate_id")
-        cid = (stored_id if isinstance(stored_id, str) and stored_id.strip()
-               else candidate_identity(rule_id, path, match_text=str(anchor.get("fingerprint") or ""),
-                                       ordinal=ranks.get(id(anchor), 1)))
+        cid = _anchor_identity(anchor, cluster["file"], ordinals)
         if cid != cid.strip() or cid in seen_ids:
             raise ValueError(f"vuln-triage: duplicate candidate_id or malformed source identity: {cid!r}")
         seen_ids.add(cid)
