@@ -136,6 +136,30 @@ class TestCoverageContract(unittest.TestCase):
         self.assertIn("tests/test_check_conf_consistency.py", suites)
         self.assertIn("tests/test_gate_entrypoint_config.py", suites)
 
+    def test_docs_drift_contract_selects_its_direct_and_dynamic_consumers(self):
+        """agents-c8619: check_docs.py must run the importer the oracle reported omitted.
+
+        test_docs_drift loads this module dynamically (SourceFileLoader), which the oracle's
+        import scanner cannot see; both suites belong in the explicit contract. This dry run
+        proves the declaration is consumed by the actual fast gate, not just valid JSON.
+        """
+        source = "agents/docs-drift/scripts/check_docs.py"
+        contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(set(contract[source]),
+                         {"tests/test_docs_drift.py", "tests/test_prepass_truth.py"})
+        tree = ast.parse((ROOT / "tests/test_prepass_truth.py").read_text(encoding="utf-8"))
+        self.assertTrue(any(isinstance(node, ast.Import)
+                            and any(alias.name == "check_docs" for alias in node.names)
+                            for node in ast.walk(tree)), "the omitted suite must still import check_docs")
+        gate = subprocess.run(
+            ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
+            env=dict(os.environ, GIT_CHANGED=source, FAST_GATE_DRY_RUN="1"), timeout=20,
+            check=False,
+        )
+        self.assertEqual(gate.returncode, 0, gate.stderr)
+        selected = {line for line in gate.stdout.splitlines() if line.startswith("tests/")}
+        self.assertTrue(set(contract[source]) <= selected, selected)
+
     def test_oracle_extract_coverage_flags_omitted_contract_suites(self):
         """When check-coverage.py runs on a diff modifying a contracted file (e.g. lib/child_env.py)
         without executing the contracted suite (tests/test_promotion.py), it must report
