@@ -678,12 +678,12 @@ class TestUnreadableDocsAreNotMissingReferences(unittest.TestCase):
 
     def test_glob_io_fault_propagates_but_invalid_patterns_do_not(self):
         resolve = check_docs.path_exists_or_matches
-        with mock.patch.object(Path, "glob", side_effect=PermissionError(errno.EACCES, "denied")):
+        with mock.patch.object(check_docs.os, "scandir", side_effect=PermissionError(errno.EACCES, "denied")):
             with self.assertRaises(PermissionError):
                 resolve(self.target, self.target, "docs/*.md")
         for error in (ValueError("invalid pattern"), NotImplementedError("non-relative")):
             with self.subTest(error=type(error).__name__):
-                with mock.patch.object(Path, "glob", side_effect=error):
+                with mock.patch.object(check_docs.os, "scandir", side_effect=error):
                     self.assertEqual(resolve(self.target, self.target, "docs/*.md"), (False, True))
 
     def test_direct_exists_and_resolve_io_faults_propagate(self):
@@ -758,6 +758,99 @@ class TestUnreadableDocsAreNotMissingReferences(unittest.TestCase):
             self.skipTest("filesystem does not enforce test permission bits")
         with self.assertRaises(PermissionError):
             check_docs.scan_target(self.target)
+
+
+class TestBoundedWildcardTraversal(unittest.TestCase):
+    """agents-dp3n2: wildcard matches are target-scoped and report unreadable paths."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.target = Path(tmp.name).resolve() / "target"
+        (self.target / "docs").mkdir(parents=True)
+        (self.target / "docs" / "PLAN.md").write_text("# Plan\n")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores ordinary file permission bits")
+    def test_wildcards_in_pruned_unreadable_subtree_fail_loudly(self):
+        locked = self.target / ".config" / "locked"
+        locked.mkdir(parents=True)
+        (locked / "inner.md").write_text("# hidden\n")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        if os.access(locked, os.R_OK):
+            self.skipTest("filesystem does not enforce test permission bits")
+        for pattern in (".config/*/*.md", ".config/**/*.md"):
+            with self.subTest(pattern=pattern):
+                with self.assertRaises(PermissionError):
+                    check_docs.path_exists_or_matches(self.target, self.target, pattern)
+        self.assertEqual(check_docs.path_exists_or_matches(self.target, self.target, "docs/*.md"),
+                         (True, True), "a disjoint pattern must not scan the locked subtree")
+        (self.target / "docs" / "PLAN.md").write_text("See `.config/*/*.md`.\n")
+        with self.assertRaises(PermissionError):
+            check_docs.scan_target(self.target)
+
+    def test_outside_symlink_is_not_enumerated_and_in_target_symlink_matches(self):
+        outside = self.target.parent / "outside"
+        (outside / "deep").mkdir(parents=True)
+        (outside / "deep" / "x.md").write_text("# outside\n")
+        (self.target / "link").symlink_to(outside, target_is_directory=True)
+        (self.target / "skills").symlink_to(self.target / "docs", target_is_directory=True)
+        actual_scandir = os.scandir
+        visited = []
+
+        def watch(path):
+            visited.append(Path(path).resolve())
+            return actual_scandir(path)
+
+        with mock.patch.object(check_docs.os, "scandir", side_effect=watch):
+            self.assertEqual(check_docs.path_exists_or_matches(self.target, self.target,
+                                                                "link/**/*.md"), (False, True))
+            self.assertEqual(check_docs.path_exists_or_matches(self.target, self.target,
+                                                                "skills/*.md"), (True, True))
+        self.assertTrue(visited, "the assertion must observe actual directory enumeration")
+        self.assertTrue(all(not path.is_relative_to(outside) for path in visited), visited)
+
+    def test_cache_is_per_scan_and_preserves_file_only_location_semantics(self):
+        (self.target / "docs" / "onlydir").mkdir()
+        (self.target / "docs" / "onlyfile").write_text("x\n")
+        cache = {}
+        budget = [check_docs._GLOB_MAX_SCANS]
+        actual_scandir = os.scandir
+        seen = []
+
+        def watch(path):
+            seen.append(str(path))
+            return actual_scandir(path)
+
+        resolve = check_docs.path_exists_or_matches
+        with mock.patch.object(check_docs.os, "scandir", side_effect=watch):
+            self.assertEqual(resolve(self.target, self.target, "docs/only*:12",
+                                     glob_cache=cache, glob_budget=budget), (True, True))
+            first_count = len(seen)
+            self.assertGreater(first_count, 0)
+            self.assertEqual(resolve(self.target, self.target, "docs/only*:12",
+                                     glob_cache=cache, glob_budget=budget), (True, True))
+            self.assertEqual(len(seen), first_count, "duplicate lookups should reuse the scan result")
+            self.assertEqual(resolve(self.target, self.target, "docs/onlyd*:12",
+                                     glob_cache=cache, glob_budget=budget), (False, True))
+            self.assertGreater(len(seen), first_count, "a different pattern must be enumerated")
+        self.assertEqual(resolve(self.target, self.target, "docs/onlyd*"), (True, True),
+                         "a directory matches without a line suffix")
+
+    def test_exhausted_traversal_budget_fails_instead_of_claiming_absence(self):
+        with self.assertRaisesRegex(OSError, "traversal budget exceeded"):
+            check_docs.path_exists_or_matches(self.target, self.target, "docs/*.md",
+                                              glob_budget=[0])
+
+    def test_multiple_recursive_segments_do_not_cycle_and_match(self):
+        (self.target / "docs" / "nested").mkdir()
+        (self.target / "docs" / "nested" / "x.md").write_text("# nested\n")
+        (self.target / "docs" / "back").symlink_to(self.target / "docs", target_is_directory=True)
+        for pattern in ("docs/**/*.md", "docs/**/**/*.md", "docs/*/*.md"):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(check_docs.path_exists_or_matches(self.target, self.target,
+                                                                    pattern), (True, True))
 
 
 class TestPlanFindingsStoreAgreement(unittest.TestCase):
