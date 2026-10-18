@@ -76,6 +76,44 @@ class TestVulnTriageNullSnippetEndToEnd(SchemaAgentCase):
         stored = json.loads((self.box.root / "findings/target.json").read_text())
         self.assertEqual(len(stored["findings"]), 3, "all repaired findings reach the store")
 
+    @staticmethod
+    def cap_census_output(*, bad_line=False):
+        findings = []
+        for i in range(18):
+            locations = [{"path": f"src/{i}-{j}.js", "line_number": i + j + 1}
+                         for j in range(2 if i < 10 else 1)]
+            if bad_line and i == 0:
+                locations[0]["line_number"] = 0
+            finding = {"rule_id": "r1", "path": f"src/{i}.js", "severity": "high",
+                       "title": f"Candidate {i}", "description": "Checked",
+                       "snippet": None, "affected_locations": locations}
+            if i < 5:
+                finding["remediation"] = None
+            findings.append(finding)
+        return json.dumps({"summary": "triaged", "findings": findings})
+
+    def test_cap_51_error_shape_reaches_the_store_after_repair(self):
+        self.box.agent("vuln-triage", self.cap_census_output(), report_schema=self.schema())
+        res = self.box.run_agent("vuln-triage")
+        changes = (res["run_dir"] / "normalised_fields.json").read_text()
+        self.assertEqual(changes.count("affected_locations["), 28)
+        self.assertFalse((res["run_dir"] / "schema_errors.json").exists())
+        self.assertEqual(len(res["report"]["findings"]), 18)
+        self.assertTrue(all(isinstance(loc, str) for f in res["report"]["findings"]
+                            for loc in f["affected_locations"]))
+        stored = json.loads((self.box.root / "findings/target.json").read_text())
+        self.assertEqual(len(stored["findings"]), 18)
+
+    def test_cap_shape_with_unknown_line_still_rejects_all_findings(self):
+        self.box.agent("vuln-triage", self.cap_census_output(bad_line=True),
+                       report_schema=self.schema())
+        with self.assertRaisesRegex(factory_cli.NoVerdictError, "affected_locations"):
+            self.box.run_agent("vuln-triage")
+        self.assertFalse((self.box.root / "findings/target.json").exists())
+        rejected = list((self.box.root / "runs").glob("vuln-triage-*/rejected_report.json"))
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(len(json.loads(rejected[0].read_text())["findings"]), 18)
+
     def test_required_null_still_rejects_without_store_updates(self):
         self.box.agent("vuln-triage", self.output(severity=None), report_schema=self.schema())
         with self.assertRaisesRegex(factory_cli.NoVerdictError, "severity"):

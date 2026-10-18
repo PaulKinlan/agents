@@ -538,6 +538,83 @@ class TestNullOptionalTriageStrings(unittest.TestCase):
         self.assertEqual(report["findings"][0]["snippet"], "scanner")
 
 
+class TestStructuredTriageAffectedLocations(unittest.TestCase):
+    """agents-jwbts: CAP's 28 path+line objects must not reject 18 valid findings."""
+
+    @staticmethod
+    def schema():
+        return json.loads((FACTORY_ROOT / "agents/vuln-triage/report.schema.json").read_text())
+
+    @staticmethod
+    def cap_census_report():
+        findings = []
+        for i in range(18):
+            locations = [{"path": f"src/{i}-{j}.js", "line_number": i + j + 1}
+                         for j in range(2 if i < 10 else 1)]
+            finding = {"rule_id": "r1", "path": f"src/{i}.js", "severity": "high",
+                       "title": f"Candidate {i}", "description": "Root cause",
+                       "snippet": None, "affected_locations": locations}
+            if i < 5:
+                finding["remediation"] = None
+            findings.append(finding)
+        return {"summary": "triaged", "findings": findings}
+
+    def test_cap_census_51_violations_become_zero_without_dropping_findings(self):
+        schema = self.schema()
+        report = self.cap_census_report()
+        raw_errors = validate(report, schema)
+        self.assertEqual(len(raw_errors), 51)
+        self.assertEqual(sum("affected_locations" in error for error in raw_errors), 28)
+        self.assertEqual(sum("snippet" in error for error in raw_errors), 18)
+        self.assertEqual(sum("remediation" in error for error in raw_errors), 5)
+        notes = normalize_report(report, schema)
+        self.assertEqual(validate(report, schema), [])
+        self.assertEqual(len(report["findings"]), 18)
+        self.assertEqual(sum("affected_locations[" in note for note in notes), 28)
+        self.assertEqual(sum("null -> omitted" in note for note in notes), 23)
+        for i, finding in enumerate(report["findings"]):
+            self.assertEqual(finding["affected_locations"],
+                             [f"src/{i}-{j}.js:{i + j + 1}" for j in range(2 if i < 10 else 1)])
+        self.assertEqual(normalize_report(report, schema), [], "normalization is idempotent")
+
+    def test_malformed_structured_locations_are_still_rejected(self):
+        schema = self.schema()
+        invalid = (
+            {"path": "a.js", "line_number": 0},
+            {"path": "a.js", "line_number": -1},
+            {"path": "a.js", "line_number": True},
+            {"path": "a.js", "line_number": None},
+            {"path": "a.js", "line_number": "?"},
+            {"path": "", "line_number": 1},
+            {"path": 42, "line_number": 1},
+            {"path": "a.js", "line_number": 1, "extra": "do not discard"},
+            {"path": "a.js"},
+        )
+        for location in invalid:
+            with self.subTest(location=location):
+                report = {"summary": "s", "findings": [{"rule_id": "r", "path": "a.js",
+                          "severity": "high", "title": "t", "description": "d",
+                          "affected_locations": [{"path": "ok.js", "line_number": 1}, location]}]}
+                normalize_report(report, schema)
+                self.assertEqual(report["findings"][0]["affected_locations"][0], "ok.js:1")
+                self.assertEqual(report["findings"][0]["affected_locations"][1], location)
+                self.assertEqual(len(validate(report, schema)), 1)
+
+    def test_digit_string_line_uses_the_shared_line_rule_and_schema_gates_repair(self):
+        location = {"path": "a.js", "line_number": "42"}
+        report = {"summary": "s", "findings": [{"rule_id": "r", "path": "a.js",
+                  "severity": "high", "title": "t", "description": "d",
+                  "affected_locations": [location]}]}
+        normalize_report(report)
+        self.assertEqual(report["findings"][0]["affected_locations"], [location])
+        schema = self.schema()
+        schema["properties"]["findings"]["items"]["properties"]["affected_locations"]["items"]["type"] = "object"
+        normalize_report(report, schema)
+        self.assertEqual(report["findings"][0]["affected_locations"], [location])
+        normalize_report(report, self.schema())
+        self.assertEqual(report["findings"][0]["affected_locations"], ["a.js:42"])
+
+
 class TestUnlocatableVerdicts(unittest.TestCase):
     """agents-0tl (D): a verifier cannot adjudicate a record it cannot locate.
 
