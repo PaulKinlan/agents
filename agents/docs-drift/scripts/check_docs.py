@@ -15,6 +15,7 @@ Outputs candidate matches as JSON.
 
 import argparse
 import errno
+import fnmatch
 import json
 import os
 import re
@@ -369,35 +370,61 @@ def _resolved_within_target(target_root: Path, path: Path) -> Optional[Path]:
     return resolved if resolved.is_relative_to(target_root) else None
 
 
-def _glob_directory_is_readable(base: Path, pattern: str, target_root: Path) -> bool:
-    """Check the fixed prefix that Path.glob silently skips when unreadable.
+_GLOB_MAX_SCANS = 10000  # Across one scan, not one reference; exhaustion fails the pre-pass.
 
-    Path.glob may yield no matches rather than raising EACCES. The known leading
-    directory can be opened with scandir without enumerating unrelated subtrees.
-    Missing or out-of-target prefixes are genuine nonmatches; other I/O errors
-    must fail the pre-pass instead of inventing a missing-reference candidate.
+
+def _bounded_glob_exists(base: Path, pattern: str, target_root: Path,
+                         file_only: bool, budget: List[int]) -> bool:
+    """Match one path pattern without pathlib's silent EACCES or outside-target walks.
+
+    Only pattern-reachable directories are listed. A result needs one match, not a
+    full list; repeated states (including in-target symlinks) are visited once.
     """
-    prefix = []
-    for component in pattern.split("/"):
-        if any(marker in component for marker in "*?["):
-            break
-        prefix.append(component)
-    directory = _resolved_within_target(target_root, base.joinpath(*prefix))
-    if directory is None:
+    parts = pattern.split("/")
+    if not parts or any(not part for part in parts):
         return False
-    try:
-        with os.scandir(directory):
-            pass
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    except OSError as error:
-        if error.errno == errno.ELOOP:
+    visited: Set[Tuple[Path, int]] = set()
+
+    def search(path: Path, index: int) -> bool:
+        real = _resolved_within_target(target_root, path)
+        if real is None:
             return False
-        raise
-    return True
+        state = (real, index)
+        if state in visited:
+            return False
+        visited.add(state)
+        if index == len(parts):
+            return real.is_file() if file_only else real.exists()
+        if not real.is_dir():
+            return False
+        part = parts[index]
+        if part != "**" and not any(ch in part for ch in "*?["):
+            return search(real / part, index + 1)
+        if part == "**" and search(real, index + 1):
+            return True
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise OSError(errno.E2BIG, "docs-drift wildcard traversal budget exceeded")
+        with os.scandir(real) as entries:
+            for entry in entries:
+                if part == "**":
+                    if not (entry.is_dir(follow_symlinks=False) or entry.is_symlink()):
+                        continue
+                    child = _resolved_within_target(target_root, Path(entry.path))
+                    if child is not None and child.is_dir() and search(child, index):
+                        return True
+                elif fnmatch.fnmatchcase(entry.name, part):
+                    child = _resolved_within_target(target_root, Path(entry.path))
+                    if child is not None and search(child, index + 1):
+                        return True
+        return False
+
+    return search(base, 0)
 
 
-def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tuple[bool, bool]:
+def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str, *,
+                           glob_cache: Optional[Dict[Tuple[str, str, bool], bool]] = None,
+                           glob_budget: Optional[List[int]] = None) -> Tuple[bool, bool]:
     """Checks if a path or path template exists.
     
     Returns (exists, was_wildcard).
@@ -433,19 +460,21 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
         # A document-controlled glob must not search a parent or absolute path.
         if Path(glob_pattern).is_absolute() or ".." in glob_pattern.split("/"):
             return False, True
+        # The cache belongs to one scan_target invocation: a later scan must see
+        # later filesystem changes. The budget is shared across that invocation.
+        cache = glob_cache if glob_cache is not None else {}
+        budget = glob_budget if glob_budget is not None else [_GLOB_MAX_SCANS]
         try:
-            matches_root = ([p for p in target_dir.glob(glob_pattern)
-                             if _resolved_within_target(target_root, p) is not None]
-                            if _glob_directory_is_readable(target_dir, glob_pattern, target_root) else [])
-            matches_doc = ([p for p in doc_dir.glob(glob_pattern)
-                            if _resolved_within_target(target_root, p) is not None]
-                           if _glob_directory_is_readable(doc_dir, glob_pattern, target_root) else [])
+            for base in (target_dir, doc_dir):
+                key = (str(base), glob_pattern, _had_location)
+                if key not in cache:
+                    cache[key] = _bounded_glob_exists(base, glob_pattern, target_root,
+                                                      _had_location, budget)
+                if cache[key]:
+                    return True, True
         except (ValueError, NotImplementedError):
             return False, True
-        if _had_location:
-            matches_root = [p for p in matches_root if p.is_file()]
-            matches_doc = [p for p in matches_doc if p.is_file()]
-        return (len(matches_root) > 0 or len(matches_doc) > 0), True
+        return False, True
 
     # Direct path checks (doc-relative or repo-relative). A reference that carried a
     # `:line` location must resolve to a FILE: a line location cannot belong to a
@@ -546,6 +575,8 @@ def parse_tree_diagrams(content: str) -> List[Tuple[int, str, str]]:
 def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
     candidates = []
     target_root = target_dir.resolve()
+    glob_cache: Dict[Tuple[str, str, bool], bool] = {}
+    glob_budget = [_GLOB_MAX_SCANS]
 
     # 1. Discover all documentation files
     doc_files: List[Path] = []
@@ -595,7 +626,8 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
                 continue
             expanded = expand_path_braces(tree_path)
             for exp_p in expanded:
-                exists, _ = path_exists_or_matches(target_dir, doc_dir, exp_p)
+                exists, _ = path_exists_or_matches(target_dir, doc_dir, exp_p,
+                                                   glob_cache=glob_cache, glob_budget=glob_budget)
                 if not exists:
                     if check_skill_paths and not skill_reference_is_checkable(
                             target_dir, doc_dir, exp_p):
@@ -734,7 +766,8 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
                 if looks_like_path:
                     expanded_paths = expand_path_braces(item_clean)
                     for exp_p in expanded_paths:
-                        exists, is_wc = path_exists_or_matches(target_dir, doc_dir, exp_p)
+                        exists, is_wc = path_exists_or_matches(target_dir, doc_dir, exp_p,
+                                                               glob_cache=glob_cache, glob_budget=glob_budget)
                         if not exists:
                             if check_skill_paths and not skill_reference_is_checkable(
                                     target_dir, doc_dir, exp_p):
