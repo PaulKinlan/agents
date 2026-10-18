@@ -383,6 +383,101 @@ printf '{"summary":"verified","target":"probe-target","findings":%s],"verificati
 """
 
 
+# agents-00sew: a model mistranscribes ONE candidate id (here a dropped character, the real shape from
+# chrome-agent-platform-z427f). The dispatcher must recognise it as a unique near match, repair it, record
+# the repair, and let the run complete instead of reporting a partial triage.
+MISTRANSCRIBING_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+declare -A seen=()
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  if [ -n "${seen[$id]:-}" ]; then continue; fi
+  seen[$id]=1
+  ids+=("$id")
+done
+out='{"summary":"t","target":"probe-target","findings":['
+first=1
+for id in "${ids[@]}"; do
+  cite="$id"
+  if [ "$id" = "cand-perf-003" ]; then cite="cand-prf-003"; fi
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"r\",\"path\":\"src/$id.ts\",\"line_number\":1,\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"$cite\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestMistranscribedIdsAreRepaired(BatchedStation):
+    def test_a_unique_near_match_is_repaired_recorded_and_accounted(self):
+        self.agent(AGENT_YAML)
+        self.stub(MISTRANSCRIBING_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        cited = [row.get("candidate_id") for row in report["findings"]]
+        self.assertIn("cand-perf-003", cited, f"the mistranscribed id must be repaired: {cited}")
+        self.assertNotIn("cand-prf-003", cited)
+
+        repairs = []
+        for path in sorted(run.glob("candidate_id_repairs*.json")):
+            repairs.extend(json.loads(path.read_text(encoding="utf-8")))
+        self.assertEqual([(r["cited"], r["repaired"], r["rule"]) for r in repairs],
+                         [("cand-prf-003", "cand-perf-003", "near")],
+                         "the repair is recorded with the rule that justified it")
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from lib.findings import candidate_coverage, read_candidate_count, read_presented_candidate_ids
+        coverage = candidate_coverage(read_candidate_count(run), len(report["findings"]),
+                                      presented_ids=read_presented_candidate_ids(run),
+                                      cited_ids=cited)
+        self.assertTrue(coverage["complete"], f"a repaired answer must account: {coverage}")
+
+
+# agents-fv5uk: batch 1 cites a candidate that belongs EXACTLY to a sibling batch. The ids are one edit
+# apart by construction ("cand-perf-004" vs "cand-perf-005"), so the repair must refuse and the run must
+# reject the row - never re-attach it to batch 1's neighbour.
+FOREIGN_CITING_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  case " ${ids[*]:-} " in *" $id "*) continue;; esac
+  ids+=("$id")
+done
+out='{"summary":"t","target":"probe-target","findings":['
+first=1
+for id in "${ids[@]}"; do
+  cite="$id"
+  if [ "$id" = "cand-perf-000" ]; then cite="cand-perf-006"; fi
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"r\",\"path\":\"src/$id.ts\",\"line_number\":1,\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"$cite\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestAForeignBatchIdIsNotLaundered(BatchedStation):
+    def test_a_sibling_batchs_exact_id_is_rejected_not_repaired(self):
+        self.agent(AGENT_YAML)
+        self.stub(FOREIGN_CITING_STUB)
+        res = self.factory("pi")
+        self.assertNotEqual(res.returncode, 0, "a row naming another batch's candidate must fail the run")
+        run = self.run_dir()
+        reason = (run / "failure_reason.txt").read_text(encoding="utf-8")
+        self.assertIn("cand-perf-006", reason, reason[:300])
+        self.assertIn("not shown", reason, reason[:300])
+
+        repairs = []
+        for path in sorted(run.glob("candidate_id_repairs*.json")):
+            repairs.extend(json.loads(path.read_text(encoding="utf-8")))
+        self.assertEqual([r for r in repairs if r["cited"] == "cand-perf-006"], [],
+                         f"the foreign citation must not be repaired: {repairs}")
+
+
 class TestVerificationsSurviveTheMerge(BatchedStation):
     def test_a_second_required_array_is_merged_row_for_row(self):
         self.agent(AGENT_YAML)

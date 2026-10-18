@@ -24,6 +24,7 @@ from lib import findings
 from lib.candidate_identity import assign_candidate_ids
 from lib.findings import (FindingsStore, StoreFileError, bind_severity, CANDIDATE_PROMPT_SLICE,
                           candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                          repair_cited_candidate_id, repair_cited_candidate_ids,
                           station_has_verdict, station_is_incomplete)
 from lib.redaction import redact_finding, redact_for_storage
 
@@ -1853,6 +1854,85 @@ class TestCandidateCoverage(unittest.TestCase):
                                           cited_ids=[None] * 5)
             self.assertEqual(coverage["identity"], "count-only")
             self.assertTrue(coverage["complete"], f"a complete answer must not read partial: {coverage}")
+
+    def test_a_mistranscribed_id_is_repaired_only_when_it_is_unambiguous(self):
+        """agents-00sew: chrome-agent-platform-z427f's model reported 4e8820782eed4e17 as
+        4e8820782eed17 - a DELETION of two hex characters, which is neither a prefix nor a substring,
+        so the repair has to cover the near-match shape too. Everything below is measured, not assumed."""
+        presented = ["4e8820782eed4e17", "05622f455345d483", "b7fddd5efdaeb0d3"]
+        # the real failure: two characters deleted mid-id
+        self.assertEqual(repair_cited_candidate_id("4e8820782eed17", presented)[0],
+                         "4e8820782eed4e17")
+        # a truncated tail and a copied fragment
+        self.assertEqual(repair_cited_candidate_id("4e8820782eed4e1", presented), ("4e8820782eed4e17", "prefix"))
+        self.assertEqual(repair_cited_candidate_id("8820782eed4e", presented), ("4e8820782eed4e17", "substring"))
+        # nothing to do, too little to go on, and nothing near
+        self.assertEqual(repair_cited_candidate_id("4e8820782eed4e17", presented), (None, "exact"))
+        self.assertIsNone(repair_cited_candidate_id("4e88", presented)[0])
+        self.assertIsNone(repair_cited_candidate_id("ffffffffffffffff", presented)[0])
+        # AMBIGUITY IS NEVER RESOLVED BY PREFERENCE
+        ambiguous, rule = repair_cited_candidate_id("4e8820782eed",
+                                                    ["4e8820782eed4e17", "4e8820782eed9abc"])
+        self.assertIsNone(ambiguous)
+        self.assertIn("ambiguous", rule)
+
+    def test_a_near_match_must_be_strictly_closest_not_merely_within_the_limit(self):
+        """Measured while wiring the e2e: "cand-prf-003" is 1 edit from "cand-perf-003" and 2 from
+        "cand-perf-004". Treating every within-limit candidate as equally ambiguous refused the repair
+        this exists for; picking "the first within the limit" would bind by id ORDER. Both are pinned."""
+        self.assertEqual(repair_cited_candidate_id("cand-prf-003",
+                                                   ["cand-perf-003", "cand-perf-004"]),
+                         ("cand-perf-003", "near"), "the closer match wins over a farther one")
+        self.assertEqual(repair_cited_candidate_id("cand-prf-003",
+                                                   ["cand-perf-004", "cand-perf-003"]),
+                         ("cand-perf-003", "near"), "and the order they arrive in cannot matter")
+
+    def test_a_true_tie_at_the_same_distance_is_refused(self):
+        # Neither is a prefix or a substring of the cited id; both sit at exactly two edits.
+        # Two substitutions each, neither a prefix nor a substring of the cited id: a genuine tie.
+        cited = "abcdef1234567890"
+        presented = ["abXXef1234567890", "abcdef12345678YY", "ffffffffffffffff"]
+        repaired, rule = repair_cited_candidate_id(cited, presented)
+        self.assertIsNone(repaired)
+        self.assertIn("ambiguous", rule)
+
+    def test_another_batchs_exact_id_is_never_repaired_onto_a_near_neighbour(self):
+        """agents-fv5uk. Batch ids sit one edit apart, so an unguarded near rule silently re-attached a row
+        naming batch 3's candidate to batch 2's - the reviewer's repro, before this guard."""
+        own, sibling = ["cand-perf-003"], ["cand-perf-004"]
+        self.assertEqual(repair_cited_candidate_id(sibling[0], own, foreign=sibling),
+                         (None, "belongs to another batch"))
+        # the SAME near match is still allowed when the cited id belongs to no other batch
+        self.assertEqual(repair_cited_candidate_id("cand-prf-003", own + sibling),
+                         ("cand-perf-003", "near"))
+
+    def test_a_typo_of_a_sibling_batchs_id_is_never_repaired_locally(self):
+        """agents-00sew round 2. The exact-match guard was not enough: "cand-perf-0o4" is a one-character
+        typo of the SIBLING batch's "cand-perf-004" (1 edit) and two edits from the local "cand-perf-003", so
+        a repair that only weighed local candidates bound the row to the wrong batch's neighbour. The match
+        must be judged globally - and a citation whose LOCAL candidate really is closest must still repair,
+        or the rule would be a blanket ban rather than a judgement."""
+        self.assertEqual(repair_cited_candidate_id("cand-perf-0o4", ["cand-perf-003"],
+                                                   foreign=["cand-perf-004"])[0], None,
+                         "the sibling explains it better, so it must be rejected there")
+        self.assertEqual(repair_cited_candidate_id("cand-perf-0o4", ["cand-perf-004"],
+                                                   foreign=["cand-perf-003"]),
+                         ("cand-perf-004", "near"), "local and closest = repaired")
+        # a more specific sibling match also wins: prefix beats a near match on the local side
+        self.assertIsNone(repair_cited_candidate_id("4e8820782eed4e", ["4e8820782eed4e17"],
+                                                    foreign=["4e8820782eed4exx"])[0])
+
+    def test_repairs_are_recorded_and_make_a_complete_answer_accountable(self):
+        presented = ["4e8820782eed4e17", "05622f455345d483"]
+        rows = [{"candidate_id": "4e8820782eed17", "path": "a.py"},
+                {"candidate_id": "05622f455345d483", "path": "b.py"}]
+        repairs = repair_cited_candidate_ids(rows, presented)
+        self.assertEqual([r["candidate_id"] for r in rows], presented, "rewritten in place")
+        self.assertEqual(repairs, [{"cited": "4e8820782eed17", "repaired": "4e8820782eed4e17",
+                                    "rule": "near", "path": "a.py"}])
+        coverage = candidate_coverage(2, 2, presented_ids=presented,
+                                      cited_ids=[r["candidate_id"] for r in rows])
+        self.assertTrue(coverage["complete"], coverage)
 
     def test_an_empty_pre_pass_is_vacuously_complete(self):
         self.assertTrue(candidate_coverage(0, 0)["complete"])

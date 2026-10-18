@@ -354,5 +354,28 @@ class TestClassifyUnparseable(unittest.TestCase):
         self.assertIn("count-only accounting", message)
 
 
+class TestAForeignBatchIdSurvivesTheRepairStage(unittest.TestCase):
+    """agents-fv5uk, the reviewer's own repro. Batch ids are consecutive by construction, so a repair that
+    only knows its OWN batch's ids re-attaches a row naming a sibling batch's candidate to a near neighbour
+    and the ownership check then accepts a foreign answer. Measured on 6ce8a3c0: repair rewrote the EXACT
+    foreign id cand-perf-004 to cand-perf-003 and attribution said "accepted". This is the discriminating
+    pin - the end-to-end case cannot be, because there every candidate in reach ties at one edit and the
+    ambiguity rule refuses the repair even without the guard."""
+
+    def test_repair_refuses_and_attribution_still_rejects(self):
+        from lib.candidate_batching import BatchMergeError, validate_batch_attribution
+        from lib.findings import repair_cited_candidate_ids
+
+        own, sibling = ["cand-perf-003"], ["cand-perf-004"]
+        row = {"candidate_id": sibling[0]}
+        repairs = repair_cited_candidate_ids([row], own, foreign=sibling)
+        self.assertEqual(repairs, [], "a sibling batch's exact id must never be repaired")
+        self.assertEqual(row["candidate_id"], "cand-perf-004", "the row keeps the id the model wrote")
+        with self.assertRaises(BatchMergeError) as caught:
+            validate_batch_attribution([row], batch_ids=own, batch_index=0,
+                                       all_batch_ids=[own, sibling])
+        self.assertIn("belongs to batch 2", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

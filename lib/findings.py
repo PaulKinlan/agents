@@ -1702,6 +1702,149 @@ def read_presented_candidate_ids(run_dir: Any,
     return ids
 
 
+# ---------------------------------------------------------------------------------------------
+# Candidate-id repair (agents-00sew). A model sometimes mistranscribes the 16-hex candidate_id it is
+# asked to copy verbatim: chrome-agent-platform-z427f reported 4e8820782eed4e17 as 4e8820782eed17.
+# Measured, that is a DELETION of the two characters at offset 12 - neither a prefix nor a contiguous
+# substring - so a prefix/substring-only repair would not have fixed the case that prompted it.
+#
+# The repair is deliberately narrow: it rewrites a cited id ONLY when exactly one presented id can have
+# produced it under a deterministic rule. An ambiguous cited id is left alone, which keeps the run's
+# accounting honest (a partial triage stays visible) instead of silently binding a verdict to a
+# candidate the model never meant.
+# ---------------------------------------------------------------------------------------------
+REPAIR_MIN_CITED_LENGTH = 8   # "4e" or "abcd" cannot identify one candidate among many
+REPAIR_MAX_EDITS = 2          # the observed mistranscription dropped two hex characters
+
+
+def _bounded_edit_distance(left: str, right: str, limit: int) -> Optional[int]:
+    """Levenshtein distance, or None as soon as it cannot be <= limit (cheap for far-apart ids)."""
+    if abs(len(left) - len(right)) > limit:
+        return None
+    previous = list(range(len(right) + 1))
+    for i, lchar in enumerate(left, start=1):
+        current = [i]
+        best = i
+        for j, rchar in enumerate(right, start=1):
+            cost = 0 if lchar == rchar else 1
+            value = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            current.append(value)
+            best = min(best, value)
+        if best > limit:
+            return None
+        previous = current
+    distance = previous[-1]
+    return distance if distance <= limit else None
+
+
+_REPAIR_RULE_NAMES = {1: "prefix", 2: "substring", 3: "near"}
+
+
+def _match_rank(cited: str, candidate: str) -> Tuple[Optional[int], int]:
+    """`(rule rank, distance within that rule)` - lower is better - or `(None, 0)` if unexplained.
+
+    One ordering for every candidate, local or sibling, so "which candidate does this id most likely
+    mean?" is answered by the same yardstick everywhere instead of per pool.
+    """
+    if candidate == cited:
+        return 0, 0
+    if len(cited) < REPAIR_MIN_CITED_LENGTH:
+        return None, 0
+    if candidate.startswith(cited):
+        return 1, len(candidate) - len(cited)
+    if cited in candidate:
+        return 2, len(candidate) - len(cited)
+    distance = _bounded_edit_distance(cited, candidate, REPAIR_MAX_EDITS)
+    return (3, distance) if distance is not None else (None, 0)
+
+
+def repair_cited_candidate_id(cited: str,
+                              presented: Iterable[str],
+                              foreign: Iterable[str] = ()) -> Tuple[Optional[str], str]:
+    """`(presented_id, rule)` when exactly ONE candidate - OF ANY BATCH - can explain `cited`, else
+    `(None, reason)`.
+
+    Rules, most specific first: an exact id, then a unique PREFIX (the model truncated the tail), then a
+    unique SUBSTRING (the model copied a fragment), then a NEAR MATCH within REPAIR_MAX_EDITS edits - the
+    deletion shape that actually occurred (agents-00sew).
+
+    `foreign` is the ids presented to OTHER batches, and it is not just an exact-match guard (agents-fv5uk
+    was the exact case; agents-00sew round 2 was the rest of it). Batch ids sit next to each other by
+    construction, so a near match must be judged GLOBALLY: a one-character typo of a sibling batch's
+    candidate is not an exact match to anything, and a repair that only looked at its own batch bound it to
+    the local neighbour ("cand-perf-0o4" is one edit from the sibling "cand-perf-004" and two from the local
+    "cand-perf-003") - the same misattribution through a typo. So a citation is repaired onto THIS batch's
+    candidate only when no sibling candidate explains it at least as well; otherwise it is left exactly as
+    the model wrote it and the ownership check rejects it.
+    """
+    cited = cited.strip() if isinstance(cited, str) else ""
+    ids = [str(cid).strip() for cid in presented or () if isinstance(cid, str) and str(cid).strip()]
+    elsewhere = {str(cid).strip() for cid in foreign or ()
+                 if isinstance(cid, str) and str(cid).strip()}
+    if not cited:
+        return None, "blank"
+    if cited in ids:
+        return None, "exact"
+    if cited in elsewhere:
+        return None, "belongs to another batch"
+
+    def scored(pool: Iterable[str]) -> List[Tuple[int, int, str]]:
+        rows = []
+        for candidate in pool:
+            rank, distance = _match_rank(cited, candidate)
+            if rank is not None:
+                rows.append((rank, distance, candidate))
+        return sorted(rows)
+
+    local = scored(ids)
+    siblings = scored(elsewhere)
+    if not local:
+        return None, "no unique match"
+    best_rank = local[0][0]
+    at_best = [(distance, candidate) for rank, distance, candidate in local if rank == best_rank]
+    if best_rank == 3:
+        best_distance = min(distance for distance, _ in at_best)
+        at_best = [(distance, candidate) for distance, candidate in at_best
+                   if distance == best_distance]
+    if len(at_best) > 1:
+        names = ", ".join(sorted(candidate for _, candidate in at_best)[:3])
+        return None, f"ambiguous {_REPAIR_RULE_NAMES[best_rank]}: {len(at_best)} candidates ({names})"
+    # A sibling candidate that explains the citation as well or better means the model was answering
+    # ANOTHER batch's candidate - the row must be rejected there, not attached to a local neighbour.
+    if siblings:
+        sibling_rank, sibling_distance, sibling_id = siblings[0]
+        if sibling_rank < best_rank or (sibling_rank == best_rank and (
+                best_rank != 3 or sibling_distance <= at_best[0][0])):
+            return None, (f"a sibling batch's candidate ({sibling_id}) explains it at least as well"
+                          if sibling_rank == best_rank else
+                          f"a sibling batch's candidate ({sibling_id}) matches more specifically")
+    return at_best[0][1], _REPAIR_RULE_NAMES[best_rank]
+
+
+def repair_cited_candidate_ids(rows: Any,
+                               presented: Iterable[str],
+                               foreign: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    """Rewrite `candidate_id` in place on rows where a UNIQUE repair exists; return the repairs.
+
+    Returns one record per rewritten row ({cited, repaired, rule, path}) so the repair is auditable in
+    the run directory rather than an invisible kindness.
+    """
+    repairs: List[Dict[str, Any]] = []
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, dict):
+            continue
+        cited = row.get("candidate_id")
+        if not isinstance(cited, str) or not cited.strip():
+            continue
+        repaired, rule = repair_cited_candidate_id(cited, presented, foreign=foreign)
+        if repaired is None:
+            continue
+        row["candidate_id"] = repaired
+        repairs.append({"cited": cited.strip(), "repaired": repaired, "rule": rule,
+                        "path": row.get("path")})
+    return repairs
+
+
 def candidate_coverage(candidates_in: Optional[int], reported: int,
                        slice_size: int = CANDIDATE_PROMPT_SLICE, *,
                        presented_ids: Optional[Iterable[str]] = None,

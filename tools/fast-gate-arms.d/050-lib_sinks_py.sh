@@ -39,6 +39,13 @@ fast_gate_arms_050_lib_sinks_py() {
       # as the slice, so the old payload reading yields 3 ids against 8 presented). Cost: 8.0 s, and
       # it only runs when this module or the batching arm changes.
       mapped="$mapped tests/test_candidate_batching_end_to_end.py"
+      # agents-00sew/agents-fv5uk: the candidate-id repair lives in this module and its discriminating
+      # regression (a sibling batch's exact id must NOT be repaired onto a neighbour, while
+      # validate_batch_attribution still rejects it) sits in tests/test_candidate_batching.py beside the
+      # batching contract. MEASURED, disabling the foreign guard reddens that suite; cost 0.02 s, and it
+      # only runs when this module or the batching arm changes. Without this fold the consumer-coverage
+      # guard reports "lib/findings.py omits 1 consumer(s)".
+      mapped="$mapped tests/test_candidate_batching.py"
       # tests/test_candidate_identity.py imports FindingsStore and load_candidate_index, so it asserts
       # this module's index/rekey expectations and moves with it - agents-l606 changed the store's
       # (new, rekeyed, fixed) counts and this suite's expected (2, 2) went RED while the fast gate stayed
