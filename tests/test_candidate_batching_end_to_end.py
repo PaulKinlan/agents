@@ -345,6 +345,61 @@ class TestMixedIdentityIsCountOnly(BatchedStation):
                         f"a complete answer must not read INCOMPLETE just because ids are partial: {coverage}")
 
 
+# agents-exhhl review P1: vuln-verify's contract requires a SECOND row array, `verifications`, and merge
+# used to drop it. The probe mirrors that shape so the merge is exercised against a real two-array contract.
+VERIFY_SCHEMA = dict(SCHEMA)
+VERIFY_SCHEMA["required"] = ["summary", "target", "findings", "verifications"]
+VERIFY_SCHEMA["properties"] = dict(SCHEMA["properties"])
+VERIFY_SCHEMA["properties"]["verifications"] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["candidate_id", "verdict"],
+        "properties": {"candidate_id": {"type": "string"}, "verdict": {"type": "string"},
+                       "reasoning": {"type": "string"}},
+    },
+}
+
+VERIFY_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+declare -A seen=()
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  if [ -n "${seen[$id]:-}" ]; then continue; fi
+  seen[$id]=1
+  ids+=("$id")
+done
+f='['
+v='['
+first=1
+for id in "${ids[@]}"; do
+  if [ $first -eq 0 ]; then f="$f,"; v="$v,"; fi
+  first=0
+  f="$f{\"rule_id\":\"r\",\"path\":\"src/$id.ts\",\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"$id\"}"
+  v="$v{\"candidate_id\":\"$id\",\"verdict\":\"confirmed\",\"reasoning\":\"r\"}"
+done
+printf '{"summary":"verified","target":"probe-target","findings":%s],"verifications":%s]}\n' "$f" "$v"
+"""
+
+
+class TestVerificationsSurviveTheMerge(BatchedStation):
+    def test_a_second_required_array_is_merged_row_for_row(self):
+        self.agent(AGENT_YAML)
+        (self.root / "agents" / "probe" / "report.schema.json").write_text(
+            json.dumps(VERIFY_SCHEMA, indent=2), encoding="utf-8")
+        self.stub(VERIFY_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        expected = [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)]
+        self.assertEqual([r["candidate_id"] for r in report["findings"]], expected)
+        self.assertIn("verifications", report, "a required row array must survive the merge")
+        self.assertEqual([r["candidate_id"] for r in report["verifications"]], expected,
+                         "every batch's verifications rows, in pre-pass order")
+
+
 class TestBatchingIsDecidedByThePlan(BatchedStation):
     def test_a_small_list_of_big_candidates_is_still_split(self):
         self.agent(AGENT_YAML.replace("max_candidates_per_call: 3", "max_candidates_per_call: 8"))
