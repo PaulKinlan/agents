@@ -367,11 +367,23 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     if clean_p.endswith("/"):
         clean_p = clean_p[:-1]
 
-    # Handle template wildcards like <name>, <project>, <target>, *
+    # Handle template wildcards like <name>, <project>, <target>, *.
     if re.search(r"<[^>]+>|\*", clean_p):
         glob_pattern = re.sub(r"<[^>]+>", "*", clean_p)
-        matches_root = list(target_dir.glob(glob_pattern))
-        matches_doc = list(doc_dir.glob(glob_pattern))
+        # pathlib requires ** to be an entire component (Python 3.12 raises on
+        # docs/**.md). Embedded runs of stars mean one-level *, not recursion.
+        glob_pattern = "/".join(
+            part if part == "**" else re.sub(r"\*{2,}", "*", part)
+            for part in glob_pattern.split("/")
+        )
+        # A document-controlled glob must not search a parent or absolute path.
+        if Path(glob_pattern).is_absolute() or ".." in glob_pattern.split("/"):
+            return False, True
+        try:
+            matches_root = list(target_dir.glob(glob_pattern))
+            matches_doc = list(doc_dir.glob(glob_pattern))
+        except (ValueError, NotImplementedError, OSError):
+            return False, True
         if _had_location:
             matches_root = [p for p in matches_root if p.is_file()]
             matches_doc = [p for p in matches_doc if p.is_file()]

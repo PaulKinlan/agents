@@ -557,6 +557,33 @@ class TestLineSuffixIsALocationNotAFilename(unittest.TestCase):
             (tmp / "docs" / "PLAN.md").write_text("See `lib/:12` for the binding.\n")
             self.assertFalse(check_docs.path_exists_or_matches(tmp, tmp / "docs", "lib/:12")[0])
 
+    def test_embedded_double_stars_do_not_abort_the_docs_scan(self):
+        """agents-xqwmo: **.md is one-level shorthand; only **/ is recursive."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "docs" / "sub").mkdir(parents=True)
+            (tmp / "docs" / "A.md").write_text("# a\n")
+            (tmp / "docs" / "sub" / "B.md").write_text("# b\n")
+            (tmp / "docs" / "PLAN.md").write_text("See `**.md` and `sub/**.md`.\n")
+            resolve = check_docs.path_exists_or_matches
+            self.assertEqual(resolve(tmp, tmp / "docs", "**.md"), (True, True))
+            self.assertEqual(resolve(tmp, tmp, "**.md"), (False, True),
+                             "embedded stars must not silently turn into recursive **")
+            self.assertEqual(resolve(tmp, tmp / "docs", "sub/**.md"), (True, True))
+            self.assertEqual(resolve(tmp, tmp / "docs", "**/*.md"), (True, True))
+            self.assertEqual(resolve(tmp, tmp / "docs", "**.missing"), (False, True))
+            candidates = check_docs.scan_target(tmp)
+            self.assertFalse(any(c.get("reference") in {"**.md", "sub/**.md"} for c in candidates))
+
+    def test_invalid_or_escaping_wildcards_fail_as_unmatched_not_exceptions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "docs").mkdir()
+            resolve = check_docs.path_exists_or_matches
+            self.assertEqual(resolve(tmp, tmp / "docs", "../*"), (False, True))
+            self.assertEqual(resolve(tmp, tmp / "docs", "/etc/*"), (False, True))
+            self.assertEqual(resolve(tmp, tmp / "docs", "[" + "*"), (False, True))
+
     def test_a_clock_like_token_is_not_reduced_to_a_directory_name(self):
         """Fails if the strip is careless: `12:30` must not become the directory `12`.
 
