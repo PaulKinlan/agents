@@ -1917,6 +1917,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             _write_run_artifact(batch_prompt_file, batch_prompt)
             os.chmod(batch_prompt_file, 0o600)
         batched = batch_count > 1
+        # agents-uetmr: a batched run names its failing batch IN the loop (with that batch's evidence in
+        # output_classification.batchK.json). The fallback below used to re-classify the CONCATENATION of
+        # every batch, which judged N outputs as one string, wrote a misleading aggregate classification
+        # beside the per-batch ones, called it "batch 1/1" and pointed at a model_output.txt that
+        # batching renames. Keep the batch's own words instead.
+        batched_named_failure: Optional[str] = None
 
         # agents-m2n: the directive file for the adapter's system channel. run_dir is
         # already read-write inside the OS sandbox, and the path reaches the adapter as a
@@ -2383,7 +2389,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         _write_run_artifact(run_dir / "failure_reason.txt", _named + "\n")
                         raise OutputTruncatedError(
                             f"{_named}; no verdict (raw output kept in {_batch_file})")
-                    batch_failure = _named
+                    batch_failure = batched_named_failure = _named
                     break
                 try:
                     # PER-BATCH CONTRACT: a row may only answer a candidate THIS batch was shown
@@ -2402,7 +2408,7 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         produced_batches=len(batch_output_files),
                         expected_ids=batch_candidate_ids(batches[_batch_index])
                         if _batch_index < len(batches) else ())
-                    batch_failure = _named
+                    batch_failure = batched_named_failure = _named
                     break
                 batch_reports.append(_part)
             if batch_failure is not None:
@@ -2447,6 +2453,20 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # rn0ky: name the failure first. A completion cut by an output bound is TRUNCATION, not a
         # model that ignored the contract, and OutputTruncatedError says so (still a plumbing
         # failure, so the repair-retry and line continuation are unchanged).
+        if batched:
+            # agents-uetmr: never re-classify across batches. Whatever the loop concluded (a batch's own
+            # named failure, or a merge refusal) already carries the batch and its evidence file; the
+            # answers live in the per-batch files, not in a single model_output.txt.
+            no_verdict = batched_named_failure or no_verdict
+            kept = f"{run_dir}/model_output.batch*.txt"
+            if "model_output.batch" not in no_verdict:
+                # The batch's own reason (a schema rejection, a merge refusal) does not necessarily name
+                # where the answers went; a reader still needs that.
+                no_verdict = f"{no_verdict} (batch outputs kept in {kept})"
+            _write_run_artifact(run_dir / "failure_reason.txt", no_verdict + "\n")
+            if no_verdict.startswith(f"{agent_name}: model output was TRUNCATED"):
+                raise OutputTruncatedError(no_verdict)
+            raise NoVerdictError(f"{agent_name}: {no_verdict}")
         no_verdict = name_parse_failure(raw_output, no_verdict, run_dir=run_dir, agent_name=agent_name)
         _write_run_artifact(run_dir / "failure_reason.txt", no_verdict + "\n")
         if no_verdict.startswith(f"{agent_name}: model output was TRUNCATED"):
