@@ -354,9 +354,6 @@ class TestClassifyUnparseable(unittest.TestCase):
         self.assertIn("count-only accounting", message)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class TestAForeignBatchIdSurvivesTheRepairStage(unittest.TestCase):
     """agents-fv5uk, the reviewer's own repro. Batch ids are consecutive by construction, so a repair that
     only knows its OWN batch's ids re-attaches a row naming a sibling batch's candidate to a near neighbour
@@ -378,3 +375,7 @@ class TestAForeignBatchIdSurvivesTheRepairStage(unittest.TestCase):
             validate_batch_attribution([row], batch_ids=own, batch_index=0,
                                        all_batch_ids=[own, sibling])
         self.assertIn("belongs to batch 2", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()
