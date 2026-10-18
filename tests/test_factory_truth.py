@@ -51,6 +51,31 @@ LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_
                "tool_pins.py", "line_numbers.py", "candidate_batching.py")
 
 
+class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
+    """agents-exhhl: perf-review and vuln-verify opt into bounded batching, and a station that silently
+    loses (or mistypes) its bound goes back to asking for one oversized completion - which is how the
+    nightly died on 21 vuln-verify candidates. The key is parsed by the dispatcher's own reader here, so a
+    malformed value fails in the gate rather than at 03:00."""
+
+    def test_declared_bounds_parse_and_the_known_stations_keep_theirs(self):
+        declared = {}
+        for path in sorted((ROOT / "agents").glob("*/agent.yaml")):
+            config = factory_cli.load_yaml_simple(path) or {}
+            output = config.get("output") if isinstance(config.get("output"), dict) else {}
+            if "max_candidates_per_call" in output:
+                declared[path.parent.name] = factory_cli.max_candidates_per_call(config)
+        self.assertTrue(declared, "at least one station must declare the bound, or batching is dead code")
+        for station, value in declared.items():
+            self.assertIsInstance(value, int, f"{station}: the bound must parse to an int, got {value!r}")
+            self.assertGreaterEqual(value, 1, f"{station}: a bound below 1 is refused, not clamped")
+        # The two stations that hit the completion ceiling: their bound is load-bearing, so its removal is
+        # a regression and not a config preference.
+        for station in ("perf-review", "vuln-verify"):
+            self.assertIn(station, declared,
+                          f"{station} lost its output.max_candidates_per_call, so it asks for one "
+                          f"unbounded completion again")
+
+
 def finding(**overrides):
     base = {"rule_id": "r1", "path": "a.js", "line_number": 1, "snippet": "x = 1",
             "severity": "medium", "title": "A finding", "description": "d",

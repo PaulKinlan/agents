@@ -128,9 +128,10 @@ def batch_candidate_ids(batch: Iterable[Any]) -> List[str]:
     return ids
 
 
-def validate_batch_attribution(findings: Any, *, batch_ids: Sequence[str],
+def validate_batch_attribution(rows: Any, *, batch_ids: Sequence[str],
                               batch_index: Optional[int] = None,
-                              all_batch_ids: Optional[Sequence[Sequence[str]]] = None) -> None:
+                              all_batch_ids: Optional[Sequence[Sequence[str]]] = None,
+                              array_name: str = "findings") -> None:
     """Refuse a report row that cites a candidate THIS batch was not shown (agents-5230a).
 
     A batched station is told to answer only for its own batch, and aggregate candidate coverage is
@@ -139,9 +140,7 @@ def validate_batch_attribution(findings: Any, *, batch_ids: Sequence[str],
     wrong code location, which no later accounting check can see. This is checked per batch, before
     the merge, and names both the id and where it was actually presented.
     """
-    if not batch_ids:
-        return  # a batch with no ids cannot be checked by identity; count accounting owns that case
-    own = {cid for cid in batch_ids if isinstance(cid, str) and cid}
+    own = {cid for cid in (batch_ids or ()) if isinstance(cid, str) and cid}
     elsewhere: Dict[str, int] = {}
     for index, ids in enumerate(all_batch_ids or ()):
         if index == batch_index:
@@ -149,7 +148,19 @@ def validate_batch_attribution(findings: Any, *, batch_ids: Sequence[str],
         for cid in ids:
             if isinstance(cid, str) and cid and cid not in own:
                 elsewhere.setdefault(cid, index + 1)
-    for row in findings if isinstance(findings, list) else ():
+    if not batch_ids:
+        # This batch's candidates carry no ids, so identity cannot be verified FOR IT - but an id KNOWN
+        # to belong to another batch is still a provable misattribution, and returning early here
+        # accepted one (agents-ju56b).
+        for row in rows if isinstance(rows, list) else ():
+            cid = row.get("candidate_id") if isinstance(row, dict) else None
+            if isinstance(cid, str) and cid.strip() and cid.strip() in elsewhere:
+                raise BatchMergeError(
+                    f"batch {batch_index + 1 if batch_index is not None else '?'} {array_name!r} row cited candidate_id "
+                    f"{cid.strip()!r}, which belongs to batch {elsewhere[cid.strip()]} - this batch's "
+                    f"candidates carry no ids, so the answer cannot be its own")
+        return  # nothing else is checkable here; count accounting owns a row without an id
+    for row in rows if isinstance(rows, list) else ():
         if not isinstance(row, dict):
             continue
         cid = row.get("candidate_id")
@@ -159,8 +170,39 @@ def validate_batch_attribution(findings: Any, *, batch_ids: Sequence[str],
         where = (f"; it belongs to batch {elsewhere[cid]}" if cid in elsewhere
                  else "; it was not presented in any batch")
         raise BatchMergeError(
-            f"batch {batch_index + 1 if batch_index is not None else '?'} cited candidate_id "
+            f"batch {batch_index + 1 if batch_index is not None else '?'} {array_name!r} row cited candidate_id "
             f"{cid!r}, which it was not shown{where} - a row may only answer a candidate in its own batch")
+
+
+# Keys the FACTORY owns after the merge: model output must never set them (a batch must not decide a
+# station's status), so they are not copied or merged.
+_FACTORY_OWNED_KEYS = ("verdict", "status", "scanned_files")
+# Keys merged as one-per-batch metadata rather than row arrays.
+_HANDLED_KEYS = ("summary", "target")
+
+
+# Always row arrays, whatever their value: a non-list here is a malformed report, not a scalar to copy.
+_ALWAYS_ROW_ARRAYS = ("findings",)
+
+
+def row_arrays(report: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """Every contract ROW ARRAY in a report, by key: findings, verifications, and any future one.
+
+    Discovered rather than enumerated, because the alternative is what shipped broken (agents-exhhl
+    review): merge copied `findings` only, so vuln-verify's `verifications` - the whole point of that
+    station - vanished from every merged report while each BATCH passed its own schema check.
+    """
+    arrays: Dict[str, List[Dict[str, Any]]] = {}
+    if not isinstance(report, dict):
+        return arrays
+    for key, value in report.items():
+        if key in _FACTORY_OWNED_KEYS or key in _HANDLED_KEYS or key == "reviewed_commits":
+            continue
+        if key in _ALWAYS_ROW_ARRAYS and not isinstance(value, list):
+            raise BatchMergeError(f"report has a non-list {key!r} ({type(value).__name__})")
+        if isinstance(value, list) and all(isinstance(row, dict) for row in value):
+            arrays[key] = list(value)
+    return arrays
 
 
 def merge_reports(parts: Sequence[Dict[str, Any]], *,
@@ -168,46 +210,43 @@ def merge_reports(parts: Sequence[Dict[str, Any]], *,
                   target: Optional[str] = None) -> Dict[str, Any]:
     """Merge per-batch reports into one report, deterministically.
 
-    Findings keep the order the batches were planned in (which is the pre-pass order), so a merged
-    report reads like the single-call report it replaces. `reviewed_commits` is unioned in first-seen
-    order. A `candidate_id` answered twice raises: two rows for one candidate means one batch
-    answered another batch's candidate (a misbuilt prompt), and picking one of them would hide it.
+    EVERY row array is merged, not just `findings` (agents-exhhl review P1): a station whose contract
+    requires another array - vuln-verify's `verifications` - got a merged report with that array missing,
+    because each batch validated against the schema alone and the merge silently dropped it. Rows keep the
+    order the batches were planned in (the pre-pass order); `reviewed_commits` is unioned in first-seen
+    order; a `candidate_id` answered twice IN THE SAME ARRAY raises, because two rows for one candidate
+    means a batch answered outside its own batch and picking one would hide it.
 
-    Non-contract keys are NOT copied: `verdict`, `status` and `scanned_files` are the factory's to
-    set after this point, and letting a batch report supply them would let model output decide a
-    station's status.
+    Non-contract keys are NOT copied: `verdict`, `status` and `scanned_files` are the factory's to set
+    after this point. Other scalars are copied first-seen so a station's own metadata survives.
     """
-    findings: List[Dict[str, Any]] = []
-    seen_ids: Dict[str, int] = {}
-    reviewed: List[str] = []
-    first_target: Optional[str] = None
     parts = list(parts)
     if not parts:
         raise BatchMergeError("no per-batch reports to merge")
+
+    merged_arrays: Dict[str, List[Dict[str, Any]]] = {}
+    seen_ids: Dict[str, Dict[str, int]] = {}
+    scalars: Dict[str, Any] = {}
+    reviewed: List[str] = []
+    first_target: Optional[str] = None
 
     for index, part in enumerate(parts):
         if not isinstance(part, dict):
             raise BatchMergeError(
                 f"batch {index} report is {type(part).__name__}, not an object")
-        rows = part.get("findings")
-        if rows is None:
-            rows = []
-        if not isinstance(rows, list):
-            raise BatchMergeError(
-                f"batch {index} report has a non-list 'findings' ({type(rows).__name__})")
-        for row in rows:
-            if not isinstance(row, dict):
-                raise BatchMergeError(
-                    f"batch {index} report has a non-object finding ({type(row).__name__})")
-            candidate_id = row.get("candidate_id")
-            if isinstance(candidate_id, str) and candidate_id.strip():
-                key = candidate_id.strip()
-                if key in seen_ids:
-                    raise BatchMergeError(
-                        f"candidate_id {key!r} appears in batch {seen_ids[key]} and batch {index}: "
-                        f"a batch answered a candidate it was not given")
-                seen_ids[key] = index
-            findings.append(row)
+        for key, rows in row_arrays(part).items():
+            target_rows = merged_arrays.setdefault(key, [])
+            seen = seen_ids.setdefault(key, {})
+            for row in rows:
+                candidate_id = row.get("candidate_id")
+                if isinstance(candidate_id, str) and candidate_id.strip():
+                    cid = candidate_id.strip()
+                    if cid in seen:
+                        raise BatchMergeError(
+                            f"candidate_id {cid!r} appears in {key!r} in batch {seen[cid]} and batch "
+                            f"{index}: a batch answered a candidate it was not given")
+                    seen[cid] = index
+                target_rows.append(row)
         commits = part.get("reviewed_commits")
         if isinstance(commits, list):
             for commit in commits:
@@ -215,16 +254,28 @@ def merge_reports(parts: Sequence[Dict[str, Any]], *,
                     reviewed.append(commit)
         if first_target is None and isinstance(part.get("target"), str) and part["target"].strip():
             first_target = part["target"]
+        for key, value in part.items():
+            if key in _FACTORY_OWNED_KEYS or key in _HANDLED_KEYS or key == "reviewed_commits":
+                continue
+            if isinstance(value, (list, dict)):
+                continue  # arrays are merged above; nested objects are not part of a batch contract
+            scalars.setdefault(key, value)
 
+    merged_arrays.setdefault("findings", [])
+    findings_rows = merged_arrays.get("findings", [])
+    extra_summary = "".join(
+        f"; {len(rows)} {key} row(s)" for key, rows in merged_arrays.items() if key != "findings")
     merged: Dict[str, Any] = {
         "summary": summary if summary is not None else (
-            f"Merged {len(parts)} bounded batch report(s): {len(findings)} row(s) "
-            f"across {len(seen_ids)} cited candidate id(s)."),
-        "findings": findings,
+            f"Merged {len(parts)} bounded batch report(s): {len(findings_rows)} row(s) "
+            f"across {len(seen_ids.get('findings', {}))} cited candidate id(s){extra_summary}."),
     }
     resolved_target = target if target is not None else first_target
     if resolved_target is not None:
         merged["target"] = resolved_target
+    for key, value in scalars.items():
+        merged.setdefault(key, value)
+    merged.update(merged_arrays)
     if reviewed:
         merged["reviewed_commits"] = reviewed
     return merged

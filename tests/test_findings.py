@@ -23,8 +23,8 @@ from unittest import mock
 from lib import findings
 from lib.candidate_identity import assign_candidate_ids
 from lib.findings import (FindingsStore, StoreFileError, bind_severity, CANDIDATE_PROMPT_SLICE,
-                          candidate_coverage, read_candidate_count, station_has_verdict,
-                          station_is_incomplete)
+                          candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                          station_has_verdict, station_is_incomplete)
 from lib.redaction import redact_finding, redact_for_storage
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
@@ -1825,6 +1825,34 @@ class TestCandidateCoverage(unittest.TestCase):
         self.assertTrue(candidate_coverage(None, 0)["complete"])
         self.assertTrue(candidate_coverage(None, 7)["complete"])
         self.assertIsNone(candidate_coverage(None, 0)["candidates_presented"])
+
+    def test_a_partial_identity_record_is_no_identity_at_all(self):
+        """agents-ju56b: the batched dispatcher records `identity: partial` when some presented candidates
+        carry no candidate_id (the retained vuln-verify bundle has ids on 2 of 5). Reading that partial list
+        made a COMPLETE answer score 2/5 and go INCOMPLETE, a regression the unbatched run did not have.
+        A partial record must fall back to count accounting - not to the payload slice, which holds the same
+        partial ids."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            # A payload with ids on 2 of 5 rows, exactly like the real one.
+            (run / "candidates.json").write_text(json.dumps({"candidates": [
+                {"candidate_id": "50a8a7c8990e463f", "rule_id": "r", "path": "THREAT_MODEL.md"},
+                {"candidate_id": "effe7026c6ffc948", "rule_id": "r", "path": "lib/budget.py"},
+                {"rule_id": "r", "path": "a.py"}, {"rule_id": "r", "path": "b.py"},
+                {"rule_id": "r", "path": "c.py"},
+            ]}), encoding="utf-8")
+            (run / "presented_candidates.json").write_text(json.dumps({
+                "presented": 5, "batch_count": 3, "identity": "partial",
+                "candidates_without_id": 3, "candidate_ids": None,
+                "batches": [["50a8a7c8990e463f", "effe7026c6ffc948"], [], []],
+            }), encoding="utf-8")
+            self.assertIsNone(read_presented_candidate_ids(run),
+                              "a partial record must not be returned as identity information")
+            coverage = candidate_coverage(5, 5, presented_ids=read_presented_candidate_ids(run),
+                                          cited_ids=[None] * 5)
+            self.assertEqual(coverage["identity"], "count-only")
+            self.assertTrue(coverage["complete"], f"a complete answer must not read partial: {coverage}")
 
     def test_an_empty_pre_pass_is_vacuously_complete(self):
         self.assertTrue(candidate_coverage(0, 0)["complete"])

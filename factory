@@ -41,7 +41,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
                                         classify_unparseable, describe_truncation, merge_reports,
-                                        plan_batches, validate_batch_attribution)
+                                        plan_batches, row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -74,7 +74,7 @@ except ImportError:
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
                                         classify_unparseable, describe_truncation, merge_reports,
-                                        plan_batches, validate_batch_attribution)
+                                        plan_batches, row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -1871,12 +1871,25 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             if len(planned) > 1:
                 batches = planned
                 batch_count = len(planned)
+                ids_by_batch = [batch_candidate_ids(batch) for batch in batches]
+                presented_total = len(candidates_slice)
+                ids_total = sum(len(ids) for ids in ids_by_batch)
+                # IDENTITY IS ALL OR NOTHING (agents-ju56b). Real pre-passes mix rows that carry a
+                # candidate_id with rows that carry none - the retained vuln-verify bundle has ids on 2
+                # of 5 - and recording the partial list as "the ids presented" made a COMPLETE answer
+                # score 2/5 accounted and go INCOMPLETE, a regression the unbatched run did not have
+                # (it fell back to count accounting for that bundle). So the id list is only recorded
+                # when it covers every presented candidate; otherwise the record says why, and the
+                # count-only path judges the run.
                 presented = {
                     "max_candidates_per_call": max_per_call,
                     "batch_count": batch_count,
-                    "presented": len(candidates_slice),
-                    "candidate_ids": [cid for batch in batches for cid in batch_candidate_ids(batch)],
-                    "batches": [batch_candidate_ids(batch) for batch in batches],
+                    "presented": presented_total,
+                    "identity": "complete" if ids_total == presented_total else "partial",
+                    "candidates_without_id": presented_total - ids_total,
+                    "candidate_ids": ([cid for ids in ids_by_batch for cid in ids]
+                                      if ids_total == presented_total else None),
+                    "batches": ids_by_batch,
                 }
             # Written BEFORE the engine runs: the accounting check reads what was PRESENTED, and a
             # batched run serialises every candidate it presents across N prompts rather than asking
@@ -2395,11 +2408,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     # PER-BATCH CONTRACT: a row may only answer a candidate THIS batch was shown
                     # (agents-5230a). Distinct ids satisfied the accounting check while attributing a
                     # candidate to a call that never saw it.
-                    validate_batch_attribution(
-                        _part.get("findings"), batch_ids=batch_candidate_ids(batches[_batch_index])
-                        if _batch_index < len(batches) else (),
-                        batch_index=_batch_index,
-                        all_batch_ids=[batch_candidate_ids(b) for b in batches])
+                    # EVERY row array is checked, not just findings (agents-exhhl review P1):
+                    # vuln-verify answers in `verifications`, and an unattributed verifier row is the
+                    # same defect one array over.
+                    _batch_own_ids = (batch_candidate_ids(batches[_batch_index])
+                                      if _batch_index < len(batches) else ())
+                    for _array_name, _rows in row_arrays(_part).items():
+                        validate_batch_attribution(
+                            _rows, batch_ids=_batch_own_ids, batch_index=_batch_index,
+                            all_batch_ids=[batch_candidate_ids(b) for b in batches],
+                            array_name=_array_name)
                 except BatchMergeError as e:
                     batch_failure = str(e)
                     _named = name_parse_failure(
@@ -2416,6 +2434,22 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             else:
                 try:
                     report, parse_reason = merge_reports(batch_reports), None
+                    # THE MERGE IS A CONTRACT OF ITS OWN (agents-exhhl review P1): every batch can pass
+                    # its schema and the MERGED report still violate it - merge used to drop vuln-verify's
+                    # required `verifications` array, silently, because each batch had one. This is the
+                    # only check that can see it, and it fails closed.
+                    _merged_errors = validate_agent_report(agent_dir, agent_cfg, report,
+                                                           target_dir=target_dir)
+                    if _merged_errors:
+                        _write_run_artifact(run_dir / "merged_report.json",
+                                            json.dumps(report, indent=2))
+                        _write_run_artifact(run_dir / "merged_schema_errors.json",
+                                            json.dumps(_merged_errors, indent=2))
+                        report, parse_reason = None, (
+                            f"the MERGED batch report violates the declared report schema "
+                            f"({len(_merged_errors)} violation(s); first: {_merged_errors[0]}) - every "
+                            f"batch passed on its own, so the merge itself lost or reshaped contract data "
+                            f"(kept in merged_report.json, violations in merged_schema_errors.json)")
                 except BatchMergeError as e:
                     # A batch answered another batch's candidate: merging would double-book it.
                     report, parse_reason = None, f"per-batch reports cannot be merged: {e}"

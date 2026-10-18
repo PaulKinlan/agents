@@ -285,6 +285,121 @@ printf '%s]}\n' "$out"
 """
 
 
+# agents-ju56b: REAL pre-passes mix rows that carry a candidate_id with rows that carry none (the retained
+# vuln-verify bundle has ids on 2 of 5). Batching must not turn that into "identity-matched 2/5" and an
+# INCOMPLETE station on a complete answer.
+MIXED_PREPASS = f'''
+import argparse, json
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--output")
+args, _unknown = parser.parse_known_args()
+candidates = []
+for i in range({CANDIDATE_COUNT}):
+    row = {{"rule_id": "layout-thrashing-forced-reflow", "path": f"src/file{{i}}.ts",
+            "line_number": i + 1, "severity": "high", "snippet": "el.offsetWidth"}}
+    if i % 4 == 0:
+        row["candidate_id"] = f"cand-perf-{{i:03d}}"
+    candidates.append(row)
+open(args.output, "w", encoding="utf-8").write(json.dumps({{"candidates": candidates}}))
+'''
+
+# Answers EVERY candidate in the prompt by PATH, carrying no candidate_id of its own - a dismissal-style row
+# set that must be judged by count when the presented set has no complete identity.
+PATH_ROWS_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+out='{"summary":"by-path","target":"probe-target","findings":['
+first=1
+for path in $(printf '%s' "$prompt" | grep -o "src/file[0-9][0-9]*\.ts" | sort -u); do
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"r\",\"path\":\"$path\",\"line_number\":1,\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestMixedIdentityIsCountOnly(BatchedStation):
+    def test_a_partial_identity_bundle_is_judged_by_count_not_by_its_few_ids(self):
+        self.agent(AGENT_YAML)
+        (self.root / "agents" / "probe" / "scripts" / "prepass.py").write_text(MIXED_PREPASS, encoding="utf-8")
+        self.stub(PATH_ROWS_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+
+        presented = json.loads((run / "presented_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(presented["identity"], "partial")
+        self.assertIsNone(presented["candidate_ids"],
+                          "a partial id list must never be recorded as the presented population")
+        self.assertEqual(presented["candidates_without_id"], CANDIDATE_COUNT - 2)
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from lib.findings import candidate_coverage, read_candidate_count, read_presented_candidate_ids
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        coverage = candidate_coverage(read_candidate_count(run), len(report["findings"]),
+                                      presented_ids=read_presented_candidate_ids(run))
+        self.assertEqual(coverage["identity"], "count-only", coverage)
+        self.assertTrue(coverage["complete"],
+                        f"a complete answer must not read INCOMPLETE just because ids are partial: {coverage}")
+
+
+# agents-exhhl review P1: vuln-verify's contract requires a SECOND row array, `verifications`, and merge
+# used to drop it. The probe mirrors that shape so the merge is exercised against a real two-array contract.
+VERIFY_SCHEMA = dict(SCHEMA)
+VERIFY_SCHEMA["required"] = ["summary", "target", "findings", "verifications"]
+VERIFY_SCHEMA["properties"] = dict(SCHEMA["properties"])
+VERIFY_SCHEMA["properties"]["verifications"] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["candidate_id", "verdict"],
+        "properties": {"candidate_id": {"type": "string"}, "verdict": {"type": "string"},
+                       "reasoning": {"type": "string"}},
+    },
+}
+
+VERIFY_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+declare -A seen=()
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  if [ -n "${seen[$id]:-}" ]; then continue; fi
+  seen[$id]=1
+  ids+=("$id")
+done
+f='['
+v='['
+first=1
+for id in "${ids[@]}"; do
+  if [ $first -eq 0 ]; then f="$f,"; v="$v,"; fi
+  first=0
+  f="$f{\"rule_id\":\"r\",\"path\":\"src/$id.ts\",\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"$id\"}"
+  v="$v{\"candidate_id\":\"$id\",\"verdict\":\"confirmed\",\"reasoning\":\"r\"}"
+done
+printf '{"summary":"verified","target":"probe-target","findings":%s],"verifications":%s]}\n' "$f" "$v"
+"""
+
+
+class TestVerificationsSurviveTheMerge(BatchedStation):
+    def test_a_second_required_array_is_merged_row_for_row(self):
+        self.agent(AGENT_YAML)
+        (self.root / "agents" / "probe" / "report.schema.json").write_text(
+            json.dumps(VERIFY_SCHEMA, indent=2), encoding="utf-8")
+        self.stub(VERIFY_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        expected = [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)]
+        self.assertEqual([r["candidate_id"] for r in report["findings"]], expected)
+        self.assertIn("verifications", report, "a required row array must survive the merge")
+        self.assertEqual([r["candidate_id"] for r in report["verifications"]], expected,
+                         "every batch's verifications rows, in pre-pass order")
+
+
 class TestBatchingIsDecidedByThePlan(BatchedStation):
     def test_a_small_list_of_big_candidates_is_still_split(self):
         self.agent(AGENT_YAML.replace("max_candidates_per_call: 3", "max_candidates_per_call: 8"))

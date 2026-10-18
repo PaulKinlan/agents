@@ -131,6 +131,25 @@ class TestMergeReports(unittest.TestCase):
         self.assertIn("cand-perf-001", str(ctx.exception))
         self.assertIn("batch 0 and batch 1", str(ctx.exception))
 
+    def test_every_row_array_is_merged_not_just_findings(self):
+        """agents-exhhl review P1: merge copied findings only, so vuln-verify's required `verifications`
+        array vanished from every merged report while each BATCH passed its own schema check."""
+        rows = [{"candidate_id": f"cand-{i}", "verdict": "confirmed"} for i in range(4)]
+        merged = merge_reports([
+            {"summary": "a", "target": "t", "verifications": rows[:2], "findings": []},
+            {"summary": "b", "target": "t", "verifications": rows[2:], "findings": []},
+        ])
+        self.assertEqual([r["candidate_id"] for r in merged["verifications"]],
+                         [r["candidate_id"] for r in rows], "batch order, every row kept")
+        self.assertEqual(merged["findings"], [])
+        self.assertIn("4 verifications row(s)", merged["summary"])
+
+    def test_a_duplicate_in_another_array_is_refused_too(self):
+        row = {"candidate_id": "cand-0", "verdict": "confirmed"}
+        with self.assertRaises(BatchMergeError) as ctx:
+            merge_reports([{"verifications": [row]}, {"verifications": [row]}])
+        self.assertIn("'verifications'", str(ctx.exception))
+
     def test_a_non_object_report_is_refused(self):
         with self.assertRaises(BatchMergeError):
             merge_reports([report([0]), "not-a-report"])
@@ -188,6 +207,28 @@ class TestValidateBatchAttribution(unittest.TestCase):
                                     {"candidate_id": "cand-perf-001"}],
                                    batch_ids=["cand-perf-000", "cand-perf-001"], batch_index=0,
                                    all_batch_ids=[["cand-perf-000", "cand-perf-001"]])
+
+    def test_a_known_foreign_id_is_refused_even_when_this_batch_has_no_ids(self):
+        # agents-ju56b: real pre-passes mix rows with and without candidate_id (the retained vuln-verify
+        # bundle has 2 of 5). A batch whose own candidates carry no ids cannot be VERIFIED, but an id that
+        # is known to belong to another batch is still a provable misattribution - the early return used
+        # to accept exactly that.
+        with self.assertRaises(BatchMergeError) as ctx:
+            validate_batch_attribution([{"candidate_id": "cand-perf-000"}], batch_ids=[],
+                                       batch_index=1,
+                                       all_batch_ids=[["cand-perf-000"], []])
+        message = str(ctx.exception)
+        self.assertIn("belongs to batch 1", message)
+        self.assertIn("carry no ids", message)
+
+    def test_the_refusal_names_the_array_it_checked(self):
+        # The verifications array is a separate contract (agents-exhhl review P1); a message that says
+        # "findings" while checking verifications would send a reader to the wrong rows.
+        with self.assertRaises(BatchMergeError) as ctx:
+            validate_batch_attribution([{"candidate_id": "cand-3"}], batch_ids=["cand-0"],
+                                       batch_index=0, all_batch_ids=[["cand-0"], ["cand-3"]],
+                                       array_name="verifications")
+        self.assertIn("'verifications'", str(ctx.exception))
 
     def test_rows_without_an_id_are_left_to_count_accounting(self):
         # A dismissal row may omit candidate_id; identity is not the only contract, so no raise here.

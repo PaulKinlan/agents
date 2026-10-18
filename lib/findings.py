@@ -1680,6 +1680,13 @@ def read_presented_candidate_ids(run_dir: Any,
                 ids = [cid for cid in recorded_ids if isinstance(cid, str) and cid]
                 # partial ids are no ids, exactly as below: the presented population must be nameable
                 return ids if len(ids) == len(recorded_ids) else []
+            if recorded.get("identity") == "partial" or recorded_ids is None:
+                # The dispatcher recorded that some presented candidates carry no id (agents-ju56b).
+                # A partial list is not identity information: returning it - or falling through to the
+                # payload slice, which holds the same partial ids - made a fully-answered run read
+                # "2/5 accounted, INCOMPLETE". Count accounting is the truthful judge here, exactly as
+                # it was for this bundle before batching existed.
+                return None
     payload = _read_candidate_payload(run_dir)
     if payload is None:
         return None
