@@ -2090,11 +2090,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                   if broker is not None else None))
                     if batched:
                         _produced = run_dir / "model_output.txt"
-                        if _produced.exists():
-                            _write_run_artifact(run_dir / f"model_output{_batch_tag}.txt",
-                                                _produced.read_text(encoding="utf-8",
-                                                                    errors="replace"))
-                            _produced.unlink()
+                        if _produced.exists() or _produced.is_symlink():
+                            # MOVE the answer aside, rather than copy-then-unlink: a rename preserves the
+                            # adapter's bytes and mode and - the reason it is a rename and not a copy plus
+                            # an unlink - adds NO deletion site to a run directory where every deletion is
+                            # enumerated by tests/test_retention.py's inventory (measured: this line as a
+                            # `_produced.unlink()` failed that guard with "unenumerated deletion site").
+                            # The destination name is unique per batch, and the session has already ended,
+                            # so a link planted at the source is moved AS a link, never followed.
+                            _produced.rename(run_dir / f"model_output{_batch_tag}.txt")
                     adapter_res = _res
                     if _res.returncode != 0:
                         # A failed call is the run's answer: later batches cannot rescue it, and
