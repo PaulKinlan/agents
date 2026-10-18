@@ -602,6 +602,67 @@ class TestLineSuffixIsALocationNotAFilename(unittest.TestCase):
             )
 
 
+class TestTargetPathScope(unittest.TestCase):
+    """agents-dxgdy: document references answer only about paths inside the target."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve()
+        self.target = self.base / "target"
+        (self.target / "docs" / "sub").mkdir(parents=True)
+        (self.target / "agents").mkdir()
+        (self.target / "README.md").write_text("# root\n")
+        (self.target / "docs" / "README.md").write_text("# docs\n")
+        (self.target / "agents" / "x.md").write_text("# x\n")
+        (self.base / "external.md").write_text("# outside\nSee `not-in-target.md`.\n")
+        (self.target / "link").symlink_to(self.base, target_is_directory=True)
+        (self.target / "skills").symlink_to(self.target / "agents", target_is_directory=True)
+        (self.target / "external-doc.md").symlink_to(self.base / "external.md")
+
+    def test_parent_absolute_and_symlinked_direct_references_cannot_escape(self):
+        resolve = check_docs.path_exists_or_matches
+        for ref, doc_dir in (("../external.md", self.target),
+                             ("../../external.md", self.target / "docs"),
+                             ("link/external.md", self.target),
+                             ("external-doc.md", self.target),
+                             (str(self.base / "external.md"), self.target),
+                             (str(self.base / "external.md") + ":1", self.target)):
+            with self.subTest(ref=ref):
+                self.assertEqual(resolve(self.target, doc_dir, ref), (False, False))
+        self.assertEqual(resolve(self.target, self.target / "docs" / "sub", "../README.md"),
+                         (True, False), "doc-relative parent inside the target is valid")
+        self.assertEqual(resolve(self.target, self.target, "skills/x.md"), (True, False),
+                         "an in-target symlink is valid")
+        self.assertEqual(resolve(self.target, self.target, str(self.target / "README.md")),
+                         (True, False), "absolute in-target paths remain valid")
+
+    def test_glob_results_through_symlinks_are_bounded_after_matching(self):
+        resolve = check_docs.path_exists_or_matches
+        self.assertEqual(resolve(self.target, self.target, "link/*.md"), (False, True))
+        self.assertEqual(resolve(self.target, self.target, "skills/*.md"), (True, True))
+        self.assertEqual(resolve(self.target, self.target, "../*"), (False, True))
+        (self.target / "README.md").write_text("See `link/*.md` and `../external.md`.\n")
+        refs = {c["reference"] for c in check_docs.scan_target(self.target)}
+        self.assertTrue({"link/*.md", "../external.md"} <= refs, refs)
+        self.assertNotIn("not-in-target.md", refs,
+                         "a symlinked markdown file outside the target must not be read")
+
+    def test_markdown_links_preserve_in_target_parents_and_site_root_paths(self):
+        (self.target / "docs" / "PLAN.md").write_text(
+            "[ok](../README.md) [site-root](/docs/README.md)\n"
+            "[outside](../../external.md) [through-link](../link/external.md)\n")
+        links = [c for c in check_docs.scan_target(self.target)
+                 if c.get("reference_type") == "file_link"]
+        self.assertEqual({c["reference"] for c in links},
+                         {"../../external.md", "../link/external.md"})
+        self.assertTrue(all(c["rule_id"] in {"doc-broken-link", "doc-deleted-reference"}
+                            for c in links))
+        self.assertFalse(check_docs.skill_reference_is_checkable(
+            self.target, self.target, "link/external.md"),
+            "a directory symlink outside the target is not a first-party prefix")
+
+
 class TestPlanFindingsStoreAgreement(unittest.TestCase):
     """PLAN.md's claim about findings/ must match .gitignore's behaviour (agents-flgz, agents-a2tm)."""
 

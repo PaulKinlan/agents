@@ -253,9 +253,11 @@ def _file_names(target_dir: Path) -> Set[str]:
     key = str(target_dir)
     if key not in _NAME_INDEX_CACHE:
         names: Set[str] = set()
+        target_root = target_dir.resolve()
         for _root, dirs, files in os.walk(target_dir):
             dirs[:] = [d for d in dirs if d != ".git"]
-            names.update(files)
+            names.update(name for name in files
+                         if _resolved_within_target(target_root, Path(_root) / name) is not None)
         _NAME_INDEX_CACHE[key] = names
     return _NAME_INDEX_CACHE[key]
 
@@ -322,11 +324,14 @@ def skill_reference_is_checkable(target_dir: Path, doc_dir: Path, ref: str) -> b
         # already covers the case where a sibling with that name exists.
         return False
     head = clean.split("/", 1)[0]
-    if (doc_dir / head).is_dir():
+    target_root = target_dir.resolve()
+    doc_head = _resolved_within_target(target_root, doc_dir / head)
+    if doc_head is not None and doc_head.is_dir():
         return True                                      # the station's own directory
     if head.lower() in TARGET_LAYOUT_DIR_NAMES:
         return False                                     # 1. the audited target's layout
-    return ((target_dir / head).is_dir()
+    target_head = _resolved_within_target(target_root, target_dir / head)
+    return (target_head is not None and target_head.is_dir()
             and _indexed(_git_paths(target_dir, "tracked"), head))
 
 
@@ -343,6 +348,19 @@ def expand_path_braces(path_str: str) -> List[str]:
         sub_paths = expand_path_braces(f"{prefix}{opt}{suffix}")
         results.extend(sub_paths)
     return results
+
+def _resolved_within_target(target_root: Path, path: Path) -> Optional[Path]:
+    """Return the real path only when it is inside the target's real root.
+
+    This aligns reference answers with the sandbox's target-only view; it is not a
+    containment boundary against symlink races (the OS sandbox remains that boundary).
+    """
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved if resolved.is_relative_to(target_root) else None
+
 
 def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tuple[bool, bool]:
     """Checks if a path or path template exists.
@@ -366,6 +384,7 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
         _had_location = True
     if clean_p.endswith("/"):
         clean_p = clean_p[:-1]
+    target_root = target_dir.resolve()
 
     # Handle template wildcards like <name>, <project>, <target>, *.
     if re.search(r"<[^>]+>|\*", clean_p):
@@ -380,8 +399,10 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
         if Path(glob_pattern).is_absolute() or ".." in glob_pattern.split("/"):
             return False, True
         try:
-            matches_root = list(target_dir.glob(glob_pattern))
-            matches_doc = list(doc_dir.glob(glob_pattern))
+            matches_root = [p for p in target_dir.glob(glob_pattern)
+                            if _resolved_within_target(target_root, p) is not None]
+            matches_doc = [p for p in doc_dir.glob(glob_pattern)
+                           if _resolved_within_target(target_root, p) is not None]
         except (ValueError, NotImplementedError, OSError):
             return False, True
         if _had_location:
@@ -395,20 +416,15 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
     # `lib/adapters:42` resolved against the DIRECTORY `lib/adapters` until the
     # cross-family review of agents-pxx8 caught it. Without a location the existing
     # directory-tolerant behaviour is unchanged.
-    p1 = (doc_dir / clean_p).resolve()
-    p2 = (target_dir / clean_p).resolve()
-
-    try:
-        if (p1.is_file() if _had_location else p1.exists()):
-            return True, False
-    except Exception:
-        pass
-
-    try:
-        if (p2.is_file() if _had_location else p2.exists()):
-            return True, False
-    except Exception:
-        pass
+    for base in (doc_dir, target_dir):
+        path = _resolved_within_target(target_root, base / clean_p)
+        if path is None:
+            continue
+        try:
+            if (path.is_file() if _had_location else path.exists()):
+                return True, False
+        except OSError:
+            pass
 
     # Bare filename searches. A document may name a file by name alone when the
     # full path is obvious in context, and this repo's own docs rely on it: `PLAN.md`,
@@ -495,6 +511,7 @@ def parse_tree_diagrams(content: str) -> List[Tuple[int, str, str]]:
 
 def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
     candidates = []
+    target_root = target_dir.resolve()
 
     # 1. Discover all documentation files
     doc_files: List[Path] = []
@@ -504,6 +521,10 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
         for file in files:
             fp = Path(root) / file
+            # os.walk does not descend symlinked directories, but it still lists
+            # symlinked files. Never read a document/source file outside the target.
+            if _resolved_within_target(target_root, fp) is None:
+                continue
             ext = fp.suffix.lower()
             if ext == ".md":
                 doc_files.append(fp)
@@ -608,12 +629,12 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
 
                 if file_target:
                     resolved_file = None
-                    p1 = (doc_dir / file_target).resolve()
-                    p2 = (target_dir / file_target.lstrip("/")).resolve()
+                    p1 = _resolved_within_target(target_root, doc_dir / file_target)
+                    p2 = _resolved_within_target(target_root, target_dir / file_target.lstrip("/"))
 
-                    if p1.exists() and p1.is_file():
+                    if p1 is not None and p1.is_file():
                         resolved_file = p1
-                    elif p2.exists() and p2.is_file():
+                    elif p2 is not None and p2.is_file():
                         resolved_file = p2
 
                     if resolved_file is None:
