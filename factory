@@ -37,6 +37,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
                              candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                             repair_cited_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
@@ -70,6 +71,7 @@ except ImportError:
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
                              candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                             repair_cited_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
@@ -1001,6 +1003,31 @@ def parse_station_report(raw_output: str, *, agent_dir: Path, agent_cfg: Any,
                       f"(kept in {run_dir / f'rejected_report{tag}.json'}, violations in "
                       f"schema_errors{tag}.json)")
     return report, None
+
+
+def repair_report_candidate_ids(report: Any, presented: Any, *, run_dir: Optional[Path] = None,
+                                tag: str = "") -> List[Dict[str, Any]]:
+    """Repair mistranscribed `candidate_id`s in every row array, recording each repair (agents-00sew).
+
+    ONLY a unique repair is applied (lib.findings.repair_cited_candidate_id): a truncated tail, a
+    copied fragment, or a near match within two edits, and only when exactly one presented candidate
+    explains it. An ambiguous id is left as the model wrote it, so the run's accounting still reports a
+    partial triage rather than binding a verdict to the wrong candidate.
+    """
+    repairs: List[Dict[str, Any]] = []
+    if report is None:
+        return repairs
+    for array_name, rows in row_arrays(report).items():
+        for record in repair_cited_candidate_ids(rows, presented or ()):
+            record["array"] = array_name
+            repairs.append(record)
+    if repairs and run_dir is not None:
+        _write_run_artifact(run_dir / f"candidate_id_repairs{tag}.json", json.dumps(repairs, indent=2))
+        first = repairs[0]
+        print(f"Note: repaired {len(repairs)} cited candidate_id(s) in {run_dir.name}"
+              f"{tag} (first: {first['cited']} -> {first['repaired']} by {first['rule']}); "
+              f"see candidate_id_repairs{tag}.json")
+    return repairs
 
 
 def name_parse_failure(raw_output: str, reason: str, *, run_dir: Path, agent_name: str,
@@ -2404,6 +2431,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             f"{_named}; no verdict (raw output kept in {_batch_file})")
                     batch_failure = batched_named_failure = _named
                     break
+                # Before ownership is judged, give a mistranscribed id the chance to be recognised as
+                # THIS batch's candidate (agents-00sew). A repair can only ever land on an id this
+                # batch presented, so it cannot launder a cross-batch answer.
+                repair_report_candidate_ids(
+                    _part,
+                    batch_candidate_ids(batches[_batch_index]) if _batch_index < len(batches) else (),
+                    run_dir=run_dir, tag=_tag)
                 try:
                     # PER-BATCH CONTRACT: a row may only answer a candidate THIS batch was shown
                     # (agents-5230a). Distinct ids satisfied the accounting check while attributing a
@@ -2457,6 +2491,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             report, parse_reason = parse_station_report(
                 raw_output, agent_dir=agent_dir, agent_cfg=agent_cfg, target_dir=target_dir,
                 run_dir=run_dir, tag="")
+            repair_report_candidate_ids(report, batch_candidate_ids(candidates_slice)
+                                        if isinstance(candidates_slice, list) else (),
+                                        run_dir=run_dir)
         if report is None:
             model_parse_succeeded = False
             no_verdict = parse_reason or (

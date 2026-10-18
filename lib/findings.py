@@ -1702,6 +1702,108 @@ def read_presented_candidate_ids(run_dir: Any,
     return ids
 
 
+# ---------------------------------------------------------------------------------------------
+# Candidate-id repair (agents-00sew). A model sometimes mistranscribes the 16-hex candidate_id it is
+# asked to copy verbatim: chrome-agent-platform-z427f reported 4e8820782eed4e17 as 4e8820782eed17.
+# Measured, that is a DELETION of the two characters at offset 12 - neither a prefix nor a contiguous
+# substring - so a prefix/substring-only repair would not have fixed the case that prompted it.
+#
+# The repair is deliberately narrow: it rewrites a cited id ONLY when exactly one presented id can have
+# produced it under a deterministic rule. An ambiguous cited id is left alone, which keeps the run's
+# accounting honest (a partial triage stays visible) instead of silently binding a verdict to a
+# candidate the model never meant.
+# ---------------------------------------------------------------------------------------------
+REPAIR_MIN_CITED_LENGTH = 8   # "4e" or "abcd" cannot identify one candidate among many
+REPAIR_MAX_EDITS = 2          # the observed mistranscription dropped two hex characters
+
+
+def _bounded_edit_distance(left: str, right: str, limit: int) -> Optional[int]:
+    """Levenshtein distance, or None as soon as it cannot be <= limit (cheap for far-apart ids)."""
+    if abs(len(left) - len(right)) > limit:
+        return None
+    previous = list(range(len(right) + 1))
+    for i, lchar in enumerate(left, start=1):
+        current = [i]
+        best = i
+        for j, rchar in enumerate(right, start=1):
+            cost = 0 if lchar == rchar else 1
+            value = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            current.append(value)
+            best = min(best, value)
+        if best > limit:
+            return None
+        previous = current
+    distance = previous[-1]
+    return distance if distance <= limit else None
+
+
+def repair_cited_candidate_id(cited: str,
+                              presented: Iterable[str]) -> Tuple[Optional[str], str]:
+    """`(presented_id, rule)` when exactly ONE presented id can explain `cited`, else `(None, reason)`.
+
+    Rules, most specific first: `exact`, then a unique PREFIX (the model truncated the tail), then a
+    unique SUBSTRING (the model copied a fragment), then a unique NEAR MATCH within
+    REPAIR_MAX_EDITS edits - the deletion shape that actually occurred. Ties are never resolved by
+    preference: two candidates within reach means the cited id is ambiguous and must stay unrepaired.
+    """
+    cited = cited.strip() if isinstance(cited, str) else ""
+    ids = [str(cid).strip() for cid in presented or () if isinstance(cid, str) and str(cid).strip()]
+    if not cited:
+        return None, "blank"
+    if cited in ids:
+        return None, "exact"
+    if len(cited) < REPAIR_MIN_CITED_LENGTH:
+        return None, "too short to identify one candidate"
+    for rule, matches in (
+        ("prefix", [cid for cid in ids if cid.startswith(cited)]),
+        ("substring", [cid for cid in ids if cited in cid]),
+    ):
+        unique = sorted(set(matches))
+        if len(unique) == 1:
+            return unique[0], rule
+        if len(unique) > 1:
+            return None, f"ambiguous {rule}: {len(unique)} candidates ({', '.join(unique[:3])})"
+    # A NEAR MATCH MUST BE STRICTLY CLOSEST, not merely within the limit: "cand-prf-003" is one edit
+    # from "cand-perf-003" and two from "cand-perf-004", so requiring the match to be unique AT ALL
+    # within the limit refused the very repair this exists for (measured while wiring the wiring the
+    # e2e). A tie at the minimum distance is still refused - that is real ambiguity.
+    distances = {}
+    for cid in ids:
+        distance = _bounded_edit_distance(cited, cid, REPAIR_MAX_EDITS)
+        if distance is not None:
+            distances[cid] = distance
+    if distances:
+        best = min(distances.values())
+        closest = sorted(cid for cid, distance in distances.items() if distance == best)
+        if len(closest) == 1:
+            return closest[0], "near"
+        return None, f"ambiguous near: {len(closest)} candidates at {best} edit(s) ({', '.join(closest[:3])})"
+    return None, "no unique match"
+
+
+def repair_cited_candidate_ids(rows: Any,
+                               presented: Iterable[str]) -> List[Dict[str, Any]]:
+    """Rewrite `candidate_id` in place on rows where a UNIQUE repair exists; return the repairs.
+
+    Returns one record per rewritten row ({cited, repaired, rule, path}) so the repair is auditable in
+    the run directory rather than an invisible kindness.
+    """
+    repairs: List[Dict[str, Any]] = []
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, dict):
+            continue
+        cited = row.get("candidate_id")
+        if not isinstance(cited, str) or not cited.strip():
+            continue
+        repaired, rule = repair_cited_candidate_id(cited, presented)
+        if repaired is None:
+            continue
+        row["candidate_id"] = repaired
+        repairs.append({"cited": cited.strip(), "repaired": repaired, "rule": rule,
+                        "path": row.get("path")})
+    return repairs
+
+
 def candidate_coverage(candidates_in: Optional[int], reported: int,
                        slice_size: int = CANDIDATE_PROMPT_SLICE, *,
                        presented_ids: Optional[Iterable[str]] = None,
