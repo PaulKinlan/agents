@@ -28,6 +28,12 @@ fast_gate_arms_040_factory() {
       # failure path end-to-end (its test_worktree_creation_failure_after_add_is_cleaned_up
       # now asserts the tombstone lands). Neither was reachable from this arm before.
       mapped="$mapped tests/test_retention.py tests/test_hillclimb.py"
+      # agents-uxiks (rn0ky port): the dispatcher's bounded-batching loop lives in THIS file - the batch
+      # prompt header, one engine call per batch, per-batch parsing/validation and the truncation
+      # classification - and tests/test_candidate_batching_end_to_end.py drives it through `factory run`
+      # with a stub engine. MEASURED: returning None from max_candidates_per_call (batching disabled)
+      # fails 2 of its tests. Cost: 8.0 s, paid only when the dispatcher changes.
+      mapped="$mapped tests/test_candidate_batching_end_to_end.py"
       ;;
     install.sh)
       # agents-3xqa: THE PROVISIONING ENTRYPOINT MATCHED NO ARM, so an implementer editing it

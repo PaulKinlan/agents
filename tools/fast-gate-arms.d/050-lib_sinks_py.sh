@@ -32,6 +32,13 @@ fast_gate_arms_050_lib_sinks_py() {
       # (agents-q0mt) - the contract is fail-closed, so it is a real consumer of this module.
       # tests/test_suppressions.py asserts the committed suppressions register contract (agents-vt7w).
       mapped="$mapped tests/test_findings.py tests/test_sinks.py tests/test_bd_json_contract.py tests/test_promotion.py tests/test_sink_layering.py tests/test_model_rule_id.py tests/test_candidate_binding.py tests/test_redaction.py tests/test_suppressions.py"
+      # rn0ky port (agents-uxiks): read_presented_candidate_ids gained the batched population -
+      # presented_candidates.json, every batch in order, read BEFORE the payload slice. The batching
+      # e2e is the suite that holds it: MEASURED, making the function ignore the recorded population
+      # turns tests.test_candidate_batching_end_to_end red (its accounting assertion passes PER_CALL
+      # as the slice, so the old payload reading yields 3 ids against 8 presented). Cost: 8.0 s, and
+      # it only runs when this module or the batching arm changes.
+      mapped="$mapped tests/test_candidate_batching_end_to_end.py"
       # tests/test_candidate_identity.py imports FindingsStore and load_candidate_index, so it asserts
       # this module's index/rekey expectations and moves with it - agents-l606 changed the store's
       # (new, rekeyed, fixed) counts and this suite's expected (2, 2) went RED while the fast gate stayed
@@ -69,6 +76,14 @@ fast_gate_arms_050_lib_sinks_py() {
       # digests; that is deliberate, so the mapped relation is the signature-and-behaviour one. Cost: one
       # more module in this arm, tests.test_vuln_triage_prepass = 25 tests / ~0.2 s at this commit.
       mapped="$mapped tests/test_candidate_identity.py tests/test_candidate_id_emission.py tests/test_vuln_triage_prepass.py"
+      ;;
+    lib/candidate_batching.py)
+      # Bounded batching, deterministic merging and truncation naming (agents-uxiks, ported from
+      # chrome-agent-platform-rn0ky). Both suites are consumers and both were measured rather than
+      # assumed: the unit suite plans/merges/classifies directly (0.07 s, 22 tests), and the e2e
+      # drives the real dispatcher with a stub engine (8.0 s, 5 tests) - disabling the bound in
+      # `factory` turns it red, so it is not merely an importer.
+      mapped="$mapped tests/test_candidate_batching.py tests/test_candidate_batching_end_to_end.py"
       ;;
     lib/credential_broker.py)
       # Credential broker plus end-to-end keyless broker test (agents-vt7w).
