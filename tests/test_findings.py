@@ -1906,6 +1906,22 @@ class TestCandidateCoverage(unittest.TestCase):
         self.assertEqual(repair_cited_candidate_id("cand-prf-003", own + sibling),
                          ("cand-perf-003", "near"))
 
+    def test_a_typo_of_a_sibling_batchs_id_is_never_repaired_locally(self):
+        """agents-00sew round 2. The exact-match guard was not enough: "cand-perf-0o4" is a one-character
+        typo of the SIBLING batch's "cand-perf-004" (1 edit) and two edits from the local "cand-perf-003", so
+        a repair that only weighed local candidates bound the row to the wrong batch's neighbour. The match
+        must be judged globally - and a citation whose LOCAL candidate really is closest must still repair,
+        or the rule would be a blanket ban rather than a judgement."""
+        self.assertEqual(repair_cited_candidate_id("cand-perf-0o4", ["cand-perf-003"],
+                                                   foreign=["cand-perf-004"])[0], None,
+                         "the sibling explains it better, so it must be rejected there")
+        self.assertEqual(repair_cited_candidate_id("cand-perf-0o4", ["cand-perf-004"],
+                                                   foreign=["cand-perf-003"]),
+                         ("cand-perf-004", "near"), "local and closest = repaired")
+        # a more specific sibling match also wins: prefix beats a near match on the local side
+        self.assertIsNone(repair_cited_candidate_id("4e8820782eed4e", ["4e8820782eed4e17"],
+                                                    foreign=["4e8820782eed4exx"])[0])
+
     def test_repairs_are_recorded_and_make_a_complete_answer_accountable(self):
         presented = ["4e8820782eed4e17", "05622f455345d483"]
         rows = [{"candidate_id": "4e8820782eed17", "path": "a.py"},

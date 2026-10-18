@@ -1737,22 +1737,45 @@ def _bounded_edit_distance(left: str, right: str, limit: int) -> Optional[int]:
     return distance if distance <= limit else None
 
 
+_REPAIR_RULE_NAMES = {1: "prefix", 2: "substring", 3: "near"}
+
+
+def _match_rank(cited: str, candidate: str) -> Tuple[Optional[int], int]:
+    """`(rule rank, distance within that rule)` - lower is better - or `(None, 0)` if unexplained.
+
+    One ordering for every candidate, local or sibling, so "which candidate does this id most likely
+    mean?" is answered by the same yardstick everywhere instead of per pool.
+    """
+    if candidate == cited:
+        return 0, 0
+    if len(cited) < REPAIR_MIN_CITED_LENGTH:
+        return None, 0
+    if candidate.startswith(cited):
+        return 1, len(candidate) - len(cited)
+    if cited in candidate:
+        return 2, len(candidate) - len(cited)
+    distance = _bounded_edit_distance(cited, candidate, REPAIR_MAX_EDITS)
+    return (3, distance) if distance is not None else (None, 0)
+
+
 def repair_cited_candidate_id(cited: str,
                               presented: Iterable[str],
                               foreign: Iterable[str] = ()) -> Tuple[Optional[str], str]:
-    """`(presented_id, rule)` when exactly ONE presented id can explain `cited`, else `(None, reason)`.
+    """`(presented_id, rule)` when exactly ONE candidate - OF ANY BATCH - can explain `cited`, else
+    `(None, reason)`.
 
-    Rules, most specific first: `exact`, then a unique PREFIX (the model truncated the tail), then a
-    unique SUBSTRING (the model copied a fragment), then a unique NEAR MATCH within
-    REPAIR_MAX_EDITS edits - the deletion shape that actually occurred. Ties are never resolved by
-    preference: two candidates within reach means the cited id is ambiguous and must stay unrepaired.
+    Rules, most specific first: an exact id, then a unique PREFIX (the model truncated the tail), then a
+    unique SUBSTRING (the model copied a fragment), then a NEAR MATCH within REPAIR_MAX_EDITS edits - the
+    deletion shape that actually occurred (agents-00sew).
 
-    `foreign` is the ids presented to OTHER batches (agents-fv5uk). A citation that IS another batch's
-    candidate must never be repaired onto a near neighbour here: batch ids sit next to each other by
-    construction ("cand-perf-003" is one edit from "cand-perf-004"), so without this guard a row naming
-    batch 3's candidate is silently re-attached to batch 2's - exactly the laundering the per-batch
-    ownership check exists to stop. Measured before the guard: repair_cited_candidate_id("cand-perf-004",
-    ["cand-perf-003"]) returned ("cand-perf-003", "near"), and attribution then accepted a foreign answer.
+    `foreign` is the ids presented to OTHER batches, and it is not just an exact-match guard (agents-fv5uk
+    was the exact case; agents-00sew round 2 was the rest of it). Batch ids sit next to each other by
+    construction, so a near match must be judged GLOBALLY: a one-character typo of a sibling batch's
+    candidate is not an exact match to anything, and a repair that only looked at its own batch bound it to
+    the local neighbour ("cand-perf-0o4" is one edit from the sibling "cand-perf-004" and two from the local
+    "cand-perf-003") - the same misattribution through a typo. So a citation is repaired onto THIS batch's
+    candidate only when no sibling candidate explains it at least as well; otherwise it is left exactly as
+    the model wrote it and the ownership check rejects it.
     """
     cited = cited.strip() if isinstance(cited, str) else ""
     ids = [str(cid).strip() for cid in presented or () if isinstance(cid, str) and str(cid).strip()]
@@ -1764,33 +1787,38 @@ def repair_cited_candidate_id(cited: str,
         return None, "exact"
     if cited in elsewhere:
         return None, "belongs to another batch"
-    if len(cited) < REPAIR_MIN_CITED_LENGTH:
-        return None, "too short to identify one candidate"
-    for rule, matches in (
-        ("prefix", [cid for cid in ids if cid.startswith(cited)]),
-        ("substring", [cid for cid in ids if cited in cid]),
-    ):
-        unique = sorted(set(matches))
-        if len(unique) == 1:
-            return unique[0], rule
-        if len(unique) > 1:
-            return None, f"ambiguous {rule}: {len(unique)} candidates ({', '.join(unique[:3])})"
-    # A NEAR MATCH MUST BE STRICTLY CLOSEST, not merely within the limit: "cand-prf-003" is one edit
-    # from "cand-perf-003" and two from "cand-perf-004", so requiring the match to be unique AT ALL
-    # within the limit refused the very repair this exists for (measured while wiring the wiring the
-    # e2e). A tie at the minimum distance is still refused - that is real ambiguity.
-    distances = {}
-    for cid in ids:
-        distance = _bounded_edit_distance(cited, cid, REPAIR_MAX_EDITS)
-        if distance is not None:
-            distances[cid] = distance
-    if distances:
-        best = min(distances.values())
-        closest = sorted(cid for cid, distance in distances.items() if distance == best)
-        if len(closest) == 1:
-            return closest[0], "near"
-        return None, f"ambiguous near: {len(closest)} candidates at {best} edit(s) ({', '.join(closest[:3])})"
-    return None, "no unique match"
+
+    def scored(pool: Iterable[str]) -> List[Tuple[int, int, str]]:
+        rows = []
+        for candidate in pool:
+            rank, distance = _match_rank(cited, candidate)
+            if rank is not None:
+                rows.append((rank, distance, candidate))
+        return sorted(rows)
+
+    local = scored(ids)
+    siblings = scored(elsewhere)
+    if not local:
+        return None, "no unique match"
+    best_rank = local[0][0]
+    at_best = [(distance, candidate) for rank, distance, candidate in local if rank == best_rank]
+    if best_rank == 3:
+        best_distance = min(distance for distance, _ in at_best)
+        at_best = [(distance, candidate) for distance, candidate in at_best
+                   if distance == best_distance]
+    if len(at_best) > 1:
+        names = ", ".join(sorted(candidate for _, candidate in at_best)[:3])
+        return None, f"ambiguous {_REPAIR_RULE_NAMES[best_rank]}: {len(at_best)} candidates ({names})"
+    # A sibling candidate that explains the citation as well or better means the model was answering
+    # ANOTHER batch's candidate - the row must be rejected there, not attached to a local neighbour.
+    if siblings:
+        sibling_rank, sibling_distance, sibling_id = siblings[0]
+        if sibling_rank < best_rank or (sibling_rank == best_rank and (
+                best_rank != 3 or sibling_distance <= at_best[0][0])):
+            return None, (f"a sibling batch's candidate ({sibling_id}) explains it at least as well"
+                          if sibling_rank == best_rank else
+                          f"a sibling batch's candidate ({sibling_id}) matches more specifically")
+    return at_best[0][1], _REPAIR_RULE_NAMES[best_rank]
 
 
 def repair_cited_candidate_ids(rows: Any,
