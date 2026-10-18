@@ -53,6 +53,39 @@ class SchemaAgentCase(unittest.TestCase):
         (directory / "report.schema.json").write_text(json.dumps(THREAT_SCHEMA), encoding="utf-8")
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+class TestVulnTriageNullSnippetEndToEnd(SchemaAgentCase):
+    """agents-2scp8: the real dispatcher repairs optional nulls before store dispatch."""
+
+    @staticmethod
+    def schema():
+        return json.loads((ROOT / "agents/vuln-triage/report.schema.json").read_text())
+
+    def output(self, **extra):
+        findings = [{"rule_id": "r1", "path": f"a{i}.js", "severity": "high",
+                     "title": f"Candidate {i}", "description": "Checked", **extra}
+                    for i in range(3)]
+        return json.dumps({"summary": "triaged", "findings": findings})
+
+    def test_null_snippets_keep_the_verdict_and_reach_the_store(self):
+        self.box.agent("vuln-triage", self.output(snippet=None), report_schema=self.schema())
+        res = self.box.run_agent("vuln-triage")
+        self.assertTrue((res["run_dir"] / "normalised_fields.json").exists())
+        self.assertFalse((res["run_dir"] / "schema_errors.json").exists())
+        self.assertTrue(all("snippet" not in item for item in res["report"]["findings"]))
+        stored = json.loads((self.box.root / "findings/target.json").read_text())
+        self.assertEqual(len(stored["findings"]), 3, "all repaired findings reach the store")
+
+    def test_required_null_still_rejects_without_store_updates(self):
+        self.box.agent("vuln-triage", self.output(severity=None), report_schema=self.schema())
+        with self.assertRaisesRegex(factory_cli.NoVerdictError, "severity"):
+            self.box.run_agent("vuln-triage")
+        self.assertFalse((self.box.root / "findings/target.json").exists())
+        rejected = list((self.box.root / "runs").glob("vuln-triage-*/rejected_report.json"))
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(len(json.loads(rejected[0].read_text())["findings"]), 3)
+
+
 class TestFieldAliases(SchemaAgentCase):
     def test_gendn_shape_id_instead_of_rule_id_is_accepted(self):
         findings = [{"id": f"TM-{i}", "severity": "Low", "title": f"t{i}", "description": "d",
