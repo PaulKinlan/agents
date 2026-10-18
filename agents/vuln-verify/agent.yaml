@@ -12,6 +12,20 @@ capabilities:
   browser: false
   requires: []
 budget:
-  max_minutes: 5
+  # MEASURED on this repo's own runs (agents-exhhl): 5 cases took 142 s of model time, so a 21-case
+  # nightly is ~10 min of work. At 5 minutes the station could not finish the case list it is given even
+  # with one call, which is why the attempt-2 failure surfaced as a truncated answer and not a timeout.
+  # Batching splits the work into more calls (each with its own engine start), so the budget follows the
+  # case count rather than the call count.
+  max_minutes: 15
 output:
   schema: report.schema.json
+  # BOUNDED BATCHING (agents-exhhl, the machinery from agents-uxiks). The nightly died with "Response was
+  # truncated: the model reached its output token limit" on 21 candidates. Measured completion cost per
+  # case on this station: 3 candidates -> 11,722 B, 5 -> 18,522 B, i.e. ~3.7 KB per case, so 21 cases ask
+  # for ~74 KB of completion in one answer. 6 keeps an answer near 22 KB (a little above the 18.5 KB that
+  # completed cleanly) and the planner's 12 KB byte bound splits this station further on its own, because
+  # one case is ~4.2 KB of prompt. Raising the engine's output budget instead was the alternative offered
+  # on the bead and it is the wrong shape: the rn0ky lesson is that the binding constraint is the size of
+  # one completion, and a bigger cap only moves the cliff.
+  max_candidates_per_call: 6
