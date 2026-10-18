@@ -361,6 +361,27 @@ class TestTruncationIsNamed(BatchedStation):
         classification = sorted(run.glob("output_classification*.json"))
         self.assertTrue(classification, "the rejected batch's evidence must be kept")
 
+    def test_a_batched_failure_is_named_in_batch_vocabulary(self):
+        # agents-uetmr: the fallback path used to re-classify the CONCATENATION of every batch output -
+        # judging N answers as one string, writing an aggregate output_classification.json beside the
+        # per-batch evidence, calling it "batch 1/1", and pointing at a model_output.txt that batching
+        # renames. A batched run must keep the failing batch's own words and its own evidence file.
+        self.agent(AGENT_YAML)
+        self.stub(SCHEMA_BREAKING_STUB)
+        res = self.factory("pi")
+        self.assertNotEqual(res.returncode, 0)
+        run = self.run_dir()
+        self.assertFalse((run / "output_classification.json").exists(),
+                         "a batched run must not write an aggregate classification of the concatenation: "
+                         f"{sorted(p.name for p in run.glob('output_classification*'))}")
+        self.assertTrue((run / "output_classification.batch2.json").exists())
+        reason = (run / "failure_reason.txt").read_text(encoding="utf-8")
+        self.assertIn("batch 2/3", reason, f"the failing batch must be named: {reason}")
+        self.assertNotIn("batch 1/1", reason, f"never a single-call count in a batched run: {reason}")
+        self.assertIn("model_output.batch", reason, f"point at the batch answers: {reason}")
+        self.assertNotIn("model_output.txt", reason,
+                         f"batching renames that file, so it must not be named: {reason}")
+
     def test_prose_instead_of_a_report_is_no_json_not_a_truncation(self):
         self.agent(AGENT_YAML)
         self.stub(PROSE_STUB)
