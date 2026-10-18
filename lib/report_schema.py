@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from lib.embargo import is_false_positive
 from lib.findings import path_resolves_in_target
+from lib.line_numbers import usable_line_number
 
 _TYPE_CHECKS = {
     # bool is a subclass of int in Python, but never in JSON Schema.
@@ -764,6 +765,21 @@ SEVERITY_SYNONYMS = {
 _LOCATION = re.compile(r"^(?P<path>.*?[^:\s]):(?P<line>\d+)(?::(?P<col>\d+))?$")
 
 
+def _canonical_affected_location(value: Any) -> Optional[str]:
+    """Convert an exact structured path+line pair to the documented string form.
+
+    Unknown/invalid lines and richer objects must remain invalid for the schema to reject;
+    a fabricated :0 or a dropped extra field would hide malformed model output (agents-jwbts).
+    """
+    if not isinstance(value, dict) or set(value) != {"path", "line_number"}:
+        return None
+    path = value["path"]
+    if not isinstance(path, str) or not path.strip():
+        return None
+    line = usable_line_number(value["line_number"])
+    return f"{path.strip()}:{line}" if line is not None else None
+
+
 def _finding_item_schema(schema: Any) -> Dict[str, Any]:
     if not isinstance(schema, dict):
         return {}
@@ -824,8 +840,9 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
     Returns human-readable notes ("findings[0]: id -> rule_id"). Also: a `path:line` location
     is split, a digit-string line becomes an integer, and a severity is lower-cased and mapped
     from common synonyms (moderate -> medium). Null optional non-nullable string properties
-    are omitted, the schema-valid spelling of an unknown value. Required fields and non-string
-    properties remain for the schema to reject (agents-2scp8).
+    are omitted, the schema-valid spelling of an unknown value (agents-2scp8). Exact path+line
+    objects in a schema-declared affected_locations string array become path:line strings
+    (agents-jwbts). Required fields and other invalid properties remain for schema rejection.
     """
     notes: List[str] = []
     if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
@@ -854,6 +871,11 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
     declared = set(properties)
     required = set(item_schema.get("required", []) or [])
     enum = (properties.get("severity", {}) or {}).get("enum")
+    affected = properties.get("affected_locations")
+    affected_items = affected.get("items") if isinstance(affected, dict) else None
+    affected_is_string_array = (isinstance(affected, dict) and affected.get("type") == "array"
+                                and isinstance(affected_items, dict)
+                                and affected_items.get("type") == "string")
 
     for index, item in enumerate(report["findings"]):
         if not isinstance(item, dict):
@@ -878,6 +900,12 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
                     and field_schema.get("type") == "string"):
                 del item[field]
                 notes.append(f"findings[{index}]: {field} null -> omitted")
+        if affected_is_string_array and isinstance(item.get("affected_locations"), list):
+            for position, location in enumerate(item["affected_locations"]):
+                canonical = _canonical_affected_location(location)
+                if canonical is not None:
+                    item["affected_locations"][position] = canonical
+                    notes.append(f"findings[{index}]: affected_locations[{position}] dict -> string")
         line = item.get("line_number")
         if isinstance(line, str):
             try:
