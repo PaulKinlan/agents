@@ -73,7 +73,9 @@ SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "ProbeReport",
     "type": "object",
-    "required": ["summary", "findings"],
+    # perf-review's own schema requires `target` (agents/perf-review/report.schema.json), so the probe
+    # does too: a weaker probe left the per-batch contract untested at production strength (review).
+    "required": ["summary", "target", "findings"],
     "properties": {
         "summary": {"type": "string"},
         "target": {"type": "string"},
@@ -116,7 +118,7 @@ for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
 done
 joined=$(printf '%s,' "${ids[@]}")
 printf 'BATCH_IDS:%s\n' "${joined%,}"
-out='{"summary":"batched","findings":['
+out='{"summary":"batched","target":"probe-target","findings":['
 first=1
 for id in "${ids[@]}"; do
   if [ $first -eq 0 ]; then out="$out,"; fi
@@ -132,6 +134,15 @@ BATCH_STUB = IDS_AND_ROWS + r"""printf '%s]}\n' "$out"
 # The nightly's shape: the second batch's completion is CUT mid-string, leaving no decodable object.
 TRUNCATING_STUB = IDS_AND_ROWS + r"""if [[ " ${ids[*]} " == *" cand-perf-003 "* ]]; then
   printf '%s{"rule_id":"r","path":"p","snippet":"s","severity":"high","title":"t","description":"partial'
+else
+  printf '%s]}\n' "$out"
+fi
+"""
+
+# A per-batch CONTRACT failure: batch 2 answers in valid JSON but omits the required `target`, so that
+# batch is rejected on its own and the run must not record the other batches as a complete verdict.
+SCHEMA_BREAKING_STUB = IDS_AND_ROWS + r"""if [[ " ${ids[*]} " == *" cand-perf-003 "* ]]; then
+  printf '%s]}\n' "${out/,\"target\":\"probe-target\"/}"
 else
   printf '%s]}\n' "$out"
 fi
@@ -255,12 +266,36 @@ class TestTruncationIsNamed(BatchedStation):
         self.assertIn("TRUNCATED", reason)
         self.assertIn("batch 2/3", reason, f"the failure names WHICH batch was cut: {reason}")
 
-        classification = json.loads((run / "output_classification.json").read_text(encoding="utf-8"))
+        # PER BATCH: a single output_classification.json let one batch's evidence overwrite another's
+        # (found in review), so the artifact is tagged with the batch it describes.
+        self.assertTrue((run / "output_classification.batch2.json").exists(),
+                        f"batch 2's classification must be its own artifact: {sorted(p.name for p in run.glob('output_classification*'))}")
+        classification = json.loads((run / "output_classification.batch2.json").read_text(encoding="utf-8"))
         self.assertEqual(classification["kind"], "truncated")
         self.assertEqual(classification["batch"], 2)
         self.assertEqual(classification["batches"], 3)
+        self.assertEqual(classification["batches_with_output"], 3)
         self.assertTrue(classification["in_string_at_end"],
                         "the nightly's shape: the completion ended inside a string")
+
+    def test_a_batch_that_breaks_the_report_contract_fails_alone(self):
+        # The per-batch contract clause: batch 2 omits a required field while batches 1 and 3 are
+        # complete. The run must fail, name the batch and the violation, and must NOT settle the
+        # other batches' findings as a verdict - a partial triage is not a clean result.
+        self.agent(AGENT_YAML)
+        self.stub(SCHEMA_BREAKING_STUB)
+        res = self.factory("pi")
+        self.assertNotEqual(res.returncode, 0, "a schema violation in one batch must fail the run")
+        run = self.run_dir()
+        failure = (run / "failure_reason.txt").read_text(encoding="utf-8") if (run / "failure_reason.txt").exists() else ""
+        combined = failure + res.stdout + res.stderr
+        self.assertIn("schema", combined.lower(), f"the violation must be named: {combined[-400:]}")
+        self.assertIn("batch 2/3", combined, f"the failing batch must be named: {combined[-400:]}")
+        # The other batches DID answer, and the point is that their rows are not settled as a verdict:
+        self.assertTrue((run / "model_output.batch1.txt").exists())
+        self.assertTrue((run / "model_output.batch3.txt").exists())
+        classification = sorted(run.glob("output_classification*.json"))
+        self.assertTrue(classification, "the rejected batch's evidence must be kept")
 
     def test_prose_instead_of_a_report_is_no_json_not_a_truncation(self):
         self.agent(AGENT_YAML)
@@ -268,7 +303,9 @@ class TestTruncationIsNamed(BatchedStation):
         res = self.factory("pi")
         self.assertNotEqual(res.returncode, 0)
         run = self.run_dir()
-        classification = json.loads((run / "output_classification.json").read_text(encoding="utf-8"))
+        classification_files = sorted(run.glob("output_classification*.json"))
+        self.assertTrue(classification_files, f"the classification must be kept: {sorted(p.name for p in run.iterdir())}")
+        classification = json.loads(classification_files[0].read_text(encoding="utf-8"))
         self.assertEqual(classification["kind"], "no_json")
 
 

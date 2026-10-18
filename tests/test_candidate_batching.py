@@ -190,6 +190,23 @@ class TestClassifyUnparseable(unittest.TestCase):
         self.assertEqual(verdict, "no_json")
         self.assertFalse(evidence["in_string_at_end"])
 
+    def test_prose_that_ends_in_a_quote_is_not_called_truncation(self):
+        # Found in review: "ends inside a string" taken on its own called prose with a trailing
+        # quote truncated, sending an operator after a token limit that was never hit. Without any
+        # JSON structure there is nothing to have been cut.
+        verdict, _ = classify_unparseable('The model said "no findings here" and then "')
+        self.assertEqual(verdict, "no_json")
+
+    def test_a_bare_array_cut_between_elements_is_called_truncation(self):
+        # A report may legally be a bare array; a cut between its elements leaves no string open and
+        # its braces balanced, so only bracket counting can tell it from prose (found in review).
+        verdict, evidence = classify_unparseable(
+            '[{"candidate_id": "cand-perf-000"}, {"candidate_id": "cand-perf-001"}')
+        self.assertEqual(verdict, "truncated")
+        self.assertEqual(evidence["open_brackets"], 1)
+        self.assertEqual(evidence["close_brackets"], 0)
+        self.assertFalse(evidence["in_string_at_end"])
+
     def test_an_empty_output_is_no_json_with_an_explicit_flag(self):
         for text in ("", "   ", None):
             verdict, evidence = classify_unparseable(text)
@@ -216,15 +233,44 @@ class TestClassifyUnparseable(unittest.TestCase):
         self.assertEqual(evidence["ids_seen"], 45)
         self.assertEqual(evidence["last_id"], "cand-perf-044")
 
-    def test_truncation_message_names_batch_bytes_and_unaccounted_ids(self):
+    def test_truncation_message_names_batch_bytes_and_visible_ids(self):
         text = self._cut_report(range(45))
         _, evidence = classify_unparseable(text)
         message = describe_truncation(evidence, batch_index=2, batch_count=6,
                                       expected_ids=[f"cand-perf-{i:03d}" for i in range(8)])
         self.assertIn("batch 3/6", message)
         self.assertIn("TRUNCATED mid-JSON", message)
-        self.assertIn("0/8 candidate id(s) visible", message)
-        self.assertIn("cand-perf-000", message)
+        # ALL EIGHT are visible in this fragment (it holds rows 0..44), so none may be called
+        # unaccounted. This assertion used to read "0/8": the evidence kept only the last five ids,
+        # which made the message name ids it had actually seen (found in review) - the accounting is
+        # the whole point of the line, so it is now counted over every id in the fragment.
+        self.assertIn("8/8 candidate id(s) visible", message)
+        self.assertNotIn("unaccounted", message)
+
+    def test_only_candidates_the_fragment_lacks_are_named_unaccounted(self):
+        # The reviewer's exact shape: a fragment holding 7 of 8 ids. The eighth is the only thing
+        # that may be reported as missing, whatever order it sits in.
+        ids = [f"cand-perf-{i:03d}" for i in range(8)]
+        rows = ", ".join(json.dumps({"candidate_id": cid, "rule_id": "r", "path": "p",
+                                     "line_number": 1, "title": "t"}) for cid in ids[:7])
+        text = '{"findings": [' + rows + ', {"candidate_id": "cand-perf-00'
+        _, evidence = classify_unparseable(text)
+        message = describe_truncation(evidence, batch_index=0, batch_count=1, expected_ids=ids)
+        self.assertIn("7/8 candidate id(s) visible", message)
+        missing_clause = message.split("first unaccounted:", 1)[-1]
+        self.assertIn("cand-perf-007", missing_clause)
+        for cid in ids[:7]:
+            self.assertNotIn(cid, missing_clause, f"a VISIBLE id was named unaccounted: {message}")
+
+    def test_a_run_that_stopped_early_says_which_batches_never_ran(self):
+        # A three-batch plan whose first batch was cut must not read as "batch 1/1": the run's shape
+        # is three batches and two of them never ran (found in review).
+        _, evidence = classify_unparseable('{"summary": "cut')
+        message = describe_truncation(evidence, batch_index=0, batch_count=3,
+                                      produced_batches=1)
+        self.assertIn("batch 1/3", message)
+        self.assertIn("only 1 of 3 planned batch(es) produced output", message)
+        self.assertIn("later batches never ran", message)
 
     def test_truncation_message_says_so_when_no_ids_were_supplied(self):
         _, evidence = classify_unparseable('{"summary": "cut')

@@ -201,6 +201,8 @@ def _scan_json_structure(text: str) -> Dict[str, Any]:
     depth = 0
     opens = 0
     closes = 0
+    open_brackets = 0
+    close_brackets = 0
     in_string = False
     escaped = False
     for char in text:
@@ -221,10 +223,19 @@ def _scan_json_structure(text: str) -> Dict[str, Any]:
             if depth > 0:
                 depth -= 1
             closes += 1
+        elif char == "[":
+            # A BARE-ARRAY report is a legal JSON shape and a completion can be cut between its
+            # elements without any string being left open, so brackets are structure too
+            # (found in review: `[{"a": 1}, {"b"` used to be called "no JSON at all").
+            open_brackets += 1
+        elif char == "]":
+            close_brackets += 1
     return {
         "depth": depth,
         "open_braces": opens,
         "close_braces": closes,
+        "open_brackets": open_brackets,
+        "close_brackets": close_brackets,
         "in_string_at_end": in_string,
         "escaped_at_end": escaped,
     }
@@ -251,19 +262,29 @@ def classify_unparseable(text: Optional[str]) -> Tuple[str, Dict[str, Any]]:
     evidence.update(scan)
     evidence["bytes"] = len(text.encode("utf-8"))
     evidence["ids_seen"] = len(ids)
-    evidence["ids"] = ids[-5:]
+    # ALL of them, not the last five: describe_truncation counts what the fragment still contains,
+    # and a five-id window made it report EARLIER (visible) ids as "unaccounted" (found in review).
+    # The list is bounded by the batch that produced it.
+    evidence["ids"] = ids
     evidence["last_id"] = ids[-1] if ids else None
     evidence["tail"] = text[-_TAIL_CHARS:]
 
-    truncated = bool(scan["in_string_at_end"]
-                     or scan["depth"] > 0
-                     or scan["open_braces"] > scan["close_braces"])
+    # A TRUNCATION VERDICT NEEDS JSON TO HAVE BEEN THERE. Taking "ends inside a string" on its own
+    # called ordinary prose that happened to end in a quote "truncated", which sends an operator
+    # looking for a token limit that was never hit (found in review). Structure - a brace or a
+    # bracket anywhere - is required before any cut can be attributed to an output bound.
+    has_structure = bool(scan["open_braces"] or scan["open_brackets"])
+    truncated = bool(has_structure and (scan["in_string_at_end"]
+                                        or scan["depth"] > 0
+                                        or scan["open_braces"] > scan["close_braces"]
+                                        or scan["open_brackets"] > scan["close_brackets"]))
     return ("truncated" if truncated else "no_json"), evidence
 
 
 def describe_truncation(evidence: Dict[str, Any], *,
                         batch_index: int, batch_count: int,
-                        expected_ids: Sequence[str] = ()) -> str:
+                        expected_ids: Sequence[str] = (),
+                        produced_batches: Optional[int] = None) -> str:
     """One operator-facing line naming the truncation, its batch and the work it lost.
 
     Deliberately concrete: a nightly reader needs to know WHICH batch was cut, how many bytes
@@ -284,4 +305,9 @@ def describe_truncation(evidence: Dict[str, Any], *,
         f"{'ends inside a string' if evidence.get('in_string_at_end') else 'unclosed structure'}); "
         f"{accounted}"
         + (f"; first unaccounted: {', '.join(missing[:5])}" if missing else "")
+        # The count above is the batches that PLANNED, so a run that stopped after batch 1 of 3 must
+        # not read as "batch 1/1": say how many produced output and that the rest never ran.
+        + (f"; only {produced_batches} of {batch_count} planned batch(es) produced output - "
+           f"the later batches never ran"
+           if produced_batches is not None and produced_batches < batch_count else "")
     )

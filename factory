@@ -1005,29 +1005,39 @@ def parse_station_report(raw_output: str, *, agent_dir: Path, agent_cfg: Any,
 
 def name_parse_failure(raw_output: str, reason: str, *, run_dir: Path, agent_name: str,
                        batch_index: Optional[int] = None, batch_count: Optional[int] = None,
-                       expected_ids: Sequence[str] = ()) -> str:
+                       expected_ids: Sequence[str] = (),
+                       produced_batches: Optional[int] = None) -> str:
     """Turn an unusable output into a NAMED failure: truncated vs no-JSON, with the evidence kept.
 
     rn0ky: a completion cut by an output bound used to reach the operator as "no verdict", which reads
     as a model that ignored the contract and sends nobody looking for a token limit. The classification
-    is structural (ends inside a string, or unclosed braces) and is written to
-    `output_classification.json` in the run directory either way, so the two failures stay tellable
-    apart after the fact.
+    is structural (ends inside a string, or unclosed braces/brackets) and is written to
+    `output_classification<.batchK>.json` in the run directory either way, so the two failures stay
+    tellable apart after the fact AND one batch's classification cannot overwrite another's (found in
+    review: a single file kept only the last batch's evidence).
     """
     kind, evidence = classify_unparseable(raw_output)
+    tag = f".batch{batch_index + 1}" if batch_index is not None else ""
     record = {"kind": kind, "reason": reason}
     if batch_index is not None and batch_count is not None:
         record["batch"] = batch_index + 1
+        # PLANNED, not produced: "batch 2/3" is the run's shape; how many got as far as output is
+        # in `produced_batches` below (found in review: a run that stopped early read as "1/1").
         record["batches"] = batch_count
+        if produced_batches is not None:
+            record["batches_with_output"] = produced_batches
     record.update(evidence)
-    _write_run_artifact(run_dir / "output_classification.json", json.dumps(record, indent=2))
+    artifact = run_dir / f"output_classification{tag}.json"
+    _write_run_artifact(artifact, json.dumps(record, indent=2))
     if kind == "truncated":
         named = describe_truncation(
             evidence,
             batch_index=batch_index if batch_index is not None else 0,
             batch_count=batch_count if batch_count is not None else 1,
-            expected_ids=expected_ids)
-        return f"{agent_name}: model output was TRUNCATED - {named} (evidence in output_classification.json)"
+            expected_ids=expected_ids,
+            produced_batches=produced_batches)
+        return (f"{agent_name}: model output was TRUNCATED - {named} "
+                f"(evidence in {artifact.name})")
     return reason
 
 
@@ -1898,8 +1908,6 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             batch_prompt_file = run_dir / f"prompt{tag}.txt"
             _write_run_artifact(batch_prompt_file, batch_prompt)
             os.chmod(batch_prompt_file, 0o600)
-            if batch_count == 1:
-                prompt = batch_prompt
         batched = batch_count > 1
 
         # agents-m2n: the directive file for the adapter's system channel. run_dir is
@@ -2353,10 +2361,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                     _batch_raw, agent_dir=agent_dir, agent_cfg=agent_cfg,
                     target_dir=target_dir, run_dir=run_dir, tag=_tag)
                 if _part is None:
-                    batch_failure = (_reason or "unparseable output") + f" (batch {_batch_index + 1}/{len(batch_output_files)})"
+                    # The PLANNED count is the run's shape; len(batch_output_files) only says how many
+                    # batches produced output before the loop broke, and reporting that as the total
+                    # read a three-batch run that stopped after batch one as "batch 1/1" (review).
+                    batch_failure = (_reason or "unparseable output") + f" (batch {_batch_index + 1}/{batch_count})"
                     _named = name_parse_failure(
                         _batch_raw, batch_failure, run_dir=run_dir, agent_name=agent_name,
-                        batch_index=_batch_index, batch_count=len(batch_output_files),
+                        batch_index=_batch_index, batch_count=batch_count,
+                        produced_batches=len(batch_output_files),
                         expected_ids=batch_candidate_ids(batches[_batch_index])
                         if _batch_index < len(batches) else ())
                     if _named.startswith(f"{agent_name}: model output was TRUNCATED"):
