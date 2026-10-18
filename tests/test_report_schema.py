@@ -493,6 +493,51 @@ class TestNormalizeReport(unittest.TestCase):
         self.assertEqual(report["scanned_files"], "²")
 
 
+class TestNullOptionalTriageStrings(unittest.TestCase):
+    """agents-2scp8: a missing scanner snippet must not discard a whole triage report."""
+
+    @staticmethod
+    def schema():
+        return json.loads((FACTORY_ROOT / "agents/vuln-triage/report.schema.json").read_text())
+
+    @staticmethod
+    def finding(**extra):
+        return {"rule_id": "r1", "path": "a.js", "severity": "high", "title": "Reachable",
+                "description": "Root cause", **extra}
+
+    def test_eighteen_null_optional_snippets_are_omitted_before_validation(self):
+        schema = self.schema()
+        report = {"summary": "triaged", "findings": [self.finding(snippet=None) for _ in range(18)]}
+        self.assertEqual(len(validate(report, schema)), 18,
+                         "precondition: every null snippet rejects the unnormalised report")
+        notes = normalize_report(report, schema)
+        self.assertEqual(validate(report, schema), [])
+        self.assertEqual(sum("snippet null -> omitted" in note for note in notes), 18)
+        self.assertTrue(all("snippet" not in finding for finding in report["findings"]))
+
+    def test_null_canonical_snippet_prefers_real_alias_before_omission(self):
+        report = {"summary": "s", "findings": [self.finding(snippet=None, code="eval(user)")]}
+        notes = normalize_report(report, self.schema())
+        self.assertEqual(report["findings"][0]["snippet"], "eval(user)")
+        self.assertIn("findings[0]: code -> snippet", notes)
+        self.assertEqual(validate(report, self.schema()), [])
+
+    def test_required_and_non_string_fields_still_reject_invalid_values(self):
+        schema = self.schema()
+        for field, value in (("severity", None), ("snippet", 42),
+                             ("covered_candidate_ids", None), ("false_positive", None)):
+            with self.subTest(field=field):
+                report = {"summary": "s", "findings": [self.finding(**{field: value})]}
+                normalize_report(report, schema)
+                errors = validate(report, schema)
+                self.assertTrue(any(field in error for error in errors), errors)
+
+    def test_non_null_canonical_snippet_is_not_replaced_by_alias(self):
+        report = {"summary": "s", "findings": [self.finding(snippet="scanner", code="model")]}
+        normalize_report(report, self.schema())
+        self.assertEqual(report["findings"][0]["snippet"], "scanner")
+
+
 class TestUnlocatableVerdicts(unittest.TestCase):
     """agents-0tl (D): a verifier cannot adjudicate a record it cannot locate.
 

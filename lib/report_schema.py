@@ -736,8 +736,8 @@ def validate_agent_report(agent_dir: Path, agent_cfg: MappingABC, report: Any,
 # produced unusable output; it has used a synonym. Rejecting the whole report for that turned a
 # 23KB threat model into "no verdict" and halted the line. Before validation, each finding's
 # well-known synonyms are mapped onto the canonical names the findings store reads. Only a
-# canonical field that is *absent* is filled, only from an alias that is not itself a declared
-# property, and every mapping is reported. The schema still decides: a report that is still
+# canonical field that is *absent* or null is filled, only from an alias that is not itself a
+# declared property, and every mapping is reported. The schema still decides: a report that is still
 # non-conformant after this is rejected exactly as before.
 # ---------------------------------------------------------------------------------------------
 
@@ -823,7 +823,9 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
 
     Returns human-readable notes ("findings[0]: id -> rule_id"). Also: a `path:line` location
     is split, a digit-string line becomes an integer, and a severity is lower-cased and mapped
-    from common synonyms (moderate -> medium). Anything else is left for the schema to judge.
+    from common synonyms (moderate -> medium). Null optional non-nullable string properties
+    are omitted, the schema-valid spelling of an unknown value. Required fields and non-string
+    properties remain for the schema to reject (agents-2scp8).
     """
     notes: List[str] = []
     if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
@@ -848,14 +850,16 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
             notes.append(f"scanned_files: dict -> integer {val}")
 
     item_schema = _finding_item_schema(schema)
-    declared = set(item_schema.get("properties", {}) or {})
-    enum = (item_schema.get("properties", {}).get("severity", {}) or {}).get("enum")
+    properties = item_schema.get("properties", {}) or {}
+    declared = set(properties)
+    required = set(item_schema.get("required", []) or [])
+    enum = (properties.get("severity", {}) or {}).get("enum")
 
     for index, item in enumerate(report["findings"]):
         if not isinstance(item, dict):
             continue
         for canonical, aliases in FINDING_FIELD_ALIASES.items():
-            if canonical in item:
+            if canonical in item and item[canonical] is not None:
                 continue
             for alias in aliases:
                 if alias in item and alias not in declared and item[alias] not in (None, ""):
@@ -868,6 +872,12 @@ def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> Li
                     item[canonical] = value
                     notes.append(f"findings[{index}]: {alias} -> {canonical}")
                     break
+        for field, value in list(item.items()):
+            field_schema = properties.get(field)
+            if (value is None and field not in required and isinstance(field_schema, dict)
+                    and field_schema.get("type") == "string"):
+                del item[field]
+                notes.append(f"findings[{index}]: {field} null -> omitted")
         line = item.get("line_number")
         if isinstance(line, str):
             try:
