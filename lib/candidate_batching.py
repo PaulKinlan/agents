@@ -128,6 +128,41 @@ def batch_candidate_ids(batch: Iterable[Any]) -> List[str]:
     return ids
 
 
+def validate_batch_attribution(findings: Any, *, batch_ids: Sequence[str],
+                              batch_index: Optional[int] = None,
+                              all_batch_ids: Optional[Sequence[Sequence[str]]] = None) -> None:
+    """Refuse a report row that cites a candidate THIS batch was not shown (agents-5230a).
+
+    A batched station is told to answer only for its own batch, and aggregate candidate coverage is
+    satisfied by distinct ids - so a report can reach the merge attributing candidate 001 to the call
+    that was shown candidate 000 and still look complete. That is a wrong verdict attached to the
+    wrong code location, which no later accounting check can see. This is checked per batch, before
+    the merge, and names both the id and where it was actually presented.
+    """
+    if not batch_ids:
+        return  # a batch with no ids cannot be checked by identity; count accounting owns that case
+    own = {cid for cid in batch_ids if isinstance(cid, str) and cid}
+    elsewhere: Dict[str, int] = {}
+    for index, ids in enumerate(all_batch_ids or ()):
+        if index == batch_index:
+            continue
+        for cid in ids:
+            if isinstance(cid, str) and cid and cid not in own:
+                elsewhere.setdefault(cid, index + 1)
+    for row in findings if isinstance(findings, list) else ():
+        if not isinstance(row, dict):
+            continue
+        cid = row.get("candidate_id")
+        if not isinstance(cid, str) or not cid.strip() or cid.strip() in own:
+            continue
+        cid = cid.strip()
+        where = (f"; it belongs to batch {elsewhere[cid]}" if cid in elsewhere
+                 else "; it was not presented in any batch")
+        raise BatchMergeError(
+            f"batch {batch_index + 1 if batch_index is not None else '?'} cited candidate_id "
+            f"{cid!r}, which it was not shown{where} - a row may only answer a candidate in its own batch")
+
+
 def merge_reports(parts: Sequence[Dict[str, Any]], *,
                   summary: Optional[str] = None,
                   target: Optional[str] = None) -> Dict[str, Any]:

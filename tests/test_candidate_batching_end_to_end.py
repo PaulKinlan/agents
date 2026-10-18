@@ -254,6 +254,70 @@ class TestBoundedBatching(BatchedStation):
         self.assertTrue((run / "prompt.txt").exists())
 
 
+# agents-gwucz: TWO candidates against a bound of EIGHT. The count fits, the BYTES do not (7 KB each
+# against a 12 KB batch budget), so the plan must split on the byte bound - the dispatcher used to
+# invoke the planner only when the count was exceeded.
+BIG_PREPASS = '''
+import argparse, json
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--output")
+args, _unknown = parser.parse_known_args()
+candidates = [{"candidate_id": f"cand-perf-{i:03d}", "rule_id": "layout-thrashing-forced-reflow",
+               "path": f"src/big{i}.ts", "line_number": i + 1, "severity": "high",
+               "snippet": "x" * 7000} for i in range(2)]
+open(args.output, "w", encoding="utf-8").write(json.dumps({"candidates": candidates}))
+'''
+
+# A stub that answers with the LAST three ids whatever batch it is given, so batch 1 attributes rows to
+# candidates that were presented in a later batch.
+SWAPPED_IDS_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+cat > /dev/null
+out='{"summary":"swapped","target":"probe-target","findings":['
+first=1
+for id in cand-perf-005 cand-perf-006 cand-perf-007; do
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"r\",\"path\":\"src/$id.ts\",\"line_number\":1,\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"$id\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestBatchingIsDecidedByThePlan(BatchedStation):
+    def test_a_small_list_of_big_candidates_is_still_split(self):
+        self.agent(AGENT_YAML.replace("max_candidates_per_call: 3", "max_candidates_per_call: 8"))
+        (self.root / "agents" / "probe" / "scripts" / "prepass.py").write_text(BIG_PREPASS, encoding="utf-8")
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        prompts = sorted(p.name for p in run.glob("prompt.batch*.txt"))
+        self.assertEqual(prompts, ["prompt.batch1.txt", "prompt.batch2.txt"],
+                         f"2 candidates over the byte bound must be 2 calls, not 1: {prompts}")
+        self.assertTrue((run / "model_output.batch1.txt").exists())
+        self.assertTrue((run / "model_output.batch2.txt").exists())
+
+
+class TestCrossBatchAttribution(BatchedStation):
+    def test_a_batch_answering_another_batch_s_candidates_fails_the_run(self):
+        self.agent(AGENT_YAML)
+        self.stub(SWAPPED_IDS_STUB)
+        res = self.factory("pi")
+        self.assertNotEqual(res.returncode, 0,
+                            "a batch that answers another batch's candidates must not be merged")
+        run = self.run_dir()
+        combined = ""
+        for name in ("failure_reason.txt",):
+            path = run / name
+            if path.exists():
+                combined += path.read_text(encoding="utf-8")
+        combined += res.stdout + res.stderr
+        self.assertIn("batch 1", combined, f"the offending batch must be named: {combined[-500:]}")
+        self.assertIn("cand-perf-005", combined, f"the misattributed id must be named: {combined[-500:]}")
+
+
 class TestTruncationIsNamed(BatchedStation):
     def test_a_batch_cut_mid_json_is_a_named_truncation_error(self):
         self.agent(AGENT_YAML)

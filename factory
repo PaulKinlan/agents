@@ -41,7 +41,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
                                         classify_unparseable, describe_truncation, merge_reports,
-                                        plan_batches)
+                                        plan_batches, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -74,7 +74,7 @@ except ImportError:
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
                                         classify_unparseable, describe_truncation, merge_reports,
-                                        plan_batches)
+                                        plan_batches, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -1859,27 +1859,35 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # nobody as a truncation because the parser could only say "no verdict".
         max_per_call = max_candidates_per_call(agent_cfg)
         batch_count = 1
-        if max_per_call and isinstance(candidates_slice, list) and len(candidates_slice) > max_per_call:
+        # DECIDED BY THE PLAN, NOT BY THE COUNT (agents-gwucz): the byte bound is part of the bound, so
+        # two 7 KB candidates against a 12 KB batch budget must split even though 2 <= max_per_call.
+        # Gating on len(...) > max_per_call meant the byte limit only ever applied to lists that were
+        # already too long by count, which is exactly the case that never needed it.
+        if max_per_call and isinstance(candidates_slice, list):
             try:
-                batches = plan_batches(candidates_slice, max_per_call)
+                planned = plan_batches(candidates_slice, max_per_call)
             except BatchPlanError as e:
                 raise StationError(f"{agent_name}: cannot bound the candidate list into batches: {e}")
-            batch_count = len(batches)
-            presented = {
-                "max_candidates_per_call": max_per_call,
-                "batch_count": batch_count,
-                "presented": len(candidates_slice),
-                "candidate_ids": [cid for batch in batches for cid in batch_candidate_ids(batch)],
-                "batches": [batch_candidate_ids(batch) for batch in batches],
-            }
+            if len(planned) > 1:
+                batches = planned
+                batch_count = len(planned)
+                presented = {
+                    "max_candidates_per_call": max_per_call,
+                    "batch_count": batch_count,
+                    "presented": len(candidates_slice),
+                    "candidate_ids": [cid for batch in batches for cid in batch_candidate_ids(batch)],
+                    "batches": [batch_candidate_ids(batch) for batch in batches],
+                }
             # Written BEFORE the engine runs: the accounting check reads what was PRESENTED, and a
             # batched run serialises every candidate it presents across N prompts rather than asking
             # for the first CANDIDATE_PROMPT_SLICE of them in one answer. The list being batched is
             # still that bounded slice - see lib/findings.read_presented_candidate_ids.
-            _write_run_artifact(run_dir / "presented_candidates.json",
-                                json.dumps(presented, indent=2))
-            print(f"-> Batching {len(candidates_slice)} candidate(s) into {batch_count} call(s) "
-                  f"of at most {max_per_call}.")
+                _write_run_artifact(run_dir / "presented_candidates.json",
+                                    json.dumps(presented, indent=2))
+                print(f"-> Batching {len(candidates_slice)} candidate(s) into {batch_count} call(s) "
+                      f"of at most {max_per_call}.")
+            else:
+                batches = [candidates_slice]
         else:
             batches = [candidates_slice]
 
@@ -2375,6 +2383,25 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         _write_run_artifact(run_dir / "failure_reason.txt", _named + "\n")
                         raise OutputTruncatedError(
                             f"{_named}; no verdict (raw output kept in {_batch_file})")
+                    batch_failure = _named
+                    break
+                try:
+                    # PER-BATCH CONTRACT: a row may only answer a candidate THIS batch was shown
+                    # (agents-5230a). Distinct ids satisfied the accounting check while attributing a
+                    # candidate to a call that never saw it.
+                    validate_batch_attribution(
+                        _part.get("findings"), batch_ids=batch_candidate_ids(batches[_batch_index])
+                        if _batch_index < len(batches) else (),
+                        batch_index=_batch_index,
+                        all_batch_ids=[batch_candidate_ids(b) for b in batches])
+                except BatchMergeError as e:
+                    batch_failure = str(e)
+                    _named = name_parse_failure(
+                        _batch_raw, batch_failure, run_dir=run_dir, agent_name=agent_name,
+                        batch_index=_batch_index, batch_count=batch_count,
+                        produced_batches=len(batch_output_files),
+                        expected_ids=batch_candidate_ids(batches[_batch_index])
+                        if _batch_index < len(batches) else ())
                     batch_failure = _named
                     break
                 batch_reports.append(_part)

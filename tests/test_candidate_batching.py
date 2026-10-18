@@ -20,6 +20,7 @@ from lib.candidate_batching import (
     describe_truncation,
     merge_reports,
     plan_batches,
+    validate_batch_attribution,
 )
 
 
@@ -160,6 +161,40 @@ class TestMergeReports(unittest.TestCase):
         merged = merge_reports([report([0, 1]), report([2])])
         self.assertEqual(merged["summary"],
                          "Merged 2 bounded batch report(s): 3 row(s) across 3 cited candidate id(s).")
+
+
+class TestValidateBatchAttribution(unittest.TestCase):
+    """agents-5230a: distinct ids satisfy aggregate coverage while attributing a candidate to a call
+    that never saw it. The check is per batch and names both the id and where it belongs."""
+
+    def test_a_row_citing_another_batch_s_candidate_is_refused(self):
+        with self.assertRaises(BatchMergeError) as ctx:
+            validate_batch_attribution([{"candidate_id": "cand-perf-001"}],
+                                       batch_ids=["cand-perf-000"], batch_index=0,
+                                       all_batch_ids=[["cand-perf-000"], ["cand-perf-001"]])
+        message = str(ctx.exception)
+        self.assertIn("cand-perf-001", message)
+        self.assertIn("batch 2", message, f"it must say where the id belongs: {message}")
+
+    def test_an_invented_candidate_id_is_refused(self):
+        with self.assertRaises(BatchMergeError) as ctx:
+            validate_batch_attribution([{"candidate_id": "cand-perf-999"}],
+                                       batch_ids=["cand-perf-000"], batch_index=0,
+                                       all_batch_ids=[["cand-perf-000"]])
+        self.assertIn("not presented in any batch", str(ctx.exception))
+
+    def test_a_row_answering_its_own_batch_is_accepted(self):
+        validate_batch_attribution([{"candidate_id": "cand-perf-000"},
+                                    {"candidate_id": "cand-perf-001"}],
+                                   batch_ids=["cand-perf-000", "cand-perf-001"], batch_index=0,
+                                   all_batch_ids=[["cand-perf-000", "cand-perf-001"]])
+
+    def test_rows_without_an_id_are_left_to_count_accounting(self):
+        # A dismissal row may omit candidate_id; identity is not the only contract, so no raise here.
+        validate_batch_attribution([{"path": "src/x.ts", "false_positive": True}],
+                                   batch_ids=["cand-perf-000"], batch_index=0,
+                                   all_batch_ids=[["cand-perf-000"]])
+        validate_batch_attribution([], batch_ids=[], batch_index=0, all_batch_ids=[[]])
 
 
 class TestClassifyUnparseable(unittest.TestCase):
