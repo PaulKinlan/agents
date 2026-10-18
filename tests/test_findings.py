@@ -1896,6 +1896,16 @@ class TestCandidateCoverage(unittest.TestCase):
         self.assertIsNone(repaired)
         self.assertIn("ambiguous", rule)
 
+    def test_another_batchs_exact_id_is_never_repaired_onto_a_near_neighbour(self):
+        """agents-fv5uk. Batch ids sit one edit apart, so an unguarded near rule silently re-attached a row
+        naming batch 3's candidate to batch 2's - the reviewer's repro, before this guard."""
+        own, sibling = ["cand-perf-003"], ["cand-perf-004"]
+        self.assertEqual(repair_cited_candidate_id(sibling[0], own, foreign=sibling),
+                         (None, "belongs to another batch"))
+        # the SAME near match is still allowed when the cited id belongs to no other batch
+        self.assertEqual(repair_cited_candidate_id("cand-prf-003", own + sibling),
+                         ("cand-perf-003", "near"))
+
     def test_repairs_are_recorded_and_make_a_complete_answer_accountable(self):
         presented = ["4e8820782eed4e17", "05622f455345d483"]
         rows = [{"candidate_id": "4e8820782eed17", "path": "a.py"},

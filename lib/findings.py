@@ -1738,20 +1738,32 @@ def _bounded_edit_distance(left: str, right: str, limit: int) -> Optional[int]:
 
 
 def repair_cited_candidate_id(cited: str,
-                              presented: Iterable[str]) -> Tuple[Optional[str], str]:
+                              presented: Iterable[str],
+                              foreign: Iterable[str] = ()) -> Tuple[Optional[str], str]:
     """`(presented_id, rule)` when exactly ONE presented id can explain `cited`, else `(None, reason)`.
 
     Rules, most specific first: `exact`, then a unique PREFIX (the model truncated the tail), then a
     unique SUBSTRING (the model copied a fragment), then a unique NEAR MATCH within
     REPAIR_MAX_EDITS edits - the deletion shape that actually occurred. Ties are never resolved by
     preference: two candidates within reach means the cited id is ambiguous and must stay unrepaired.
+
+    `foreign` is the ids presented to OTHER batches (agents-fv5uk). A citation that IS another batch's
+    candidate must never be repaired onto a near neighbour here: batch ids sit next to each other by
+    construction ("cand-perf-003" is one edit from "cand-perf-004"), so without this guard a row naming
+    batch 3's candidate is silently re-attached to batch 2's - exactly the laundering the per-batch
+    ownership check exists to stop. Measured before the guard: repair_cited_candidate_id("cand-perf-004",
+    ["cand-perf-003"]) returned ("cand-perf-003", "near"), and attribution then accepted a foreign answer.
     """
     cited = cited.strip() if isinstance(cited, str) else ""
     ids = [str(cid).strip() for cid in presented or () if isinstance(cid, str) and str(cid).strip()]
+    elsewhere = {str(cid).strip() for cid in foreign or ()
+                 if isinstance(cid, str) and str(cid).strip()}
     if not cited:
         return None, "blank"
     if cited in ids:
         return None, "exact"
+    if cited in elsewhere:
+        return None, "belongs to another batch"
     if len(cited) < REPAIR_MIN_CITED_LENGTH:
         return None, "too short to identify one candidate"
     for rule, matches in (
@@ -1782,7 +1794,8 @@ def repair_cited_candidate_id(cited: str,
 
 
 def repair_cited_candidate_ids(rows: Any,
-                               presented: Iterable[str]) -> List[Dict[str, Any]]:
+                               presented: Iterable[str],
+                               foreign: Iterable[str] = ()) -> List[Dict[str, Any]]:
     """Rewrite `candidate_id` in place on rows where a UNIQUE repair exists; return the repairs.
 
     Returns one record per rewritten row ({cited, repaired, rule, path}) so the repair is auditable in
@@ -1795,7 +1808,7 @@ def repair_cited_candidate_ids(rows: Any,
         cited = row.get("candidate_id")
         if not isinstance(cited, str) or not cited.strip():
             continue
-        repaired, rule = repair_cited_candidate_id(cited, presented)
+        repaired, rule = repair_cited_candidate_id(cited, presented, foreign=foreign)
         if repaired is None:
             continue
         row["candidate_id"] = repaired

@@ -1005,7 +1005,8 @@ def parse_station_report(raw_output: str, *, agent_dir: Path, agent_cfg: Any,
     return report, None
 
 
-def repair_report_candidate_ids(report: Any, presented: Any, *, run_dir: Optional[Path] = None,
+def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (),
+                                run_dir: Optional[Path] = None,
                                 tag: str = "") -> List[Dict[str, Any]]:
     """Repair mistranscribed `candidate_id`s in every row array, recording each repair (agents-00sew).
 
@@ -1018,7 +1019,7 @@ def repair_report_candidate_ids(report: Any, presented: Any, *, run_dir: Optiona
     if report is None:
         return repairs
     for array_name, rows in row_arrays(report).items():
-        for record in repair_cited_candidate_ids(rows, presented or ()):
+        for record in repair_cited_candidate_ids(rows, presented or (), foreign=foreign or ()):
             record["array"] = array_name
             repairs.append(record)
     if repairs and run_dir is not None:
@@ -2434,9 +2435,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 # Before ownership is judged, give a mistranscribed id the chance to be recognised as
                 # THIS batch's candidate (agents-00sew). A repair can only ever land on an id this
                 # batch presented, so it cannot launder a cross-batch answer.
+                _own_ids = (batch_candidate_ids(batches[_batch_index])
+                            if _batch_index < len(batches) else ())
                 repair_report_candidate_ids(
-                    _part,
-                    batch_candidate_ids(batches[_batch_index]) if _batch_index < len(batches) else (),
+                    _part, _own_ids,
+                    # ids presented to a SIBLING batch are off limits (agents-fv5uk): batch ids are
+                    # near-identical by construction, so allowing a near match onto one of them would
+                    # re-attach an answer to the wrong candidate instead of rejecting it.
+                    foreign=[cid for _other, _batch in enumerate(batches) if _other != _batch_index
+                             for cid in batch_candidate_ids(_batch)],
                     run_dir=run_dir, tag=_tag)
                 try:
                     # PER-BATCH CONTRACT: a row may only answer a candidate THIS batch was shown
