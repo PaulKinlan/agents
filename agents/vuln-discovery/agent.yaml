@@ -15,3 +15,11 @@ budget:
   max_minutes: 20
 output:
   schema: report.schema.json
+  # BOUNDED BATCHING (agents-dz33p, the machinery from agents-uxiks). The qrcode nightly halted at station 3
+  # (vuln-discovery) with output token limit truncation on attempt 2 after schema violation on attempt 1.
+  # Measured completion cost per finding on this station: ~1.0-1.2 KB of structured JSON (detailed description,
+  # remediation, exploit chain, candidate_id). On nightlies with 20-30 surface scan candidates, an unbounded
+  # completion demands 25-35 KB of JSON, which hits model output token limits. 6 candidates per call keeps
+  # answers near 7-9 KB (~2,000 output tokens), well within adapter limits, while the planner's 12 KB byte
+  # bound safely handles any candidate with an oversized snippet.
+  max_candidates_per_call: 6
