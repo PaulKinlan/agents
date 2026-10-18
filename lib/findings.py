@@ -1657,6 +1657,29 @@ def read_presented_candidate_ids(run_dir: Any,
     Counting and identity are two different bounds. A count can be satisfied by the right NUMBER of rows
     describing candidates the station was never shown; citing ids cannot.
     """
+    # rn0ky (ported: agents-uxiks): a BATCHED run spreads its candidate list across N prompts, so "the
+    # prompt carried the first slice_size" is no longer one prompt's answer and counting it as one
+    # under-reads a run that presented the whole list. The dispatcher writes presented_candidates.json
+    # with exactly the ids it put in front of the model - every batch, in batch order - and THIS is the
+    # population a report must cite. Read it first, and fall back to the slice for every run that
+    # predates batching; the fallback is not a compatibility nicety, those runs really did present only
+    # the slice.
+    #
+    # NOT "every candidate the pre-pass found": batching is applied to the candidate list the dispatcher
+    # presents, which is still bounded by CANDIDATE_PROMPT_SLICE before it is split. Lifting that bound
+    # would multiply a run's model calls by the size of the backlog, which is not what this change is
+    # for - the recorded population says what was actually shown, whatever bounded it.
+    if run_dir:
+        try:
+            recorded = json.loads((Path(run_dir) / "presented_candidates.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recorded = None
+        if isinstance(recorded, dict):
+            recorded_ids = recorded.get("candidate_ids")
+            if isinstance(recorded_ids, list):
+                ids = [cid for cid in recorded_ids if isinstance(cid, str) and cid]
+                # partial ids are no ids, exactly as below: the presented population must be nameable
+                return ids if len(ids) == len(recorded_ids) else []
     payload = _read_candidate_payload(run_dir)
     if payload is None:
         return None

@@ -15,3 +15,7 @@ budget:
   max_minutes: 10
 output:
   schema: report.schema.json
+  # rn0ky: a single call carrying 47 candidates produced a 50 KB completion cut mid-JSON at candidate
+  # 45, which the parser could only report as "no verdict". Eight candidates per call keeps every
+  # response small enough to finish, and each batch is validated and retried on its own.
+  max_candidates_per_call: 8

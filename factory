@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_hex
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Sequence
 
 FACTORY_ROOT = Path(__file__).resolve().parent
 
@@ -39,6 +39,9 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              candidate_coverage, read_candidate_count, read_presented_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
+    from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
+                                        classify_unparseable, describe_truncation, merge_reports,
+                                        plan_batches, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -69,6 +72,9 @@ except ImportError:
                              candidate_coverage, read_candidate_count, read_presented_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
+    from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
+                                        classify_unparseable, describe_truncation, merge_reports,
+                                        plan_batches, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -181,6 +187,17 @@ class SilentStationError(NoVerdictError):
     degrades to ERROR, allowing the line to continue as INCOMPLETE rather than halting every
     downstream station. Subclasses NoVerdictError so line continuation and retry mechanisms
     catch it cleanly.
+    """
+
+
+class OutputTruncatedError(NoVerdictError):
+    """The engine's output was CUT mid-JSON - a completion that hit an output bound (rn0ky).
+
+    A PLUMBING failure like its parent, and named rather than silent: the nightly read a 47-candidate
+    perf-review as "no verdict" when what actually happened was a 50 KB completion cut mid-string at
+    candidate 45. The classification (truncated vs no-json-at-all), the evidence (bytes, brace counts,
+    the ids visible in the fragment) and the batch it came from are in the message, so an operator can
+    tell an output bound from a model that ignored the contract.
     """
 
 
@@ -912,6 +929,117 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     with_findings = [o for o in objects if isinstance(o[1].get("findings"), list)]
     pool = with_findings or objects
     return max(pool, key=lambda o: o[0])[1]
+
+def max_candidates_per_call(agent_cfg: Any) -> Optional[int]:
+    """The station's declared per-call candidate bound, or None for one call (rn0ky).
+
+    Opt-in by declaration, deliberately: batching changes what a station asks the model for, so it is
+    the station's decision (agent.yaml `output.max_candidates_per_call`), not a global surprise for the
+    twenty other stations. A malformed value is refused loudly rather than silently ignored - a bound
+    nobody applied is how a 47-candidate batch truncated in the first place.
+    """
+    if not isinstance(agent_cfg, dict):
+        return None
+    output = agent_cfg.get("output")
+    if not isinstance(output, dict):
+        return None
+    raw = output.get("max_candidates_per_call")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise StationError(
+            f"agent.yaml output.max_candidates_per_call must be an integer, got {raw!r}")
+    if value < 1:
+        raise StationError(
+            f"agent.yaml output.max_candidates_per_call must be >= 1, got {value}")
+    return value
+
+
+def parse_station_report(raw_output: str, *, agent_dir: Path, agent_cfg: Any,
+                         target_dir: Optional[Path], run_dir: Path,
+                         tag: str = "") -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Parse, normalise and schema-validate ONE engine output. `(report, None)` or `(None, reason)`.
+
+    Extracted from the single-call path so a BATCHED run (rn0ky) applies exactly the same contract to
+    every batch: the same field normalisation, the same schema, the same artifacts. `tag` suffixes the
+    artifact names (`.batch3`) so a batched run keeps each batch's rejected report instead of the last
+    one overwriting the others.
+
+    The reason string is the same text the single-call path has always produced, so a downstream reader
+    (and the repair-retry hint) sees no change for single-call stations.
+    """
+    report = extract_json_from_output(raw_output)
+    if report is not None and not isinstance(report.get("findings"), list):
+        # Every report contract requires a findings list. An object without one (a fragment of
+        # truncated output, an echoed tool call) is not a verdict; reading its missing findings as
+        # [] was a clean PASS/0 nobody earned.
+        report = None
+    if report is None:
+        return None, "Could not parse a JSON report (with a findings list) from model output"
+    # Known field-name synonyms are mapped first (fleet-9wyi): `"id"` for `rule_id` is a usable
+    # report, not a missing one. Every mapping is printed and recorded.
+    normalised = normalize_agent_report(agent_dir, agent_cfg, report)
+    if normalised:
+        print(f"Note: normalised {len(normalised)} field name(s)/value(s) in the model "
+              f"report (first: {normalised[0]}); see normalised_fields{tag}.json.")
+        _write_run_artifact(run_dir / f"normalised_fields{tag}.json", json.dumps(normalised, indent=2))
+    # The output contract is the deterministic half of the agent (SF-07): a report that violates it
+    # is treated exactly like unparseable output - the store never sees it, so no finding transitions
+    # on half-formed data.
+    schema_errors = validate_agent_report(agent_dir, agent_cfg, report, target_dir=target_dir)
+    if schema_errors:
+        rejected = report.get("findings") if isinstance(report.get("findings"), list) else []
+        # Say what was lost and where it is, so a rejection never reads as an empty response
+        # (fleet-9wyi): the full violation list and the parsed report are kept.
+        _write_run_artifact(run_dir / f"schema_errors{tag}.json", json.dumps(schema_errors, indent=2))
+        _write_run_artifact(run_dir / f"rejected_report{tag}.json", json.dumps(report, indent=2))
+        return None, (f"Model output violates the declared report schema "
+                      f"({len(schema_errors)} violation(s); first: {schema_errors[0]}); "
+                      f"{len(rejected)} finding(s) were in the rejected report "
+                      f"(kept in {run_dir / f'rejected_report{tag}.json'}, violations in "
+                      f"schema_errors{tag}.json)")
+    return report, None
+
+
+def name_parse_failure(raw_output: str, reason: str, *, run_dir: Path, agent_name: str,
+                       batch_index: Optional[int] = None, batch_count: Optional[int] = None,
+                       expected_ids: Sequence[str] = (),
+                       produced_batches: Optional[int] = None) -> str:
+    """Turn an unusable output into a NAMED failure: truncated vs no-JSON, with the evidence kept.
+
+    rn0ky: a completion cut by an output bound used to reach the operator as "no verdict", which reads
+    as a model that ignored the contract and sends nobody looking for a token limit. The classification
+    is structural (ends inside a string, or unclosed braces/brackets) and is written to
+    `output_classification<.batchK>.json` in the run directory either way, so the two failures stay
+    tellable apart after the fact AND one batch's classification cannot overwrite another's (found in
+    review: a single file kept only the last batch's evidence).
+    """
+    kind, evidence = classify_unparseable(raw_output)
+    tag = f".batch{batch_index + 1}" if batch_index is not None else ""
+    record = {"kind": kind, "reason": reason}
+    if batch_index is not None and batch_count is not None:
+        record["batch"] = batch_index + 1
+        # PLANNED, not produced: "batch 2/3" is the run's shape; how many got as far as output is
+        # in `produced_batches` below (found in review: a run that stopped early read as "1/1").
+        record["batches"] = batch_count
+        if produced_batches is not None:
+            record["batches_with_output"] = produced_batches
+    record.update(evidence)
+    artifact = run_dir / f"output_classification{tag}.json"
+    _write_run_artifact(artifact, json.dumps(record, indent=2))
+    if kind == "truncated":
+        named = describe_truncation(
+            evidence,
+            batch_index=batch_index if batch_index is not None else 0,
+            batch_count=batch_count if batch_count is not None else 1,
+            expected_ids=expected_ids,
+            produced_batches=produced_batches)
+        return (f"{agent_name}: model output was TRUNCATED - {named} "
+                f"(evidence in {artifact.name})")
+    return reason
+
 
 _TRANSIENT_DIRS: List[Path] = []
 _TRANSIENT_DIR_PREFIXES = ("factory-sock-", "factory-pi-", "factory-pins-")
@@ -1705,12 +1833,6 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         candidates_slice = (candidates_data[:CANDIDATE_PROMPT_SLICE]
                             if isinstance(candidates_data, list) else candidates_data)
 
-        prompt = (
-            f"You are the {agent_name} agent. Examine the following context and candidate issues discovered by the "
-            f"deterministic scanner in repository '{target_name}'. Follow your SKILL.md instructions, "
-            f"triage each item, and output your structured JSON findings.\n\n"
-            f"Scanner Data:\n{json.dumps(candidates_slice, indent=2)}\n"
-        ) + context_block
         # Carry the exact output contract in the prompt: a SKILL.md example with `"findings": []`
         # left the model to invent finding field names, and `"id"` for `rule_id` cost a whole
         # threat model (fleet-9wyi).
@@ -1718,18 +1840,83 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             output_schema = declared_schema(agent_dir, agent_cfg)
         except (FileNotFoundError, ValueError):
             output_schema = None
+        contract_block = ""
         if output_schema:
             # The schema alone states which fields exist and marks some required in a nested array;
             # a model that omits one loses the whole report with it (agents-sz8q: 35 violations for
             # 35 candidates). The fragment spells out the required sets in words too.
-            prompt += output_contract_prompt(output_schema)
+            contract_block = output_contract_prompt(output_schema)
         if repair_hint:
             # agents-noo: a repair-retry tells the model exactly what was rejected, so the second
             # attempt has a real chance of producing a valid report instead of the same garbage.
-            prompt += "\n\n" + repair_hint
-        prompt_file = run_dir / "prompt.txt"
-        _write_run_artifact(prompt_file, prompt)
-        os.chmod(prompt_file, 0o600)
+            contract_block += "\n\n" + repair_hint
+
+        # rn0ky: BOUNDED BATCHING. A station may declare `output.max_candidates_per_call`; when the
+        # presented list is larger, it is split into deterministic bounded batches (by count AND by
+        # serialized bytes) and each batch is one engine call with its own contract and its own
+        # check. The alternative - one call carrying 47 candidates and asking for 47 fully-populated
+        # rows - is what produced a 50 KB completion cut mid-JSON at candidate 45, which reached
+        # nobody as a truncation because the parser could only say "no verdict".
+        max_per_call = max_candidates_per_call(agent_cfg)
+        batch_count = 1
+        # DECIDED BY THE PLAN, NOT BY THE COUNT (agents-gwucz): the byte bound is part of the bound, so
+        # two 7 KB candidates against a 12 KB batch budget must split even though 2 <= max_per_call.
+        # Gating on len(...) > max_per_call meant the byte limit only ever applied to lists that were
+        # already too long by count, which is exactly the case that never needed it.
+        if max_per_call and isinstance(candidates_slice, list):
+            try:
+                planned = plan_batches(candidates_slice, max_per_call)
+            except BatchPlanError as e:
+                raise StationError(f"{agent_name}: cannot bound the candidate list into batches: {e}")
+            if len(planned) > 1:
+                batches = planned
+                batch_count = len(planned)
+                presented = {
+                    "max_candidates_per_call": max_per_call,
+                    "batch_count": batch_count,
+                    "presented": len(candidates_slice),
+                    "candidate_ids": [cid for batch in batches for cid in batch_candidate_ids(batch)],
+                    "batches": [batch_candidate_ids(batch) for batch in batches],
+                }
+            # Written BEFORE the engine runs: the accounting check reads what was PRESENTED, and a
+            # batched run serialises every candidate it presents across N prompts rather than asking
+            # for the first CANDIDATE_PROMPT_SLICE of them in one answer. The list being batched is
+            # still that bounded slice - see lib/findings.read_presented_candidate_ids.
+                _write_run_artifact(run_dir / "presented_candidates.json",
+                                    json.dumps(presented, indent=2))
+                print(f"-> Batching {len(candidates_slice)} candidate(s) into {batch_count} call(s) "
+                      f"of at most {max_per_call}.")
+            else:
+                batches = [candidates_slice]
+        else:
+            batches = [candidates_slice]
+
+        prompts: List[str] = []
+        for batch_index, batch in enumerate(batches):
+            if batch_count > 1:
+                batch_ids = batch_candidate_ids(batch)
+                header = (
+                    f"BATCH {batch_index + 1} of {batch_count}: the candidate list is presented in "
+                    f"{batch_count} batches so that no single response has to carry every row. Answer "
+                    f"ONLY for the candidates in THIS batch, and answer for EVERY one of them - a "
+                    f"confirmed row or a dismissal with `false_positive: true`, never an omission."
+                    + (f" The candidate ids in this batch: {', '.join(batch_ids)}." if batch_ids else "")
+                    + "\n\n"
+                )
+            else:
+                header = ""
+            batch_prompt = header + (
+                f"You are the {agent_name} agent. Examine the following context and candidate issues discovered by the "
+                f"deterministic scanner in repository '{target_name}'. Follow your SKILL.md instructions, "
+                f"triage each item, and output your structured JSON findings.\n\n"
+                f"Scanner Data:\n{json.dumps(batch, indent=2)}\n"
+            ) + context_block + contract_block
+            prompts.append(batch_prompt)
+            tag = f".batch{batch_index + 1}" if batch_count > 1 else ""
+            batch_prompt_file = run_dir / f"prompt{tag}.txt"
+            _write_run_artifact(batch_prompt_file, batch_prompt)
+            os.chmod(batch_prompt_file, 0o600)
+        batched = batch_count > 1
 
         # agents-m2n: the directive file for the adapter's system channel. run_dir is
         # already read-write inside the OS sandbox, and the path reaches the adapter as a
@@ -1903,12 +2090,36 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # broker serves exactly the process it was started for and no other
             # descendant of the dispatcher.
             try:
-                adapter_res = run_station_command(
-                    adapter_cmd, budget, f"engine '{engine}'",
-                    input=prompt, capture_output=True, text=True,
-                    check=False, env=adapter_env,
-                    on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
-                              if broker is not None else None))
+                # rn0ky: one engine call per batch. Each call's raw output is moved aside
+                # (model_output.batch<k>.txt) so the next call cannot overwrite it - the adapter
+                # always writes model_output.txt, and a batched run needs every batch's answer.
+                adapter_res = None
+                for _batch_index, _batch_prompt in enumerate(prompts):
+                    _batch_tag = f".batch{_batch_index + 1}" if batched else ""
+                    _batch_label = (f"engine '{engine}' batch {_batch_index + 1}/{len(prompts)}"
+                                    if batched else f"engine '{engine}'")
+                    _res = run_station_command(
+                        adapter_cmd, budget, _batch_label,
+                        input=_batch_prompt, capture_output=True, text=True,
+                        check=False, env=adapter_env,
+                        on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
+                                  if broker is not None else None))
+                    if batched:
+                        _produced = run_dir / "model_output.txt"
+                        if _produced.exists() or _produced.is_symlink():
+                            # MOVE the answer aside, rather than copy-then-unlink: a rename preserves the
+                            # adapter's bytes and mode and - the reason it is a rename and not a copy plus
+                            # an unlink - adds NO deletion site to a run directory where every deletion is
+                            # enumerated by tests/test_retention.py's inventory (measured: this line as a
+                            # `_produced.unlink()` failed that guard with "unenumerated deletion site").
+                            # The destination name is unique per batch, and the session has already ended,
+                            # so a link planted at the source is moved AS a link, never followed.
+                            _produced.rename(run_dir / f"model_output{_batch_tag}.txt")
+                    adapter_res = _res
+                    if _res.returncode != 0:
+                        # A failed call is the run's answer: later batches cannot rescue it, and
+                        # carrying on would spend the budget on a session that already failed.
+                        break
             except StationTimeout as e:
                 reason = str(e)
                 report = {
@@ -1931,8 +2142,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # agents-7ik: collect the proposal ONLY from a successful session — a failed one
             # leaves partial edits that must not be presented as "the proposal"; they are
             # discarded together with the worktree in the finally below.
+            # rn0ky: a batched run moves each batch's answer aside, so "the session produced an
+            # answer" is any batch output, not just the single-call file name.
             session_succeeded = (adapter_res.returncode == 0
-                                 and (run_dir / "model_output.txt").exists())
+                                 and ((run_dir / "model_output.txt").exists()
+                                      or bool(list(run_dir.glob("model_output.batch*.txt")))))
             if worktree_dir is not None:
                 if session_succeeded:
                     patch_file = _collect_session_diff(worktree_dir, run_dir, worktree_gitdir)
@@ -1977,7 +2191,15 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         
         output_file = run_dir / "model_output.txt"
         stderr_file = run_dir / "model_stderr.txt"
-        raw_output = output_file.read_text(encoding="utf-8", errors="replace") if output_file.exists() else ""
+        # rn0ky: with batching, the answer lives in model_output.batch<k>.txt (the single-call file
+        # name is kept for the un-batched path, and for an adapter that ignored the rename).
+        batch_output_files = sorted(run_dir.glob("model_output.batch*.txt"),
+                                    key=lambda f: int("".join(ch for ch in f.stem if ch.isdigit()) or 0))
+        if batched and batch_output_files:
+            raw_output = "\n".join(f.read_text(encoding="utf-8", errors="replace")
+                                   for f in batch_output_files)
+        else:
+            raw_output = output_file.read_text(encoding="utf-8", errors="replace") if output_file.exists() else ""
         stderr_raw = stderr_file.read_text(encoding="utf-8", errors="replace") if stderr_file.exists() else ""
         if adapter_res.returncode != 0:
             auth_reason = detect_adapter_auth_failure(raw_output, adapter_res.stderr or "", adapter_res.stdout or "")
@@ -2001,7 +2223,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 raise AdapterAuthError(agent_name, engine, adapter_res.returncode, auth_reason,
                                        output_file if output_file.exists() else None)
 
-        has_output = bool(raw_output.strip()) if output_file.exists() else False
+        # rn0ky: with batching the answer is in the batch files, so "the engine produced output" must
+        # not be read off the single-call file name.
+        has_output = bool(raw_output.strip()) if (output_file.exists() or batch_output_files) else False
         has_engine_stderr = bool(stderr_raw.strip())
         has_adapter_stderr = bool((adapter_res.stderr or "").strip())
         engine_exited_zero = (
@@ -2010,7 +2234,9 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         )
 
         # agents-h8i4, agents-2wgg: Failure classification ladder when output is missing or empty.
-        if not output_file.exists():
+        # rn0ky: a batched run moves every batch's answer to model_output.batch<k>.txt, so the single
+        # call's file name is legitimately absent - the answers are the batch files.
+        if not output_file.exists() and not batch_output_files:
             # If model_output.txt was not created AND adapter stderr has no diagnostics,
             # this is a silent crash without output file: route to silent station retry.
             if not has_adapter_stderr:
@@ -2130,58 +2356,82 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             _write_run_artifact(run_dir / "failure_reason.txt", reason + "\n")
             raise StationError(reason)
 
-        raw_output = output_file.read_text(encoding="utf-8", errors="replace")
-        report = extract_json_from_output(raw_output)
-        if report is not None and not isinstance(report.get("findings"), list):
-            # Every report contract requires a findings list. An object without one (a
-            # fragment of truncated output, an echoed tool call) is not a verdict; reading
-            # its missing findings as [] was a clean PASS/0 nobody earned.
-            report = None
+        # rn0ky: parsing, field normalisation and the schema check are one shared function, so a
+        # batched run applies exactly this contract to every batch. `tag` keeps per-batch artifacts
+        # apart instead of the last batch overwriting the others.
+        if batched and batch_output_files:
+            batch_reports: List[Dict[str, Any]] = []
+            batch_failure: Optional[str] = None
+            for _batch_index, _batch_file in enumerate(batch_output_files):
+                _tag = f".batch{_batch_index + 1}"
+                _batch_raw = _batch_file.read_text(encoding="utf-8", errors="replace")
+                _part, _reason = parse_station_report(
+                    _batch_raw, agent_dir=agent_dir, agent_cfg=agent_cfg,
+                    target_dir=target_dir, run_dir=run_dir, tag=_tag)
+                if _part is None:
+                    # The PLANNED count is the run's shape; len(batch_output_files) only says how many
+                    # batches produced output before the loop broke, and reporting that as the total
+                    # read a three-batch run that stopped after batch one as "batch 1/1" (review).
+                    batch_failure = (_reason or "unparseable output") + f" (batch {_batch_index + 1}/{batch_count})"
+                    _named = name_parse_failure(
+                        _batch_raw, batch_failure, run_dir=run_dir, agent_name=agent_name,
+                        batch_index=_batch_index, batch_count=batch_count,
+                        produced_batches=len(batch_output_files),
+                        expected_ids=batch_candidate_ids(batches[_batch_index])
+                        if _batch_index < len(batches) else ())
+                    if _named.startswith(f"{agent_name}: model output was TRUNCATED"):
+                        _write_run_artifact(run_dir / "failure_reason.txt", _named + "\n")
+                        raise OutputTruncatedError(
+                            f"{_named}; no verdict (raw output kept in {_batch_file})")
+                    batch_failure = _named
+                    break
+                try:
+                    # PER-BATCH CONTRACT: a row may only answer a candidate THIS batch was shown
+                    # (agents-5230a). Distinct ids satisfied the accounting check while attributing a
+                    # candidate to a call that never saw it.
+                    validate_batch_attribution(
+                        _part.get("findings"), batch_ids=batch_candidate_ids(batches[_batch_index])
+                        if _batch_index < len(batches) else (),
+                        batch_index=_batch_index,
+                        all_batch_ids=[batch_candidate_ids(b) for b in batches])
+                except BatchMergeError as e:
+                    batch_failure = str(e)
+                    _named = name_parse_failure(
+                        _batch_raw, batch_failure, run_dir=run_dir, agent_name=agent_name,
+                        batch_index=_batch_index, batch_count=batch_count,
+                        produced_batches=len(batch_output_files),
+                        expected_ids=batch_candidate_ids(batches[_batch_index])
+                        if _batch_index < len(batches) else ())
+                    batch_failure = _named
+                    break
+                batch_reports.append(_part)
+            if batch_failure is not None:
+                report, parse_reason = None, batch_failure
+            else:
+                try:
+                    report, parse_reason = merge_reports(batch_reports), None
+                except BatchMergeError as e:
+                    # A batch answered another batch's candidate: merging would double-book it.
+                    report, parse_reason = None, f"per-batch reports cannot be merged: {e}"
+        else:
+            report, parse_reason = parse_station_report(
+                raw_output, agent_dir=agent_dir, agent_cfg=agent_cfg, target_dir=target_dir,
+                run_dir=run_dir, tag="")
         if report is None:
             model_parse_succeeded = False
-            no_verdict = "Could not parse a JSON report (with a findings list) from model output"
+            no_verdict = parse_reason or (
+                "Could not parse a JSON report (with a findings list) from model output")
             print(f"Warning: {no_verdict}. Skipping findings store update to prevent false 'fixed' transitions.")
             report = {
-                "summary": "NO VERDICT: model output contained no JSON report.",
+                "summary": ("NO VERDICT: model output failed the declared report schema."
+                            if "violates the declared report schema" in no_verdict
+                            else "NO VERDICT: model output contained no JSON report."),
                 "verdict": "error",
                 "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
                 "findings": []
             }
         else:
-            # Known field-name synonyms are mapped first (fleet-9wyi): `"id"` for `rule_id`
-            # is a usable report, not a missing one. Every mapping is printed and recorded.
-            normalised = normalize_agent_report(agent_dir, agent_cfg, report)
-            if normalised:
-                print(f"Note: normalised {len(normalised)} field name(s)/value(s) in the model "
-                      f"report (first: {normalised[0]}); see normalised_fields.json.")
-                _write_run_artifact(run_dir / "normalised_fields.json",
-                                    json.dumps(normalised, indent=2))
-            # The output contract is the deterministic half of the agent (SF-07): a report
-            # that violates it is treated exactly like unparseable output — the store never
-            # sees it, so no finding transitions on half-formed data.
-            schema_errors = validate_agent_report(agent_dir, agent_cfg, report, target_dir=target_dir)
-            if schema_errors:
-                model_parse_succeeded = False
-                rejected = report.get("findings") if isinstance(report.get("findings"), list) else []
-                # Say what was lost and where it is, so a rejection never reads as an empty
-                # response (fleet-9wyi): the full violation list and the parsed report are kept.
-                _write_run_artifact(run_dir / "schema_errors.json",
-                                    json.dumps(schema_errors, indent=2))
-                _write_run_artifact(run_dir / "rejected_report.json",
-                                    json.dumps(report, indent=2))
-                no_verdict = (f"Model output violates the declared report schema "
-                              f"({len(schema_errors)} violation(s); first: {schema_errors[0]}); "
-                              f"{len(rejected)} finding(s) were in the rejected report "
-                              f"(kept in {run_dir / 'rejected_report.json'}, violations in "
-                              f"schema_errors.json)")
-                print(f"Warning: {no_verdict}. "
-                      f"Skipping findings store update to prevent false 'fixed' transitions.")
-                report = {
-                    "summary": "NO VERDICT: model output failed the declared report schema.",
-                    "verdict": "error",
-                    "scanned_files": len(candidates_data) if isinstance(candidates_data, list) else 1,
-                    "findings": []
-                }
+            model_parse_succeeded = True
 
     if isinstance(report.get("findings"), list):
         report["findings"].sort(key=_finding_sort_key)
@@ -2190,10 +2440,18 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     if not model_parse_succeeded:
         # No verdict is a station failure, never PASS/0 (fleet-ddd, journal-mid). The raw output
         # stays in the run directory for a human (or a re-import) to recover. The engine ran and
-        # returned zero — only its output was unusable — so this is a PLUMBING failure, not a
+        # returned zero - only its output was unusable - so this is a PLUMBING failure, not a
         # genuine engine failure: NoVerdictError, which run_line repair-retries once then degrades
         # and continues instead of halting every downstream station (agents-noo).
+        #
+        # rn0ky: name the failure first. A completion cut by an output bound is TRUNCATION, not a
+        # model that ignored the contract, and OutputTruncatedError says so (still a plumbing
+        # failure, so the repair-retry and line continuation are unchanged).
+        no_verdict = name_parse_failure(raw_output, no_verdict, run_dir=run_dir, agent_name=agent_name)
         _write_run_artifact(run_dir / "failure_reason.txt", no_verdict + "\n")
+        if no_verdict.startswith(f"{agent_name}: model output was TRUNCATED"):
+            raise OutputTruncatedError(
+                f"{no_verdict}; no verdict (raw output kept in {run_dir / 'model_output.txt'})")
         raise NoVerdictError(f"{agent_name}: {no_verdict}; no verdict (raw output kept in "
                            f"{run_dir / 'model_output.txt'})")
 
