@@ -161,9 +161,11 @@ class TestCoverageContract(unittest.TestCase):
         self.assertTrue(set(contract[source]) <= selected, selected)
 
     def test_oracle_extract_coverage_flags_omitted_contract_suites(self):
-        """When check-coverage.py runs on a diff modifying a contracted file (e.g. lib/child_env.py)
-        without executing the contracted suite (tests/test_promotion.py), it must report
-        tests/test_promotion.py in omitted suites."""
+        """agents-4zqo3: partial placement is not unmapped; the contracted suite still matters.
+
+        The oracle sees other child_env consumers in this repo, so assert membership rather than
+        an exact omitted set. These three log shapes make both `omitted` and `unmapped` falsifiable.
+        """
         if not ORACLE_SCRIPT.is_file():
             self.skipTest("fleet check-coverage.py not available in environment")
 
@@ -172,33 +174,45 @@ class TestCoverageContract(unittest.TestCase):
         oracle_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(oracle_mod)
 
-        with tempfile.NamedTemporaryFile("w") as log:
-            log.write("fast-gate: passed: tests/test_child_env.py\n")
-            log.flush()
+        # Mock git commands so the only changed path is the REAL contracted source.
+        orig_check_output = oracle_mod.subprocess.check_output
+        def mock_check_output(cmd, *args, **kwargs):
+            if isinstance(cmd, list):
+                if "rev-parse" in cmd:
+                    return ("deadbeef" * 5) + "\n"
+                if any("diff" in str(x) for x in cmd):
+                    return "lib/child_env.py\n"
+            return orig_check_output(cmd, *args, **kwargs)
 
-            # Mock git commands so oracle sees non-merged commit with lib/child_env.py changed
-            orig_check_output = oracle_mod.subprocess.check_output
-            def mock_check_output(cmd, *args, **kwargs):
-                if isinstance(cmd, list):
-                    if "rev-parse" in cmd:
-                        return ("deadbeef" * 5) + "\n"
-                    if any("diff" in str(x) for x in cmd):
-                        return "lib/child_env.py\n"
-                return orig_check_output(cmd, *args, **kwargs)
+        from unittest.mock import patch
+        def coverage_for(suite):
+            with tempfile.NamedTemporaryFile("w") as log:
+                log.write(f"fast-gate: passed: {suite}\n")
+                log.flush()
+                with patch.object(oracle_mod.subprocess, "check_output", side_effect=mock_check_output):
+                    return oracle_mod.extract_coverage(log.name, str(ROOT), "HEAD", "bash tools/fast-gate.sh")
 
-            from unittest.mock import patch
-            with patch.object(oracle_mod.subprocess, "check_output", side_effect=mock_check_output):
-                cov = oracle_mod.extract_coverage(log.name, str(ROOT), "HEAD", "bash tools/fast-gate.sh")
+        def unmapped_paths(cov):
+            # agents-8b05: accept both structured provenance records and legacy string paths.
+            return [e["path"] if isinstance(e, dict) else e for e in cov.get("unmapped", [])]
 
-            # agents-8b05: the record publishes each unmapped entry as {"path": ..., "source": ...} so the
-            # provenance travels with the entry; older records (and older reporters) publish plain strings.
-            # Ask for the PATH either way, so this pins the BEHAVIOUR rather than the encoding, and stays
-            # correct against both shapes.
-            unmapped_paths = [e["path"] if isinstance(e, dict) else e for e in cov.get("unmapped", [])]
-            self.assertIn("lib/child_env.py", unmapped_paths,
-                          "changed file with omitted contract suite must be flagged in unmapped")
-            self.assertIn("tests/test_promotion.py", cov.get("omitted", []),
-                          "contract-declared suite must be named in omitted suites when not executed (agents-1kzf)")
+        source, contracted = "lib/child_env.py", "tests/test_promotion.py"
+        covered = coverage_for(contracted)
+        self.assertNotIn(contracted, covered.get("omitted", []), "an executed contract cannot be omitted")
+        self.assertNotIn(source, unmapped_paths(covered), "the contracted suite places the source")
+
+        partially_covered = coverage_for("tests/test_child_env.py")
+        self.assertEqual(partially_covered.get("coverage"), "PARTIAL")
+        self.assertIn(contracted, partially_covered.get("omitted", []),
+                      "the contracted consumer must be named when only a different consumer ran")
+        self.assertNotIn(source, unmapped_paths(partially_covered),
+                         "a source placed by its namesake suite is partial, not unmapped")
+
+        unplaced = coverage_for("tests/test_unrelated_probe.py")
+        self.assertIn(source, unmapped_paths(unplaced),
+                      "when no candidate suite runs, the source must be unmapped")
+        self.assertIn(contracted, unplaced.get("omitted", []),
+                      "the contracted consumer is still omitted when nothing covering ran")
 
     def test_malformed_coverage_contract_aborts_fast_gate_loudly(self):
         """A malformed tests/coverage-contract.json must not be silently ignored by tools/fast-gate.sh;
