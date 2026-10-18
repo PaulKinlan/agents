@@ -189,6 +189,19 @@ class TestValidateBatchAttribution(unittest.TestCase):
                                    batch_ids=["cand-perf-000", "cand-perf-001"], batch_index=0,
                                    all_batch_ids=[["cand-perf-000", "cand-perf-001"]])
 
+    def test_a_known_foreign_id_is_refused_even_when_this_batch_has_no_ids(self):
+        # agents-ju56b: real pre-passes mix rows with and without candidate_id (the retained vuln-verify
+        # bundle has 2 of 5). A batch whose own candidates carry no ids cannot be VERIFIED, but an id that
+        # is known to belong to another batch is still a provable misattribution - the early return used
+        # to accept exactly that.
+        with self.assertRaises(BatchMergeError) as ctx:
+            validate_batch_attribution([{"candidate_id": "cand-perf-000"}], batch_ids=[],
+                                       batch_index=1,
+                                       all_batch_ids=[["cand-perf-000"], []])
+        message = str(ctx.exception)
+        self.assertIn("belongs to batch 1", message)
+        self.assertIn("carry no ids", message)
+
     def test_rows_without_an_id_are_left_to_count_accounting(self):
         # A dismissal row may omit candidate_id; identity is not the only contract, so no raise here.
         validate_batch_attribution([{"path": "src/x.ts", "false_positive": True}],

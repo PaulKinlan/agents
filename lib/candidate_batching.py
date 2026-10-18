@@ -139,9 +139,7 @@ def validate_batch_attribution(findings: Any, *, batch_ids: Sequence[str],
     wrong code location, which no later accounting check can see. This is checked per batch, before
     the merge, and names both the id and where it was actually presented.
     """
-    if not batch_ids:
-        return  # a batch with no ids cannot be checked by identity; count accounting owns that case
-    own = {cid for cid in batch_ids if isinstance(cid, str) and cid}
+    own = {cid for cid in (batch_ids or ()) if isinstance(cid, str) and cid}
     elsewhere: Dict[str, int] = {}
     for index, ids in enumerate(all_batch_ids or ()):
         if index == batch_index:
@@ -149,6 +147,18 @@ def validate_batch_attribution(findings: Any, *, batch_ids: Sequence[str],
         for cid in ids:
             if isinstance(cid, str) and cid and cid not in own:
                 elsewhere.setdefault(cid, index + 1)
+    if not batch_ids:
+        # This batch's candidates carry no ids, so identity cannot be verified FOR IT - but an id KNOWN
+        # to belong to another batch is still a provable misattribution, and returning early here
+        # accepted one (agents-ju56b).
+        for row in findings if isinstance(findings, list) else ():
+            cid = row.get("candidate_id") if isinstance(row, dict) else None
+            if isinstance(cid, str) and cid.strip() and cid.strip() in elsewhere:
+                raise BatchMergeError(
+                    f"batch {batch_index + 1 if batch_index is not None else '?'} cited candidate_id "
+                    f"{cid.strip()!r}, which belongs to batch {elsewhere[cid.strip()]} - this batch's "
+                    f"candidates carry no ids, so the answer cannot be its own")
+        return  # nothing else is checkable here; count accounting owns a row without an id
     for row in findings if isinstance(findings, list) else ():
         if not isinstance(row, dict):
             continue

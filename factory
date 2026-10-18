@@ -1871,12 +1871,25 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             if len(planned) > 1:
                 batches = planned
                 batch_count = len(planned)
+                ids_by_batch = [batch_candidate_ids(batch) for batch in batches]
+                presented_total = len(candidates_slice)
+                ids_total = sum(len(ids) for ids in ids_by_batch)
+                # IDENTITY IS ALL OR NOTHING (agents-ju56b). Real pre-passes mix rows that carry a
+                # candidate_id with rows that carry none - the retained vuln-verify bundle has ids on 2
+                # of 5 - and recording the partial list as "the ids presented" made a COMPLETE answer
+                # score 2/5 accounted and go INCOMPLETE, a regression the unbatched run did not have
+                # (it fell back to count accounting for that bundle). So the id list is only recorded
+                # when it covers every presented candidate; otherwise the record says why, and the
+                # count-only path judges the run.
                 presented = {
                     "max_candidates_per_call": max_per_call,
                     "batch_count": batch_count,
-                    "presented": len(candidates_slice),
-                    "candidate_ids": [cid for batch in batches for cid in batch_candidate_ids(batch)],
-                    "batches": [batch_candidate_ids(batch) for batch in batches],
+                    "presented": presented_total,
+                    "identity": "complete" if ids_total == presented_total else "partial",
+                    "candidates_without_id": presented_total - ids_total,
+                    "candidate_ids": ([cid for ids in ids_by_batch for cid in ids]
+                                      if ids_total == presented_total else None),
+                    "batches": ids_by_batch,
                 }
             # Written BEFORE the engine runs: the accounting check reads what was PRESENTED, and a
             # batched run serialises every candidate it presents across N prompts rather than asking

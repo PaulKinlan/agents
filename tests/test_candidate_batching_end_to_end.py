@@ -285,6 +285,66 @@ printf '%s]}\n' "$out"
 """
 
 
+# agents-ju56b: REAL pre-passes mix rows that carry a candidate_id with rows that carry none (the retained
+# vuln-verify bundle has ids on 2 of 5). Batching must not turn that into "identity-matched 2/5" and an
+# INCOMPLETE station on a complete answer.
+MIXED_PREPASS = f'''
+import argparse, json
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--output")
+args, _unknown = parser.parse_known_args()
+candidates = []
+for i in range({CANDIDATE_COUNT}):
+    row = {{"rule_id": "layout-thrashing-forced-reflow", "path": f"src/file{{i}}.ts",
+            "line_number": i + 1, "severity": "high", "snippet": "el.offsetWidth"}}
+    if i % 4 == 0:
+        row["candidate_id"] = f"cand-perf-{{i:03d}}"
+    candidates.append(row)
+open(args.output, "w", encoding="utf-8").write(json.dumps({{"candidates": candidates}}))
+'''
+
+# Answers EVERY candidate in the prompt by PATH, carrying no candidate_id of its own - a dismissal-style row
+# set that must be judged by count when the presented set has no complete identity.
+PATH_ROWS_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+out='{"summary":"by-path","target":"probe-target","findings":['
+first=1
+for path in $(printf '%s' "$prompt" | grep -o "src/file[0-9][0-9]*\.ts" | sort -u); do
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"r\",\"path\":\"$path\",\"line_number\":1,\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestMixedIdentityIsCountOnly(BatchedStation):
+    def test_a_partial_identity_bundle_is_judged_by_count_not_by_its_few_ids(self):
+        self.agent(AGENT_YAML)
+        (self.root / "agents" / "probe" / "scripts" / "prepass.py").write_text(MIXED_PREPASS, encoding="utf-8")
+        self.stub(PATH_ROWS_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+
+        presented = json.loads((run / "presented_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(presented["identity"], "partial")
+        self.assertIsNone(presented["candidate_ids"],
+                          "a partial id list must never be recorded as the presented population")
+        self.assertEqual(presented["candidates_without_id"], CANDIDATE_COUNT - 2)
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from lib.findings import candidate_coverage, read_candidate_count, read_presented_candidate_ids
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        coverage = candidate_coverage(read_candidate_count(run), len(report["findings"]),
+                                      presented_ids=read_presented_candidate_ids(run))
+        self.assertEqual(coverage["identity"], "count-only", coverage)
+        self.assertTrue(coverage["complete"],
+                        f"a complete answer must not read INCOMPLETE just because ids are partial: {coverage}")
+
+
 class TestBatchingIsDecidedByThePlan(BatchedStation):
     def test_a_small_list_of_big_candidates_is_still_split(self):
         self.agent(AGENT_YAML.replace("max_candidates_per_call: 3", "max_candidates_per_call: 8"))
