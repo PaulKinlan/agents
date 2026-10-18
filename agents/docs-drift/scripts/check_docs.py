@@ -14,6 +14,7 @@ Outputs candidate matches as JSON.
 """
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -178,10 +179,7 @@ def slugify_heading(heading: str) -> str:
 def get_markdown_headings(file_path: Path) -> Set[str]:
     """Extract all heading anchor slugs from a markdown file."""
     slugs = set()
-    try:
-        content = file_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return slugs
+    content = file_path.read_text(encoding="utf-8", errors="ignore")
 
     for line in content.splitlines():
         line = line.strip()
@@ -254,7 +252,7 @@ def _file_names(target_dir: Path) -> Set[str]:
     if key not in _NAME_INDEX_CACHE:
         names: Set[str] = set()
         target_root = target_dir.resolve()
-        for _root, dirs, files in os.walk(target_dir):
+        for _root, dirs, files in os.walk(target_dir, onerror=_raise_walk_error):
             dirs[:] = [d for d in dirs if d != ".git"]
             names.update(name for name in files
                          if _resolved_within_target(target_root, Path(_root) / name) is not None)
@@ -349,6 +347,11 @@ def expand_path_braces(path_str: str) -> List[str]:
         results.extend(sub_paths)
     return results
 
+def _raise_walk_error(error: OSError) -> None:
+    """An unreadable subtree is a failed pre-pass, never an empty clean scan."""
+    raise error
+
+
 def _resolved_within_target(target_root: Path, path: Path) -> Optional[Path]:
     """Return the real path only when it is inside the target's real root.
 
@@ -357,9 +360,41 @@ def _resolved_within_target(target_root: Path, path: Path) -> Optional[Path]:
     """
     try:
         resolved = path.resolve()
-    except (OSError, RuntimeError, ValueError):
-        return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return None  # A symlink loop names no file, not an unreadable scan.
+        raise
+    except (RuntimeError, ValueError):
+        return None  # Python 3.12 reports symlink loops as RuntimeError.
     return resolved if resolved.is_relative_to(target_root) else None
+
+
+def _glob_directory_is_readable(base: Path, pattern: str, target_root: Path) -> bool:
+    """Check the fixed prefix that Path.glob silently skips when unreadable.
+
+    Path.glob may yield no matches rather than raising EACCES. The known leading
+    directory can be opened with scandir without enumerating unrelated subtrees.
+    Missing or out-of-target prefixes are genuine nonmatches; other I/O errors
+    must fail the pre-pass instead of inventing a missing-reference candidate.
+    """
+    prefix = []
+    for component in pattern.split("/"):
+        if any(marker in component for marker in "*?["):
+            break
+        prefix.append(component)
+    directory = _resolved_within_target(target_root, base.joinpath(*prefix))
+    if directory is None:
+        return False
+    try:
+        with os.scandir(directory):
+            pass
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return False
+        raise
+    return True
 
 
 def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tuple[bool, bool]:
@@ -399,11 +434,13 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
         if Path(glob_pattern).is_absolute() or ".." in glob_pattern.split("/"):
             return False, True
         try:
-            matches_root = [p for p in target_dir.glob(glob_pattern)
+            matches_root = ([p for p in target_dir.glob(glob_pattern)
+                             if _resolved_within_target(target_root, p) is not None]
+                            if _glob_directory_is_readable(target_dir, glob_pattern, target_root) else [])
+            matches_doc = ([p for p in doc_dir.glob(glob_pattern)
                             if _resolved_within_target(target_root, p) is not None]
-            matches_doc = [p for p in doc_dir.glob(glob_pattern)
-                           if _resolved_within_target(target_root, p) is not None]
-        except (ValueError, NotImplementedError, OSError):
+                           if _glob_directory_is_readable(doc_dir, glob_pattern, target_root) else [])
+        except (ValueError, NotImplementedError):
             return False, True
         if _had_location:
             matches_root = [p for p in matches_root if p.is_file()]
@@ -420,11 +457,8 @@ def path_exists_or_matches(target_dir: Path, doc_dir: Path, path_str: str) -> Tu
         path = _resolved_within_target(target_root, base / clean_p)
         if path is None:
             continue
-        try:
-            if (path.is_file() if _had_location else path.exists()):
-                return True, False
-        except OSError:
-            pass
+        if (path.is_file() if _had_location else path.exists()):
+            return True, False
 
     # Bare filename searches. A document may name a file by name alone when the
     # full path is obvious in context, and this repo's own docs rely on it: `PLAN.md`,
@@ -517,7 +551,7 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
     doc_files: List[Path] = []
     source_files: List[Path] = []
     
-    for root, dirs, files in os.walk(target_dir):
+    for root, dirs, files in os.walk(target_dir, onerror=_raise_walk_error):
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith(".")]
         for file in files:
             fp = Path(root) / file
@@ -534,11 +568,8 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
     # Pre-cache source file contents for symbol lookup
     source_cache: Dict[str, str] = {}
     for sf in source_files:
-        try:
-            if sf.stat().st_size < 1024 * 1024:
-                source_cache[str(sf.relative_to(target_dir))] = sf.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
+        if sf.stat().st_size < 1024 * 1024:
+            source_cache[str(sf.relative_to(target_dir))] = sf.read_text(encoding="utf-8", errors="ignore")
 
     # Pre-cache headings in markdown files
     headings_cache: Dict[Path, Set[str]] = {}
@@ -555,10 +586,7 @@ def scan_target(target_dir: Path) -> List[Dict[str, Any]]:
         # filtered by skill_reference_is_checkable() below (agents-6zq).
         check_skill_paths = is_station_skill(rel_doc)
         doc_dir = doc_path.parent
-        try:
-            content = doc_path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
+        content = doc_path.read_text(encoding="utf-8", errors="ignore")
 
         # Check ASCII directory tree blocks
         tree_entries = parse_tree_diagrams(content)

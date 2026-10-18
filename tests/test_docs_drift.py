@@ -8,13 +8,16 @@ was dropped, its parent prefix was lost, and the entry was checked against the w
 path. `.github/workflows/` was reported missing while it existed.
 """
 
+import errno
 import importlib.machinery
 import importlib.util
+import os
 import re
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader(
@@ -661,6 +664,100 @@ class TestTargetPathScope(unittest.TestCase):
         self.assertFalse(check_docs.skill_reference_is_checkable(
             self.target, self.target, "link/external.md"),
             "a directory symlink outside the target is not a first-party prefix")
+
+
+class TestUnreadableDocsAreNotMissingReferences(unittest.TestCase):
+    """agents-tlwvy: an I/O failure is not a missing path or a clean partial scan."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.target = Path(tmp.name).resolve()
+        (self.target / "docs").mkdir()
+        (self.target / "docs" / "PLAN.md").write_text("See `docs/locked/*.md`.\n")
+
+    def test_glob_io_fault_propagates_but_invalid_patterns_do_not(self):
+        resolve = check_docs.path_exists_or_matches
+        with mock.patch.object(Path, "glob", side_effect=PermissionError(errno.EACCES, "denied")):
+            with self.assertRaises(PermissionError):
+                resolve(self.target, self.target, "docs/*.md")
+        for error in (ValueError("invalid pattern"), NotImplementedError("non-relative")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(Path, "glob", side_effect=error):
+                    self.assertEqual(resolve(self.target, self.target, "docs/*.md"), (False, True))
+
+    def test_direct_exists_and_resolve_io_faults_propagate(self):
+        resolve = check_docs.path_exists_or_matches
+        original_resolve = Path.resolve
+        original_exists = Path.exists
+
+        def fail_resolve(path, *args, **kwargs):
+            if path.name == "blocked.md":
+                raise PermissionError(errno.EACCES, "denied")
+            return original_resolve(path, *args, **kwargs)
+
+        def fail_exists(path):
+            if path.name == "blocked.md":
+                raise PermissionError(errno.EACCES, "denied")
+            return original_exists(path)
+
+        with mock.patch.object(Path, "resolve", fail_resolve):
+            with self.assertRaises(PermissionError):
+                resolve(self.target, self.target, "blocked.md")
+        with mock.patch.object(Path, "exists", fail_exists):
+            with self.assertRaises(PermissionError):
+                resolve(self.target, self.target, "blocked.md")
+
+    def test_symlink_loops_remain_unresolvable_not_io_failures(self):
+        (self.target / "a").symlink_to("b")
+        (self.target / "b").symlink_to("a")
+        self.assertEqual(check_docs.path_exists_or_matches(self.target, self.target, "a/x.md"),
+                         (False, False))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores ordinary file permission bits")
+    def test_real_unreadable_subtree_fails_scan_and_glob_loudly(self):
+        locked = self.target / "docs" / "locked"
+        locked.mkdir()
+        (locked / "inner.md").write_text("See `missing.md`.\n")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        if os.access(locked, os.R_OK):
+            self.skipTest("filesystem does not enforce test permission bits")
+        with self.assertRaises(PermissionError):
+            check_docs.scan_target(self.target)
+        with self.assertRaises(PermissionError):
+            check_docs.path_exists_or_matches(self.target, self.target, "docs/locked/*.md")
+        with self.assertRaises(PermissionError):
+            check_docs.path_exists_or_matches(self.target, self.target, "docs/locked/inner.md")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores ordinary file permission bits")
+    def test_unreadable_file_cannot_silently_shrink_document_or_source_scan(self):
+        doc = self.target / "docs" / "PLAN.md"
+        doc.chmod(0)
+        self.addCleanup(doc.chmod, 0o600)
+        if os.access(doc, os.R_OK):
+            self.skipTest("filesystem does not enforce test permission bits")
+        with self.assertRaises(PermissionError):
+            check_docs.scan_target(self.target)
+        doc.chmod(0o600)
+        source = self.target / "source.py"
+        source.write_text("def parse(): pass\n")
+        source.chmod(0)
+        self.addCleanup(source.chmod, 0o600)
+        with self.assertRaises(PermissionError):
+            check_docs.scan_target(self.target)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores ordinary file permission bits")
+    def test_unreadable_root_cannot_produce_an_empty_scan(self):
+        self.target.chmod(0)
+        self.addCleanup(self.target.chmod, 0o700)
+        if os.access(self.target, os.R_OK):
+            self.skipTest("filesystem does not enforce test permission bits")
+        with self.assertRaises(PermissionError):
+            check_docs.scan_target(self.target)
 
 
 class TestPlanFindingsStoreAgreement(unittest.TestCase):
