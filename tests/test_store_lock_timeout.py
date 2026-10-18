@@ -47,6 +47,27 @@ OPENER = (
 OUTER_TIMEOUT = 25  # generous on purpose: exceeding it means the wait was NOT bounded
 
 
+class FakeClock:
+    """Advance only lib.findings' lock clock; never patch the shared time module."""
+
+    MAX_CALLS = 1000  # Turn a non-expiring or spinning lock loop into a fast failure.
+
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+        self.calls = 0
+
+    def monotonic(self):
+        self.calls += 1
+        if self.calls > self.MAX_CALLS:
+            raise AssertionError("store lock loop did not expire on the fake clock")
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class TestStoreLockWaitIsBounded(unittest.TestCase):
     def _hold_lock(self, tmp):
         proc = subprocess.Popen(
@@ -131,22 +152,46 @@ class TestStoreLockWaitIsBounded(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 5.0, "a reader blocked on a writer's lock")
 
     def test_a_free_store_acquires_immediately(self):
-        """The guard must not reject an uncontended store - the bound is a ceiling, not a delay."""
+        """An uncontended lock never sleeps, regardless of four-shard host load (agents-rim5o)."""
         with tempfile.TemporaryDirectory() as tmp:
             sys.path.insert(0, str(ROOT))
-            from lib.findings import FindingsStore
+            import lib.findings as findings_mod
+            self.assertIs(findings_mod.time, time, "the fake must patch the lock loop's clock")
 
-            started = time.monotonic()
-            store = FindingsStore("probe", findings_dir=Path(tmp))
-            try:
-                lock_text = (Path(tmp) / "probe.json.lock").read_text(encoding="utf-8")
-                self.assertIn(f"pid {os.getpid()}", lock_text)  # the holder names itself
-            finally:
-                store.close()
-            self.assertLess(time.monotonic() - started, 1.0)
+            clock = FakeClock()
+            with mock.patch.object(findings_mod, "time", clock):
+                store = findings_mod.FindingsStore("probe", findings_dir=Path(tmp))
+                try:
+                    lock_text = (Path(tmp) / "probe.json.lock").read_text(encoding="utf-8")
+                    self.assertIn(f"pid {os.getpid()}", lock_text)  # the holder names itself
+                finally:
+                    store.close()
+            self.assertEqual(clock.sleeps, [], "an uncontended store paid the wait ceiling")
             # Released: the metadata is cleared BEFORE the unlock, so a stale owner is never shown.
             self.assertEqual((Path(tmp) / "probe.json.lock").read_text(encoding="utf-8").strip(), "")
 
+    def test_the_bound_is_polled_and_expires_on_the_clock_not_the_wall(self):
+        """A contended lock polls up to its ceiling, then fails, independent of host load."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sys.path.insert(0, str(ROOT))
+            import lib.findings as findings_mod
+            self.assertIs(findings_mod.time, time, "the fake must patch the lock loop's clock")
+
+            # A second open in the same process has a distinct flock file description.
+            holder = findings_mod.FindingsStore("probe", findings_dir=Path(tmp), lock_timeout=0)
+            clock = FakeClock()
+            try:
+                with mock.patch.object(findings_mod, "time", clock), \
+                     mock.patch.object(findings_mod, "STORE_LOCK_POLL_SECONDS", 0.25):
+                    with self.assertRaises(findings_mod.StoreBusyError) as caught:
+                        findings_mod.FindingsStore("probe", findings_dir=Path(tmp), lock_timeout=1.0)
+            finally:
+                holder.close()
+
+            self.assertEqual(clock.sleeps, [0.25] * 4,
+                             "the store must poll at the configured interval until its deadline")
+            self.assertEqual(sum(clock.sleeps), 1.0, "waiting must not exceed the ceiling")
+            self.assertIn("waited 1s", str(caught.exception))
 
     def test_a_reader_that_proceeded_unlocked_does_not_erase_the_live_holder(self):
         """agents-4sij review P1: the diagnostic must survive the READ path.
