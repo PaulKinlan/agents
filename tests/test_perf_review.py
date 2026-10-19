@@ -193,6 +193,51 @@ class TestPerfReviewVerdictReproducibility(unittest.TestCase):
 class TestConcurrencyRecommendationGuard(unittest.TestCase):
     """agents-vorw / hub fleet-4inv: Concurrency recommendation reentrancy guard."""
 
+    def test_guard_output_satisfies_its_own_validator_for_all_signal_fields(self):
+        """agents-ahw1h: title/description signals may pair with cancellation-only remediation."""
+        cases = {
+            "remediation": {"remediation": "Run all jobs concurrently."},
+            "description": {"description": "Existing PDF worker pool has no abort path.",
+                            "remediation": "Check AbortSignal between pages."},
+            "title": {"title": "PDF worker pool stalls ingestion",
+                      "remediation": "Cap PDF input size."},
+            "empty_remediation": {"description": "Use a worker pool for PDF parsing."},
+            "withheld_diff": {"description": "Existing worker pool has no abort path.",
+                              "remediation": "Add cancellation checks.",
+                              "proposed_fix_diff": "+Promise.all(tasks.map(parse))"},
+        }
+        for name, fields in cases.items():
+            with self.subTest(name=name):
+                finding = {"rule_id": "tm-pdf-parse-uncancellable", **fields}
+                self.assertTrue(is_concurrency_recommendation(finding))
+                report = {"findings": [finding]}
+                self.assertTrue(normalize_report(report))
+                self.assertTrue(has_reentrancy_precondition(finding), finding["remediation"])
+                self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+                if name == "withheld_diff":
+                    self.assertNotIn("proposed_fix_diff", finding)
+                    self.assertIn("Code patch withheld", finding["remediation"])
+
+    def test_guard_wrapper_does_not_admit_unconditional_or_unsafe_fallbacks(self):
+        finding = {"rule_id": "tm-pdf-parse-uncancellable",
+                   "description": "Existing worker pool has no abort path.",
+                   "remediation": "Add cancellation checks."}
+        normalize_report({"findings": [finding]})
+        canonical = finding["remediation"]
+        self.assertTrue(has_reentrancy_precondition(finding))
+        for text in (
+            canonical.replace("otherwise preserve serial execution", "otherwise use Promise.all"),
+            canonical.replace("otherwise preserve serial execution", "otherwise preserve serial execution; use Promise.all"),
+            canonical.replace("; otherwise preserve serial execution.", "."),
+            canonical.replace("Add cancellation checks.; otherwise", "otherwise"),
+            "The backend is reentrant; use Promise.all.",
+            "IF this runtime is reentrant, use Promise.all.",
+        ):
+            with self.subTest(remediation=text):
+                self.assertNotEqual(text, canonical, "the negative mutation must change the guard output")
+                self.assertFalse(has_reentrancy_precondition({"rule_id": finding["rule_id"],
+                                                              "remediation": text}))
+
     def test_scanner_rule_suggestion_carries_reentrancy_precondition(self):
         """scan_perf_changes.py rule suggestion must state reentrancy precondition."""
         mod = load_scanner_module()

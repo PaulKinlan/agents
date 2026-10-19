@@ -855,6 +855,33 @@ class TestThreatModelSchemaBound(unittest.TestCase):
                         errors)
 
 
+class TestThreatModelConcurrencyRoundTrip(unittest.TestCase):
+    """agents-ahw1h: a guard-normalized threat-model report must pass its real schema gate."""
+
+    def test_description_signalled_pdf_finding_at_fifth_row_validates_after_guard(self):
+        agent_dir = FACTORY_ROOT / "agents" / "threat-model"
+        cfg = {"output": {"schema": "report.schema.json"}}
+        report = {"summary": "PDF parse threat model", "target": "audio-feed",
+                  "findings": [
+                      {"rule_id": f"tm-control-{i}", "severity": "low", "title": "Control",
+                       "description": "Review the input boundary."} for i in range(4)
+                  ] + [{
+                      "rule_id": "tm-pdf-parse-uncancellable", "severity": "medium",
+                      "path": "src/audio/ingest.ts", "line_number": 88,
+                      "title": "PDF parsing cannot be cancelled and stalls ingestion",
+                      "description": "The ingest path parses untrusted PDFs in a worker pool with no abort path.",
+                      "remediation": "Add an AbortSignal check between page parses and cap input size.",
+                  }]}
+        before = validate_agent_report(agent_dir, cfg, report)
+        self.assertEqual(len(before), 1, before)
+        self.assertIn("$.findings[4]: concurrency recommendation", before[0])
+        notes = normalize_report(report, declared_schema(agent_dir, cfg))
+        self.assertTrue(any("findings[4]: enforced reentrancy precondition" in note for note in notes))
+        self.assertEqual(validate_agent_report(agent_dir, cfg, report), [],
+                         "guard-authored remediation must pass its own cross-field validator")
+        self.assertIn("Add an AbortSignal check", report["findings"][4]["remediation"])
+
+
 class TestThePromptSpellsOutTheRequiredFields(unittest.TestCase):
     """agents-sz8q: the station's report was rejected 35 times for 35 candidates - one violation per
     candidate - and the prompt was already carrying the full JSON Schema. What it never stated was, in

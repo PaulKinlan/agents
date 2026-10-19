@@ -256,6 +256,15 @@ _FIRST_FALLBACK_SERIAL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# The guard's own conditional prefix. Its branch can name a non-concurrency action when the
+# recommendation signal was in the title/description; validation must accept that guarded
+# result without accepting a model's bare assertion of reentrancy (agents-ahw1h).
+_CONCURRENCY_GUARD_PREFIX = (
+    "Precondition: Verify backend reentrancy before applying. "
+    "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a "
+    "non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), "
+)
+
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
     re.IGNORECASE
@@ -605,6 +614,17 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
                 if not _EXECUTION_CONCURRENCY_PATTERN.search(prefix) and _EXECUTION_CONCURRENCY_PATTERN.search(concurrency_branch):
                     return True
 
+    # Case 1b: the exact guard-authored prefix with a non-empty conditional action.
+    # The guard sometimes wraps an action such as "add cancellation" when a worker pool is
+    # mentioned only in the finding's description. It must pass its own validator, but the
+    # FIRST fallback must still preserve serial execution without advocating concurrency.
+    if first_fb and remediation.startswith(_CONCURRENCY_GUARD_PREFIX):
+        branch = remediation[len(_CONCURRENCY_GUARD_PREFIX):first_fb.start()].strip(" ,;.")
+        fallback_part = remediation[first_fb.start():]
+        if (branch and _FIRST_FALLBACK_SERIAL_PATTERN.match(fallback_part)
+                and not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_part)):
+            return True
+
     # Case 2: Named backend citing proven evidence of overlap tolerance
     if has_proven_backend_evidence(finding):
         return True
@@ -642,18 +662,15 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
             ).strip()
             if clean_rem:
                 finding["remediation"] = (
-                    "Precondition: Verify backend reentrancy before applying. "
-                    f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {clean_rem}; otherwise preserve serial execution."
+                    f"{_CONCURRENCY_GUARD_PREFIX}{clean_rem}; otherwise preserve serial execution."
                 )
             else:
                 finding["remediation"] = (
-                    "Precondition: Verify backend reentrancy before applying. "
-                    "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
+                    f"{_CONCURRENCY_GUARD_PREFIX}consider parallel execution; otherwise preserve serial execution."
                 )
         else:
             finding["remediation"] = (
-                "Precondition: Verify backend reentrancy before applying. "
-                "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
+                f"{_CONCURRENCY_GUARD_PREFIX}consider parallel execution; otherwise preserve serial execution."
             )
 
         desc = str(finding.get("description", "")).strip()
