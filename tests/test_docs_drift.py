@@ -50,11 +50,8 @@ class TestDocsDriftReportExamples(unittest.TestCase):
                                             "doc-broken-link", "doc-broken-anchor", "doc-missing-symbol"},
                           "a model-only doc-spec-drift row cannot cite a scanner candidate")
 
-    def test_scanner_citation_validates_and_accounts_for_a_broken_link(self):
-        """Drive the real CLI: its emitted id must survive report validation and accounting."""
-        from lib.findings import candidate_coverage
-        from lib.report_schema import validate_agent_report
-
+    def test_scanner_stamps_a_citable_id_on_a_broken_link(self):
+        """Drive the real CLI; report validation and accounting live in their consumer suites."""
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"
             target.mkdir()
@@ -69,15 +66,6 @@ class TestDocsDriftReportExamples(unittest.TestCase):
             candidate = emitted["candidates"][0]
             self.assertEqual(candidate["rule_id"], "doc-broken-link")
             self.assertRegex(candidate["candidate_id"], r"^[0-9a-f]{16}$")
-            cfg = {"output": {"schema": "report.schema.json"}}
-            agent_dir = FACTORY_ROOT / "agents" / "docs-drift"
-            row = {key: candidate[key] for key in ("rule_id", "path", "snippet", "severity",
-                                                    "title", "description", "candidate_id")}
-            self.assertEqual(validate_agent_report(agent_dir, cfg, {"findings": [row]}), [])
-            coverage = candidate_coverage(1, 1, presented_ids=[candidate["candidate_id"]],
-                                          cited_ids=[row["candidate_id"]])
-            self.assertTrue(coverage["complete"])
-            self.assertEqual(coverage["candidates_accounted"], 1)
 
 
 class TestTreeDiagramParser(unittest.TestCase):
