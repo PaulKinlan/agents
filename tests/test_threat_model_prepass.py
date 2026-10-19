@@ -183,9 +183,66 @@ class TestPromptInjectionHygiene(unittest.TestCase):
             data = json.loads(out_file.read_text(encoding="utf-8"))
             self.assertIn("evidence_nonce", data)
             self.assertIn("system_instruction", data)
+            self.assertIn("is_self_target", data)
+            self.assertIs(data["is_self_target"], False)
             nonce = data["evidence_nonce"]
             self.assertIn(nonce, data["system_instruction"])
             self.assertIn("NEVER be executed", data["system_instruction"])
+
+    def test_is_self_target_cli_flags_and_emission(self):
+        """agents-xu3n1: mine_history emits is_self_target in result dict, honoring explicit CLI flags."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            out_explicit_self = repo_dir / "out_self.json"
+            subprocess.run([
+                sys.executable, str(ROOT / "agents" / "threat-model" / "scripts" / "mine_history.py"),
+                "--target", str(repo_dir),
+                "--output", str(out_explicit_self),
+                "--is-self-target"
+            ], check=True)
+            data_self = json.loads(out_explicit_self.read_text(encoding="utf-8"))
+            self.assertIn("is_self_target", data_self)
+            self.assertIs(data_self["is_self_target"], True)
+
+            out_explicit_non_self = repo_dir / "out_non_self.json"
+            subprocess.run([
+                sys.executable, str(ROOT / "agents" / "threat-model" / "scripts" / "mine_history.py"),
+                "--target", str(repo_dir),
+                "--output", str(out_explicit_non_self),
+                "--no-is-self-target"
+            ], check=True)
+            data_non_self = json.loads(out_explicit_non_self.read_text(encoding="utf-8"))
+            self.assertIn("is_self_target", data_non_self)
+            self.assertIs(data_non_self["is_self_target"], False)
+
+    def test_scan_entry_points_returns_is_self_target(self):
+        """agents-xu3n1: scan_entry_points threads is_self_target out when return_self_target=True."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_dir = tmp_path / "src"
+            src_dir.mkdir(parents=True)
+            (src_dir / "server.ts").write_text("app.post('/api/login', handleLogin);\n", encoding="utf-8")
+
+            # With return_suppressed=True and return_self_target=True
+            results, suppressed, is_self = mine_history.scan_entry_points(
+                tmp_path, return_suppressed=True, return_self_target=True
+            )
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(suppressed), 0)
+            self.assertIs(is_self, False)
+
+            # Explicit is_self_target=True passed in
+            results2, suppressed2, is_self2 = mine_history.scan_entry_points(
+                tmp_path, is_self_target=True, return_suppressed=True, return_self_target=True
+            )
+            self.assertIs(is_self2, True)
+
+            # With return_suppressed=False and return_self_target=True
+            results3, is_self3 = mine_history.scan_entry_points(
+                tmp_path, return_self_target=True
+            )
+            self.assertEqual(len(results3), 1)
+            self.assertIs(is_self3, False)
 
 
 class TestScannerSelfMatchAndExclusions(unittest.TestCase):
