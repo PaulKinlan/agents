@@ -1022,7 +1022,7 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertEqual(violations, [])
 
     def test_guard_preserves_mid_sentence_otherwise_and_worker_pool_advice(self):
-        """agents-i87nx: guard must not truncate remediation after mid-sentence 'otherwise'."""
+        """agents-i87nx / agents-7pe7y: guard must not truncate remediation after mid-sentence 'otherwise'."""
         finding = {
             "rule_id": "tm-pdf-parse-uncancellable",
             "path": "src/parse.ts",
@@ -1042,6 +1042,41 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
         self.assertTrue(is_concurrency_recommendation(report["findings"][0]))
         self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+        # Finding with concurrency vocabulary inside causal otherwise (Reviewer P1 finding agents-7pe7y)
+        finding_worker_hazard = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 43,
+            "remediation": "Make the parse cancellable; otherwise a worker pool blocks the queue. Prefer a worker pool with per-parse abort.",
+        }
+        report_worker = {"findings": [finding_worker_hazard]}
+        notes_worker = normalize_report(report_worker)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes_worker))
+        guarded_worker = report_worker["findings"][0]["remediation"]
+        self.assertIn("Prefer a worker pool with per-parse abort", guarded_worker)
+        self.assertIn("otherwise a worker pool blocks the queue", guarded_worker)
+        self.assertIn("otherwise preserve serial execution", guarded_worker)
+        self.assertTrue(has_reentrancy_precondition(report_worker["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report_worker), [])
+
+        # Finding with proposal before and advice after causal otherwise (Reviewer P1 finding agents-7pe7y)
+        finding_advice_after = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 44,
+            "remediation": "Prefer a worker pool with per-parse abort; otherwise a slow PDF blocks the queue. Add an abort signal to each parse.",
+        }
+        report_advice = {"findings": [finding_advice_after]}
+        notes_advice = normalize_report(report_advice)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes_advice))
+        guarded_advice = report_advice["findings"][0]["remediation"]
+        self.assertIn("Prefer a worker pool with per-parse abort", guarded_advice)
+        self.assertIn("otherwise a slow PDF blocks the queue", guarded_advice)
+        self.assertIn("Add an abort signal to each parse", guarded_advice)
+        self.assertIn("otherwise preserve serial execution", guarded_advice)
+        self.assertTrue(has_reentrancy_precondition(report_advice["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report_advice), [])
 
     def test_guard_and_validator_with_true_serial_fallback_and_mid_sentence_otherwise(self):
         """agents-i87nx: true serial fallback is stripped once and re-wrapped, preserving mid-sentence 'otherwise'."""

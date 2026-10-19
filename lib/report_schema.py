@@ -584,42 +584,34 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     return True
 
 
+_FALLBACK_DIRECTIVE_PATTERN = re.compile(
+    r"\b(?:otherwise|else)\s*[,:]?\s*"
+    r"(?:"
+    r"(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b"
+    r"|(?:(?:also\s+)?(?:use|using|run|running|execute|executing|launch|launching|dispatch|dispatching|call|calling|start|starting|employ|employing|apply|applying|spawn|spawning|fall\s+back|rely\s+on|switch\s+to|do\s+not|don't|never|preserve|keep|maintain|default\s+to|abort|return|throw|exit|fail|revert|stop|continue|proceed)\b)"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def _find_fallback_delimiter(text: str) -> Optional[re.Match]:
     """Find the first true fallback delimiter ('otherwise' or 'else') in remediation text.
 
-    A true fallback delimiter introduces either:
+    A true fallback delimiter introduces an alternative directive branch:
     1. A valid serial fallback clause (matching _FIRST_FALLBACK_SERIAL_PATTERN, e.g.
        'otherwise preserve serial execution', 'else keep serial execution').
-    2. An unsafe or competing fallback clause proposing concurrency (e.g.
+    2. An unsafe or competing fallback clause (matching _FALLBACK_DIRECTIVE_PATTERN, e.g.
        'otherwise use Promise.any', 'otherwise launch model runs on separate workers').
 
     Mid-sentence causal or explanatory usage (e.g. 'Make the parse cancellable; otherwise
-    a slow PDF blocks the queue. Prefer a worker pool with per-parse abort.') does NOT
-    introduce a fallback branch and must not truncate actionable remediation advice (agents-i87nx).
+    a slow PDF blocks the queue. Prefer a worker pool with per-parse abort.' or
+    'otherwise a worker pool blocks the queue') does NOT direct an alternative action and
+    must not truncate actionable remediation advice (agents-i87nx / agents-7pe7y).
     """
-    matches = list(re.finditer(r"\b(?:otherwise|else)\b", text, re.IGNORECASE))
-    if not matches:
-        return None
-
-    conc_matches = list(_EXECUTION_CONCURRENCY_PATTERN.finditer(text))
-
-    for m in matches:
+    for m in re.finditer(r"\b(?:otherwise|else)\b", text, re.IGNORECASE):
         after = text[m.start():]
-        # 1. Immediate serial fallback
-        if _FIRST_FALLBACK_SERIAL_PATTERN.match(after):
+        if _FIRST_FALLBACK_SERIAL_PATTERN.match(after) or _FALLBACK_DIRECTIVE_PATTERN.match(after):
             return m
-        # 2. Concurrency directive immediately following otherwise/else
-        after_del = after[len(m.group(0)):].strip(" :,-")
-        clause = re.split(r"(?:\.\s+|[;!?\n]|\b(?:otherwise|else)\b)", after_del)[0]
-        if _EXECUTION_CONCURRENCY_PATTERN.search(clause):
-            return m
-        # 3. If there is a concurrency pattern before m, and no subsequent sentence
-        # contains a concurrency pattern, then this is a fallback branch.
-        has_conc_before = any(cm.start() < m.start() for cm in conc_matches)
-        has_conc_after = any(cm.start() > m.start() for cm in conc_matches)
-        if has_conc_before and not has_conc_after:
-            return m
-
     return None
 
 
