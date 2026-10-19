@@ -1922,6 +1922,26 @@ class TestCandidateCoverage(unittest.TestCase):
         self.assertIsNone(repair_cited_candidate_id("4e8820782eed4e", ["4e8820782eed4e17"],
                                                     foreign=["4e8820782eed4exx"])[0])
 
+    def test_a_refused_citation_keeps_its_reason_and_names_the_nearest_candidate(self):
+        """agents-afx5o: the refusal reason was computed and discarded, so a failed run said "no unique
+        match" while holding the very ids it compared against - an operator could not tell a typo from a
+        wrong-batch answer. The nearest candidate is named only when it is close enough to be plausible."""
+        rows = [{"candidate_id": "4e8820782eed4e1xxx", "path": "a.py"},
+                {"candidate_id": "4e8820782eed4e17", "path": "b.py"}]
+        refusals = []
+        applied = repair_cited_candidate_ids(rows, ["4e8820782eed4e17"], refusals=refusals)
+        self.assertEqual(applied, [], "three edits is beyond the repair bound")
+        self.assertEqual(refusals, [{"cited": "4e8820782eed4e1xxx", "path": "a.py",
+                                     "reason": "no unique match (nearest candidate: "
+                                               "4e8820782eed4e17 at 3 edits)"}])
+        # an already-exact id is not a refusal, and a hopeless one does not name a 16-edit neighbour
+        refusals.clear()
+        repair_cited_candidate_ids([{"candidate_id": "4e8820782eed4e17"}], ["4e8820782eed4e17"],
+                                   refusals=refusals)
+        self.assertEqual(refusals, [])
+        self.assertEqual(repair_cited_candidate_id("ffffffffffffffff", ["4e8820782eed4e17"]),
+                         (None, "no unique match"))
+
     def test_repairs_are_recorded_and_make_a_complete_answer_accountable(self):
         presented = ["4e8820782eed4e17", "05622f455345d483"]
         rows = [{"candidate_id": "4e8820782eed17", "path": "a.py"},

@@ -1018,18 +1018,34 @@ def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (
     partial triage rather than binding a verdict to the wrong candidate.
     """
     repairs: List[Dict[str, Any]] = []
+    refusals: List[Dict[str, Any]] = []
     if report is None:
         return repairs
     for array_name, rows in row_arrays(report).items():
-        for record in repair_cited_candidate_ids(rows, presented or (), foreign=foreign or ()):
+        batch_refusals: List[Dict[str, Any]] = []
+        for record in repair_cited_candidate_ids(rows, presented or (), foreign=foreign or (),
+                                                 refusals=batch_refusals):
             record["array"] = array_name
             repairs.append(record)
+        for refusal in batch_refusals:
+            refusal["array"] = array_name
+        refusals.extend(batch_refusals)
     if repairs and run_dir is not None:
         _write_run_artifact(run_dir / f"candidate_id_repairs{tag}.json", json.dumps(repairs, indent=2))
         first = repairs[0]
         print(f"Note: repaired {len(repairs)} cited candidate_id(s) in {run_dir.name}"
               f"{tag} (first: {first['cited']} -> {first['repaired']} by {first['rule']}); "
               f"see candidate_id_repairs{tag}.json")
+    if refusals and run_dir is not None:
+        # agents-afx5o: a citation that could NOT be repaired is the interesting one when a run fails, and
+        # the reason (including the nearest candidate, when there is a plausible one) was previously
+        # computed and thrown away - so the operator saw "refused" with nothing to act on.
+        _write_run_artifact(run_dir / f"candidate_id_repairs_refused{tag}.json",
+                            json.dumps(refusals[:20], indent=2))
+        first_refusal = refusals[0]
+        print(f"Note: {len(refusals)} cited candidate_id(s) in {run_dir.name}{tag} could not be repaired "
+              f"(first: {first_refusal['cited']!r} - {first_refusal['reason']}); "
+              f"see candidate_id_repairs_refused{tag}.json")
     return repairs
 
 
