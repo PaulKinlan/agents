@@ -387,7 +387,8 @@ def scan_entry_points(
     nonce: Optional[str] = None,
     *,
     is_self_target: Optional[bool] = None,
-    return_suppressed: bool = False
+    return_suppressed: bool = False,
+    return_self_target: bool = False
 ) -> Any:
     """Scan source files for exposed attack surfaces and sensitive primitives.
 
@@ -469,8 +470,12 @@ def scan_entry_points(
                         "snippet": wrap_untrusted(line.strip()[:100], nonce=active_nonce, max_length=100)
                     })
                     if len(findings) > 60:
+                        if return_self_target:
+                            return (findings, suppressed_entry_points, is_self_target) if return_suppressed else (findings, is_self_target)
                         return (findings, suppressed_entry_points) if return_suppressed else findings
 
+    if return_self_target:
+        return (findings, suppressed_entry_points, is_self_target) if return_suppressed else (findings, is_self_target)
     return (findings, suppressed_entry_points) if return_suppressed else findings
 
 
@@ -550,6 +555,10 @@ def main():
     parser.add_argument("--target-dir", "--target", dest="target_dir", required=True, help="Target repository directory")
     parser.add_argument("--output", help="Output JSON path")
     parser.add_argument("--nonce", help="Optional explicit nonce (generated securely if omitted)")
+    parser.add_argument("--is-self-target", dest="is_self_target", action="store_true", default=None,
+                        help="Explicitly mark target as Software Factory self-target (auto-detected if omitted)")
+    parser.add_argument("--no-is-self-target", dest="is_self_target", action="store_false",
+                        help="Explicitly mark target as third-party target (auto-detected if omitted)")
     args = parser.parse_args()
 
     target_dir = Path(args.target_dir).resolve()
@@ -566,12 +575,12 @@ def main():
     beads_bugs = mine_beads_issues(target_dir, nonce=nonce)
 
     sys.stderr.write(f"Scanning entry points and sensitive primitives...\n")
-    entry_points, suppressed_entry_points = scan_entry_points(
-        target_dir, nonce=nonce, return_suppressed=True
+    entry_points, suppressed_entry_points, is_self_target = scan_entry_points(
+        target_dir, nonce=nonce, is_self_target=args.is_self_target, return_suppressed=True, return_self_target=True
     )
     if suppressed_entry_points:
         sys.stderr.write(
-            f"Note: {len(suppressed_entry_points)} candidate entry point(s) suppressed by self-referential rules.\n"
+            f"Note: {len(suppressed_entry_points)} candidate entry point(s) suppressed by self-referential rules (is_self_target={is_self_target}).\n"
         )
 
     meta = extract_project_metadata(target_dir, nonce=nonce)
@@ -586,6 +595,7 @@ def main():
 
     result = {
         "target": target_dir.name,
+        "is_self_target": is_self_target,
         "evidence_nonce": nonce,
         "system_instruction": SYSTEM_INSTRUCTION.format(nonce=nonce),
         "threat_model": threat_model_info,
