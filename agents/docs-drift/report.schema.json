@@ -24,7 +24,7 @@
         "properties": {
           "rule_id": {
             "type": "string",
-            "description": "Identifier for drift rule (e.g. doc-broken-link, doc-missing-file, doc-deleted-reference, doc-missing-symbol, doc-unknown-cli-flag, doc-spec-drift)."
+            "description": "Copy the rule_id from the same shown pre-pass candidate as candidate_id (doc-broken-link, doc-broken-anchor, doc-missing-file, doc-deleted-reference, or doc-missing-symbol). Do not invent a model-only rule or cite an unrelated candidate id."
           },
           "path": {
             "type": "string",

@@ -37,14 +37,16 @@ The factory writes the deterministic pre-pass to `candidates.json` and presents 
 candidates under `Scanner Data` in your prompt. Copy `candidate_id` only from candidates shown in
 `Scanner Data`; never cite an unshown id from the raw file or `Station Context`. Every JSON example
 below uses a placeholder candidate id: replace it with the matching id actually shown, never copy
-that placeholder as a citation. Do not add a speculative finding without a shown pre-pass candidate;
-it cannot account for any candidate in this run.
+that placeholder as a citation. Copy `rule_id`, `path`, `line_number`, and `snippet` from the SAME
+shown candidate as the `candidate_id`; never borrow an unrelated id to account for a model-only row.
+Do not add a speculative finding without a shown pre-pass candidate; it cannot account for any
+candidate in this run.
 
 The shape of one dismissal:
 
 ```json
 {
-  "rule_id": "candidate-evaluated-and-rejected",
+  "rule_id": "doc-broken-link",
   "candidate_id": "<copy the matching id from Scanner Data>",
   "path": "path/to/file",
   "line_number": 42,
@@ -88,22 +90,22 @@ The shape of one dismissal:
          "candidate_id": "<copy the matching id from Scanner Data>",
          "path": "docs/PLAN.md",
          "line_number": 504,
-         "snippet": "[Adapter](../lib/adapters/removed.sh)",
+         "snippet": "<copy the matched snippet from Scanner Data>",
          "severity": "medium",
          "title": "Broken link: Removed Adapter",
          "description": "docs/PLAN.md links to an adapter script that does not exist in this repository.",
          "remediation": "Update the link to an existing adapter or annotate it as a planned target."
        },
        {
-         "rule_id": "doc-external-target-description",
+         "rule_id": "doc-broken-link",
          "candidate_id": "<copy the matching id from Scanner Data>",
          "path": "docs/PLAN.md",
          "line_number": 118,
-         "snippet": "Uses the external chrome-agent-platform harness.",
+         "snippet": "<copy the matched snippet from Scanner Data>",
          "severity": "info",
          "false_positive": true,
          "title": "Dismissed: External Target Description",
-         "description": "Discusses an external repository's harness, not a file expected in this repo. Evaluated and rejected - recorded so the triage accounts for every candidate it was shown.",
+         "description": "The shown link describes an external repository's harness, not a file expected in this repo. Evaluated and rejected - recorded so the triage accounts for every candidate it was shown.",
          "remediation": "No action required."
        }
      ]

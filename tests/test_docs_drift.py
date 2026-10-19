@@ -36,6 +36,8 @@ class TestDocsDriftReportExamples(unittest.TestCase):
         text = (FACTORY_ROOT / "agents" / "docs-drift" / "SKILL.md").read_text(encoding="utf-8")
         examples = [json.loads(block) for block in re.findall(r"```json\s*\n(.*?)```", text, re.S)]
         self.assertEqual(len(examples), 2, "assert against both the dismissal and report examples")
+        scanner_rules = {"doc-deleted-reference", "doc-missing-file", "doc-broken-link",
+                         "doc-broken-anchor", "doc-missing-symbol"}
         for example in examples:
             for finding in example.get("findings", [example]):
                 with self.subTest(rule=finding["rule_id"]):
@@ -43,12 +45,22 @@ class TestDocsDriftReportExamples(unittest.TestCase):
                     self.assertIsInstance(candidate_id, str)
                     self.assertTrue(candidate_id.startswith("<copy ") and "Scanner Data" in candidate_id,
                                     "the example must require a shown, not invented, citation")
+                    self.assertIn(finding["rule_id"], scanner_rules,
+                                  "all shown rows, including dismissals, must name scanner-backed rules")
         confirmed = [row for row in examples[1]["findings"] if not row.get("false_positive")]
         self.assertTrue(confirmed, "the report example must demonstrate a confirmed candidate")
-        for row in confirmed:
-            self.assertIn(row["rule_id"], {"doc-deleted-reference", "doc-missing-file",
-                                            "doc-broken-link", "doc-broken-anchor", "doc-missing-symbol"},
-                          "a model-only doc-spec-drift row cannot cite a scanner candidate")
+
+    def test_fenced_report_example_does_not_create_its_own_missing_link_candidate(self):
+        text = (FACTORY_ROOT / "agents" / "docs-drift" / "SKILL.md").read_text(encoding="utf-8")
+        report_block = re.findall(r"```json\s*\n(.*?)```", text, re.S)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "docs").mkdir()
+            (target / "docs" / "PLAN.md").write_text(
+                "# Documentation example\n```json\n" + report_block + "```\n", encoding="utf-8")
+            candidates = check_docs.scan_target(target)
+        self.assertFalse(any(c["rule_id"] == "doc-broken-link" for c in candidates),
+                         "fenced example must not invent a broken link in its own source")
 
     def test_scanner_stamps_a_citable_id_on_a_broken_link(self):
         """Drive the real CLI; report validation and accounting live in their consumer suites."""
