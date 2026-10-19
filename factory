@@ -40,7 +40,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              repair_cited_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
-    from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
+    from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
+                                              batch_candidate_ids,
                                         classify_unparseable, describe_truncation, merge_reports,
                                         plan_batches, row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
@@ -74,7 +75,8 @@ except ImportError:
                              repair_cited_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
-    from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_candidate_ids,
+    from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
+                                              batch_candidate_ids,
                                         classify_unparseable, describe_truncation, merge_reports,
                                         plan_batches, row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
@@ -1935,15 +1937,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         prompts: List[str] = []
         for batch_index, batch in enumerate(batches):
             if batch_count > 1:
-                batch_ids = batch_candidate_ids(batch)
-                header = (
-                    f"BATCH {batch_index + 1} of {batch_count}: the candidate list is presented in "
-                    f"{batch_count} batches so that no single response has to carry every row. Answer "
-                    f"ONLY for the candidates in THIS batch, and answer for EVERY one of them - a "
-                    f"confirmed row or a dismissal with `false_positive: true`, never an omission."
-                    + (f" The candidate ids in this batch: {', '.join(batch_ids)}." if batch_ids else "")
-                    + "\n\n"
-                )
+                # agents-g42wa: the brief states the batch POPULATION, not just the ids it happens to
+                # carry - naming only the ids described a 4-candidate batch with 1 id as though the ids
+                # were the batch, and the model skipped the three unnamed candidates.
+                header = batch_brief(batch, batch_index, batch_count)
             else:
                 header = ""
             batch_prompt = header + (
