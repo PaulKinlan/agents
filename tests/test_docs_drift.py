@@ -11,9 +11,11 @@ path. `.github/workflows/` was reported missing while it existed.
 import errno
 import importlib.machinery
 import importlib.util
+import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +28,56 @@ loader = importlib.machinery.SourceFileLoader(
 spec = importlib.util.spec_from_loader("check_docs", loader)
 check_docs = importlib.util.module_from_spec(spec)
 loader.exec_module(check_docs)
+
+
+class TestDocsDriftReportExamples(unittest.TestCase):
+    def test_each_example_cites_a_candidate_and_the_confirmed_rule_is_scanner_backed(self):
+        """agents-fmakh: the SKILL arm must catch examples that teach missing citations."""
+        text = (FACTORY_ROOT / "agents" / "docs-drift" / "SKILL.md").read_text(encoding="utf-8")
+        examples = [json.loads(block) for block in re.findall(r"```json\s*\n(.*?)```", text, re.S)]
+        self.assertEqual(len(examples), 2, "assert against both the dismissal and report examples")
+        scanner_rules = {"doc-deleted-reference", "doc-missing-file", "doc-broken-link",
+                         "doc-broken-anchor", "doc-missing-symbol"}
+        for example in examples:
+            for finding in example.get("findings", [example]):
+                with self.subTest(rule=finding["rule_id"]):
+                    candidate_id = finding.get("candidate_id")
+                    self.assertIsInstance(candidate_id, str)
+                    self.assertTrue(candidate_id.startswith("<copy ") and "Scanner Data" in candidate_id,
+                                    "the example must require a shown, not invented, citation")
+                    self.assertIn(finding["rule_id"], scanner_rules,
+                                  "all shown rows, including dismissals, must name scanner-backed rules")
+        confirmed = [row for row in examples[1]["findings"] if not row.get("false_positive")]
+        self.assertTrue(confirmed, "the report example must demonstrate a confirmed candidate")
+
+    def test_fenced_report_example_does_not_create_its_own_missing_link_candidate(self):
+        text = (FACTORY_ROOT / "agents" / "docs-drift" / "SKILL.md").read_text(encoding="utf-8")
+        report_block = re.findall(r"```json\s*\n(.*?)```", text, re.S)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            (target / "docs").mkdir()
+            (target / "docs" / "PLAN.md").write_text(
+                "# Documentation example\n```json\n" + report_block + "```\n", encoding="utf-8")
+            candidates = check_docs.scan_target(target)
+        self.assertFalse(any(c["rule_id"] == "doc-broken-link" for c in candidates),
+                         "fenced example must not invent a broken link in its own source")
+
+    def test_scanner_stamps_a_citable_id_on_a_broken_link(self):
+        """Drive the real CLI; report validation and accounting live in their consumer suites."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            target.mkdir()
+            (target / "README.md").write_text("# Test\n[missing](gone.md)\n", encoding="utf-8")
+            output = Path(tmp) / "candidates.json"
+            subprocess.run([sys.executable, str(FACTORY_ROOT / "agents" / "docs-drift" /
+                                                "scripts" / "check_docs.py"), "--target", str(target),
+                            "--output", str(output)], check=True, capture_output=True, text=True,
+                           env={**os.environ, "FACTORY_ALLOW_UNPINNED_TOOLS": "1"})
+            emitted = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(emitted["candidate_count"], 1)
+            candidate = emitted["candidates"][0]
+            self.assertEqual(candidate["rule_id"], "doc-broken-link")
+            self.assertRegex(candidate["candidate_id"], r"^[0-9a-f]{16}$")
 
 
 class TestTreeDiagramParser(unittest.TestCase):
