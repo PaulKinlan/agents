@@ -257,6 +257,45 @@ class TestDeclaredSchema(unittest.TestCase):
                               f"{schema_path}: findings items must require 'severity'")
 
 
+class TestDocsDriftCandidateIdentityContract(unittest.TestCase):
+    """agents-fmakh: the schema arm must reject missing ids before accounting sees the report."""
+
+    def setUp(self):
+        self.agent_dir = FACTORY_ROOT / "agents" / "docs-drift"
+        self.cfg = {"output": {"schema": "report.schema.json"}}
+        self.schema = declared_schema(self.agent_dir, self.cfg)
+        self.finding = {"rule_id": "doc-broken-link", "path": "docs/PLAN.md",
+                        "snippet": "[missing](gone.md)", "severity": "medium",
+                        "title": "Broken link", "description": "The link is missing"}
+
+    def test_missing_or_blank_id_is_rejected_and_named_in_prompt(self):
+        report = {"findings": [dict(self.finding)]}
+        self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, report),
+                         ["$.findings[0]: missing required property 'candidate_id'"])
+        report["findings"][0]["candidate_id"] = ""
+        self.assertTrue(any("candidate_id" in error for error in
+                            validate_agent_report(self.agent_dir, self.cfg, report)))
+        note = required_fields_note(self.schema)
+        self.assertIn("`candidate_id`", note.split("Each entry in `findings` MUST include:", 1)[1])
+        self.assertIn(note.strip(), output_contract_prompt(self.schema))
+
+    def test_normalization_keeps_the_citation_and_dismissals_still_validate(self):
+        row = dict(self.finding, candidate_id="0123456789abcdef", remediation=None,
+                   false_positive=True, severity="info")
+        report = {"findings": [row]}
+        notes = normalize_report(report, self.schema)
+        self.assertEqual(row["candidate_id"], "0123456789abcdef")
+        self.assertNotIn("remediation", row)
+        self.assertTrue(any("remediation null -> omitted" in note for note in notes))
+        self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, report), [])
+        self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, {"findings": []}), [])
+        row["candidate_id"] = None
+        normalize_report(report, self.schema)
+        self.assertIsNone(row["candidate_id"], "a required null id must not be silently omitted")
+        self.assertTrue(any("candidate_id" in error for error in
+                            validate_agent_report(self.agent_dir, self.cfg, report)))
+
+
 @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
 class TestDispatcherSchemaGate(unittest.TestCase):
     """A report that violates the declared schema is treated like unparseable output:

@@ -375,8 +375,12 @@ class TestTheContractsAndSchemasCarryIdentity(unittest.TestCase):
                 items = json.loads((REPO / "agents" / station / "report.schema.json").read_text())[
                     "properties"]["findings"]["items"]
                 self.assertEqual(items["properties"]["candidate_id"]["type"], "string")
-                self.assertNotIn("candidate_id", items.get("required", []),
-                                 "pre-scheme reports and stations without a pre-pass do not carry it")
+                if station == "docs-drift":
+                    # check_docs.py always stamps ids; optional rows yielded 0/5 citations (agents-fmakh).
+                    self.assertIn("candidate_id", items.get("required", []))
+                else:
+                    self.assertNotIn("candidate_id", items.get("required", []),
+                                     "pre-scheme reports and stations without a pre-pass do not carry it")
 
     def test_every_station_contract_asks_for_the_citation(self):
         # Reader control for the contracts below: the raw pre-pass has one extra id,
