@@ -128,6 +128,48 @@ def batch_candidate_ids(batch: Iterable[Any]) -> List[str]:
     return ids
 
 
+def batch_brief(batch: Sequence[Any], batch_index: int, batch_count: int) -> str:
+    """The header that tells the model what THIS batch is, and how much of it carries an id
+    (agents-g42wa).
+
+    WHY THE COUNTS ARE SPELLED OUT. The header used to end with "The candidate ids in this batch: a,
+    b." - and when a batch mixes identified and unidentified candidates (vuln-verify's pre-pass ids
+    some rows and not others), that sentence described a 4-candidate batch containing one id as though
+    the id list WERE the batch. A model answering "every candidate I was told about" then answered the
+    one id and skipped the other three: measured on a 16-candidate plan (13 ids), the third batch held
+    4 candidates and listed 1, which is exactly the reported "13/16 verified, 3 silently dropped". The
+    candidates were never dropped by the code - they were never named to the model.
+
+    So the brief states the population (how many candidates), the identified count (and their ids), and
+    the UNIDENTIFIED count with the instruction to answer those rows too, without a candidate_id. A
+    batch with no ids at all says so, because that is the count-only case, not an empty batch.
+    """
+    ids = batch_candidate_ids(batch)
+    total = len(list(batch))
+    idless = max(total - len(ids), 0)
+    if not ids:
+        population = (f" This batch holds {total} candidate(s) and NONE of them carry a candidate_id: "
+                      f"answer every one, and omit the candidate_id field. Coverage for a batch without "
+                      f"ids is a row count, so an omitted row is indistinguishable from a missing answer.")
+    elif idless == 0:
+        population = (f" This batch holds {total} candidate(s), each with a candidate_id: "
+                      f"{', '.join(ids)}.")
+    else:
+        population = (f" This batch holds {total} candidate(s): {len(ids)} "
+                      f"{'carries' if len(ids) == 1 else 'carry'} a candidate_id "
+                      f"({', '.join(ids)}) and the other {idless} "
+                      f"{'carries' if idless == 1 else 'carry'} NO candidate_id - answer those "
+                      f"rows too, and omit the candidate_id field on them rather than skipping them.")
+    return (
+        f"BATCH {batch_index + 1} of {batch_count}: the candidate list is presented in "
+        f"{batch_count} batches so that no single response has to carry every row. Answer "
+        f"ONLY for the candidates in THIS batch, and answer for EVERY one of them - a "
+        f"confirmed row or a dismissal with `false_positive: true`, never an omission."
+        + population
+        + "\n\n"
+    )
+
+
 def validate_batch_attribution(rows: Any, *, batch_ids: Sequence[str],
                               batch_index: Optional[int] = None,
                               all_batch_ids: Optional[Sequence[Sequence[str]]] = None,

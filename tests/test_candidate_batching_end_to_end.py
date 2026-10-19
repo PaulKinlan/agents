@@ -156,6 +156,31 @@ echo "I reviewed the diff and found nothing of note."
 """
 
 
+# agents-g42wa: vuln-verify's pre-pass ids SOME candidates and not others. Batching then has to describe a
+# batch by its POPULATION, not by the ids it happens to carry - naming only the ids described a
+# 4-candidate batch with 1 id as though the ids were the batch, and the model skipped the unnamed rows
+# (the reported "13/16 verified, 3 silently dropped").
+PARTIALLY_IDENTIFIED_PREPASS = f'''
+import argparse, json
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--output")
+args, _unknown = parser.parse_known_args()
+candidates = [
+    {{
+        "candidate_id": (f"cand-perf-{{i:03d}}" if i < 5 else None),
+        "rule_id": "layout-thrashing-forced-reflow",
+        "path": f"src/file{{i}}.ts",
+        "line_number": i + 1,
+        "severity": "high",
+        "snippet": "el.offsetWidth",
+    }}
+    for i in range({CANDIDATE_COUNT})
+]
+open(args.output, "w", encoding="utf-8").write(json.dumps({{"candidates": candidates}}))
+'''
+
+
 class BatchedStation(ContainmentHarness):
     """The real dispatcher, a real pre-pass, a stub engine; batching declared in agent.yaml."""
 
@@ -182,6 +207,36 @@ class BatchedStation(ContainmentHarness):
         dirs = self.run_dirs()
         self.assertEqual(len(dirs), 1, f"expected one run directory, got {dirs}")
         return dirs[0]
+
+
+class TestAMixedBatchNamesItsUnidentifiedRows(BatchedStation):
+    """The pre-pass identifies 5 of 8 candidates, so the batches are: [0,1,2] all identified,
+    [3,4,5] two identified, and [6,7] with no ids at all. Each brief must state the true population."""
+
+    def agent(self, yaml_text):  # noqa: D401 - stage the mixed pre-pass instead of the uniform one
+        super().agent(yaml_text)
+        (self.root / "agents" / "probe" / "scripts" / "prepass.py").write_text(
+            PARTIALLY_IDENTIFIED_PREPASS, encoding="utf-8")
+
+    def test_each_brief_states_the_population_and_the_unidentified_count(self):
+        self.agent(AGENT_YAML)
+        self.stub(BATCH_STUB)
+        self.factory("pi")
+        run = self.run_dir()
+        briefs = [p.read_text(encoding="utf-8") for p in sorted(run.glob("prompt.batch*.txt"))]
+        self.assertEqual(len(briefs), 3, [b[:60] for b in briefs])
+
+        self.assertIn("holds 3 candidate(s), each with a candidate_id", briefs[0])
+        self.assertIn("holds 3 candidate(s): 2 carry a candidate_id", briefs[1])
+        self.assertIn("the other 1 carries NO candidate_id", briefs[1])
+        self.assertIn("holds 2 candidate(s) and NONE of them carry a candidate_id", briefs[2])
+        # and the payload still carries every record of the batch, not only the identified ones
+        # (parse the Scanner Data block: counting "rule_id" in the whole prompt also counts the schema)
+        for index, brief in enumerate(briefs, start=1):
+            payload = brief.split("Scanner Data:\n", 1)[1].split("\n\nYour final answer", 1)[0]
+            rows = json.loads(payload)
+            self.assertEqual(len(rows), 3 if index < 3 else 2,
+                             f"batch {index} lost candidates from its payload: {len(rows)} rows")
 
 
 class TestBoundedBatching(BatchedStation):

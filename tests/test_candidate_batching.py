@@ -354,6 +354,51 @@ class TestClassifyUnparseable(unittest.TestCase):
         self.assertIn("count-only accounting", message)
 
 
+class TestTheBatchBriefNamesTheWholePopulation(unittest.TestCase):
+    """agents-g42wa: a batch of 4 candidates carrying 1 id was described to the model as "The candidate
+    ids in this batch: cand-vv-012." - so a model answering every candidate it was TOLD about answered
+    one and skipped three. Measured on a 16-candidate plan: 13 ids, and the last batch (4 candidates)
+    listed 1, which is the reported "13/16 verified, 3 silently dropped". The brief now states the
+    population and the unidentified count, and tells the model to answer those rows without an id."""
+
+    def brief(self, candidates, index=0, count=2):
+        from lib.candidate_batching import batch_brief
+        return batch_brief(candidates, index, count)
+
+    def test_a_mixed_batch_names_its_population_and_the_unidentified_rows(self):
+        text = self.brief([{"candidate_id": "cand-vv-012"}, {"path": "a"}, {}, {"candidate_id": "  "}])
+        self.assertIn("holds 4 candidate(s)", text)
+        self.assertIn("1 carries a candidate_id (cand-vv-012)", text)
+        self.assertIn("the other 3 carry NO candidate_id", text)
+        self.assertIn("answer those rows too", text)
+
+    def test_a_fully_identified_batch_lists_its_ids_and_no_phantom_count(self):
+        text = self.brief([{"candidate_id": "a"}, {"candidate_id": "b"}])
+        self.assertIn("each with a candidate_id: a, b", text)
+        self.assertNotIn("NO candidate_id", text)
+
+    def test_a_batch_without_any_id_says_so_rather_than_looking_empty(self):
+        text = self.brief([{"path": "x"}, {"path": "y"}])
+        self.assertIn("holds 2 candidate(s) and NONE of them carry a candidate_id", text)
+        self.assertIn("row count", text)
+
+    def test_the_counts_are_the_batch_not_a_sample(self):
+        # every population size with every identified count: the arithmetic must hold for each
+        from lib.candidate_batching import batch_brief
+        for total in range(1, 6):
+            for identified in range(total + 1):
+                candidates = ([{"candidate_id": f"id{i}"} for i in range(identified)]
+                              + [{"path": f"p{i}"} for i in range(total - identified)])
+                text = batch_brief(candidates, 0, 2)
+                self.assertIn(f"holds {total} candidate(s)", text)
+                if identified == 0:
+                    self.assertIn("NONE of them carry a candidate_id", text)
+                elif total - identified:
+                    self.assertIn(f"the other {total - identified} "
+                                  f"{'carries' if total - identified == 1 else 'carry'} NO candidate_id",
+                                  text)
+
+
 class TestAForeignBatchIdSurvivesTheRepairStage(unittest.TestCase):
     """agents-fv5uk, the reviewer's own repro. Batch ids are consecutive by construction, so a repair that
     only knows its OWN batch's ids re-attaches a row naming a sibling batch's candidate to a near neighbour
