@@ -750,6 +750,23 @@ class TestLineAndon(unittest.TestCase):
                 rep = json.loads((r / "report.json").read_text(encoding="utf-8"))
                 self.assertEqual(rep["status"], "ERROR")
                 self.assertEqual(rep["verdict"], "error")
+                # agents-lbgso: a failed attempt must leave enough behind to diagnose it. Measured on
+                # this tree before writing these: a silent engine exits 2 (never 0), and each attempt
+                # keeps prompt.txt (what was asked), model_output.txt (the model's raw stdout channel,
+                # empty here because the engine wrote nothing), model_stderr.txt and the reason. The
+                # premise that prompted the bead - "exits 0 with an empty model_output.txt" - is stale;
+                # what was unpinned is that the ASK and the ENGINE's own words survive the failure.
+                self.assertTrue((r / "prompt.txt").exists(), f"{r.name} must keep the prompt it sent")
+                self.assertGreater((r / "prompt.txt").stat().st_size, 0, f"{r.name}: empty prompt.txt")
+                self.assertTrue((r / "model_output.txt").exists(),
+                                f"{r.name} must keep the raw stdout channel even when empty")
+                self.assertEqual((r / "model_output.txt").stat().st_size, 0,
+                                 "the silent engine wrote nothing, so the artifact is empty - and kept")
+                self.assertIn("engine diagnostic: warning notice",
+                              (r / "model_stderr.txt").read_text(encoding="utf-8"),
+                              f"{r.name}: the engine's own stderr must be preserved")
+                self.assertIn("engine diagnostic: warning notice", reason,
+                              "and quoted in the reason, so the failure reads without opening files")
 
 
 if __name__ == "__main__":
