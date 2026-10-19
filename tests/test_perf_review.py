@@ -1078,6 +1078,43 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertTrue(has_reentrancy_precondition(report_advice["findings"][0]))
         self.assertEqual(unpreconditioned_concurrency_findings(report_advice), [])
 
+        # Finding with gerund 'otherwise using a worker pool blocks...' (Reviewer P2 finding agents-o62px)
+        finding_gerund_hazard = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 45,
+            "remediation": "Make the parse cancellable; otherwise using a worker pool blocks the queue. Prefer a worker pool with per-parse abort.",
+        }
+        report_gerund = {"findings": [finding_gerund_hazard]}
+        notes_gerund = normalize_report(report_gerund)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes_gerund))
+        guarded_gerund = report_gerund["findings"][0]["remediation"]
+        self.assertIn("Prefer a worker pool with per-parse abort", guarded_gerund)
+        self.assertIn("otherwise using a worker pool blocks the queue", guarded_gerund)
+        self.assertIn("otherwise preserve serial execution", guarded_gerund)
+        self.assertTrue(has_reentrancy_precondition(report_gerund["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report_gerund), [])
+
+    def test_unsafe_otherwise_parallelize_is_rejected_and_repaired(self):
+        """agents-o3wbe (P1 finding): 'otherwise parallelize operations; else preserve serial' must be rejected and repaired."""
+        finding = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 42,
+            "remediation": "IF backend is reentrant, use a worker pool; otherwise parallelize operations; else preserve serial execution.",
+        }
+        # Before normalization: rejected because intermediate fallback advocates concurrency
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        guarded = report["findings"][0]["remediation"]
+        self.assertNotIn("parallelize operations", guarded)
+        self.assertIn("use a worker pool", guarded)
+        self.assertIn("otherwise preserve serial execution", guarded)
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
     def test_guard_and_validator_with_true_serial_fallback_and_mid_sentence_otherwise(self):
         """agents-i87nx: true serial fallback is stripped once and re-wrapped, preserving mid-sentence 'otherwise'."""
         finding = {

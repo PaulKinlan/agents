@@ -584,34 +584,43 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     return True
 
 
-_FALLBACK_DIRECTIVE_PATTERN = re.compile(
-    r"\b(?:otherwise|else)\s*[,:]?\s*"
-    r"(?:"
-    r"(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b"
-    r"|(?:(?:also\s+)?(?:use|using|run|running|execute|executing|launch|launching|dispatch|dispatching|call|calling|start|starting|employ|employing|apply|applying|spawn|spawning|fall\s+back|rely\s+on|switch\s+to|do\s+not|don't|never|preserve|keep|maintain|default\s+to|abort|return|throw|exit|fail|revert|stop|continue|proceed)\b)"
-    r")",
-    re.IGNORECASE,
-)
+def _find_fallback_delimiter(text: str) -> Optional[int]:
+    """Find the start index of the first true fallback delimiter ('otherwise' or 'else') in text.
 
-
-def _find_fallback_delimiter(text: str) -> Optional[re.Match]:
-    """Find the first true fallback delimiter ('otherwise' or 'else') in remediation text.
-
-    A true fallback delimiter introduces an alternative directive branch:
-    1. A valid serial fallback clause (matching _FIRST_FALLBACK_SERIAL_PATTERN, e.g.
+    A true fallback delimiter introduces an alternative execution branch:
+    1. An immediate serial fallback clause (matching _FIRST_FALLBACK_SERIAL_PATTERN, e.g.
        'otherwise preserve serial execution', 'else keep serial execution').
-    2. An unsafe or competing fallback clause (matching _FALLBACK_DIRECTIVE_PATTERN, e.g.
-       'otherwise use Promise.any', 'otherwise launch model runs on separate workers').
+    2. An intermediate fallback delimiter chained into another fallback within the same sentence
+       (e.g. '; otherwise <unsafe> ; else <serial>').
+    3. A terminal fallback delimiter at the end of the text (e.g. '; otherwise use Promise.any').
 
     Mid-sentence causal or explanatory usage (e.g. 'Make the parse cancellable; otherwise
     a slow PDF blocks the queue. Prefer a worker pool with per-parse abort.' or
-    'otherwise a worker pool blocks the queue') does NOT direct an alternative action and
-    must not truncate actionable remediation advice (agents-i87nx / agents-7pe7y).
+    'otherwise using a worker pool blocks the queue') occurs in an earlier sentence before
+    the primary proposal and does NOT introduce a fallback branch (agents-i87nx / agents-7pe7y / agents-o62px).
     """
-    for m in re.finditer(r"\b(?:otherwise|else)\b", text, re.IGNORECASE):
+    matches = list(re.finditer(r"\b(?:otherwise|else)\b", text, re.IGNORECASE))
+    if not matches:
+        return None
+
+    for m in matches:
         after = text[m.start():]
-        if _FIRST_FALLBACK_SERIAL_PATTERN.match(after) or _FALLBACK_DIRECTIVE_PATTERN.match(after):
-            return m
+        # 1. Immediate serial fallback
+        if _FIRST_FALLBACK_SERIAL_PATTERN.match(after):
+            return m.start()
+
+        # 2. Intermediate fallback chained within the same sentence before another delimiter
+        sentence = re.split(r"(?:\.\s+|\n)", after)[0]
+        inner_matches = list(re.finditer(r"\b(?:otherwise|else)\b", sentence, re.IGNORECASE))
+        if len(inner_matches) > 1:
+            return m.start()
+
+        # 3. Terminal fallback delimiter at the end of the text
+        if m == matches[-1]:
+            sentences_after = [s for s in re.split(r"(?:\.\s+|\n)", after) if s.strip()]
+            if len(sentences_after) <= 1:
+                return m.start()
+
     return None
 
 
@@ -633,10 +642,10 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     # Inspect starting from the FIRST true fallback delimiter ('otherwise' or 'else'). The immediate first
     # fallback clause must direct serial execution (not deferred to a later 'else'), and the entire
     # fallback section must contain no execution concurrency advice.
-    first_fb = _find_fallback_delimiter(remediation)
-    if first_fb:
-        conditional_part = remediation[:first_fb.start()]
-        fallback_part = remediation[first_fb.start():]
+    first_fb_start = _find_fallback_delimiter(remediation)
+    if first_fb_start is not None:
+        conditional_part = remediation[:first_fb_start]
+        fallback_part = remediation[first_fb_start:]
         if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_part) and _FIRST_FALLBACK_SERIAL_PATTERN.match(fallback_part):
             m_if = _IF_REENTRANT_PATTERN.search(conditional_part)
             if m_if:
@@ -672,8 +681,8 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
         remediation = str(finding.get("remediation", "")).strip()
         if remediation:
             # Strip any broken/unsafe trailing fallback or malformed conditional prefix (Reviewer P1)
-            first_fb = _find_fallback_delimiter(remediation)
-            clean_rem = (remediation[:first_fb.start()] if first_fb else remediation).strip().rstrip(";,.")
+            first_fb_start = _find_fallback_delimiter(remediation)
+            clean_rem = (remediation[:first_fb_start] if first_fb_start is not None else remediation).strip().rstrip(";,.")
             clean_rem = re.sub(
                 r"^(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b\s*)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)[,;:]?\s*",
                 "",
