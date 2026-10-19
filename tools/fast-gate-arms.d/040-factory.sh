@@ -7,6 +7,13 @@ fast_gate_arms_040_factory() {
     factory)
       # The dispatcher script; covered by the core runner, truth harnesses, auth failures, line andon, prompt exposure, and transient dir cleanup.
       mapped="$mapped tests/test_factory_core.py tests/test_factory_truth.py tests/test_factory_truth_2.py tests/test_adapter_auth_failure.py tests/test_line_andon.py tests/test_prompt_exposure.py tests/test_transient_dirs.py"
+      # agents-5grx0: the CLI's EXIT CODE for a failed station lives in this file's __main__ handler, and
+      # tests/test_line_andon.py cannot see it because it calls run_line() in-process - so flipping
+      # sys.exit(2) to sys.exit(0) on the (StationTimeout, StationError) branch left the andon suite green
+      # (reviewer-measured). This suite drives `factory run` as a SUBPROCESS and asserts the code: measured
+      # mutant, sys.exit(2)->0 reddens both of its tests; cost 3.0 s for 2 tests, paid only when this file
+      # changes.
+      mapped="$mapped tests/test_station_exit_codes.py"
       # agents-rw6z: the opt-in payload context and absent-key byte-identity prompt contract
       # are exercised through the real dispatcher and retained prompt, not a formatting stub.
       mapped="$mapped tests/test_factory_context_channel.py"
