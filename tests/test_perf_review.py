@@ -1021,6 +1021,30 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         violations = unpreconditioned_concurrency_findings(report)
         self.assertEqual(violations, [])
 
+    def test_unsafe_fallback_across_sentences_is_rejected_and_repaired(self):
+        """agents-b99s8: unsafe intermediate fallback across sentence boundaries is rejected and repaired."""
+        remediation = (
+            "IF backend is reentrant, use a worker pool; otherwise parallelize operations. "
+            "On failure, preserve serial execution; else preserve serial execution."
+        )
+        finding = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 42,
+            "remediation": remediation,
+        }
+        # Before normalization: rejected because intermediate fallback advocates concurrency
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        guarded = report["findings"][0]["remediation"]
+        self.assertNotIn("parallelize operations", guarded)
+        self.assertIn("use a worker pool", guarded)
+        self.assertIn("otherwise preserve serial execution", guarded)
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
         original_remediation = (
