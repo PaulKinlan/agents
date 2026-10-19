@@ -825,6 +825,29 @@ class TestVulnVerifyRequiresPublishedVerifiedFindings(unittest.TestCase):
         errors = self._errors(self._report())
         self.assertTrue(any("matching candidate_id" in e for e in errors), errors)
 
+    def test_verified_with_no_candidate_id_at_all_is_rejected(self):
+        """agents-rcgb3: a pre-pass that leaves a candidate without an id makes `verified` unrepresentable -
+        there is no id to cite and inventing one is refused as a foreign citation. The rule is old
+        (agents-t6fut); what was missing is that nothing said so, so the model looped through a repair-retry
+        it could not legitimately exit."""
+        errors = self._errors(self._report(candidate_id=""))
+        self.assertTrue(any("candidate_id" in e for e in errors), errors)
+
+    def test_the_station_says_what_to_do_instead(self):
+        """The rule is only escapable if the model is TOLD the escape, so pin the words in both places the
+        model reads: the schema description it is handed in the prompt, and SKILL.md."""
+        import json as _json
+        schema = _json.loads((FACTORY_ROOT / "agents" / "vuln-verify" / "report.schema.json")
+                             .read_text(encoding="utf-8"))
+        description = schema["properties"]["verifications"]["items"]["properties"]["candidate_id"]["description"]
+        skill = (FACTORY_ROOT / "agents" / "vuln-verify" / "SKILL.md").read_text(encoding="utf-8")
+        # SKILL.md is written in caps, so compare case-insensitively rather than pinning its shouting.
+        for label, text in (("schema description", description), ("SKILL.md", skill)):
+            upper = text.upper()
+            self.assertIn("UNVERIFIABLE", upper, f"{label} must name the escape verdict")
+            self.assertIn("CANNOT BE VERIFIED", upper, f"{label} must name the id-less case it applies to")
+            self.assertIn("AGENTS-RCGB3", upper, f"{label} must carry the finding it answers")
+
     def test_verified_with_a_mismatched_or_dismissed_finding_is_rejected(self):
         for findings in ([self._finding("c1")], [self._finding(false_positive=True)]):
             with self.subTest(findings=findings):

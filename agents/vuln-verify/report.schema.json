@@ -78,7 +78,7 @@
           },
           "candidate_id": {
             "type": "string",
-            "description": "The candidate_id of the pre-pass candidate this verification answers. Copy it verbatim: the factory compares verification ids with presented ids (agents-w9ni). Omit for disproved/unverifiable rows only when the pre-pass supplied no ids (count-only fallback); a verified row must carry an ID matching a publishable finding (agents-t6fut)."
+            "description": "The candidate_id of the pre-pass candidate this verification answers. Copy it verbatim: the factory compares verification ids with presented ids (agents-w9ni). Omit for disproved/unverifiable rows only when the pre-pass supplied no ids (count-only fallback); a verified row must carry an ID matching a publishable finding (agents-t6fut). A candidate with NO candidate_id CANNOT be verified: a verified row needs a publishable finding with a matching id, so record such a candidate as `unverifiable` with your reasoning (or dismiss it) instead of claiming `verified` - inventing an id is refused as a foreign citation and omitting it rejects the report (agents-rcgb3)."
           }
         }
       }
