@@ -1021,6 +1021,87 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         violations = unpreconditioned_concurrency_findings(report)
         self.assertEqual(violations, [])
 
+    def test_guard_preserves_mid_sentence_otherwise_and_worker_pool_advice(self):
+        """agents-i87nx: guard must not truncate remediation after mid-sentence 'otherwise'."""
+        finding = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 42,
+            "remediation": "Make the parse cancellable; otherwise a slow PDF blocks the queue. Prefer a worker pool with per-parse abort.",
+        }
+        self.assertTrue(is_concurrency_recommendation(finding))
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        guarded = report["findings"][0]["remediation"]
+        # Entire advice must be preserved, not truncated after 'otherwise'
+        self.assertIn("Prefer a worker pool with per-parse abort", guarded)
+        self.assertIn("otherwise a slow PDF blocks the queue", guarded)
+        self.assertIn("otherwise preserve serial execution", guarded)
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+        self.assertTrue(is_concurrency_recommendation(report["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+    def test_guard_and_validator_with_true_serial_fallback_and_mid_sentence_otherwise(self):
+        """agents-i87nx: true serial fallback is stripped once and re-wrapped, preserving mid-sentence 'otherwise'."""
+        finding = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 42,
+            "remediation": "Make the parse cancellable; otherwise a slow PDF blocks the queue. Prefer a worker pool with per-parse abort; otherwise preserve serial execution.",
+        }
+        # Missing 'IF reentrant' precondition prefix initially
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        guarded = report["findings"][0]["remediation"]
+        # Serial fallback must not be duplicated
+        self.assertEqual(guarded.count("otherwise preserve serial execution"), 1)
+        self.assertIn("Prefer a worker pool with per-parse abort", guarded)
+        self.assertIn("otherwise a slow PDF blocks the queue", guarded)
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+    def test_validator_accepts_preconditioned_finding_with_mid_sentence_otherwise(self):
+        """agents-i87nx: validator accepts preconditioned finding containing mid-sentence 'otherwise'."""
+        finding = {
+            "rule_id": "tm-pdf-parse-uncancellable",
+            "path": "src/parse.ts",
+            "line_number": 42,
+            "remediation": (
+                "Precondition: Verify backend reentrancy before applying. "
+                "IF the underlying runtime is reentrant and thread-safe, "
+                "make the parse cancellable; otherwise a slow PDF blocks the queue. "
+                "Prefer a worker pool with per-parse abort; otherwise preserve serial execution."
+            ),
+        }
+        self.assertTrue(has_reentrancy_precondition(finding))
+        self.assertEqual(unpreconditioned_concurrency_findings({"findings": [finding]}), [])
+
+    def test_unsafe_fallback_after_mid_sentence_otherwise_is_rejected_and_repaired(self):
+        """agents-i87nx: unsafe fallback following mid-sentence 'otherwise' is rejected and repaired."""
+        finding = {
+            "rule_id": "sequential-await-waterfall",
+            "path": "src/tasks.ts",
+            "line_number": 12,
+            "remediation": (
+                "IF backend is reentrant, make the parse cancellable; otherwise a slow PDF blocks the queue. "
+                "Prefer a worker pool with per-parse abort; otherwise use Promise.any; else preserve serial execution"
+            ),
+        }
+        self.assertFalse(has_reentrancy_precondition(finding))
+        report = {"findings": [finding]}
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in n for n in notes))
+        guarded = report["findings"][0]["remediation"]
+        self.assertNotIn("Promise.any", guarded)
+        self.assertIn("Prefer a worker pool with per-parse abort", guarded)
+        self.assertIn("otherwise a slow PDF blocks the queue", guarded)
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
     def test_post_filter_leaves_preconditioned_finding_intact(self):
         """Post-filter must not double-wrap an already preconditioned finding."""
         original_remediation = (

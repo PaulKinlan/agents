@@ -256,6 +256,15 @@ _FIRST_FALLBACK_SERIAL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# The guard's own conditional prefix. Its branch can name a non-concurrency action when the
+# recommendation signal was in the title/description; validation must accept that guarded
+# result without accepting a model's bare assertion of reentrancy (agents-ahw1h / agents-i87nx).
+_CONCURRENCY_GUARD_PREFIX = (
+    "Precondition: Verify backend reentrancy before applying. "
+    "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a "
+    "non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), "
+)
+
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
     re.IGNORECASE
@@ -575,6 +584,45 @@ def has_proven_backend_evidence(finding: Dict[str, Any]) -> bool:
     return True
 
 
+def _find_fallback_delimiter(text: str) -> Optional[re.Match]:
+    """Find the first true fallback delimiter ('otherwise' or 'else') in remediation text.
+
+    A true fallback delimiter introduces either:
+    1. A valid serial fallback clause (matching _FIRST_FALLBACK_SERIAL_PATTERN, e.g.
+       'otherwise preserve serial execution', 'else keep serial execution').
+    2. An unsafe or competing fallback clause proposing concurrency (e.g.
+       'otherwise use Promise.any', 'otherwise launch model runs on separate workers').
+
+    Mid-sentence causal or explanatory usage (e.g. 'Make the parse cancellable; otherwise
+    a slow PDF blocks the queue. Prefer a worker pool with per-parse abort.') does NOT
+    introduce a fallback branch and must not truncate actionable remediation advice (agents-i87nx).
+    """
+    matches = list(re.finditer(r"\b(?:otherwise|else)\b", text, re.IGNORECASE))
+    if not matches:
+        return None
+
+    conc_matches = list(_EXECUTION_CONCURRENCY_PATTERN.finditer(text))
+
+    for m in matches:
+        after = text[m.start():]
+        # 1. Immediate serial fallback
+        if _FIRST_FALLBACK_SERIAL_PATTERN.match(after):
+            return m
+        # 2. Concurrency directive immediately following otherwise/else
+        after_del = after[len(m.group(0)):].strip(" :,-")
+        clause = re.split(r"(?:\.\s+|[;!?\n]|\b(?:otherwise|else)\b)", after_del)[0]
+        if _EXECUTION_CONCURRENCY_PATTERN.search(clause):
+            return m
+        # 3. If there is a concurrency pattern before m, and no subsequent sentence
+        # contains a concurrency pattern, then this is a fallback branch.
+        has_conc_before = any(cm.start() < m.start() for cm in conc_matches)
+        has_conc_after = any(cm.start() > m.start() for cm in conc_matches)
+        if has_conc_before and not has_conc_after:
+            return m
+
+    return None
+
+
 def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
     """Return True if the remediation is properly conditional with a serial fallback
     or names a specific backend with cited evidence that it tolerates overlap.
@@ -590,10 +638,10 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
         return False
 
     # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
-    # Inspect starting from the FIRST fallback delimiter ('otherwise' or 'else'). The immediate first
+    # Inspect starting from the FIRST true fallback delimiter ('otherwise' or 'else'). The immediate first
     # fallback clause must direct serial execution (not deferred to a later 'else'), and the entire
     # fallback section must contain no execution concurrency advice.
-    first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
+    first_fb = _find_fallback_delimiter(remediation)
     if first_fb:
         conditional_part = remediation[:first_fb.start()]
         fallback_part = remediation[first_fb.start():]
@@ -632,8 +680,8 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
         remediation = str(finding.get("remediation", "")).strip()
         if remediation:
             # Strip any broken/unsafe trailing fallback or malformed conditional prefix (Reviewer P1)
-            first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
-            clean_rem = remediation[:first_fb.start()].strip().rstrip(";,.") if first_fb else remediation
+            first_fb = _find_fallback_delimiter(remediation)
+            clean_rem = (remediation[:first_fb.start()] if first_fb else remediation).strip().rstrip(";,.")
             clean_rem = re.sub(
                 r"^(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b\s*)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)[,;:]?\s*",
                 "",
@@ -642,18 +690,15 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
             ).strip()
             if clean_rem:
                 finding["remediation"] = (
-                    "Precondition: Verify backend reentrancy before applying. "
-                    f"IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), {clean_rem}; otherwise preserve serial execution."
+                    f"{_CONCURRENCY_GUARD_PREFIX}{clean_rem}; otherwise preserve serial execution."
                 )
             else:
                 finding["remediation"] = (
-                    "Precondition: Verify backend reentrancy before applying. "
-                    "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
+                    f"{_CONCURRENCY_GUARD_PREFIX}consider parallel execution; otherwise preserve serial execution."
                 )
         else:
             finding["remediation"] = (
-                "Precondition: Verify backend reentrancy before applying. "
-                "IF the underlying runtime/backend is reentrant and thread-safe (e.g. does not use a non-reentrant mutex or shared state like ONNX Runtime _OrtRun or WebGPU queues), consider parallel execution; otherwise preserve serial execution."
+                f"{_CONCURRENCY_GUARD_PREFIX}consider parallel execution; otherwise preserve serial execution."
             )
 
         desc = str(finding.get("description", "")).strip()
