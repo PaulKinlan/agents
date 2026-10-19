@@ -478,6 +478,8 @@ class TestMistranscribedIdsAreRepaired(BatchedStation):
 
         repairs = []
         for path in sorted(run.glob("candidate_id_repairs*.json")):
+            if "_refused" in path.name:
+                continue
             repairs.extend(json.loads(path.read_text(encoding="utf-8")))
         self.assertEqual([(r["cited"], r["repaired"], r["rule"]) for r in repairs],
                          [("cand-prf-003", "cand-perf-003", "near")],
@@ -515,6 +517,48 @@ printf '%s]}\n' "$out"
 """
 
 
+# agents-afx5o: a citation that matches nothing at all. The repair refuses, the run fails closed - and the
+# refusal is RECORDED, because otherwise the operator sees a rejection with no evidence of what was compared.
+HOPELESS_CITING_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  case " ${ids[*]:-} " in *" $id "*) continue;; esac
+  ids+=("$id")
+done
+out='{"summary":"t","target":"probe-target","findings":['
+first=1
+for id in "${ids[@]}"; do
+  cite="$id"
+  if [ "$id" = "cand-perf-000" ]; then cite="cand-perf-998"; fi
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"r\",\"path\":\"src/$id.ts\",\"line_number\":1,\"snippet\":\"s\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"$cite\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestARefusedRepairIsRecordedWithItsReason(BatchedStation):
+    def test_a_citation_that_matches_nothing_is_recorded_and_still_fails(self):
+        self.agent(AGENT_YAML)
+        self.stub(HOPELESS_CITING_STUB)
+        res = self.factory("pi")
+        self.assertNotEqual(res.returncode, 0, "an unaccountable citation must still fail the run")
+        run = self.run_dir()
+
+        refusals = []
+        for path in sorted(run.glob("candidate_id_repairs_refused*.json")):
+            refusals.extend(json.loads(path.read_text(encoding="utf-8")))
+        cited = [r["cited"] for r in refusals]
+        self.assertIn("cand-perf-998", cited, f"the refused citation must be recorded: {refusals}")
+        reason = next(r["reason"] for r in refusals if r["cited"] == "cand-perf-998")
+        self.assertIn("no unique match", reason)
+        # 998 is two edits from 000, so the nearest candidate IS plausible and must be named
+        self.assertIn("cand-perf-000", reason, f"the nearest candidate must be named: {reason}")
+
+
 class TestAForeignBatchIdIsNotLaundered(BatchedStation):
     def test_a_sibling_batchs_exact_id_is_rejected_not_repaired(self):
         self.agent(AGENT_YAML)
@@ -528,6 +572,8 @@ class TestAForeignBatchIdIsNotLaundered(BatchedStation):
 
         repairs = []
         for path in sorted(run.glob("candidate_id_repairs*.json")):
+            if "_refused" in path.name:
+                continue
             repairs.extend(json.loads(path.read_text(encoding="utf-8")))
         self.assertEqual([r for r in repairs if r["cited"] == "cand-perf-006"], [],
                          f"the foreign citation must not be repaired: {repairs}")

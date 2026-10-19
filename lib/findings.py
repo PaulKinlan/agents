@@ -1715,6 +1715,7 @@ def read_presented_candidate_ids(run_dir: Any,
 # ---------------------------------------------------------------------------------------------
 REPAIR_MIN_CITED_LENGTH = 8   # "4e" or "abcd" cannot identify one candidate among many
 REPAIR_MAX_EDITS = 2          # the observed mistranscription dropped two hex characters
+NEAREST_REPORTABLE_EDITS = 4  # a refusal names the nearest candidate only when it is plausibly the same one
 
 
 def _bounded_edit_distance(left: str, right: str, limit: int) -> Optional[int]:
@@ -1799,7 +1800,10 @@ def repair_cited_candidate_id(cited: str,
     local = scored(ids)
     siblings = scored(elsewhere)
     if not local:
-        return None, "no unique match"
+        # agents-afx5o: name the nearest candidate rather than discarding what the search already found.
+        # Without it a failed citation reads "no unique match" while the run holds the very ids it was
+        # compared against, so an operator cannot tell a typo from a wrong-batch answer by reading the log.
+        return None, _no_match_reason(cited, ids, elsewhere)
     best_rank = local[0][0]
     at_best = [(distance, candidate) for rank, distance, candidate in local if rank == best_rank]
     if best_rank == 3:
@@ -1821,9 +1825,26 @@ def repair_cited_candidate_id(cited: str,
     return at_best[0][1], _REPAIR_RULE_NAMES[best_rank]
 
 
+def _no_match_reason(cited: str, ids: Iterable[str], elsewhere: Iterable[str]) -> str:
+    """`no unique match`, plus the closest candidate the search saw and how far away it was."""
+    nearest: Optional[Tuple[int, str]] = None
+    for candidate in list(ids) + list(elsewhere):
+        distance = _bounded_edit_distance(cited, candidate, len(cited) + 1)
+        if distance is not None and (nearest is None or distance < nearest[0]):
+            nearest = (distance, candidate)
+    # Naming a candidate that is 16 edits away is noise, not a clue: report the nearest only when it is
+    # close enough to be a plausible typo of the one that was cited.
+    if nearest is None or nearest[0] > NEAREST_REPORTABLE_EDITS:
+        return "no unique match"
+    return (f"no unique match (nearest candidate: {nearest[1]} at {nearest[0]} edit"
+            f"{'' if nearest[0] == 1 else 's'})")
+
+
 def repair_cited_candidate_ids(rows: Any,
                                presented: Iterable[str],
-                               foreign: Iterable[str] = ()) -> List[Dict[str, Any]]:
+                               foreign: Iterable[str] = (),
+                               refusals: Optional[List[Dict[str, Any]]] = None
+                               ) -> List[Dict[str, Any]]:
     """Rewrite `candidate_id` in place on rows where a UNIQUE repair exists; return the repairs.
 
     Returns one record per rewritten row ({cited, repaired, rule, path}) so the repair is auditable in
@@ -1838,6 +1859,10 @@ def repair_cited_candidate_ids(rows: Any,
             continue
         repaired, rule = repair_cited_candidate_id(cited, presented, foreign=foreign)
         if repaired is None:
+            # agents-afx5o: keep the reason. An id that was already exact is not a refusal - there was
+            # nothing to repair - so only cited ids that could not be accounted for are recorded.
+            if refusals is not None and rule != "exact":
+                refusals.append({"cited": cited.strip(), "reason": rule, "path": row.get("path")})
             continue
         row["candidate_id"] = repaired
         repairs.append({"cited": cited.strip(), "repaired": repaired, "rule": rule,
