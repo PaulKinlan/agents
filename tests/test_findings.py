@@ -2002,6 +2002,176 @@ class TestCandidateCoverage(unittest.TestCase):
         self.assertEqual(accounted["reason"], "")
 
 
+class TestADuplicatedCitationIsNamedAndRepairedByPath(unittest.TestCase):
+    """agents-amgst, measured on nightly 2026-10-23 (run dir modern-web-...-20261023-032632).
+
+    Six modern-web dismissal rows, one per page, but the `docs/index.html` row cited `docs/help.html`'s
+    candidate_id. Coverage intersected DISTINCT ids, so six rows accounted for five candidates and
+    `b1cea3c268d41ac2` was cited by nobody - while `repair_cited_candidate_id` answered `(None, 'exact')`
+    for both duplicate rows, so the row was invisible to repair AND to refusal and the operator saw only
+    "cited 5 of the 6". One low-severity dismissal therefore made the whole night's findings UNKNOWN.
+    """
+
+    CANDIDATES = [
+        ("d21fff3b2fa42e68", "docs/help.html"),
+        ("b1cea3c268d41ac2", "docs/index.html"),
+        ("51f53868c774953d", "docs/install.html"),
+        ("c49da5acae4731ad", "docs/lines.html"),
+        ("5eced7ca1f833236", "docs/stations.html"),
+        ("21a8f812d9cebe04", "docs/use.html"),
+    ]
+    PRESENTED = [cid for cid, _ in CANDIDATES]
+    PATHS = dict(CANDIDATES)
+
+    def rows(self):
+        """The measured report, exactly: the index.html row carries help.html's id."""
+        return [
+            {"candidate_id": "d21fff3b2fa42e68", "path": "docs/help.html"},
+            {"candidate_id": "d21fff3b2fa42e68", "path": "docs/index.html"},
+            {"candidate_id": "51f53868c774953d", "path": "docs/install.html"},
+            {"candidate_id": "c49da5acae4731ad", "path": "docs/lines.html"},
+            {"candidate_id": "5eced7ca1f833236", "path": "docs/stations.html"},
+            {"candidate_id": "21a8f812d9cebe04", "path": "docs/use.html"},
+        ]
+
+    def test_the_shortfall_names_the_duplicate_and_the_unanswered_candidate(self):
+        """The operator-facing reason must point at both, because "cited 5 of the 6" points at neither."""
+        rows = self.rows()
+        coverage = candidate_coverage(6, len(rows), presented_ids=self.PRESENTED,
+                                      cited_ids=[row["candidate_id"] for row in rows])
+        self.assertFalse(coverage["complete"])
+        self.assertEqual(coverage["candidates_accounted"], 5)
+        self.assertIn("cited 5 of the 6", coverage["reason"])
+        self.assertIn("d21fff3b2fa42e68 cited by 2 rows", coverage["reason"])
+        self.assertIn("presented id(s) no row cited: b1cea3c268d41ac2", coverage["reason"])
+        self.assertEqual(coverage["duplicate_cited_ids"],
+                         [{"candidate_id": "d21fff3b2fa42e68", "citations": 2}])
+        self.assertEqual(coverage["uncited_candidate_ids"], ["b1cea3c268d41ac2"])
+
+    def test_the_duplicated_row_is_re_bound_by_its_own_path_and_the_run_accounts(self):
+        rows = self.rows()
+        repairs = repair_cited_candidate_ids(rows, self.PRESENTED, candidate_paths=self.PATHS)
+        self.assertEqual(repairs, [{"cited": "d21fff3b2fa42e68",
+                                    "repaired": "b1cea3c268d41ac2",
+                                    "rule": "path", "path": "docs/index.html"}],
+                         "only the row whose own path names the uncited candidate may be rewritten")
+        self.assertEqual([row["candidate_id"] for row in rows],
+                         [cid for cid, _ in self.CANDIDATES])
+        coverage = candidate_coverage(6, len(rows), presented_ids=self.PRESENTED,
+                                      cited_ids=[row["candidate_id"] for row in rows])
+        self.assertTrue(coverage["complete"], coverage)
+        self.assertEqual((coverage["duplicate_cited_ids"], coverage["uncited_candidate_ids"]),
+                         ([], []))
+
+    def test_without_path_evidence_nothing_is_re_written_or_invented(self):
+        rows = self.rows()
+        self.assertEqual(repair_cited_candidate_ids(rows, self.PRESENTED), [],
+                         "no candidate paths = no evidence, so the citation stays as written")
+        self.assertEqual(rows[1]["candidate_id"], "d21fff3b2fa42e68")
+
+    def test_the_candidate_paths_are_read_from_the_run_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "candidates.json").write_text(json.dumps({"candidates": [
+                {"candidate_id": "d21fff3b2fa42e68", "path": "./docs/help.html"},
+                {"candidate_id": "b1cea3c268d41ac2", "path": "docs/index.html"},
+                {"candidate_id": "no-path-here"},
+            ]}), encoding="utf-8")
+            self.assertEqual(findings.read_candidate_paths(run), {
+                "d21fff3b2fa42e68": "docs/help.html", "b1cea3c268d41ac2": "docs/index.html"},
+                "a candidate with no path is not path evidence")
+            self.assertEqual(findings.read_candidate_paths(None), {})
+            (run / "candidates.json").write_text("not json", encoding="utf-8")
+            self.assertEqual(findings.read_candidate_paths(run), {})
+
+
+class TestThePathRepairRefusesRatherThanGuesses(unittest.TestCase):
+    """The four conditions that must ALL hold before a duplicated citation is re-bound (agents-amgst)."""
+
+    def test_an_ambiguous_path_is_left_alone_and_recorded_as_a_refusal(self):
+        paths = {"cand-a": "src/x.js", "cand-b": "src/x.js", "cand-c": "src/y.js"}
+        rows = [{"candidate_id": "cand-a", "path": "src/x.js"},
+                {"candidate_id": "cand-a", "path": "src/x.js"}]
+        refusals = []
+        self.assertEqual(repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths,
+                                                   refusals=refusals), [])
+        self.assertEqual([row["candidate_id"] for row in rows], ["cand-a", "cand-a"])
+        self.assertEqual(len(refusals), 1, refusals)
+        self.assertEqual(refusals[0]["cited"], "cand-a")
+        self.assertIn("duplicated citation: 2 row(s) cite it", refusals[0]["reason"])
+        self.assertIn("2 presented candidate id(s) stay unaccounted", refusals[0]["reason"])
+
+    def test_a_path_whose_only_candidate_is_already_cited_is_not_stolen(self):
+        paths = {"cand-a": "p1", "cand-b": "p2", "cand-c": "p3"}
+        rows = [{"candidate_id": "cand-a", "path": "p1"},
+                {"candidate_id": "cand-a", "path": "p2"},   # p2 -> cand-b, but cand-b is cited
+                {"candidate_id": "cand-b", "path": "p3"}]
+        self.assertEqual(repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths), [])
+        self.assertEqual([row["candidate_id"] for row in rows],
+                         ["cand-a", "cand-a", "cand-b"],
+                         "a citation is never moved off a candidate another row already names")
+
+    def test_an_intentional_duplicate_that_costs_no_coverage_is_untouched_and_unreported(self):
+        """Two rows may legitimately answer one candidate; a duplicate only matters when it leaves a
+        presented candidate uncited, so a complete run gets neither a rewrite nor a refusal."""
+        paths = {"cand-a": "p1", "cand-b": "p2"}
+        rows = [{"candidate_id": "cand-a", "path": "p1"},
+                {"candidate_id": "cand-a", "path": "p1"},
+                {"candidate_id": "cand-b", "path": "p2"}]
+        refusals = []
+        self.assertEqual(repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths,
+                                                   refusals=refusals), [])
+        self.assertEqual(refusals, [])
+
+    def test_every_resolvable_duplicate_row_is_re_bound_to_its_own_candidate(self):
+        """Three rows quoting one id whose paths name three DIFFERENT candidates: all three are re-bound,
+        and the id they all quoted becomes the unanswered one - visible in coverage, never silently lost.
+        A row whose own path names the candidate it already cites is the one left alone (the measured
+        2026-10-23 shape), so nothing is re-bound off a candidate another row legitimately answers."""
+        paths = {"cand-a": "p1", "cand-b": "p2", "cand-c": "p3", "cand-d": "p4"}
+        rows = [{"candidate_id": "cand-a", "path": "p2"},
+                {"candidate_id": "cand-a", "path": "p3"},
+                {"candidate_id": "cand-a", "path": "p4"}]
+        repairs = repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths)
+        self.assertEqual([row["candidate_id"] for row in rows],
+                         ["cand-b", "cand-c", "cand-d"])
+        self.assertEqual([record["rule"] for record in repairs], ["path", "path", "path"])
+        coverage = candidate_coverage(4, 3, presented_ids=list(paths),
+                                      cited_ids=[row["candidate_id"] for row in rows])
+        self.assertFalse(coverage["complete"], "cand-a is still unanswered")
+        self.assertEqual(coverage["uncited_candidate_ids"], ["cand-a"])
+        self.assertEqual(coverage["duplicate_cited_ids"], [])
+
+        # the row that keeps its citation is the one whose own path names it
+        rows = [{"candidate_id": "cand-a", "path": "p1"},
+                {"candidate_id": "cand-a", "path": "p2"}]
+        repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths)
+        self.assertEqual([row["candidate_id"] for row in rows], ["cand-a", "cand-b"])
+
+
+class TestCoverageDiagnosticsStayQuietWhenTheyWouldBeNoise(unittest.TestCase):
+    def test_a_nothing_cited_report_does_not_list_forty_five_ids(self):
+        ids = [f"cand-{i}" for i in range(45)]
+        refused = candidate_coverage(45, 45, presented_ids=ids, cited_ids=[])
+        self.assertFalse(refused["complete"])
+        self.assertNotIn("presented id(s) no row cited", refused["reason"],
+                         "\"cited 0\" is the whole finding; naming all 45 is a wall of ids")
+        self.assertEqual(refused["duplicate_cited_ids"], [])
+        self.assertEqual(refused["uncited_candidate_ids"], ids,
+                         "the structured field still carries the full population")
+
+    def test_a_large_shortfall_names_a_bounded_number_of_ids(self):
+        ids = [f"cand-{i}" for i in range(45)]
+        got = candidate_coverage(45, 45, presented_ids=ids, cited_ids=ids[:1])
+        self.assertIn("presented id(s) no row cited: cand-1, cand-2, cand-3, cand-4, cand-5, +39 more",
+                      got["reason"])
+
+    def test_a_count_only_station_carries_no_identity_diagnostics(self):
+        got = candidate_coverage(5, 2, presented_ids=[])
+        self.assertEqual((got["duplicate_cited_ids"], got["uncited_candidate_ids"]), ([], []))
+        self.assertNotIn("presented id(s)", got["reason"])
+
+
 class TestStationPredicates(unittest.TestCase):
     """agents-kve2, agents-pim5: one predicate pair, and the two facts stay independent.
 

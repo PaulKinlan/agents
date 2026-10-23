@@ -36,7 +36,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                             candidate_coverage, read_candidate_count, read_candidate_paths,
+                             read_presented_candidate_ids,
                              repair_cited_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
@@ -71,7 +72,8 @@ except ImportError:
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                             candidate_coverage, read_candidate_count, read_candidate_paths,
+                             read_presented_candidate_ids,
                              repair_cited_candidate_ids,
                              station_is_incomplete,
                              dispatch_env_failure_report, write_line_report)
@@ -1016,15 +1018,22 @@ def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (
     copied fragment, or a near match within two edits, and only when exactly one presented candidate
     explains it. An ambiguous id is left as the model wrote it, so the run's accounting still reports a
     partial triage rather than binding a verdict to the wrong candidate.
+
+    The one further repair is the DUPLICATED-but-valid citation (agents-amgst), which the id-text rules
+    cannot express because the id is exact: it is re-bound onto the candidate the row's own `path` names,
+    and only when that is exactly one still-uncited presented candidate. It needs the pre-pass candidate
+    paths, read from `run_dir` here so every caller gets it.
     """
     repairs: List[Dict[str, Any]] = []
     refusals: List[Dict[str, Any]] = []
     if report is None:
         return repairs
+    candidate_paths = read_candidate_paths(run_dir) if run_dir is not None else {}
     for array_name, rows in row_arrays(report).items():
         batch_refusals: List[Dict[str, Any]] = []
         for record in repair_cited_candidate_ids(rows, presented or (), foreign=foreign or (),
-                                                 refusals=batch_refusals):
+                                                 refusals=batch_refusals,
+                                                 candidate_paths=candidate_paths):
             record["array"] = array_name
             repairs.append(record)
         for refusal in batch_refusals:
