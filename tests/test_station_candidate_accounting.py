@@ -295,19 +295,26 @@ class TestAggregateCandidateAccounting(unittest.TestCase):
                 candidate_accounting_mode({"candidate_accounting": bad})
 
     def test_old_row_mode_scores_and_count_only_fixtures_are_unchanged(self):
+        # agents-amgst: the record gained `duplicate_cited_ids`/`uncited_candidate_ids`, and an
+        # identity-matched shortfall's reason now names the unanswered candidate. The scores, the
+        # completeness predicate and the count-only wording are unchanged.
         self.assertEqual(candidate_coverage(None, 7), {
             "candidates_in": None, "candidates_presented": None,
-            "candidates_accounted": 7, "complete": True, "reason": "", "identity": "not-applicable"})
+            "candidates_accounted": 7, "complete": True, "reason": "", "identity": "not-applicable",
+            "duplicate_cited_ids": [], "uncited_candidate_ids": []})
         self.assertEqual(candidate_coverage(2, 2, presented_ids=[]), {
             "candidates_in": 2, "candidates_presented": 2,
-            "candidates_accounted": 2, "complete": True, "reason": "", "identity": "count-only"})
+            "candidates_accounted": 2, "complete": True, "reason": "", "identity": "count-only",
+            "duplicate_cited_ids": [], "uncited_candidate_ids": []})
         self.assertEqual(candidate_coverage(2, 1, presented_ids=["A", "B"], cited_ids=["A"]), {
             "candidates_in": 2, "candidates_presented": 2,
             "candidates_accounted": 1, "complete": False,
             "reason": "cited 1 of the 2 candidate id(s) shown (2 found by the pre-pass): a partial "
                       "triage is not a clean result; every row - confirmed or dismissed - must carry "
-                      "the candidate_id of the pre-pass candidate it answers",
-            "identity": "identity-matched"})
+                      "the candidate_id of the pre-pass candidate it answers; presented id(s) no row "
+                      "cited: B",
+            "identity": "identity-matched", "duplicate_cited_ids": [],
+            "uncited_candidate_ids": ["B"]})
 
 
 class TestPresentedIdsComeFromTheRun(unittest.TestCase):

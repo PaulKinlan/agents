@@ -12,6 +12,17 @@ from unittest import mock
 
 from lib.sinks.beads import _bd_json
 
+# A HANG GUARD, NOT A MEASUREMENT (agents-e3r9p). Nothing in this module asserts how fast `bd` is - the
+# contract under test is the real CLI's JSON SHAPES - so this bound only exists to stop a wedged binary from
+# wedging the gate. It was 60 s, which is below what a cold `bd init` costs on the fleet VM: the test
+# builds an EMPTY HOME/XDG config+data home on purpose, so bd bootstraps its dolt data directory and runs
+# its migrations from nothing every time. Measured on the agents-factory VM with bd 1.3.1: 71.70 s with the
+# ambient HOME, 99.20 s with this test's isolated env. `lib/findings.py` maps to this module, so a 60 s
+# guard here failed the fast gate for every lib/findings change - and the merger's full gate with it - for a
+# reason no author could fix. Do not make this a skip: that would drop the contract on exactly the hosts
+# where it matters.
+_BD_GUARD_S = 240
+
 
 def _real_bd():
     selected = shutil.which("bd")
@@ -59,7 +70,7 @@ class TestRealBdJsonContract(unittest.TestCase):
                 init = subprocess.run(
                     [bd_bin, "init", "--skip-hooks", "--skip-agents",
                      "--non-interactive", "--prefix", "scratch", "--quiet"],
-                    cwd=repo, capture_output=True, text=True, timeout=60)
+                    cwd=repo, capture_output=True, text=True, timeout=_BD_GUARD_S)
                 self.assertEqual(init.returncode, 0, init.stderr)
                 self.assertTrue((repo / ".beads").is_dir())
                 self.assertEqual(_bd_json(bd_bin, repo,

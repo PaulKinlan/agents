@@ -1702,6 +1702,48 @@ def read_presented_candidate_ids(run_dir: Any,
     return ids
 
 
+def _normalise_cited_path(value: Any) -> str:
+    """A path as it is compared, never as it is reported: `/`-separated, no `./` prefix, no outer space.
+
+    A row's `path` is model-written and a candidate's `path` is pre-pass-written, so the two spellings of
+    the same file can differ by a leading `./` or a stray space. Only the comparison is normalised - every
+    diagnostic and every repair record keeps the original string, because that is what an operator greps.
+    """
+    if not isinstance(value, str):
+        return ""
+    path = value.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/")
+
+
+def read_candidate_paths(run_dir: Any) -> Dict[str, str]:
+    """`candidate_id -> path` for every candidate the pre-pass recorded; `{}` when there is no evidence.
+
+    The presented population is named by `read_presented_candidate_ids` (identity), and this is the same
+    population joined to the one other thing a candidate carries that a ROW also carries: the file it was
+    found in. It exists for one narrow repair (agents-amgst): a citation that is exact but DUPLICATED - two
+    rows naming the same presented candidate while another is named by nobody - is invisible to every
+    id-text rule, and the row's own path is the only remaining evidence of which candidate it meant.
+
+    An unreadable payload, a pre-pass with no ids, or candidates with no path yields `{}`, which disables
+    that repair rather than inventing a binding.
+    """
+    payload = _read_candidate_payload(run_dir)
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        return {}
+    paths: Dict[str, str] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        cid = candidate.get(CANDIDATE_ID_FIELD)
+        path = _normalise_cited_path(candidate.get("path"))
+        if isinstance(cid, str) and cid.strip() and path:
+            paths.setdefault(cid.strip(), path)
+    return paths
+
+
 # ---------------------------------------------------------------------------------------------
 # Candidate-id repair (agents-00sew). A model sometimes mistranscribes the 16-hex candidate_id it is
 # asked to copy verbatim: chrome-agent-platform-z427f reported 4e8820782eed4e17 as 4e8820782eed17.
@@ -1840,15 +1882,128 @@ def _no_match_reason(cited: str, ids: Iterable[str], elsewhere: Iterable[str]) -
             f"{'' if nearest[0] == 1 else 's'})")
 
 
+def _rows_by_cited_id(rows: Iterable[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Every row that cites each id - with MULTIPLICITY, because a duplicate is the thing being read."""
+    citing: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        cited = row.get("candidate_id")
+        if isinstance(cited, str) and cited.strip():
+            citing.setdefault(cited.strip(), []).append(row)
+    return citing
+
+
+def repair_duplicate_citations_by_path(rows: Any, presented: Iterable[str],
+                                       candidate_paths: Optional[Dict[str, str]],
+                                       repairs: List[Dict[str, Any]],
+                                       refusals: Optional[List[Dict[str, Any]]] = None
+                                       ) -> List[Dict[str, Any]]:
+    """Re-bind a DUPLICATED-but-valid citation onto the candidate the row's own path names.
+
+    THE CASE THE ID-TEXT RULES CANNOT SEE (agents-amgst). Nightly 2026-10-23 failed on one modern-web
+    station: six dismissal rows, one per page, but the `docs/index.html` row cited `docs/help.html`'s
+    candidate_id. Two rows therefore cite `d21fff3b2fa42e68`, `b1cea3c268d41ac2` is cited by nobody, and
+    the station reads "cited 5 of the 6". `repair_cited_candidate_id` answers `(None, 'exact')` for a
+    citation that IS a presented id, so the row was invisible to repair AND to refusal: no
+    `candidate_id_repairs*.json` was written at all and the operator got only the count.
+
+    ALL FOUR must hold or the citation is left exactly as the model wrote it, because binding a verdict to
+    the wrong candidate is worse than a visible shortfall:
+      * the cited id is a PRESENTED candidate cited by MORE THAN ONE row (two rows may legitimately answer
+        one candidate, and a run whose every candidate is cited is not short of anything);
+      * at least one presented candidate is cited by NO row, read BEFORE any rewrite (a duplicate only
+        matters when it plausibly explains the shortfall);
+      * the row's own `path` matches exactly ONE presented candidate - a model-written path, so an
+        ambiguous one refuses instead of guessing; and
+      * that candidate is still uncited (a citation is never moved off a candidate another row names).
+
+    Every applied rewrite is appended to `repairs` as `rule: 'path'` so it is auditable in the run
+    directory rather than an invisible kindness. A duplicate that survives is appended to `refusals`, naming
+    the id, the rows' paths and how many candidates stay unaccounted - the diagnostic the failure lacked.
+    """
+    rows_list = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    presented_ids: List[str] = []
+    for value in presented or ():
+        if isinstance(value, str) and value.strip() and value.strip() not in presented_ids:
+            presented_ids.append(value.strip())
+    paths: Dict[str, str] = {}
+    for cid, path in (candidate_paths or {}).items():
+        normalised = _normalise_cited_path(path)
+        if isinstance(cid, str) and cid.strip() and normalised:
+            paths[cid.strip()] = normalised
+    if not rows_list or not presented_ids or not paths:
+        return []
+
+    citing = _rows_by_cited_id(rows_list)
+    uncited = [cid for cid in presented_ids if cid not in citing]
+    duplicated = [cid for cid in presented_ids if len(citing.get(cid, [])) > 1]
+    if not uncited or not duplicated:
+        return []
+
+    by_path: Dict[str, List[str]] = {}
+    for cid in presented_ids:
+        path = paths.get(cid)
+        if path:
+            by_path.setdefault(path, []).append(cid)
+
+    applied: List[Dict[str, Any]] = []
+    still_uncited = set(uncited)
+    for cid in duplicated:
+        for row in citing.get(cid, []):
+            matches = by_path.get(_normalise_cited_path(row.get("path")), [])
+            if len(matches) != 1 or matches[0] not in still_uncited:
+                continue
+            target = matches[0]
+            row["candidate_id"] = target
+            still_uncited.discard(target)
+            record = {"cited": cid, "repaired": target, "rule": "path", "path": row.get("path")}
+            repairs.append(record)
+            applied.append(record)
+
+    if refusals is None:
+        return applied
+    citing = _rows_by_cited_id(rows_list)
+    for cid in duplicated:
+        rows_here = citing.get(cid, [])
+        if len(rows_here) < 2:
+            continue                                  # the duplicate was resolved, not refused
+        remaining = [other for other in presented_ids if other not in citing]
+        if not remaining:
+            continue                                  # an intentional duplicate that costs no coverage
+        re_bound = sum(1 for record in applied if record["cited"] == cid)
+        row_paths = [row.get("path") for row in rows_here]
+        named = ", ".join(str(path) for path in row_paths[:4])
+        if len(row_paths) > 4:
+            named += f", +{len(row_paths) - 4} more"
+        refusals.append({
+            "cited": cid,
+            "path": row_paths[0] if row_paths else None,
+            "paths": row_paths,
+            "reason": (
+                f"duplicated citation: {len(rows_here)} row(s) cite it ({named})"
+                f"{f' - {re_bound} re-bound by path' if re_bound else ''}, and the left-over"
+                f" row path(s) do not name exactly one still-uncited presented candidate, so"
+                f" {len(remaining)} presented candidate id(s) stay unaccounted"
+                f" ({', '.join(remaining[:4])}"
+                f"{f', +{len(remaining) - 4} more' if len(remaining) > 4 else ''})"),
+        })
+    return applied
+
+
 def repair_cited_candidate_ids(rows: Any,
                                presented: Iterable[str],
                                foreign: Iterable[str] = (),
-                               refusals: Optional[List[Dict[str, Any]]] = None
+                               refusals: Optional[List[Dict[str, Any]]] = None,
+                               candidate_paths: Optional[Dict[str, str]] = None
                                ) -> List[Dict[str, Any]]:
     """Rewrite `candidate_id` in place on rows where a UNIQUE repair exists; return the repairs.
 
     Returns one record per rewritten row ({cited, repaired, rule, path}) so the repair is auditable in
     the run directory rather than an invisible kindness.
+
+    `candidate_paths` (`candidate_id -> path`, `read_candidate_paths`) enables the ONE repair the id-text
+    rules cannot express: a duplicated-but-valid citation, re-bound onto the candidate the row's own path
+    names when that is unambiguous (agents-amgst, `repair_duplicate_citations_by_path`). Without it the
+    function behaves exactly as before.
     """
     repairs: List[Dict[str, Any]] = []
     for row in rows if isinstance(rows, list) else ():
@@ -1867,7 +2022,37 @@ def repair_cited_candidate_ids(rows: Any,
         row["candidate_id"] = repaired
         repairs.append({"cited": cited.strip(), "repaired": repaired, "rule": rule,
                         "path": row.get("path")})
+    # A second pass deliberately: the duplicate rule needs the citations the first pass produced.
+    repair_duplicate_citations_by_path(rows, presented, candidate_paths, repairs, refusals)
     return repairs
+
+
+COVERAGE_NAMED_UNCITED_IDS = 5   # name a shortfall's candidates, never a wall of 45 of them
+
+
+def _coverage_diagnostic(accounted: int, duplicates: List[Dict[str, Any]],
+                         uncited: List[str]) -> str:
+    """The part of a coverage reason that says WHICH candidates the shortfall is about (agents-amgst).
+
+    "cited 5 of the 6" was the only clue a failed nightly offered, and it pointed at neither the duplicated
+    citation nor the candidate nobody answered: nightly 2026-10-23's modern-web station had six dismissal
+    rows where one row cited another page's candidate_id, so the count was short by a duplicate and not by
+    a missing row. Naming both is what turns that into one sentence an operator can act on.
+
+    NOT A WALL OF IDS. An 8-of-49 report would otherwise list 41 ids the model is being told to copy back,
+    and a 0-of-N report names nothing it does not already say ("cited 0" is the whole finding), so a
+    nothing-cited report keeps its existing text and only duplicates are named.
+    """
+    parts: List[str] = []
+    if duplicates:
+        parts.append("duplicated citation(s): " + "; ".join(
+            f"{record['candidate_id']} cited by {record['citations']} rows" for record in duplicates))
+    if uncited and accounted > 0:
+        named = ", ".join(uncited[:COVERAGE_NAMED_UNCITED_IDS])
+        if len(uncited) > COVERAGE_NAMED_UNCITED_IDS:
+            named += f", +{len(uncited) - COVERAGE_NAMED_UNCITED_IDS} more"
+        parts.append(f"presented id(s) no row cited: {named}")
+    return "; ".join(parts)
 
 
 def candidate_coverage(candidates_in: Optional[int], reported: int,
@@ -1891,17 +2076,36 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
     presented candidate accounts for nothing. When they do not, the count stands and `identity` says
     "count-only", which every surface must show: a weaker check indistinguishable from the stronger one is
     the same blind spot one level down.
+
+    A SHORTFALL NAMES ITS OWN CAUSE (agents-amgst). "cited 5 of the 6" is true and useless: nightly
+    2026-10-23's failing station had six dismissal rows where one row cited another page's candidate_id, so
+    the missing sixth was a DUPLICATE, not a missing row. The reason therefore names duplicated citations
+    (with their row counts) and the presented ids no row cited - and carries both as structured fields
+    (`duplicate_cited_ids`, `uncited_candidate_ids`) so a line-level reader does not have to parse prose.
     """
+    duplicates: List[Dict[str, Any]] = []
+    uncited: List[str] = []
     if candidates_in is None:
         return {"candidates_in": None, "candidates_presented": None,
                 "candidates_accounted": int(reported), "complete": True, "reason": "",
-                "identity": "not-applicable"}
+                "identity": "not-applicable", "duplicate_cited_ids": duplicates,
+                "uncited_candidate_ids": uncited}
     total = max(0, int(candidates_in))
     presented = min(total, max(0, int(slice_size)))
     ids = [str(i) for i in (presented_ids or []) if i]
     if ids:
         identity = "identity-matched"
-        accounted = len(set(ids) & {str(i) for i in (cited_ids or []) if i})
+        # Counted WITH multiplicity (agents-amgst): coverage intersects sets, so a citation repeated by a
+        # second row is invisible in the count - and that duplication is exactly what leaves a presented
+        # candidate unanswered while every row looks answered.
+        citations: Dict[str, int] = {}
+        for value in cited_ids or []:
+            if value:
+                citations[str(value)] = citations.get(str(value), 0) + 1
+        accounted = len(set(ids) & set(citations))
+        duplicates = [{"candidate_id": cid, "citations": count}
+                      for cid, count in citations.items() if count > 1 and cid in set(ids)]
+        uncited = [cid for cid in ids if cid not in citations]
     else:
         identity = "count-only"
         accounted = int(reported)
@@ -1913,6 +2117,9 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
             f"cited {accounted} of the {presented} candidate id(s) shown "
             f"({total} found by the pre-pass): a partial triage is not a clean result; every row - confirmed "
             f"or dismissed - must carry the candidate_id of the pre-pass candidate it answers")
+        diagnostic = _coverage_diagnostic(accounted, duplicates, uncited)
+        if diagnostic:
+            reason = f"{reason}; {diagnostic}"
     else:
         reason = (
             f"accounted for {accounted} of the {presented} candidate(s) shown "
@@ -1921,7 +2128,8 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
             f"(count-only: these candidates carry no candidate_id to compare)")
     return {"candidates_in": total, "candidates_presented": presented,
             "candidates_accounted": accounted, "complete": complete, "reason": reason,
-            "identity": identity}
+            "identity": identity, "duplicate_cited_ids": duplicates,
+            "uncited_candidate_ids": uncited}
 
 
 def candidate_accounting_mode(agent_cfg: Dict[str, Any]) -> str:

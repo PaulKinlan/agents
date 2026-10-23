@@ -1,15 +1,93 @@
 """Drive the real full-gate entrypoint against isolated, tiny unittest packages."""
 
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def measured_start_seconds(samples=3):
+    """What one `python -m unittest` start costs on THIS host, right now.
+
+    A fixture's per-module wall is a bound on the WHOLE module process, interpreter start
+    included, so any case that wants a CONTENT failure inside a wall is racing the start.
+    On 2026-10-23 that race was lost on this VM (agents-nxzkw): the synthetic ``broken``
+    module was killed at wall=1.101s rc=124 ids=0 under the full gate's own parallelism,
+    so it was classified ``unknown`` and the masking cases (agents-mzqfs) reported a red
+    gate for two cleared, reviewed beads - on a delta that touches neither sharding nor
+    this fixture. A constant is only safe on an idle host, so measure instead of assume.
+
+    Three samples, worst case: a single start can be lucky, and the wall has to survive the
+    unlucky one.
+    """
+    worst = 0.0
+    for _ in range(samples):
+        began = time.monotonic()
+        subprocess.run([sys.executable, "-u", "-c", "import unittest"],
+                       capture_output=True, check=False)
+        worst = max(worst, time.monotonic() - began)
+    return worst
+
+
+_MEASURED_WALL = {}
+
+
+def kill_wall_seconds():
+    """The per-module wall for the KILL fixtures: several interpreter starts wide, min 5s.
+
+    THE NUMBERS ARE MEASURED, NOT CHOSEN. ``FULL_GATE_MODULE_TIMEOUT_S`` bounds the WHOLE
+    module process - interpreter start included - so a case that wants a CONTENT failure
+    inside a wall is racing the start. On 2026-10-23 this VM lost that race at wall=1s: the
+    merger's full gate reported ``module=tests.test_broken wall=1.101s rc=124 ids=0``, i.e. a
+    module start costs about a second here under the gate's own parallelism, so the 'broken'
+    module was KILLED before it could assert, arrived as ``unknown``, and the masking cases
+    (agents-mzqfs) reddened a gate for two already-cleared, reviewed beads. The delta touched
+    neither sharding nor this fixture (agents-nxzkw).
+
+    3x the measured start, floor 5s: on a quiet host the measurement is ~0.3s and the floor
+    applies; under the contention the merger measured it is ~1.1s and the floor still applies
+    with a ~4.5x margin; only a host worse than any measurement here escalates the wall. The
+    floor is also what keeps the fixture cheap: 5s, not minutes -- this module is in the full
+    gate once per landing (tests/fast_gate_allowlists.d has it only for tools/full-gate.sh).
+    """
+    if "wall" not in _MEASURED_WALL:
+        _MEASURED_WALL["start"] = measured_start_seconds()
+        _MEASURED_WALL["wall"] = max(5, math.ceil(_MEASURED_WALL["start"] * 3))
+    return _MEASURED_WALL["wall"]
+
+
+def wall_note(wall):
+    """Appended to a masking case's failure message, so a future red gate NAMES this race.
+
+    Without it a wall that has slipped back under a module start reads exactly like a real
+    precedence bug in tools/full-gate.sh - and on 2026-10-23 that misreading cost a full gate
+    and two cleared beads (agents-nxzkw).
+    """
+    start = _MEASURED_WALL.get("start", 0.0)
+    return (f"\n[fixture] per-module wall={wall}s; a `python -m unittest` start measured "
+            f"{start:.3f}s on this host. If those two are CLOSE, the 'broken' module was killed "
+            "before it could assert: that is this fixture racing the wall (agents-nxzkw), not a "
+            "defect in the gate's precedence.")
+
+
+def hang_body(wall):
+    """A module the per-module bound must kill: it sleeps past the wall, then passes.
+
+    Sleeping just past the wall (rather than forever, and rather than a multiple of it) keeps
+    the fixture cheap and a BROKEN kill path legible: if the bound stops firing the module
+    completes and the case fails on its own 'unknown modules' assertion with the gate output
+    attached, instead of hanging the harness until it times out.
+    """
+    return f" def test_slow(self): time.sleep({wall + 5})\n"
 
 
 class TestFullGateSharding(unittest.TestCase):
@@ -37,6 +115,11 @@ class TestFullGateSharding(unittest.TestCase):
     def run_gate(self, *args, **settings):
         env = dict(os.environ, FLEET_CHECKS_DIR=str(self.root / "checks"),
                    FULL_GATE_SHARDS="2", FULL_GATE_BUDGET_S="20")
+        # A nested gate given an explicit per-module wall may legitimately run for a wall plus
+        # the sleeping fixture's own sleep, so the harness timeout is derived from that wall too
+        # - otherwise raising the wall to make the fixtures deterministic would make THIS harness
+        # the thing that times out.
+        wall = settings.get("FULL_GATE_MODULE_TIMEOUT_S")
         # The nested gate must not inherit the PARENT gate's shard-child marker: with it set, the
         # child behaves as a shard, skips the serial-only test this case constructs deliberately,
         # and exits 0 - which is exactly the assertion below failing for the wrong reason.
@@ -44,7 +127,7 @@ class TestFullGateSharding(unittest.TestCase):
         env.update(settings)
         return subprocess.run(["bash", str(self.root / "tools" / "full-gate.sh"), *args],
                               cwd=self.root, env=env, capture_output=True, text=True,
-                              timeout=25, check=False)
+                              timeout=max(25, 2 * int(wall) + 15) if wall else 25, check=False)
 
     def test_exact_union_and_measured_cost_cache(self):
         self.module("a", " def test_one(self): time.sleep(.05)\n")
@@ -210,9 +293,9 @@ class TestFullGateSharding(unittest.TestCase):
         having passed either.
         """
         # Two ids, so a pre-fix run contributes both of them to `missing` rather than one.
-        self.module("hangs", " def test_slow(self): time.sleep(5)\n"
-                             " def test_never_reached(self): pass\n")
-        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1")
+        wall = kill_wall_seconds()
+        self.module("hangs", hang_body(wall) + " def test_never_reached(self): pass\n")
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S=str(wall))
         self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
         self.assertIn("tests.test_hangs", res.stdout)
         self.assertNotIn(
@@ -234,11 +317,20 @@ class TestFullGateSharding(unittest.TestCase):
             + res.stdout + res.stderr)
 
     def test_a_killed_module_does_not_mask_a_genuinely_failing_one(self):
-        """The distinction must survive the mixture: a real failure still fails, and is named."""
-        self.module("hangs", " def test_slow(self): time.sleep(5)\n")
+        """The distinction must survive the mixture: a real failure still fails, and is named.
+
+        The wall here is MEASURED, not the 1s this case first used (agents-nxzkw). A 1s wall
+        bounds the whole module process, interpreter start included, and a python start on this
+        VM measured 1.1s under the full gate's own parallelism - so the ``broken`` module was
+        killed before it could assert, arrived as ``unknown``, and this case reported a red gate
+        for the wrong reason. See ``kill_wall_seconds``.
+        """
+        wall = kill_wall_seconds()
+        self.module("hangs", hang_body(wall))
         self.module("broken", " def test_bad(self): self.assertTrue(False, 'real failure')\n")
-        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1")
-        self.assertIn("failing modules: tests.test_broken", res.stdout, res.stdout + res.stderr)
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S=str(wall))
+        self.assertIn("failing modules: tests.test_broken", res.stdout,
+                      res.stdout + res.stderr + wall_note(wall))
         self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
         self.assertNotIn("failing modules: tests.test_hangs", res.stdout, res.stdout + res.stderr)
         self.assertEqual(
@@ -287,14 +379,16 @@ class TestFullGateSharding(unittest.TestCase):
         sides of the id-set check - so 'executed ids=1 expected=1 missing=0' is the accounting that
         proves the kill neither reddens via missing ids nor hides the real failure.
         """
-        self.module("hangs", " def test_slow(self): time.sleep(5)\n")
+        wall = kill_wall_seconds()
+        self.module("hangs", hang_body(wall))
         self.module("broken", " def test_bad(self): self.assertTrue(False, 'real failure')\n")
-        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1", FULL_GATE_BUDGET_S="1")
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S=str(wall), FULL_GATE_BUDGET_S="1")
         self.assertIn(
             "executed ids=1 expected=1 missing=0 extra=0 duplicate=0", res.stdout,
             "the killed module's ids must be excluded from BOTH sides even beside a real failure, "
             "leaving only the failing module's id counted:\n" + res.stdout + res.stderr)
-        self.assertIn("failing modules: tests.test_broken", res.stdout, res.stdout + res.stderr)
+        self.assertIn("failing modules: tests.test_broken", res.stdout,
+                      res.stdout + res.stderr + wall_note(wall))
         self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)
         self.assertIn("OVER BUDGET", res.stdout, res.stdout + res.stderr)
         self.assertNotIn(
@@ -326,8 +420,9 @@ class TestFullGateSharding(unittest.TestCase):
         """
         self.module("killed", " def test_sigkill(self): os.kill(os.getpid(), 9)\n")
         self.module("termed", " def test_sigterm(self): os.kill(os.getpid(), 15)\n")
-        self.module("hangs", " def test_slow(self): time.sleep(5)\n")
-        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S="1")
+        wall = kill_wall_seconds()
+        self.module("hangs", hang_body(wall))
+        res = self.run_gate(FULL_GATE_MODULE_TIMEOUT_S=str(wall))
         for module in ("tests.test_killed", "tests.test_termed", "tests.test_hangs"):
             self.assertIn(module, res.stdout, res.stdout + res.stderr)
         self.assertIn("unknown modules", res.stdout, res.stdout + res.stderr)

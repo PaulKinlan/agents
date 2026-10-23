@@ -493,6 +493,63 @@ class TestMistranscribedIdsAreRepaired(BatchedStation):
         self.assertTrue(coverage["complete"], f"a repaired answer must account: {coverage}")
 
 
+# agents-amgst: every row of a batch answers the batch's FIRST candidate while keeping its own page's
+# path - the measured 2026-10-23 modern-web shape, where six per-page dismissal rows cited five distinct
+# ids and one duplicate. The id-text rules cannot see it (each cited id IS presented), so the run would
+# otherwise read "cited 2 of the 3" and go INCOMPLETE; the row's own path is the evidence that re-binds it.
+DUPLICATE_CITING_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  case " ${ids[*]:-} " in *" $id "*) continue;; esac
+  ids+=("$id")
+done
+out='{"summary":"t","target":"probe-target","findings":['
+first=1
+for id in "${ids[@]}"; do
+  idx=$((10#${id#cand-perf-}))
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"r\",\"path\":\"src/file$idx.ts\",\"line_number\":1,\"snippet\":\"s\",\"severity\":\"low\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"${ids[0]}\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestADuplicatedCitationIsReBoundByItsOwnPath(BatchedStation):
+    """agents-amgst. The dispatcher must hand the repair the pre-pass paths, or the measured failure is
+    unfixable no matter what lib/findings can do: this is the wiring half of the change."""
+
+    def test_a_per_page_row_citing_another_page_is_re_bound_and_the_run_accounts(self):
+        self.agent(AGENT_YAML)
+        self.stub(DUPLICATE_CITING_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        expected = [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)]
+        self.assertEqual(sorted(row["candidate_id"] for row in report["findings"]), expected,
+                         "every presented candidate is cited exactly once after the path repair")
+
+        repairs = []
+        for path in sorted(run.glob("candidate_id_repairs*.json")):
+            if "_refused" in path.name:
+                continue
+            repairs.extend(json.loads(path.read_text(encoding="utf-8")))
+        self.assertEqual([r["rule"] for r in repairs], ["path"] * (CANDIDATE_COUNT - 3),
+                         f"one row per batch correctly kept its own id, the rest were re-bound: {repairs}")
+        self.assertEqual([(r["repaired"], r["path"]) for r in repairs],
+                         [(f"cand-perf-{i:03d}", f"src/file{i}.ts") for i in (1, 2, 4, 5, 7)])
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from lib.findings import candidate_coverage, read_candidate_count, read_presented_candidate_ids
+        coverage = candidate_coverage(read_candidate_count(run), len(report["findings"]),
+                                      presented_ids=read_presented_candidate_ids(run),
+                                      cited_ids=[row["candidate_id"] for row in report["findings"]])
+        self.assertTrue(coverage["complete"], coverage)
+
+
 # agents-fv5uk: batch 1 cites a candidate that belongs EXACTLY to a sibling batch. The ids are one edit
 # apart by construction ("cand-perf-004" vs "cand-perf-005"), so the repair must refuse and the run must
 # reject the row - never re-attach it to batch 1's neighbour.
