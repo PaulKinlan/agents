@@ -27,6 +27,24 @@ from lib.tool_pins import (MAX_PINS_FILE_BYTES, TRUSTED_TOOLS, ToolPinError,
                            verify_pin)
 
 
+# A HANG GUARD, NOT A MEASUREMENT (agents-h71zr). Nothing in this module asserts how fast the
+# generator is - every arm asserts WHERE A PIN COMES FROM (a PATH-planted binary, an exported shell
+# function, a CWD namesake, a relative --lookup-path dir must never be the pin's source), so this
+# bound only exists to stop a wedged script from wedging the gate. It was 30 s at the sites in
+# GenerateToolPinsSourceTests and 120 s in the two later classes, and 30 s is below what ONE run of
+# the generator costs on this VM: it hashes every installed trusted tool TWICE - once with sha256sum
+# and once with `python3 -I` as the independent digest (agents-0poh) - so a host carrying a 249 MB
+# `claude` spends ~20 s on that one binary. Measured on the agents-factory VM, 2026-10-23:
+#   /usr/bin/time bash tools/generate-tool-pins.sh /tmp/tp-out.yaml  ->  WALL 38.59 s
+# and this module runs the real script ten times, one per behavioural arm. Five of them therefore
+# ERRORED with subprocess.TimeoutExpired after 30 s, and test_tool_pins was the ONLY failing module
+# of the batch gate - for a reason no author could fix (same shape as agents-e3r9p and agents-nxzkw).
+# Do not turn this into a skip (that drops the contract on exactly the hosts where it matters) and do
+# not lower it; re-measure before REPLACING it, since a per-run cost below this bound is what the
+# number means.
+_GENERATOR_GUARD_S = 240
+
+
 def _make_tool(directory: Path, name: str, content: str = "#!/bin/sh\nexit 0\n") -> Path:
     path = directory / name
     path.write_text(content, encoding="utf-8")
@@ -409,7 +427,7 @@ class GenerateToolPinsSourceTests(unittest.TestCase):
                "HOME": str(self.tmp)}
         res = subprocess.run(
             ["bash", str(GenerateToolPinsScriptTests.SCRIPT), str(self.out), *extra_args],
-            env=env, capture_output=True, text=True, timeout=30)
+            env=env, capture_output=True, text=True, timeout=_GENERATOR_GUARD_S)
         self.assertEqual(res.returncode, 0, res.stderr)
         return self.out.read_text(encoding="utf-8")
 
@@ -479,7 +497,7 @@ class GenerateToolPinsSourceTests(unittest.TestCase):
         env = {"PATH": os.pathsep.join([str(self.fakebin), *self.LOOKUP_DIRS]),
                "HOME": str(self.tmp)}
         res = subprocess.run(["bash", "-c", wrapper], env=env, capture_output=True,
-                             text=True, timeout=30)
+                             text=True, timeout=_GENERATOR_GUARD_S)
         self.assertEqual(res.returncode, 0, res.stderr)
         body = self.out.read_text(encoding="utf-8")
         for match in re.finditer(r'^  path: (\S+)$', body, re.MULTILINE):
@@ -509,7 +527,7 @@ class GenerateToolPinsSourceTests(unittest.TestCase):
         res = subprocess.run(
             ["bash", str(GenerateToolPinsScriptTests.SCRIPT), str(self.out),
              "--lookup-path", "oprel"],
-            env=env, cwd=self.tmp, capture_output=True, text=True, timeout=30)
+            env=env, cwd=self.tmp, capture_output=True, text=True, timeout=_GENERATOR_GUARD_S)
         self.assertEqual(res.returncode, 0, res.stderr)
         body = self.out.read_text(encoding="utf-8")
         # The header comment legitimately records the flag's value; the boundary is that
@@ -811,7 +829,7 @@ class LookupPathContractTests(unittest.TestCase):
         res = subprocess.run(
             ["bash", str(root / "tools" / "generate-tool-pins.sh"),
              str(out), "--lookup-path", str(lookup)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={**os.environ, "HOME": str(out.parent)},
         )
         self.assertEqual(res.returncode, 0, f"generator failed: {res.stderr[:300]}")
@@ -843,7 +861,7 @@ class LookupPathContractTests(unittest.TestCase):
             bare = tmpdir / "pins-bare.yaml"
             res = subprocess.run(
                 ["bash", str(root / "tools" / "generate-tool-pins.sh"), str(bare)],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
                 env={**os.environ, "HOME": str(tmpdir)},
             )
             self.assertEqual(res.returncode, 0, res.stderr[:200])
@@ -912,7 +930,7 @@ class TheSkippedToolsAreAnnouncedTests(unittest.TestCase):
     def _generate(self, tmpdir: Path, out: Path, *args: str) -> subprocess.CompletedProcess:
         res = subprocess.run(
             ["bash", str(self.SCRIPT), str(out), *args],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=_GENERATOR_GUARD_S,
             env={**os.environ, "HOME": str(tmpdir)},
         )
         self.assertEqual(res.returncode, 0, f"generator failed: {res.stderr[:300]}")
@@ -937,8 +955,10 @@ class TheSkippedToolsAreAnnouncedTests(unittest.TestCase):
     def test_the_omission_is_announced_and_stops_being_announced_once_pinned(self):
         """The property AND its forced case, in one test on purpose.
 
-        Each arm needs the real generator to run (~3 s: it hashes claude + pi twice each), and the
-        arm pair shares a bare run, so they are one test rather than two paying for the same work.
+        Each arm needs the real generator to run (~3 s on a healthy host; 38.6 s on the fleet VM,
+        measured in agents-h71zr: it hashes claude + pi twice each), and the arm pair shares a bare
+        run, so they are one test rather than two paying for the same work. The subprocess bound is
+        _GENERATOR_GUARD_S, not a host budget, for the same reason.
 
         THE EQUIVALENCE FIRST: every tool the pins file records as not found is named on stderr, in
         both directions. Neither direction is cosmetic - a tool the file omits and stderr does not
