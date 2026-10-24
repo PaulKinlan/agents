@@ -30,6 +30,17 @@ import importlib.util
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# agents-xb8tp: A HANG GUARD, NOT A PERFORMANCE BUDGET. The bound this replaces was a bare 30s, and on
+# the 2026-10-24 landing gate a degraded host (2026.9s of wall for a suite budgeted at 1800s) pushed
+# this ONE subprocess past it: subprocess.TimeoutExpired on a test whose property is 'an adapter auth
+# failure exits 2 and prints [environment failure]' - nothing about wall clock. MEASURED here, alone,
+# on an otherwise quiet host: 5.4s (2026-10-24, `python3 -m unittest` of the single case). The
+# measurement sits beside the guard so the number can be re-checked rather than trusted; 240s is ~44x
+# it and matches the named-guard value the two earlier instances of this class took
+# (tests/test_tool_pins.py:_GENERATOR_GUARD_S, tests/test_bd_json_contract.py:_BD_GUARD_S). It is
+# deliberately NOT a skip-when-slow arm: a factory that genuinely wedges still fails HERE.
+_FACTORY_RUN_GUARD_S = 240
+
 # The tracked-file instrument (tests/__init__.py). The dispatcher fixture stages its runtime from GIT'S
 # INDEX rather than globbing lib/, because the filesystem is not a frozen set during a run and another
 # shard's probe is not part of this tree (agents-zf2p, the agents-4ieg shape).
@@ -386,7 +397,7 @@ class TestLineAdapterAuthFailure(unittest.TestCase):
              "--target", "target", "--engine", "pi", "--sink", "file"],
             cwd=str(self.root),
             env=dict(os.environ, FACTORY_ALLOW_UNSANDBOXED="1", ANTHROPIC_API_KEY="dummy"),
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=_FACTORY_RUN_GUARD_S,
         )
         self.assertEqual(res.returncode, 2, f"STDOUT: {res.stdout}\nSTDERR: {res.stderr}")
         self.assertIn("[environment failure]", res.stderr)
