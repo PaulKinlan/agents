@@ -148,6 +148,34 @@ class Sandbox:
         (root / "lines").mkdir()
         self.bin = root / "bin"
         self.bin.mkdir()
+        # A BATCHED prompt must be answered like a compliant model: only for the candidates that batch
+        # was SHOWN. Since agents-tq1lt the dispatcher enforces a per-call candidate bound, so a station
+        # whose pre-pass finds more than the bound is presented in several calls and a canned answer
+        # citing every candidate is (correctly) refused as a cross-batch attribution. This filter turns
+        # the canned report into the answer its batch deserves; a single-call prompt is passed through
+        # untouched, so no existing fixture changes shape. python3 is in the sandbox's executable
+        # allowlist (station pre-passes are python), so this also works under bubblewrap.
+        (self.bin / "batch_filter.py").write_text(
+            "import json, re, sys\n"
+            "path = sys.argv[1]\n"
+            "prompt = sys.stdin.read()\n"
+            "text = open(path, encoding='utf-8').read()\n"
+            "try:\n"
+            "    payload = json.loads(text)\n"
+            "except ValueError:\n"
+            "    sys.stdout.write(text)  # prose, a truncation fixture: the stub says what it says\n"
+            "    raise SystemExit(0)\n"
+            "shown = set(re.findall(r'\"candidate_id\"\\s*:\\s*\"([^\"]+)\"', prompt))\n"
+            "if not shown:\n"
+            "    sys.stdout.write(text)  # count-only accounting: nothing to attribute rows to\n"
+            "    raise SystemExit(0)\n"
+            "for key, value in list(payload.items()):\n"
+            "    if isinstance(value, list) and value and all(isinstance(r, dict) for r in value):\n"
+            "        payload[key] = [r for r in value\n"
+            "                        if not isinstance(r.get('candidate_id'), str)\n"
+            "                        or r['candidate_id'] in shown]\n"
+            "json.dump(payload, sys.stdout)\n",
+            encoding="utf-8")
         stub = self.bin / "pi"
         # The adapter passes --skill <agent dir>; print that agent's canned output.
         stub.write_text(
@@ -157,8 +185,13 @@ class Sandbox:
             # Drain the prompt: the adapter pipes it in under `set -euo pipefail` and the real
             # engine reads it, so a stub that exits without reading makes printf take SIGPIPE
             # (141), which the adapter reports as a spurious "engine 'pi' exited 1" (agents-lx4).
-            "cat >/dev/null\n"
-            f"cat '{root}/outputs/'\"$(basename \"$skill\")\".txt\n",
+            "prompt=$(cat)\n"
+            f"out='{root}/outputs/'\"$(basename \"$skill\")\".txt\n"
+            # batch_brief() opens every batched prompt with this header (lib/candidate_batching.py).
+            "case \"$prompt\" in\n"
+            "  'BATCH '*) printf '%s' \"$prompt\" | python3 '" + str(self.bin / "batch_filter.py") + "' \"$out\" ;;\n"
+            "  *) cat \"$out\" ;;\n"
+            "esac\n",
             encoding="utf-8")
         stub.chmod(0o755)
 
