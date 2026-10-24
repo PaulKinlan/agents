@@ -986,5 +986,37 @@ class TestAggregateClaimedLineJudge(SandboxCase):
         self.assertNotIn("candidate_claims", legacy)
 
 
+@unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
+class TestASingleCallStationIsToldItsCandidates(SandboxCase):
+    """agents-o0nv2: the DISPATCHER, not just batch_brief(), must put the population in a 1-call prompt.
+
+    Driving the real `factory run` path is the point: a unit test on batch_brief() passes even if the
+    caller still emits the header only for `batch_count > 1`, and the reported failure was a real
+    single-call night (modern-web, 6 candidates, 0 cited ids).
+    """
+
+    def test_one_batch_prompt_names_the_population_and_its_ids(self):
+        self.box.agent("six", report(*[finding(candidate_id=f"c{i}") for i in range(6)]),
+                       prepass=prepass(6))
+        res = self.box.run_agent("six")
+        prompt = (Path(res["run_dir"]) / "prompt.txt").read_text(encoding="utf-8")
+        self.assertIn("The candidate list holds 6 candidate(s), each with a candidate_id: "
+                      "c0, c1, c2, c3, c4, c5.", prompt)
+        self.assertIn("answer for EVERY candidate below", prompt)
+        self.assertTrue(prompt.startswith("The candidate list is not split into batches"), prompt[:120])
+        self.assertNotIn("BATCH 1 of 1", prompt)
+
+    def test_a_single_call_with_idless_candidates_states_the_count_only_case(self):
+        no_ids = ("import argparse,json\n"
+                  "p=argparse.ArgumentParser();p.add_argument('--target');p.add_argument('--output');a=p.parse_args()\n"
+                  "row={'rule_id':'r','path':'a.js','line_number':1}\n"
+                  "json.dump({'candidates':[row]},open(a.output,'w'))\n")
+        self.box.agent("bare", report(finding()), prepass=no_ids)
+        res = self.box.run_agent("bare")
+        prompt = (Path(res["run_dir"]) / "prompt.txt").read_text(encoding="utf-8")
+        self.assertIn("holds 1 candidate(s) and NONE of them carry a candidate_id", prompt)
+        self.assertIn("omit the candidate_id field", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -402,6 +402,66 @@ class TestTheBatchBriefNamesTheWholePopulation(unittest.TestCase):
                                   text)
 
 
+class TestASingleCallStillHearsItsPopulation(unittest.TestCase):
+    """agents-o0nv2: the brief is not a batching feature.
+
+    Only multi-batch prompts carried it, so a station whose candidate list fits ONE call - modern-web's 6,
+    docs-drift's 49, vuln-triage's 31, most nights - was told nothing about its population or its ids. Its
+    only "copy the candidate_id" text was a schema description inside the JSON blob, right before the
+    derived checklist of fields a finding MUST carry (which cannot include the one field that must stay
+    omittable). A model reading that checklist as the contract emitted conforming rows citing no id and the
+    run was judged 0 of 6.
+    """
+
+    def brief(self, candidates, index=0, count=1):
+        from lib.candidate_batching import batch_brief
+        return batch_brief(candidates, index, count)
+
+    def test_a_single_call_names_the_population_and_every_id(self):
+        text = self.brief([{"candidate_id": "a"}, {"candidate_id": "b"}, {"candidate_id": "c"}])
+        self.assertIn("The candidate list holds 3 candidate(s), each with a candidate_id: a, b, c.", text)
+        self.assertIn("answer for EVERY candidate below", text)
+        self.assertIn("never an omission", text)
+
+    def test_a_single_call_is_not_worded_as_a_batch(self):
+        text = self.brief([{"candidate_id": "a"}])
+        # 'BATCH ' is how a batched prompt is recognised downstream; a single-call prompt must not look
+        # like one, and "this batch" would be a lie about a list that was never split.
+        self.assertFalse(text.startswith("BATCH "), text)
+        self.assertNotIn("BATCH 1 of 1", text)
+        self.assertNotIn("This batch", text)
+
+    def test_a_single_call_with_no_ids_states_the_count_only_case(self):
+        text = self.brief([{"path": "x"}, {"path": "y"}])
+        self.assertIn("holds 2 candidate(s) and NONE of them carry a candidate_id", text)
+        self.assertIn("omit the candidate_id field", text)
+        self.assertIn("row count", text)
+
+    def test_a_single_mixed_call_names_the_unidentified_rows_too(self):
+        text = self.brief([{"candidate_id": "a"}, {"path": "x"}])
+        self.assertIn("1 carries a candidate_id (a)", text)
+        self.assertIn("the other 1 carries NO candidate_id", text)
+
+    def test_the_multi_batch_text_is_unmoved_by_the_single_call_branch(self):
+        text = self.brief([{"candidate_id": "a"}, {"candidate_id": "b"}], index=0, count=2)
+        self.assertEqual(
+            text,
+            "BATCH 1 of 2: the candidate list is presented in 2 batches so that no single response has to "
+            "carry every row. Answer ONLY for the candidates in THIS batch, and answer for EVERY one of "
+            "them - a confirmed row or a dismissal with `false_positive: true`, never an omission. This "
+            "batch holds 2 candidate(s), each with a candidate_id: a, b.\n\n")
+
+    def test_the_arithmetic_is_the_same_at_every_population_size(self):
+        from lib.candidate_batching import batch_brief
+        for total in range(0, 6):
+            for identified in range(total + 1):
+                candidates = ([{"candidate_id": f"id{i}"} for i in range(identified)]
+                              + [{"path": f"p{i}"} for i in range(total - identified)])
+                one, many = batch_brief(candidates, 0, 1), batch_brief(candidates, 0, 2)
+                self.assertIn(f"holds {total} candidate(s)", one)
+                self.assertIn(f"holds {total} candidate(s)", many)
+
+
 class TestAForeignBatchIdSurvivesTheRepairStage(unittest.TestCase):
     """agents-fv5uk, the reviewer's own repro. Batch ids are consecutive by construction, so a repair that
     only knows its OWN batch's ids re-attaches a row naming a sibling batch's candidate to a near neighbour

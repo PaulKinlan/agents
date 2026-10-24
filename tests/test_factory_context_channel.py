@@ -71,17 +71,31 @@ class TestStationContextChannel(unittest.TestCase):
         return [(run_dir / "prompt.txt").read_text(encoding="utf-8")]
 
     def test_no_context_is_byte_identical_to_the_previous_prompt(self):
-        # A payload the per-call bound covers stays ONE call, and that call's prompt is byte-identical to
-        # the one this channel has always produced - no batch header, no reordering.
+        # A payload the per-call bound covers stays ONE call, and adding the context channel must not touch
+        # that prompt (no context block, no reordering, no batching wording).
+        #
+        # The base prompt DID gain one sentence on purpose (agents-o0nv2): a single-call station used to be
+        # told nothing about its candidate population or its ids, and the only "copy the candidate_id" text
+        # was a schema description - one model reading the derived required-fields checklist as the whole
+        # contract emitted conforming rows citing no id and the run was judged 0 of 6. So the expected text
+        # below is the NEW base, and the assertions keep the property this test exists for: a single call
+        # carries the population brief and never the batching wording.
         few = self.candidates[:3]
         prompts = self.run_payload({"candidates": few})
         expected = (
+            "The candidate list is not split into batches: answer for EVERY candidate below - a confirmed "
+            "row or a dismissal with `false_positive: true`, never an omission. The candidate list holds 3 "
+            "candidate(s) and NONE of them carry a candidate_id: answer every one, and omit the "
+            "candidate_id field. Coverage for a list without ids is a row count, so an omitted row is "
+            "indistinguishable from a missing answer.\n\n"
             "You are the probe agent. Examine the following context and candidate issues discovered by the "
             "deterministic scanner in repository 'trusted'. Follow your SKILL.md instructions, "
             "triage each item, and output your structured JSON findings.\n\n"
             f"Scanner Data:\n{json.dumps(few, indent=2)}\n"
         )
         self.assertEqual(prompts, [expected])
+        self.assertNotIn("BATCH ", prompts[0], "a single call must not be worded as a batch")
+        self.assertNotIn("Station Context:", prompts[0], "no context may leak into a payload without one")
 
     def test_context_is_separate_unsliced_and_not_an_identity_candidate(self):
         context = {"clusters": [{"cluster": i} for i in range(55)], "threat_model_summary": "model evidence",

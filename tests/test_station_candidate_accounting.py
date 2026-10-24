@@ -247,13 +247,61 @@ class TestAggregateCandidateAccounting(unittest.TestCase):
         self.assertFalse(got["complete"])
         self.assertIn("anchor_candidate_id", got["reason"])
 
+    def test_a_claim_that_is_also_the_anchor_is_counted_once_and_never_discarded(self):
+        """agents-hwjhv: anchors are not thrown away - an id claimed AND anchored already counts."""
+        ids = [f"id{i:02d}" for i in range(50)]
+        got = self.cover(ids, [{"covered_candidate_ids": [cid], "anchor_candidate_id": cid}
+                               for cid in ids])
+        self.assertTrue(got["complete"])
+        self.assertEqual((got["candidates_accounted"], got["candidates_presented"]), (50, 50))
+        self.assertEqual(got["reason"], "")
+
+    def test_anchor_only_rows_do_not_count_toward_coverage(self):
+        """The "35 of 50" shape: 15 ids present ONLY as anchors were never claimed, so folding
+        anchors into the row set would report a false 50/50 PASS on 15 unclaimed candidates."""
+        ids = [f"id{i:02d}" for i in range(50)]
+        rows = [{"covered_candidate_ids": [cid], "anchor_candidate_id": cid} for cid in ids[:35]]
+        rows += [{"anchor_candidate_id": cid} for cid in ids[35:]]
+        got = self.cover(ids, rows)
+        self.assertFalse(got["complete"])
+        self.assertEqual(got["candidates_accounted"], 35, "an anchor alone is not a disposition")
+
+    def test_the_shortfall_reason_names_the_unaccounted_ids_and_the_anchor_only_rows(self):
+        """The verdict was right and its REASON read as though 15 valid anchors had been discarded."""
+        ids = ["A", "B", "C", "D", "E", "F"]
+        rows = [{"covered_candidate_ids": ["A"]}] + [{"anchor_candidate_id": cid} for cid in ids[1:]]
+        got = self.cover(ids, rows)
+        reason = got["reason"]
+        self.assertFalse(got["complete"])
+        self.assertTrue(reason.startswith("missing 5 presented candidate id(s) (B, C, D, E, +1 more)"),
+                        reason)
+        self.assertIn("row 1: anchor only - anchor_candidate_id B is primary identity, not coverage",
+                      reason)
+        self.assertNotIn("outside its own", reason,
+                         "an anchor-only row is one cause; it must not also be reported as a mis-scoped claim")
+
+    def test_a_malformed_coverage_list_is_named_as_malformed_not_as_absent(self):
+        got = self.cover(["A", "B"], [{"covered_candidate_ids": "A,B"}])
+        self.assertFalse(got["complete"])
+        self.assertIn("covered_candidate_ids must be a list of ids, got str", got["reason"])
+        self.assertNotIn("absent or empty", got["reason"])
+
+    def test_an_anchor_outside_a_present_claim_is_still_refused_with_the_count_visible(self):
+        ids = ["A", "B", "C"]
+        got = self.cover(ids, [{"covered_candidate_ids": ["A"], "anchor_candidate_id": "B"},
+                               {"covered_candidate_ids": ["B", "C"]}])
+        self.assertFalse(got["complete"])
+        self.assertEqual(got["candidates_accounted"], 3, "the anchor never supplies the missing claim")
+        self.assertIn("row 0: anchor_candidate_id is outside its own covered_candidate_ids", got["reason"])
+        self.assertNotIn("missing", got["reason"],
+                         "every presented id is claimed here - only the anchor is mis-scoped")
+
     def test_dismissal_counts_by_claim_and_echo_is_not_required(self):
         got = self.cover(["A", "B"], [
             {"covered_candidate_ids": ["A"], "false_positive": True, "severity": "info"},
             {"covered_candidate_ids": ["B"], "title": "real cause"}])
         self.assertTrue(got["complete"])
         self.assertEqual(got["candidates_accounted"], 2)
-
     def test_only_first_fifty_ids_shown_may_be_claimed(self):
         all_ids = [f"id-{i}" for i in range(52)]
         presented = all_ids[:CANDIDATE_PROMPT_SLICE]
