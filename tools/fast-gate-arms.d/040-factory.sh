@@ -38,8 +38,15 @@ fast_gate_arms_040_factory() {
       # agents-uxiks (rn0ky port): the dispatcher's bounded-batching loop lives in THIS file - the batch
       # prompt header, one engine call per batch, per-batch parsing/validation and the truncation
       # classification - and tests/test_candidate_batching_end_to_end.py drives it through `factory run`
-      # with a stub engine. MEASURED: returning None from max_candidates_per_call (batching disabled)
-      # fails 2 of its tests. Cost: 8.0 s, paid only when the dispatcher changes.
+      # with a stub engine. agents-tq1lt made the bound POLICY rather than an opt-in declaration, so the
+      # arm's old control ("returning None from max_candidates_per_call disables batching") no longer
+      # exists: that function always returns the resolved bound. The equivalent control now is the
+      # ceiling itself - raising MAX_CANDIDATES_PER_BATCH above the candidate count in the suite stops it
+      # splitting - and the suite carries which bound applies to whom (undeclared station -> ceiling,
+      # declaration above the ceiling -> capped), so a dispatcher that stops applying the policy fails
+      # it either way. Cost, MEASURED on this VM under load: the two agents-tq1lt tests add two 2-call
+      # dispatcher runs, ~35 s; the module was ~8.0 s for 5 tests on a quiet box before them, so read the
+      # cost as "a handful of engine-free dispatcher runs", not as a fixed number.
       mapped="$mapped tests/test_candidate_batching_end_to_end.py"
       ;;
     install.sh)
