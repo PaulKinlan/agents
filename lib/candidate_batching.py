@@ -30,6 +30,16 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # A batch of 8 candidates is ~9 KB of prompt/response - well inside the size at which the nightly
 # truncated (45 ids, 50,314 B). Callers may override per station.
 DEFAULT_MAX_PER_BATCH = 8
+
+# THE PER-CALL BOUND IS POLICY, NOT A STATION'S OPT-IN (agents-tq1lt). It used to be an opt-in
+# declaration read by the dispatcher, and three of the stations that present the largest candidate
+# lists - vuln-triage, docs-drift, deps-supply-chain - never declared one. They therefore kept asking
+# a model for up to CANDIDATE_PROMPT_SLICE (50) fully-populated rows in ONE completion, which is the
+# documented truncation regime (~50 KB) and surfaced on five VMs at once as a candidate-accounting /
+# JSON-parse failure on the batch-2 call rather than as a named truncation. A station that presents
+# candidates is now batched whether or not it declared a bound; a declaration may only TIGHTEN this
+# ceiling (vuln-verify asks for 6 from its own measured cost per case), never raise it.
+MAX_CANDIDATES_PER_BATCH = DEFAULT_MAX_PER_BATCH
 # Even a small count of huge candidate records (a 40 KB diff excerpt each) must not build a batch
 # the model cannot answer, so a batch is also bounded by the serialized bytes of its candidates.
 DEFAULT_MAX_BATCH_BYTES = 12_000
@@ -51,6 +61,57 @@ class BatchPlanError(ValueError):
 
 class BatchMergeError(ValueError):
     """Per-batch reports cannot be merged without losing or duplicating a candidate."""
+
+
+def declared_max_candidates_per_call(agent_cfg: Any) -> Optional[int]:
+    """The station's `output.max_candidates_per_call`, or None when it declares no bound.
+
+    A malformed or non-positive value is REFUSED rather than coerced or ignored: a bound nobody
+    applied is how a 47-candidate completion truncated in the first place, and a station silently
+    reverting to one unbounded call is the failure this module exists to remove.
+    """
+    if not isinstance(agent_cfg, dict):
+        return None
+    output = agent_cfg.get("output")
+    if not isinstance(output, dict):
+        return None
+    raw = output.get("max_candidates_per_call")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise BatchPlanError(
+            f"agent.yaml output.max_candidates_per_call must be an integer, got {raw!r}")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise BatchPlanError(
+            f"agent.yaml output.max_candidates_per_call must be an integer, got {raw!r}") from None
+    if isinstance(raw, float) and raw != value:
+        # 2.5 is not "2 candidates per call": refusing a fractional bound keeps a typo from becoming a
+        # silently different batch size (the dispatcher used to truncate it without a word).
+        raise BatchPlanError(
+            f"agent.yaml output.max_candidates_per_call must be an integer, got {raw!r}")
+    if value < 1:
+        raise BatchPlanError(
+            f"agent.yaml output.max_candidates_per_call must be >= 1, got {value}")
+    return value
+
+
+def resolve_max_candidates_per_call(agent_cfg: Any) -> int:
+    """The per-call bound the dispatcher MUST apply: never above MAX_CANDIDATES_PER_BATCH.
+
+    Undeclared resolves to the policy ceiling, so every station that presents a candidate list is
+    batched - the station's declaration is a way to ask for a SMALLER batch, not a switch that can
+    leave a station asking for one 50-candidate completion. A declaration above the ceiling is
+    capped, not honoured and not refused: the batch is what keeps the completion inside the model's
+    output bound, and a station declaring a larger number has no evidence that a larger completion
+    completes. (The gate refuses the drift where it can be caught - tests/test_factory_truth.py - so a
+    declaration above the ceiling fails review rather than 03:00.)
+    """
+    declared = declared_max_candidates_per_call(agent_cfg)
+    if declared is None:
+        return MAX_CANDIDATES_PER_BATCH
+    return min(declared, MAX_CANDIDATES_PER_BATCH)
 
 
 def _candidate_bytes(candidate: Any) -> int:

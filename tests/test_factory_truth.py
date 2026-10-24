@@ -39,6 +39,7 @@ _NEEDS_BWRAP = "needs a host where bubblewrap actually runs"
 
 from lib.embargo import is_false_positive, reported_severity  # noqa: E402
 from lib.findings import FindingsStore, load_candidate_index  # noqa: E402
+from lib.candidate_batching import MAX_CANDIDATES_PER_BATCH  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader("factory_cli_truth", str(ROOT / "factory"))
 _spec = importlib.util.spec_from_loader("factory_cli_truth", _loader)
@@ -52,10 +53,16 @@ LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_
 
 
 class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
-    """agents-exhhl: perf-review and vuln-verify opt into bounded batching, and a station that silently
-    loses (or mistypes) its bound goes back to asking for one oversized completion - which is how the
-    nightly died on 21 vuln-verify candidates. The key is parsed by the dispatcher's own reader here, so a
-    malformed value fails in the gate rather than at 03:00."""
+    """agents-exhhl/agents-tq1lt: every station that presents candidates is batched at the policy ceiling
+    (lib/candidate_batching.MAX_CANDIDATES_PER_BATCH), and a station may only declare a SMALLER bound.
+
+    The history matters here. The bound used to be opt-in, so perf-review and vuln-verify declared it and
+    the stations that never did - vuln-triage, docs-drift, deps-supply-chain - kept asking for up to
+    CANDIDATE_PROMPT_SLICE rows in one completion, which is the truncation regime the machinery exists to
+    remove (five VMs reported it as a parse failure on the second call). The key is still parsed by the
+    dispatcher's own reader here, so a malformed value fails in the gate rather than at 03:00; a
+    declaration ABOVE the ceiling is drift too, because the dispatcher would cap it - the station would
+    silently run a different batch size than its yaml says."""
 
     def test_declared_bounds_parse_and_the_known_stations_keep_theirs(self):
         declared = {}
@@ -68,12 +75,31 @@ class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
         for station, value in declared.items():
             self.assertIsInstance(value, int, f"{station}: the bound must parse to an int, got {value!r}")
             self.assertGreaterEqual(value, 1, f"{station}: a bound below 1 is refused, not clamped")
+            self.assertLessEqual(
+                value, MAX_CANDIDATES_PER_BATCH,
+                f"{station} declares max_candidates_per_call={value}, above the policy ceiling of "
+                f"{MAX_CANDIDATES_PER_BATCH}: the dispatcher caps it, so the yaml would be lying about "
+                f"the batch size that actually runs")
         # The two stations that hit the completion ceiling: their bound is load-bearing, so its removal is
         # a regression and not a config preference.
         for station in ("perf-review", "vuln-verify"):
             self.assertIn(station, declared,
                           f"{station} lost its output.max_candidates_per_call, so it asks for one "
                           f"unbounded completion again")
+
+    def test_an_undeclared_station_still_batches_at_the_ceiling(self):
+        # THE BEAD'S CORE CASES (agents-tq1lt): these three present candidates and never declared a
+        # bound, so they were the ones asking for one oversized completion.
+        for station in ("vuln-triage", "docs-drift", "deps-supply-chain"):
+            path = ROOT / "agents" / station / "agent.yaml"
+            config = factory_cli.load_yaml_simple(path) or {}
+            output = config.get("output") if isinstance(config.get("output"), dict) else {}
+            self.assertNotIn("max_candidates_per_call", output,
+                             f"{station} is the undeclared case this test exists for; if it now declares "
+                             f"a bound, pick another undeclared candidate-bearing station")
+            self.assertEqual(factory_cli.max_candidates_per_call(config), MAX_CANDIDATES_PER_BATCH,
+                             f"{station} must be batched at the policy ceiling, not sent one call")
+
 
 
 def finding(**overrides):

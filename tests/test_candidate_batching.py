@@ -13,13 +13,16 @@ import unittest
 from lib.candidate_batching import (
     DEFAULT_MAX_BATCH_BYTES,
     DEFAULT_MAX_PER_BATCH,
+    MAX_CANDIDATES_PER_BATCH,
     BatchMergeError,
     BatchPlanError,
     batch_candidate_ids,
     classify_unparseable,
+    declared_max_candidates_per_call,
     describe_truncation,
     merge_reports,
     plan_batches,
+    resolve_max_candidates_per_call,
     validate_batch_attribution,
 )
 
@@ -420,6 +423,59 @@ class TestAForeignBatchIdSurvivesTheRepairStage(unittest.TestCase):
             validate_batch_attribution([row], batch_ids=own, batch_index=0,
                                        all_batch_ids=[own, sibling])
         self.assertIn("belongs to batch 2", str(caught.exception))
+
+
+class TestThePerCallBoundIsPolicy(unittest.TestCase):
+    """agents-tq1lt: the bound is ENFORCED, not an opt-in declaration.
+
+    Five VMs hit the same candidate-accounting/JSON-parse failure, and the stations named in the report
+    (vuln-triage, docs-drift, deps-supply-chain) never declared `output.max_candidates_per_call` - so
+    they kept asking for up to CANDIDATE_PROMPT_SLICE rows in one completion, which is the truncation
+    regime this module exists to bound. Undeclared must therefore batch; a declaration may only tighten
+    the ceiling, never lift it.
+    """
+
+    def test_the_policy_ceiling_is_eight(self):
+        self.assertEqual(MAX_CANDIDATES_PER_BATCH, 8,
+                         "the ceiling is the documented <9 KB-per-completion bound (rn0ky)")
+
+    def test_an_undeclared_station_batches_at_the_ceiling(self):
+        for cfg in ({}, None, [], {"output": {}}, {"output": "nonsense"},
+                    {"output": {"schema": "report.schema.json"}}):
+            with self.subTest(cfg=cfg):
+                self.assertEqual(resolve_max_candidates_per_call(cfg), MAX_CANDIDATES_PER_BATCH)
+                self.assertIsNone(declared_max_candidates_per_call(cfg))
+
+    def test_a_declaration_may_tighten_the_ceiling(self):
+        cfg = {"output": {"max_candidates_per_call": 6}}
+        self.assertEqual(resolve_max_candidates_per_call(cfg), 6)
+        self.assertEqual(declared_max_candidates_per_call(cfg), 6)
+
+    def test_a_declaration_equal_to_the_ceiling_is_honoured(self):
+        self.assertEqual(
+            resolve_max_candidates_per_call({"output": {"max_candidates_per_call": 8}}), 8)
+
+    def test_a_declaration_above_the_ceiling_is_capped_not_honoured(self):
+        cfg = {"output": {"max_candidates_per_call": 50}}
+        self.assertEqual(resolve_max_candidates_per_call(cfg), MAX_CANDIDATES_PER_BATCH,
+                         "a station cannot ask for one 50-candidate completion back")
+        self.assertEqual(declared_max_candidates_per_call(cfg), 50,
+                         "the declaration is still readable, so the dispatcher can say it was capped")
+
+    def test_a_malformed_declaration_is_refused_rather_than_ignored(self):
+        for raw in ("eight", 0, -3, 2.5, True):
+            with self.subTest(raw=raw):
+                with self.assertRaises(BatchPlanError):
+                    resolve_max_candidates_per_call({"output": {"max_candidates_per_call": raw}})
+
+    def test_the_capped_bound_is_what_the_planner_is_given(self):
+        # What the dispatcher actually does: resolve, then plan with the resolved number.
+        candidates = [candidate(i) for i in range(10)]
+        bound = resolve_max_candidates_per_call({"output": {"max_candidates_per_call": 20}})
+        batches = plan_batches(candidates, bound)
+        self.assertEqual([len(b) for b in batches], [8, 2])
+        self.assertEqual([row["candidate_id"] for b in batches for row in b],
+                         [row["candidate_id"] for row in candidates])
 
 
 if __name__ == "__main__":

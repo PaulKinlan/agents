@@ -43,8 +43,10 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
                                               batch_candidate_ids,
-                                        classify_unparseable, describe_truncation, merge_reports,
-                                        plan_batches, row_arrays, validate_batch_attribution)
+                                        classify_unparseable, declared_max_candidates_per_call,
+                                        describe_truncation, merge_reports,
+                                        plan_batches, resolve_max_candidates_per_call,
+                                        row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -79,8 +81,10 @@ except ImportError:
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
                                               batch_candidate_ids,
-                                        classify_unparseable, describe_truncation, merge_reports,
-                                        plan_batches, row_arrays, validate_batch_attribution)
+                                        classify_unparseable, declared_max_candidates_per_call,
+                                        describe_truncation, merge_reports,
+                                        plan_batches, resolve_max_candidates_per_call,
+                                        row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -936,31 +940,20 @@ def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
     pool = with_findings or objects
     return max(pool, key=lambda o: o[0])[1]
 
-def max_candidates_per_call(agent_cfg: Any) -> Optional[int]:
-    """The station's declared per-call candidate bound, or None for one call (rn0ky).
+def max_candidates_per_call(agent_cfg: Any) -> int:
+    """The enforced per-call candidate bound for a station (agents-tq1lt).
 
-    Opt-in by declaration, deliberately: batching changes what a station asks the model for, so it is
-    the station's decision (agent.yaml `output.max_candidates_per_call`), not a global surprise for the
-    twenty other stations. A malformed value is refused loudly rather than silently ignored - a bound
-    nobody applied is how a 47-candidate batch truncated in the first place.
+    Always an int, never None: batching is POLICY now, not an opt-in declaration. lib/candidate_batching
+    owns the number (MAX_CANDIDATES_PER_BATCH = 8) and the rule that a station's declaration may only
+    TIGHTEN it, because leaving the bound undeclared used to mean ONE completion carrying up to
+    CANDIDATE_PROMPT_SLICE candidates - the ~50 KB truncation regime that five VMs hit as a
+    candidate-accounting failure on the second call. A malformed declaration is refused loudly rather
+    than silently ignored: a bound nobody applied is how that truncation started.
     """
-    if not isinstance(agent_cfg, dict):
-        return None
-    output = agent_cfg.get("output")
-    if not isinstance(output, dict):
-        return None
-    raw = output.get("max_candidates_per_call")
-    if raw is None:
-        return None
     try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        raise StationError(
-            f"agent.yaml output.max_candidates_per_call must be an integer, got {raw!r}")
-    if value < 1:
-        raise StationError(
-            f"agent.yaml output.max_candidates_per_call must be >= 1, got {value}")
-    return value
+        return resolve_max_candidates_per_call(agent_cfg)
+    except BatchPlanError as e:
+        raise StationError(str(e)) from None
 
 
 def parse_station_report(raw_output: str, *, agent_dir: Path, agent_cfg: Any,
@@ -1906,19 +1899,26 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # attempt has a real chance of producing a valid report instead of the same garbage.
             contract_block += "\n\n" + repair_hint
 
-        # rn0ky: BOUNDED BATCHING. A station may declare `output.max_candidates_per_call`; when the
-        # presented list is larger, it is split into deterministic bounded batches (by count AND by
-        # serialized bytes) and each batch is one engine call with its own contract and its own
-        # check. The alternative - one call carrying 47 candidates and asking for 47 fully-populated
-        # rows - is what produced a 50 KB completion cut mid-JSON at candidate 45, which reached
-        # nobody as a truncation because the parser could only say "no verdict".
+        # rn0ky/agents-tq1lt: BOUNDED BATCHING, ENFORCED. Every station that presents a candidate list
+        # is split into deterministic bounded batches (by count AND by serialized bytes) and each batch
+        # is one engine call with its own contract and its own check. This is no longer opt-in per
+        # station: leaving it to a declaration left vuln-triage, docs-drift and deps-supply-chain asking
+        # for up to 50 fully-populated rows in ONE completion - the 50 KB completion cut mid-JSON that
+        # reached nobody as a truncation because the parser could only say "no verdict". The bound
+        # lives in lib/candidate_batching.MAX_CANDIDATES_PER_BATCH; a station may only declare a SMALLER
+        # one.
         max_per_call = max_candidates_per_call(agent_cfg)
         batch_count = 1
+        declared_per_call = declared_max_candidates_per_call(agent_cfg)
+        if declared_per_call is not None and declared_per_call > max_per_call:
+            print(f"-> Note: {agent_name} declares max_candidates_per_call={declared_per_call}, "
+                  f"capped to the policy bound of {max_per_call} "
+                  f"(lib/candidate_batching.MAX_CANDIDATES_PER_BATCH).")
         # DECIDED BY THE PLAN, NOT BY THE COUNT (agents-gwucz): the byte bound is part of the bound, so
         # two 7 KB candidates against a 12 KB batch budget must split even though 2 <= max_per_call.
         # Gating on len(...) > max_per_call meant the byte limit only ever applied to lists that were
         # already too long by count, which is exactly the case that never needed it.
-        if max_per_call and isinstance(candidates_slice, list):
+        if isinstance(candidates_slice, list):
             try:
                 planned = plan_batches(candidates_slice, max_per_call)
             except BatchPlanError as e:
