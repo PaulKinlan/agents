@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -523,6 +524,237 @@ class TestScannerSelfMatchAndExclusions(unittest.TestCase):
 
             results = mine_history.scan_entry_points(tmp_path)
             self.assertEqual(len(results), 0, f"Expected 0 findings due to is_scanner_file exclusion, got: {results}")
+
+
+class TestSelfTargetRepositoryIdentity(unittest.TestCase):
+    """agents-32twc: self-target identity is the REPOSITORY, not the running installation's path.
+
+    The nightly self-audit loads the pre-pass from the deployed install and audits a separate
+    clone, so every such run used to answer "third-party" and lose all self-referential
+    suppression. Each case below is built from tiny synthetic repositories and a patched
+    FACTORY_ROOT, so the assertions test the identity check rather than this checkout's path.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.tmp = Path(cls._tmp.name)
+
+        def git(repo, *args):
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+                check=True, capture_output=True, text=True,
+            )
+
+        # A stand-in "factory" installation, plus a separate CLONE of it - the nightly shape:
+        # two different paths, two different common git dirs, one repository.
+        cls.factory = cls.tmp / "factory"
+        cls.factory.mkdir()
+        git(cls.factory, "init", "-q")
+        (cls.factory / "marker.txt").write_text("factory v1\n", encoding="utf-8")
+        # One of the factory's own instrument files, committed BEFORE the clone exists: a clone's
+        # copy of it must be byte-identical to the installation's, which is the per-file test
+        # agents-vq5aj requires before a shared-history checkout may exclude it.
+        instrument = cls.factory / "agents" / "probe" / "scripts"
+        instrument.mkdir(parents=True)
+        cls.INSTRUMENT_CODE = (
+            'rule_dict = {"rule_id": "network", "title": "fetch() without timeout"}\n'
+            'ENTRY_POINT_PATTERNS = [("t", re.compile(r"fetch\\("))]\n'
+        )
+        (instrument / "scan_probe.py").write_text(cls.INSTRUMENT_CODE, encoding="utf-8")
+        git(cls.factory, "add", "-A")
+        git(cls.factory, "commit", "-qm", "first")
+
+        cls.clone = cls.tmp / "clone"
+        subprocess.run(["git", "clone", "-q", "--local", str(cls.factory), str(cls.clone)],
+                       check=True, capture_output=True, text=True)
+
+        # The installation moves on: now the CLONE is BEHIND the install, the other direction.
+        (cls.factory / "marker.txt").write_text("factory v2\n", encoding="utf-8")
+        git(cls.factory, "add", "-A")
+        git(cls.factory, "commit", "-qm", "second")
+
+        # A shallow (depth-1) installation that is NEWER than the audited clone: the documented
+        # fail-safe gap - its only anchor is a commit the older clone cannot contain.
+        cls.shallow = cls.tmp / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{cls.factory}", str(cls.shallow)],
+                       check=True, capture_output=True, text=True)
+
+        # A third-party repository with its own unrelated history.
+        cls.foreign = cls.tmp / "foreign"
+        cls.foreign.mkdir()
+        git(cls.foreign, "init", "-q")
+        (cls.foreign / "app.py").write_text("handler = app.get('/api', h)\n", encoding="utf-8")
+        git(cls.foreign, "add", "-A")
+        git(cls.foreign, "commit", "-qm", "foreign")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _as_installation(self, root: Path):
+        """Point the module's identity checks at `root` as if the pre-pass were loaded from it."""
+        return mock.patch.multiple(
+            mine_history,
+            FACTORY_ROOT=root,
+            FACTORY_COMMON_GIT_DIR=mine_history._resolve_common_git_dir(root),
+        )
+
+    def _new_clone(self) -> Path:
+        """A per-test clone of the stand-in factory: no test may inherit another's scratch files."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dest = Path(tmp.name) / "clone"
+        subprocess.run(["git", "clone", "-q", "--local", str(self.factory), str(dest)],
+                       check=True, capture_output=True, text=True)
+        return dest
+
+    def test_separate_clone_of_the_factory_keeps_structural_exclusions_only(self):
+        """A separate clone excludes ITS OWN unmodified instrument files, and nothing broader.
+
+        The nightly noise is all in `agents/*/scripts/`, so the structural exclusion is what a
+        cross-install self-audit needs - and it is all it gets, per file: the content-level
+        rule-metadata gate stays off, because shared history does not prove this checkout is the
+        factory (agents-uviio), and the path exclusion itself applies only to files that ARE this
+        installation's copy (agents-vq5aj).
+        """
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(self.clone),
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
+            self.assertTrue(mine_history.is_factory_self_target(self.clone))
+            self.assertTrue(mine_history.is_factory_own_file(
+                self.clone / "agents" / "probe" / "scripts" / "scan_probe.py",
+                "agents/probe/scripts/scan_probe.py",
+                mine_history.SELF_TARGET_SHARED_REPOSITORY))
+            results, suppressed = mine_history.scan_entry_points(self.clone, return_suppressed=True)
+        self.assertEqual(results, [], f"factory instrument files must be excluded by path, got: {results}")
+        self.assertEqual(suppressed, [])
+
+    def test_modified_instrument_file_is_scanned_in_a_clone(self):
+        """The per-file test is not vacuous: a changed copy is no longer the factory's instrument."""
+        clone = self._new_clone()
+        target = clone / "agents" / "probe" / "scripts" / "scan_probe.py"
+        target.write_text(self.INSTRUMENT_CODE + "mount = app.get('/changed', h)\n", encoding="utf-8")
+        with self._as_installation(self.factory):
+            self.assertFalse(mine_history.is_factory_own_file(
+                target, "agents/probe/scripts/scan_probe.py",
+                mine_history.SELF_TARGET_SHARED_REPOSITORY))
+            results = mine_history.scan_entry_points(clone)
+        self.assertEqual([(r["category"], r["path"]) for r in results],
+                         [("external-fetch", "agents/probe/scripts/scan_probe.py"),
+                          ("server-listener", "agents/probe/scripts/scan_probe.py")],
+                         f"a changed copy is scanned as ordinary source (its rule line included, "
+                         f"since the content gate is off for a shared-history checkout), got: {results}")
+
+    def test_forked_product_endpoint_under_agents_scripts_is_not_excluded(self):
+        """agents-vq5aj P2 regression: a fork keeps its endpoints WHATEVER directory it puts them in.
+
+        The layout exclusion used to apply to every `agents/*/scripts/` path of a shared-history
+        checkout, so a forked product's `agents/product/scripts/route.py` vanished from the
+        inventory. Only this installation's own copy of a path may be excluded.
+        """
+        clone = self._new_clone()
+        route = clone / "agents" / "product" / "scripts"
+        route.mkdir(parents=True)
+        (route / "route.py").write_text('handler = app.get("/secret", h)\n', encoding="utf-8")
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(clone),
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
+            self.assertFalse(mine_history.is_factory_own_file(
+                route / "route.py", "agents/product/scripts/route.py",
+                mine_history.SELF_TARGET_SHARED_REPOSITORY))
+            results, suppressed = mine_history.scan_entry_points(clone, return_suppressed=True)
+        self.assertEqual([(r["category"], r["path"]) for r in results],
+                         [("server-listener", "agents/product/scripts/route.py")],
+                         f"a forked product's endpoint must survive its directory, got: {results}")
+        self.assertEqual(suppressed, [])
+
+    def test_forked_product_keeps_its_production_endpoint(self):
+        """agents-uviio P2 regression: a fork of the factory is NOT the factory for line suppression.
+
+        A product forked from the factory shares every factory commit. Granting the broad
+        rule-metadata suppression on that shared ancestry hid `app.get('/secret', h)` behind a
+        `category:` key - a real production sink dropped from the inventory. The reviewer's
+        reproduction, kept as the test: identity is shared-repository, the endpoint MUST survive.
+        """
+        clone = self._new_clone()
+        (clone / "api.py").write_text(
+            'handler = {"category": "production", "route": app.get("/secret", h)}\n',
+            encoding="utf-8",
+        )
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(clone),
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
+            self.assertEqual(mine_history.self_target_suppression_scope(mine_history.SELF_TARGET_SHARED_REPOSITORY),
+                             (True, False))
+            results, suppressed = mine_history.scan_entry_points(clone, return_suppressed=True)
+        self.assertEqual([r["category"] for r in results], ["server-listener"],
+                         f"a forked product's endpoint must not be suppressed, got: {results}")
+        self.assertEqual(suppressed, [])
+
+    def test_declared_self_target_grants_both_gates(self):
+        """An operator declaration is stronger than detection, and the artifact says so."""
+        clone = self._new_clone()
+        (clone / "api.py").write_text(
+            'handler = {"category": "production", "route": app.get("/secret", h)}\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(mine_history.self_target_suppression_scope("declared"), (True, True))
+        self.assertEqual(mine_history.self_target_suppression_scope("declined"), (False, False))
+        self.assertEqual(mine_history.self_target_suppression_scope(
+            mine_history.SELF_TARGET_SAME_INSTALLATION), (True, True))
+        self.assertEqual(mine_history.self_target_suppression_scope(
+            mine_history.SELF_TARGET_FOREIGN_REPOSITORY), (False, False))
+        results, suppressed = mine_history.scan_entry_points(clone, is_self_target=True, return_suppressed=True)
+        self.assertEqual(results, [], "a declared self-target keeps the factory's own rule lines quiet")
+        self.assertEqual([s["category"] for s in suppressed], ["server-listener"], suppressed)
+
+    def test_target_behind_the_installation_is_still_self(self):
+        """Identity holds when the INSTALLATION is the newer side (the reverse object direction)."""
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(self.clone),
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
+
+    def test_shallow_installation_newer_than_target_is_foreign_by_contract(self):
+        """Documented fail-safe, not a bug: with no shared object to prove lineage, stay third-party.
+
+        A depth-1 installation newer than the audited clone holds only its own tip, so the older
+        clone cannot contain its anchor and the installation cannot contain the clone's HEAD.
+        NOISE is the affordable direction; silent loss of a third party's production sinks is not.
+        """
+        with self._as_installation(self.shallow):
+            self.assertEqual(mine_history.factory_self_target_reason(self.clone),
+                             mine_history.SELF_TARGET_FOREIGN_REPOSITORY)
+            self.assertFalse(mine_history.is_factory_self_target(self.clone))
+
+    def test_unrelated_repository_stays_third_party_and_keeps_its_sinks(self):
+        """A repository that shares no history with the installation keeps its production sinks."""
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(self.foreign),
+                             mine_history.SELF_TARGET_FOREIGN_REPOSITORY)
+            results = mine_history.scan_entry_points(self.foreign)
+        self.assertEqual([r["category"] for r in results], ["server-listener"], results)
+
+    def test_this_installation_and_its_worktrees_are_recognised_by_path(self):
+        """The unchanged fast path: this checkout, a linked worktree, and any subdirectory of them."""
+        self.assertEqual(mine_history.factory_self_target_reason(ROOT),
+                         mine_history.SELF_TARGET_SAME_INSTALLATION)
+        self.assertEqual(mine_history.factory_self_target_reason(ROOT / "agents" / "threat-model"),
+                         mine_history.SELF_TARGET_SAME_INSTALLATION)
+
+    def test_no_git_identity_is_reported_as_such(self):
+        """A non-git directory says WHY it cannot be identified instead of a bare False."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(mine_history.factory_self_target_reason(Path(tmp)),
+                             mine_history.SELF_TARGET_NO_GIT_IDENTITY)
+
+    def test_resolve_self_target_names_the_signal(self):
+        """The run record carries the reason, and an operator declaration wins over detection."""
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.resolve_self_target(self.clone),
+                             (True, mine_history.SELF_TARGET_SHARED_REPOSITORY))
+            self.assertEqual(mine_history.resolve_self_target(self.clone, declared=False), (False, "declined"))
+        self.assertEqual(mine_history.resolve_self_target(self.foreign, declared=True), (True, "declared"))
 
 
 class TestThreatModelRefusalGuardsAndExclusions(unittest.TestCase):
