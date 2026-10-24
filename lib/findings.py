@@ -2151,6 +2151,16 @@ def aggregate_candidate_coverage(candidates_in: Optional[int],
     names the distinct PRESENTED ids it disposes of; an anchor_candidate_id selects
     primary identity only and cannot count toward this coverage. Return the claimed
     ID-to-row mapping as report evidence, even when an invalid claim refuses PASS.
+
+    THE VERDICT AND ITS REASON MUST NOT DISAGREE (agents-hwjhv). A run read "accounted for 35 of
+    the 50", but its 15 anchor values looked to the operator exactly like 15 supplied ids, so the
+    summary read as though the counter had thrown valid anchors away. It had not - measured: an id
+    that is BOTH covered and anchored is counted once (50/50), so "35 of 50" is only reachable when
+    those ids appear ONLY as anchors, i.e. were never claimed. Counting anchors instead would turn
+    15 unclaimed candidates into a false 50/50 PASS and reverse agents-88cd, so the diagnostics say
+    what happened instead: the anchor-only row is named as such (one problem, not a duplicate and
+    false-sounding "outside its own covered_candidate_ids"), a malformed list is named as malformed
+    rather than absent, and the unaccounted ids are listed so nobody has to infer them.
     """
     claims = [{"row_index": index,
                "covered_candidate_ids": row.get("covered_candidate_ids") if isinstance(row, dict) else None,
@@ -2167,6 +2177,7 @@ def aggregate_candidate_coverage(candidates_in: Optional[int],
         problems.append("aggregate mode requires a candidates pre-pass, not a count or an absent index")
     elif len(ids) != presented or len(valid_ids) != presented or len(presented_set) != presented:
         problems.append("aggregate mode requires unique presented candidate ids for every shown candidate")
+    population_problems = len(problems)
 
     claimed = set()
     for index, row in enumerate(rows):
@@ -2174,8 +2185,25 @@ def aggregate_candidate_coverage(candidates_in: Optional[int],
             problems.append(f"row {index}: expected a finding object with covered_candidate_ids")
             continue
         row_ids = row.get("covered_candidate_ids")
-        if not isinstance(row_ids, list) or not row_ids:
-            problems.append(f"row {index}: covered_candidate_ids absent or empty")
+        has_list = isinstance(row_ids, list) and bool(row_ids)
+        if row_ids is not None and not isinstance(row_ids, list):
+            # A model that joins the ids into one string HAS claimed coverage, badly; calling that
+            # "absent" would hide the shape that actually produced the shortfall (agents-hwjhv).
+            problems.append(f"row {index}: covered_candidate_ids must be a list of ids, got"
+                            f" {type(row_ids).__name__}")
+        elif not has_list:
+            # `anchor_candidate_id` is primary identity, never coverage, so a row that carries only an
+            # anchor is named as an anchor-only row: the old wording reported "absent or empty" AND
+            # "anchor is outside its own covered_candidate_ids" for one cause, which reads to an
+            # operator holding that anchor value like a valid claim being discarded (agents-hwjhv).
+            anchor_value = row.get("anchor_candidate_id")
+            anchor_named = anchor_value.strip() if isinstance(anchor_value, str) and anchor_value.strip() else ""
+            if anchor_named:
+                problems.append(f"row {index}: anchor only - anchor_candidate_id {anchor_named} is primary"
+                                f" identity, not coverage; list it in covered_candidate_ids")
+            else:
+                problems.append(f"row {index}: covered_candidate_ids absent or empty")
+        if not has_list:
             row_ids = []
         valid_row_ids = []
         for value in row_ids:
@@ -2191,12 +2219,21 @@ def aggregate_candidate_coverage(candidates_in: Optional[int],
         claimed.update(row_set)
         if row_set - presented_set:
             problems.append(f"row {index}: unknown/unshown covered_candidate_ids")
-        if "anchor_candidate_id" in row:
+        if "anchor_candidate_id" in row and has_list:
+            # Only a row that HAS a claim can hold an anchor outside it; the anchor-only row is
+            # already explained above and must not be reported twice for one cause (agents-hwjhv).
             anchor = row["anchor_candidate_id"]
             if not isinstance(anchor, str) or not anchor.strip() or anchor not in row_set:
                 problems.append(f"row {index}: anchor_candidate_id is outside its own covered_candidate_ids")
     if presented_set - claimed:
-        problems.append(f"missing {len(presented_set - claimed)} presented candidate id(s)")
+        unaccounted = [cid for cid in valid_ids if cid not in claimed]
+        named = ", ".join(unaccounted[:4])
+        if len(unaccounted) > 4:
+            named += f", +{len(unaccounted) - 4} more"
+        # The population fact first: it is the one line an operator reads, and it names the ids so a
+        # reader never has to guess whose absence made the count short (agents-hwjhv).
+        problems.insert(population_problems,
+                        f"missing {len(unaccounted)} presented candidate id(s) ({named})")
     return {"candidates_in": total, "candidates_presented": presented,
             "candidates_accounted": len(presented_set & claimed),
             "complete": not problems, "reason": "; ".join(problems),
