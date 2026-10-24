@@ -39,7 +39,6 @@ _NEEDS_BWRAP = "needs a host where bubblewrap actually runs"
 
 from lib.embargo import is_false_positive, reported_severity  # noqa: E402
 from lib.findings import FindingsStore, load_candidate_index  # noqa: E402
-from lib.candidate_batching import MAX_CANDIDATES_PER_BATCH  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader("factory_cli_truth", str(ROOT / "factory"))
 _spec = importlib.util.spec_from_loader("factory_cli_truth", _loader)
@@ -65,6 +64,12 @@ class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
     silently run a different batch size than its yaml says."""
 
     def test_declared_bounds_parse_and_the_known_stations_keep_theirs(self):
+        # The ceiling comes from the DISPATCHER'S OWN READER, not an imported constant: this suite pins
+        # the contract a station's yaml has with `factory`, and asking `factory` for an undeclared
+        # station's bound is exactly the policy value (agents-tq1lt). Keeping the constant out of the
+        # import list also keeps this module a non-consumer of lib/candidate_batching, so the fast gate's
+        # consumer coverage stays honest rather than paying for a 39 s suite it does not need.
+        policy_ceiling = factory_cli.max_candidates_per_call({})
         declared = {}
         for path in sorted((ROOT / "agents").glob("*/agent.yaml")):
             config = factory_cli.load_yaml_simple(path) or {}
@@ -76,10 +81,10 @@ class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
             self.assertIsInstance(value, int, f"{station}: the bound must parse to an int, got {value!r}")
             self.assertGreaterEqual(value, 1, f"{station}: a bound below 1 is refused, not clamped")
             self.assertLessEqual(
-                value, MAX_CANDIDATES_PER_BATCH,
+                value, policy_ceiling,
                 f"{station} declares max_candidates_per_call={value}, above the policy ceiling of "
-                f"{MAX_CANDIDATES_PER_BATCH}: the dispatcher caps it, so the yaml would be lying about "
-                f"the batch size that actually runs")
+                f"{policy_ceiling}: the dispatcher caps it, so the yaml would be lying about the batch "
+                f"size that actually runs")
         # The two stations that hit the completion ceiling: their bound is load-bearing, so its removal is
         # a regression and not a config preference.
         for station in ("perf-review", "vuln-verify"):
@@ -90,6 +95,7 @@ class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
     def test_an_undeclared_station_still_batches_at_the_ceiling(self):
         # THE BEAD'S CORE CASES (agents-tq1lt): these three present candidates and never declared a
         # bound, so they were the ones asking for one oversized completion.
+        policy_ceiling = factory_cli.max_candidates_per_call({})
         for station in ("vuln-triage", "docs-drift", "deps-supply-chain"):
             path = ROOT / "agents" / station / "agent.yaml"
             config = factory_cli.load_yaml_simple(path) or {}
@@ -97,7 +103,7 @@ class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
             self.assertNotIn("max_candidates_per_call", output,
                              f"{station} is the undeclared case this test exists for; if it now declares "
                              f"a bound, pick another undeclared candidate-bearing station")
-            self.assertEqual(factory_cli.max_candidates_per_call(config), MAX_CANDIDATES_PER_BATCH,
+            self.assertEqual(factory_cli.max_candidates_per_call(config), policy_ceiling,
                              f"{station} must be batched at the policy ceiling, not sent one call")
 
 
