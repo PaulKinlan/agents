@@ -28,7 +28,7 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 SECURITY_KEYWORDS = [
     "security", "vuln", "cve", "sanitize", "escape", "bypass", "auth",
@@ -215,35 +215,151 @@ def _resolve_enclosing_git_dir(path: Path) -> Optional[Path]:
     return None
 
 
-def is_factory_self_target(target_dir: Path) -> bool:
-    """Determine whether the target repository is the Software Factory itself.
+# How the self-target question was answered (agents-32twc). The first two mean "this target IS
+# the factory" and their suppressions apply; the last two mean "third-party", which is the fail-safe
+# direction. The value travels into the pre-pass result so a self-audit that reports
+# `is_self_target: false` names the identity check that produced it instead of looking like an
+# unexplained anomaly.
+SELF_TARGET_SAME_INSTALLATION = "same-installation"
+SELF_TARGET_SHARED_REPOSITORY = "shared-repository"
+SELF_TARGET_NO_GIT_IDENTITY = "no-git-identity"
+SELF_TARGET_FOREIGN_REPOSITORY = "foreign-repository"
+SELF_TARGET_POSITIVE = frozenset({SELF_TARGET_SAME_INSTALLATION, SELF_TARGET_SHARED_REPOSITORY})
+
+# Bounds the identity probes: git never gets to hang a pre-pass on a hostile or broken repository.
+GIT_IDENTITY_TIMEOUT_S = 15
+
+
+def _git_ok(repo_dir: Path, *args: str) -> bool:
+    """Run a read-only git command in `repo_dir`; True only on a clean exit.
+
+    Every failure mode (git missing, not a repository, dubious ownership, a timeout) is False,
+    because identity detection must never raise into the scan path: the contract is to fail
+    toward third-party and let the noise show up.
+    """
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            capture_output=True, text=True, check=False, timeout=GIT_IDENTITY_TIMEOUT_S,
+        )
+    except Exception:
+        return False
+    return res.returncode == 0
+
+
+def _git_out(repo_dir: Path, *args: str) -> Optional[str]:
+    """Run a read-only git command in `repo_dir`; stripped stdout, or None on any failure."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            capture_output=True, text=True, check=False, timeout=GIT_IDENTITY_TIMEOUT_S,
+        )
+    except Exception:
+        return None
+    if res.returncode != 0:
+        return None
+    return res.stdout.strip() or None
+
+
+def _git_has_commit(repo_dir: Path, sha: str) -> bool:
+    """True when `repo_dir`'s object database already contains commit `sha`."""
+    return _git_ok(repo_dir, "cat-file", "-e", f"{sha}^{{commit}}")
+
+
+def _factory_identity_commits() -> List[str]:
+    """Commit shas that identify THIS installation's repository (agents-32twc).
+
+    HEAD is the cheapest anchor, and the root commit covers two installations that have diverged
+    so that neither HEAD contains the other. A shallow installation only contributes what it
+    actually has - its HEAD, and its shallow boundary as the "root" - which is the honest limit
+    of a purely local instrument, and it fails toward third-party (see factory_self_target_reason).
+    """
+    shas: List[str] = []
+    head = _git_out(FACTORY_ROOT, "rev-parse", "--verify", "HEAD^{commit}")
+    if head:
+        shas.append(head)
+    roots = _git_out(FACTORY_ROOT, "rev-list", "--max-parents=0", "HEAD")
+    if roots:
+        shas.extend(roots.split())
+    return list(dict.fromkeys(shas))
+
+
+def factory_self_target_reason(target_dir: Path) -> str:
+    """Say WHY the target is, or is not, the Software Factory - the reason, not just the verdict.
+
+    Two installations of the factory are two different paths, so a path comparison only ever
+    recognises the running installation and its own worktrees; the nightly self-audit runs the
+    pre-pass from the deployed install while auditing a separate clone, and used to answer
+    "third-party" to every such run (agents-32twc). Repository identity is therefore matched at
+    the OBJECT level, which is the same in every clone of the same repository:
+
+    1. same common git dir - the installation's own checkout, a linked worktree, or a subdirectory
+       of either (agents-rul9/760p/i4ra: the enclosing repository, never path containment);
+    2. a commit object shared with this installation, in either direction - the target is at/ahead
+       of the installed HEAD, or the installation is ahead of the target's HEAD;
+    3. otherwise third-party.
 
     WHEN IDENTITY CANNOT BE ESTABLISHED, TREAT THE TARGET AS THIRD-PARTY AND DO NOT SUPPRESS.
     A false negative costs NOISE - the factory flags its own pattern definitions when it audits
     itself - and a false positive costs SILENT LOSS OF PRODUCTION SINKS FROM AN ATTACK-SURFACE
     INVENTORY. The function must fail toward "not self", and it must say so, because the next
-    person to open it will otherwise reach for the safer-looking default.
+    person to open it will otherwise reach for the safer-looking default. The residual gaps are
+    therefore named rather than hidden: a non-git installation (extracted tarball), a target that
+    shares no commit object with this installation (a rewritten history, or a depth-1 install
+    that is NEWER than the audited clone, whose only anchor the clone cannot contain), and a host
+    where git cannot run at all all answer third-party.
     """
     try:
         resolved = target_dir.resolve()
         enclosing_common = _resolve_enclosing_git_dir(resolved)
-
-        # P3 fix (agents-i4ra): Resolve git repository identity via the nearest enclosing
-        # repository. A directory inside a repository belongs to that repository.
-        # If the target (or any parent directory) carries a git repository identity,
-        # it is self ONLY IF that enclosing repository matches the factory's.
-        # If it belongs to a foreign repository (even one nested inside the factory tree),
-        # fail toward third-party immediately so no path containment can rescue it.
-        if enclosing_common is not None:
-            if FACTORY_COMMON_GIT_DIR is not None and enclosing_common == FACTORY_COMMON_GIT_DIR:
-                return True
-            return False
-
-        # When no git identity can be established (e.g. non-git directory or extracted tarball),
-        # fail toward third-party per contract: return False.
     except Exception:
-        pass
-    return False
+        return SELF_TARGET_NO_GIT_IDENTITY
+
+    # No git identity at all (non-git directory, extracted tarball): third-party per contract.
+    if enclosing_common is None:
+        return SELF_TARGET_NO_GIT_IDENTITY
+
+    # P3 fix (agents-i4ra): a directory inside a repository belongs to that repository, so the
+    # enclosing repository's identity is what counts - and if it is a FOREIGN repository (even
+    # one nested inside the factory tree), no path containment may rescue it.
+    if FACTORY_COMMON_GIT_DIR is not None and enclosing_common == FACTORY_COMMON_GIT_DIR:
+        return SELF_TARGET_SAME_INSTALLATION
+
+    # Cross-installation: the audited checkout is not this installation's own git dir. Two clones
+    # of one repository share commit objects, so a shared object proves the target is the factory
+    # even though the paths differ. Both directions, because either side may be the newer one.
+    if any(_git_has_commit(resolved, sha) for sha in _factory_identity_commits()):
+        return SELF_TARGET_SHARED_REPOSITORY
+    target_head = _git_out(resolved, "rev-parse", "--verify", "HEAD^{commit}")
+    if target_head and _git_has_commit(FACTORY_ROOT, target_head):
+        return SELF_TARGET_SHARED_REPOSITORY
+
+    return SELF_TARGET_FOREIGN_REPOSITORY
+
+
+def is_factory_self_target(target_dir: Path) -> bool:
+    """Determine whether the target repository is the Software Factory itself.
+
+    This is the boolean face of factory_self_target_reason, which carries the identity check and
+    the fail-toward-third-party contract: the target is self only when its own repository is the
+    factory's, whichever path and whichever clone it is checked out at (agents-32twc).
+    """
+    return factory_self_target_reason(target_dir) in SELF_TARGET_POSITIVE
+
+
+def resolve_self_target(target_dir: Path, declared: Optional[bool] = None) -> Tuple[bool, str]:
+    """Resolve the self-target flag to (verdict, reason) for the run record.
+
+    An operator override (`--is-self-target` / `--no-is-self-target`) wins and names itself,
+    because an explicit decision is part of what the run artifact should say; otherwise the
+    reason is the identity check that decided it.
+    """
+    if declared is True:
+        return True, "declared"
+    if declared is False:
+        return False, "declined"
+    reason = factory_self_target_reason(target_dir)
+    return reason in SELF_TARGET_POSITIVE, reason
 
 
 def is_scanner_file(fpath: Path, rel_path: str, is_self_target: bool = True) -> bool:
@@ -575,12 +691,16 @@ def main():
     beads_bugs = mine_beads_issues(target_dir, nonce=nonce)
 
     sys.stderr.write(f"Scanning entry points and sensitive primitives...\n")
+    resolved_self_target, self_target_signal = resolve_self_target(target_dir, args.is_self_target)
+    sys.stderr.write(
+        f"Self-target identity: {self_target_signal} (is_self_target={resolved_self_target}).\n"
+    )
     entry_points, suppressed_entry_points, is_self_target = scan_entry_points(
-        target_dir, nonce=nonce, is_self_target=args.is_self_target, return_suppressed=True, return_self_target=True
+        target_dir, nonce=nonce, is_self_target=resolved_self_target, return_suppressed=True, return_self_target=True
     )
     if suppressed_entry_points:
         sys.stderr.write(
-            f"Note: {len(suppressed_entry_points)} candidate entry point(s) suppressed by self-referential rules (is_self_target={is_self_target}).\n"
+            f"Note: {len(suppressed_entry_points)} candidate entry point(s) suppressed by self-referential rules (is_self_target={is_self_target}, identity={self_target_signal}).\n"
         )
 
     meta = extract_project_metadata(target_dir, nonce=nonce)
@@ -596,6 +716,7 @@ def main():
     result = {
         "target": target_dir.name,
         "is_self_target": is_self_target,
+        "self_target_signal": self_target_signal,
         "evidence_nonce": nonce,
         "system_instruction": SYSTEM_INSTRUCTION.format(nonce=nonce),
         "threat_model": threat_model_info,
