@@ -552,6 +552,16 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
         cls.factory.mkdir()
         git(cls.factory, "init", "-q")
         (cls.factory / "marker.txt").write_text("factory v1\n", encoding="utf-8")
+        # One of the factory's own instrument files, committed BEFORE the clone exists: a clone's
+        # copy of it must be byte-identical to the installation's, which is the per-file test
+        # agents-vq5aj requires before a shared-history checkout may exclude it.
+        instrument = cls.factory / "agents" / "probe" / "scripts"
+        instrument.mkdir(parents=True)
+        cls.INSTRUMENT_CODE = (
+            'rule_dict = {"rule_id": "network", "title": "fetch() without timeout"}\n'
+            'ENTRY_POINT_PATTERNS = [("t", re.compile(r"fetch\\("))]\n'
+        )
+        (instrument / "scan_probe.py").write_text(cls.INSTRUMENT_CODE, encoding="utf-8")
         git(cls.factory, "add", "-A")
         git(cls.factory, "commit", "-qm", "first")
 
@@ -600,25 +610,63 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
         return dest
 
     def test_separate_clone_of_the_factory_keeps_structural_exclusions_only(self):
-        """A separate clone gets the scanner-LAYOUT exclusion, and nothing broader (agents-uviio).
+        """A separate clone excludes ITS OWN unmodified instrument files, and nothing broader.
 
         The nightly noise is all in `agents/*/scripts/`, so the structural exclusion is what a
-        cross-install self-audit needs - and it is all it gets: the content-level rule-metadata
-        gate stays off, because shared history does not prove this checkout is the factory.
+        cross-install self-audit needs - and it is all it gets, per file: the content-level
+        rule-metadata gate stays off, because shared history does not prove this checkout is the
+        factory (agents-uviio), and the path exclusion itself applies only to files that ARE this
+        installation's copy (agents-vq5aj).
+        """
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(self.clone),
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
+            self.assertTrue(mine_history.is_factory_self_target(self.clone))
+            self.assertTrue(mine_history.is_factory_own_file(
+                self.clone / "agents" / "probe" / "scripts" / "scan_probe.py",
+                "agents/probe/scripts/scan_probe.py",
+                mine_history.SELF_TARGET_SHARED_REPOSITORY))
+            results, suppressed = mine_history.scan_entry_points(self.clone, return_suppressed=True)
+        self.assertEqual(results, [], f"factory instrument files must be excluded by path, got: {results}")
+        self.assertEqual(suppressed, [])
+
+    def test_modified_instrument_file_is_scanned_in_a_clone(self):
+        """The per-file test is not vacuous: a changed copy is no longer the factory's instrument."""
+        clone = self._new_clone()
+        target = clone / "agents" / "probe" / "scripts" / "scan_probe.py"
+        target.write_text(self.INSTRUMENT_CODE + "mount = app.get('/changed', h)\n", encoding="utf-8")
+        with self._as_installation(self.factory):
+            self.assertFalse(mine_history.is_factory_own_file(
+                target, "agents/probe/scripts/scan_probe.py",
+                mine_history.SELF_TARGET_SHARED_REPOSITORY))
+            results = mine_history.scan_entry_points(clone)
+        self.assertEqual([(r["category"], r["path"]) for r in results],
+                         [("external-fetch", "agents/probe/scripts/scan_probe.py"),
+                          ("server-listener", "agents/probe/scripts/scan_probe.py")],
+                         f"a changed copy is scanned as ordinary source (its rule line included, "
+                         f"since the content gate is off for a shared-history checkout), got: {results}")
+
+    def test_forked_product_endpoint_under_agents_scripts_is_not_excluded(self):
+        """agents-vq5aj P2 regression: a fork keeps its endpoints WHATEVER directory it puts them in.
+
+        The layout exclusion used to apply to every `agents/*/scripts/` path of a shared-history
+        checkout, so a forked product's `agents/product/scripts/route.py` vanished from the
+        inventory. Only this installation's own copy of a path may be excluded.
         """
         clone = self._new_clone()
-        instrument = clone / "agents" / "probe" / "scripts"
-        instrument.mkdir(parents=True)
-        (instrument / "scan_probe.py").write_text(
-            'rule_dict = {"rule_id": "network", "title": "fetch() without timeout"}\n',
-            encoding="utf-8",
-        )
+        route = clone / "agents" / "product" / "scripts"
+        route.mkdir(parents=True)
+        (route / "route.py").write_text('handler = app.get("/secret", h)\n', encoding="utf-8")
         with self._as_installation(self.factory):
             self.assertEqual(mine_history.factory_self_target_reason(clone),
                              mine_history.SELF_TARGET_SHARED_REPOSITORY)
-            self.assertTrue(mine_history.is_factory_self_target(clone))
+            self.assertFalse(mine_history.is_factory_own_file(
+                route / "route.py", "agents/product/scripts/route.py",
+                mine_history.SELF_TARGET_SHARED_REPOSITORY))
             results, suppressed = mine_history.scan_entry_points(clone, return_suppressed=True)
-        self.assertEqual(results, [], f"factory instrument files must be excluded by path, got: {results}")
+        self.assertEqual([(r["category"], r["path"]) for r in results],
+                         [("server-listener", "agents/product/scripts/route.py")],
+                         f"a forked product's endpoint must survive its directory, got: {results}")
         self.assertEqual(suppressed, [])
 
     def test_forked_product_keeps_its_production_endpoint(self):

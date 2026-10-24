@@ -229,6 +229,10 @@ SELF_TARGET_POSITIVE = frozenset({SELF_TARGET_SAME_INSTALLATION, SELF_TARGET_SHA
 # Bounds the identity probes: git never gets to hang a pre-pass on a hostile or broken repository.
 GIT_IDENTITY_TIMEOUT_S = 15
 
+# Largest instrument file whose bytes are compared when deciding whether a shared-history checkout's
+# file is this installation's own copy (agents-vq5aj). Above it the file is scanned - noise, not a loss.
+FACTORY_FILE_COMPARE_MAX_BYTES = 2 * 1024 * 1024
+
 
 def _git_ok(repo_dir: Path, *args: str) -> bool:
     """Run a read-only git command in `repo_dir`; True only on a clean exit.
@@ -373,12 +377,49 @@ def self_target_suppression_scope(reason: str) -> Tuple[bool, bool]:
     Returns (structural_exclusions, content_suppressions). Both gates stay available through the
     existing `is_scanner_file(..., is_self_target=)` / `is_self_referential_line(..., is_self_target=)`
     arguments, which an explicit declaration sets to True together.
+
+    The structural grant for a shared-history checkout is further narrowed PER FILE by
+    `is_factory_own_file`: sharing the factory's history is not evidence that a file at
+    `agents/product/scripts/route.py` is the factory's instrument, so that exclusion must also
+    match this installation's copy of the path (agents-vq5aj).
     """
     if reason in (SELF_TARGET_SAME_INSTALLATION, "declared"):
         return True, True
     if reason == SELF_TARGET_SHARED_REPOSITORY:
         return True, False
     return False, False
+
+
+def is_factory_own_file(fpath: Path, rel_path: str, reason: str) -> bool:
+    """Whether `fpath` may be excluded as one of the factory's OWN instrument files.
+
+    A FORK KEEPS ITS ENDPOINTS WHEREVER IT PUTS THEM (agents-vq5aj). Sharing the factory's history
+    says nothing about a path that only the fork has, so for a shared-history checkout the
+    scanner-layout exclusion additionally requires the file to BE this installation's copy of the
+    same relative path - equivalent content, verified against the tree the pre-pass is running
+    from, not inferred from the clone's history.
+
+    Consequences, all in the affordable direction:
+    - the installation's own files (and a separate clone's unmodified copies of them) stay excluded,
+      which is the nightly self-audit's noise;
+    - a fork's own file at the same layout is scanned, because no copy of it exists here;
+    - a file the factory has since changed no longer matches, so it is scanned until this
+      installation catches up - a little NOISE, never a lost third-party sink.
+    """
+    if reason in (SELF_TARGET_SAME_INSTALLATION, "declared"):
+        return True
+    if reason != SELF_TARGET_SHARED_REPOSITORY:
+        return False
+    reference = FACTORY_ROOT / rel_path
+    try:
+        if Path(rel_path).is_absolute() or not reference.is_file():
+            return False
+        ref_size = reference.stat().st_size
+        if ref_size != fpath.stat().st_size or ref_size > FACTORY_FILE_COMPARE_MAX_BYTES:
+            return False
+        return reference.read_bytes() == fpath.read_bytes()
+    except Exception:
+        return False
 
 
 def resolve_self_target(target_dir: Path, declared: Optional[bool] = None) -> Tuple[bool, str]:
@@ -565,7 +606,10 @@ def scan_entry_points(
     (`self_target_suppression_scope`, agents-uviio): a checkout that shares the factory's history
     but is not the installation's own - a separate clone, or a product forked from the factory -
     gets the structural scanner-file exclusion, never the content-level rule-metadata
-    suppression. An explicit `is_self_target` is an operator declaration and grants both.
+    suppression. An explicit `is_self_target` is an operator declaration and grants both. The
+    structural exclusion is narrowed PER FILE for a shared-history checkout
+    (`is_factory_own_file`, agents-vq5aj): only this installation's own instrument files qualify,
+    so a fork's `agents/product/scripts/route.py` is scanned wherever the fork puts it.
     """
     findings = []
     suppressed_entry_points = []
@@ -575,6 +619,7 @@ def scan_entry_points(
         structural_self, content_self = self_target_suppression_scope(reason)
         is_self_target = reason in SELF_TARGET_POSITIVE
     else:
+        reason = "declared" if is_self_target else "declined"
         structural_self = content_self = is_self_target
 
     for root, dirs, files in os.walk(target_dir):
@@ -599,7 +644,8 @@ def scan_entry_points(
                 continue
 
             # Exclude pattern-defining scanner files and scanner scripts
-            if is_scanner_file(fpath, rel_path, is_self_target=structural_self):
+            if is_scanner_file(fpath, rel_path, is_self_target=structural_self) \
+                    and is_factory_own_file(fpath, rel_path, reason):
                 continue
 
             try:
