@@ -228,17 +228,27 @@ def batch_brief(batch: Sequence[Any], batch_index: int, batch_count: int) -> str
     list with no ids at all says so, because that is the count-only case, not an empty one.
 
     AND IT IS NOT A BATCHING FEATURE (agents-o0nv2). Only multi-batch runs used to get this header, so a
-    station whose candidate list fits ONE call - modern-web's 6, docs-drift's 49, vuln-triage's 31, i.e.
-    most nights - was told nothing about its population or its ids. The only instruction to copy a
-    candidate_id in that prompt was a schema `description` inside the JSON blob, immediately followed by
+    station whose candidate list fits ONE call was told nothing about its population or its ids. Since
+    e5799b72 that is every list of 8 or fewer candidates (the policy bound is unconditional), and the
+    reported night is exactly one of those: modern-web, 6 candidates, 0 cited ids. (docs-drift's 49 and
+    vuln-triage's 31 are NOT single-call any more - they plan 7 and 4 batches - so this was narrower than
+    "most nights"; it was still precisely the shape that failed.) The only instruction to copy a
+    candidate_id in such a prompt was a schema `description` inside the JSON blob, immediately followed by
     the derived checklist that lists the fields a finding MUST carry and, correctly, does not include the
     one field that cannot be schema-required. A model reading that checklist as the contract emitted
     conforming rows with no ids, and the run was judged 0 of 6. `factory:1963` now calls this for every
     planned batch, and with ONE batch the facts are stated without the batching wording - deliberately
     not starting with `BATCH `, which is how a batched prompt is recognised downstream.
+
+    AN EMPTY LIST GETS NO BRIEF AT ALL (agents-o0nv2 review). 15 of the 22 stations do not declare
+    `short_circuit_empty`, so a clean scan really does reach the model with zero candidates: telling that
+    prompt "answer for EVERY candidate below ... holds 0 candidate(s)" is self-contradictory noise, and
+    returning "" keeps the pre-change prompt byte-identical for the clean-scan path.
     """
     ids = batch_candidate_ids(batch)
     total = len(list(batch))
+    if total == 0:
+        return ""
     idless = max(total - len(ids), 0)
     if int(batch_count) <= 1:
         return (

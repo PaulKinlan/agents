@@ -405,8 +405,9 @@ class TestTheBatchBriefNamesTheWholePopulation(unittest.TestCase):
 class TestASingleCallStillHearsItsPopulation(unittest.TestCase):
     """agents-o0nv2: the brief is not a batching feature.
 
-    Only multi-batch prompts carried it, so a station whose candidate list fits ONE call - modern-web's 6,
-    docs-drift's 49, vuln-triage's 31, most nights - was told nothing about its population or its ids. Its
+    Only multi-batch prompts carried it, so a station whose candidate list fits ONE call - every list of 8
+    or fewer since e5799b72 made the policy bound unconditional, and modern-web's 6 on the reported night
+    is exactly that - was told nothing about its population or its ids. Its
     only "copy the candidate_id" text was a schema description inside the JSON blob, right before the
     derived checklist of fields a finding MUST carry (which cannot include the one field that must stay
     omittable). A model reading that checklist as the contract emitted conforming rows citing no id and the
@@ -442,6 +443,22 @@ class TestASingleCallStillHearsItsPopulation(unittest.TestCase):
         self.assertIn("1 carries a candidate_id (a)", text)
         self.assertIn("the other 1 carries NO candidate_id", text)
 
+    def test_an_empty_list_gets_no_brief_at_all(self):
+        # 15 of the 22 stations do not short-circuit an empty pre-pass, so a clean scan really does reach
+        # the model with zero candidates; "answer for EVERY candidate ... holds 0 candidate(s)" is
+        # self-contradictory, and "" keeps that prompt byte-identical to the pre-change one.
+        self.assertEqual(self.brief([]), "")
+
+    def test_the_single_call_boundary_is_eight_and_is_pinned(self):
+        # The docstring's claim about which lists are single-call must be the policy's answer, not a
+        # memory of one nightly: modern-web's 6 is single-call, docs-drift's 49 is not (7 batches).
+        from lib.candidate_batching import MAX_CANDIDATES_PER_BATCH, plan_batches
+        self.assertEqual(MAX_CANDIDATES_PER_BATCH, 8)
+        for count, batches in ((6, 1), (8, 1), (9, 2), (31, 4), (49, 7)):
+            candidates = [{"candidate_id": f"c{i}", "path": f"p{i}"}.copy() for i in range(count)]
+            self.assertEqual(len(plan_batches(candidates, MAX_CANDIDATES_PER_BATCH)), batches,
+                             f"{count} candidates")
+
     def test_the_multi_batch_text_is_unmoved_by_the_single_call_branch(self):
         text = self.brief([{"candidate_id": "a"}, {"candidate_id": "b"}], index=0, count=2)
         self.assertEqual(
@@ -453,7 +470,7 @@ class TestASingleCallStillHearsItsPopulation(unittest.TestCase):
 
     def test_the_arithmetic_is_the_same_at_every_population_size(self):
         from lib.candidate_batching import batch_brief
-        for total in range(0, 6):
+        for total in range(1, 6):   # an empty list gets "" on purpose - see the test above
             for identified in range(total + 1):
                 candidates = ([{"candidate_id": f"id{i}"} for i in range(identified)]
                               + [{"path": f"p{i}"} for i in range(total - identified)])
