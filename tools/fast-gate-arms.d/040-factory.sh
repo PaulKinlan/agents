@@ -44,9 +44,11 @@ fast_gate_arms_040_factory() {
       # ceiling itself - raising MAX_CANDIDATES_PER_BATCH above the candidate count in the suite stops it
       # splitting - and the suite carries which bound applies to whom (undeclared station -> ceiling,
       # declaration above the ceiling -> capped), so a dispatcher that stops applying the policy fails
-      # it either way. Cost, MEASURED on this VM under load: the two agents-tq1lt tests add two 2-call
-      # dispatcher runs, ~35 s; the module was ~8.0 s for 5 tests on a quiet box before them, so read the
-      # cost as "a handful of engine-free dispatcher runs", not as a fixed number.
+      # it either way. Cost, MEASURED on this VM under load: the agents-tq1lt test adds ONE 2-call
+      # dispatcher run, ~13 s (a second dispatcher-run case was cut for exactly that reason - it pushed
+      # this gate to its 600 s bound and got KILLED at 631 s). The module was ~8.0 s for 5 tests on a
+      # quiet box before it, so read the cost as "a handful of engine-free dispatcher runs", not as a
+      # fixed number.
       mapped="$mapped tests/test_candidate_batching_end_to_end.py"
       ;;
     install.sh)

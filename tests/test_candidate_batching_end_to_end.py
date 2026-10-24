@@ -805,19 +805,11 @@ class TestThePerCallBoundIsPolicy(BatchedStation):
                          [f"cand-perf-{i:03d}" for i in range(10)],
                          "the Python-side merge accounts for every candidate across both calls")
 
-    def test_a_declaration_above_the_ceiling_is_capped_and_says_so(self):
-        self.agent(AGENT_YAML.replace("max_candidates_per_call: 3", "max_candidates_per_call: 20"))
-        self.stub(BATCH_STUB)
-        res = self.factory("pi")
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        run = self.run_dir()
-        prompts = sorted(run.glob("prompt.batch*.txt"))
-        self.assertEqual(len(prompts), 2,
-                         f"a declared 20 must not lift the ceiling: {[p.name for p in prompts]}")
-        presented = json.loads((run / "presented_candidates.json").read_text(encoding="utf-8"))
-        self.assertEqual(presented["max_candidates_per_call"], 8)
-        self.assertIn("capped to the policy bound of 8", res.stdout,
-                      f"the cap must be stated, not silent: {res.stdout[-400:]}")
+    # The CAP (a station declaring above the ceiling) is pinned as a unit case in
+    # tests/test_candidate_batching.py, not here: this suite drives the real dispatcher, and each of
+    # those runs costs a full engine dispatch (~17 s on a loaded VM). MEASURED: adding it here pushed
+    # the fast gate to its bound (KILLED at 631 s against 600 s), and the cap is one line of policy in
+    # resolve_max_candidates_per_call() with no dispatcher-side arithmetic to get wrong.
 
 
 if __name__ == "__main__":
