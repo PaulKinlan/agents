@@ -33,6 +33,7 @@ change, and the tracked file stays the source of truth a PR can review.
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import os
 import re
@@ -199,9 +200,29 @@ def _prevent_real_gate(env: dict, home: str) -> Path:
 # AND THE CHECK IS SCOPED TO THIS TEST'S OWN HOME, deliberately: a global process diff would fire on
 # another lane's perfectly legitimate in-flight gate, and a machine-state assertion that turns an
 # unrelated change red is the defect class this suite already had to fix once (agents-3xqa).
+# agents-xb8tp: THE TEMP HOMES LIVE ONE LEVEL DEEPER, UNDER A HIDDEN PARENT, AND THAT IS THE FIX
+# rather than a tidy-up. tempfile.mkdtemp(prefix=...) puts the home DIRECTLY under /tmp, so a
+# co-tenant's disk-hygiene sweep - `du -sh /tmp/*`, `ls /tmp`, `grep -r /tmp` - has THIS SUITE'S OWN
+# HOME as an EXPANDED ARGV TOKEN, which is precisely what the argv channel below matches. Measured on
+# the 2026-10-24 landing gate: the tripwire fired on a live `du -sh /tmp/00sew-flake.txt
+# /tmp/00sew-handoff.txt ... /tmp/d081-loud-6a_3hx88` from another lane that held nothing, and the
+# change was red for a reason it did not cause. `/tmp/*` does not expand a dot-prefixed entry, so a
+# home under /tmp/.fleet-test-homes/ is invisible to every sweep shaped like that AT ANY DEPTH
+# (`/tmp/*/*` skips the hidden directory too) while ALL THREE CHANNELS stay exactly as they are. The
+# tripwire is NOT weakened: argv exclusions are what agents-3xqa/agents-825v/agents-qlqc exist to
+# prevent, so none were added and `_assert_no_live_process_referencing` is untouched.
+_TMP_HOMES_ROOT = Path("/tmp/.fleet-test-homes")
+
+
+def _tmp_homes_root() -> str:
+    """The shared parent for this suite's temp HOMEs (agents-xb8tp), created on demand."""
+    _TMP_HOMES_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return str(_TMP_HOMES_ROOT)
+
+
 def _registered_tmp_home(case: unittest.TestCase, prefix: str) -> str:
     """A temp HOME whose teardown asserts no live process still references it."""
-    home = tempfile.mkdtemp(prefix=prefix)
+    home = tempfile.mkdtemp(prefix=prefix, dir=_tmp_homes_root())
     case.addCleanup(_assert_no_live_process_referencing, case, home)
     return home
 
@@ -240,6 +261,50 @@ def _assert_no_live_process_referencing(case: unittest.TestCase, path: str) -> N
         f"the VM's single heavy slot. Kill it in this test's own cleanup, or stop the fixture "
         f"inheriting the environment.",
     )
+
+
+class TestACoTenantsTmpSweepCannotTripTheLeakTripwire(unittest.TestCase):
+    """agents-xb8tp item 2: the tripwire must fire on a LEAK, never on a co-tenant's legitimate sweep.
+
+    RED-FIRST SHAPE, stated so a later reader can re-run it against the old code: on the old
+    `tempfile.mkdtemp(prefix=...)` (no `dir=`) the home is a DIRECT child of /tmp, so the expansion
+    of `/tmp/*` - the argv a real `du -sh /tmp/*` sweep presents, taken here from glob rather than
+    from a guess - CONTAINS the home, and the live-sweeper arm below turns this test red. It is not
+    a timing or machine-state assertion: it compares one string against one glob expansion, so it
+    cannot flake on a busy host and cannot read another lane's state beyond the /tmp listing itself.
+    """
+
+    def test_a_tmp_glob_expansion_does_not_name_this_suites_temp_home(self):
+        home = _registered_tmp_home(self, "xb8tp-sweep-")
+        # The exact expansion a co-tenant's `du -sh /tmp/*` and `du -sh /tmp/*/*` present as argv.
+        for pattern in ("/tmp/*", "/tmp/*/*"):
+            expanded = glob.glob(pattern)
+            self.assertNotIn(
+                home, expanded,
+                f"{pattern} expands to this suite's temp HOME {home}, so any co-tenant running "
+                f"`du -sh {pattern}` has it in argv and trips the agents-825v leak tripwire for a "
+                f"process that holds nothing (agents-xb8tp). Keep the home under the hidden "
+                f"{_TMP_HOMES_ROOT} parent.",
+            )
+
+    def test_a_live_sweeper_carrying_that_expansion_does_not_trip_the_tripwire(self):
+        """The behavioural half: a real process holding the sweep's expansion in argv while the
+        tripwire runs. On the old code the home is in that expansion, so this fails here."""
+        home = _registered_tmp_home(self, "xb8tp-live-")
+        swept = sorted(glob.glob("/tmp/*"))
+        sweeper = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(3)"] + swept,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertNotIn(home, swept)
+            argv_with_home_would_fire = [t for t in swept if home in t]
+            self.assertEqual(argv_with_home_would_fire, [])
+            # The tripwire itself, unchanged, run while the sweeper is alive: it must stay quiet.
+            _assert_no_live_process_referencing(self, home)
+        finally:
+            sweeper.kill()
+            sweeper.wait(timeout=30)
 
 
 class TestTheEntrypointReadsTheTrackedCommand(unittest.TestCase):
