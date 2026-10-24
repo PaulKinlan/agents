@@ -590,22 +590,76 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
             FACTORY_COMMON_GIT_DIR=mine_history._resolve_common_git_dir(root),
         )
 
-    def test_separate_clone_of_the_factory_is_self_and_suppresses(self):
-        """A clone at a different path is the factory, and its pattern-definition lines are suppressed."""
-        src = self.clone / "src"
-        src.mkdir()
-        (src / "rules.py").write_text(
-            'rule_dict = {"rule_id": "network", "title": "fetch() without timeout"}\n'
-            'rule_listener = {"category": "listener", "handler": app.get("/api", h)}\n',
+    def _new_clone(self) -> Path:
+        """A per-test clone of the stand-in factory: no test may inherit another's scratch files."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dest = Path(tmp.name) / "clone"
+        subprocess.run(["git", "clone", "-q", "--local", str(self.factory), str(dest)],
+                       check=True, capture_output=True, text=True)
+        return dest
+
+    def test_separate_clone_of_the_factory_keeps_structural_exclusions_only(self):
+        """A separate clone gets the scanner-LAYOUT exclusion, and nothing broader (agents-uviio).
+
+        The nightly noise is all in `agents/*/scripts/`, so the structural exclusion is what a
+        cross-install self-audit needs - and it is all it gets: the content-level rule-metadata
+        gate stays off, because shared history does not prove this checkout is the factory.
+        """
+        clone = self._new_clone()
+        instrument = clone / "agents" / "probe" / "scripts"
+        instrument.mkdir(parents=True)
+        (instrument / "scan_probe.py").write_text(
+            'rule_dict = {"rule_id": "network", "title": "fetch() without timeout"}\n',
             encoding="utf-8",
         )
         with self._as_installation(self.factory):
-            self.assertEqual(mine_history.factory_self_target_reason(self.clone),
+            self.assertEqual(mine_history.factory_self_target_reason(clone),
                              mine_history.SELF_TARGET_SHARED_REPOSITORY)
-            self.assertTrue(mine_history.is_factory_self_target(self.clone))
-            results, suppressed = mine_history.scan_entry_points(self.clone, return_suppressed=True)
-        self.assertEqual(results, [], f"self-referential pattern lines must be suppressed, got: {results}")
-        self.assertEqual({s["category"] for s in suppressed}, {"external-fetch", "server-listener"}, suppressed)
+            self.assertTrue(mine_history.is_factory_self_target(clone))
+            results, suppressed = mine_history.scan_entry_points(clone, return_suppressed=True)
+        self.assertEqual(results, [], f"factory instrument files must be excluded by path, got: {results}")
+        self.assertEqual(suppressed, [])
+
+    def test_forked_product_keeps_its_production_endpoint(self):
+        """agents-uviio P2 regression: a fork of the factory is NOT the factory for line suppression.
+
+        A product forked from the factory shares every factory commit. Granting the broad
+        rule-metadata suppression on that shared ancestry hid `app.get('/secret', h)` behind a
+        `category:` key - a real production sink dropped from the inventory. The reviewer's
+        reproduction, kept as the test: identity is shared-repository, the endpoint MUST survive.
+        """
+        clone = self._new_clone()
+        (clone / "api.py").write_text(
+            'handler = {"category": "production", "route": app.get("/secret", h)}\n',
+            encoding="utf-8",
+        )
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(clone),
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
+            self.assertEqual(mine_history.self_target_suppression_scope(mine_history.SELF_TARGET_SHARED_REPOSITORY),
+                             (True, False))
+            results, suppressed = mine_history.scan_entry_points(clone, return_suppressed=True)
+        self.assertEqual([r["category"] for r in results], ["server-listener"],
+                         f"a forked product's endpoint must not be suppressed, got: {results}")
+        self.assertEqual(suppressed, [])
+
+    def test_declared_self_target_grants_both_gates(self):
+        """An operator declaration is stronger than detection, and the artifact says so."""
+        clone = self._new_clone()
+        (clone / "api.py").write_text(
+            'handler = {"category": "production", "route": app.get("/secret", h)}\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(mine_history.self_target_suppression_scope("declared"), (True, True))
+        self.assertEqual(mine_history.self_target_suppression_scope("declined"), (False, False))
+        self.assertEqual(mine_history.self_target_suppression_scope(
+            mine_history.SELF_TARGET_SAME_INSTALLATION), (True, True))
+        self.assertEqual(mine_history.self_target_suppression_scope(
+            mine_history.SELF_TARGET_FOREIGN_REPOSITORY), (False, False))
+        results, suppressed = mine_history.scan_entry_points(clone, is_self_target=True, return_suppressed=True)
+        self.assertEqual(results, [], "a declared self-target keeps the factory's own rule lines quiet")
+        self.assertEqual([s["category"] for s in suppressed], ["server-listener"], suppressed)
 
     def test_target_behind_the_installation_is_still_self(self):
         """Identity holds when the INSTALLATION is the newer side (the reverse object direction)."""

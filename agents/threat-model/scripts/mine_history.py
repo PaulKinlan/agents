@@ -299,6 +299,11 @@ def factory_self_target_reason(target_dir: Path) -> str:
        of the installed HEAD, or the installation is ahead of the target's HEAD;
     3. otherwise third-party.
 
+    Case 2 is a WEAKER identity than case 1 and the suppression scope says so: it licenses the
+    structural scanner-file exclusion but NOT the broad rule-metadata suppression, because a
+    product forked from the factory shares every factory commit and still ships its own endpoints
+    (agents-uviio, `self_target_suppression_scope`).
+
     WHEN IDENTITY CANNOT BE ESTABLISHED, TREAT THE TARGET AS THIRD-PARTY AND DO NOT SUPPRESS.
     A false negative costs NOISE - the factory flags its own pattern definitions when it audits
     itself - and a false positive costs SILENT LOSS OF PRODUCTION SINKS FROM AN ATTACK-SURFACE
@@ -347,6 +352,35 @@ def is_factory_self_target(target_dir: Path) -> bool:
     return factory_self_target_reason(target_dir) in SELF_TARGET_POSITIVE
 
 
+def self_target_suppression_scope(reason: str) -> Tuple[bool, bool]:
+    """What an identity reason licenses: (scanner-file exclusions, rule-metadata suppressions).
+
+    THE TWO GATES ARE NOT EQUALLY SAFE, SO THEY ARE NOT GRADED EQUALLY (agents-uviio).
+
+    - `is_scanner_file` is STRUCTURAL: it excludes paths that are the factory's own instrument
+      layout (`agents/*/scripts/`, `mine_history.py`, `*-THREAT_MODEL.md`). A clone of the factory
+      inherits that layout, and a third-party product that forked the factory does not put its own
+      endpoints there, so this gate is safe for any checkout carrying the factory's history.
+    - `is_self_referential_line` is CONTENT-LEVEL and broad: it drops any line carrying
+      `rule_id:`/`category:`/`severity:`/`re.compile`, tokens ordinary production code uses for
+      routing, logging and dispatch (agents-tj9u). It is only defensible where the code IS the
+      factory's, because a SHARED ANCESTOR DOES NOT PROVE THE CURRENT REPOSITORY IS THE FACTORY: a
+      product forked from the factory keeps every factory commit and still ships its own
+      production endpoints. Granting the content-level gate on shared history alone hid a real
+      `app.get()` sink behind a `category:` key in a fork (agents-uviio), so it is reserved for
+      the installation's own checkout and for an operator's explicit `--is-self-target`.
+
+    Returns (structural_exclusions, content_suppressions). Both gates stay available through the
+    existing `is_scanner_file(..., is_self_target=)` / `is_self_referential_line(..., is_self_target=)`
+    arguments, which an explicit declaration sets to True together.
+    """
+    if reason in (SELF_TARGET_SAME_INSTALLATION, "declared"):
+        return True, True
+    if reason == SELF_TARGET_SHARED_REPOSITORY:
+        return True, False
+    return False, False
+
+
 def resolve_self_target(target_dir: Path, declared: Optional[bool] = None) -> Tuple[bool, str]:
     """Resolve the self-target flag to (verdict, reason) for the run record.
 
@@ -368,6 +402,10 @@ def is_scanner_file(fpath: Path, rel_path: str, is_self_target: bool = True) -> 
     P3 fix (agents-tj9u): Gated on `is_self_target`. Third-party targets are never
     assumed to be Software Factory scanner installations, so files named `mine_history.py`
     or paths in `agents/*/scripts/` in third-party targets are not excluded.
+
+    This is the STRUCTURAL gate: `self_target_suppression_scope` grants it to any checkout that
+    carries the factory's own instrument layout, including a separate clone (agents-32twc),
+    because the exclusion is a property of that layout rather than of the code's meaning.
     """
     try:
         if fpath.resolve() == Path(__file__).resolve():
@@ -394,6 +432,12 @@ def is_self_referential_line(line: str, is_self_target: bool = True) -> bool:
     the Software Factory itself. Third-party repositories often use these common
     property names in production code (e.g. routing, logging, event dispatch),
     so applying them globally caused silent dropping of genuine production sinks.
+
+    This is the CONTENT-LEVEL gate, and the broadest one: `self_target_suppression_scope`
+    withholds it from a checkout that merely SHARES the factory's history, because a product
+    forked from the factory keeps every factory commit and still ships its own endpoints - a
+    `category:` key there is the fork's routing metadata, not the factory's rule definition
+    (agents-uviio).
     """
     clean = line.strip()
     if not clean or clean.startswith(("//", "#", "*", "/*", "'''", '"""')):
@@ -516,12 +560,22 @@ def scan_entry_points(
     and scanner file suppressions strictly to Software Factory self-audits.
     Fail-visible telemetry records suppressed entry points so any dropped candidate
     is explicit rather than silent.
+
+    Auto-detection grades the two gates rather than switching them together
+    (`self_target_suppression_scope`, agents-uviio): a checkout that shares the factory's history
+    but is not the installation's own - a separate clone, or a product forked from the factory -
+    gets the structural scanner-file exclusion, never the content-level rule-metadata
+    suppression. An explicit `is_self_target` is an operator declaration and grants both.
     """
     findings = []
     suppressed_entry_points = []
     active_nonce = nonce or generate_nonce()
     if is_self_target is None:
-        is_self_target = is_factory_self_target(target_dir)
+        reason = factory_self_target_reason(target_dir)
+        structural_self, content_self = self_target_suppression_scope(reason)
+        is_self_target = reason in SELF_TARGET_POSITIVE
+    else:
+        structural_self = content_self = is_self_target
 
     for root, dirs, files in os.walk(target_dir):
         dirs[:] = [
@@ -545,7 +599,7 @@ def scan_entry_points(
                 continue
 
             # Exclude pattern-defining scanner files and scanner scripts
-            if is_scanner_file(fpath, rel_path, is_self_target=is_self_target):
+            if is_scanner_file(fpath, rel_path, is_self_target=structural_self):
                 continue
 
             try:
@@ -565,7 +619,7 @@ def scan_entry_points(
                     continue
 
                 # Check if line is suppressed by self-referential rules
-                if is_self_referential_line(line, is_self_target=is_self_target):
+                if is_self_referential_line(line, is_self_target=content_self):
                     for category in matched_categories:
                         suppressed_entry_points.append({
                             "id": f"sep-{len(suppressed_entry_points) + 1}",
@@ -692,15 +746,21 @@ def main():
 
     sys.stderr.write(f"Scanning entry points and sensitive primitives...\n")
     resolved_self_target, self_target_signal = resolve_self_target(target_dir, args.is_self_target)
+    structural_self, content_self = self_target_suppression_scope(self_target_signal)
+    scope = "full" if content_self else ("structural-only" if structural_self else "none")
     sys.stderr.write(
-        f"Self-target identity: {self_target_signal} (is_self_target={resolved_self_target}).\n"
+        f"Self-target identity: {self_target_signal} (is_self_target={resolved_self_target}, "
+        f"suppression scope={scope}).\n"
     )
+    # The DECLARED flag is passed through, not the resolved verdict: an undeclared run must keep
+    # auto-detection's graded scope (a shared-history checkout gets structural exclusions only),
+    # and collapsing it to a bool here is how agents-uviio hid a fork's production sink.
     entry_points, suppressed_entry_points, is_self_target = scan_entry_points(
-        target_dir, nonce=nonce, is_self_target=resolved_self_target, return_suppressed=True, return_self_target=True
+        target_dir, nonce=nonce, is_self_target=args.is_self_target, return_suppressed=True, return_self_target=True
     )
     if suppressed_entry_points:
         sys.stderr.write(
-            f"Note: {len(suppressed_entry_points)} candidate entry point(s) suppressed by self-referential rules (is_self_target={is_self_target}, identity={self_target_signal}).\n"
+            f"Note: {len(suppressed_entry_points)} candidate entry point(s) suppressed by self-referential rules (is_self_target={is_self_target}, identity={self_target_signal}, scope={scope}).\n"
         )
 
     meta = extract_project_metadata(target_dir, nonce=nonce)
@@ -717,6 +777,7 @@ def main():
         "target": target_dir.name,
         "is_self_target": is_self_target,
         "self_target_signal": self_target_signal,
+        "self_target_suppression_scope": scope,
         "evidence_nonce": nonce,
         "system_instruction": SYSTEM_INSTRUCTION.format(nonce=nonce),
         "threat_model": threat_model_info,
