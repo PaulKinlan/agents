@@ -38,8 +38,19 @@ fast_gate_arms_040_factory() {
       # agents-uxiks (rn0ky port): the dispatcher's bounded-batching loop lives in THIS file - the batch
       # prompt header, one engine call per batch, per-batch parsing/validation and the truncation
       # classification - and tests/test_candidate_batching_end_to_end.py drives it through `factory run`
-      # with a stub engine. MEASURED: returning None from max_candidates_per_call (batching disabled)
-      # fails 2 of its tests. Cost: 8.0 s, paid only when the dispatcher changes.
+      # with a stub engine. agents-tq1lt made the bound POLICY, which retired this arm's old control:
+      # "returning None from max_candidates_per_call (batching disabled)" names a state that no longer
+      # exists - factory:max_candidates_per_call returns resolve_max_candidates_per_call(agent_cfg) or
+      # raises, and is never None (agents-7f5pk). THE CONTROL THAT REPLACES IT IS THE CEILING ITSELF:
+      # set MAX_CANDIDATES_PER_BATCH above the suite's candidate count and the split stops. MEASURED
+      # 2026-10-24 on this VM - with MAX_CANDIDATES_PER_BATCH=20 the suite's two policy tests go red
+      # together ("10 candidates with no declaration must be 2 calls at the policy bound of 8, got []"
+      # and "a declared 20 must not lift the ceiling: []"), so an undeclared station AND a station
+      # declaring above the ceiling are both pinned by the ceiling's value - the suite pins the NUMBER,
+      # not an on/off switch, because the switch was removed with the None state. Cost, MEASURED the same day under load: 188.1 s for
+      # the module's 18 tests (~8 s per engine-free dispatcher run). NOT the 8.0 s an earlier revision
+      # claimed: that was the module as it stood before most of those runs existed. Paid only when the
+      # dispatcher changes.
       mapped="$mapped tests/test_candidate_batching_end_to_end.py"
       ;;
     install.sh)
