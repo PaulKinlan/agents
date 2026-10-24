@@ -45,6 +45,13 @@ class TestStationContextChannel(unittest.TestCase):
         ]
 
     def run_payload(self, payload):
+        """Run one dispatcher pass and return the prompts it actually sent, in batch order.
+
+        A list, not one string: since agents-tq1lt the per-call candidate bound is enforced by the
+        dispatcher (lib/candidate_batching.MAX_CANDIDATES_PER_BATCH), so a payload with more candidates
+        than the bound is presented as several batches. A payload under it is still ONE call with the
+        legacy `prompt.txt`, which is the byte-identical case below.
+        """
         self.payload.write_text(json.dumps(payload), encoding="utf-8")
         before = set((self.box.root / "runs").glob("probe-*")) if (self.box.root / "runs").exists() else set()
         # The target explicitly attests trust; force the same test-only no-bwrap
@@ -53,19 +60,28 @@ class TestStationContextChannel(unittest.TestCase):
              mock.patch("lib.sandbox._probe_result", False), contextlib.redirect_stdout(io.StringIO()):
             factory_cli.run_agent("probe", "trusted", engine_arg="pi", explicit_sink="file")
         after = set((self.box.root / "runs").glob("probe-*")) - before
-        self.assertEqual(len(after), 1, "one actual dispatcher run must write one prompt")
-        return (after.pop() / "prompt.txt").read_text(encoding="utf-8")
+        self.assertEqual(len(after), 1, "one actual dispatcher run must write its prompt")
+        run_dir = after.pop()
+        batch_files = sorted(run_dir.glob("prompt.batch*.txt"),
+                             key=lambda path: int(path.name.split(".batch")[1].split(".")[0]))
+        if batch_files:
+            self.assertFalse((run_dir / "prompt.txt").exists(),
+                             "a batched run renames every prompt; a stray prompt.txt would be stale")
+            return [path.read_text(encoding="utf-8") for path in batch_files]
+        return [(run_dir / "prompt.txt").read_text(encoding="utf-8")]
 
     def test_no_context_is_byte_identical_to_the_previous_prompt(self):
-        prompt = self.run_payload({"candidates": self.candidates})
+        # A payload the per-call bound covers stays ONE call, and that call's prompt is byte-identical to
+        # the one this channel has always produced - no batch header, no reordering.
+        few = self.candidates[:3]
+        prompts = self.run_payload({"candidates": few})
         expected = (
             "You are the probe agent. Examine the following context and candidate issues discovered by the "
             "deterministic scanner in repository 'trusted'. Follow your SKILL.md instructions, "
             "triage each item, and output your structured JSON findings.\n\n"
-            f"Scanner Data:\n{json.dumps(self.candidates[:50], indent=2)}\n"
+            f"Scanner Data:\n{json.dumps(few, indent=2)}\n"
         )
-        self.assertEqual(prompt, expected)
-        self.assertNotIn("rule-50", prompt, "candidate slice remains 50")
+        self.assertEqual(prompts, [expected])
 
     def test_context_is_separate_unsliced_and_not_an_identity_candidate(self):
         context = {"clusters": [{"cluster": i} for i in range(55)], "threat_model_summary": "model evidence",
@@ -76,20 +92,24 @@ class TestStationContextChannel(unittest.TestCase):
             report(finding(rule_id="injected", path="src/context.py", line_number=9)),
             encoding="utf-8",
         )
-        prompt = self.run_payload({"candidates": self.candidates, "context": context,
-                                   "candidate_id_scheme": "identity stamp excluded",
-                                   "system_instruction": "SYSTEM TEST DIRECTIVE not user data"})
-        expected_base = (
-            "You are the probe agent. Examine the following context and candidate issues discovered by the "
-            "deterministic scanner in repository 'trusted'. Follow your SKILL.md instructions, "
-            "triage each item, and output your structured JSON findings.\n\n"
-            f"Scanner Data:\n{json.dumps(self.candidates[:50], indent=2)}\n"
-        )
-        self.assertEqual(prompt, expected_base + f"\nStation Context:\n{json.dumps(context, indent=2)}\n")
-        self.assertNotIn("rule-50", prompt)
-        self.assertIn('"cluster": 54', prompt, "context cannot inherit the 50-candidate slice")
-        self.assertNotIn("identity stamp excluded", prompt)
-        self.assertNotIn("SYSTEM TEST DIRECTIVE", prompt, "system_instruction keeps its separate channel")
+        prompts = self.run_payload({"candidates": self.candidates, "context": context,
+                                    "candidate_id_scheme": "identity stamp excluded",
+                                    "system_instruction": "SYSTEM TEST DIRECTIVE not user data"})
+        context_block = f"\nStation Context:\n{json.dumps(context, indent=2)}\n"
+        self.assertGreater(len(prompts), 1,
+                           "52 candidates are more than the enforced per-call bound: this is the batched "
+                           "case, and the 50-candidate SLICE still owns what may appear")
+        for prompt in prompts:
+            self.assertTrue(prompt.endswith(context_block),
+                            f"every batch carries the unsliced context: {prompt[-160:]}")
+            self.assertNotIn("rule-50", prompt,
+                             "the candidate slice is still 50, in every batch (rule-50 is the 51st)")
+            self.assertNotIn("rule-51", prompt, "the slice drops the 52nd candidate too")
+            self.assertIn('"cluster": 54', prompt,
+                          "context cannot inherit the 50-candidate slice, in any batch")
+            self.assertNotIn("identity stamp excluded", prompt)
+            self.assertNotIn("SYSTEM TEST DIRECTIVE", prompt,
+                             "system_instruction keeps its separate channel")
         run_dir, = (self.box.root / "runs").glob("probe-*")
         self.assertIn("SYSTEM TEST DIRECTIVE", (run_dir / "system_directive.txt").read_text())
         store = json.loads((self.box.root / "findings" / "trusted.json").read_text())
@@ -98,8 +118,9 @@ class TestStationContextChannel(unittest.TestCase):
                          "context must never enter the candidate identity index")
 
     def test_present_json_null_is_not_treated_as_absent(self):
-        prompt = self.run_payload({"candidates": self.candidates, "context": None})
-        self.assertTrue(prompt.endswith("\nStation Context:\nnull\n"), prompt[-100:])
+        prompts = self.run_payload({"candidates": self.candidates, "context": None})
+        for prompt in prompts:
+            self.assertTrue(prompt.endswith("\nStation Context:\nnull\n"), prompt[-100:])
 
 
 if __name__ == "__main__":

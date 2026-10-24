@@ -298,14 +298,16 @@ class TestBoundedBatching(BatchedStation):
         ids = read_presented_candidate_ids(self.run_dir(), PER_CALL)
         self.assertEqual(ids, [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)])
 
-    def test_a_station_without_the_bound_stays_one_call(self):
-        self.agent(AGENT_YAML.replace("  max_candidates_per_call: 3\n", ""))
+    def test_a_station_under_the_bound_stays_one_call(self):
+        # The bound is enforced, not opt-in (agents-tq1lt), but a list that FITS the bound must still be
+        # one call: batching a list of 3 against a ceiling of 8 would only add engine starts.
+        self.agent(AGENT_YAML.replace("max_candidates_per_call: 3", "max_candidates_per_call: 8"))
         self.stub(BATCH_STUB)
         res = self.factory("pi")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         run = self.run_dir()
         self.assertFalse(list(run.glob("prompt.batch*.txt")),
-                         "batching is opt-in: an undeclared bound must not split the call")
+                         f"{CANDIDATE_COUNT} candidates under a bound of 8 must not split the call")
         self.assertTrue((run / "prompt.txt").exists())
 
 
@@ -760,6 +762,62 @@ class TestTruncationIsNamed(BatchedStation):
         self.assertTrue(classification_files, f"the classification must be kept: {sorted(p.name for p in run.iterdir())}")
         classification = json.loads(classification_files[0].read_text(encoding="utf-8"))
         self.assertEqual(classification["kind"], "no_json")
+
+
+# agents-tq1lt: the stations that hit the truncation (vuln-triage, docs-drift, deps-supply-chain) never
+# declared a per-call bound, so they asked for up to CANDIDATE_PROMPT_SLICE rows in ONE completion. Ten
+# candidates is the smallest list that shows the enforced ceiling: 8 + 2, where undeclared used to be 1.
+TEN_CANDIDATE_PREPASS = PREPASS.replace("in range(8)", "in range(10)")
+
+
+class TestThePerCallBoundIsPolicy(BatchedStation):
+    """The bound is enforced by the dispatcher, not opted into by a station declaration."""
+
+    def agent(self, yaml_text):  # noqa: D401 - stage ten candidates
+        super().agent(yaml_text)
+        (self.root / "agents" / "probe" / "scripts" / "prepass.py").write_text(
+            TEN_CANDIDATE_PREPASS, encoding="utf-8")
+
+    def test_an_undeclared_station_is_still_batched_at_the_policy_bound(self):
+        self.agent(AGENT_YAML.replace("  max_candidates_per_call: 3\n", ""))
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+
+        prompts = sorted(run.glob("prompt.batch*.txt"))
+        self.assertEqual(len(prompts), 2,
+                         f"10 candidates with no declaration must be 2 calls at the policy bound of 8, "
+                         f"got {[p.name for p in prompts]}")
+        sizes = []
+        for prompt in prompts:
+            text = prompt.read_text(encoding="utf-8")
+            sizes.append(len(sorted(set(__import__("re").findall(r"cand-perf-\d{3}", text)))))
+        self.assertEqual(sizes, [8, 2], "the ceiling is 8 per call, and the tail is its own call")
+
+        presented = json.loads((run / "presented_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(presented["batch_count"], 2)
+        self.assertEqual(presented["max_candidates_per_call"], 8)
+        self.assertEqual(presented["presented"], 10)
+
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([f["candidate_id"] for f in report["findings"]],
+                         [f"cand-perf-{i:03d}" for i in range(10)],
+                         "the Python-side merge accounts for every candidate across both calls")
+
+    def test_a_declaration_above_the_ceiling_is_capped_and_says_so(self):
+        self.agent(AGENT_YAML.replace("max_candidates_per_call: 3", "max_candidates_per_call: 20"))
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        prompts = sorted(run.glob("prompt.batch*.txt"))
+        self.assertEqual(len(prompts), 2,
+                         f"a declared 20 must not lift the ceiling: {[p.name for p in prompts]}")
+        presented = json.loads((run / "presented_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(presented["max_candidates_per_call"], 8)
+        self.assertIn("capped to the policy bound of 8", res.stdout,
+                      f"the cap must be stated, not silent: {res.stdout[-400:]}")
 
 
 if __name__ == "__main__":

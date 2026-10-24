@@ -52,12 +52,24 @@ LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_
 
 
 class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
-    """agents-exhhl: perf-review and vuln-verify opt into bounded batching, and a station that silently
-    loses (or mistypes) its bound goes back to asking for one oversized completion - which is how the
-    nightly died on 21 vuln-verify candidates. The key is parsed by the dispatcher's own reader here, so a
-    malformed value fails in the gate rather than at 03:00."""
+    """agents-exhhl/agents-tq1lt: every station that presents candidates is batched at the policy ceiling
+    (lib/candidate_batching.MAX_CANDIDATES_PER_BATCH), and a station may only declare a SMALLER bound.
+
+    The history matters here. The bound used to be opt-in, so perf-review and vuln-verify declared it and
+    the stations that never did - vuln-triage, docs-drift, deps-supply-chain - kept asking for up to
+    CANDIDATE_PROMPT_SLICE rows in one completion, which is the truncation regime the machinery exists to
+    remove (five VMs reported it as a parse failure on the second call). The key is still parsed by the
+    dispatcher's own reader here, so a malformed value fails in the gate rather than at 03:00; a
+    declaration ABOVE the ceiling is drift too, because the dispatcher would cap it - the station would
+    silently run a different batch size than its yaml says."""
 
     def test_declared_bounds_parse_and_the_known_stations_keep_theirs(self):
+        # The ceiling comes from the DISPATCHER'S OWN READER, not an imported constant: this suite pins
+        # the contract a station's yaml has with `factory`, and asking `factory` for an undeclared
+        # station's bound is exactly the policy value (agents-tq1lt). Keeping the constant out of the
+        # import list also keeps this module a non-consumer of lib/candidate_batching, so the fast gate's
+        # consumer coverage stays honest rather than paying for a 39 s suite it does not need.
+        policy_ceiling = factory_cli.max_candidates_per_call({})
         declared = {}
         for path in sorted((ROOT / "agents").glob("*/agent.yaml")):
             config = factory_cli.load_yaml_simple(path) or {}
@@ -68,12 +80,32 @@ class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
         for station, value in declared.items():
             self.assertIsInstance(value, int, f"{station}: the bound must parse to an int, got {value!r}")
             self.assertGreaterEqual(value, 1, f"{station}: a bound below 1 is refused, not clamped")
+            self.assertLessEqual(
+                value, policy_ceiling,
+                f"{station} declares max_candidates_per_call={value}, above the policy ceiling of "
+                f"{policy_ceiling}: the dispatcher caps it, so the yaml would be lying about the batch "
+                f"size that actually runs")
         # The two stations that hit the completion ceiling: their bound is load-bearing, so its removal is
         # a regression and not a config preference.
         for station in ("perf-review", "vuln-verify"):
             self.assertIn(station, declared,
                           f"{station} lost its output.max_candidates_per_call, so it asks for one "
                           f"unbounded completion again")
+
+    def test_an_undeclared_station_still_batches_at_the_ceiling(self):
+        # THE BEAD'S CORE CASES (agents-tq1lt): these three present candidates and never declared a
+        # bound, so they were the ones asking for one oversized completion.
+        policy_ceiling = factory_cli.max_candidates_per_call({})
+        for station in ("vuln-triage", "docs-drift", "deps-supply-chain"):
+            path = ROOT / "agents" / station / "agent.yaml"
+            config = factory_cli.load_yaml_simple(path) or {}
+            output = config.get("output") if isinstance(config.get("output"), dict) else {}
+            self.assertNotIn("max_candidates_per_call", output,
+                             f"{station} is the undeclared case this test exists for; if it now declares "
+                             f"a bound, pick another undeclared candidate-bearing station")
+            self.assertEqual(factory_cli.max_candidates_per_call(config), policy_ceiling,
+                             f"{station} must be batched at the policy ceiling, not sent one call")
+
 
 
 def finding(**overrides):
@@ -116,6 +148,34 @@ class Sandbox:
         (root / "lines").mkdir()
         self.bin = root / "bin"
         self.bin.mkdir()
+        # A BATCHED prompt must be answered like a compliant model: only for the candidates that batch
+        # was SHOWN. Since agents-tq1lt the dispatcher enforces a per-call candidate bound, so a station
+        # whose pre-pass finds more than the bound is presented in several calls and a canned answer
+        # citing every candidate is (correctly) refused as a cross-batch attribution. This filter turns
+        # the canned report into the answer its batch deserves; a single-call prompt is passed through
+        # untouched, so no existing fixture changes shape. python3 is in the sandbox's executable
+        # allowlist (station pre-passes are python), so this also works under bubblewrap.
+        (self.bin / "batch_filter.py").write_text(
+            "import json, re, sys\n"
+            "path = sys.argv[1]\n"
+            "prompt = sys.stdin.read()\n"
+            "text = open(path, encoding='utf-8').read()\n"
+            "try:\n"
+            "    payload = json.loads(text)\n"
+            "except ValueError:\n"
+            "    sys.stdout.write(text)  # prose, a truncation fixture: the stub says what it says\n"
+            "    raise SystemExit(0)\n"
+            "shown = set(re.findall(r'\"candidate_id\"\\s*:\\s*\"([^\"]+)\"', prompt))\n"
+            "if not shown:\n"
+            "    sys.stdout.write(text)  # count-only accounting: nothing to attribute rows to\n"
+            "    raise SystemExit(0)\n"
+            "for key, value in list(payload.items()):\n"
+            "    if isinstance(value, list) and value and all(isinstance(r, dict) for r in value):\n"
+            "        payload[key] = [r for r in value\n"
+            "                        if not isinstance(r.get('candidate_id'), str)\n"
+            "                        or r['candidate_id'] in shown]\n"
+            "json.dump(payload, sys.stdout)\n",
+            encoding="utf-8")
         stub = self.bin / "pi"
         # The adapter passes --skill <agent dir>; print that agent's canned output.
         stub.write_text(
@@ -125,8 +185,13 @@ class Sandbox:
             # Drain the prompt: the adapter pipes it in under `set -euo pipefail` and the real
             # engine reads it, so a stub that exits without reading makes printf take SIGPIPE
             # (141), which the adapter reports as a spurious "engine 'pi' exited 1" (agents-lx4).
-            "cat >/dev/null\n"
-            f"cat '{root}/outputs/'\"$(basename \"$skill\")\".txt\n",
+            "prompt=$(cat)\n"
+            f"out='{root}/outputs/'\"$(basename \"$skill\")\".txt\n"
+            # batch_brief() opens every batched prompt with this header (lib/candidate_batching.py).
+            "case \"$prompt\" in\n"
+            "  'BATCH '*) printf '%s' \"$prompt\" | python3 '" + str(self.bin / "batch_filter.py") + "' \"$out\" ;;\n"
+            "  *) cat \"$out\" ;;\n"
+            "esac\n",
             encoding="utf-8")
         stub.chmod(0o755)
 
