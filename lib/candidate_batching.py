@@ -189,9 +189,31 @@ def batch_candidate_ids(batch: Iterable[Any]) -> List[str]:
     return ids
 
 
+def _population_brief(ids: Sequence[str], total: int, idless: int, *,
+                      subject: str, noun: str) -> str:
+    """The population sentence: how many candidates, how many carry an id, and the ids themselves.
+
+    `subject`/`noun` exist so the SAME facts can be stated for one batch of many (`This batch`) and for
+    a list presented in a single call (`The candidate list`) without inventing a second wording that
+    could drift from this one (agents-o0nv2).
+    """
+    if not ids:
+        return (f" {subject} holds {total} candidate(s) and NONE of them carry a candidate_id: "
+                f"answer every one, and omit the candidate_id field. Coverage for a {noun} without "
+                f"ids is a row count, so an omitted row is indistinguishable from a missing answer.")
+    if idless == 0:
+        return (f" {subject} holds {total} candidate(s), each with a candidate_id: "
+                f"{', '.join(ids)}.")
+    return (f" {subject} holds {total} candidate(s): {len(ids)} "
+            f"{'carries' if len(ids) == 1 else 'carry'} a candidate_id "
+            f"({', '.join(ids)}) and the other {idless} "
+            f"{'carries' if idless == 1 else 'carry'} NO candidate_id - answer those "
+            f"rows too, and omit the candidate_id field on them rather than skipping them.")
+
+
 def batch_brief(batch: Sequence[Any], batch_index: int, batch_count: int) -> str:
-    """The header that tells the model what THIS batch is, and how much of it carries an id
-    (agents-g42wa).
+    """The header that tells the model what it is answering, and how much of it carries an id
+    (agents-g42wa, agents-o0nv2).
 
     WHY THE COUNTS ARE SPELLED OUT. The header used to end with "The candidate ids in this batch: a,
     b." - and when a batch mixes identified and unidentified candidates (vuln-verify's pre-pass ids
@@ -203,31 +225,36 @@ def batch_brief(batch: Sequence[Any], batch_index: int, batch_count: int) -> str
 
     So the brief states the population (how many candidates), the identified count (and their ids), and
     the UNIDENTIFIED count with the instruction to answer those rows too, without a candidate_id. A
-    batch with no ids at all says so, because that is the count-only case, not an empty batch.
+    list with no ids at all says so, because that is the count-only case, not an empty one.
+
+    AND IT IS NOT A BATCHING FEATURE (agents-o0nv2). Only multi-batch runs used to get this header, so a
+    station whose candidate list fits ONE call - modern-web's 6, docs-drift's 49, vuln-triage's 31, i.e.
+    most nights - was told nothing about its population or its ids. The only instruction to copy a
+    candidate_id in that prompt was a schema `description` inside the JSON blob, immediately followed by
+    the derived checklist that lists the fields a finding MUST carry and, correctly, does not include the
+    one field that cannot be schema-required. A model reading that checklist as the contract emitted
+    conforming rows with no ids, and the run was judged 0 of 6. `factory:1963` now calls this for every
+    planned batch, and with ONE batch the facts are stated without the batching wording - deliberately
+    not starting with `BATCH `, which is how a batched prompt is recognised downstream.
     """
     ids = batch_candidate_ids(batch)
     total = len(list(batch))
     idless = max(total - len(ids), 0)
-    if not ids:
-        population = (f" This batch holds {total} candidate(s) and NONE of them carry a candidate_id: "
-                      f"answer every one, and omit the candidate_id field. Coverage for a batch without "
-                      f"ids is a row count, so an omitted row is indistinguishable from a missing answer.")
-    elif idless == 0:
-        population = (f" This batch holds {total} candidate(s), each with a candidate_id: "
-                      f"{', '.join(ids)}.")
-    else:
-        population = (f" This batch holds {total} candidate(s): {len(ids)} "
-                      f"{'carries' if len(ids) == 1 else 'carry'} a candidate_id "
-                      f"({', '.join(ids)}) and the other {idless} "
-                      f"{'carries' if idless == 1 else 'carry'} NO candidate_id - answer those "
-                      f"rows too, and omit the candidate_id field on them rather than skipping them.")
+    if int(batch_count) <= 1:
+        return (
+            "The candidate list is not split into batches: answer for EVERY candidate below - a "
+            "confirmed row or a dismissal with `false_positive: true`, never an omission."
+            + _population_brief(ids, total, idless, subject="The candidate list", noun="list")
+            + "\n\n"
+        )
     return (
         f"BATCH {batch_index + 1} of {batch_count}: the candidate list is presented in "
         f"{batch_count} batches so that no single response has to carry every row. Answer "
         f"ONLY for the candidates in THIS batch, and answer for EVERY one of them - a "
         f"confirmed row or a dismissal with `false_positive: true`, never an omission."
-        + population
+        + _population_brief(ids, total, idless, subject="This batch", noun="batch")
         + "\n\n"
+
     )
 
 

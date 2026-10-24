@@ -1961,13 +1961,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
 
         prompts: List[str] = []
         for batch_index, batch in enumerate(batches):
-            if batch_count > 1:
-                # agents-g42wa: the brief states the batch POPULATION, not just the ids it happens to
-                # carry - naming only the ids described a 4-candidate batch with 1 id as though the ids
-                # were the batch, and the model skipped the three unnamed candidates.
-                header = batch_brief(batch, batch_index, batch_count)
-            else:
-                header = ""
+            # agents-g42wa: the brief states the batch POPULATION, not just the ids it happens to
+            # carry - naming only the ids described a 4-candidate batch with 1 id as though the ids
+            # were the batch, and the model skipped the three unnamed candidates.
+            # agents-o0nv2: and it is not a BATCHING feature. Emitting it only when batch_count > 1
+            # left every single-call station (modern-web 6, docs-drift 49, vuln-triage 31 - most
+            # nights) told nothing about its population or its ids, which is the shape a 0-of-6 read.
+            # A non-list slice (a context-only payload) carries no candidates to describe.
+            header = batch_brief(batch, batch_index, batch_count) if isinstance(batch, list) else ""
             batch_prompt = header + (
                 f"You are the {agent_name} agent. Examine the following context and candidate issues discovered by the "
                 f"deterministic scanner in repository '{target_name}'. Follow your SKILL.md instructions, "
