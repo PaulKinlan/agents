@@ -1297,6 +1297,26 @@ def _finding_sort_key(finding: Any) -> Tuple[str, int, str]:
     return (str(finding.get("path", "")), line, str(finding.get("rule_id", "")))
 
 
+def sweep_grace_warning(budget: Any) -> Optional[str]:
+    """A line to print when this station's deadline can reach the run-sweep grace (agents-6ep5s).
+
+    A run directory is protected from a CONCURRENT `factory` prune only by the AGE of its `.active`
+    marker (`lib/retention.py:_marker_is_active`), so a station still working at the grace is swept -
+    and its findings with it. The FUNDED ceiling (lib/budget.py:STATION_DEADLINE_CEILING_MINUTES, 45
+    min) stays inside the default grace by construction, but two caller choices can still leave it: a
+    station that DECLARES a deadline at or above the grace is honoured rather than shrunk, and an
+    operator can lower FACTORY_RUN_ACTIVE_GRACE_SECONDS. Printed, not raised: the run is the
+    operator's call, but it must not be a silent one.
+    """
+    grace = active_grace_seconds()
+    if budget.max_seconds < grace:
+        return None
+    return (f"Note: this station's deadline ({budget.minutes:g} min) is at or above the run-sweep "
+            f"grace ({grace / 60:g} min), so a concurrent factory prune could sweep its run directory "
+            f"while it is still working. Raise FACTORY_RUN_ACTIVE_GRACE_SECONDS above the deadline, "
+            f"or lower budget.max_minutes.")
+
+
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
               station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
               read_target_dir: Optional[Path] = None, model_arg: Optional[str] = None,
@@ -1751,6 +1771,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                              unpinned_note=unpinned_note):
         print(line)
     print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy, engine)}")
+    # agents-6ep5s: a deadline at or above the run-sweep grace can be pruned mid-run. Named here, at
+    # the declaration, and again below if funding the batches raises it past the grace.
+    grace_warning = sweep_grace_warning(budget)
+    if grace_warning:
+        print(f"  {grace_warning}")
     print(f"  Target:      {target_name} ({target_dir})")
     print(f"  Visibility:  {normalize_visibility(target_cfg.get('visibility'))} (enforced)")
     print(f"  Engine:      {engine}")
@@ -1966,6 +1991,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 print(f"-> Station deadline now {funded / 60.0:g} min for {batch_count} call(s) of "
                       f"{budget.declared_minutes:g} min (ceiling "
                       f"{STATION_DEADLINE_CEILING_MINUTES:g} min).")
+                # agents-6ep5s: funding the calls can raise a deadline the declaration alone kept
+                # inside the sweep grace (or an operator may have lowered the grace) - say so now, not
+                # after the run directory has been swept by a concurrent prune.
+                funded_warning = sweep_grace_warning(budget)
+                if funded_warning and funded_warning != grace_warning:
+                    print(f"  {funded_warning}")
             else:
                 batches = [candidates_slice]
         else:

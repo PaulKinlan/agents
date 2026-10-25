@@ -869,5 +869,36 @@ printf '%s]}\n' "$out"
         self.assertIn("exceeded its", failure)
 
 
+class TestTheSweepGraceIsNotSilentlyCrossed(BatchedStation):
+    """agents-6ep5s (review of agents-xm2xc): a station deadline must not reach the run-sweep grace.
+
+    A run directory is protected from a CONCURRENT prune only while its `.active` marker is younger
+    than lib/retention.py's grace, so a station still working at the grace loses its run directory and
+    its findings. The funded ceiling now stays inside the default grace; these drive the two ways a
+    caller can still cross it, and require the dispatcher to SAY so rather than let a run be swept.
+    """
+
+    def test_a_declaration_at_or_above_the_grace_is_named_at_the_banner(self):
+        self.agent(AGENT_YAML.replace("max_minutes: 5", "max_minutes: 120"))   # 2 h > 1 h grace
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("at or above the run-sweep grace", res.stdout,
+                      f"a 120-minute declaration must be named, not silently sweepable: {res.stdout[:600]}")
+        self.assertIn("FACTORY_RUN_ACTIVE_GRACE_SECONDS", res.stdout,
+                      "the warning must name the lever that fixes it")
+
+    def test_a_lowered_grace_under_the_funded_deadline_is_named_when_funding(self):
+        # the default path is safe by construction; an operator who lowers the grace is not, so the
+        # funded deadline must be re-checked AFTER plan_calls rather than only at the banner
+        self.agent(AGENT_YAML)                                        # 5 min per call, 3 calls
+        self.stub(BATCH_STUB)
+        res = self.factory("pi", extra_env={"FACTORY_RUN_ACTIVE_GRACE_SECONDS": "600"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Station deadline now 15 min for 3 call(s)", res.stdout)
+        self.assertIn("grace (10 min)", res.stdout,
+                      f"the funded 15-minute deadline exceeds a 10-minute grace: {res.stdout[:900]}")
+
+
 if __name__ == "__main__":
     unittest.main()

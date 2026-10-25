@@ -37,7 +37,22 @@ DEFAULT_MAX_MINUTES = 5.0
 #
 # Two bounds keep "fund the calls" from becoming "no bound at all": a ceiling on the station total,
 # and a reserve kept out of the engine phase for the step that follows it.
-STATION_DEADLINE_CEILING_MINUTES = 60.0
+#
+# THE CEILING MUST STAY BELOW THE RUN-SWEEP GRACE (agents-6ep5s, review of agents-xm2xc). A run
+# directory is protected from a CONCURRENT `factory` prune only by its `.active` marker's AGE
+# (lib/retention.py: ACTIVE_GRACE_SECONDS_DEFAULT = 3600 s, _marker_is_active). A ceiling AT that grace
+# let a batched station still be dispatching findings at 3600 s while another scheduled run swept its
+# run directory out from under it - the deadline and the sweep threshold were the same number, which is
+# how the first draft of this change reached 3600 s on a 12-call plan. So the ceiling is the grace
+# minus a 15-minute sweep margin: 45 min, comfortably more than the measured plan that mattered (50
+# candidates -> 7 calls -> 35 min at a 5-minute declaration) and provably inside the grace.
+#
+# lib/budget.py deliberately does NOT import lib/retention.py for this number: budget.py is copied into
+# the dispatcher-runtime sandboxes of tests/test_report_schema.py and tests/test_prompt_exposure.py,
+# which stage a named module set that does not include retention.py. The relationship is pinned by
+# tests/test_budget.py::TestBatchedCallPlanning.test_the_ceiling_stays_inside_the_run_sweep_grace, so
+# either constant moving fails the gate instead of silently reopening the hole.
+STATION_DEADLINE_CEILING_MINUTES = 45.0
 # The step after the engine calls is the findings dispatch - a local command, not a model call. With a
 # multi-call deadline it is the step that gets squeezed: batches that each spend their full allowance
 # leave it zero seconds, and the run reports a TIMEOUT over a report the model already produced.

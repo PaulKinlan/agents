@@ -128,8 +128,9 @@ class TestBatchedCallPlanning(unittest.TestCase):
     def test_a_call_is_reduced_to_its_fair_share_when_the_ceiling_binds(self):
         # 30 calls cannot buy 30 x 5 min, so the ceiling is divided instead of multiplied
         budget = StationBudget(5, clock=FakeClock())
-        budget.plan_calls(30)
-        self.assertAlmostEqual(budget.call_timeout("engine 'pi' batch 1/30", 30), 3570 / 30)
+        total = budget.plan_calls(30)
+        self.assertEqual(total, STATION_DEADLINE_CEILING_MINUTES * 60)
+        self.assertAlmostEqual(budget.call_timeout("engine 'pi' batch 1/30", 30), (total - 30) / 30)
 
     def test_the_last_call_leaves_the_findings_dispatch_its_reserve(self):
         clock = FakeClock()
@@ -153,6 +154,27 @@ class TestBatchedCallPlanning(unittest.TestCase):
         budget = StationBudget(0.01, clock=FakeClock())   # 0.6 s
         budget.plan_calls(2)
         self.assertLessEqual(budget.call_timeout("engine 'pi' batch 1/2", 2), 0.6)
+
+    def test_the_ceiling_stays_inside_the_run_sweep_grace(self):
+        """agents-6ep5s: a station deadline must never reach the run-sweep grace.
+
+        A run directory is protected from a concurrent prune only while its `.active` marker is
+        YOUNGER than lib/retention.py's grace (default 3600 s). The first draft of this change funded
+        up to 60 min, i.e. exactly the grace, so a batched station could still be dispatching findings
+        at 3600 s while another scheduled run swept its run directory (driven in the finding's own
+        repro: plan_calls(12) -> 3600 s, then prune_run_dirs removed a directory whose marker was
+        3601 s old). The ceiling is now the grace minus a sweep margin, and this test is what stops
+        either constant drifting back into a collision.
+        """
+        from lib.retention import ACTIVE_GRACE_SECONDS_DEFAULT
+
+        self.assertLess(STATION_DEADLINE_CEILING_MINUTES * 60, ACTIVE_GRACE_SECONDS_DEFAULT,
+                        "a station deadline at or above the sweep grace can be pruned while it runs")
+        self.assertGreaterEqual(STATION_DEADLINE_CEILING_MINUTES, 30,
+                                "the ceiling must still fund a real plan: 50 candidates at 8 per "
+                                "call is 7 calls, 35 min at a 5-minute declaration")
+        budget = StationBudget(5, clock=FakeClock())
+        self.assertEqual(budget.plan_calls(12), STATION_DEADLINE_CEILING_MINUTES * 60)
 
     def test_a_planned_call_actually_bounds_the_child(self):
         # the arithmetic above is only a promise; this drives the timeout that consumes it

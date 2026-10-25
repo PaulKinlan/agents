@@ -129,7 +129,14 @@ _HILLCLIMB_PREFIX = "hillclimb-"
 # An in-progress run carries this marker file. Pruning skips a directory whose marker
 # is younger than the active grace, so a concurrent run cannot sweep a live run.
 ACTIVE_MARKER_NAME = ".active"
-ACTIVE_GRACE_SECONDS_DEFAULT = 3600  # one hour: comfortably above any station budget
+ACTIVE_GRACE_SECONDS_DEFAULT = 3600
+# One hour, chosen to stay ABOVE the station-deadline CEILING in lib/budget.py (45 min) plus a sweep
+# margin, so a run that is still working cannot be old enough to sweep. The earlier comment here - "one
+# hour: comfortably above any station budget" - was a claim the batched deadline made false: a single
+# station could reach this exact number (agents-6ep5s).
+# tests/test_budget.py::TestBatchedCallPlanning.test_the_ceiling_stays_inside_the_run_sweep_grace pins
+# the relationship, and the dispatcher prints a warning when a station DECLARES a deadline at or above
+# this grace, or when an operator lowers FACTORY_RUN_ACTIVE_GRACE_SECONDS below a funded one.
 _ENV_ACTIVE_GRACE_SECONDS = "FACTORY_RUN_ACTIVE_GRACE_SECONDS"
 
 # The pruned-directory tombstone ledger (agents-dm8n): one append-only JSON line
