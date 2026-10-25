@@ -156,10 +156,12 @@ class TestBatchedCallPlanning(unittest.TestCase):
 
     def test_a_planned_call_actually_bounds_the_child(self):
         # the arithmetic above is only a promise; this drives the timeout that consumes it
-        budget = StationBudget(0.02, label="slow", clock=time.monotonic)  # 1.2 s, reserve 0.12 s
-        budget.plan_calls(2)
+        budget = StationBudget(0.02, label="slow", clock=time.monotonic)  # 1.2 s per call
+        budget.plan_calls(2)                                                # 2.4 s total
         allowance = budget.call_timeout("engine batch 1/2", 2)
-        self.assertAlmostEqual(allowance, 0.54, places=2)   # (1.2 - 0.12) / 2 calls
+        # the post-engine reserve (0.12 s) comes off the STATION total once, then the rest is divided
+        # between the calls: (2.4 - 0.12) / 2
+        self.assertAlmostEqual(allowance, 1.14, places=2)
         started = time.monotonic()
         with self.assertRaises(StationTimeout) as ctx:
             run_station_command(
@@ -168,7 +170,7 @@ class TestBatchedCallPlanning(unittest.TestCase):
             )
         # The killed call is the CALL's allowance, not the station's: the bound below is loose because
         # the process-group kill and reap have their own bounded cost (GROUP_EXIT_WAIT_SECONDS), which
-        # is why this asserts "well under the 30 s child" rather than the exact 0.54 s.
+        # is why this asserts "well under the 30 s child" rather than the exact 1.14 s.
         self.assertLess(time.monotonic() - started, 5)
         self.assertIn("exceeded its", str(ctx.exception))
         self.assertIn("process group killed", str(ctx.exception))
