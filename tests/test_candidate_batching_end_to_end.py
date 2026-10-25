@@ -867,6 +867,13 @@ printf '%s]}\n' "$out"
         failure = (run / "failure_reason.txt").read_text(encoding="utf-8")
         self.assertIn("batch 1/3", failure, f"the reason names the batch that hung: {failure}")
         self.assertIn("exceeded its", failure)
+        # agents-03iq4, the WIRING half: a failed run keeps its .active marker (only a successful one
+        # drops it), and that marker must name its owner so a concurrent prune can see the run is gone
+        # rather than reason from the marker's age. This is the only place the real dispatcher's marker
+        # survives a run, so it is the place to assert what the dispatcher actually wrote.
+        owner = (run / ".active").read_text(encoding="utf-8").split()
+        self.assertGreater(int(owner[0]), 0, f"the marker must name a pid, got {owner!r}")
+        self.assertGreater(len(owner), 1, f"the marker must name the process start time, got {owner!r}")
 
 
 class TestTheSweepGraceIsNotSilentlyCrossed(BatchedStation):

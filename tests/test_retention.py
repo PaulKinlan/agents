@@ -73,6 +73,7 @@ from lib.retention import (  # noqa: E402
     retention_config,
     retention_ledger_path,
     run_directories,
+    write_active_marker,
 )
 
 _SECONDS_PER_DAY = 86400
@@ -1524,6 +1525,109 @@ class TestActiveRunGuard(unittest.TestCase):
 
             self.assertFalse(fake.exists())
             self.assertEqual(pruned, [fake.resolve()])
+
+
+    def test_a_live_owner_protects_the_directory_however_old_the_marker_is(self):
+        """agents-03iq4, THE CASE THE AGE RULE COULD NOT PROMISE.
+
+        RED-FIRST against the age-only rule: every assertion below fails on it, because the marker is
+        deliberately aged far past a 100-second grace while its owner (this test process) is alive. A
+        run that outlives the grace - a declared budget above the ceiling, a lowered grace, a suspended
+        VM - must not have its directory, evidence and findings swept out from under it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            live = make_dir(runs, "still-running", 1)
+            marker = write_active_marker(live)
+            os.utime(marker, (1000, 1000))      # 1000 s older than `now`, i.e. 900 s past a 100 s grace
+            os.utime(live, (1, 1))
+            abandoned = make_dir(runs, "abandoned", 2)
+            stale = write_active_marker(abandoned)
+            # a pid that is not running - written BEFORE the utime, because writing is what would make
+            # the marker look fresh and this test would then assert nothing about the owner signal
+            stale.write_text("999999 1\n", encoding="utf-8")
+            os.utime(stale, (1000, 1000))
+            os.utime(abandoned, (1, 1))
+
+            pruned = prune_run_dirs(runs, now=2000, retain=0, max_age_seconds=1, active_grace=100)
+
+            self.assertTrue(live.exists(), "a LIVE owner's run directory was swept by age alone")
+            self.assertFalse(abandoned.exists(), "a dead owner's stale marker still protected the dir")
+            self.assertEqual(pruned, [abandoned.resolve()])
+
+    def test_the_owner_identity_survives_pid_reuse(self):
+        # pids are reused: a live pid with a DIFFERENT start time is a different process, so the aged
+        # marker must not keep the abandoned directory alive for ever
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            reused = make_dir(runs, "reused-pid", 1)
+            marker = write_active_marker(reused)
+            real_pid = os.getpid()
+            marker.write_text(f"{real_pid} 1\n", encoding="utf-8")  # right pid, wrong start time
+            os.utime(marker, (1000, 1000))
+            os.utime(reused, (1, 1))
+
+            pruned = prune_run_dirs(runs, now=2000, retain=0, max_age_seconds=1, active_grace=100)
+
+            self.assertFalse(reused.exists(),
+                             "a recycled pid kept an abandoned directory alive past the grace")
+            self.assertEqual(pruned, [reused.resolve()])
+
+    def test_the_marker_names_its_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            live = make_dir(runs, "named-owner", 1)
+            marker = write_active_marker(live)
+            owner = marker.read_text(encoding="utf-8").split()
+            self.assertEqual(int(owner[0]), os.getpid())
+            self.assertGreater(len(owner), 1,
+                               "the start time is what makes the pid check honest when pids are reused")
+
+    def test_a_marker_with_no_owner_keeps_the_age_rule(self):
+        # an older factory's marker (and every test fixture) carries arbitrary text: the age rule still
+        # applies, so an upgrade does not orphan every in-flight run or resurrect every stale one
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            fresh = make_dir(runs, "legacy-fresh", 1)
+            (fresh / ACTIVE_MARKER_NAME).write_text("active\n", encoding="utf-8")
+            os.utime(fresh / ACTIVE_MARKER_NAME, (2000, 2000))
+            os.utime(fresh, (1, 1))
+            aged = make_dir(runs, "legacy-aged", 2)
+            (aged / ACTIVE_MARKER_NAME).write_text("active\n", encoding="utf-8")
+            os.utime(aged / ACTIVE_MARKER_NAME, (1000, 1000))
+            os.utime(aged, (1, 1))
+
+            pruned = prune_run_dirs(runs, now=2000, retain=0, max_age_seconds=1, active_grace=100)
+
+            self.assertTrue(fresh.exists())
+            self.assertFalse(aged.exists())
+            self.assertEqual(pruned, [aged.resolve()])
+
+    def test_an_unverifiable_start_time_is_the_conservative_direction(self):
+        """A host with no procfs can check only the pid, and the documented choice is to PROTECT then.
+
+        Both directions are asserted, because a one-sided test here would let either mistake through:
+        a live pid whose start time cannot be read keeps its directory (we cannot contradict the pid),
+        and a DEAD pid is swept once aged even without a start time (the age rule still bounds it).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = make_runs(tmp)
+            live = make_dir(runs, "pid-only-live", 1)
+            live_marker = write_active_marker(live)
+            os.utime(live_marker, (1000, 1000))
+            os.utime(live, (1, 1))
+            dead = make_dir(runs, "pid-only-dead", 2)
+            dead_marker = write_active_marker(dead)
+            dead_marker.write_text("999999\n", encoding="utf-8")   # no start time, no such process
+            os.utime(dead_marker, (1000, 1000))
+            os.utime(dead, (1, 1))
+
+            with mock.patch("lib.retention._process_start_time", return_value=None):
+                pruned = prune_run_dirs(runs, now=2000, retain=0, max_age_seconds=1, active_grace=100)
+
+            self.assertTrue(live.exists(), "a live pid must protect its directory when /proc is absent")
+            self.assertFalse(dead.exists(), "age must still bound a marker naming a dead pid")
+            self.assertEqual(pruned, [dead.resolve()])
 
 
 class TestActiveGraceConfig(unittest.TestCase):

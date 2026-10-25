@@ -126,8 +126,8 @@ _ENV_RETAIN_AGE_DAYS = "FACTORY_RUN_RETENTION_AGE_DAYS"
 # proposal artifact, not a run record, and must never be swept as one.
 _HILLCLIMB_PREFIX = "hillclimb-"
 
-# An in-progress run carries this marker file. Pruning skips a directory whose marker
-# is younger than the active grace, so a concurrent run cannot sweep a live run.
+# An in-progress run carries this marker file. Pruning skips a directory whose marker says a run is
+# still inside it - by OWNER liveness first, by marker age as the fallback (see the block below).
 ACTIVE_MARKER_NAME = ".active"
 ACTIVE_GRACE_SECONDS_DEFAULT = 3600
 # One hour, chosen to stay ABOVE the station-deadline CEILING in lib/budget.py (45 min) plus a sweep
@@ -137,6 +137,13 @@ ACTIVE_GRACE_SECONDS_DEFAULT = 3600
 # tests/test_budget.py::TestBatchedCallPlanning.test_the_ceiling_stays_inside_the_run_sweep_grace pins
 # the relationship, and the dispatcher prints a warning when a station DECLARES a deadline at or above
 # this grace, or when an operator lowers FACTORY_RUN_ACTIVE_GRACE_SECONDS below a funded one.
+#
+# AGE IS THE FALLBACK, NOT THE DECISION (agents-03iq4). The grace is a heuristic about how long a live
+# run can plausibly take; a run that outlives it - a declared budget above the ceiling, a lowered grace,
+# a suspended VM - was swept while it was still writing, taking its evidence and its findings with it.
+# The marker therefore names its OWNER (pid + process start time) and a live owner protects the
+# directory regardless of age; the grace still bounds how long a CRASHED run's stale marker protects it.
+_ACTIVE_MARKER_MAX_BYTES = 64
 _ENV_ACTIVE_GRACE_SECONDS = "FACTORY_RUN_ACTIVE_GRACE_SECONDS"
 
 # The pruned-directory tombstone ledger (agents-dm8n): one append-only JSON line
@@ -381,13 +388,103 @@ def run_directories(runs_dir: Path) -> Iterable[Path]:
             yield entry
 
 
-def _marker_is_active(directory: Path, now: float, grace: float) -> bool:
-    """True when ``directory`` carries a fresh ``.active`` marker.
+def _process_start_time(pid: int) -> Optional[int]:
+    """The 22nd field of /proc/<pid>/stat (clock ticks since boot), or None when unreadable.
 
-    A fresh marker means a run is still allocating/completing inside ``directory``,
-    so pruning must skip it. Only a regular file counts (a symlink or a directory
-    named ``.active`` is not a marker), and ``grace`` bounds how long a stale marker
-    (from a hard-killed run) keeps its directory protected.
+    Linux-only by design: this is a LOCAL liveness detail, and on a host without procfs the caller falls
+    back to the age rule rather than guessing. The value is what makes a pid check honest - pids are
+    reused, so "a process with this pid exists" is not "the run that wrote the marker is alive".
+    """
+    try:
+        stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # `comm` (field 2) is parenthesised and may itself contain spaces or ')', so the positional fields
+    # start after the LAST ')': there fields[0] is field 3 (state) and starttime (field 22) is index 19.
+    try:
+        return int(stat_line.rsplit(")", 1)[1].split()[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def write_active_marker(directory: Path) -> Path:
+    """Create/replace ``directory``'s `.active` marker, naming THIS process as its owner.
+
+    factory calls this at run allocation. The owner is `"<pid> <start-time>"` (start-time omitted when
+    the host has no procfs), so a concurrent prune can ask the kernel whether the run is still alive
+    instead of inferring it from how old the marker looks (agents-03iq4).
+    """
+    marker = Path(directory) / ACTIVE_MARKER_NAME
+    pid = os.getpid()
+    start = _process_start_time(pid)
+    marker.write_text(f"{pid} {start}" if start is not None else str(pid), encoding="utf-8")
+    return marker
+
+
+def _marker_owner(marker: Path) -> Optional[Tuple[int, Optional[int]]]:
+    """``(pid, start-time)`` from the marker's contents, or None when it names no readable owner.
+
+    Unknown content is NOT an error: a marker written by an older factory, or by a test, carries whatever
+    text it carries, and those directories keep exactly the behaviour they had - the age rule. Refusing
+    an unreadable marker instead would sweep every in-flight run across an upgrade.
+    """
+    try:
+        raw = marker.read_text(encoding="utf-8", errors="replace")[:_ACTIVE_MARKER_MAX_BYTES]
+    except OSError:
+        return None
+    parts = raw.split()
+    if not parts:
+        return None
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return None
+    if pid <= 0:
+        return None
+    start: Optional[int] = None
+    if len(parts) > 1:
+        try:
+            start = int(parts[1])
+        except ValueError:
+            start = None
+    return pid, start
+
+
+def _owner_is_alive(pid: int, start: Optional[int]) -> bool:
+    """True when ``pid`` is a live process AND, when its start time is known, still the same process.
+
+    PermissionError means the process exists but belongs to another user: alive from our point of view.
+    An unreadable live start time is treated as alive (the pid exists and its identity cannot be
+    contradicted) - the conservative direction, because protecting a directory too long costs a delayed
+    prune while sweeping a live one costs the evidence.
+
+    A session that can write its run directory can already refresh the marker's mtime, so naming a
+    long-lived pid here grants nothing it did not have; it can only delay its own sweep.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    except OSError:
+        return False
+    if start is None:
+        return True
+    live_start = _process_start_time(pid)
+    return live_start is None or live_start == start
+
+
+def _marker_is_active(directory: Path, now: float, grace: float) -> bool:
+    """True when ``directory`` still holds a run that must not be swept.
+
+    Two signals, cheapest first: a marker whose OWNER is still alive (agents-03iq4 - a live run is never
+    swept, however long it runs, which is what the age rule could not promise), and the original AGE rule
+    for markers that name no owner or whose owner is gone - a crashed run's stale marker stops protecting
+    the directory once it is older than ``grace``.
+
+    Only a regular file counts (a symlink or a directory named ``.active`` is not a marker), and the age
+    rule is measured against the caller's ``now`` so a pruner can be driven deterministically.
     """
     marker = directory / ACTIVE_MARKER_NAME
     try:
@@ -396,6 +493,9 @@ def _marker_is_active(directory: Path, now: float, grace: float) -> bool:
         return False
     if not stat.S_ISREG(st.st_mode):
         return False
+    owner = _marker_owner(marker)
+    if owner is not None and _owner_is_alive(*owner):
+        return True
     return (now - st.st_mtime) < grace
 
 

@@ -500,16 +500,18 @@ tombstone must never be read as having reclaimed an older citation. See
 
 **Active-run guard** — a concurrently running `factory` (e.g. a scheduled scan) must
 never sweep another process's still-running run directory, even when many fast runs
-overflow the count bound. Each run directory carries a `.active` marker created at
-allocation; pruning skips any directory whose marker is fresher than
-`FACTORY_RUN_ACTIVE_GRACE_SECONDS` (default `3600`, one hour). The marker is removed
-when the run completes successfully; a run that crashes or is hard-killed leaves its
-marker behind, and the grace bounds how long that stale marker protects the directory
-before it is swept. Set `FACTORY_RUN_ACTIVE_GRACE_SECONDS` larger than your longest
-station deadline — note that a station whose candidate list is split into N bounded
-batches is one engine call per batch, so its deadline is N x `budget.max_minutes`
-(capped by `STATION_DEADLINE_CEILING_MINUTES`, default 60 min, in `lib/budget.py`),
-not the declared single-call budget.
+overflow the count bound. Each run directory carries a `.active` marker written at
+allocation, naming the running process (pid plus its start time), so pruning asks the
+kernel whether that owner is alive: **a live run is never swept, however long it runs.**
+The marker's age is the fallback — `FACTORY_RUN_ACTIVE_GRACE_SECONDS` (default `3600`, one
+hour) bounds how long a *crashed* run's stale marker protects its directory, and markers
+written by an older factory (which carry no owner) keep exactly that age behaviour. The
+marker is removed when the run completes successfully; a run that crashes or is
+hard-killed leaves it behind. Set `FACTORY_RUN_ACTIVE_GRACE_SECONDS` larger than your
+longest station deadline if you declare long budgets — note that a station whose candidate
+list is split into N bounded batches is one engine call per batch, so its deadline is
+N x `budget.max_minutes`, capped by `STATION_DEADLINE_CEILING_MINUTES` (default 45 min, in
+`lib/budget.py`, deliberately below the default grace), not the declared single-call budget.
 
 ---
 
