@@ -115,6 +115,25 @@ class TestTheRepairRefusesToInvent(unittest.TestCase):
                          "escaping here fabricates one value out of two")
         self.assertIsNotNone(describe_unrepairable(text), "refusing must still be NAMED")
 
+    def test_an_escape_inside_the_second_value_does_not_smuggle_a_merge(self):
+        """agents-4lpo3 (reviewer repro at 1d6c4251): the guard's token pattern refused any token with a
+        backslash, so `["a" "b\\c"]` slipped past it and the repair returned the single value
+        `a" "b\\c` - two values fused, recorded as a success."""
+        text = '{"tags": ["a" "b\\c"]}'
+        self.assertEqual(repair_json(text), (text, []),
+                         "a token containing an escape is still a whole token")
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+
+    def test_three_adjacent_strings_are_not_merged_either(self):
+        # The P3 half of the same finding: `"b"` followed by another value's opening quote is a
+        # separator boundary too, and the old follower set only knew closers and commas.
+        text = '{"tags": ["a" "b" "c"]}'
+        self.assertEqual(repair_json(text), (text, []))
+        named = describe_unrepairable(text)
+        self.assertIn("two values", named)
+
     def test_a_prose_colon_inside_a_string_is_refused_rather_than_repaired(self):
         # `"on": it matters` is indistinguishable from a member name, so the pass refuses. Losing a
         # repair we might have got away with is the price of never fabricating a payload.
@@ -183,6 +202,13 @@ class TestDescribeUnrepairable(unittest.TestCase):
         self.assertIn("','", named)
         self.assertIn("missing", named)
         self.assertIn("two values", named)
+
+    def test_an_object_member_name_with_an_escape_is_still_treated_as_a_member(self):
+        # The member guard had the same escape blindness: a member name may legally contain `\uXXXX` or
+        # an escaped character, and missing it would send this shape back to the unescaped-quote branch.
+        named = describe_unrepairable('{"summary": "a" "find\\ings": []}')
+        self.assertIsNotNone(named)
+        self.assertIn("object members", named)
 
     def test_a_missing_colon_is_named_as_a_missing_colon(self):
         text = '{"summary" "s", "findings": []}'

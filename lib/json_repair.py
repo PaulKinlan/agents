@@ -85,6 +85,13 @@ def _excerpt(fragment: str) -> str:
     return line
 
 
+# A complete JSON string token: ESCAPES COUNT (agents-4lpo3). The first cut used `[^"\\\n]*`, which
+# refuses any token containing an escape, so `["a" "b\\c"]` slipped past the separate-value guard - the
+# repair escaped the adjacent quote and returned the single value `a" "b\\c`, exactly the fabrication the
+# guard exists to prevent. The same blindness was in the object-member guard.
+_QUOTED_TOKEN = r'"(?:[^"\\]|\\.)*"'
+
+
 def _prev_nonspace(body: str, position: int) -> int:
     """The index of the last non-space character before `position`, or -1."""
     index = position - 1
@@ -103,7 +110,7 @@ def _looks_like_object_member(body: str, quote_position: int) -> bool:
     Refusing it costs a repair we might have got away with (prose can contain `"word":`), and a named
     failure is worth more than a guess with a fabricated payload behind it.
     """
-    return re.match(r'"[^"\\\n]*"\s*:', body[quote_position:]) is not None
+    return re.match(_QUOTED_TOKEN + r'\s*:', body[quote_position:]) is not None
 
 
 def _starts_a_separate_value(body: str, quote_position: int) -> bool:
@@ -120,7 +127,9 @@ def _starts_a_separate_value(body: str, quote_position: int) -> bool:
     keeps going as words. Refusing costs a repair we might have got away with (a one-word quote inside
     an array element), and a named failure is worth more than a fabricated payload.
     """
-    return re.match(r'"[^"\\\n]*"\s*[,}\]]', body[quote_position:]) is not None
+    # The followers: a collection closer, a comma, or ANOTHER value's opening quote (three adjacent
+    # strings are three values, agents-4lpo3's P3 symptom).
+    return re.match(_QUOTED_TOKEN + r'\s*["}}\],]', body[quote_position:]) is not None
 
 
 def _one_repair(body: str, error: "json.JSONDecodeError") -> Optional[Tuple[str, str]]:
