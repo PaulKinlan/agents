@@ -105,6 +105,35 @@ class TestTheRepairRefusesToInvent(unittest.TestCase):
         self.assertIn("not a JSON literal", named)
         self.assertIn("path.replace", named, f"the name must carry the offending text: {named}")
 
+    def test_two_adjacent_string_values_are_not_merged_into_one_string(self):
+        """agents-9tw8i: `["a" "b"]` and prose inside a string look identical to the decoder, and the
+        first cut escaped both - turning two array values into the single string `a "b`, a decodable
+        report whose content nobody wrote."""
+        text = '{"tags": ["a" "b"]}'
+        repaired, notes = repair_json(text)
+        self.assertEqual((repaired, notes), (text, []),
+                         "escaping here fabricates one value out of two")
+        self.assertIsNotNone(describe_unrepairable(text), "refusing must still be NAMED")
+
+    def test_an_escape_inside_the_second_value_does_not_smuggle_a_merge(self):
+        """agents-4lpo3 (reviewer repro at 1d6c4251): the guard's token pattern refused any token with a
+        backslash, so `["a" "b\\c"]` slipped past it and the repair returned the single value
+        `a" "b\\c` - two values fused, recorded as a success."""
+        text = '{"tags": ["a" "b\\c"]}'
+        self.assertEqual(repair_json(text), (text, []),
+                         "a token containing an escape is still a whole token")
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+
+    def test_three_adjacent_strings_are_not_merged_either(self):
+        # The P3 half of the same finding: `"b"` followed by another value's opening quote is a
+        # separator boundary too, and the old follower set only knew closers and commas.
+        text = '{"tags": ["a" "b" "c"]}'
+        self.assertEqual(repair_json(text), (text, []))
+        named = describe_unrepairable(text)
+        self.assertIn("two values", named)
+
     def test_a_prose_colon_inside_a_string_is_refused_rather_than_repaired(self):
         # `"on": it matters` is indistinguishable from a member name, so the pass refuses. Losing a
         # repair we might have got away with is the price of never fabricating a payload.
@@ -143,6 +172,50 @@ class TestDescribeUnrepairable(unittest.TestCase):
     def test_a_decodable_report_has_nothing_to_describe(self):
         self.assertIsNone(describe_unrepairable('{"summary": "s", "findings": []}'))
         self.assertIsNone(describe_unrepairable(""))
+
+    def test_a_missing_comma_between_two_rows_is_named_as_a_missing_comma(self):
+        """agents-fsrqw: `[{"a": 1} {"b": 2}]` arrived as "no message at all" - the retry was told
+        nothing, and the one thing it needed to hear was that a separator is missing."""
+        text = '{"summary": "s", "findings": [{"a": 1} {"b": 2}]}'
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+        self.assertIn("missing", named)
+        self.assertIn("char", named, "the offset is what locates the fix")
+        self.assertEqual(repair_json(text), (text, []),
+                         "naming it must not become inserting it: a comma is a place the model left empty")
+
+    def test_a_missing_comma_between_members_is_not_called_an_unescaped_quote(self):
+        # Both arrive as "Expecting ',' delimiter" and the decoder stops on a QUOTE, so the quote branch
+        # must not claim this one: the model's bug is a missing separator, not a string.
+        text = '{"summary": "a" "findings": []}'
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+        self.assertNotIn("unescaped quote", named, f"the wrong diagnosis sends the retry looking for a string bug: {named}")
+
+    def test_a_missing_comma_between_two_string_array_values_is_named_as_a_missing_comma(self):
+        """agents-9tw8i: the array/string twin of the member shape - the stop char is a quote, so the
+        unescaped-quote branch claimed it and sent the retry looking for a string bug."""
+        named = describe_unrepairable('{"tags": ["a" "b"]}')
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+        self.assertIn("missing", named)
+        self.assertIn("two values", named)
+
+    def test_an_object_member_name_with_an_escape_is_still_treated_as_a_member(self):
+        # The member guard had the same escape blindness: a member name may legally contain `\uXXXX` or
+        # an escaped character, and missing it would send this shape back to the unescaped-quote branch.
+        named = describe_unrepairable('{"summary": "a" "find\\ings": []}')
+        self.assertIsNotNone(named)
+        self.assertIn("object members", named)
+
+    def test_a_missing_colon_is_named_as_a_missing_colon(self):
+        text = '{"summary" "s", "findings": []}'
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("':'", named)
+        self.assertIn("member name", named)
 
     def test_the_excerpt_is_bounded(self):
         text = '{"summary": "s", "findings": [{"rule_id": ' + "x" * 500 + '}]}'
