@@ -48,7 +48,8 @@ _loader.exec_module(factory_cli)
 LIB_MODULES = ("findings.py", "redaction.py", "embargo.py", "budget.py", "child_env.py",
                "credential_broker.py", "net_forward.py", "egress_proxy.py",
                "report_schema.py", "containment.py", "sandbox.py", "retention.py",
-               "tool_pins.py", "line_numbers.py", "candidate_batching.py")
+               "tool_pins.py", "line_numbers.py", "candidate_batching.py",
+               "json_repair.py")
 
 
 class TestEveryDeclarationOfThePerCallBoundIsUsable(unittest.TestCase):
@@ -361,6 +362,32 @@ class TestNoVerdictIsAnError(SandboxCase):
     def test_no_json_at_all_is_none(self):
         self.assertIsNone(factory_cli.extract_json_from_output("All clean, nothing to report."))
         self.assertIsNone(factory_cli.extract_json_from_output("```json\n{broken\n```"))
+
+    def test_an_unescaped_quote_is_repaired_and_the_repair_is_recorded(self):
+        """agents-lb0w3: the CAP nightly's attempt 2 - the model quoting a word in its own summary."""
+        output = ('{"summary": "Found "one" issue", "target": "cap", "findings": '
+                  '[{"rule_id": "r", "path": "p", "snippet": "s", "severity": "high", "title": "t", '
+                  '"description": "d", "remediation": "x"}]}')
+        notes = []
+        report = factory_cli.extract_json_from_output(output, notes=notes)
+        self.assertIsNotNone(report, "the report is readable; only a quote is missing")
+        self.assertEqual(report["summary"], 'Found "one" issue')
+        self.assertTrue(notes, "a repair must be reported to the caller, never applied silently")
+
+    def test_a_findings_less_fragment_does_not_stop_the_repair_finding_the_report(self):
+        # The strict scan decodes the first finding ROW out of the broken payload and returns it as
+        # "the report"; the real report is one escape away and must still be found.
+        output = ('{"summary": "Found "one" issue", "findings": '
+                  '[{"rule_id": "r", "path": "p", "snippet": "s", "severity": "high", "title": "t", '
+                  '"description": "d", "remediation": "x"}]}')
+        report = factory_cli.extract_json_from_output(output)
+        self.assertEqual(report["summary"], 'Found "one" issue')
+
+    def test_a_report_that_parses_is_never_touched_by_the_repair_pass(self):
+        body = {"summary": "s", "findings": []}
+        notes = []
+        self.assertEqual(factory_cli.extract_json_from_output(json.dumps(body), notes=notes), body)
+        self.assertEqual(notes, [])
 
     @unittest.skipUnless(_RUNNABLE_BWRAP, _NEEDS_BWRAP)
     def test_unparseable_output_raises_and_never_touches_the_store(self):
