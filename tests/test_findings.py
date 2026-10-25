@@ -2102,6 +2102,36 @@ class TestThePathRepairRefusesRatherThanGuesses(unittest.TestCase):
         self.assertIn("duplicated citation: 2 row(s) cite it", refusals[0]["reason"])
         self.assertIn("2 presented candidate id(s) stay unaccounted", refusals[0]["reason"])
 
+    def test_two_candidates_in_one_file_are_ambiguous_even_when_one_is_uncited(self):
+        """The MULTIPLICITY guard, on a run where it is the deciding check (agents-ifb3t).
+
+        The test above refuses because `matches[0]` is already cited, so it would still pass with the
+        `len(matches) != 1` half of the condition deleted - measured: the mutant
+        `if not matches or matches[0] not in still_uncited:` bound this row and left the whole suite green.
+        Two candidates in ONE file is the ordinary shape (one page, several findings), so the run that
+        matters is the one where the ambiguous match is ALSO the still-uncited candidate: here `cand-p1-a`
+        is cited by nobody and the duplicated `cand-p1-b` has no business inheriting its verdict.
+        """
+        paths = {"cand-p1-a": "src/x.js", "cand-p1-b": "src/x.js"}
+        rows = [{"candidate_id": "cand-p1-b", "path": "src/x.js"},
+                {"candidate_id": "cand-p1-b", "path": "src/x.js"}]
+        refusals = []
+        repairs = repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths,
+                                             refusals=refusals)
+        self.assertEqual(repairs, [],
+                         "one file, two candidates: the row cannot say which one it meant")
+        self.assertEqual([row["candidate_id"] for row in rows], ["cand-p1-b", "cand-p1-b"])
+        self.assertEqual(len(refusals), 1, refusals)
+        self.assertEqual(refusals[0]["cited"], "cand-p1-b")
+        self.assertIn("row path(s) do not name exactly one still-uncited presented candidate",
+                      refusals[0]["reason"])
+        self.assertIn("1 presented candidate id(s) stay unaccounted (cand-p1-a)",
+                      refusals[0]["reason"])
+        coverage = candidate_coverage(2, len(rows), presented_ids=list(paths),
+                                      cited_ids=[row["candidate_id"] for row in rows])
+        self.assertFalse(coverage["complete"], "an unresolved duplicate is still a shortfall")
+        self.assertEqual(coverage["uncited_candidate_ids"], ["cand-p1-a"])
+
     def test_a_path_whose_only_candidate_is_already_cited_is_not_stolen(self):
         paths = {"cand-a": "p1", "cand-b": "p2", "cand-c": "p3"}
         rows = [{"candidate_id": "cand-a", "path": "p1"},
