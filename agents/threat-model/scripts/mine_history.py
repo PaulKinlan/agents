@@ -216,15 +216,29 @@ def _resolve_enclosing_git_dir(path: Path) -> Optional[Path]:
 
 
 # How the self-target question was answered (agents-32twc). The first two mean "this target IS
-# the factory" and their suppressions apply; the last two mean "third-party", which is the fail-safe
+# the factory" and their suppressions apply; the rest mean "not self", which is the fail-safe
 # direction. The value travels into the pre-pass result so a self-audit that reports
 # `is_self_target: false` names the identity check that produced it instead of looking like an
 # unexplained anomaly.
+#
+# `no-git-identity` and `identity-unreadable` are the three-branch answer to "I could not tell",
+# and they are deliberately NOT `foreign-repository` (agents-hc2wp): that last value is a POSITIVE
+# claim that the target was identified as someone else's repository. A target whose `.git` was
+# found but whose object database could not be read is a BLIND probe, and saying "third-party"
+# for it hid the sandbox-shaped nightly defect for a whole bead generation.
 SELF_TARGET_SAME_INSTALLATION = "same-installation"
 SELF_TARGET_SHARED_REPOSITORY = "shared-repository"
 SELF_TARGET_NO_GIT_IDENTITY = "no-git-identity"
+SELF_TARGET_IDENTITY_UNREADABLE = "identity-unreadable"
 SELF_TARGET_FOREIGN_REPOSITORY = "foreign-repository"
 SELF_TARGET_POSITIVE = frozenset({SELF_TARGET_SAME_INSTALLATION, SELF_TARGET_SHARED_REPOSITORY})
+
+# The committed marker that makes identity a property of the TARGET TREE instead of its object
+# database (agents-hc2wp). A linked worktree's `.git` file points at an object database outside
+# the OS sandbox's read scope, so `git -C <target>` fails for every nightly self-audit; this file
+# is inside the target, needs no git, and therefore answers identically in and out of the sandbox.
+FACTORY_IDENTITY_MARKER_NAME = ".factory-identity"
+FACTORY_IDENTITY_MARKER_MAX_BYTES = 4096
 
 # Bounds the identity probes: git never gets to hang a pre-pass on a hostile or broken repository.
 GIT_IDENTITY_TIMEOUT_S = 15
@@ -270,6 +284,89 @@ def _git_has_commit(repo_dir: Path, sha: str) -> bool:
     return _git_ok(repo_dir, "cat-file", "-e", f"{sha}^{{commit}}")
 
 
+def _git_probe_error(repo_dir: Path) -> Optional[str]:
+    """git's own first line of complaint when it cannot read `repo_dir`, or None when it can.
+
+    This is the evidence `identity-unreadable` points at (agents-hc2wp): the artifact must say
+    WHICH probe was blind, not just that the answer was "not self". Truncated and single-line so
+    a hostile repository cannot inflate the run artifact through git's stderr.
+    """
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, check=False, timeout=GIT_IDENTITY_TIMEOUT_S,
+        )
+    except Exception as exc:  # git missing, timeout, permission denied
+        return f"{type(exc).__name__}: {exc}"[:200]
+    if res.returncode == 0:
+        return None
+    first = (res.stderr or "").strip().splitlines()
+    return (first[0][:200] if first else f"git rev-parse --git-dir exited {res.returncode}")
+
+
+def _installation_identity_marker() -> Optional[bytes]:
+    """This installation's own identity marker bytes, or None when it does not carry one.
+
+    The comparison is bytes-for-bytes against the RUNNING installation, deliberately: it is the
+    same rule `is_factory_own_file` already applies per instrument file, so an installation that
+    predates the marker (or an extracted tarball with no marker) simply keeps the old git-object
+    behaviour rather than guessing identity from a filename.
+    """
+    try:
+        marker = FACTORY_ROOT / FACTORY_IDENTITY_MARKER_NAME
+        if not marker.is_file() or marker.stat().st_size > FACTORY_IDENTITY_MARKER_MAX_BYTES:
+            return None
+        return marker.read_bytes()
+    except Exception:
+        return None
+
+
+def _tree_identity_marker_path(target_dir: Path) -> Optional[Path]:
+    """Find the identity marker for `target_dir` using FILE READS ONLY, or None.
+
+    Walks from the target up to ITS repository root and no further: the first ancestor holding a
+    `.git` entry ends the walk, so a marker above the repository boundary can never identify a
+    checkout that does not carry one. Every failure (a target path the sandbox does not expose,
+    an unreadable directory) is None, because identity must never raise into the scan path.
+    """
+    try:
+        current = target_dir.resolve()
+        ancestors = [current, *current.parents]
+    except Exception:
+        return None
+    for parent in ancestors:
+        try:
+            marker = parent / FACTORY_IDENTITY_MARKER_NAME
+            if marker.is_file():
+                return marker
+            if (parent / ".git").exists():
+                return None
+        except Exception:
+            return None
+    return None
+
+
+def _target_carries_installation_identity(target_dir: Path) -> bool:
+    """True when the target tree carries THIS installation's identity marker.
+
+    A marker that differs in any byte is not a match: an edited marker (a fork's) falls through to
+    the git probes, and a target with no marker at all falls through too. Fails toward third-party
+    in every branch.
+    """
+    expected = _installation_identity_marker()
+    if not expected:
+        return False
+    marker = _tree_identity_marker_path(target_dir)
+    if marker is None:
+        return False
+    try:
+        if marker.stat().st_size != len(expected):
+            return False
+        return marker.read_bytes() == expected
+    except Exception:
+        return False
+
+
 def _factory_identity_commits() -> List[str]:
     """Commit shas that identify THIS installation's repository (agents-32twc).
 
@@ -295,15 +392,20 @@ def factory_self_target_reason(target_dir: Path) -> str:
     recognises the running installation and its own worktrees; the nightly self-audit runs the
     pre-pass from the deployed install while auditing a separate clone, and used to answer
     "third-party" to every such run (agents-32twc). Repository identity is therefore matched at
-    the OBJECT level, which is the same in every clone of the same repository:
+    the OBJECT level, which is the same in every clone of the same repository - plus one TREE-level
+    probe, because the object level is out of reach exactly where the nightly runs (agents-hc2wp):
 
+    0. the target tree carries this installation's committed `.factory-identity` marker - file
+       reads only, so it answers the same inside the OS sandbox, where a linked worktree's `.git`
+       file names an object database outside the binds and every git probe below is blind. A
+       marker is inherited with the history, so it is graded exactly like case 2, not case 1;
     1. same common git dir - the installation's own checkout, a linked worktree, or a subdirectory
        of either (agents-rul9/760p/i4ra: the enclosing repository, never path containment);
     2. a commit object shared with this installation, in either direction - the target is at/ahead
        of the installed HEAD, or the installation is ahead of the target's HEAD;
     3. otherwise third-party.
 
-    Case 2 is a WEAKER identity than case 1 and the suppression scope says so: it licenses the
+    Case 0/2 is a WEAKER identity than case 1 and the suppression scope says so: it licenses the
     structural scanner-file exclusion but NOT the broad rule-metadata suppression, because a
     product forked from the factory shares every factory commit and still ships its own endpoints
     (agents-uviio, `self_target_suppression_scope`).
@@ -316,7 +418,9 @@ def factory_self_target_reason(target_dir: Path) -> str:
     therefore named rather than hidden: a non-git installation (extracted tarball), a target that
     shares no commit object with this installation (a rewritten history, or a depth-1 install
     that is NEWER than the audited clone, whose only anchor the clone cannot contain), and a host
-    where git cannot run at all all answer third-party.
+    where git cannot run at all all answer third-party. A repository whose object database cannot
+    be READ is the one case that is not a verdict at all, and it says so (`identity-unreadable`,
+    with git's own complaint in the run artifact) rather than claiming `foreign-repository`.
     """
     try:
         resolved = target_dir.resolve()
@@ -334,6 +438,12 @@ def factory_self_target_reason(target_dir: Path) -> str:
     if FACTORY_COMMON_GIT_DIR is not None and enclosing_common == FACTORY_COMMON_GIT_DIR:
         return SELF_TARGET_SAME_INSTALLATION
 
+    # agents-hc2wp: the TARGET TREE's own marker, before any git probe. Cheap (one small read),
+    # and identical in and out of the OS sandbox - which is where the object probes below are
+    # blind, because a linked worktree's `.git` file names an object database outside the binds.
+    if _target_carries_installation_identity(resolved):
+        return SELF_TARGET_SHARED_REPOSITORY
+
     # Cross-installation: the audited checkout is not this installation's own git dir. Two clones
     # of one repository share commit objects, so a shared object proves the target is the factory
     # even though the paths differ. Both directions, because either side may be the newer one.
@@ -342,6 +452,13 @@ def factory_self_target_reason(target_dir: Path) -> str:
     target_head = _git_out(resolved, "rev-parse", "--verify", "HEAD^{commit}")
     if target_head and _git_has_commit(FACTORY_ROOT, target_head):
         return SELF_TARGET_SHARED_REPOSITORY
+
+    # A `.git` entry was found above, so this directory BELONGS to a repository - but if git
+    # cannot even name its git dir, nothing about identity was established. Saying
+    # "foreign-repository" here would be a positive third-party claim we did not earn
+    # (agents-hc2wp), and it is exactly what made the sandboxed nightly defect unreadable.
+    if _git_probe_error(resolved) is not None:
+        return SELF_TARGET_IDENTITY_UNREADABLE
 
     return SELF_TARGET_FOREIGN_REPOSITORY
 
@@ -824,6 +941,10 @@ def main():
         "is_self_target": is_self_target,
         "self_target_signal": self_target_signal,
         "self_target_suppression_scope": scope,
+        "self_target_probe_error": (
+            _git_probe_error(target_dir)
+            if self_target_signal == SELF_TARGET_IDENTITY_UNREADABLE else None
+        ),
         "evidence_nonce": nonce,
         "system_instruction": SYSTEM_INSTRUCTION.format(nonce=nonce),
         "threat_model": threat_model_info,

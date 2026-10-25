@@ -1,0 +1,18 @@
+# The Software Factory repository identity marker (agents-hc2wp).
+#
+# agents/threat-model/scripts/mine_history.py decides whether an audited target is the
+# factory by comparing THIS FILE'S BYTES with its own copy at the installation root. That
+# needs no git command and no access to the target's object database, so it answers the
+# same inside the OS sandbox as on the host - a linked worktree's `.git` file points at an
+# object database the sandbox cannot bind, which is how every nightly self-audit used to
+# land on "foreign-repository" and re-discover its own detection rules as attack surface.
+#
+# Identity from this file is the WEAK form (shared-repository): structural scanner-file
+# exclusions only, each file still compared against this installation's copy. A fork that
+# keeps this file gets exactly what a fork that keeps the history already gets - no more.
+#
+# Change it only deliberately: an edited marker stops matching, and a target that stops
+# matching is scanned as third-party. That direction is noise, never a lost sink.
+software-factory
+schema: 1
+repository: PaulKinlan/agents

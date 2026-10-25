@@ -103,7 +103,14 @@ fast_gate_arms_050_lib_sinks_py() {
       # case drives sandbox_command with a dispatcher-built child env and the read-only pins bind,
       # which is exactly this module's child-side contract; the gate's coverage oracle named it as
       # an omitted consumer when the child channel moved, and it caught the regression.
-      mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py tests/test_station_trusted_tool_pins.py"
+      #
+      # agents-hc2wp: tests/test_threat_model_prepass.py joins (the suite measures 24 s on
+      # this VM, and runs only when this file changes). Its two sandboxed cases assert a BIND-SET property, not just
+      # a pre-pass one: that a linked worktree's `.git` names an object database the read scope does
+      # not cover. That is why the nightly self-audit was blind (agents-hc2wp), and it is also the
+      # property a widened bind would quietly destroy - the safe direction for a containment module
+      # is to run the suite that would notice.
+      mapped="$mapped tests/test_sandbox.py tests/test_no_bwrap_guard.py tests/test_station_trusted_tool_pins.py tests/test_threat_model_prepass.py"
       ;;
     lib/child_env.py)
       # This arm INCLUDES tests/test_credential_broker.py and tests/test_sink_adapters.py (agents-hay8).

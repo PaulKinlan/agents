@@ -11,11 +11,13 @@ Covers:
 """
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,21 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agents" / "threat-model" / "scripts"))
 
 import mine_history  # noqa: E402
+from lib.sandbox import sandbox_available, sandbox_command  # noqa: E402
+from tests.sandbox_fixtures import copy_station_script  # noqa: E402
+
+# Whether THIS host can run bubblewrap. Only the sandbox-shape acceptance test needs it; every
+# other case builds the same `.git`-file shape on the host, where git is blind for the same reason
+# (the object database it names does not exist).
+_BWRAP = sandbox_available()
+
+
+def _run_git(repo: Path, *args: str) -> None:
+    """Run one git command in a fixture repository, failing the test loudly on error."""
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+        check=True, capture_output=True, text=True,
+    )
 
 
 class TestPromptInjectionHygiene(unittest.TestCase):
@@ -562,12 +579,22 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
             'ENTRY_POINT_PATTERNS = [("t", re.compile(r"fetch\\("))]\n'
         )
         (instrument / "scan_probe.py").write_text(cls.INSTRUMENT_CODE, encoding="utf-8")
+        # agents-hc2wp: the committed identity marker every checkout of the repository carries.
+        # Identity from the TREE is what survives an unreadable object database, so the fixture
+        # has to have one exactly as the real repository does.
+        cls.marker_bytes = (ROOT / mine_history.FACTORY_IDENTITY_MARKER_NAME).read_bytes()
+        (cls.factory / mine_history.FACTORY_IDENTITY_MARKER_NAME).write_bytes(cls.marker_bytes)
         git(cls.factory, "add", "-A")
         git(cls.factory, "commit", "-qm", "first")
 
         cls.clone = cls.tmp / "clone"
         subprocess.run(["git", "clone", "-q", "--local", str(cls.factory), str(cls.clone)],
                        check=True, capture_output=True, text=True)
+        # An OLDER clone kept aside: the marker-less fail-safe case needs a target whose object
+        # database does NOT contain the newer installation's anchor, and the tests that remove a
+        # marker or reset a clone must not disturb the shared fixture they were given.
+        cls.old_clone = cls.tmp / "old-clone"
+        shutil.copytree(cls.clone, cls.old_clone)
 
         # The installation moves on: now the CLONE is BEHIND the install, the other direction.
         (cls.factory / "marker.txt").write_text("factory v2\n", encoding="utf-8")
@@ -715,25 +742,134 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
             self.assertEqual(mine_history.factory_self_target_reason(self.clone),
                              mine_history.SELF_TARGET_SHARED_REPOSITORY)
 
-    def test_shallow_installation_newer_than_target_is_foreign_by_contract(self):
-        """Documented fail-safe, not a bug: with no shared object to prove lineage, stay third-party.
+    def test_shallow_installation_newer_than_target_is_still_identified_by_the_marker(self):
+        """agents-hc2wp narrows the documented depth-1 gap: identity no longer needs a commit.
 
-        A depth-1 installation newer than the audited clone holds only its own tip, so the older
-        clone cannot contain its anchor and the installation cannot contain the clone's HEAD.
-        NOISE is the affordable direction; silent loss of a third party's production sinks is not.
+        A depth-1 installation newer than the audited clone holds only its own tip, so neither
+        side can prove lineage from the object database. The marker is in the TREE of both, so
+        the gap the identity check used to have - and had to fail toward third-party to survive -
+        no longer decides this case. The residual marker-less gap is pinned by the test below.
         """
         with self._as_installation(self.shallow):
             self.assertEqual(mine_history.factory_self_target_reason(self.clone),
-                             mine_history.SELF_TARGET_FOREIGN_REPOSITORY)
-            self.assertFalse(mine_history.is_factory_self_target(self.clone))
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
 
-    def test_unrelated_repository_stays_third_party_and_keeps_its_sinks(self):
+    def test_without_a_marker_a_newer_shallow_installation_keeps_the_fail_safe(self):
+        """Documented fail-safe, not a bug: no marker AND no shared object => stay third-party.
+
+        The noise is the affordable direction; silently deciding "self" without evidence would
+        drop a third party's production sinks from its attack-surface inventory.
+        """
+        clone = Path(tempfile.mkdtemp(dir=self.tmp, prefix="old-clone-")) / "old-clone"
+        self.addCleanup(shutil.rmtree, clone.parent, True)
+        shutil.copytree(self.old_clone, clone)
+        (clone / mine_history.FACTORY_IDENTITY_MARKER_NAME).unlink()
+        with self._as_installation(self.shallow):
+            self.assertEqual(mine_history.factory_self_target_reason(clone),
+                             mine_history.SELF_TARGET_FOREIGN_REPOSITORY)
+            self.assertFalse(mine_history.is_factory_self_target(clone))
+
+    def test_an_unrelated_repository_stays_third_party_and_keeps_its_sinks(self):
         """A repository that shares no history with the installation keeps its production sinks."""
         with self._as_installation(self.factory):
             self.assertEqual(mine_history.factory_self_target_reason(self.foreign),
                              mine_history.SELF_TARGET_FOREIGN_REPOSITORY)
             results = mine_history.scan_entry_points(self.foreign)
         self.assertEqual([r["category"] for r in results], ["server-listener"], results)
+
+    # --- agents-hc2wp: identity from the target TREE, where the object database is out of reach --
+
+    def _blind_worktree(self, marker: Optional[bytes] = None) -> Path:
+        """A target shaped like the sandboxed nightly one: `.git` naming an unreachable object DB.
+
+        This is not a simulation of the sandbox - it is the same observable state. The nightly
+        target is a LINKED WORKTREE of another clone, so `git -C <target>` reads a `gitdir:` line
+        that points outside the sandbox's read scope, and every git probe in this module fails
+        while the files in the target tree stay perfectly readable. On the host the same happens
+        when that object database simply is not there.
+        """
+        tmp = tempfile.TemporaryDirectory(prefix="agents-hc2wp-blind-")
+        self.addCleanup(tmp.cleanup)
+        tree = Path(tmp.name) / "wt"
+        (tree / "agents" / "probe" / "scripts").mkdir(parents=True)
+        (tree / "agents" / "probe" / "scripts" / "scan_probe.py").write_text(
+            self.INSTRUMENT_CODE, encoding="utf-8")
+        (tree / ".git").write_text(
+            f"gitdir: {Path(tmp.name) / 'elsewhere' / '.git' / 'worktrees' / 'wt'}\n", encoding="utf-8")
+        if marker is not None:
+            (tree / mine_history.FACTORY_IDENTITY_MARKER_NAME).write_bytes(marker)
+        return tree
+
+    def test_the_marker_identifies_a_target_whose_object_database_is_out_of_reach(self):
+        """agents-hc2wp acceptance: an unreadable object database no longer defeats identity.
+
+        The tree carries this installation's committed marker, so the answer is `shared-repository`
+        - the same grade a shared commit object earns, and for the same reason: a checkout that
+        inherits the marker inherits the history that put it there. Structural exclusions apply
+        per file, and the factory's own rule-definition line stays quiet.
+        """
+        tree = self._blind_worktree(marker=self.marker_bytes)
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(tree),
+                             mine_history.SELF_TARGET_SHARED_REPOSITORY)
+            self.assertEqual(mine_history.resolve_self_target(tree),
+                             (True, mine_history.SELF_TARGET_SHARED_REPOSITORY))
+            self.assertEqual(
+                mine_history.self_target_suppression_scope(mine_history.SELF_TARGET_SHARED_REPOSITORY),
+                (True, False))
+            results = mine_history.scan_entry_points(tree)
+        self.assertEqual(results, [], f"a marked tree is scanned as the factory, got: {results}")
+
+    def test_a_blind_object_database_alone_is_not_reported_as_foreign(self):
+        """agents-hc2wp: a probe that COULD NOT RUN is not a positive third-party verdict.
+
+        `foreign-repository` claims the target was examined and is someone else's repository. When
+        git cannot even name the target's git dir, none of the identity probes ran, so the run
+        says `identity-unreadable` - and still fails toward third-party for suppression.
+        """
+        tree = self._blind_worktree(marker=None)
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(tree),
+                             mine_history.SELF_TARGET_IDENTITY_UNREADABLE)
+            self.assertFalse(mine_history.is_factory_self_target(tree))
+            self.assertEqual(
+                mine_history.self_target_suppression_scope(mine_history.SELF_TARGET_IDENTITY_UNREADABLE),
+                (False, False))
+            results = mine_history.scan_entry_points(tree)
+        self.assertEqual({r["path"] for r in results}, {"agents/probe/scripts/scan_probe.py"},
+                         f"the known noise: the factory's own rule line scanned as surface, got: {results}")
+        probe_error = mine_history._git_probe_error(tree)
+        self.assertIsNotNone(probe_error, "the blind probe must name itself")
+        self.assertIn("not a git repository", probe_error)
+
+    def test_an_edited_marker_is_not_an_identity(self):
+        """The marker is a byte comparison, not a filename: a fork's edited copy proves nothing."""
+        tree = self._blind_worktree(marker=self.marker_bytes + b"# forked locally\n")
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(tree),
+                             mine_history.SELF_TARGET_IDENTITY_UNREADABLE)
+
+    def test_a_marker_above_the_repository_root_does_not_identify_a_checkout(self):
+        """The marker walk stops at the target's OWN repository root, so it cannot be borrowed.
+
+        A workspace directory that happens to hold a marker must not make every unrelated
+        repository beneath it look like the factory.
+        """
+        tmp = tempfile.TemporaryDirectory(prefix="agents-hc2wp-above-")
+        self.addCleanup(tmp.cleanup)
+        workspace = Path(tmp.name)
+        workspace.joinpath(mine_history.FACTORY_IDENTITY_MARKER_NAME).write_bytes(self.marker_bytes)
+        repo = workspace / "unrelated"
+        repo.mkdir()
+        _run_git(repo, "init", "-q")
+        (repo / "app.py").write_text("handler = app.get('/api', h)\n", encoding="utf-8")
+        _run_git(repo, "add", "-A")
+        _run_git(repo, "commit", "-qm", "unrelated")
+        with self._as_installation(self.factory):
+            self.assertEqual(mine_history.factory_self_target_reason(repo),
+                             mine_history.SELF_TARGET_FOREIGN_REPOSITORY)
+            self.assertEqual([r["category"] for r in mine_history.scan_entry_points(repo)],
+                             ["server-listener"])
 
     def test_this_installation_and_its_worktrees_are_recognised_by_path(self):
         """The unchanged fast path: this checkout, a linked worktree, and any subdirectory of them."""
@@ -755,6 +891,115 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
                              (True, mine_history.SELF_TARGET_SHARED_REPOSITORY))
             self.assertEqual(mine_history.resolve_self_target(self.clone, declared=False), (False, "declined"))
         self.assertEqual(mine_history.resolve_self_target(self.foreign, declared=True), (True, "declared"))
+
+
+class TestSelfTargetIdentityInTheOsSandbox(unittest.TestCase):
+    """agents-hc2wp acceptance: the nightly self-audit is a SANDBOXED run.
+
+    agents-32twc made identity repository-based and verified it on the HOST. In production the
+    pre-pass is loaded from one installation and run inside bubblewrap against a LINKED WORKTREE
+    of a different clone, whose `.git` file names an object database no bind covers - so every git
+    probe in `factory_self_target_reason` was blind and each nightly self-audit reported
+    `foreign-repository`, handing the station its own detection rules as attack surface eight rows
+    at a time. These tests run the real pre-pass inside a real sandbox instead of measuring the
+    host, because the host is what passed the first time.
+
+    Option (a) from the bead - binding the target's common git dir into the read scope - is
+    deliberately NOT taken: the path comes from target-written `gitdir:` content, so it would let
+    an audited repository ask the sandbox to read-bind an arbitrary host path.
+    """
+
+    INSTRUMENT_REL = "agents/modern-web/scripts/scan_modern_web.py"
+    # The shape the nightly triage reported (tm/external-fetch-rule-definition): a detection rule
+    # in the factory's own instrument layout. The `fetch()` in the title is what the deterministic
+    # pre-pass calls an external-fetch entry point when the file is scanned as third-party source.
+    INSTRUMENT_CODE = (
+        "SURFACE_PATTERNS = [\n"
+        "    {\n"
+        '        "rule_id": "fetch-without-timeout",\n'
+        '        "title": "Unbounded fetch() With No AbortSignal.timeout()",\n'
+        '        "category": "external-fetch",\n'
+        '        "severity": "medium",\n'
+        "    },\n"
+        "]\n"
+    )
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="agents-hc2wp-sandbox-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+        # The installation the pre-pass is loaded FROM: its own tree, its own git dir.
+        self.install = self.tmp / "install"
+        copy_station_script(
+            self.install,
+            ROOT / "agents" / "threat-model" / "scripts" / "mine_history.py",
+            "agents/threat-model/scripts/mine_history.py",
+        )
+        instrument = self.install / self.INSTRUMENT_REL
+        instrument.parent.mkdir(parents=True, exist_ok=True)
+        instrument.write_text(self.INSTRUMENT_CODE, encoding="utf-8")
+        (self.install / mine_history.FACTORY_IDENTITY_MARKER_NAME).write_bytes(
+            (ROOT / mine_history.FACTORY_IDENTITY_MARKER_NAME).read_bytes())
+        _run_git(self.install, "init", "-q")
+        _run_git(self.install, "add", "-A")
+        _run_git(self.install, "commit", "-qm", "install")
+
+        # The AUDITED target: a DIFFERENT clone of the same repository, and a linked worktree of
+        # it. Its `.git` is a file naming the clone's object database, which the sandbox does not
+        # bind - a real cross-installation self-audit, not a host-side rehearsal of one.
+        self.other = self.tmp / "other"
+        subprocess.run(["git", "clone", "-q", "--local", str(self.install), str(self.other)],
+                       check=True, capture_output=True, text=True)
+        self.worktree = self.other / "wt"
+        _run_git(self.other, "worktree", "add", "-q", "--detach", str(self.worktree), "HEAD")
+        self.assertTrue((self.worktree / ".git").is_file(),
+                        "the fixture must be a LINKED WORKTREE: that is the whole shape")
+
+    def _prepass_in_sandbox(self) -> dict:
+        """Run the real pre-pass inside bubblewrap, as the nightly dispatcher does."""
+        run_dir = Path(tempfile.mkdtemp(dir=self.tmp, prefix="run-"))
+        output = run_dir / "candidates.json"
+        command = sandbox_command(
+            [sys.executable,
+             str(self.install / "agents" / "threat-model" / "scripts" / "mine_history.py"),
+             "--target", str(self.worktree), "--output", str(output)],
+            target_dir=self.worktree,
+            factory_root=self.install,
+            run_dir=run_dir,
+        )
+        res = subprocess.run(command, capture_output=True, text=True, timeout=180)
+        self.assertEqual(res.returncode, 0, f"pre-pass failed inside the sandbox:\n{res.stdout}\n{res.stderr}")
+        return json.loads(output.read_text(encoding="utf-8"))
+
+    def test_the_sandboxed_nightly_shape_reports_self_target(self):
+        """The artifact says `shared-repository`, and the instrument's rule line is not a candidate."""
+        payload = self._prepass_in_sandbox()
+        self.assertEqual(payload["self_target_signal"], mine_history.SELF_TARGET_SHARED_REPOSITORY,
+                         f"the object DB is unreadable here by construction; artifact: {payload['self_target_signal']}")
+        self.assertTrue(payload["is_self_target"])
+        self.assertEqual(payload["self_target_suppression_scope"], "structural-only")
+        self.assertIsNone(payload["self_target_probe_error"])
+        self.assertNotIn(self.INSTRUMENT_REL, {ep["path"] for ep in payload["entry_points"]},
+                         f"the factory's own rule definition is not attack surface: {payload['entry_points']}")
+
+    def test_without_the_marker_the_same_run_says_identity_unreadable(self):
+        """The ONE thing the marker changes: with it gone the run is blind, and it says so.
+
+        This is also the honest measurement of the defect: no marker means the instrument file is
+        scanned as third-party source and its rule definition surfaces - the nightly noise, and
+        the second acceptance criterion's `identity-unreadable` in place of `foreign-repository`.
+        """
+        (self.worktree / mine_history.FACTORY_IDENTITY_MARKER_NAME).unlink()
+        payload = self._prepass_in_sandbox()
+        self.assertEqual(payload["self_target_signal"], mine_history.SELF_TARGET_IDENTITY_UNREADABLE,
+                         f"a blind probe must not claim third-party; artifact: {payload['self_target_signal']}")
+        self.assertFalse(payload["is_self_target"])
+        self.assertEqual(payload["self_target_suppression_scope"], "none")
+        self.assertIn("not a git repository", payload["self_target_probe_error"] or "",
+                      "the artifact must name the probe that was blind")
+        self.assertIn(self.INSTRUMENT_REL, {ep["path"] for ep in payload["entry_points"]},
+                      f"the noise this bead removes: {payload['entry_points']}")
 
 
 class TestThreatModelRefusalGuardsAndExclusions(unittest.TestCase):
