@@ -144,6 +144,34 @@ class TestDescribeUnrepairable(unittest.TestCase):
         self.assertIsNone(describe_unrepairable('{"summary": "s", "findings": []}'))
         self.assertIsNone(describe_unrepairable(""))
 
+    def test_a_missing_comma_between_two_rows_is_named_as_a_missing_comma(self):
+        """agents-fsrqw: `[{"a": 1} {"b": 2}]` arrived as "no message at all" - the retry was told
+        nothing, and the one thing it needed to hear was that a separator is missing."""
+        text = '{"summary": "s", "findings": [{"a": 1} {"b": 2}]}'
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+        self.assertIn("missing", named)
+        self.assertIn("char", named, "the offset is what locates the fix")
+        self.assertEqual(repair_json(text), (text, []),
+                         "naming it must not become inserting it: a comma is a place the model left empty")
+
+    def test_a_missing_comma_between_members_is_not_called_an_unescaped_quote(self):
+        # Both arrive as "Expecting ',' delimiter" and the decoder stops on a QUOTE, so the quote branch
+        # must not claim this one: the model's bug is a missing separator, not a string.
+        text = '{"summary": "a" "findings": []}'
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+        self.assertNotIn("unescaped quote", named, f"the wrong diagnosis sends the retry looking for a string bug: {named}")
+
+    def test_a_missing_colon_is_named_as_a_missing_colon(self):
+        text = '{"summary" "s", "findings": []}'
+        named = describe_unrepairable(text)
+        self.assertIsNotNone(named)
+        self.assertIn("':'", named)
+        self.assertIn("member name", named)
+
     def test_the_excerpt_is_bounded(self):
         text = '{"summary": "s", "findings": [{"rule_id": ' + "x" * 500 + '}]}'
         named = describe_unrepairable(text)

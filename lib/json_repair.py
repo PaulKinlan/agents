@@ -194,7 +194,10 @@ def describe_unrepairable(text: str) -> Optional[str]:
       deterministic repair is impossible: the value depends on data the factory does not have, and
       inventing a string would bind a finding to a candidate id nobody wrote;
     * a string whose unescaped quote could not be escaped within the bound, reported with the offset so
-      the retry can be told which string to fix.
+      the retry can be told which string to fix;
+    * a missing separator - the comma between two adjacent members or values, or the colon after a
+      member name - named as the separator the decoder asked for rather than as the unescaped quote it
+      stopped on (agents-fsrqw: both arrive as "Expecting ... delimiter").
 
     Returns None when the payload is decodable (nothing to say) or when the error is one this function
     has no better words for than the caller's own.
@@ -226,12 +229,35 @@ def describe_unrepairable(text: str) -> Optional[str]:
                 f"unquoted text or an expression where a quoted string was required, which no "
                 f"deterministic repair can recover")
     if "delimiter" in message:
-        # The same two shapes `_one_repair` escapes: the quote the decoder stopped AT, or the quote just
-        # before the position it choked on (a string that ended early, then prose). Mirrored here so a
-        # payload the repair declined is still NAMED as the unescaped-quote shape it is.
         index = _prev_nonspace(body, position)
-        if char == '"' or (index >= 0 and body[index] == '"'):
-            where = position if char == '"' else index
+        quote_at_error = char == '"'
+        quote_before = index >= 0 and body[index] == '"'
+        # A MISSING SEPARATOR IS NOT AN UNESCAPED QUOTE (agents-fsrqw). Both arrive as "delimiter", so
+        # the message text - which delimiter the decoder wanted - is read before the character it
+        # stopped on. Naming these matters because they are what the retry gets told: `[{"a": 1}
+        # {"b": 2}]` is a missing comma between two rows, and "unescaped quote" would send the model
+        # looking for a string bug it does not have.
+        if "':'" in message:
+            return (f"a ':' is missing at char {position} before "
+                    f"{_excerpt(body[position:position + _EXCERPT_CHARS])!r} - an object member name is "
+                    f"not followed by its value")
+        if "','" in message:
+            # Two peers adjacent, with no separator between them. Refused rather than inserted: the
+            # comma is a PLACE the model left empty, and asserting the structure there is a decision
+            # (_looks_like_object_member refuses the same class one branch over).
+            if quote_at_error and _looks_like_object_member(body, position):
+                return (f"a ',' is missing at char {position} between two object members "
+                        f"({_excerpt(body[position:position + _EXCERPT_CHARS])!r}) - the repair pass "
+                        f"does not insert one")
+            if not quote_at_error and not quote_before:
+                return (f"a ',' is missing at char {position} between two values "
+                        f"({_excerpt(body[max(position - 40, 0):position + _EXCERPT_CHARS])!r}) - the "
+                        f"repair pass does not insert one")
+        if quote_at_error or quote_before:
+            # The same two shapes `_one_repair` escapes: the quote the decoder stopped AT, or the quote
+            # just before the position it choked on (a string that ended early, then prose). Mirrored
+            # here so a payload the repair declined is still NAMED as the unescaped-quote shape it is.
+            where = position if quote_at_error else index
             return (f"a string contains an unescaped quote at char {where} "
                     f"({_excerpt(body[max(where - 40, 0):where + _EXCERPT_CHARS])!r}) that the repair "
                     f"pass could not escape within its bound")
