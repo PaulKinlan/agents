@@ -1162,6 +1162,42 @@ class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
         self.assertIn("prefer a worker pool with per-parse abort", remediation)
         self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
 
+    def test_a_noun_that_is_also_a_verb_does_not_turn_a_consequence_into_a_fallback(self):
+        """agents-3t9oz: "otherwise queue starvation blocks the pipeline".
+
+        The first version of this fix asked whether the clause OPENED WITH AN IMPERATIVE, which needs a verb
+        lexicon and so cannot tell a directive from a consequence whose subject is a verb: `queue`, `pool`
+        and `batch` are all verbs. Queue-starvation prose was cut again and the worker-pool proposal after it
+        was dropped - the same defect one shape over. A cut now also needs the clause to DIRECT concurrency,
+        so a consequence is preserved whatever noun it starts with.
+        """
+        for consequence in ("otherwise queue starvation blocks the pipeline",
+                            "otherwise pool starvation spreads across tenants",
+                            "otherwise batch size grows without bound"):
+            with self.subTest(consequence=consequence):
+                report = {"findings": [self.finding(
+                    f"Make the parse cancellable; {consequence}; prefer a worker pool with per-parse abort.")]}
+                notes = normalize_report(report)
+                remediation = report["findings"][0]["remediation"]
+                self.assertIn("prefer a worker pool with per-parse abort", remediation)
+                self.assertIn(consequence, remediation)
+                self.assertFalse(any("withheld" in note for note in notes), notes)
+                self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+                self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+    def test_a_fallback_that_orders_workers_is_still_withheld(self):
+        # The cut keeps its job: a clause that orders overlap in the non-reentrant branch is replaced, even
+        # when it says "workers" rather than "parallel" - the narrower rule must not become a no-op.
+        report = {"findings": [self.finding(
+            "IF backend is reentrant, use Promise.all; otherwise launch model runs on separate workers; "
+            "else preserve serial execution")]}
+        notes = normalize_report(report)
+        remediation = report["findings"][0]["remediation"]
+        self.assertNotIn("separate workers", remediation)
+        self.assertIn("use Promise.all", remediation)
+        self.assertTrue(any("withheld" in note for note in notes), notes)
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
     def test_an_unsafe_fallback_is_still_withheld_and_the_withholding_is_named(self):
         # The cut the guard is entitled to make: a fallback branch that directs concurrency instead of
         # serial execution. It must still be removed - and now the note says how much was removed.

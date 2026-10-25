@@ -261,23 +261,35 @@ _FIRST_FALLBACK_SERIAL_PATTERN = re.compile(
 # the change matters and then proposes a workload change - it is not "else do this instead". Treating every
 # connector as a fallback boundary cut the remediation at it, dropped the worker-pool proposal, and left a
 # validator that then reported nothing wrong: a false-green rewrite. So a connector only marks a fallback
-# when the clause it introduces is a DIRECTIVE (an imperative with no subject of its own, or the serial
-# formula the guard itself writes). The cuts this narrows are exactly the ones the guard is entitled to
-# make - replacing an unconditional/differently-conditional branch - and everything else is preserved
-# inside the preconditioned branch, where it is safe by construction.
+# when the clause it introduces DIRECTS EXECUTION the guard has to replace: it orders serial execution
+# (the formula the guard writes itself) or it orders concurrency that the precondition must qualify.
+#
+# THE CUT NEEDS THE DIRECTION, NOT THE GRAMMAR (agents-3t9oz). A first pass asked only whether the clause
+# opened with an imperative, which needs a verb lexicon and so misreads a noun that is also a verb: the
+# reviewer's "otherwise queue starvation blocks the pipeline" is a consequence with `queue` as its subject,
+# and cutting there dropped the advice after it all over again. Anything that directs NEITHER serial nor
+# concurrent execution is a statement about consequences, and every clause this keeps lands inside the
+# conditioned branch ("IF ... reentrant ..., <kept text>; otherwise preserve serial execution"), so
+# keeping is safe by construction while cutting is the only way to lose a proposal.
 _FALLBACK_CONNECTOR = re.compile(r"\b(?:otherwise|else)\b", re.IGNORECASE)
 _FALLBACK_CLAUSE_END = re.compile(r"[.;!?](?:\s|$)")
 # The imperatives a fallback directive opens with. Not a grammar - the verbs that actually appear in this
-# corpus, kept because the alternative (calling any clause with concurrency words in it a fallback) cuts a
-# CAUSAL clause that merely mentions concurrency ("otherwise parallel requests corrupt the index") and so
-# re-creates the dropped-advice defect from the other side. A directive this misses is left inside the
-# conditioned branch, which is the safe direction: the advice is then still explicitly conditional.
+# corpus. It is only ever consulted TOGETHER with a concurrency direction in the same clause, so the
+# noun-verb homographs it cannot tell apart (queue, pool, batch, cap) cost nothing on their own.
 _FALLBACK_IMPERATIVE_PATTERN = re.compile(
     r"^(?:please\s+)?(?:preserve|keep|maintain|retain|stay|remain|default\s+to|fall\s+back(?:\s+to)?|"
     r"revert|defer|serialize|serialise|run|use|prefer|consider|apply|adopt|switch|execute|process|"
     r"handle|batch|group|combine|parallelize|parallelise|await|spawn|launch|start|stop|enable|disable|"
     r"allow|avoid|limit|cap|queue|pool|fan|split|divide|wrap|move|replace|swap|add|remove|call|invoke|"
     r"make|do|go)\b",
+    re.IGNORECASE
+)
+# What makes a clause a DIRECTIVE the guard must replace: it orders overlap. `_EXECUTION_CONCURRENCY_PATTERN`
+# is the shared vocabulary, plus the worker/thread words it does not carry on their own - "launch model runs
+# on separate workers" is concurrency advice even though it says neither "parallel" nor "concurrently".
+_FALLBACK_CONCURRENCY_PATTERN = re.compile(
+    rf"(?:{_EXECUTION_CONCURRENCY_PATTERN.pattern})"
+    r"|\b(?:workers?|threads?|thread\s*pools?|worker\s*pools?|multiprocessing|fork(?:ing)?)\b",
     re.IGNORECASE
 )
 
@@ -292,9 +304,10 @@ def first_fallback_marker(text: str) -> Optional[re.Match]:
     become the validator's fallback boundary, its clause holds the worker-pool proposal, and the rewritten
     finding reads as unpreconditioned again.
 
-    A connector is a fallback boundary when its own clause is a DIRECTIVE - the serial formula the guard
-    writes, or an imperative that opens the clause. "otherwise a slow PDF blocks the queue" introduces a
-    consequence, so it is not one and nothing after it is withheld (agents-gjm4n).
+    A connector is a fallback boundary when the clause it introduces DIRECTS execution - serial execution by
+    the guard's own formula, or concurrency that the precondition has to qualify. "otherwise a slow PDF
+    blocks the queue" and "otherwise queue starvation blocks the pipeline" introduce consequences, so they
+    are not boundaries and nothing after them is withheld (agents-gjm4n, agents-3t9oz).
     """
     if not isinstance(text, str):
         return None
@@ -306,9 +319,10 @@ def first_fallback_marker(text: str) -> Optional[re.Match]:
         clause = clause.strip().lstrip(",:;-\u2013\u2014").strip()
         if not clause:
             continue
-        if _FALLBACK_IMPERATIVE_PATTERN.match(clause):
-            return match
         if _FIRST_FALLBACK_SERIAL_PATTERN.match(text[match.start():]):
+            return match
+        if (_FALLBACK_IMPERATIVE_PATTERN.match(clause)
+                and _FALLBACK_CONCURRENCY_PATTERN.search(clause)):
             return match
     return None
 
