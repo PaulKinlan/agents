@@ -23,7 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple, Sequence
 FACTORY_ROOT = Path(__file__).resolve().parent
 
 try:  # repo root on sys.path, or run as a script from another cwd
-    from lib.budget import StationTimeout, budget_for, run_station_command
+    from lib.budget import (STATION_DEADLINE_CEILING_MINUTES, StationTimeout, budget_for,
+                           run_station_command)
     from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
                                  budget_note, check_engine, downgrade_network_to_withheld,
                                  downgrade_write_to_read_only, egress_allowlist,
@@ -52,6 +53,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                validate_agent_report)
     from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
+                               write_active_marker,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
                                prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
@@ -62,7 +64,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
-    from lib.budget import StationTimeout, budget_for, run_station_command
+    from lib.budget import (STATION_DEADLINE_CEILING_MINUTES, StationTimeout, budget_for,
+                           run_station_command)
     from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
                                  budget_note, check_engine, downgrade_network_to_withheld,
                                  downgrade_write_to_read_only, egress_allowlist,
@@ -91,6 +94,7 @@ except ImportError:
                                validate_agent_report)
     from lib import sinks
     from lib.retention import (ACTIVE_MARKER_NAME, active_grace_seconds, findings_retention_config,
+                               write_active_marker,
                                hillclimb_retention_ttl, prune_findings, prune_hillclimb_dirs,
                                prune_run_dirs, remove_recorded, retention_config)
     from lib.sandbox import (ENGINE_EXECUTABLES, PREPASS_EXECUTABLES, SANDBOXED_ENGINES,
@@ -1290,10 +1294,11 @@ def create_run_dir(agent_name: str, target_name: str, run_id: str) -> Path:
     # Raw scanner matches and prompts stay private to the operator (agents-pgr).
     os.chmod(run_dir, 0o700)
     # Mark the run active (agents-ped P2): a concurrent scheduled run must never sweep a
-    # still-running run directory, even when fast runs overflow the count bound. The marker
-    # mtime is the freshness signal prune_run_dirs checks; it is removed on successful
-    # completion, and a crashed/killed run's marker goes stale and is swept after the grace.
-    (run_dir / ACTIVE_MARKER_NAME).touch()
+    # still-running run directory, even when fast runs overflow the count bound. The marker names THIS
+    # process as its owner (agents-03iq4), so the prune asks the kernel whether the run is alive; its
+    # mtime is the fallback signal for a crashed run's stale marker, and it is removed on successful
+    # completion.
+    write_active_marker(run_dir)
     # Bounded retention (agents-ped): run artifacts embed raw scanner matches and model
     # output, so prune old run directories now that this run's directory is in place. The
     # just-allocated directory is excluded, so a mid-run crash never loses the live run.
@@ -1347,6 +1352,26 @@ def _finding_sort_key(finding: Any) -> Tuple[str, int, str]:
     elif not isinstance(line, int):
         line = 0
     return (str(finding.get("path", "")), line, str(finding.get("rule_id", "")))
+
+
+def sweep_grace_warning(budget: Any) -> Optional[str]:
+    """A line to print when this station's deadline can reach the run-sweep grace (agents-6ep5s).
+
+    A run directory is protected from a CONCURRENT `factory` prune only by the AGE of its `.active`
+    marker (`lib/retention.py:_marker_is_active`), so a station still working at the grace is swept -
+    and its findings with it. The FUNDED ceiling (lib/budget.py:STATION_DEADLINE_CEILING_MINUTES, 45
+    min) stays inside the default grace by construction, but two caller choices can still leave it: a
+    station that DECLARES a deadline at or above the grace is honoured rather than shrunk, and an
+    operator can lower FACTORY_RUN_ACTIVE_GRACE_SECONDS. Printed, not raised: the run is the
+    operator's call, but it must not be a silent one.
+    """
+    grace = active_grace_seconds()
+    if budget.max_seconds < grace:
+        return None
+    return (f"Note: this station's deadline ({budget.minutes:g} min) is at or above the run-sweep "
+            f"grace ({grace / 60:g} min), so a concurrent factory prune could sweep its run directory "
+            f"while it is still working. Raise FACTORY_RUN_ACTIVE_GRACE_SECONDS above the deadline, "
+            f"or lower budget.max_minutes.")
 
 
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
@@ -1803,6 +1828,11 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                              unpinned_note=unpinned_note):
         print(line)
     print(f"  Budget:      {budget.minutes:g} min (enforced){budget_note(policy, engine)}")
+    # agents-6ep5s: a deadline at or above the run-sweep grace can be pruned mid-run. Named here, at
+    # the declaration, and again below if funding the batches raises it past the grace.
+    grace_warning = sweep_grace_warning(budget)
+    if grace_warning:
+        print(f"  {grace_warning}")
     print(f"  Target:      {target_name} ({target_dir})")
     print(f"  Visibility:  {normalize_visibility(target_cfg.get('visibility'))} (enforced)")
     print(f"  Engine:      {engine}")
@@ -2022,6 +2052,22 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                     json.dumps(presented, indent=2))
                 print(f"-> Batching {len(candidates_slice)} candidate(s) into {batch_count} call(s) "
                       f"of at most {max_per_call}.")
+                # agents-xm2xc: THE DEADLINE FUNDS THE CALLS IT PLANNED. `budget.max_minutes` sized ONE
+                # engine call, and the deadline was still that single-call budget after e5799b72 made
+                # batching unconditional: the nightly's 5-minute vuln-triage expired on batch 6 of 7,
+                # discarding five batches of finished triage and skipping six later stations. The
+                # declaration now buys a per-call allowance and the deadline covers the sequence, up to
+                # the ceiling in lib/budget.py (agents-xm2xc: STATION_DEADLINE_CEILING_MINUTES).
+                funded = budget.plan_calls(batch_count)
+                print(f"-> Station deadline now {funded / 60.0:g} min for {batch_count} call(s) of "
+                      f"{budget.declared_minutes:g} min (ceiling "
+                      f"{STATION_DEADLINE_CEILING_MINUTES:g} min).")
+                # agents-6ep5s: funding the calls can raise a deadline the declaration alone kept
+                # inside the sweep grace (or an operator may have lowered the grace) - say so now, not
+                # after the run directory has been swept by a concurrent prune.
+                funded_warning = sweep_grace_warning(budget)
+                if funded_warning and funded_warning != grace_warning:
+                    print(f"  {funded_warning}")
             else:
                 batches = [candidates_slice]
         else:
@@ -2240,6 +2286,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                     if batched else f"engine '{engine}'")
                     _res = run_station_command(
                         adapter_cmd, budget, _batch_label,
+                        # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
+                        # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
+                        # with them the station. Each call gets its own allowance (the declaration,
+                        # reduced to a fair share when the ceiling or a slow earlier call leaves less),
+                        # and the last one leaves the findings dispatch its reserve.
+                        timeout_seconds=(budget.call_timeout(_batch_label, len(prompts) - _batch_index)
+                                         if batched else None),
                         input=_batch_prompt, capture_output=True, text=True,
                         check=False, env=adapter_env,
                         on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))

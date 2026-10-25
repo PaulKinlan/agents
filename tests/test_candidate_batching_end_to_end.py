@@ -972,6 +972,91 @@ class TestTheMergedReportCarriesThePrepPassCount(BatchedStation):
         self.assertEqual([f["candidate_id"] for f in report["findings"]],
                          [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)],
                          "the merge still accounts for every candidate")
+# agents-xm2xc: THE DEADLINE FUNDS THE BATCHES IT PLANNED. The nightly planned 7 calls of <=8
+# candidates against vuln-triage's 5-minute budget.max_minutes, the single shared deadline expired on
+# batch 6, five finished batches were discarded and the line skipped six stations behind them. This
+# drives that shape at a test-sized clock: three batches, each spending most of ONE declared allowance,
+# so the run only reaches its last batch if the deadline covers the sequence.
+SLOW_BATCH_STUB = IDS_AND_ROWS + r"""sleep 2
+printf '%s]}\n' "$out"
+"""
+
+# 0.1 min = 6 s per call: three slow calls need ~6 s of engine time, and the pre-pass and findings
+# dispatch need their own share, so a single shared 6-second deadline cannot finish them (RED: measured
+# as a batch-3 StationTimeout before the fix).
+SHORT_DECLARED_BUDGET_YAML = AGENT_YAML.replace("max_minutes: 5", "max_minutes: 0.1")
+
+
+class TestTheDeadlineFundsItsBatches(BatchedStation):
+    def test_three_slow_batches_complete_inside_a_funded_deadline(self):
+        self.agent(SHORT_DECLARED_BUDGET_YAML)
+        self.stub(SLOW_BATCH_STUB)
+        res = self.factory("pi")
+        run = self.run_dir()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Station deadline now 0.3 min for 3 call(s) of 0.1 min", res.stdout,
+                      "the extension is stated with both numbers: 3 calls x the declared 0.1 min")
+        self.assertEqual(len(sorted(run.glob("model_output.batch*.txt"))), 3,
+                         "every batch ran: a shared 6-second deadline expires on the third")
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([f["candidate_id"] for f in report["findings"]],
+                         [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)],
+                         "a run that funds all three calls keeps all three batches' rows")
+
+    def test_one_hung_batch_cannot_spend_the_whole_funded_deadline(self):
+        # The other half of the bound: batch 1 hangs for longer than its own allowance. Its allowance
+        # is one declaration (not the whole 18-second deadline), so batches 2 and 3 still run and the
+        # station fails ON the hung call - named, with the batch number in the reason.
+        self.agent(SHORT_DECLARED_BUDGET_YAML)
+        self.stub(IDS_AND_ROWS + r"""if [[ " ${ids[*]} " == *" cand-perf-000 "* ]]; then
+  sleep 30
+fi
+printf '%s]}\n' "$out"
+""")
+        res = self.factory("pi")
+        run = self.run_dir()
+        self.assertNotEqual(res.returncode, 0, "a hung batch must fail the station, not hang the line")
+        failure = (run / "failure_reason.txt").read_text(encoding="utf-8")
+        self.assertIn("batch 1/3", failure, f"the reason names the batch that hung: {failure}")
+        self.assertIn("exceeded its", failure)
+        # agents-03iq4, the WIRING half: a failed run keeps its .active marker (only a successful one
+        # drops it), and that marker must name its owner so a concurrent prune can see the run is gone
+        # rather than reason from the marker's age. This is the only place the real dispatcher's marker
+        # survives a run, so it is the place to assert what the dispatcher actually wrote.
+        owner = (run / ".active").read_text(encoding="utf-8").split()
+        self.assertGreater(int(owner[0]), 0, f"the marker must name a pid, got {owner!r}")
+        self.assertGreater(len(owner), 1, f"the marker must name the process start time, got {owner!r}")
+
+
+class TestTheSweepGraceIsNotSilentlyCrossed(BatchedStation):
+    """agents-6ep5s (review of agents-xm2xc): a station deadline must not reach the run-sweep grace.
+
+    A run directory is protected from a CONCURRENT prune only while its `.active` marker is younger
+    than lib/retention.py's grace, so a station still working at the grace loses its run directory and
+    its findings. The funded ceiling now stays inside the default grace; these drive the two ways a
+    caller can still cross it, and require the dispatcher to SAY so rather than let a run be swept.
+    """
+
+    def test_a_declaration_at_or_above_the_grace_is_named_at_the_banner(self):
+        self.agent(AGENT_YAML.replace("max_minutes: 5", "max_minutes: 120"))   # 2 h > 1 h grace
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("at or above the run-sweep grace", res.stdout,
+                      f"a 120-minute declaration must be named, not silently sweepable: {res.stdout[:600]}")
+        self.assertIn("FACTORY_RUN_ACTIVE_GRACE_SECONDS", res.stdout,
+                      "the warning must name the lever that fixes it")
+
+    def test_a_lowered_grace_under_the_funded_deadline_is_named_when_funding(self):
+        # the default path is safe by construction; an operator who lowers the grace is not, so the
+        # funded deadline must be re-checked AFTER plan_calls rather than only at the banner
+        self.agent(AGENT_YAML)                                        # 5 min per call, 3 calls
+        self.stub(BATCH_STUB)
+        res = self.factory("pi", extra_env={"FACTORY_RUN_ACTIVE_GRACE_SECONDS": "600"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Station deadline now 15 min for 3 call(s)", res.stdout)
+        self.assertIn("grace (10 min)", res.stdout,
+                      f"the funded 15-minute deadline exceeds a 10-minute grace: {res.stdout[:900]}")
 
 
 if __name__ == "__main__":
