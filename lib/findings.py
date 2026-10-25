@@ -1728,20 +1728,54 @@ def read_candidate_paths(run_dir: Any) -> Dict[str, str]:
 
     An unreadable payload, a pre-pass with no ids, or candidates with no path yields `{}`, which disables
     that repair rather than inventing a binding.
+
+    The path-only view of `read_candidate_locations`, kept because that repair needs nothing else.
+    """
+    return {cid: location["path"]
+            for cid, location in read_candidate_locations(run_dir).items()
+            if location.get("path")}
+
+
+def read_candidate_locations(run_dir: Any) -> Dict[str, Dict[str, Any]]:
+    """`candidate_id -> {"path": <normalised>, "line": <int|None>}` for every recorded candidate.
+
+    ONE MORE JOIN THAN `read_candidate_paths` (agents-op02b). The qrcode nightly's vuln-discovery run
+    emitted seven findings with NO candidate_id at all, so every row accounted for nothing and the
+    station read INCOMPLETE - while the pre-pass was holding the very candidates those rows described.
+    The row's own `path` (and, when several candidates live in one file, its `line_number`) is the
+    remaining evidence of which candidate it meant, so the reader exposes both from the same payload
+    the coverage check already reads, and the two can never disagree about the population.
+
+    An unreadable payload, a pre-pass with no ids, or candidates with no path yields `{}`, which
+    disables the location repair rather than inventing a binding.
     """
     payload = _read_candidate_payload(run_dir)
     candidates = payload.get("candidates") if isinstance(payload, dict) else None
     if not isinstance(candidates, list):
         return {}
-    paths: Dict[str, str] = {}
+    locations: Dict[str, Dict[str, Any]] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         cid = candidate.get(CANDIDATE_ID_FIELD)
         path = _normalise_cited_path(candidate.get("path"))
-        if isinstance(cid, str) and cid.strip() and path:
-            paths.setdefault(cid.strip(), path)
-    return paths
+        if not (isinstance(cid, str) and cid.strip() and path):
+            continue
+        locations.setdefault(cid.strip(), {"path": path,
+                                           "line": _usable_line_number(candidate.get("line_number"))})
+    return locations
+
+
+def _usable_line_number(value: Any) -> Optional[int]:
+    """A line a row and a candidate can be COMPARED on, or None - never a coercion that invents one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+        return number if number > 0 else None
+    return None
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1993,7 +2027,8 @@ def repair_cited_candidate_ids(rows: Any,
                                presented: Iterable[str],
                                foreign: Iterable[str] = (),
                                refusals: Optional[List[Dict[str, Any]]] = None,
-                               candidate_paths: Optional[Dict[str, str]] = None
+                               candidate_paths: Optional[Dict[str, str]] = None,
+                               candidate_locations: Optional[Dict[str, Dict[str, Any]]] = None
                                ) -> List[Dict[str, Any]]:
     """Rewrite `candidate_id` in place on rows where a UNIQUE repair exists; return the repairs.
 
@@ -2004,7 +2039,14 @@ def repair_cited_candidate_ids(rows: Any,
     rules cannot express: a duplicated-but-valid citation, re-bound onto the candidate the row's own path
     names when that is unambiguous (agents-amgst, `repair_duplicate_citations_by_path`). Without it the
     function behaves exactly as before.
+
+    `candidate_locations` (`candidate_id -> {path, line}`, `read_candidate_locations`) enables the repair
+    for a row that carries NO id at all (agents-op02b, `repair_missing_candidate_ids_by_location`). It is
+    a superset of `candidate_paths`, so a caller holding it needs to pass only this one.
     """
+    if candidate_paths is None and candidate_locations:
+        candidate_paths = {cid: location["path"] for cid, location in candidate_locations.items()
+                           if isinstance(location, dict) and location.get("path")}
     repairs: List[Dict[str, Any]] = []
     for row in rows if isinstance(rows, list) else ():
         if not isinstance(row, dict):
@@ -2022,16 +2064,135 @@ def repair_cited_candidate_ids(rows: Any,
         row["candidate_id"] = repaired
         repairs.append({"cited": cited.strip(), "repaired": repaired, "rule": rule,
                         "path": row.get("path")})
-    # A second pass deliberately: the duplicate rule needs the citations the first pass produced.
+    # A second pass deliberately: each later rule needs the citations the earlier ones produced - the
+    # missing-id rule must not double-book a candidate an id-text row already names, and the duplicate
+    # rule can only see duplicates among the citations that survived.
+    if candidate_locations:
+        repair_missing_candidate_ids_by_location(rows, presented, candidate_locations, repairs, refusals)
     repair_duplicate_citations_by_path(rows, presented, candidate_paths, repairs, refusals)
     return repairs
+
+
+MISSING_ROW_NAMED_CANDIDATES = 2   # a refusal names the candidates its location could have meant
+
+
+def repair_missing_candidate_ids_by_location(rows: Any,
+                                            presented: Iterable[str],
+                                            locations: Optional[Dict[str, Dict[str, Any]]],
+                                            repairs: List[Dict[str, Any]],
+                                            refusals: Optional[List[Dict[str, Any]]] = None
+                                            ) -> List[Dict[str, Any]]:
+    """Give a row that carries NO candidate_id the one presented candidate its own location names (agents-op02b).
+
+    THE DEFECT THIS ANSWERS, MEASURED. The qrcode nightly's vuln-discovery station emitted seven findings
+    whose `path`/`line_number` described real pre-pass candidates but which carried no `candidate_id` key
+    at all. Every id-text rule skips such a row (`repair_cited_candidate_ids` `continue`s on a blank
+    citation) and every path rule needs an id to move, so the station's coverage read "cited 0 of 7" and
+    the run was INCOMPLETE - while the answer to every one of those candidates was sitting in the row. The
+    omission is unwritable-to-repair for the id rules and unambiguous for a location rule, which is why it
+    is a repair and not another schema requirement: `candidate_id` cannot be `required` in the shared
+    station schemas (a pre-pass with no ids, and every count-only station, legitimately omit it - see
+    tests/test_station_candidate_accounting.py), and a rejection would spend a whole model call to
+    re-derive what is already in the report.
+
+    STRICTER THAN THE ID RULES, ON PURPOSE. Binding a verdict to the wrong candidate is worse than a
+    visible shortfall, so an id is filled in only when ALL FOUR hold:
+      * the row names a `path`, and that path is one exactly ONE presented candidate carries;
+      * when the row also carries a `line_number`, candidates in that file are narrowed to the one on that
+        line - a unique path does not have to be a unique LOCATION, and a file with three candidates is
+        the ordinary case, not the exotic one;
+      * no candidate OUTSIDE the presented population (a sibling batch, or a pre-pass record the prompt
+        never carried) matches the location as well or better - the same sibling rule the id-text repair
+        uses (agents-fv5uk), one level over;
+      * the candidate is not already cited by another row - a citation is never double-booked.
+    Everything refused is appended to `refusals` with the reason, because "7 rows lost their id" and "7
+    rows could not be matched" are different operator problems and the run directory has to tell them apart.
+    """
+    presented_ids: List[str] = []
+    for value in presented or ():
+        if isinstance(value, str) and value.strip() and value.strip() not in presented_ids:
+            presented_ids.append(value.strip())
+    if not presented_ids or not isinstance(locations, dict) or not locations:
+        return []
+    own = {cid: locations[cid] for cid in presented_ids
+           if isinstance(locations.get(cid), dict) and locations[cid].get("path")}
+    if not own:
+        return []
+    elsewhere = {cid: location for cid, location in locations.items()
+                 if cid not in own and isinstance(location, dict) and location.get("path")}
+    rows_list = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def rank(location: Dict[str, Any], path: str, line: Optional[int]) -> Optional[int]:
+        """1 for the same file AND line, 2 for the same file, None for a different file."""
+        if not path or location.get("path") != path:
+            return None
+        return 1 if line is not None and location.get("line") == line else 2
+
+    cited = set()
+    for row in rows_list:
+        current = row.get("candidate_id")
+        if isinstance(current, str) and current.strip():
+            cited.add(current.strip())
+
+    applied: List[Dict[str, Any]] = []
+    for row in rows_list:
+        current = row.get("candidate_id")
+        if isinstance(current, str) and current.strip():
+            continue                                  # id-text and duplicate rules own that row
+        path = _normalise_cited_path(row.get("path"))
+        line = _usable_line_number(row.get("line_number"))
+        if not path:
+            if refusals is not None:
+                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                 "reason": "row carries no candidate_id and no path to match one on"})
+            continue
+        scored = sorted((rank(location, path, line), cid) for cid, location in own.items()
+                        if rank(location, path, line) is not None)
+        if not scored:
+            if refusals is not None:
+                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                 "reason": (f"row carries no candidate_id and its path {path!r} names none of "
+                                            f"the {len(own)} presented candidate(s)")})
+            continue
+        best_rank = scored[0][0]
+        at_best = [cid for rank_here, cid in scored if rank_here == best_rank]
+        if len(at_best) > 1:
+            named = ", ".join(sorted(at_best)[:MISSING_ROW_NAMED_CANDIDATES])
+            if refusals is not None:
+                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                 "reason": (f"row carries no candidate_id and {len(at_best)} presented "
+                                            f"candidate(s) share its location ({named}); "
+                                            f"a row that names no line cannot choose between them")})
+            continue
+        target = at_best[0]
+        better = [cid for cid, location in elsewhere.items()
+                  if (rank(location, path, line) or 99) <= best_rank]
+        if better:
+            if refusals is not None:
+                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                 "reason": (f"row carries no candidate_id and a candidate it was NOT shown "
+                                            f"({sorted(better)[0]}) matches its location at least as well")})
+            continue
+        if target in cited:
+            if refusals is not None:
+                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                 "reason": (f"row carries no candidate_id and the candidate its location names "
+                                            f"({target}) is already cited by another row")})
+            continue
+        row["candidate_id"] = target
+        cited.add(target)
+        record = {"cited": None, "repaired": target,
+                  "rule": "path+line" if best_rank == 1 else "path", "path": row.get("path")}
+        repairs.append(record)
+        applied.append(record)
+    return applied
 
 
 COVERAGE_NAMED_UNCITED_IDS = 5   # name a shortfall's candidates, never a wall of 45 of them
 
 
 def _coverage_diagnostic(accounted: int, duplicates: List[Dict[str, Any]],
-                         uncited: List[str]) -> str:
+                         uncited: List[str], rows_without_candidate_id: int = 0) -> str:
     """The part of a coverage reason that says WHICH candidates the shortfall is about (agents-amgst).
 
     "cited 5 of the 6" was the only clue a failed nightly offered, and it pointed at neither the duplicated
@@ -2039,11 +2200,18 @@ def _coverage_diagnostic(accounted: int, duplicates: List[Dict[str, Any]],
     rows where one row cited another page's candidate_id, so the count was short by a duplicate and not by
     a missing row. Naming both is what turns that into one sentence an operator can act on.
 
+    A ROW WITH NO ID IS A THIRD CAUSE AND IT GOES FIRST (agents-op02b). The qrcode nightly read "cited 0 of
+    the 7" for seven rows that each named a real candidate by path and simply carried no id, which looks
+    exactly like seven rows naming the wrong candidate. It is named first because the delta table truncates
+    this note at 200 characters: a clause appended after two others is the one an operator never sees.
+
     NOT A WALL OF IDS. An 8-of-49 report would otherwise list 41 ids the model is being told to copy back,
     and a 0-of-N report names nothing it does not already say ("cited 0" is the whole finding), so a
     nothing-cited report keeps its existing text and only duplicates are named.
     """
     parts: List[str] = []
+    if rows_without_candidate_id:
+        parts.append(f"{rows_without_candidate_id} row(s) carried no candidate_id")
     if duplicates:
         parts.append("duplicated citation(s): " + "; ".join(
             f"{record['candidate_id']} cited by {record['citations']} rows" for record in duplicates))
@@ -2082,6 +2250,11 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
     the missing sixth was a DUPLICATE, not a missing row. The reason therefore names duplicated citations
     (with their row counts) and the presented ids no row cited - and carries both as structured fields
     (`duplicate_cited_ids`, `uncited_candidate_ids`) so a line-level reader does not have to parse prose.
+
+    A ROW THAT CARRIES NO ID AT ALL IS COUNTED HERE (agents-op02b), as `rows_without_candidate_id`. It is not
+    the same defect as a WRONG id and it is not the count-only path: count-only means the pre-pass supplied
+    no ids, so a blank is expected there and is never counted. This is identity mode with a report that
+    named no candidate while the machine was holding `presented` of them.
     """
     duplicates: List[Dict[str, Any]] = []
     uncited: List[str] = []
@@ -2089,10 +2262,11 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
         return {"candidates_in": None, "candidates_presented": None,
                 "candidates_accounted": int(reported), "complete": True, "reason": "",
                 "identity": "not-applicable", "duplicate_cited_ids": duplicates,
-                "uncited_candidate_ids": uncited}
+                "uncited_candidate_ids": uncited, "rows_without_candidate_id": 0}
     total = max(0, int(candidates_in))
     presented = min(total, max(0, int(slice_size)))
     ids = [str(i) for i in (presented_ids or []) if i]
+    rows_without_candidate_id = 0
     if ids:
         identity = "identity-matched"
         # Counted WITH multiplicity (agents-amgst): coverage intersects sets, so a citation repeated by a
@@ -2100,8 +2274,10 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
         # candidate unanswered while every row looks answered.
         citations: Dict[str, int] = {}
         for value in cited_ids or []:
-            if value:
-                citations[str(value)] = citations.get(str(value), 0) + 1
+            if isinstance(value, str) and value.strip():
+                citations[value.strip()] = citations.get(value.strip(), 0) + 1
+            else:
+                rows_without_candidate_id += 1
         accounted = len(set(ids) & set(citations))
         duplicates = [{"candidate_id": cid, "citations": count}
                       for cid, count in citations.items() if count > 1 and cid in set(ids)]
@@ -2117,7 +2293,7 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
             f"cited {accounted} of the {presented} candidate id(s) shown "
             f"({total} found by the pre-pass): a partial triage is not a clean result; every row - confirmed "
             f"or dismissed - must carry the candidate_id of the pre-pass candidate it answers")
-        diagnostic = _coverage_diagnostic(accounted, duplicates, uncited)
+        diagnostic = _coverage_diagnostic(accounted, duplicates, uncited, rows_without_candidate_id)
         if diagnostic:
             reason = f"{reason}; {diagnostic}"
     else:
@@ -2129,7 +2305,8 @@ def candidate_coverage(candidates_in: Optional[int], reported: int,
     return {"candidates_in": total, "candidates_presented": presented,
             "candidates_accounted": accounted, "complete": complete, "reason": reason,
             "identity": identity, "duplicate_cited_ids": duplicates,
-            "uncited_candidate_ids": uncited}
+            "uncited_candidate_ids": uncited,
+            "rows_without_candidate_id": rows_without_candidate_id}
 
 
 def candidate_accounting_mode(agent_cfg: Dict[str, Any]) -> str:

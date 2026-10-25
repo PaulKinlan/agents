@@ -87,6 +87,11 @@ triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj; the shap
 cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented
 rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting
 rows and is reported as count-only.
+
+**Leaving the id out is not free (agents-op02b).** A row that carries no `candidate_id` is bound to the pre-pass
+candidate its own `path` names - narrowed by `line_number` when several candidates live in one file, and only when
+exactly one presented candidate matches. A row that cannot be bound that way is reported as a row that carried no
+id, and the run stays INCOMPLETE. That is a net under a correct row, never a shortcut: cite the id.
  Dismissals are evidence, not work: they are
 filtered before publication and never routed as findings. An excluded candidate must not be routed as a vulnerability: the dismissal flag is what keeps it evidence
 
