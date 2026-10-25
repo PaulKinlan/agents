@@ -256,6 +256,62 @@ _FIRST_FALLBACK_SERIAL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# `otherwise` IS A CONSEQUENCE AT LEAST AS OFTEN AS IT IS A FALLBACK (agents-gjm4n). "Make the parse
+# cancellable; otherwise a slow PDF blocks the queue; prefer a worker pool with per-parse abort" says WHY
+# the change matters and then proposes a workload change - it is not "else do this instead". Treating every
+# connector as a fallback boundary cut the remediation at it, dropped the worker-pool proposal, and left a
+# validator that then reported nothing wrong: a false-green rewrite. So a connector only marks a fallback
+# when the clause it introduces is a DIRECTIVE (an imperative with no subject of its own, or the serial
+# formula the guard itself writes). The cuts this narrows are exactly the ones the guard is entitled to
+# make - replacing an unconditional/differently-conditional branch - and everything else is preserved
+# inside the preconditioned branch, where it is safe by construction.
+_FALLBACK_CONNECTOR = re.compile(r"\b(?:otherwise|else)\b", re.IGNORECASE)
+_FALLBACK_CLAUSE_END = re.compile(r"[.;!?](?:\s|$)")
+# The imperatives a fallback directive opens with. Not a grammar - the verbs that actually appear in this
+# corpus, kept because the alternative (calling any clause with concurrency words in it a fallback) cuts a
+# CAUSAL clause that merely mentions concurrency ("otherwise parallel requests corrupt the index") and so
+# re-creates the dropped-advice defect from the other side. A directive this misses is left inside the
+# conditioned branch, which is the safe direction: the advice is then still explicitly conditional.
+_FALLBACK_IMPERATIVE_PATTERN = re.compile(
+    r"^(?:please\s+)?(?:preserve|keep|maintain|retain|stay|remain|default\s+to|fall\s+back(?:\s+to)?|"
+    r"revert|defer|serialize|serialise|run|use|prefer|consider|apply|adopt|switch|execute|process|"
+    r"handle|batch|group|combine|parallelize|parallelise|await|spawn|launch|start|stop|enable|disable|"
+    r"allow|avoid|limit|cap|queue|pool|fan|split|divide|wrap|move|replace|swap|add|remove|call|invoke|"
+    r"make|do|go)\b",
+    re.IGNORECASE
+)
+
+
+def first_fallback_marker(text: str) -> Optional[re.Match]:
+    """The first connector that introduces a FALLBACK, or None when every connector is causal.
+
+    ONE READING FOR BOTH CONSUMERS, because they are a pair: `guard_concurrency_finding` rewrites the
+    remediation at the cutoff this returns and `has_reentrancy_precondition` judges the result with the
+    same one. Two readings would let the guard write text its own validator rejects (a re-wrap on every
+    pass), which is what a naive "only cut the serial formula" fix produced: the causal `otherwise` would
+    become the validator's fallback boundary, its clause holds the worker-pool proposal, and the rewritten
+    finding reads as unpreconditioned again.
+
+    A connector is a fallback boundary when its own clause is a DIRECTIVE - the serial formula the guard
+    writes, or an imperative that opens the clause. "otherwise a slow PDF blocks the queue" introduces a
+    consequence, so it is not one and nothing after it is withheld (agents-gjm4n).
+    """
+    if not isinstance(text, str):
+        return None
+    for match in _FALLBACK_CONNECTOR.finditer(text):
+        clause = text[match.end():]
+        end = _FALLBACK_CLAUSE_END.search(clause)
+        if end:
+            clause = clause[:end.start()]
+        clause = clause.strip().lstrip(",:;-\u2013\u2014").strip()
+        if not clause:
+            continue
+        if _FALLBACK_IMPERATIVE_PATTERN.match(clause):
+            return match
+        if _FIRST_FALLBACK_SERIAL_PATTERN.match(text[match.start():]):
+            return match
+    return None
+
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
     re.IGNORECASE
@@ -590,10 +646,12 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
         return False
 
     # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
-    # Inspect starting from the FIRST fallback delimiter ('otherwise' or 'else'). The immediate first
-    # fallback clause must direct serial execution (not deferred to a later 'else'), and the entire
-    # fallback section must contain no execution concurrency advice.
-    first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
+    # Inspect starting from the first FALLBACK delimiter (a connector that introduces a directive). The
+    # immediate first fallback clause must direct serial execution (not deferred to a later 'else'), and
+    # the entire fallback section must contain no execution concurrency advice. A causal 'otherwise'
+    # ("otherwise a slow PDF blocks the queue") is not a delimiter at all (agents-gjm4n), so the advice
+    # after it stays inside the conditioned branch and this judge reads it the way the rewriter wrote it.
+    first_fb = first_fallback_marker(remediation)
     if first_fb:
         conditional_part = remediation[:first_fb.start()]
         fallback_part = remediation[first_fb.start():]
@@ -626,14 +684,19 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
         return None
 
     modified = False
+    withheld = 0   # characters of a fallback clause the rewrite took out (agents-gjm4n)
 
     # 1. Enforce precondition on remediation if not already preconditioned
     if not has_reentrancy_precondition(finding):
         remediation = str(finding.get("remediation", "")).strip()
         if remediation:
-            # Strip any broken/unsafe trailing fallback or malformed conditional prefix (Reviewer P1)
-            first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
-            clean_rem = remediation[:first_fb.start()].strip().rstrip(";,.") if first_fb else remediation
+            # Strip any broken/unsafe trailing fallback or malformed conditional prefix (Reviewer P1).
+            # ONLY a clause that is a fallback is stripped: a causal 'otherwise' introduces the reason the
+            # advice exists, and cutting there dropped every proposal after it (agents-gjm4n).
+            first_fb = first_fallback_marker(remediation)
+            clean_rem = (remediation[:first_fb.start()].strip().rstrip(";,.") if first_fb
+                         else remediation.rstrip(";,."))
+            withheld = len(remediation) - len(clean_rem) if first_fb else 0
             clean_rem = re.sub(
                 r"^(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b\s*)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)[,;:]?\s*",
                 "",
@@ -675,7 +738,13 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
             modified = True
 
     if modified:
-        return f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
+        note = f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
+        if withheld:
+            # The rewrite is not allowed to be a quiet deletion: whatever it took out is named, with its
+            # size, so a reader can tell a preserved proposal from a withheld one (agents-gjm4n).
+            note += (f" (withheld {withheld} character(s) of fallback-only advice from the"
+                     f" remediation)")
+        return note
     return None
 
 

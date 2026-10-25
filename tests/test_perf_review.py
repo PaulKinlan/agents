@@ -1107,6 +1107,82 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         self.assertEqual(violations_after, [])
 
 
+class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
+    """agents-gjm4n: "otherwise" states a CONSEQUENCE at least as often as it states a fallback.
+
+    The measured shape (perf-review tm-pdf-parse-uncancellable):
+    "Make the parse cancellable; otherwise a slow PDF blocks the queue; prefer a worker pool with
+    per-parse abort." The old rewrite cut at the first `otherwise`, kept "Make the parse cancellable",
+    appended its own serial fallback - and the worker-pool proposal was gone, with the validator then
+    reporting nothing wrong. That is a false-green rewrite: the advice was withheld and nothing said so.
+    """
+
+    REPRO = ("Make the parse cancellable; otherwise a slow PDF blocks the queue; "
+             "prefer a worker pool with per-parse abort.")
+
+    def finding(self, remediation):
+        return {"rule_id": "tm-pdf-parse-uncancellable", "path": "src/parse.ts",
+                "line_number": 42, "remediation": remediation}
+
+    def test_the_proposal_after_a_causal_otherwise_survives_the_rewrite(self):
+        report = {"findings": [self.finding(self.REPRO)]}
+        self.assertFalse(has_reentrancy_precondition(report["findings"][0]),
+                         "the original does not state the precondition")
+        notes = normalize_report(report)
+        self.assertTrue(any("enforced reentrancy precondition" in note for note in notes), notes)
+        remediation = report["findings"][0]["remediation"]
+        self.assertIn("prefer a worker pool with per-parse abort", remediation,
+                      "the actionable proposal is preserved, not silently dropped")
+        self.assertIn("otherwise a slow PDF blocks the queue", remediation,
+                      "the causal clause is preserved: it is the reason, not a fallback")
+        self.assertIn("otherwise preserve serial execution", remediation)
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [],
+                         "the rewrite must be a report its own validator accepts")
+        self.assertFalse(any("withheld" in note for note in notes),
+                         f"nothing was withheld, so nothing may claim to be: {notes}")
+
+    def test_the_rewrite_is_stable_and_never_reports_a_finding_as_clean_while_rewriting_it(self):
+        report = {"findings": [self.finding(self.REPRO)]}
+        normalize_report(report)
+        once = report["findings"][0]["remediation"]
+        self.assertEqual(normalize_report(report), [],
+                         "a second pass must find nothing to do: the guard writes what its validator reads")
+        self.assertEqual(report["findings"][0]["remediation"], once)
+
+    def test_a_consequence_that_merely_mentions_concurrency_is_still_not_a_fallback(self):
+        # The other half of the same reading: a causal clause whose words LOOK concurrent is a statement
+        # ("requests" + "corrupt" is a subject and a verb), so cutting it would re-create the dropped-advice
+        # defect from the other side. Everything kept lands inside the conditioned branch, which is safe.
+        report = {"findings": [self.finding(
+            "Make the parse cancellable; otherwise parallel requests corrupt the index; "
+            "prefer a worker pool with per-parse abort.")]}
+        normalize_report(report)
+        remediation = report["findings"][0]["remediation"]
+        self.assertIn("prefer a worker pool with per-parse abort", remediation)
+        self.assertTrue(has_reentrancy_precondition(report["findings"][0]))
+
+    def test_an_unsafe_fallback_is_still_withheld_and_the_withholding_is_named(self):
+        # The cut the guard is entitled to make: a fallback branch that directs concurrency instead of
+        # serial execution. It must still be removed - and now the note says how much was removed.
+        report = {"findings": [self.finding(
+            "IF backend is reentrant, use a worker pool; otherwise parallelize operations. "
+            "On failure, preserve serial execution; else preserve serial execution.")]}
+        notes = normalize_report(report)
+        remediation = report["findings"][0]["remediation"]
+        self.assertNotIn("parallelize operations", remediation)
+        self.assertIn("use a worker pool", remediation)
+        self.assertIn("otherwise preserve serial execution", remediation)
+        self.assertTrue(any("withheld" in note and "fallback-only advice" in note for note in notes), notes)
+        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+
+    def test_an_unconditioned_recommendation_is_still_a_violation_never_a_false_green(self):
+        # The guard only rewrites reports it can make safe; a report that bypasses normalization is still
+        # rejected. "Never emit a false-green rewritten finding" applies to BOTH halves.
+        bare = {"findings": [self.finding("Use Promise.all to run the parses concurrently")]}
+        self.assertTrue(unpreconditioned_concurrency_findings(bare))
+
+
 class TestTheOutputContractAsksForWhatTheSchemaRequires(unittest.TestCase):
     """agents-sz8q: the schema required `snippet` on every finding while this SKILL asked for the other six, so a
     finding written from the SKILL alone was rejected - measured on the gendn run as exactly 35 violations for 35
