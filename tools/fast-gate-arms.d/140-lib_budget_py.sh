@@ -74,7 +74,15 @@ fast_gate_arms_140_lib_budget_py() {
       # DROPPING the module's own suite. Shape: agents-bwbe's (other families' consumers), not
       # agents-mo75's (a split family whose thin namesake ran).
       # Measured with the coverage oracle - before: 1 omitted consumer(s); after: 0.
-      mapped="$mapped tests/test_retention.py tests/test_hillclimb.py"
+      # agents-6ep5s (review of agents-xm2xc): tests/test_budget.py JOINS THIS ARM because it now
+      # imports ACTIVE_GRACE_SECONDS_DEFAULT and fails if the station-deadline ceiling ever reaches the
+      # run-sweep grace - a relationship between lib/budget.py and THIS module. The gate's own consumer
+      # oracle asked for it rather than my judgement: the first run for the fix reported "lib/retention.py
+      # omits 1 consumer(s) and they are not in the allowlist: tests/test_budget.py imports
+      # lib/retention.py, but the lib/retention.py) arm in tools/fast-gate.sh does not select it". Listing
+      # it is what makes the invariant true in CI instead of only in a full suite. Its cost is already
+      # paid by this change's other half (the lib/budget.py) arm runs it too).
+      mapped="$mapped tests/test_retention.py tests/test_hillclimb.py tests/test_budget.py"
     ;;
     lib/egress_proxy.py)
       # agents-bwbe (rev-cqrm's finding: the agents-mo75 class in a second instance). Without an arm
