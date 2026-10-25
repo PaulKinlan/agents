@@ -2081,8 +2081,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # agents-o0nv2: and it is not a BATCHING feature. Emitting it only when batch_count > 1
             # left every single-call station told nothing about its population or its ids, which is the
             # shape a 0-of-6 read (modern-web's 6 candidates on the reported night). Since e5799b72 made
-            # the <=8 per-call bound unconditional that is every list of 8 or fewer; 9 plans 2 calls, 31
-            # plans 4 and 49 plans 7, so the hole was narrower than "most nights" - and exactly this one.
+            # the <=8 per-call bound unconditional, the brief reaches every list the planner keeps to ONE
+            # call - and that is a JOINT bound, not a count (agents-vnnlt): a batch also stops before
+            # crossing DEFAULT_MAX_BATCH_BYTES (12,000 B), and a station may declare a lower per-call
+            # bound (vuln-discovery and vuln-verify declare 6). So 8 small records are 1 call and 9/31/49
+            # of them plan 2/4/7 - while 6 records of ~5 KB plan 3 calls, and 7 records at vuln-
+            # discovery's bound plan 2. Measured in
+            # tests/test_candidate_batching.py::TestTheSingleCallClaimHoldsOnlyWithinBothBounds.
             # A non-list slice (a context-only payload) carries no candidates to describe.
             header = batch_brief(batch, batch_index, batch_count) if isinstance(batch, list) else ""
             batch_prompt = header + (

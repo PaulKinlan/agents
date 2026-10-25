@@ -108,6 +108,45 @@ class TestPlanBatches(unittest.TestCase):
         self.assertEqual(DEFAULT_MAX_BATCH_BYTES, 12_000)
 
 
+class TestTheSingleCallClaimHoldsOnlyWithinBothBounds(unittest.TestCase):
+    """agents-vnnlt: "every list of 8 or fewer is single-call" was false in two comments.
+
+    The planner's bound is JOINT - a batch stops at DEFAULT_MAX_PER_BATCH records OR before adding a
+    record that would cross DEFAULT_MAX_BATCH_BYTES - and a station may declare a LOWER per-call bound
+    (vuln-discovery and vuln-verify declare 6). Both comments in `factory` and `batch_brief` now quote
+    these numbers, so they are asserted here: a change to any of the three inputs cannot leave the prose
+    claiming a call count the planner no longer produces.
+    """
+
+    def counts(self, count, *, padding=0, **bounds):
+        rows = [candidate(i, padding=padding) for i in range(count)]
+        return [len(batch) for batch in plan_batches(rows, **bounds)]
+
+    def test_small_records_at_the_default_bound_are_one_call_only_up_to_eight(self):
+        self.assertEqual(self.counts(8), [8])
+        self.assertEqual(self.counts(9), [8, 1])
+        self.assertEqual(len(self.counts(31)), 4)
+        self.assertEqual(len(self.counts(49)), 7)
+
+    def test_the_byte_bound_makes_six_small_looking_records_three_calls(self):
+        # The bead's own repro: six candidates of ~5 KB serialise past the 12,000-byte budget two at a
+        # time, so a list well under the eight-record ceiling is three calls, not one.
+        counts = self.counts(6, padding=5000)
+        self.assertEqual(counts, [2, 2, 2])
+        rows = [candidate(i, padding=5000) for i in range(6)]
+        for batch in plan_batches(rows):
+            self.assertLessEqual(len(json.dumps(batch, ensure_ascii=False).encode("utf-8")),
+                                 DEFAULT_MAX_BATCH_BYTES + 5_200,
+                                 "one oversized record may exceed the budget alone, never two")
+
+    def test_a_station_declaring_six_makes_seven_records_two_calls(self):
+        declared = resolve_max_candidates_per_call({"output": {"max_candidates_per_call": 6}})
+        self.assertEqual(declared, 6)
+        self.assertLess(declared, MAX_CANDIDATES_PER_BATCH,
+                        "a declaration may only tighten the policy ceiling")
+        self.assertEqual(self.counts(7, max_per_batch=declared), [6, 1])
+
+
 class TestBatchCandidateIds(unittest.TestCase):
     def test_ids_are_copied_verbatim_and_never_invented(self):
         batch = [candidate(0), candidate(1, with_id=False), candidate(2)]

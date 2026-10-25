@@ -231,10 +231,12 @@ def batch_brief(batch: Sequence[Any], batch_index: int, batch_count: int) -> str
 
     AND IT IS NOT A BATCHING FEATURE (agents-o0nv2). Only multi-batch runs used to get this header, so a
     station whose candidate list fits ONE call was told nothing about its population or its ids. Since
-    e5799b72 that is every list of 8 or fewer candidates (the policy bound is unconditional), and the
-    reported night is exactly one of those: modern-web, 6 candidates, 0 cited ids. (docs-drift's 49 and
-    vuln-triage's 31 are NOT single-call any more - they plan 7 and 4 batches - so this was narrower than
-    "most nights"; it was still precisely the shape that failed.) The only instruction to copy a
+    e5799b72 the brief reaches every list the planner keeps to one call - and that is a JOINT condition,
+    not a count (agents-vnnlt): at most 8 records (a declaration may only lower that; vuln-discovery and
+    vuln-verify declare 6) AND small enough to stay inside DEFAULT_MAX_BATCH_BYTES (12,000 B). So
+    docs-drift's 49 and vuln-triage's 31 plan 7 and 4 calls only because their records are small, and six
+    records of ~5 KB plan 3 - the reported night is one of the single-call lists: modern-web, 6
+    candidates, 0 cited ids. The only instruction to copy a
     candidate_id in such a prompt was a schema `description` inside the JSON blob, immediately followed by
     the derived checklist that lists the fields a finding MUST carry and, correctly, does not include the
     one field that cannot be schema-required. A model reading that checklist as the contract emitted
