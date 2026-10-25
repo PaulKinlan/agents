@@ -106,6 +106,23 @@ def _looks_like_object_member(body: str, quote_position: int) -> bool:
     return re.match(r'"[^"\\\n]*"\s*:', body[quote_position:]) is not None
 
 
+def _starts_a_separate_value(body: str, quote_position: int) -> bool:
+    """True when the quote at `quote_position` opens a WHOLE value of its own, not prose inside one.
+
+    THE ARRAY SIDE OF THE MISSING-COMMA AMBIGUITY (agents-9tw8i). `{"tags": ["a" "b"]}` and
+    `{"summary": "Found "modern" APIs"}` look identical to the decoder - both stop at a quote after a
+    complete string - and the first cut of this module escaped both. That turned the first into ONE
+    string `a "b`, a decodable report whose content nobody wrote: the silent corruption
+    `_looks_like_object_member` already prevents on the object side, unfixed on the array side.
+
+    The discriminator is FORWARD, because that is where the two shapes differ: a separate value is a
+    complete quoted token that ends the collection (`"b"]`, `"b"}`, `"b",`), while prose inside a string
+    keeps going as words. Refusing costs a repair we might have got away with (a one-word quote inside
+    an array element), and a named failure is worth more than a fabricated payload.
+    """
+    return re.match(r'"[^"\\\n]*"\s*[,}\]]', body[quote_position:]) is not None
+
+
 def _one_repair(body: str, error: "json.JSONDecodeError") -> Optional[Tuple[str, str]]:
     """The single repair the decoder's error justifies, or None if it justifies none.
 
@@ -119,7 +136,9 @@ def _one_repair(body: str, error: "json.JSONDecodeError") -> Optional[Tuple[str,
         return None
     char = body[position]
 
-    if "delimiter" in message and char == '"' and not _looks_like_object_member(body, position):
+    if ("delimiter" in message and char == '"'
+            and not _looks_like_object_member(body, position)
+            and not _starts_a_separate_value(body, position)):
         # "Expecting ',' delimiter" AT a quote means the decoder had already finished a string and
         # found another quote where a comma belonged - i.e. the string contained a literal quote.
         return (body[:position] + '\\"' + body[position + 1:],
@@ -127,7 +146,20 @@ def _one_repair(body: str, error: "json.JSONDecodeError") -> Optional[Tuple[str,
 
     if "delimiter" in message:
         index = _prev_nonspace(body, position)
-        if index >= 0 and body[index] == '"' and not _looks_like_object_member(body, index):
+        # THE ERROR POSITION DECIDES WHETHER THE PREVIOUS QUOTE IS THE CULPRIT (agents-9tw8i). When the
+        # decoder stopped AT a quote that opens a whole value of its own - an object member (`"b":`) or a
+        # separate array value (`"b"]`) - the missing piece is a COMMA: escaping the quote before it
+        # would splice two values into one string (`["a" "b"]` -> `a "b`), which is the fabrication this
+        # module refuses. When it stopped on prose instead (CAP's `"Found "modern" APIs`), the quote
+        # before it IS the culprit and rule 2 is the repair. Guarding on the position rather than on the
+        # preceding quote is what makes both true: an earlier cut guarded the preceding quote, which
+        # ends in the model's prose followed by `",` and therefore matched the separate-value pattern by
+        # construction - it refused every prose-quote repair, the CAP case included.
+        missing_separator = char == '"' and (_looks_like_object_member(body, position)
+                                             or _starts_a_separate_value(body, position))
+        if (index >= 0 and body[index] == '"'
+                and not _looks_like_object_member(body, index)
+                and not missing_separator):
             # The mirror image, which is how a prose quote PAIR continues: the decoder accepted a string
             # that ended too early, skipped the space after it and then choked on prose ('A' in
             # `"Found 3 \\"modern" APIs`). The quote before the error ended that string too early.
@@ -249,6 +281,14 @@ def describe_unrepairable(text: str) -> Optional[str]:
                 return (f"a ',' is missing at char {position} between two object members "
                         f"({_excerpt(body[position:position + _EXCERPT_CHARS])!r}) - the repair pass "
                         f"does not insert one")
+            if quote_at_error and _starts_a_separate_value(body, position):
+                # agents-9tw8i: the array/string twin of the member shape. `{"tags": ["a" "b"]}` is two
+                # values with no comma, and calling it an unescaped quote sends the retry hunting a
+                # string bug it does not have.
+                return (f"a ',' is missing at char {position} between two values "
+                        f"({_excerpt(body[position:position + _EXCERPT_CHARS])!r}) - the repair pass "
+                        f"does not insert one, and it refuses to escape the quote because escaping it "
+                        f"would merge two values into one string")
             if not quote_at_error and not quote_before:
                 return (f"a ',' is missing at char {position} between two values "
                         f"({_excerpt(body[max(position - 40, 0):position + _EXCERPT_CHARS])!r}) - the "

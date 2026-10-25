@@ -105,6 +105,16 @@ class TestTheRepairRefusesToInvent(unittest.TestCase):
         self.assertIn("not a JSON literal", named)
         self.assertIn("path.replace", named, f"the name must carry the offending text: {named}")
 
+    def test_two_adjacent_string_values_are_not_merged_into_one_string(self):
+        """agents-9tw8i: `["a" "b"]` and prose inside a string look identical to the decoder, and the
+        first cut escaped both - turning two array values into the single string `a "b`, a decodable
+        report whose content nobody wrote."""
+        text = '{"tags": ["a" "b"]}'
+        repaired, notes = repair_json(text)
+        self.assertEqual((repaired, notes), (text, []),
+                         "escaping here fabricates one value out of two")
+        self.assertIsNotNone(describe_unrepairable(text), "refusing must still be NAMED")
+
     def test_a_prose_colon_inside_a_string_is_refused_rather_than_repaired(self):
         # `"on": it matters` is indistinguishable from a member name, so the pass refuses. Losing a
         # repair we might have got away with is the price of never fabricating a payload.
@@ -164,6 +174,15 @@ class TestDescribeUnrepairable(unittest.TestCase):
         self.assertIsNotNone(named)
         self.assertIn("','", named)
         self.assertNotIn("unescaped quote", named, f"the wrong diagnosis sends the retry looking for a string bug: {named}")
+
+    def test_a_missing_comma_between_two_string_array_values_is_named_as_a_missing_comma(self):
+        """agents-9tw8i: the array/string twin of the member shape - the stop char is a quote, so the
+        unescaped-quote branch claimed it and sent the retry looking for a string bug."""
+        named = describe_unrepairable('{"tags": ["a" "b"]}')
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+        self.assertIn("missing", named)
+        self.assertIn("two values", named)
 
     def test_a_missing_colon_is_named_as_a_missing_colon(self):
         text = '{"summary" "s", "findings": []}'
