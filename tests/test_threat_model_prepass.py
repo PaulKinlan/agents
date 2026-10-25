@@ -838,9 +838,56 @@ class TestSelfTargetRepositoryIdentity(unittest.TestCase):
             results = mine_history.scan_entry_points(tree)
         self.assertEqual({r["path"] for r in results}, {"agents/probe/scripts/scan_probe.py"},
                          f"the known noise: the factory's own rule line scanned as surface, got: {results}")
-        probe_error = mine_history._git_probe_error(tree)
+        probe_error = mine_history._git_identity_probe_error(tree)
         self.assertIsNotNone(probe_error, "the blind probe must name itself")
         self.assertIn("not a git repository", probe_error)
+
+    def test_a_corrupt_object_database_is_reported_as_unreadable(self):
+        """Review finding on agents-hc2wp: a readable git dir is not proof the probes ran.
+
+        `rev-parse --git-dir` answers in a repository whose object database is corrupt, partial or
+        otherwise unreadable, so keying the blind-probe signal on it alone still reported a
+        positive `foreign-repository` for a target nobody could read. The identity has to be read
+        out of the object database - HEAD's commit - before third-party may be claimed.
+        """
+        tmp = tempfile.TemporaryDirectory(prefix="agents-hc2wp-corrupt-")
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name) / "corrupt"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "app.py").write_text("handler = app.get('/api', h)\n", encoding="utf-8")
+        _run_git(repo, "init", "-q")
+        _run_git(repo, "add", "-A")
+        _run_git(repo, "commit", "-qm", "corrupt")
+        for obj in (repo / ".git" / "objects").rglob("*"):
+            if obj.is_file():
+                obj.unlink()
+        with self._as_installation(self.factory):
+            self.assertIsNotNone(mine_history._git_identity_probe_error(repo),
+                                 "the probe must notice the object database is unreadable")
+            self.assertEqual(mine_history.factory_self_target_reason(repo),
+                             mine_history.SELF_TARGET_IDENTITY_UNREADABLE)
+            self.assertFalse(mine_history.is_factory_self_target(repo))
+            results = mine_history.scan_entry_points(repo)
+        self.assertEqual([r["category"] for r in results], ["server-listener"],
+                         f"an unreadable target is still scanned, unsuppressed: {results}")
+
+    def test_an_unborn_head_keeps_the_third_party_verdict(self):
+        """The distinction the signal needs: no commits is not the same as unreadable commits.
+
+        A fresh `git init` has no identity to read, so the object-database probe must stay quiet
+        and the ordinary third-party verdict stands; calling it `identity-unreadable` would make
+        the signal mean "git was inconvenient" instead of "the evidence could not be read".
+        """
+        tmp = tempfile.TemporaryDirectory(prefix="agents-hc2wp-unborn-")
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name) / "empty"
+        repo.mkdir()
+        (repo / "app.py").write_text("handler = app.get('/api', h)\n", encoding="utf-8")
+        _run_git(repo, "init", "-q")
+        with self._as_installation(self.factory):
+            self.assertIsNone(mine_history._git_identity_probe_error(repo))
+            self.assertEqual(mine_history.factory_self_target_reason(repo),
+                             mine_history.SELF_TARGET_FOREIGN_REPOSITORY)
 
     def test_an_edited_marker_is_not_an_identity(self):
         """The marker is a byte comparison, not a filename: a fork's edited copy proves nothing."""

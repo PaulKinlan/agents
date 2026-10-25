@@ -284,16 +284,16 @@ def _git_has_commit(repo_dir: Path, sha: str) -> bool:
     return _git_ok(repo_dir, "cat-file", "-e", f"{sha}^{{commit}}")
 
 
-def _git_probe_error(repo_dir: Path) -> Optional[str]:
-    """git's own first line of complaint when it cannot read `repo_dir`, or None when it can.
+def _git_failure(repo_dir: Path, *args: str) -> Optional[str]:
+    """git's own first line of complaint when `args` fail in `repo_dir`, or None on success.
 
-    This is the evidence `identity-unreadable` points at (agents-hc2wp): the artifact must say
-    WHICH probe was blind, not just that the answer was "not self". Truncated and single-line so
-    a hostile repository cannot inflate the run artifact through git's stderr.
+    Truncated and single-line so a hostile repository cannot inflate the run artifact through
+    git's stderr; a missing git, a timeout and a permission denial all report WHAT happened
+    instead of a bare failure.
     """
     try:
         res = subprocess.run(
-            ["git", "-C", str(repo_dir), "rev-parse", "--git-dir"],
+            ["git", "-C", str(repo_dir), *args],
             capture_output=True, text=True, check=False, timeout=GIT_IDENTITY_TIMEOUT_S,
         )
     except Exception as exc:  # git missing, timeout, permission denied
@@ -301,7 +301,30 @@ def _git_probe_error(repo_dir: Path) -> Optional[str]:
     if res.returncode == 0:
         return None
     first = (res.stderr or "").strip().splitlines()
-    return (first[0][:200] if first else f"git rev-parse --git-dir exited {res.returncode}")
+    return first[0][:200] if first else f"git {' '.join(args)} exited {res.returncode}"
+
+
+def _git_identity_probe_error(repo_dir: Path) -> Optional[str]:
+    """Why git cannot establish `repo_dir`'s identity, or None when its object database is readable.
+
+    There are two blind states, and neither is a third-party verdict (agents-hc2wp):
+
+    * the git dir itself cannot be resolved - a linked worktree whose `.git` file names an object
+      database outside the sandbox's read scope, which is the nightly self-audit's shape;
+    * the git dir resolves but the commit HEAD names cannot be read out of it - a corrupt or
+      partial object database, a broken alternates path, an unreadable pack (review finding on
+      agents-hc2wp: `rev-parse --git-dir` answering was not enough to prove the probes ran).
+
+    An UNBORN HEAD is neither: a fresh `git init` has no commits, so there is no identity to fail
+    to read and the caller's own probes already answered honestly (third-party).
+    """
+    git_dir_failure = _git_failure(repo_dir, "rev-parse", "--git-dir")
+    if git_dir_failure is not None:
+        return git_dir_failure
+    # A repository with no commits has no identity to read; leave the verdict to the probes.
+    if _git_failure(repo_dir, "rev-parse", "--verify", "HEAD") is not None:
+        return None
+    return _git_failure(repo_dir, "rev-parse", "--verify", "HEAD^{commit}")
 
 
 def _installation_identity_marker() -> Optional[bytes]:
@@ -454,10 +477,12 @@ def factory_self_target_reason(target_dir: Path) -> str:
         return SELF_TARGET_SHARED_REPOSITORY
 
     # A `.git` entry was found above, so this directory BELONGS to a repository - but if git
-    # cannot even name its git dir, nothing about identity was established. Saying
+    # cannot read the identity out of it, nothing about identity was established. Saying
     # "foreign-repository" here would be a positive third-party claim we did not earn
-    # (agents-hc2wp), and it is exactly what made the sandboxed nightly defect unreadable.
-    if _git_probe_error(resolved) is not None:
+    # (agents-hc2wp), and it is exactly what made the sandboxed nightly defect unreadable. The two
+    # blind states are the unreachable git dir and the readable git dir with an unreadable object
+    # database; `_git_identity_probe_error` names whichever one this is.
+    if _git_identity_probe_error(resolved) is not None:
         return SELF_TARGET_IDENTITY_UNREADABLE
 
     return SELF_TARGET_FOREIGN_REPOSITORY
@@ -942,7 +967,7 @@ def main():
         "self_target_signal": self_target_signal,
         "self_target_suppression_scope": scope,
         "self_target_probe_error": (
-            _git_probe_error(target_dir)
+            _git_identity_probe_error(target_dir)
             if self_target_signal == SELF_TARGET_IDENTITY_UNREADABLE else None
         ),
         "evidence_nonce": nonce,
