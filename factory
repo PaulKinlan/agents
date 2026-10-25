@@ -44,7 +44,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
                                               batch_candidate_ids,
                                         classify_unparseable, declared_max_candidates_per_call,
-                                        describe_truncation, merge_reports,
+                                        coerce_scanned_files, describe_truncation, merge_reports,
                                         plan_batches, resolve_max_candidates_per_call,
                                         row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
@@ -82,7 +82,7 @@ except ImportError:
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
                                               batch_candidate_ids,
                                         classify_unparseable, declared_max_candidates_per_call,
-                                        describe_truncation, merge_reports,
+                                        coerce_scanned_files, describe_truncation, merge_reports,
                                         plan_batches, resolve_max_candidates_per_call,
                                         row_arrays, validate_batch_attribution)
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
@@ -1769,6 +1769,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
     # 1. Deterministic pre-pass
     candidates_data = []
     candidates_snapshot: Optional[bytes] = None
+    # agents-demur: the pre-pass's OWN scanned-file count. It is the factory's value for the merged
+    # report (lib/candidate_batching.merge_reports), because the merge refuses to copy a batch's
+    # `scanned_files` - model output must not decide it - and dropping it altogether failed the merged
+    # schema check for every station that requires the field (modern-web, resilience, ui-ux-audit,
+    # memory-profile) while every batch had passed on its own.
+    prepass_scanned_files: Optional[int] = None
     model_parse_succeeded = True
     system_directive_text = None  # agents-m2n: lifted from the payload, see below
     context_block = ""  # agents-rw6z: absent context must preserve the old prompt byte-for-byte
@@ -1845,6 +1851,14 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # never apply the 50-candidate slice to the station's declared context budget.
             if isinstance(cand_json, dict) and "context" in cand_json:
                 context_block = f"\nStation Context:\n{json.dumps(cand_json['context'], indent=2)}\n"
+            if isinstance(cand_json, dict) and "scanned_files" in cand_json:
+                # agents-demur: the pre-pass's own count, validated here so a bad value is named as
+                # what it is (a pre-pass payload problem) rather than as a merge refusal.
+                try:
+                    prepass_scanned_files = coerce_scanned_files(cand_json.get("scanned_files"))
+                except BatchMergeError as e:
+                    raise StationError(
+                        f"{agent_name}: the pre-pass payload's scanned_files cannot be used: {e}")
             if isinstance(cand_json, dict) and "candidates" in cand_json:
                 candidates_data = cand_json["candidates"]
                 print(f"-> Deterministic scanner found {len(candidates_data)} candidate matches.")
@@ -2499,7 +2513,8 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 report, parse_reason = None, batch_failure
             else:
                 try:
-                    report, parse_reason = merge_reports(batch_reports), None
+                    report, parse_reason = merge_reports(
+                        batch_reports, scanned_files=prepass_scanned_files), None
                     # THE MERGE IS A CONTRACT OF ITS OWN (agents-exhhl review P1): every batch can pass
                     # its schema and the MERGED report still violate it - merge used to drop vuln-verify's
                     # required `verifications` array, silently, because each batch had one. This is the

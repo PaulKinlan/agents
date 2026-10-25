@@ -179,6 +179,30 @@ class TestMergeReports(unittest.TestCase):
                                         report([0], target="chosen")])["target"], "chosen")
         self.assertNotIn("target", merge_reports([{"summary": "s", "findings": []}]))
 
+    def test_the_factory_s_own_scanned_count_is_carried_into_the_merge(self):
+        """agents-demur: modern-web/resilience/ui-ux-audit/memory-profile REQUIRE `scanned_files`, so a
+        merged report without it failed the merged contract check while every batch had passed its own
+        - and the whole run reached nobody as a no-verdict."""
+        merged = merge_reports([report([0, 1]), report([2])], scanned_files=235)
+        self.assertEqual(merged["scanned_files"], 235)
+
+    def test_the_scanned_count_is_not_summed_across_batches(self):
+        # Every batch describes the SAME scan, so summing would multiply one count by the batch count.
+        parts = [report([0]), report([1])]
+        for part in parts:
+            part["scanned_files"] = 137
+        self.assertEqual(merge_reports(parts, scanned_files=137)["scanned_files"], 137)
+
+    def test_a_digit_string_scanned_count_is_accepted_like_normalize_report_does(self):
+        self.assertEqual(merge_reports([report([0])], scanned_files=" 42 ")["scanned_files"], 42)
+
+    def test_a_scanned_count_that_cannot_be_a_count_is_refused(self):
+        # A count that cannot be read is a plumbing error, never a number to invent.
+        for bad in (-1, True, "many", 2.5, {"count": 3}):
+            with self.assertRaises(BatchMergeError) as ctx:
+                merge_reports([report([0])], scanned_files=bad)
+            self.assertIn("scanned_files", str(ctx.exception))
+
     def test_summary_is_deterministic_and_counts_rows_and_ids(self):
         merged = merge_reports([report([0, 1]), report([2])])
         self.assertEqual(merged["summary"],

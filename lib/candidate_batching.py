@@ -16,7 +16,9 @@ engine:
    single oversized candidate goes in a batch of its own rather than being dropped or split.
 2. `merge_reports` - one report from N per-batch reports: findings concatenated in pre-pass order,
    `reviewed_commits` unioned, duplicates REFUSED by name rather than silently dropped. A merge
-   that loses a candidate would turn the accounting check into a lie, so it raises instead.
+   that loses a candidate would turn the accounting check into a lie, so it raises instead. The
+   factory-supplied `scanned_files` is carried through (agents-demur): a station whose schema
+   REQUIRES it lost its whole verdict when the merge dropped it.
 3. `classify_unparseable` - decides whether unparseable output was TRUNCATED (the JSON structure
    ends inside a string or with unclosed braces) or merely had no JSON in it, with the evidence
    (bytes, brace counts, candidate ids visible in the fragment). Truncation is a named station
@@ -345,9 +347,29 @@ def row_arrays(report: Any) -> Dict[str, List[Dict[str, Any]]]:
     return arrays
 
 
+def coerce_scanned_files(value: Any) -> int:
+    """Coerce the FACTORY's own scanned-file count, refusing anything that is not one.
+
+    Tolerant of the shapes a pre-pass already emits (an int, or a digit string - the same two forms
+    `lib/report_schema.normalize_report` accepts from a model), strict about everything else: a count
+    that cannot be read is a plumbing error, never a number to invent.
+    """
+    if isinstance(value, bool):
+        raise BatchMergeError(f"scanned_files must be a count, not {value!r} ({type(value).__name__})")
+    if isinstance(value, int):
+        if value < 0:
+            raise BatchMergeError(f"scanned_files cannot be negative ({value})")
+        return value
+    if isinstance(value, str) and value.strip().lstrip("+").isdigit():
+        return int(value.strip())
+    raise BatchMergeError(
+        f"scanned_files must be an integer count, not {value!r} ({type(value).__name__})")
+
+
 def merge_reports(parts: Sequence[Dict[str, Any]], *,
                   summary: Optional[str] = None,
-                  target: Optional[str] = None) -> Dict[str, Any]:
+                  target: Optional[str] = None,
+                  scanned_files: Optional[Any] = None) -> Dict[str, Any]:
     """Merge per-batch reports into one report, deterministically.
 
     EVERY row array is merged, not just `findings` (agents-exhhl review P1): a station whose contract
@@ -359,10 +381,20 @@ def merge_reports(parts: Sequence[Dict[str, Any]], *,
 
     Non-contract keys are NOT copied: `verdict`, `status` and `scanned_files` are the factory's to set
     after this point. Other scalars are copied first-seen so a station's own metadata survives.
+
+    `scanned_files` is where the factory sets that one (agents-demur): the pre-pass KNOWS how many files
+    it walked, so its count is passed in here and is the only value a merged report may carry. Leaving it
+    out entirely - which is what dropping it as factory-owned did - made every batched run of a station
+    whose schema REQUIRES the field (modern-web, resilience, ui-ux-audit, memory-profile) fail the merged
+    contract check while every batch had passed its own, and reach nobody as a no-verdict. It is not
+    summed from the parts: each batch describes the SAME scan, so a sum would multiply one count by the
+    batch count. A batch's own value is still never copied (model output must not decide it).
     """
     parts = list(parts)
     if not parts:
         raise BatchMergeError("no per-batch reports to merge")
+    resolved_scanned_files = (None if scanned_files is None
+                              else coerce_scanned_files(scanned_files))
 
     merged_arrays: Dict[str, List[Dict[str, Any]]] = {}
     seen_ids: Dict[str, Dict[str, int]] = {}
@@ -416,6 +448,8 @@ def merge_reports(parts: Sequence[Dict[str, Any]], *,
     for key, value in scalars.items():
         merged.setdefault(key, value)
     merged.update(merged_arrays)
+    if resolved_scanned_files is not None:
+        merged["scanned_files"] = resolved_scanned_files
     if reviewed:
         merged["reviewed_commits"] = reviewed
     return merged

@@ -820,5 +820,92 @@ class TestThePerCallBoundIsPolicy(BatchedStation):
                       f"the cap must be stated, not silent: {res.stdout[-400:]}")
 
 
+# agents-demur: modern-web (and resilience, ui-ux-audit, memory-profile) REQUIRE `scanned_files`, and their
+# pre-pass already counts the files it walked. The merge dropped it as factory-owned and nothing set it
+# again, so every BATCH passed its own schema and the MERGED report failed the same schema - the whole run
+# then reached nobody as a no-verdict. The pre-pass count is the truth; a batch cannot supply it.
+SCANNED_FILES_PREPASS = f'''
+import argparse, json
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--output")
+args, _unknown = parser.parse_known_args()
+candidates = [
+    {{
+        "candidate_id": f"cand-perf-{{i:03d}}",
+        "rule_id": "layout-thrashing-forced-reflow",
+        "path": f"src/file{{i}}.ts",
+        "line_number": i + 1,
+        "severity": "high",
+        "snippet": "el.offsetWidth",
+    }}
+    for i in range({CANDIDATE_COUNT})
+]
+open(args.output, "w", encoding="utf-8").write(
+    json.dumps({{"scanned_files": 137, "candidates": candidates}}))
+'''
+
+# The same schema as the probe, plus the required field modern-web declares.
+SCANNED_FILES_SCHEMA = dict(SCHEMA)
+SCANNED_FILES_SCHEMA["required"] = ["summary", "target", "scanned_files", "findings"]
+SCANNED_FILES_SCHEMA["properties"] = dict(SCHEMA["properties"])
+SCANNED_FILES_SCHEMA["properties"]["scanned_files"] = {"type": "integer"}
+
+# Every batch INVENTS a scanned count (999) that no pre-pass ever produced: the merged report must carry
+# the pre-pass's 137, not a batch's guess and not a sum.
+INVENTED_SCANNED_FILES_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+declare -A seen=()
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  if [ -n "${seen[$id]:-}" ]; then continue; fi
+  seen[$id]=1
+  ids+=("$id")
+done
+out='{"summary":"batched","target":"probe-target","scanned_files":999,"findings":['
+first=1
+for id in "${ids[@]}"; do
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"layout-thrashing-forced-reflow\",\"path\":\"src/$id.ts\",\"line_number\":1,\"snippet\":\"el.offsetWidth\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\",\"candidate_id\":\"$id\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
+class TestTheMergedReportCarriesThePrepPassCount(BatchedStation):
+    """agents-demur: the merged report must satisfy the station's own schema, and its `scanned_files`
+    must be the count the pre-pass actually produced."""
+
+    def agent(self, yaml_text):  # noqa: D401 - stage the scanned-files pre-pass and schema
+        super().agent(yaml_text)
+        directory = self.root / "agents" / "probe"
+        (directory / "report.schema.json").write_text(json.dumps(SCANNED_FILES_SCHEMA, indent=2),
+                                                      encoding="utf-8")
+        (directory / "scripts" / "prepass.py").write_text(SCANNED_FILES_PREPASS,
+                                                          encoding="utf-8")
+
+    def test_a_batched_run_of_a_station_requiring_scanned_files_keeps_its_verdict(self):
+        self.agent(AGENT_YAML)
+        self.stub(INVENTED_SCANNED_FILES_STUB)
+        res = self.factory("pi")
+        run = self.run_dir()
+        stray = run / "merged_schema_errors.json"
+        self.assertEqual(res.returncode, 0,
+                         "the merged report must satisfy the schema every batch satisfied; "
+                         f"merged_schema_errors={stray.read_text(encoding='utf-8') if stray.exists() else 'none'}\n"
+                         + res.stdout + res.stderr)
+        self.assertFalse(stray.exists(),
+                         "the merge must not leave a schema violation behind")
+
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["scanned_files"], 137,
+                         "the pre-pass count, not a batch's invented 999 and not a per-batch sum")
+        self.assertEqual([f["candidate_id"] for f in report["findings"]],
+                         [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)],
+                         "the merge still accounts for every candidate")
+
+
 if __name__ == "__main__":
     unittest.main()
