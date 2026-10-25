@@ -284,12 +284,27 @@ _FALLBACK_IMPERATIVE_PATTERN = re.compile(
     r"make|do|go)\b",
     re.IGNORECASE
 )
-# What makes a clause a DIRECTIVE the guard must replace: it orders overlap. `_EXECUTION_CONCURRENCY_PATTERN`
-# is the shared vocabulary, plus the worker/thread words it does not carry on their own - "launch model runs
-# on separate workers" is concurrency advice even though it says neither "parallel" nor "concurrently".
-_FALLBACK_CONCURRENCY_PATTERN = re.compile(
-    rf"(?:{_EXECUTION_CONCURRENCY_PATTERN.pattern})"
-    r"|\b(?:workers?|threads?|thread\s*pools?|worker\s*pools?|multiprocessing|fork(?:ing)?)\b",
+# What makes a clause a DIRECTIVE the guard must replace: it orders overlap, and says SO ABOUT A WORKFORCE
+# OR AN ADVERB - not merely "contains a word from the concurrency vocabulary". The looser test (any
+# concurrency word anywhere in the clause) was wrong a second time (agents-3t9oz, round 2):
+# "otherwise pool workers block the queue" contains `workers`, `pool` is an imperative in the lexicon, and
+# `workers` is a concurrency word, so a consequence was cut and the worker-pool proposal after it was lost.
+# A directive here is the object the overlap is dispatched to, with the determiner or preposition that puts
+# work ON it ("on separate workers", "use a worker pool", "in parallel", "Promise.all"), which a
+# consequence like "pool workers block the queue" does not carry.
+_FALLBACK_CONCURRENCY_DIRECTION_PATTERN = re.compile(
+    # An explicit concurrency adverb orders overlap however the clause starts.
+    r"\b(?:in\s+parallel|concurrently|in\s+concurrency|multi[\s-]?threaded)\b"
+    # A named concurrent primitive.
+    r"|\bPromise\s*\.\s*(?:all|allSettled|any|race)\b"
+    r"|\bparallel(?:ize|ise|ized|ised|izing|ising)\b"
+    # Work dispatched ONTO a workforce, or a workforce with its determiner. The determiner is the whole
+    # difference between "use a worker pool" (directive) and "pool workers block the queue" (consequence).
+    r"|\b(?:on|across|into|over)\s+(?:(?:the|a|an|its|their|your|separate|multiple|several|more|extra|"
+    r"two|three|four)\s+)*(?:workers?|threads?|cores?|cpus?|thread[\s-]*pools?|worker[\s-]*pools?|"
+    r"executors?|lanes?)\b"
+    r"|\b(?:the|a|an|its|their|your|separate|multiple|several|more|extra|two|three|four)\s+"
+    r"(?:workers?|threads?|cores?|thread[\s-]*pools?|worker[\s-]*pools?|executors?)\b",
     re.IGNORECASE
 )
 
@@ -322,7 +337,7 @@ def first_fallback_marker(text: str) -> Optional[re.Match]:
         if _FIRST_FALLBACK_SERIAL_PATTERN.match(text[match.start():]):
             return match
         if (_FALLBACK_IMPERATIVE_PATTERN.match(clause)
-                and _FALLBACK_CONCURRENCY_PATTERN.search(clause)):
+                and _FALLBACK_CONCURRENCY_DIRECTION_PATTERN.search(clause)):
             return match
     return None
 

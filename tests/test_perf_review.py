@@ -1172,6 +1172,7 @@ class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
         so a consequence is preserved whatever noun it starts with.
         """
         for consequence in ("otherwise queue starvation blocks the pipeline",
+                            "otherwise pool workers block the queue",
                             "otherwise pool starvation spreads across tenants",
                             "otherwise batch size grows without bound"):
             with self.subTest(consequence=consequence):
@@ -1187,16 +1188,21 @@ class TestACausalOtherwiseIsNotAFallbackBoundary(unittest.TestCase):
 
     def test_a_fallback_that_orders_workers_is_still_withheld(self):
         # The cut keeps its job: a clause that orders overlap in the non-reentrant branch is replaced, even
-        # when it says "workers" rather than "parallel" - the narrower rule must not become a no-op.
-        report = {"findings": [self.finding(
-            "IF backend is reentrant, use Promise.all; otherwise launch model runs on separate workers; "
-            "else preserve serial execution")]}
-        notes = normalize_report(report)
-        remediation = report["findings"][0]["remediation"]
-        self.assertNotIn("separate workers", remediation)
-        self.assertIn("use Promise.all", remediation)
-        self.assertTrue(any("withheld" in note for note in notes), notes)
-        self.assertEqual(unpreconditioned_concurrency_findings(report), [])
+        # when it says "workers" rather than "parallel" - the narrower rule must not become a no-op. Each of
+        # these dispatches work ONTO a workforce ("on separate workers", "a thread pool"), which is what
+        # separates a directive from the consequence "pool workers block the queue" above.
+        for directive in ("otherwise launch model runs on separate workers",
+                          "otherwise run the parse on a thread pool",
+                          "otherwise fan the reads out across workers"):
+            with self.subTest(directive=directive):
+                report = {"findings": [self.finding(
+                    f"IF backend is reentrant, use Promise.all; {directive}; else preserve serial execution")]}
+                notes = normalize_report(report)
+                remediation = report["findings"][0]["remediation"]
+                self.assertIn("use Promise.all", remediation)
+                self.assertNotIn(directive.replace("otherwise ", ""), remediation)
+                self.assertTrue(any("withheld" in note for note in notes), notes)
+                self.assertEqual(unpreconditioned_concurrency_findings(report), [])
 
     def test_an_unsafe_fallback_is_still_withheld_and_the_withholding_is_named(self):
         # The cut the guard is entitled to make: a fallback branch that directs concurrency instead of
