@@ -127,9 +127,29 @@ def _starts_a_separate_value(body: str, quote_position: int) -> bool:
     keeps going as words. Refusing costs a repair we might have got away with (a one-word quote inside
     an array element), and a named failure is worth more than a fabricated payload.
     """
-    # The followers: a collection closer, a comma, or ANOTHER value's opening quote (three adjacent
-    # strings are three values, agents-4lpo3's P3 symptom).
-    return re.match(_QUOTED_TOKEN + r'\s*["}}\],]', body[quote_position:]) is not None
+    # The followers: a collection closer, a comma, ANOTHER value's opening quote (three adjacent strings
+    # are three values - agents-4lpo3's P3 symptom), a nested opener, or a whole PRIMITIVE that itself
+    # ends the collection (agents-0hln5: `["a" "b" 42]`).
+    tail = body[quote_position:]
+    match = re.match(_QUOTED_TOKEN, tail)
+    if match is None:
+        return False
+    rest = tail[match.end():]
+    if re.match(r'\s*["}}\],[{]', rest):
+        return True
+    return _PRIMITIVE_AT_END.match(rest.lstrip()) is not None
+
+
+# A whole JSON PRIMITIVE that ends a collection: the third thing a separate value can look like
+# (agents-0hln5). `["a" "b" 42]` is three values; only a complete primitive followed by a closer counts,
+# so prose that merely starts with a digit or a letter ("Found "3 issues" here") is not mistaken for it -
+# which is exactly the trap a bare `char in "0123456789"` test would fall into.
+_PRIMITIVE_AT_END = re.compile(r'(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*[,}\]]')
+
+
+def _starts_a_separate_primitive(body: str, position: int) -> bool:
+    """True when a complete primitive VALUE with a collection closer after it starts at `position`."""
+    return _PRIMITIVE_AT_END.match(body, position) is not None
 
 
 def _one_repair(body: str, error: "json.JSONDecodeError") -> Optional[Tuple[str, str]]:
@@ -298,6 +318,10 @@ def describe_unrepairable(text: str) -> Optional[str]:
                         f"({_excerpt(body[position:position + _EXCERPT_CHARS])!r}) - the repair pass "
                         f"does not insert one, and it refuses to escape the quote because escaping it "
                         f"would merge two values into one string")
+            if not quote_at_error and _starts_a_separate_primitive(body, position):
+                return (f"a ',' is missing at char {position} before a primitive value "
+                        f"({_excerpt(body[max(position - 40, 0):position + _EXCERPT_CHARS])!r}) - the "
+                        f"repair pass does not insert one")
             if not quote_at_error and not quote_before:
                 return (f"a ',' is missing at char {position} between two values "
                         f"({_excerpt(body[max(position - 40, 0):position + _EXCERPT_CHARS])!r}) - the "

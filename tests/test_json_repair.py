@@ -210,6 +210,29 @@ class TestDescribeUnrepairable(unittest.TestCase):
         self.assertIsNotNone(named)
         self.assertIn("object members", named)
 
+    def test_a_primitive_after_a_string_array_value_is_named_as_a_missing_comma(self):
+        """agents-0hln5 (reviewer repro at 545c3f45): `["a" "b" 42]` refused correctly but was diagnosed
+        as an unescaped quote, because the follower set only knew closers, commas and quotes."""
+        named = describe_unrepairable('{"tags": ["a" "b" 42]}')
+        self.assertIsNotNone(named)
+        self.assertIn("','", named)
+        self.assertIn("two values", named)
+
+    def test_a_primitive_directly_after_a_string_value_is_named_too(self):
+        for literal in ("42", "true", "null", "-1.5e3"):
+            named = describe_unrepairable('{"tags": ["a" ' + literal + "]}") or ""
+            self.assertIn("','", named, f"{literal}: {named}")
+            self.assertIn("primitive", named, f"{literal}: {named}")
+
+    def test_prose_that_starts_with_a_digit_or_word_is_still_repaired(self):
+        # The trap the primitive guard has to avoid: "Found "3 issues" here" looks like a number at the
+        # stop position, but it is prose inside one string and must keep repairing.
+        for summary in ('Found "3 issues" here', 'Found "true facts" here', 'Found "null pointers" here'):
+            text = '{"summary": "' + summary + '", "findings": []}'
+            repaired, notes = repair_json(text)
+            self.assertTrue(notes, f"prose quotes must still be repaired: {summary}")
+            self.assertEqual(decode(repaired)["summary"], summary)
+
     def test_a_missing_colon_is_named_as_a_missing_colon(self):
         text = '{"summary" "s", "findings": []}'
         named = describe_unrepairable(text)
