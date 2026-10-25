@@ -156,6 +156,32 @@ echo "I reviewed the diff and found nothing of note."
 """
 
 
+# agents-op02b, the qrcode-nightly shape: every row describes a real candidate by PATH and LINE and
+# carries NO candidate_id at all. The dispatcher must give each row the one presented candidate its
+# location names, or seven answered candidates read as zero answered. Bash + builtins only, for the same
+# reason as the stubs above.
+OMITTING_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+declare -A seen=()
+ids=()
+for id in $(printf '%s' "$prompt" | grep -o "cand-perf-[0-9][0-9][0-9]"); do
+  if [ -n "${seen[$id]:-}" ]; then continue; fi
+  seen[$id]=1
+  ids+=("$id")
+done
+out='{"summary":"rows without ids","target":"probe-target","findings":['
+first=1
+for id in "${ids[@]}"; do
+  i="${id#cand-perf-}"; i=$((10#$i))
+  if [ $first -eq 0 ]; then out="$out,"; fi
+  first=0
+  out="$out{\"rule_id\":\"layout-thrashing-forced-reflow\",\"path\":\"src/file$i.ts\",\"line_number\":$((i + 1)),\"snippet\":\"el.offsetWidth\",\"severity\":\"high\",\"title\":\"t\",\"description\":\"d\",\"remediation\":\"x\"}"
+done
+printf '%s]}\n' "$out"
+"""
+
+
 # agents-g42wa: vuln-verify's pre-pass ids SOME candidates and not others. Batching then has to describe a
 # batch by its POPULATION, not by the ids it happens to carry - naming only the ids described a
 # 4-candidate batch with 1 id as though the ids were the batch, and the model skipped the unnamed rows
@@ -237,6 +263,47 @@ class TestAMixedBatchNamesItsUnidentifiedRows(BatchedStation):
             rows = json.loads(payload)
             self.assertEqual(len(rows), 3 if index < 3 else 2,
                              f"batch {index} lost candidates from its payload: {len(rows)} rows")
+
+
+class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(BatchedStation):
+    """agents-op02b: seven qrcode-nightly rows named their candidate by path and carried no id at all.
+
+    The station read "cited 0 of 7" and the run was INCOMPLETE while the pre-pass was holding every
+    candidate those rows described. Driven through the real dispatcher, a real pre-pass and the real
+    candidate artefacts: the repair has to happen in the run, not only in a unit call.
+    """
+
+    def test_each_row_without_an_id_is_bound_and_the_run_accounts(self):
+        self.agent(AGENT_YAML)
+        self.stub(OMITTING_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([finding.get("candidate_id") for finding in report["findings"]],
+                         [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)],
+                         "every row keeps the candidate its own location named")
+
+        repairs = []
+        for artifact in sorted(run.glob("candidate_id_repairs.batch*.json")):
+            repairs.extend(json.loads(artifact.read_text(encoding="utf-8")))
+        self.assertEqual(len(repairs), CANDIDATE_COUNT, repairs)
+        self.assertEqual({record["cited"] for record in repairs}, {None},
+                         "a repaired row had no id to quote, and the artifact must say so")
+        self.assertEqual({record["rule"] for record in repairs}, {"path+line"})
+
+        # The accounting the line performs, over the artefacts the run left behind: it must read complete.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from lib.findings import (candidate_coverage, read_candidate_count,
+                                  read_presented_candidate_ids)
+        rows = report["findings"]
+        coverage = candidate_coverage(read_candidate_count(run), len(rows),
+                                      presented_ids=read_presented_candidate_ids(run),
+                                      cited_ids=[row.get("candidate_id") for row in rows])
+        self.assertTrue(coverage["complete"], coverage)
+        self.assertEqual(coverage["candidates_accounted"], CANDIDATE_COUNT)
+        self.assertEqual(coverage["rows_without_candidate_id"], 0)
 
 
 class TestBoundedBatching(BatchedStation):

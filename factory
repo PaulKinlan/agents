@@ -36,7 +36,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count, read_candidate_paths,
+                             candidate_coverage, read_candidate_count, read_candidate_locations,
                              read_presented_candidate_ids,
                              repair_cited_candidate_ids,
                              station_is_incomplete,
@@ -75,7 +75,7 @@ except ImportError:
     from lib.embargo import (VALID_VISIBILITIES, is_false_positive, normalize_visibility,
                              reported_severity)
     from lib.findings import (VERDICT_STATUSES, CANDIDATE_PROMPT_SLICE, INCOMPLETE_STATUS,
-                             candidate_coverage, read_candidate_count, read_candidate_paths,
+                             candidate_coverage, read_candidate_count, read_candidate_locations,
                              read_presented_candidate_ids,
                              repair_cited_candidate_ids,
                              station_is_incomplete,
@@ -1061,17 +1061,21 @@ def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (
     cannot express because the id is exact: it is re-bound onto the candidate the row's own `path` names,
     and only when that is exactly one still-uncited presented candidate. It needs the pre-pass candidate
     paths, read from `run_dir` here so every caller gets it.
+
+    The last repair is for a row that carries NO id at all (agents-op02b): it is given the one presented
+    candidate its own `path` (and `line_number`, when several candidates share a file) names. That needs
+    the locations rather than just the paths, so both are read once, from the same payload.
     """
     repairs: List[Dict[str, Any]] = []
     refusals: List[Dict[str, Any]] = []
     if report is None:
         return repairs
-    candidate_paths = read_candidate_paths(run_dir) if run_dir is not None else {}
+    candidate_locations = read_candidate_locations(run_dir) if run_dir is not None else {}
     for array_name, rows in row_arrays(report).items():
         batch_refusals: List[Dict[str, Any]] = []
         for record in repair_cited_candidate_ids(rows, presented or (), foreign=foreign or (),
                                                  refusals=batch_refusals,
-                                                 candidate_paths=candidate_paths):
+                                                 candidate_locations=candidate_locations):
             record["array"] = array_name
             repairs.append(record)
         for refusal in batch_refusals:
@@ -1080,8 +1084,11 @@ def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (
     if repairs and run_dir is not None:
         _write_run_artifact(run_dir / f"candidate_id_repairs{tag}.json", json.dumps(repairs, indent=2))
         first = repairs[0]
-        print(f"Note: repaired {len(repairs)} cited candidate_id(s) in {run_dir.name}"
-              f"{tag} (first: {first['cited']} -> {first['repaired']} by {first['rule']}); "
+        # A row that arrived with no id at all has no `cited` value to show, and "None -> abc" reads as a
+        # bug in the log rather than as the omission it repaired.
+        origin = first.get("cited") or f"no id at {first.get('path')!r}"
+        print(f"Note: repaired {len(repairs)} candidate_id(s) in {run_dir.name}"
+              f"{tag} (first: {origin} -> {first['repaired']} by {first['rule']}); "
               f"see candidate_id_repairs{tag}.json")
     if refusals and run_dir is not None:
         # agents-afx5o: a citation that could NOT be repaired is the interesting one when a run fails, and
@@ -1090,9 +1097,11 @@ def repair_report_candidate_ids(report: Any, presented: Any, *, foreign: Any = (
         _write_run_artifact(run_dir / f"candidate_id_repairs_refused{tag}.json",
                             json.dumps(refusals[:20], indent=2))
         first_refusal = refusals[0]
-        print(f"Note: {len(refusals)} cited candidate_id(s) in {run_dir.name}{tag} could not be repaired "
-              f"(first: {first_refusal['cited']!r} - {first_refusal['reason']}); "
-              f"see candidate_id_repairs_refused{tag}.json")
+        what = (f"row(s) without a candidate_id ({first_refusal['path']!r})"
+                if first_refusal.get("missing") else
+                f"cited candidate_id(s) (first: {first_refusal['cited']!r})")
+        print(f"Note: {len(refusals)} {what} in {run_dir.name}{tag} could not be repaired "
+              f"({first_refusal['reason']}); see candidate_id_repairs_refused{tag}.json")
     return repairs
 
 

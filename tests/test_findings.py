@@ -23,7 +23,8 @@ from unittest import mock
 from lib import findings
 from lib.candidate_identity import assign_candidate_ids
 from lib.findings import (FindingsStore, StoreFileError, bind_severity, CANDIDATE_PROMPT_SLICE,
-                          candidate_coverage, read_candidate_count, read_presented_candidate_ids,
+                          candidate_coverage, read_candidate_count, read_candidate_locations,
+                          read_candidate_paths, read_presented_candidate_ids,
                           repair_cited_candidate_id, repair_cited_candidate_ids,
                           station_has_verdict, station_is_incomplete)
 from lib.redaction import redact_finding, redact_for_storage
@@ -2101,6 +2102,36 @@ class TestThePathRepairRefusesRatherThanGuesses(unittest.TestCase):
         self.assertIn("duplicated citation: 2 row(s) cite it", refusals[0]["reason"])
         self.assertIn("2 presented candidate id(s) stay unaccounted", refusals[0]["reason"])
 
+    def test_two_candidates_in_one_file_are_ambiguous_even_when_one_is_uncited(self):
+        """The MULTIPLICITY guard, on a run where it is the deciding check (agents-ifb3t).
+
+        The test above refuses because `matches[0]` is already cited, so it would still pass with the
+        `len(matches) != 1` half of the condition deleted - measured: the mutant
+        `if not matches or matches[0] not in still_uncited:` bound this row and left the whole suite green.
+        Two candidates in ONE file is the ordinary shape (one page, several findings), so the run that
+        matters is the one where the ambiguous match is ALSO the still-uncited candidate: here `cand-p1-a`
+        is cited by nobody and the duplicated `cand-p1-b` has no business inheriting its verdict.
+        """
+        paths = {"cand-p1-a": "src/x.js", "cand-p1-b": "src/x.js"}
+        rows = [{"candidate_id": "cand-p1-b", "path": "src/x.js"},
+                {"candidate_id": "cand-p1-b", "path": "src/x.js"}]
+        refusals = []
+        repairs = repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths,
+                                             refusals=refusals)
+        self.assertEqual(repairs, [],
+                         "one file, two candidates: the row cannot say which one it meant")
+        self.assertEqual([row["candidate_id"] for row in rows], ["cand-p1-b", "cand-p1-b"])
+        self.assertEqual(len(refusals), 1, refusals)
+        self.assertEqual(refusals[0]["cited"], "cand-p1-b")
+        self.assertIn("row path(s) do not name exactly one still-uncited presented candidate",
+                      refusals[0]["reason"])
+        self.assertIn("1 presented candidate id(s) stay unaccounted (cand-p1-a)",
+                      refusals[0]["reason"])
+        coverage = candidate_coverage(2, len(rows), presented_ids=list(paths),
+                                      cited_ids=[row["candidate_id"] for row in rows])
+        self.assertFalse(coverage["complete"], "an unresolved duplicate is still a shortfall")
+        self.assertEqual(coverage["uncited_candidate_ids"], ["cand-p1-a"])
+
     def test_a_path_whose_only_candidate_is_already_cited_is_not_stolen(self):
         paths = {"cand-a": "p1", "cand-b": "p2", "cand-c": "p3"}
         rows = [{"candidate_id": "cand-a", "path": "p1"},
@@ -2147,6 +2178,161 @@ class TestThePathRepairRefusesRatherThanGuesses(unittest.TestCase):
                 {"candidate_id": "cand-a", "path": "p2"}]
         repair_cited_candidate_ids(rows, list(paths), candidate_paths=paths)
         self.assertEqual([row["candidate_id"] for row in rows], ["cand-a", "cand-b"])
+
+
+class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(unittest.TestCase):
+    """agents-op02b: the qrcode nightly's vuln-discovery rows named a candidate by path and carried no id.
+
+    Measured shape: seven findings with `path`/`line_number` describing real pre-pass candidates and no
+    `candidate_id` key at all. Every id-text rule skips such a row, so the station read "cited 0 of 7" and
+    the run was INCOMPLETE while the answer to each candidate was sitting in the row itself. """
+
+    LOCATIONS = {
+        "cand-1": {"path": "src/a.ts", "line": 10},
+        "cand-2": {"path": "src/a.ts", "line": 20},
+        "cand-3": {"path": "src/b.ts", "line": 5},
+    }
+    PRESENTED = ["cand-1", "cand-2", "cand-3"]
+
+    def cited(self, rows):
+        return [row.get("candidate_id") for row in rows]
+
+    def repair(self, rows, presented=None, locations=None, foreign=()):
+        refusals = []
+        repairs = repair_cited_candidate_ids(
+            rows, self.PRESENTED if presented is None else presented, foreign=foreign,
+            refusals=refusals,
+            candidate_locations=self.LOCATIONS if locations is None else locations)
+        return repairs, refusals
+
+    def test_the_nightly_shape_now_accounts_for_every_candidate_it_was_shown(self):
+        rows = [{"path": "src/a.ts", "line_number": 10},
+                {"path": "src/a.ts", "line_number": 20},
+                {"path": "src/b.ts", "line_number": 5}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(self.cited(rows), self.PRESENTED, "each row keeps its own candidate")
+        self.assertEqual(refusals, [])
+        self.assertEqual([record["rule"] for record in repairs], ["path+line"] * 3)
+        self.assertEqual([record["cited"] for record in repairs], [None] * 3,
+                         "a repaired row had no id to quote, and the record must say so")
+        coverage = candidate_coverage(3, len(rows), presented_ids=self.PRESENTED,
+                                      cited_ids=self.cited(rows))
+        self.assertTrue(coverage["complete"], coverage)
+        self.assertEqual(coverage["rows_without_candidate_id"], 0)
+
+    def test_a_unique_path_is_enough_when_the_row_names_no_line(self):
+        rows = [{"path": "./src/b.ts"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(self.cited(rows), ["cand-3"], "a leading ./ is the same file")
+        self.assertEqual(repairs[0]["rule"], "path")
+        self.assertEqual(refusals, [])
+
+    def test_a_line_that_matches_nothing_falls_back_to_the_only_candidate_in_that_file(self):
+        rows = [{"path": "src/b.ts", "line_number": 99}]
+        self.repair(rows)
+        self.assertEqual(self.cited(rows), ["cand-3"],
+                         "a unique path is a unique candidate; a model-written line cannot veto it")
+
+    def test_a_shared_path_with_no_line_is_refused_rather_than_guessed(self):
+        rows = [{"path": "src/a.ts"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(repairs, [])
+        self.assertEqual(self.cited(rows), [None])
+        self.assertEqual(len(refusals), 1, refusals)
+        self.assertTrue(refusals[0]["missing"])
+        self.assertIn("2 presented candidate(s) share its location", refusals[0]["reason"])
+        self.assertIn("cand-1, cand-2", refusals[0]["reason"])
+
+    def test_a_path_no_presented_candidate_has_is_refused(self):
+        rows = [{"path": "src/elsewhere.ts", "line_number": 1}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("names none of the 3 presented candidate(s)", refusals[0]["reason"])
+
+    def test_a_row_with_no_path_is_refused_and_named(self):
+        rows = [{"title": "no location at all"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(repairs, [])
+        self.assertIn("no path to match one on", refusals[0]["reason"])
+
+    def test_a_candidate_another_row_already_cites_is_not_double_booked(self):
+        rows = [{"candidate_id": "cand-2", "path": "src/a.ts", "line_number": 20},
+                {"path": "src/a.ts", "line_number": 20}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(repairs, [])
+        self.assertEqual(self.cited(rows), ["cand-2", None])
+        self.assertIn("already cited by another row", refusals[0]["reason"])
+
+    def test_a_candidate_the_prompt_never_showed_blocks_a_better_looking_match(self):
+        """agents-fv5uk one level over: if a record the model was NOT shown matches the location better
+        (or equally well), the row may not be attached to a neighbour it merely shares a file with."""
+        locations = dict(self.LOCATIONS)
+        locations["cand-unshown"] = {"path": "src/a.ts", "line": 20}
+        rows = [{"path": "src/a.ts", "line_number": 20}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual(repairs, [])
+        self.assertEqual(self.cited(rows), [None])
+        self.assertIn("NOT shown", refusals[0]["reason"])
+        self.assertIn("cand-unshown", refusals[0]["reason"])
+
+    def test_count_only_runs_neither_repair_nor_complain(self):
+        # A pre-pass with no ids legitimately produces id-less rows: there is nothing to bind, and a
+        # refusal per row would name the normal shape as a defect.
+        rows = [{"path": "src/a.ts", "line_number": 10}]
+        refusals = []
+        self.assertEqual(repair_cited_candidate_ids(rows, [], refusals=refusals,
+                                                    candidate_locations=self.LOCATIONS), [])
+        self.assertEqual((self.cited(rows), refusals), ([None], []))
+
+    def test_a_duplicated_citation_still_wins_over_a_missing_id_for_the_same_candidate(self):
+        """The id rules run first, so a row that already cites a candidate is never re-bound by location -
+        and a missing-id row is bound only onto what is left."""
+        rows = [{"candidate_id": "cand-2", "path": "src/a.ts"},
+                {"candidate_id": "cand-2", "path": "src/a.ts"},
+                {"path": "src/b.ts", "line_number": 5}]
+        self.repair(rows)
+        self.assertEqual(self.cited(rows), ["cand-2", "cand-2", "cand-3"])
+
+    def test_the_locations_are_read_from_the_run_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "candidates.json").write_text(json.dumps({"candidates": [
+                {"candidate_id": "d21fff3b2fa42e68", "path": "./docs/help.html", "line_number": 12},
+                {"candidate_id": "b1cea3c268d41ac2", "path": "docs/index.html",
+                 "line_number": "7"},
+                {"candidate_id": "no-path-here", "line_number": 3},
+                {"rule_id": "r", "path": "docs/unidentified.html", "line_number": 4},
+            ]}), encoding="utf-8")
+            self.assertEqual(read_candidate_locations(run), {
+                "d21fff3b2fa42e68": {"path": "docs/help.html", "line": 12},
+                "b1cea3c268d41ac2": {"path": "docs/index.html", "line": 7}})
+            self.assertEqual(read_candidate_paths(run), {
+                "d21fff3b2fa42e68": "docs/help.html",
+                "b1cea3c268d41ac2": "docs/index.html"},
+                "the path-only reader is the same population, so the two cannot disagree")
+            self.assertEqual(read_candidate_locations(Path(tmp) / "absent"), {})
+
+    def test_the_repair_is_what_makes_a_partial_report_accountable_end_to_end(self):
+        """The whole point: without the location repair this report is INCOMPLETE and names no cause; with
+        it the rows account, and a row that could not be bound is reported as a row with no id."""
+        presented = [f"cand-{i:02d}" for i in range(7)]
+        locations = {cid: {"path": f"src/f{i}.ts", "line": i + 1}
+                     for i, cid in enumerate(presented)}
+        rows = [{"path": f"src/f{i}.ts", "line_number": i + 1} for i in range(6)]
+        rows.append({"path": "src/f6.ts"})            # no line, unique path: still bindable
+        before = candidate_coverage(7, len(rows), presented_ids=presented,
+                                    cited_ids=[row.get("candidate_id") for row in rows])
+        self.assertFalse(before["complete"])
+        self.assertEqual(before["rows_without_candidate_id"], 7)
+        self.assertIn("7 row(s) carried no candidate_id", before["reason"])
+        refusals = []
+        repair_cited_candidate_ids(rows, presented, refusals=refusals, candidate_locations=locations)
+        self.assertEqual(refusals, [])
+        after = candidate_coverage(7, len(rows), presented_ids=presented,
+                                   cited_ids=[row.get("candidate_id") for row in rows])
+        self.assertTrue(after["complete"], after)
+        self.assertEqual(after["candidates_accounted"], 7)
+        self.assertEqual(after["rows_without_candidate_id"], 0)
 
 
 class TestCoverageDiagnosticsStayQuietWhenTheyWouldBeNoise(unittest.TestCase):

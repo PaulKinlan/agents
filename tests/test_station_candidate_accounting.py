@@ -344,16 +344,19 @@ class TestAggregateCandidateAccounting(unittest.TestCase):
 
     def test_old_row_mode_scores_and_count_only_fixtures_are_unchanged(self):
         # agents-amgst: the record gained `duplicate_cited_ids`/`uncited_candidate_ids`, and an
-        # identity-matched shortfall's reason now names the unanswered candidate. The scores, the
-        # completeness predicate and the count-only wording are unchanged.
+        # identity-matched shortfall's reason now names the unanswered candidate.
+        # agents-op02b: it gained `rows_without_candidate_id`, which is 0 here because every cited id is
+        # a real string - a row that carried NO id at all is a different cause and is reported separately.
         self.assertEqual(candidate_coverage(None, 7), {
             "candidates_in": None, "candidates_presented": None,
             "candidates_accounted": 7, "complete": True, "reason": "", "identity": "not-applicable",
-            "duplicate_cited_ids": [], "uncited_candidate_ids": []})
+            "duplicate_cited_ids": [], "uncited_candidate_ids": [],
+            "rows_without_candidate_id": 0})
         self.assertEqual(candidate_coverage(2, 2, presented_ids=[]), {
             "candidates_in": 2, "candidates_presented": 2,
             "candidates_accounted": 2, "complete": True, "reason": "", "identity": "count-only",
-            "duplicate_cited_ids": [], "uncited_candidate_ids": []})
+            "duplicate_cited_ids": [], "uncited_candidate_ids": [],
+            "rows_without_candidate_id": 0})
         self.assertEqual(candidate_coverage(2, 1, presented_ids=["A", "B"], cited_ids=["A"]), {
             "candidates_in": 2, "candidates_presented": 2,
             "candidates_accounted": 1, "complete": False,
@@ -362,7 +365,29 @@ class TestAggregateCandidateAccounting(unittest.TestCase):
                       "the candidate_id of the pre-pass candidate it answers; presented id(s) no row "
                       "cited: B",
             "identity": "identity-matched", "duplicate_cited_ids": [],
-            "uncited_candidate_ids": ["B"]})
+            "uncited_candidate_ids": ["B"], "rows_without_candidate_id": 0})
+
+    def test_a_row_with_no_id_at_all_is_counted_and_named_as_its_own_cause(self):
+        # agents-op02b: the qrcode nightly's seven vuln-discovery rows named a real candidate by path and
+        # carried no candidate_id key. "cited 0 of the 7" reads as seven WRONG ids; the counter therefore
+        # says how many rows carried none, and names that cause first because the delta table truncates it.
+        coverage = candidate_coverage(7, 7, presented_ids=["A", "B"], cited_ids=[None, "", "A"])
+        self.assertFalse(coverage["complete"])
+        self.assertEqual(coverage["rows_without_candidate_id"], 2)
+        self.assertEqual(coverage["candidates_accounted"], 1)
+        self.assertIn("2 row(s) carried no candidate_id", coverage["reason"])
+        self.assertTrue(coverage["reason"].endswith("presented id(s) no row cited: B"), coverage["reason"])
+        self.assertLess(coverage["reason"].index("carried no candidate_id"),
+                        coverage["reason"].index("presented id(s) no row cited"),
+                        "the truncating surface must keep the cause, not lose it")
+
+    def test_count_only_mode_never_blames_a_row_for_carrying_no_id(self):
+        # A pre-pass with no ids legitimately produces id-less rows: counting them would name the normal
+        # shape as a defect, and the count-only wording already says why the ids cannot be compared.
+        coverage = candidate_coverage(3, 3, presented_ids=[], cited_ids=[None, None, None])
+        self.assertTrue(coverage["complete"])
+        self.assertEqual(coverage["rows_without_candidate_id"], 0)
+        self.assertEqual(coverage["reason"], "")
 
 
 class TestPresentedIdsComeFromTheRun(unittest.TestCase):
