@@ -27,6 +27,26 @@ from typing import Any, Callable, Dict, Optional, Sequence
 # positive finite number. Never unbounded, never zero.
 DEFAULT_MAX_MINUTES = 5.0
 
+# A BATCHED STATION DOES N TIMES THE WORK ITS DECLARATION WAS SIZED FOR (agents-xm2xc).
+# `budget.max_minutes` is written for ONE engine call, and since e5799b72 every station that presents
+# candidates makes one call per bounded batch. The deadline stayed the single-call one, so on the
+# reported nightly (wib2r) vuln-triage planned 7 calls of <=8 candidates against a 5-minute station
+# budget and expired ON BATCH 6: five batches of finished triage were discarded, and the line skipped
+# the six stations behind it. Once the call sequence is known the declaration therefore becomes a
+# PER-CALL allowance and the station's deadline funds the whole sequence.
+#
+# Two bounds keep "fund the calls" from becoming "no bound at all": a ceiling on the station total,
+# and a reserve kept out of the engine phase for the step that follows it.
+STATION_DEADLINE_CEILING_MINUTES = 60.0
+# The step after the engine calls is the findings dispatch - a local command, not a model call. With a
+# multi-call deadline it is the step that gets squeezed: batches that each spend their full allowance
+# leave it zero seconds, and the run reports a TIMEOUT over a report the model already produced.
+POST_ENGINE_RESERVE_FRACTION = 0.1
+POST_ENGINE_RESERVE_CEILING_SECONDS = 30.0
+# Never hand a call a zero timeout. min(declared, 1 s) keeps a sub-second declared budget sub-second
+# instead of rounding it up to a second it never had.
+MIN_CALL_FLOOR_SECONDS = 1.0
+
 
 class StationTimeout(RuntimeError):
     """A station step overran the station's declared budget.max_minutes."""
@@ -54,8 +74,14 @@ class StationBudget:
         self.label = label
         self.minutes = _positive_minutes(max_minutes) or DEFAULT_MAX_MINUTES
         self.max_seconds = self.minutes * 60.0
+        # The declaration as written, kept before plan_calls() can fund a longer deadline: a batched
+        # station reports both numbers, because "5 min" and "35 min" are both true of different things.
+        self.declared_minutes = self.minutes
+        self.declared_seconds = self.max_seconds
+        self.calls_planned = 1
         self._clock = clock
-        self._deadline = clock() + self.max_seconds
+        self._started = clock()
+        self._deadline = self._started + self.max_seconds
 
     @property
     def remaining_seconds(self) -> float:
@@ -72,6 +98,45 @@ class StationBudget:
             raise StationTimeout(
                 f"{self.label}: budget of {self.minutes:g} min exhausted before {step}"
             ) from None
+
+    def plan_calls(self, calls: int) -> float:
+        """Fund `calls` engine calls instead of the single call the declaration was sized for.
+
+        The declaration is a PER-CALL allowance (see STATION_DEADLINE_CEILING_MINUTES): the station's
+        deadline becomes `declared * calls` - never less than the declaration itself, so an agent that
+        already declares more than the ceiling keeps it - measured from the moment the station started,
+        so the pre-pass time already spent is still spent. Returns the funded total in seconds.
+
+        Idempotent for reporting purposes but not cumulative: calling it twice with the same count is
+        the same deadline, because the deadline is derived from the start rather than added to.
+        """
+        try:
+            calls = int(calls)
+        except (TypeError, ValueError):
+            raise ValueError(f"{self.label}: call count must be an integer, got {calls!r}") from None
+        if calls < 1:
+            raise ValueError(f"{self.label}: call count must be at least 1, got {calls}")
+        ceiling = STATION_DEADLINE_CEILING_MINUTES * 60.0
+        self.calls_planned = calls
+        self.max_seconds = min(self.declared_seconds * calls,
+                               max(ceiling, self.declared_seconds))
+        self.minutes = self.max_seconds / 60.0
+        self._deadline = self._started + self.max_seconds
+        return self.max_seconds
+
+    def call_timeout(self, step: str, calls_left: int) -> float:
+        """Seconds for ONE of the `calls_left` engine calls still to make (agents-xm2xc).
+
+        The per-call allowance, reduced to a fair share of what remains once the post-engine reserve is
+        set aside - which is what stops one hung batch from spending every later batch's time, and what
+        keeps the findings dispatch behind them funded. Raises StationTimeout when nothing is left.
+        """
+        remaining = self.remaining_seconds
+        reserve = min(POST_ENGINE_RESERVE_CEILING_SECONDS,
+                      self.declared_seconds * POST_ENGINE_RESERVE_FRACTION)
+        fair_share = max(remaining - reserve, 0.0) / max(1, int(calls_left))
+        floor = min(self.declared_seconds, MIN_CALL_FLOOR_SECONDS)
+        return max(floor, min(self.declared_seconds, fair_share))
 
 
 def budget_for(
@@ -106,6 +171,7 @@ def run_station_command(
     check: bool = False,
     kill_group_on_exit: bool = False,
     on_spawn: Optional[Callable[[subprocess.Popen], None]] = None,
+    timeout_seconds: Optional[float] = None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """Run one station command under `budget`, killing its whole process group on expiry.
@@ -123,12 +189,17 @@ def run_station_command(
     engine session's own process tree, so no other descendant of the dispatcher is
     served).
 
+    `timeout_seconds` overrides the command's share of the station budget for THIS call only. A batched
+    station passes StationBudget.call_timeout, because one batch's fair share of a multi-call deadline is
+    not the whole remaining budget (agents-xm2xc: the shared deadline expired on batch 6 of 7 and threw
+    away five batches of finished triage).
+
     A hook that RAISES cannot orphan the child it was handed (agents-8z4z): the exception is
     propagated only after the session started above has been killed and reaped, because the
     alternative is a station child still running with live model credentials in its
     environment and nobody to reap it.
     """
-    timeout = budget.timeout_for(step)
+    timeout = timeout_seconds if timeout_seconds is not None else budget.timeout_for(step)
     # `capture_output` and `input` are subprocess.run conveniences, not Popen arguments.
     stdin_data = kwargs.pop("input", None)
     if kwargs.pop("capture_output", False):
@@ -175,8 +246,8 @@ def run_station_command(
         stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
     except subprocess.TimeoutExpired:
         timeout_error = StationTimeout(
-            f"{budget.label}: {step} exceeded the {budget.minutes:g} min station budget; "
-            f"process group killed"
+            f"{budget.label}: {step} exceeded its {timeout:g}s allowance (station budget "
+            f"{budget.minutes:g} min); process group killed"
         )
         # agents-0hbq: THE EXPIRY PATH NEEDS THE SAME CONTAINMENT AS THE HOOK PATH. It used to
         # call _kill_and_reap bare, so a reap that failed here did exactly what the hook path

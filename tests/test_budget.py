@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from lib.budget import (  # noqa: E402
     DEFAULT_MAX_MINUTES,
+    STATION_DEADLINE_CEILING_MINUTES,
     StationBudget,
     StationTimeout,
     budget_for,
@@ -82,6 +83,95 @@ class TestStationBudget(unittest.TestCase):
                 os.environ["FACTORY_BUDGET_MINUTES"] = orig
             else:
                 os.environ.pop("FACTORY_BUDGET_MINUTES", None)
+
+
+class TestBatchedCallPlanning(unittest.TestCase):
+    """agents-xm2xc: a station that makes one engine call per batch is FUNDED for the sequence.
+
+    The reported nightly (wib2r) planned 7 calls of <=8 candidates against vuln-triage's 5-minute
+    `budget.max_minutes`, and the single shared deadline expired ON BATCH 6: five batches of finished
+    triage were discarded and the line skipped six stations behind them. These pin the arithmetic and,
+    as importantly, the two bounds that keep "fund the calls" from being "no deadline at all".
+    """
+
+    def test_the_declaration_buys_one_allowance_per_call(self):
+        budget = StationBudget(5, label="vuln-triage", clock=FakeClock())
+        self.assertEqual(budget.plan_calls(7), 2100)
+        self.assertEqual(budget.minutes, 35)
+        self.assertEqual(budget.declared_minutes, 5,
+                         "the declaration a human reads in agent.yaml must not be rewritten")
+        self.assertEqual(budget.remaining_seconds, 2100)
+
+    def test_the_ceiling_bounds_a_long_call_sequence(self):
+        budget = StationBudget(5, clock=FakeClock())
+        self.assertEqual(budget.plan_calls(30), STATION_DEADLINE_CEILING_MINUTES * 60)
+
+    def test_a_declaration_above_the_ceiling_is_never_shrunk(self):
+        # the ceiling is a bound on the FUNDING, not a cap on what an agent may declare
+        budget = StationBudget(90, clock=FakeClock())
+        self.assertEqual(budget.plan_calls(3), 5400)
+
+    def test_pre_pass_time_is_not_given_back_by_the_extension(self):
+        clock = FakeClock()
+        budget = StationBudget(5, clock=clock)
+        clock.now = 60                     # the pre-pass already spent a minute
+        budget.plan_calls(3)
+        self.assertEqual(budget.remaining_seconds, 840)
+
+    def test_a_later_call_gets_the_full_allowance_when_earlier_calls_were_cheap(self):
+        clock = FakeClock()
+        budget = StationBudget(5, clock=clock)
+        budget.plan_calls(3)               # 900 s for 3 calls of 300 s
+        clock.now = 30                     # the engine phase has used 30 s so far
+        self.assertEqual(budget.call_timeout("engine 'pi' batch 3/3", 1), 300)
+
+    def test_a_call_is_reduced_to_its_fair_share_when_the_ceiling_binds(self):
+        # 30 calls cannot buy 30 x 5 min, so the ceiling is divided instead of multiplied
+        budget = StationBudget(5, clock=FakeClock())
+        budget.plan_calls(30)
+        self.assertAlmostEqual(budget.call_timeout("engine 'pi' batch 1/30", 30), 3570 / 30)
+
+    def test_the_last_call_leaves_the_findings_dispatch_its_reserve(self):
+        clock = FakeClock()
+        budget = StationBudget(5, clock=clock)
+        budget.plan_calls(7)
+        clock.now = 2000                   # 100 s left of the 35-minute deadline
+        self.assertEqual(budget.call_timeout("engine 'pi' batch 7/7", 1), 70)
+
+    def test_an_exhausted_deadline_still_raises_before_a_call(self):
+        clock = FakeClock()
+        budget = StationBudget(1, clock=clock)
+        budget.plan_calls(2)
+        clock.now = 120
+        with self.assertRaises(StationTimeout) as ctx:
+            budget.call_timeout("engine 'pi' batch 2/2", 1)
+        self.assertIn("budget of 2 min exhausted", str(ctx.exception))
+
+    def test_a_sub_second_declaration_keeps_its_own_allowance(self):
+        # the end-to-end suites declare tiny budgets so a real timeout is cheap to drive; the floor
+        # must not round them UP to a second the declaration never had
+        budget = StationBudget(0.01, clock=FakeClock())   # 0.6 s
+        budget.plan_calls(2)
+        self.assertLessEqual(budget.call_timeout("engine 'pi' batch 1/2", 2), 0.6)
+
+    def test_a_planned_call_actually_bounds_the_child(self):
+        # the arithmetic above is only a promise; this drives the timeout that consumes it
+        budget = StationBudget(0.02, label="slow", clock=time.monotonic)  # 1.2 s, reserve 0.12 s
+        budget.plan_calls(2)
+        allowance = budget.call_timeout("engine batch 1/2", 2)
+        self.assertAlmostEqual(allowance, 0.54, places=2)   # (1.2 - 0.12) / 2 calls
+        started = time.monotonic()
+        with self.assertRaises(StationTimeout) as ctx:
+            run_station_command(
+                [sys.executable, "-c", "import time; time.sleep(30)"], budget, "engine batch 1/2",
+                timeout_seconds=allowance, capture_output=True, text=True, check=False,
+            )
+        # The killed call is the CALL's allowance, not the station's: the bound below is loose because
+        # the process-group kill and reap have their own bounded cost (GROUP_EXIT_WAIT_SECONDS), which
+        # is why this asserts "well under the 30 s child" rather than the exact 0.54 s.
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("exceeded its", str(ctx.exception))
+        self.assertIn("process group killed", str(ctx.exception))
 
 
 class TestRunStationCommand(unittest.TestCase):

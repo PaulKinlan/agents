@@ -23,7 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple, Sequence
 FACTORY_ROOT = Path(__file__).resolve().parent
 
 try:  # repo root on sys.path, or run as a script from another cwd
-    from lib.budget import StationTimeout, budget_for, run_station_command
+    from lib.budget import (STATION_DEADLINE_CEILING_MINUTES, StationTimeout, budget_for,
+                           run_station_command)
     from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
                                  budget_note, check_engine, downgrade_network_to_withheld,
                                  downgrade_write_to_read_only, egress_allowlist,
@@ -61,7 +62,8 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                prepass_tool_env, resolve_tool, unpinned_allowed, write_effective_pins)
 except ImportError:
     sys.path.insert(0, str(FACTORY_ROOT))
-    from lib.budget import StationTimeout, budget_for, run_station_command
+    from lib.budget import (STATION_DEADLINE_CEILING_MINUTES, StationTimeout, budget_for,
+                           run_station_command)
     from lib.containment import (ContainmentError, READ_ONLY, WORKTREE_WRITE, banner_lines,
                                  budget_note, check_engine, downgrade_network_to_withheld,
                                  downgrade_write_to_read_only, egress_allowlist,
@@ -1954,6 +1956,16 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                     json.dumps(presented, indent=2))
                 print(f"-> Batching {len(candidates_slice)} candidate(s) into {batch_count} call(s) "
                       f"of at most {max_per_call}.")
+                # agents-xm2xc: THE DEADLINE FUNDS THE CALLS IT PLANNED. `budget.max_minutes` sized ONE
+                # engine call, and the deadline was still that single-call budget after e5799b72 made
+                # batching unconditional: the nightly's 5-minute vuln-triage expired on batch 6 of 7,
+                # discarding five batches of finished triage and skipping six later stations. The
+                # declaration now buys a per-call allowance and the deadline covers the sequence, up to
+                # the ceiling in lib/budget.py (agents-xm2xc: STATION_DEADLINE_CEILING_MINUTES).
+                funded = budget.plan_calls(batch_count)
+                print(f"-> Station deadline now {funded / 60.0:g} min for {batch_count} call(s) of "
+                      f"{budget.declared_minutes:g} min (ceiling "
+                      f"{STATION_DEADLINE_CEILING_MINUTES:g} min).")
             else:
                 batches = [candidates_slice]
         else:
@@ -2172,6 +2184,13 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                     if batched else f"engine '{engine}'")
                     _res = run_station_command(
                         adapter_cmd, budget, _batch_label,
+                        # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
+                        # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
+                        # with them the station. Each call gets its own allowance (the declaration,
+                        # reduced to a fair share when the ceiling or a slow earlier call leaves less),
+                        # and the last one leaves the findings dispatch its reserve.
+                        timeout_seconds=(budget.call_timeout(_batch_label, len(prompts) - _batch_index)
+                                         if batched else None),
                         input=_batch_prompt, capture_output=True, text=True,
                         check=False, env=adapter_env,
                         on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))

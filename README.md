@@ -506,7 +506,10 @@ allocation; pruning skips any directory whose marker is fresher than
 when the run completes successfully; a run that crashes or is hard-killed leaves its
 marker behind, and the grace bounds how long that stale marker protects the directory
 before it is swept. Set `FACTORY_RUN_ACTIVE_GRACE_SECONDS` larger than your longest
-station `budget.max_minutes` if you override budgets.
+station deadline — note that a station whose candidate list is split into N bounded
+batches is one engine call per batch, so its deadline is N x `budget.max_minutes`
+(capped by `STATION_DEADLINE_CEILING_MINUTES`, default 60 min, in `lib/budget.py`),
+not the declared single-call budget.
 
 ---
 

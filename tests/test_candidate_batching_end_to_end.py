@@ -820,5 +820,54 @@ class TestThePerCallBoundIsPolicy(BatchedStation):
                       f"the cap must be stated, not silent: {res.stdout[-400:]}")
 
 
+# agents-xm2xc: THE DEADLINE FUNDS THE BATCHES IT PLANNED. The nightly planned 7 calls of <=8
+# candidates against vuln-triage's 5-minute budget.max_minutes, the single shared deadline expired on
+# batch 6, five finished batches were discarded and the line skipped six stations behind them. This
+# drives that shape at a test-sized clock: three batches, each spending most of ONE declared allowance,
+# so the run only reaches its last batch if the deadline covers the sequence.
+SLOW_BATCH_STUB = IDS_AND_ROWS + r"""sleep 2
+printf '%s]}\n' "$out"
+"""
+
+# 0.1 min = 6 s per call: three slow calls need ~6 s of engine time, and the pre-pass and findings
+# dispatch need their own share, so a single shared 6-second deadline cannot finish them (RED: measured
+# as a batch-3 StationTimeout before the fix).
+SHORT_DECLARED_BUDGET_YAML = AGENT_YAML.replace("max_minutes: 5", "max_minutes: 0.1")
+
+
+class TestTheDeadlineFundsItsBatches(BatchedStation):
+    def test_three_slow_batches_complete_inside_a_funded_deadline(self):
+        self.agent(SHORT_DECLARED_BUDGET_YAML)
+        self.stub(SLOW_BATCH_STUB)
+        res = self.factory("pi")
+        run = self.run_dir()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("Station deadline now 0.3 min for 3 call(s) of 0.1 min", res.stdout,
+                      "the extension is stated with both numbers: 3 calls x the declared 0.1 min")
+        self.assertEqual(len(sorted(run.glob("model_output.batch*.txt"))), 3,
+                         "every batch ran: a shared 6-second deadline expires on the third")
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual([f["candidate_id"] for f in report["findings"]],
+                         [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)],
+                         "a run that funds all three calls keeps all three batches' rows")
+
+    def test_one_hung_batch_cannot_spend_the_whole_funded_deadline(self):
+        # The other half of the bound: batch 1 hangs for longer than its own allowance. Its allowance
+        # is one declaration (not the whole 18-second deadline), so batches 2 and 3 still run and the
+        # station fails ON the hung call - named, with the batch number in the reason.
+        self.agent(SHORT_DECLARED_BUDGET_YAML)
+        self.stub(IDS_AND_ROWS + r"""if [[ " ${ids[*]} " == *" cand-perf-000 "* ]]; then
+  sleep 30
+fi
+printf '%s]}\n' "$out"
+""")
+        res = self.factory("pi")
+        run = self.run_dir()
+        self.assertNotEqual(res.returncode, 0, "a hung batch must fail the station, not hang the line")
+        failure = (run / "failure_reason.txt").read_text(encoding="utf-8")
+        self.assertIn("batch 1/3", failure, f"the reason names the batch that hung: {failure}")
+        self.assertIn("exceeded its", failure)
+
+
 if __name__ == "__main__":
     unittest.main()
