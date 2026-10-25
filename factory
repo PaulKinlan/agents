@@ -47,6 +47,7 @@ try:  # repo root on sys.path, or run as a script from another cwd
                                         coerce_scanned_files, describe_truncation, merge_reports,
                                         plan_batches, resolve_max_candidates_per_call,
                                         row_arrays, validate_batch_attribution)
+    from lib.json_repair import describe_unrepairable, repair_json
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -85,6 +86,7 @@ except ImportError:
                                         coerce_scanned_files, describe_truncation, merge_reports,
                                         plan_batches, resolve_max_candidates_per_call,
                                         row_arrays, validate_batch_attribution)
+    from lib.json_repair import describe_unrepairable, repair_json
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
                                validate_agent_report)
     from lib import sinks
@@ -896,8 +898,36 @@ def _resolve_engine_bin(engine: str) -> Optional[str]:
 MAX_JSON_DECODE_ATTEMPTS = 20000
 
 
-def extract_json_from_output(text: str) -> Optional[Dict[str, Any]]:
+def extract_json_from_output(text: str, *, notes: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """Find the report object in a model's output, tolerating the ways models wrap it.
+
+    agents-lb0w3: when nothing decodes, ONE bounded, decoder-driven repair pass is tried
+    (lib.json_repair) before giving up - a model that writes unescaped quotes inside its own summary
+    string has still answered, and losing the whole verdict over a quote costs a station its night.
+    `notes` is an optional sink for the repairs applied, so a repair is recorded (never silent);
+    it stays empty when the strict parse worked or when the repair did not.
+    """
+    strict = _extract_json_strict(text)
+    if strict is not None and isinstance(strict.get("findings"), list):
+        return strict
+    repaired_text, repairs = repair_json(text)
+    if repairs:
+        repaired = _extract_json_strict(repaired_text)
+        # A REPAIR ONLY WINS IF IT PRODUCES A REPORT. The strict scan happily decodes a FRAGMENT of a
+        # broken payload - an unescaped quote in `summary` makes the whole object undecodable, but the
+        # first finding row inside it is valid JSON and is returned as "the report" - so a findings-less
+        # result must not stop the repair from seeing the real one (measured: without this the CAP
+        # payload still failed, because the fragment satisfied the old early return).
+        if repaired is not None and isinstance(repaired.get("findings"), list):
+            if notes is not None:
+                notes.extend(repairs)
+            return repaired
+    # Nothing repairable: the strict scan's answer stands, findings-less or None, exactly as before.
+    return strict
+
+
+def _extract_json_strict(text: str) -> Optional[Dict[str, Any]]:
+    """`extract_json_from_output` WITHOUT the repair pass: the exact pre-agents-lb0w3 behaviour.
 
     The old extractor tried a whole-text parse, then each ```fence``` with a non-greedy
     regex, then first-`{`-to-last-`}`. A report whose strings themselves contain a fence (a
@@ -969,14 +999,29 @@ def parse_station_report(raw_output: str, *, agent_dir: Path, agent_cfg: Any,
     The reason string is the same text the single-call path has always produced, so a downstream reader
     (and the repair-retry hint) sees no change for single-call stations.
     """
-    report = extract_json_from_output(raw_output)
+    # agents-lb0w3: `repairs` is both the sink for the one bounded JSON repair pass and the proof that
+    # it ran - a repair is recorded in the run directory, never applied silently.
+    repairs: List[str] = []
+    report = extract_json_from_output(raw_output, notes=repairs)
+    if repairs:
+        _write_run_artifact(run_dir / f"json_repair{tag}.json",
+                            json.dumps({"repairs": repairs}, indent=2))
+        print(f"Note: repaired the model's JSON before parsing ({len(repairs)} repair(s); "
+              f"first: {repairs[0]}); see json_repair{tag}.json")
     if report is not None and not isinstance(report.get("findings"), list):
         # Every report contract requires a findings list. An object without one (a fragment of
         # truncated output, an echoed tool call) is not a verdict; reading its missing findings as
         # [] was a clean PASS/0 nobody earned.
         report = None
     if report is None:
-        return None, "Could not parse a JSON report (with a findings list) from model output"
+        reason = "Could not parse a JSON report (with a findings list) from model output"
+        # agents-lb0w3: and SAY WHAT IS WRONG WITH IT. "Could not parse" is all the repair-retry prompt
+        # used to learn, so a second attempt reproduced the same unescaped quote. An unrepairable shape
+        # (an unquoted JS expression where a string belongs) is named with its offset and an excerpt.
+        named = describe_unrepairable(raw_output)
+        if named:
+            reason += f": {named}"
+        return None, reason
     # Known field-name synonyms are mapped first (fleet-9wyi): `"id"` for `rule_id` is a usable
     # report, not a missing one. Every mapping is printed and recorded.
     normalised = normalize_agent_report(agent_dir, agent_cfg, report)
