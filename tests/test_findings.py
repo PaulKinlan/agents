@@ -2428,9 +2428,51 @@ class TestASharedLocationIsNarrowedByTheRowsOwnRuleOrTitle(unittest.TestCase):
                  "rule_id": "legacy-reset", "title": "Prefixed property, no modern form"}]
         repairs, refusals = self.repair(rows)
         self.assertEqual((repairs, self.cited(rows)), ([], [None]))
-        self.assertIn("its rule_id and title point at different candidates", refusals[0]["reason"])
+        self.assertIn("its rule_id and title do not name the same candidate", refusals[0]["reason"])
         self.assertIn("aaaa1111bbbb2222, cccc3333dddd4444", refusals[0]["reason"],
                       "the refusal names both candidates the row wavered between")
+
+    def test_a_title_that_only_READS_AS_the_other_candidate_also_contradicts(self):
+        """Reviewer finding on 53959bb4, measured: `rule_id=reset`, `title=Prefixed` against
+        `reset/Vendor reset…` and `prefix/Prefixed property…` was bound to the reset candidate, because
+        `Prefixed` is a PREFIX of the other title and an exact comparison therefore saw no contradiction.
+        A truncated title is exactly how a model restates one, so containment at a word boundary counts as
+        a contradiction - only the contradiction test is allowed to be that lenient."""
+        locations = {"aaaa1111bbbb2222": {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "reset", "title": "Vendor reset contradicts native"},
+                     "cccc3333dddd4444": {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "prefix", "title": "Prefixed property, no modern form"}}
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "reset",
+                 "title": "Prefixed"}]
+        repairs, refusals = self.repair(rows, locations=locations, presented=list(locations))
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]),
+                         "a row that reads as the other candidate is not bound to this one")
+        self.assertIn("do not name the same candidate", refusals[0]["reason"])
+
+    def test_a_fragment_too_short_to_mean_anything_is_not_a_contradiction(self):
+        """The floor that keeps the lenient test honest: `the` sits inside dozens of titles, so it must not
+        be read as a rendering of another candidate's."""
+        locations = {"aaaa1111bbbb2222": {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "reset", "title": "Vendor reset contradicts native"},
+                     "cccc3333dddd4444": {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "prefix", "title": "Prefixed property, no modern form"}}
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "reset",
+                 "title": "the"}]
+        repairs, refusals = self.repair(rows, locations=locations, presented=list(locations))
+        self.assertEqual((self.cited(rows), refusals), (["aaaa1111bbbb2222"], []))
+        self.assertEqual(repairs[0]["rule"], "path+line+rule_id")
+
+    def test_an_unrelated_title_does_not_block_a_rule_that_names_one_candidate(self):
+        """Binding stays exact-only: a paraphrased title that reads as neither candidate costs nothing,
+        because the rule label still names exactly one of them."""
+        locations = {"aaaa1111bbbb2222": {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "reset", "title": "Vendor reset contradicts native"},
+                     "cccc3333dddd4444": {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "prefix", "title": "Prefixed property, no modern form"}}
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "reset",
+                 "title": "Remove the legacy reset from normalize"}]
+        repairs, refusals = self.repair(rows, locations=locations, presented=list(locations))
+        self.assertEqual((self.cited(rows), refusals), (["aaaa1111bbbb2222"], []))
 
     def test_a_title_shared_by_both_candidates_is_not_a_contradiction(self):
         """The other half: a generic title that matches the chosen candidate as well tells us nothing

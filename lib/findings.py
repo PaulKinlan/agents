@@ -2230,7 +2230,7 @@ def repair_missing_candidate_ids_by_location(rows: Any,
                 refusals.append({"cited": None, "path": row.get("path"), "missing": True,
                                  "reason": (f"row carries no candidate_id and its "
                                             f"{' and '.join(narrowed_on)} and "
-                                            f"{', '.join(conflicting)} point at different candidates "
+                                            f"{', '.join(conflicting)} do not name the same candidate "
                                             f"among those sharing its location ({named}); "
                                             f"a self-contradicting row is not evidence for either")})
             continue
@@ -2304,8 +2304,17 @@ def _contradicting_identity(tied: List[str], locations: Dict[str, Dict[str, Any]
     answer is to refuse: picking A because `rule_id` is tried first would bind a verdict to a claim the row
     itself contradicts (reviewer finding on 3e1851d0).
 
-    A field only contradicts when it MATCHES something in the tie: a title that matches neither candidate,
-    or one that matches the chosen candidate as well as another, tells us nothing against the choice.
+    A field only contradicts when it MATCHES something in the tie: a title that matches nothing at all, or
+    one that matches the chosen candidate as well as another, tells us nothing against the choice.
+
+    NEAR MATCHES COUNT HERE, AND ONLY HERE (reviewer finding on 53959bb4). A row reading `rule_id=reset`,
+    `title=Prefixed` against candidates `reset/Vendor reset…` and `prefix/Prefixed property…` was bound to
+    the reset candidate, because `Prefixed` is not the OTHER title but a prefix of it - the exact comparison
+    saw no match and therefore no contradiction. A truncated or quoted-fragment title is precisely how a
+    model restates a candidate's title, so the contradiction test accepts a word-boundary containment (with
+    a length floor, so `the` cannot be a reading of anything) while BINDING still requires an exact match.
+    The asymmetry is deliberate: fuzzy evidence may only ever cost us a row we then report, never buy us a
+    binding.
     """
     conflicting: List[str] = []
     for field in _LOCATION_IDENTITY_FIELDS:
@@ -2313,10 +2322,36 @@ def _contradicting_identity(tied: List[str], locations: Dict[str, Dict[str, Any]
         if not value:
             continue
         hits = [cid for cid in tied
-                if _normalise_identity_text(locations.get(cid, {}).get(field)) == value]
+                if _identity_reads_as(locations.get(cid, {}).get(field), value)]
         if hits and chosen not in hits:
             conflicting.append(field)
     return conflicting
+
+
+# A fragment shorter than this is not a reading of anything: "the" is inside dozens of titles.
+_IDENTITY_NEAR_MATCH_MIN_CHARS = 8
+
+
+def _identity_reads_as(candidate_value: Any, row_value: str) -> bool:
+    """Could the row's field be a (possibly truncated or quoted) rendering of the candidate's?
+
+    EXACT OR WORD-BOUNDARY CONTAINMENT, with the shorter string long enough to mean something. Used only by
+    the contradiction test, never to choose a candidate: a row that reads as another candidate's title is
+    evidence that the row is unsure, not evidence of which one it meant.
+    """
+    normalised = _normalise_identity_text(candidate_value)
+    if not normalised or not row_value:
+        return False
+    if normalised == row_value:
+        return True
+    shorter, longer = sorted((normalised, row_value), key=len)
+    if len(shorter) < _IDENTITY_NEAR_MATCH_MIN_CHARS or shorter not in longer:
+        return False
+    start = longer.index(shorter)
+    end = start + len(shorter)
+    starts_a_word = start == 0 or not longer[start - 1].isalnum()
+    ends_a_word = end == len(longer) or not longer[end].isalnum()
+    return starts_a_word and ends_a_word
 
 
 def _shares_narrowing_identity(location: Dict[str, Any], chosen: Dict[str, Any],
