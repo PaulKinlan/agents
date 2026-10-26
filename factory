@@ -44,9 +44,11 @@ try:  # repo root on sys.path, or run as a script from another cwd
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
                                               batch_candidate_ids,
-                                        classify_unparseable, declared_max_candidates_per_call,
+                                        classify_unparseable, context_prune_notice,
+                                        declared_max_candidates_per_call,
                                         coerce_scanned_files, describe_truncation, merge_reports,
-                                        plan_batches, resolve_max_candidates_per_call,
+                                        plan_batches, prune_context_for_batch,
+                                        resolve_max_candidates_per_call,
                                         row_arrays, validate_batch_attribution)
     from lib.json_repair import describe_unrepairable, repair_json
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
@@ -85,9 +87,11 @@ except ImportError:
                              dispatch_env_failure_report, write_line_report)
     from lib.candidate_batching import (BatchMergeError, BatchPlanError, batch_brief,
                                               batch_candidate_ids,
-                                        classify_unparseable, declared_max_candidates_per_call,
+                                        classify_unparseable, context_prune_notice,
+                                        declared_max_candidates_per_call,
                                         coerce_scanned_files, describe_truncation, merge_reports,
-                                        plan_batches, resolve_max_candidates_per_call,
+                                        plan_batches, prune_context_for_batch,
+                                        resolve_max_candidates_per_call,
                                         row_arrays, validate_batch_attribution)
     from lib.json_repair import describe_unrepairable, repair_json
     from lib.report_schema import (declared_schema, normalize_agent_report, output_contract_prompt,
@@ -2090,12 +2094,34 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
             # tests/test_candidate_batching.py::TestTheSingleCallClaimHoldsOnlyWithinBothBounds.
             # A non-list slice (a context-only payload) carries no candidates to describe.
             header = batch_brief(batch, batch_index, batch_count) if isinstance(batch, list) else ""
+            # agents-h53yp: the station's opt-in context is per-batch input, not a per-run constant.
+            # It used to be appended byte-identically to all N prompts, so vuln-triage sent ~355 KB of
+            # cluster bodies with each of its 7 batches (~2.5 MB for one station) and the engine exited 1
+            # on batch 3. `prune_context_for_batch` keeps a record that carries candidate ids only for the
+            # candidate in THIS batch and keeps every record it cannot attribute (see the module comment);
+            # when it drops nothing the block below is the identical `context_block`, so an id-less
+            # context - the ADR's count-only case - is untouched, byte-for-byte.
+            batch_context = context_block
+            prune_record: Optional[Dict[str, Any]] = None
+            if context_block and batch_count > 1 and isinstance(batch, list):
+                _pruned, prune_record = prune_context_for_batch(cand_json.get("context"), batch)
+                if prune_record is not None:
+                    batch_context = (f"\n{context_prune_notice(prune_record, batch_index=batch_index, batch_count=batch_count)}"
+                                     + json.dumps(_pruned, indent=2) + "\n")
+                    print(f"-> Batch {batch_index + 1}/{batch_count} context pruned: kept "
+                          f"{prune_record['kept']} of {prune_record['kept'] + prune_record['dropped']} "
+                          f"per-candidate context record(s); {prune_record['dropped']} belong to other "
+                          f"batches and are not sent in this call")
+                    _write_run_artifact(
+                        run_dir / f"context_prune.batch{batch_index + 1}.json",
+                        json.dumps({"agent": agent_name, "batch": batch_index + 1,
+                                    "batches": batch_count, **prune_record}, indent=2))
             batch_prompt = header + (
                 f"You are the {agent_name} agent. Examine the following context and candidate issues discovered by the "
                 f"deterministic scanner in repository '{target_name}'. Follow your SKILL.md instructions, "
                 f"triage each item, and output your structured JSON findings.\n\n"
                 f"Scanner Data:\n{json.dumps(batch, indent=2)}\n"
-            ) + context_block + contract_block
+            ) + batch_context + contract_block
             prompts.append(batch_prompt)
             tag = f".batch{batch_index + 1}" if batch_count > 1 else ""
             batch_prompt_file = run_dir / f"prompt{tag}.txt"
@@ -2285,39 +2311,87 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 # (model_output.batch<k>.txt) so the next call cannot overwrite it - the adapter
                 # always writes model_output.txt, and a batched run needs every batch's answer.
                 adapter_res = None
+                batch_retries: List[Dict[str, Any]] = []
                 for _batch_index, _batch_prompt in enumerate(prompts):
                     _batch_tag = f".batch{_batch_index + 1}" if batched else ""
                     _batch_label = (f"engine '{engine}' batch {_batch_index + 1}/{len(prompts)}"
                                     if batched else f"engine '{engine}'")
-                    _res = run_station_command(
-                        adapter_cmd, budget, _batch_label,
-                        # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
-                        # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
-                        # with them the station. Each call gets its own allowance (the declaration,
-                        # reduced to a fair share when the ceiling or a slow earlier call leaves less),
-                        # and the last one leaves the findings dispatch its reserve.
-                        timeout_seconds=(budget.call_timeout(_batch_label, len(prompts) - _batch_index)
-                                         if batched else None),
-                        input=_batch_prompt, capture_output=True, text=True,
-                        check=False, env=adapter_env,
-                        on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
-                                  if broker is not None else None))
-                    if batched:
-                        _produced = run_dir / "model_output.txt"
-                        if _produced.exists() or _produced.is_symlink():
-                            # MOVE the answer aside, rather than copy-then-unlink: a rename preserves the
-                            # adapter's bytes and mode and - the reason it is a rename and not a copy plus
-                            # an unlink - adds NO deletion site to a run directory where every deletion is
-                            # enumerated by tests/test_retention.py's inventory (measured: this line as a
-                            # `_produced.unlink()` failed that guard with "unenumerated deletion site").
-                            # The destination name is unique per batch, and the session has already ended,
-                            # so a link planted at the source is moved AS a link, never followed.
-                            _produced.rename(run_dir / f"model_output{_batch_tag}.txt")
-                    adapter_res = _res
-                    if _res.returncode != 0:
+                    # agents-h53yp: ONE bounded retry of a batch that failed transiently (see
+                    # batch_retry_refusal). Before this, `if returncode != 0: break` meant a single
+                    # engine exit 1 with 0 bytes of output on batch 3 of 7 lost the station AND the
+                    # four batches that would have answered. A single-call station is untouched: its
+                    # bounded retry already lives at the station level (run_station_with_repair_retry).
+                    _attempts = BATCH_RETRY_ATTEMPTS if batched else 1
+                    for _attempt in range(1, _attempts + 1):
+                        if _attempt > 1:
+                            # A retry is an extra engine call, so it is funded like a planned batch:
+                            # one more call's declaration, measured from the station's start.
+                            budget.plan_calls(len(prompts) + len(batch_retries) + 1)
+                        _call_label = (_batch_label if _attempt == 1
+                                       else f"{_batch_label} retry {_attempt - 1}")
+                        _res = run_station_command(
+                            adapter_cmd, budget, _call_label,
+                            # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
+                            # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
+                            # with them the station. Each call gets its own allowance (the declaration,
+                            # reduced to a fair share when the ceiling or a slow earlier call leaves less),
+                            # and the last one leaves the findings dispatch its reserve.
+                            timeout_seconds=(budget.call_timeout(_call_label, len(prompts) - _batch_index)
+                                             if batched else None),
+                            input=_batch_prompt, capture_output=True, text=True,
+                            check=False, env=adapter_env,
+                            on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
+                                      if broker is not None else None))
+                        _attempt_output = ""
+                        if batched:
+                            _produced = run_dir / "model_output.txt"
+                            if _produced.exists() or _produced.is_symlink():
+                                # MOVE the answer aside, rather than copy-then-unlink: a rename preserves the
+                                # adapter's bytes and mode and - the reason it is a rename and not a copy plus
+                                # an unlink - adds NO deletion site to a run directory where every deletion is
+                                # enumerated by tests/test_retention.py's inventory (measured: this line as a
+                                # `_produced.unlink()` failed that guard with "unenumerated deletion site").
+                                # The destination name is unique per batch, and the session has already ended,
+                                # so a link planted at the source is moved AS a link, never followed.
+                                # agents-h53yp: read it BEFORE the move - a failed attempt's own bytes decide
+                                # whether the failure was transient, and a retried batch's answer replaces this
+                                # file, which is the answer the merge should see.
+                                _attempt_output = _produced.read_text(encoding="utf-8", errors="replace")
+                                _produced.rename(run_dir / f"model_output{_batch_tag}.txt")
+                        adapter_res = _res
+                        if _res.returncode == 0 or not batched:
+                            break
+                        _refusal = batch_retry_refusal(_res.returncode, _res.stdout or "",
+                                                       _res.stderr or "", _attempt_output)
+                        if _refusal is None and not budget_allows_another_call(budget):
+                            _refusal = "no budget left for another engine call"
+                        if _refusal is None and _attempt >= _attempts:
+                            _refusal = ("already retried once: a batch that fails twice is the "
+                                        "station's answer")
+                        batch_retries.append({
+                            "batch": _batch_index + 1,
+                            "batches": len(prompts),
+                            "attempt": _attempt,
+                            "exit_code": _res.returncode,
+                            "output_bytes": len(_attempt_output.encode("utf-8")),
+                            "stderr_tail": ((_res.stderr or "")[-400:] or None),
+                            "retried": _refusal is None,
+                            "not_retried_because": _refusal,
+                        })
+                        if _refusal is not None:
+                            print(f"  ⚠️ [batch-retry] batch {_batch_index + 1}/{len(prompts)} exited "
+                                  f"{_res.returncode}; NOT retried: {_refusal}")
+                            break
+                        print(f"  🔁 [batch-retry] batch {_batch_index + 1}/{len(prompts)} exited "
+                              f"{_res.returncode} with no output; retrying it once "
+                              f"(attempt {_attempt + 1}/{_attempts})")
+                    if adapter_res.returncode != 0:
                         # A failed call is the run's answer: later batches cannot rescue it, and
                         # carrying on would spend the budget on a session that already failed.
                         break
+                if batch_retries:
+                    _write_run_artifact(run_dir / "batch_retries.json",
+                                        json.dumps(batch_retries, indent=2))
             except StationTimeout as e:
                 reason = str(e)
                 report = {
@@ -2882,6 +2956,48 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         "target_name": target_name,
         "fragment": str(fragment) if fragment.exists() else None,
     }
+
+# agents-h53yp: which batch failures are worth ONE retry.
+#
+# cloud-factory-cf: vuln-triage halted on batch 3/7 - model_output.batch3.txt was 0 bytes and the engine
+# had exited 1. Batches 4-7 never ran and the station was lost, on a failure that says nothing about the
+# candidates: an engine process that dies before writing anything is the TRANSIENT shape (a resourcing
+# blip, a provider 502, a killed subprocess), and the same prompt usually answers on a second call.
+#
+# What is NOT transient, and must not be papered over by a retry:
+#   * an adapter authentication failure - an environment problem no retry can fix, and the run has to
+#     report it as such;
+#   * a call that DID write output before exiting non-zero - the engine answered and its answer was
+#     rejected, which is a judgement about the answer, not a blip.
+# The retry is bounded at one per batch, funded as one more engine call, and still terminal if it fails:
+# a batch that fails twice is the station's answer, exactly as before.
+BATCH_RETRY_ATTEMPTS = 2  # the call, plus one retry
+
+
+def budget_allows_another_call(budget: Any) -> bool:
+    """True while the station still has budget for one more engine call (agents-h53yp).
+
+    Reading `remaining_seconds` raises StationTimeout once the deadline has passed; a retry must then
+    be REFUSED, not converted into a station timeout - the station already has a failure to report.
+    """
+    try:
+        return budget.remaining_seconds > 0
+    except StationTimeout:
+        return False
+
+
+def batch_retry_refusal(returncode: int, stdout: str, stderr: str,
+                        model_output: str) -> Optional[str]:
+    """None when this failed batch call should be retried once, else the reason it must not be."""
+    if returncode == 0:
+        return "the call succeeded"
+    auth_reason = detect_adapter_auth_failure(model_output, stderr, stdout)
+    if auth_reason:
+        return f"engine adapter authentication failed: {auth_reason}"
+    if model_output.strip():
+        return "the engine wrote output before exiting non-zero (not the transient no-output shape)"
+    return None
+
 
 def count_criticals(findings: Any) -> int:
     """The line's critical count, from the same severity source as the findings store.
