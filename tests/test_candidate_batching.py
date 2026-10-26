@@ -738,7 +738,7 @@ class TestPerBatchContextPruning(unittest.TestCase):
     def test_the_notice_states_the_population_and_that_absence_is_not_absence(self):
         _pruned, record = prune_context_for_batch(self.context(), [candidate(1), candidate(2)])
         notice = context_prune_notice(record, batch_index=1, batch_count=3)
-        self.assertIn("batch 2/3: this call presents 2 of 4 per-candidate record(s)", notice)
+        self.assertIn("batch 2/3: this call presents 2 of the 4 per-candidate record(s)", notice)
         self.assertIn("pruned under: clusters", notice)
         self.assertIn("absence here is not absence in the scan", notice,
                       "a model must be told the other records exist in another call")

@@ -805,6 +805,6 @@ def context_prune_notice(record: Dict[str, Any], *, batch_index: int, batch_coun
     least = "at least " if record.get("complete", True) is False else ""
     return (
         f"Station Context (batch {batch_index + 1}/{batch_count}: this call presents "
-        f"{least}{record['kept']} of {total} per-candidate record(s) the scan produced{where}; "
+        f"{least}{record['kept']} of the {total} per-candidate record(s) the scan produced{where}; "
         f"the other {record['dropped']} belong to candidates in other batches and are presented "
         f"in their own calls, so absence here is not absence in the scan):\n")
