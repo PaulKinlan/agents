@@ -981,10 +981,20 @@ SLOW_BATCH_STUB = IDS_AND_ROWS + r"""sleep 2
 printf '%s]}\n' "$out"
 """
 
-# 0.1 min = 6 s per call: three slow calls need ~6 s of engine time, and the pre-pass and findings
-# dispatch need their own share, so a single shared 6-second deadline cannot finish them (RED: measured
-# as a batch-3 StationTimeout before the fix).
-SHORT_DECLARED_BUDGET_YAML = AGENT_YAML.replace("max_minutes: 5", "max_minutes: 0.1")
+# 0.5 min = 30 s per call, and three slow calls therefore only finish if the deadline funds THREE
+# declarations (1.5 min) rather than one shared 30-second deadline (RED: measured as a batch-3
+# StationTimeout before the fix). THE CLOCK IS 0.5 min AND NOT 0.1 min on purpose (agents-k4pf1): at
+# 0.1 min (6 s per call) this box spends ~5 s of the allowance on sandbox, target snapshot and
+# broker/egress setup before the pre-pass even starts, so the run is killed on its pre-pass or its
+# findings dispatch - measured on origin/main a70b006a as "pre-pass.py pre-pass exceeded its 1.59975s
+# allowance (station budget 0.1 min)" and on the same tree as "findings dispatch exceeded its
+# 1.30109s allowance (station budget 0.3 min)". That is this VM's environment cost, not the property
+# under test, so the ratio (3 calls x 1 declaration) is what stays pinned and the clock is raised to
+# clear it. Do not lower it back without re-measuring on a quiet box.
+SHORT_DECLARED_BUDGET_YAML = AGENT_YAML.replace("max_minutes: 5", "max_minutes: 0.5")
+
+# The hung batch must outlast ONE declaration (30 s), not the whole 1.5-minute deadline.
+HUNG_BATCH_SLEEP_S = 40
 
 
 class TestTheDeadlineFundsItsBatches(BatchedStation):
@@ -994,10 +1004,10 @@ class TestTheDeadlineFundsItsBatches(BatchedStation):
         res = self.factory("pi")
         run = self.run_dir()
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertIn("Station deadline now 0.3 min for 3 call(s) of 0.1 min", res.stdout,
-                      "the extension is stated with both numbers: 3 calls x the declared 0.1 min")
+        self.assertIn("Station deadline now 1.5 min for 3 call(s) of 0.5 min", res.stdout,
+                      "the extension is stated with both numbers: 3 calls x the declared 0.5 min")
         self.assertEqual(len(sorted(run.glob("model_output.batch*.txt"))), 3,
-                         "every batch ran: a shared 6-second deadline expires on the third")
+                         "every batch ran: one shared 30-second deadline expires on the third")
         report = json.loads((run / "report.json").read_text(encoding="utf-8"))
         self.assertEqual([f["candidate_id"] for f in report["findings"]],
                          [f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)],
@@ -1005,13 +1015,13 @@ class TestTheDeadlineFundsItsBatches(BatchedStation):
 
     def test_one_hung_batch_cannot_spend_the_whole_funded_deadline(self):
         # The other half of the bound: batch 1 hangs for longer than its own allowance. Its allowance
-        # is one declaration (not the whole 18-second deadline), so batches 2 and 3 still run and the
+        # is one declaration (not the whole 1.5-minute deadline), so batches 2 and 3 still run and the
         # station fails ON the hung call - named, with the batch number in the reason.
         self.agent(SHORT_DECLARED_BUDGET_YAML)
-        self.stub(IDS_AND_ROWS + r"""if [[ " ${ids[*]} " == *" cand-perf-000 "* ]]; then
-  sleep 30
+        self.stub(IDS_AND_ROWS + f"""if [[ " ${{ids[*]}} " == *" cand-perf-000 "* ]]; then
+  sleep {HUNG_BATCH_SLEEP_S}
 fi
-printf '%s]}\n' "$out"
+printf '%s]}}\\n' "$out"
 """)
         res = self.factory("pi")
         run = self.run_dir()
