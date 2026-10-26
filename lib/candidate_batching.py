@@ -634,8 +634,13 @@ def direct_candidate_ids(record: Any) -> Set[str]:
     return ids
 
 
-def _count_id_records(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> int:
-    """How many records in a subtree carry their own candidate ids (used for a DROPPED subtree)."""
+def _count_id_records(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> Tuple[int, bool]:
+    """`(count, complete)`: how many records in a subtree carry their own candidate ids.
+
+    `complete` is False when the walk stopped at the node limit, and the caller must then report the
+    count as a LOWER BOUND rather than as a number (see `context_prune_notice`): an operator line that
+    states "4 records" for a sweep that stopped counting is the same class of lie as a silent drop.
+    """
     count = 0
     stack: List[Any] = [value]
     visited = 0
@@ -643,7 +648,7 @@ def _count_id_records(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> i
         node = stack.pop()
         visited += 1
         if visited > limit:
-            break
+            return count, False
         if isinstance(node, dict):
             if direct_candidate_ids(node):
                 count += 1
@@ -651,16 +656,18 @@ def _count_id_records(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> i
             stack.extend(item for item in node.values() if isinstance(item, (dict, list)))
         elif isinstance(node, list):
             stack.extend(item for item in node if isinstance(item, (dict, list)))
-    return count
+    return count, True
 
 
-def carried_candidate_ids(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> Set[str]:
-    """Every candidate id a context record carries under a candidate-id key, at any depth.
+def _scan_candidate_ids(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> Tuple[Set[str], bool]:
+    """`(ids, complete)`: the candidate ids a record carries, and whether the walk saw all of it.
 
     Iterative on purpose: a deeply nested cluster body must not raise RecursionError out of a prompt
-    build. The node limit bounds the walk; hitting it returns the ids found so far, which keeps the
-    record (see `prune_context_for_batch` - a partial id set can only make a record MORE likely to be
-    kept).
+    build. The node limit bounds the walk, and COMPLETENESS IS PART OF THE RESULT (agents-h53yp review
+    P2): a walk that stopped early has an id set that may be missing the very id that would have kept
+    the record in this batch, so it must never be read as "this record belongs to another batch" - the
+    old code's "a partial id set can only make a record more likely to be kept" was false for exactly
+    that direction, and a >200k-node context silently lost current-batch evidence.
     """
     ids: Set[str] = set()
     stack: List[Any] = [value]
@@ -669,7 +676,7 @@ def carried_candidate_ids(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) 
         node = stack.pop()
         visited += 1
         if visited > limit:
-            break
+            return ids, False
         if isinstance(node, dict):
             for key, item in node.items():
                 if key in _CONTEXT_ID_KEYS:
@@ -680,42 +687,70 @@ def carried_candidate_ids(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) 
                     stack.append(item)
         elif isinstance(node, list):
             stack.extend(item for item in node if isinstance(item, (dict, list)))
-    return ids
+    return ids, True
+
+
+def carried_candidate_ids(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> Set[str]:
+    """Every candidate id a context record carries under a candidate-id key, at any depth.
+
+    A BOUNDED walk: at the node limit this returns the ids found so far and NOT the whole picture, so a
+    caller that decides anything from the result must use `_scan_candidate_ids` and honour its
+    `complete` flag (`prune_context_for_batch` does; this function stays for inspection and tests).
+    """
+    return _scan_candidate_ids(value, limit=limit)[0]
 
 
 def _prune_context_node(node: Any, batch_ids: Set[str], *, path: str,
-                        groups: List[Dict[str, Any]]) -> Any:
+                        groups: List[Dict[str, Any]],
+                        limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> Any:
     """Copy of `node` with records belonging only to other batches removed (counts into `groups`)."""
     if isinstance(node, list):
         kept: List[Any] = []
         kept_ids = dropped_ids = 0
+        partial = False   # a record the bounded walk could not see the end of
         for item in node:
-            item_ids = carried_candidate_ids(item) if isinstance(item, (dict, list)) else set()
-            if item_ids and not (item_ids & batch_ids):
+            item_ids, scan_complete = (_scan_candidate_ids(item, limit=limit)
+                                       if isinstance(item, (dict, list)) else (set(), True))
+            if scan_complete and item_ids and not (item_ids & batch_ids):
                 # A dropped subtree counts its own id-bearing records, and an item that carries ids
                 # ITSELF counts once - never both, or the operator line reports more records than the
                 # pre-pass produced (measured: a cluster counted twice, once as the cluster and once as
                 # its single item).
-                dropped_ids += 1 if direct_candidate_ids(item) else _count_id_records(item)
+                if direct_candidate_ids(item):
+                    dropped_ids += 1
+                else:
+                    counted, count_complete = _count_id_records(item, limit=limit)
+                    dropped_ids += counted
+                    partial = partial or not count_complete
                 continue
-            kept.append(_prune_context_node(item, batch_ids, path=f"{path}[]", groups=groups)
+            kept.append(_prune_context_node(item, batch_ids, path=f"{path}[]", groups=groups,
+                                            limit=limit)
                         if isinstance(item, (dict, list)) else item)
             if direct_candidate_ids(item):
                 kept_ids += 1
-        if kept_ids or dropped_ids:
-            groups.append({"path": path or "$", "kept": kept_ids, "dropped": dropped_ids})
+            elif scan_complete is False:
+                # The walk stopped before the end of this record, so whatever ids it carries beyond
+                # the limit are unknown: KEEP it (never lose this batch's evidence) and say that the
+                # record is unattributable rather than attributable elsewhere.
+                partial = True
+        if kept_ids or dropped_ids or partial:
+            groups.append({"path": path or "$", "kept": kept_ids, "dropped": dropped_ids,
+                           "complete": not partial})
         return kept
     if isinstance(node, dict):
         pruned: Dict[Any, Any] = {}
         for key, value in node.items():
             child_path = f"{path}.{key}" if path else str(key)
-            pruned[key] = (_prune_context_node(value, batch_ids, path=child_path, groups=groups)
+            pruned[key] = (_prune_context_node(value, batch_ids, path=child_path, groups=groups,
+                                               limit=limit)
                            if isinstance(value, (dict, list)) else value)
         return pruned
     return node
 
 
-def prune_context_for_batch(context: Any, batch: Iterable[Any]) -> Tuple[Any, Optional[Dict[str, Any]]]:
+def prune_context_for_batch(context: Any, batch: Iterable[Any], *,
+                            limit: int = _CONTEXT_SCAN_NODE_LIMIT
+                            ) -> Tuple[Any, Optional[Dict[str, Any]]]:
     """The context THIS batch needs, plus a record of what was dropped (`None` when nothing was).
 
     `record` is None whenever no record was dropped - the common case, and the one that must leave the
@@ -724,12 +759,16 @@ def prune_context_for_batch(context: Any, batch: Iterable[Any]) -> Tuple[Any, Op
 
     A non-container context (a JSON null, a string) and a batch carrying no ids are returned untouched
     with no record: there is no join key, so there is nothing provable to prune.
+
+    `limit` is the node bound of the id scan and exists so the bound is TESTABLE without a 200k-node
+    fixture; production never passes it. A walk that stops at the bound makes the record it was reading
+    UNATTRIBUTABLE, so it is kept and the counts become lower bounds (agents-h53yp review P2).
     """
     batch_ids = set(batch_candidate_ids(batch))
     if not batch_ids or not isinstance(context, (dict, list)):
         return context, None
     groups: List[Dict[str, Any]] = []
-    pruned = _prune_context_node(context, batch_ids, path="", groups=groups)
+    pruned = _prune_context_node(context, batch_ids, path="", groups=groups, limit=limit)
     dropped = sum(group["dropped"] for group in groups)
     if not dropped:
         return context, None
@@ -737,6 +776,10 @@ def prune_context_for_batch(context: Any, batch: Iterable[Any]) -> Tuple[Any, Op
         "batch_ids": sorted(batch_ids),
         "kept": sum(group["kept"] for group in groups),
         "dropped": dropped,
+        # agents-h53yp review P2: False when some record was too large for the bounded walk, so the
+        # counts above are LOWER BOUNDS - the notice says "at least" and nothing here claims a sweep it
+        # could not see the end of.
+        "complete": all(group.get("complete", True) for group in groups),
         "groups": groups,
     }
 
@@ -756,8 +799,12 @@ def context_prune_notice(record: Dict[str, Any], *, batch_index: int, batch_coun
     pruned_keys = sorted({str(group["path"]).split(".")[0].split("[")[0]
                           for group in record.get("groups", ()) if group["dropped"]})
     where = f" (pruned under: {', '.join(pruned_keys)})" if pruned_keys else ""
+    # "at least" when a record was too large for the bounded scan: a record the walk could not finish is
+    # KEPT but not counted, so `kept` is a lower bound and a bare number would read as a complete sweep
+    # (agents-h53yp review P2). `dropped` stays exact: only a fully scanned record is ever dropped.
+    least = "at least " if record.get("complete", True) is False else ""
     return (
         f"Station Context (batch {batch_index + 1}/{batch_count}: this call presents "
-        f"{record['kept']} of the {total} per-candidate record(s) the scan produced{where}; the "
-        f"other {record['dropped']} belong to candidates in other batches and are presented in their "
-        f"own calls, so absence here is not absence in the scan):\n")
+        f"{least}{record['kept']} of {total} per-candidate record(s) the scan produced{where}; "
+        f"the other {record['dropped']} belong to candidates in other batches and are presented "
+        f"in their own calls, so absence here is not absence in the scan):\n")

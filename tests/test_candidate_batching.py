@@ -700,10 +700,45 @@ class TestPerBatchContextPruning(unittest.TestCase):
         self.assertEqual(carried_candidate_ids({"candidate_ids": ["a", "b"]}), {"a", "b"})
         self.assertEqual(carried_candidate_ids({"items": [{"candidate_id": "a"}]}), {"a"})
 
+    def oversized_record(self, *, early_id, late_id):
+        """A record whose OTHER-batch id comes first and this batch's id is beyond the node bound.
+
+        This is the agents-h53yp review P2 shape: a bounded id scan stops between the two, so the ids it
+        found are non-empty, belong to nobody in this batch, and the pre-fix code dropped the record -
+        losing current-batch evidence from a >200k-node context.
+        """
+        return {"file": "src/big.py",
+                "items": [{"candidate_id": early_id}]
+                         + [{"filler": index} for index in range(20)]
+                         + [{"candidate_id": late_id}]}
+
+    def test_a_record_the_bounded_scan_could_not_finish_is_kept_not_dropped(self):
+        oversized = self.oversized_record(early_id="cand-perf-099", late_id="cand-perf-001")
+        other = {"file": "src/other.py", "items": [{"candidate_id": "cand-perf-098"}]}
+        mine = {"file": "src/mine.py", "items": [{"candidate_id": "cand-perf-001"}]}
+        context = {"clusters": [oversized, other, mine], "threat_model_summary": "model evidence"}
+
+        pruned, record = prune_context_for_batch(context, [candidate(1)], limit=5)
+
+        self.assertIn("src/big.py", [cluster["file"] for cluster in pruned["clusters"]],
+                      "the record carries this batch's id beyond the bound, so it must be KEPT")
+        self.assertNotIn("src/other.py", [cluster["file"] for cluster in pruned["clusters"]],
+                         "a record that WAS fully scanned is still dropped - the bound does not "
+                         "disable the prune")
+        self.assertFalse(record["complete"],
+                         "a walk that stopped early must be recorded as incomplete, not as a number")
+        self.assertIn("at least", context_prune_notice(record, batch_index=0, batch_count=2),
+                      "the model must not be told a complete count this call cannot vouch for")
+
+    def test_a_complete_scan_reports_exact_counts(self):
+        pruned, record = prune_context_for_batch(self.context(), [candidate(1), candidate(2)])
+        self.assertTrue(record["complete"], record)
+        self.assertNotIn("at least", context_prune_notice(record, batch_index=0, batch_count=3))
+
     def test_the_notice_states_the_population_and_that_absence_is_not_absence(self):
         _pruned, record = prune_context_for_batch(self.context(), [candidate(1), candidate(2)])
         notice = context_prune_notice(record, batch_index=1, batch_count=3)
-        self.assertIn("batch 2/3: this call presents 2 of the 4 per-candidate record(s)", notice)
+        self.assertIn("batch 2/3: this call presents 2 of 4 per-candidate record(s)", notice)
         self.assertIn("pruned under: clusters", notice)
         self.assertIn("absence here is not absence in the scan", notice,
                       "a model must be told the other records exist in another call")
