@@ -295,8 +295,11 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
                 stub.write_text("import unittest\nclass Stub(unittest.TestCase):\n    def test_stub(self): pass\n",
                                 encoding="utf-8")
 
+            # agents-vc5i2: 120s, not 30s — same load-dependent-bound pathology as agents-rhxkl:
+            # this is a REAL (non-dry) run of the copied 995-line gate, and a 30s wall-clock bound
+            # trips under parallel gate load, reddening the full gate for unrelated changes.
             res = subprocess.run(["bash", "tools/fast-gate.sh"], cwd=isolated, env=env,
-                                 capture_output=True, text=True, timeout=30)
+                                 capture_output=True, text=True, timeout=120)
             self.assertEqual(res.returncode, 0,
                              f"fast-gate.sh failed to execute child suite:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
             passed = [line.removeprefix("fast-gate: passed: ").split()
@@ -307,7 +310,7 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
             # must not make the test green. No real source or host config is edited.
             (tests / "__init__.py").write_text("# inert test declaration\n", encoding="utf-8")
             broken = subprocess.run(["bash", "tools/fast-gate.sh"], cwd=isolated, env=env,
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=120)  # agents-vc5i2
             self.assertNotEqual(broken.returncode, 0,
                                 "an inert test declaration must fail through the unmodified gate")
             self.assertIn("FACTORY_TOOL_PINS", broken.stdout + broken.stderr)
