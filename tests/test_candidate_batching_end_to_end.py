@@ -1059,5 +1059,152 @@ class TestTheSweepGraceIsNotSilentlyCrossed(BatchedStation):
                       f"the funded 15-minute deadline exceeds a 10-minute grace: {res.stdout[:900]}")
 
 
+
+# agents-h53yp: a pre-pass whose context is PER-CANDIDATE (vuln-triage's shape: one cluster record
+# per candidate plus evidence that is not per-candidate). On cloud-factory-cf this context was
+# resent byte-identically with all 7 batches (~355 KB each) and the engine exited 1 on batch 3.
+CONTEXT_PREPASS = f'''
+import argparse, json
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--output")
+args, _unknown = parser.parse_known_args()
+candidates = [
+    {{
+        "candidate_id": f"cand-perf-{{i:03d}}",
+        "rule_id": "layout-thrashing-forced-reflow",
+        "path": f"src/file{{i}}.ts",
+        "line_number": i + 1,
+        "severity": "high",
+        "snippet": "el.offsetWidth",
+    }}
+    for i in range({CANDIDATE_COUNT})
+]
+context = {{
+    "threat_model_summary": "TM-EVIDENCE",
+    "clusters": [
+        {{"file": f"src/file{{i}}.ts",
+          "items": [{{"candidate_id": f"cand-perf-{{i:03d}}", "rule_id": "layout-thrashing-forced-reflow",
+                     "snippet": "el.offsetWidth" * 40}}]}}
+        for i in range({CANDIDATE_COUNT})
+    ],
+}}
+open(args.output, "w", encoding="utf-8").write(json.dumps({{"candidates": candidates, "context": context}}))
+'''
+
+# The answer half of IDS_AND_ROWS without its own stdin read: the guards below consume the prompt to
+# decide whether to fail, so the row emission must not try to read it a second time (a stub that did
+# answered an empty prompt, which read as "0 rows" and hid what was being tested).
+_ROWS_BODY = IDS_AND_ROWS.split("prompt=$(cat)\n", 1)[1]
+
+# Fails the FIRST call that sees batch 2's candidates (exit 1, nothing on stdout, exactly the
+# cloud-factory-cf shape: model_output.batch3.txt was 0 bytes) and answers normally afterwards.
+# The state lives in PI_CODING_AGENT_DIR, the per-run directory the dispatcher binds writable into
+# the engine sandbox - a test-only stub may not write anywhere else.
+FLAKY_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+marker="${PI_CODING_AGENT_DIR:-/nonexistent}/ctxprune-attempted"
+if [[ "$prompt" == *cand-perf-003* && ! -e "$marker" ]]; then
+  printf '' > "$marker" || { echo 'stub cannot record its first attempt' >&2; exit 9; }
+  exit 1
+fi
+""" + _ROWS_BODY + r"""printf '%s]}\n' "$out"
+"""
+
+# Always fails on batch 2: the retry must be the LAST word, not an infinite loop.
+ALWAYS_FAILING_STUB = r"""#!/usr/bin/env bash
+set -uo pipefail
+prompt=$(cat)
+if [[ "$prompt" == *cand-perf-003* ]]; then
+  exit 1
+fi
+""" + _ROWS_BODY + r"""printf '%s]}\n' "$out"
+"""
+
+
+class ContextPruningStation(BatchedStation):
+    def agent(self, yaml_text):  # noqa: D401 - stage the per-candidate context pre-pass
+        super().agent(yaml_text)
+        (self.root / "agents" / "probe" / "scripts" / "prepass.py").write_text(
+            CONTEXT_PREPASS, encoding="utf-8")
+
+    def prompts(self, run):
+        return [p.read_text(encoding="utf-8") for p in
+                sorted(run.glob("prompt.batch*.txt"))]
+
+
+class TestContextIsPrunedPerBatch(ContextPruningStation):
+    """Each call carries this batch's own per-candidate records, not every batch's."""
+
+    def test_each_batch_carries_only_the_context_records_it_can_act_on(self):
+        self.agent(AGENT_YAML)
+        self.stub(BATCH_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        run = self.run_dir()
+        prompts = self.prompts(run)
+        self.assertEqual(len(prompts), 3, [p[:60] for p in prompts])
+
+        for index, prompt in enumerate(prompts):
+            section = prompt.split("Station Context", 1)[1]
+            mine = {f"cand-perf-{i:03d}" for i in range(index * PER_CALL,
+                                                       min((index + 1) * PER_CALL, CANDIDATE_COUNT))}
+            for candidate_id in mine:
+                self.assertIn(candidate_id, section,
+                              f"batch {index + 1} lost its own context record for {candidate_id}")
+            for other in {f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)} - mine:
+                self.assertNotIn(other, section,
+                                 f"batch {index + 1} was sent another batch's context record "
+                                 f"({other}) - that is the ~355 KB-per-batch defect")
+            self.assertIn("TM-EVIDENCE", section,
+                          "context the factory cannot attribute stays in every call")
+
+        # the prune is NAMED to the model, and the run records what it pruned per batch
+        self.assertIn("this call presents 3 of the 8 per-candidate record(s)", prompts[0])
+        self.assertIn("absence here is not absence in the scan", prompts[0])
+        artifacts = sorted(run.glob("context_prune.batch*.json"))
+        self.assertEqual(len(artifacts), 3, artifacts)
+        record = json.loads(artifacts[0].read_text(encoding="utf-8"))
+        self.assertEqual((record["batch"], record["kept"], record["dropped"]), (1, 3, 5))
+
+
+class TestATransientBatchFailureIsRetriedOnce(ContextPruningStation):
+    """agents-h53yp: one engine exit 1 with no output on batch 3/7 must not lose the station."""
+
+    def test_the_failed_batch_is_retried_and_the_run_completes(self):
+        self.agent(AGENT_YAML)
+        self.stub(FLAKY_STUB)
+        res = self.factory("pi")
+        self.assertEqual(res.returncode, 0,
+                         "a transient exit 1 on one batch must not fail the station: "
+                         + res.stdout + res.stderr)
+        run = self.run_dir()
+        report = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(report["findings"]), CANDIDATE_COUNT,
+                         "every batch must be merged after the retry")
+
+        retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(retries), 1, retries)
+        self.assertEqual((retries[0]["batch"], retries[0]["attempt"]), (2, 1))
+        self.assertEqual(retries[0]["exit_code"], 1)
+        self.assertEqual(retries[0]["output_bytes"], 0)
+        self.assertTrue(retries[0]["retried"])
+        # the retried call's answer is the one the merge saw
+        answer = (run / "model_output.batch2.txt").read_text(encoding="utf-8")
+        self.assertIn("cand-perf-003", answer)
+
+    def test_a_batch_that_fails_twice_is_still_terminal(self):
+        self.agent(AGENT_YAML)
+        self.stub(ALWAYS_FAILING_STUB)
+        res = self.factory("pi")
+        self.assertNotEqual(res.returncode, 0, "two failures are the station's answer")
+        run = self.run_dir()
+        retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
+        self.assertEqual([(r["batch"], r["attempt"]) for r in retries], [(2, 1), (2, 2)], retries)
+        self.assertTrue(retries[0]["retried"])
+        self.assertFalse(retries[1]["retried"])
+        self.assertIn("already retried once", retries[1]["not_retried_because"])
+
 if __name__ == "__main__":
     unittest.main()

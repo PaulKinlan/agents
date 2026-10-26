@@ -27,7 +27,7 @@ engine:
 
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 # A batch of 8 candidates is ~9 KB of prompt/response - well inside the size at which the nightly
 # truncated (45 ids, 50,314 B). Callers may override per station.
@@ -573,3 +573,191 @@ def describe_truncation(evidence: Dict[str, Any], *,
            f"the later batches never ran"
            if produced_batches is not None and produced_batches < batch_count else "")
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Per-batch context pruning (agents-h53yp)
+#
+# A station's opt-in context (ADR agents-3f4b) rides in EVERY prompt. That is right for evidence a
+# station needs in all of its calls - a threat model summary, the recent commits, prior verification
+# rows - and it is waste that becomes a failure for records that are PER-CANDIDATE: on
+# cloud-factory-cf, vuln-triage sent ~355 KB of cluster bodies with each of its 7 batches (~2.5 MB of
+# prompt for one station) and the engine exited 1 on batch 3. Nothing was wrong with batch 3's own
+# candidates; it was being asked to carry every other batch's evidence too.
+#
+# The prune is IDENTITY-based, and deliberately conservative in one direction only:
+#   * a record that CARRIES candidate ids is kept when one of them is in THIS batch, dropped otherwise
+#     - the ids are the factory's own join key, so this is provable rather than a guess about text;
+#   * a record that carries NO id is kept in every batch, because nothing proves which batch it
+#     belongs to, and dropping evidence that might be this batch's is the failure mode that matters;
+#   * nothing is summarised, reordered or truncated mid-structure: after the prune the remaining
+#     records ARE this batch's own evidence, in pre-pass order, so the model reading one batch reads
+#     the same records the unsliced prompt held for those candidates.
+# A batch that carries no ids cannot be joined on, so it gets the context BYTE-FOR-BYTE - which is also
+# why a caller must keep the legacy `Station Context:` header whenever nothing was dropped (the ADR's
+# no-id, count-only case stays exactly as it was).
+# ---------------------------------------------------------------------------------------------
+
+# The keys that make a context record per-candidate. Keyed, NEVER pattern-matched with
+# _CANDIDATE_ID_RE: that regex would match an id quoted inside a prose snippet, and a record must not
+# vanish from a batch because someone else's id appears in its text.
+_CONTEXT_ID_KEYS = ("candidate_id", "candidate_ids")
+
+# A context payload is pre-pass output, not attacker input, but a walk over it must still be bounded:
+# a pathological nesting would otherwise turn one prompt build into an unbounded recursion.
+_CONTEXT_SCAN_NODE_LIMIT = 200_000
+
+
+def _ids_under_key(value: Any) -> Set[str]:
+    """The ids a `candidate_id` / `candidate_ids` VALUE states (a string, or a list of strings)."""
+    if isinstance(value, str):
+        return {value.strip()} if value.strip() else set()
+    if isinstance(value, (list, tuple)):
+        return {item.strip() for item in value if isinstance(item, str) and item.strip()}
+    return set()
+
+
+def direct_candidate_ids(record: Any) -> Set[str]:
+    """The ids a record carries ON ITSELF - `candidate_id` / `candidate_ids` keys of this dict.
+
+    Kept separate from `carried_candidate_ids` because the two answer different questions: which batch
+    may DROP a record (any id it carries anywhere counts, so a cluster is dropped with its items), and
+    which record the counts in the operator line are about (the leaf item, once - not the item and the
+    cluster that contains it).
+    """
+    if not isinstance(record, dict):
+        return set()
+    ids: Set[str] = set()
+    for key in _CONTEXT_ID_KEYS:
+        if key in record:
+            ids |= _ids_under_key(record[key])
+    return ids
+
+
+def _count_id_records(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> int:
+    """How many records in a subtree carry their own candidate ids (used for a DROPPED subtree)."""
+    count = 0
+    stack: List[Any] = [value]
+    visited = 0
+    while stack:
+        node = stack.pop()
+        visited += 1
+        if visited > limit:
+            break
+        if isinstance(node, dict):
+            if direct_candidate_ids(node):
+                count += 1
+                continue
+            stack.extend(item for item in node.values() if isinstance(item, (dict, list)))
+        elif isinstance(node, list):
+            stack.extend(item for item in node if isinstance(item, (dict, list)))
+    return count
+
+
+def carried_candidate_ids(value: Any, *, limit: int = _CONTEXT_SCAN_NODE_LIMIT) -> Set[str]:
+    """Every candidate id a context record carries under a candidate-id key, at any depth.
+
+    Iterative on purpose: a deeply nested cluster body must not raise RecursionError out of a prompt
+    build. The node limit bounds the walk; hitting it returns the ids found so far, which keeps the
+    record (see `prune_context_for_batch` - a partial id set can only make a record MORE likely to be
+    kept).
+    """
+    ids: Set[str] = set()
+    stack: List[Any] = [value]
+    visited = 0
+    while stack:
+        node = stack.pop()
+        visited += 1
+        if visited > limit:
+            break
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if key in _CONTEXT_ID_KEYS:
+                    ids |= _ids_under_key(item)
+                    if isinstance(item, (list, tuple, dict)):
+                        stack.append(item)
+                elif isinstance(item, (dict, list)):
+                    stack.append(item)
+        elif isinstance(node, list):
+            stack.extend(item for item in node if isinstance(item, (dict, list)))
+    return ids
+
+
+def _prune_context_node(node: Any, batch_ids: Set[str], *, path: str,
+                        groups: List[Dict[str, Any]]) -> Any:
+    """Copy of `node` with records belonging only to other batches removed (counts into `groups`)."""
+    if isinstance(node, list):
+        kept: List[Any] = []
+        kept_ids = dropped_ids = 0
+        for item in node:
+            item_ids = carried_candidate_ids(item) if isinstance(item, (dict, list)) else set()
+            if item_ids and not (item_ids & batch_ids):
+                # A dropped subtree counts its own id-bearing records, and an item that carries ids
+                # ITSELF counts once - never both, or the operator line reports more records than the
+                # pre-pass produced (measured: a cluster counted twice, once as the cluster and once as
+                # its single item).
+                dropped_ids += 1 if direct_candidate_ids(item) else _count_id_records(item)
+                continue
+            kept.append(_prune_context_node(item, batch_ids, path=f"{path}[]", groups=groups)
+                        if isinstance(item, (dict, list)) else item)
+            if direct_candidate_ids(item):
+                kept_ids += 1
+        if kept_ids or dropped_ids:
+            groups.append({"path": path or "$", "kept": kept_ids, "dropped": dropped_ids})
+        return kept
+    if isinstance(node, dict):
+        pruned: Dict[Any, Any] = {}
+        for key, value in node.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            pruned[key] = (_prune_context_node(value, batch_ids, path=child_path, groups=groups)
+                           if isinstance(value, (dict, list)) else value)
+        return pruned
+    return node
+
+
+def prune_context_for_batch(context: Any, batch: Iterable[Any]) -> Tuple[Any, Optional[Dict[str, Any]]]:
+    """The context THIS batch needs, plus a record of what was dropped (`None` when nothing was).
+
+    `record` is None whenever no record was dropped - the common case, and the one that must leave the
+    prompt byte-identical. Callers key the decorated `Station Context (batch k/n: ...)` header on it,
+    so a context nobody pruned is never described as if it had been.
+
+    A non-container context (a JSON null, a string) and a batch carrying no ids are returned untouched
+    with no record: there is no join key, so there is nothing provable to prune.
+    """
+    batch_ids = set(batch_candidate_ids(batch))
+    if not batch_ids or not isinstance(context, (dict, list)):
+        return context, None
+    groups: List[Dict[str, Any]] = []
+    pruned = _prune_context_node(context, batch_ids, path="", groups=groups)
+    dropped = sum(group["dropped"] for group in groups)
+    if not dropped:
+        return context, None
+    return pruned, {
+        "batch_ids": sorted(batch_ids),
+        "kept": sum(group["kept"] for group in groups),
+        "dropped": dropped,
+        "groups": groups,
+    }
+
+
+def context_prune_notice(record: Dict[str, Any], *, batch_index: int, batch_count: int) -> str:
+    """The `Station Context` header for a PRUNED context: what this batch holds, and what it does not.
+
+    Stated to the model rather than only in the run directory: a model that is silently handed half
+    the cluster bodies needs to know the other half exists in another call, or it reports the
+    missing ones as absent evidence.
+    """
+    total = record["kept"] + record["dropped"]
+    # The context KEYS that lost records, not a per-list fraction: a list nested inside a list reports
+    # its own counts, and printing both reads as "clusters holds 0 of 2" for a batch whose records live
+    # one level down in `clusters[].items` - a number that is true of the outer list and useless to the
+    # model reading it.
+    pruned_keys = sorted({str(group["path"]).split(".")[0].split("[")[0]
+                          for group in record.get("groups", ()) if group["dropped"]})
+    where = f" (pruned under: {', '.join(pruned_keys)})" if pruned_keys else ""
+    return (
+        f"Station Context (batch {batch_index + 1}/{batch_count}: this call presents "
+        f"{record['kept']} of the {total} per-candidate record(s) the scan produced{where}; the "
+        f"other {record['dropped']} belong to candidates in other batches and are presented in their "
+        f"own calls, so absence here is not absence in the scan):\n")

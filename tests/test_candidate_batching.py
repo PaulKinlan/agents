@@ -17,11 +17,14 @@ from lib.candidate_batching import (
     BatchMergeError,
     BatchPlanError,
     batch_candidate_ids,
+    carried_candidate_ids,
     classify_unparseable,
+    context_prune_notice,
     declared_max_candidates_per_call,
     describe_truncation,
     merge_reports,
     plan_batches,
+    prune_context_for_batch,
     resolve_max_candidates_per_call,
     validate_batch_attribution,
 )
@@ -616,6 +619,94 @@ class TestThePerCallBoundIsPolicy(unittest.TestCase):
         self.assertEqual([len(b) for b in batches], [8, 2])
         self.assertEqual([row["candidate_id"] for b in batches for row in b],
                          [row["candidate_id"] for row in candidates])
+
+
+class TestPerBatchContextPruning(unittest.TestCase):
+    """agents-h53yp: a per-candidate context record rides only in the call that can act on it.
+
+    cloud-factory-cf sent ~355 KB of vuln-triage cluster bodies with EACH of its 7 batches and the engine
+    exited 1 on batch 3. These pin the prune's two directions: a record whose candidate ids are all in
+    another batch is dropped, and a record the factory cannot attribute is KEPT everywhere.
+    """
+
+    def cluster(self, index, *, with_id=True):
+        item = {"rule_id": "sql-injection", "path": f"src/file{index}.py", "line_number": index}
+        if with_id:
+            item["candidate_id"] = f"cand-perf-{index:03d}"
+        return {"file": f"src/file{index}.py", "items": [item]}
+
+    def context(self):
+        return {
+            "threat_model_summary": "model evidence",
+            "clusters": [self.cluster(i) for i in range(4)] + [self.cluster(9, with_id=False)],
+            "prior_verifications": {"cand-perf-000": {"verdict": "verified"}},
+        }
+
+    def test_a_record_for_another_batch_is_dropped_and_counts_are_named(self):
+        pruned, record = prune_context_for_batch(
+            self.context(), [candidate(1), candidate(2)])
+        self.assertEqual([cluster["file"] for cluster in pruned["clusters"]],
+                         ["src/file1.py", "src/file2.py", "src/file9.py"],
+                         "this batch's own records plus the one the factory cannot attribute")
+        self.assertEqual(record["kept"], 2)
+        self.assertEqual(record["dropped"], 2)
+        self.assertEqual(record["batch_ids"], ["cand-perf-001", "cand-perf-002"])
+        self.assertLess(len(json.dumps(pruned)), len(json.dumps(self.context())),
+                        "the prune must actually shrink the prompt payload")
+
+    def test_records_without_ids_are_kept_everywhere(self):
+        pruned, record = prune_context_for_batch(
+            self.context(), [candidate(1)])
+        self.assertIn("src/file9.py", [cluster["file"] for cluster in pruned["clusters"]],
+                      "an unattributable record must never be dropped on a guess")
+        self.assertIsNotNone(record, "the attributable records of other batches were still dropped")
+
+    def test_context_keys_that_are_not_per_candidate_are_untouched(self):
+        context = self.context()
+        pruned, _record = prune_context_for_batch(context, [candidate(1)])
+        self.assertEqual(pruned["threat_model_summary"], "model evidence")
+        self.assertEqual(pruned["prior_verifications"], context["prior_verifications"],
+                         "a dict of cross-batch evidence is not a per-candidate record list")
+
+    def test_a_batch_without_ids_prunes_nothing(self):
+        context = self.context()
+        pruned, record = prune_context_for_batch(context, [{"rule_id": "r", "path": "src/file1.py"}])
+        self.assertIsNone(record, "no join key, so no record may be described as pruned")
+        self.assertEqual(pruned, context)
+
+    def test_a_context_without_ids_is_returned_untouched(self):
+        context = {"clusters": [{"cluster": i} for i in range(55)]}
+        pruned, record = prune_context_for_batch(context, [candidate(1), candidate(2)])
+        self.assertIsNone(record)
+        self.assertEqual(pruned, context,
+                         "the ADR's unsliceable context stays byte-identical when nothing is provable")
+
+    def test_a_non_container_context_is_returned_untouched(self):
+        for context in (None, "text", 7):
+            pruned, record = prune_context_for_batch(context, [candidate(1)])
+            self.assertIsNone(record)
+            self.assertEqual(pruned, context)
+
+    def test_nothing_is_dropped_when_every_record_belongs_to_the_batch(self):
+        pruned, record = prune_context_for_batch(
+            self.context(), [candidate(0), candidate(1), candidate(2), candidate(3)])
+        self.assertIsNone(record, "an unchanged context must not be decorated as if it had been pruned")
+        self.assertEqual(pruned, self.context())
+
+    def test_the_ids_are_read_from_keys_not_from_text(self):
+        # A snippet quoting somebody else's id must not make a record this batch's.
+        self.assertEqual(carried_candidate_ids({"snippet": "see cand-perf-002 for comparison"}), set())
+        self.assertEqual(carried_candidate_ids({"candidate_id": "cand-perf-002"}), {"cand-perf-002"})
+        self.assertEqual(carried_candidate_ids({"candidate_ids": ["a", "b"]}), {"a", "b"})
+        self.assertEqual(carried_candidate_ids({"items": [{"candidate_id": "a"}]}), {"a"})
+
+    def test_the_notice_states_the_population_and_that_absence_is_not_absence(self):
+        _pruned, record = prune_context_for_batch(self.context(), [candidate(1), candidate(2)])
+        notice = context_prune_notice(record, batch_index=1, batch_count=3)
+        self.assertIn("batch 2/3: this call presents 2 of the 4 per-candidate record(s)", notice)
+        self.assertIn("pruned under: clusters", notice)
+        self.assertIn("absence here is not absence in the scan", notice,
+                      "a model must be told the other records exist in another call")
 
 
 if __name__ == "__main__":
