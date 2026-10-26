@@ -274,7 +274,9 @@ class TestHermeticEnvironmentDeclaration(unittest.TestCase):
             # must not require updating an unrelated environment-plumbing test.
             dry_run = subprocess.run(["bash", "tools/fast-gate.sh"], cwd=isolated,
                                      env={**env, "FAST_GATE_DRY_RUN": "1"},
-                                     capture_output=True, text=True, timeout=30)
+                                     # agents-rhxkl: load-independent bound (was 30s); the copied gate
+                                     # is the same 995-line script and trips under parallel load.
+                                     capture_output=True, text=True, timeout=120)
             self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
             resolved = dry_run.stdout.strip().splitlines()
             self.assertIn(probe_name, resolved, "the real gate must select the environment probe")

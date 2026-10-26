@@ -153,7 +153,11 @@ class TestCoverageContract(unittest.TestCase):
                             for node in ast.walk(tree)), "the omitted suite must still import check_docs")
         gate = subprocess.run(
             ["bash", "tools/fast-gate.sh"], cwd=ROOT, capture_output=True, text=True,
-            env=dict(os.environ, GIT_CHANGED=source, FAST_GATE_DRY_RUN="1"), timeout=20,
+            # agents-rhxkl: 120s, not 20s — a wall-clock bound tight enough to trip under
+            # parallel gate load makes the FULL gate red for reasons the change under test
+            # cannot influence (measured 2026-10-26: 6.5s quiet, >20s loaded). Matches the
+            # repo's convention for this same real-repo invocation (test_fast_gate_mapping).
+            env=dict(os.environ, GIT_CHANGED=source, FAST_GATE_DRY_RUN="1"), timeout=120,
             check=False,
         )
         self.assertEqual(gate.returncode, 0, gate.stderr)
