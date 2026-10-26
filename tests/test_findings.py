@@ -2312,6 +2312,26 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(unittest.TestCase):
                 "the path-only reader is the same population, so the two cannot disagree")
             self.assertEqual(read_candidate_locations(Path(tmp) / "absent"), {})
 
+    def test_the_location_reader_also_exposes_the_identity_a_shared_line_needs(self):
+        """agents-k4pf1: two candidates can share a path AND a line, and then the rule/title is the only
+        thing that tells them apart. Read through the comparison normalisation, and absent when the
+        candidate carries neither - an absent key is not an empty value pretending to be one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "candidates.json").write_text(json.dumps({"candidates": [
+                {"candidate_id": "aaaa1111bbbb2222", "path": "assets/css/vendor.css",
+                 "line_number": 1, "rule_id": "  Legacy-Reset ",
+                 "title": "Vendor   reset contradicts native normalize"},
+                {"candidate_id": "cccc3333dddd4444", "path": "assets/css/vendor.css",
+                 "line_number": 1, "rule_id": "unused-vendor-prefix"},
+            ]}), encoding="utf-8")
+            self.assertEqual(read_candidate_locations(run), {
+                "aaaa1111bbbb2222": {"path": "assets/css/vendor.css", "line": 1,
+                                     "rule_id": "legacy-reset",
+                                     "title": "vendor reset contradicts native normalize"},
+                "cccc3333dddd4444": {"path": "assets/css/vendor.css", "line": 1,
+                                     "rule_id": "unused-vendor-prefix"}})
+
     def test_the_repair_is_what_makes_a_partial_report_accountable_end_to_end(self):
         """The whole point: without the location repair this report is INCOMPLETE and names no cause; with
         it the rows account, and a row that could not be bound is reported as a row with no id."""
@@ -2333,6 +2353,126 @@ class TestARowThatOmitsItsCandidateIdIsBoundByItsLocation(unittest.TestCase):
         self.assertTrue(after["complete"], after)
         self.assertEqual(after["candidates_accounted"], 7)
         self.assertEqual(after["rows_without_candidate_id"], 0)
+
+
+class TestASharedLocationIsNarrowedByTheRowsOwnRuleOrTitle(unittest.TestCase):
+    """agents-k4pf1: two PRESENTED candidates on one line is not always an ambiguity.
+
+    Measured shape: the modern-web nightly's pre-pass put two rule candidates on
+    `assets/css/open-props-normalize.css:1`, so every row describing that line was refused as ambiguous and
+    the station read 32/33 accounted - while each row's own `rule_id` named one of the two. A row's rule
+    label is copied from the same pre-pass record the candidate came from, so it is evidence about which
+    candidate the row answers, not a guess from its prose.
+    """
+
+    SHARED = {
+        # The reported shape: same vendored line, two different rules.
+        "aaaa1111bbbb2222": {"path": "assets/css/vendor.css", "line": 1,
+                             "rule_id": "legacy-reset", "title": "Vendor reset contradicts native"},
+        "cccc3333dddd4444": {"path": "assets/css/vendor.css", "line": 1,
+                             "rule_id": "unused-vendor-prefix", "title": "Prefixed property, no modern form"},
+        "eeee5555ffff6666": {"path": "index.html", "line": 7,
+                             "rule_id": "legacy-viewport-media", "title": "Viewport media query"},
+    }
+    PRESENTED = ["aaaa1111bbbb2222", "cccc3333dddd4444", "eeee5555ffff6666"]
+
+    def repair(self, rows, locations=None, presented=None):
+        refusals = []
+        repairs = repair_cited_candidate_ids(
+            rows, self.PRESENTED if presented is None else presented, refusals=refusals,
+            candidate_locations=self.SHARED if locations is None else locations)
+        return repairs, refusals
+
+    def cited(self, rows):
+        return [row.get("candidate_id") for row in rows]
+
+    def test_the_reported_shape_now_binds_on_the_rows_rule_id(self):
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual(self.cited(rows), ["cccc3333dddd4444"])
+        self.assertEqual(refusals, [])
+        self.assertEqual(repairs[0]["rule"], "path+line+rule_id",
+                         "the repair record must say WHICH evidence bound the row")
+
+    def test_the_rule_is_compared_the_way_a_model_would_restate_it(self):
+        rows = [{"path": "./assets/css/vendor.css", "line_number": 1,
+                 "rule_id": " Legacy-Reset "}]
+        self.repair(rows)
+        self.assertEqual(self.cited(rows), ["aaaa1111bbbb2222"])
+
+    def test_a_title_breaks_a_rule_tie(self):
+        locations = dict(self.SHARED)
+        locations["cccc3333dddd4444"] = dict(locations["cccc3333dddd4444"], rule_id="legacy-reset")
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "legacy-reset", "title": "Prefixed property, no modern form"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual((self.cited(rows), refusals), (["cccc3333dddd4444"], []))
+        self.assertEqual(repairs[0]["rule"], "path+line+title",
+                         "the rule both candidates carry is not the evidence that decided it, so it is not named")
+
+    def test_a_rule_that_names_neither_candidate_still_refuses(self):
+        """A model-written rule is not a licence to force a binding: a label belonging to neither candidate
+        leaves the row as ambiguous as it was, and the refusal must say what was tried."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "not-a-rule"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("2 presented candidate(s) share its location", refusals[0]["reason"])
+        self.assertIn("its rule_id does not single one out", refusals[0]["reason"])
+
+    def test_two_candidates_that_share_rule_and_title_are_still_refused(self):
+        locations = dict(self.SHARED)
+        locations["cccc3333dddd4444"] = dict(locations["aaaa1111bbbb2222"])
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "legacy-reset",
+                 "title": "Vendor reset contradicts native"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("its rule_id or title does not single one out", refusals[0]["reason"])
+
+    def test_a_row_with_no_location_line_is_narrowed_the_same_way(self):
+        rows = [{"path": "assets/css/vendor.css", "rule_id": "legacy-reset"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((self.cited(rows), refusals), (["aaaa1111bbbb2222"], []))
+        self.assertEqual(repairs[0]["rule"], "path+rule_id")
+
+    def test_an_unshown_candidate_with_a_different_rule_does_not_block_a_named_match(self):
+        """The sibling guard must narrow WITH the row: a candidate that was never shown cannot be what a row
+        naming this rule means when it carries a different rule, or the same ambiguity would reappear one
+        population over and the line would stay unbindable."""
+        locations = dict(self.SHARED)
+        locations["9999888877776666"] = {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "another-rule", "title": "Another rule"}
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual((self.cited(rows), refusals), (["cccc3333dddd4444"], []))
+        self.assertEqual(repairs[0]["rule"], "path+line+rule_id")
+
+    def test_an_unshown_candidate_with_the_same_rule_still_blocks(self):
+        """The other half of the same rule: if the candidate the model never saw carries the SAME rule, the
+        row could equally have been about it, and the repair must stay refused."""
+        locations = dict(self.SHARED)
+        locations["9999888877776666"] = {"path": "assets/css/vendor.css", "line": 1,
+                                         "rule_id": "unused-vendor-prefix"}
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("NOT shown", refusals[0]["reason"])
+        self.assertIn("9999888877776666", refusals[0]["reason"])
+
+    def test_the_narrowed_report_accounts_end_to_end(self):
+        """What the operator sees: the station stops reading INCOMPLETE for a line the pre-pass recorded
+        twice, and every shown candidate is accounted for."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "legacy-reset"},
+                {"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "unused-vendor-prefix"},
+                {"path": "index.html", "line_number": 7, "rule_id": "legacy-viewport-media"}]
+        self.repair(rows)
+        coverage = candidate_coverage(3, len(rows), presented_ids=self.PRESENTED,
+                                      cited_ids=self.cited(rows))
+        self.assertTrue(coverage["complete"], coverage)
+        self.assertEqual(coverage["rows_without_candidate_id"], 0)
 
 
 class TestCoverageDiagnosticsStayQuietWhenTheyWouldBeNoise(unittest.TestCase):

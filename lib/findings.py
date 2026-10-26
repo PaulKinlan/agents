@@ -1717,6 +1717,24 @@ def _normalise_cited_path(value: Any) -> str:
     return path.rstrip("/")
 
 
+# The fields a row can be identified BY when a location is shared, in the order that decides which one is
+# tried first: a rule label is the station's own vocabulary and a title is prose the model may re-word.
+_LOCATION_IDENTITY_FIELDS = ("rule_id", "title")
+
+
+def _normalise_identity_text(value: Any) -> str:
+    """A `rule_id` or `title` as it is COMPARED, never as it is reported - or "" when it is not one.
+
+    Case-folded and whitespace-collapsed, because a row's `rule_id` is model-copied text: a rule split over
+    two lines by a wrap and the same rule on one line are the same claim, and must tie. Nothing else is
+    normalised - a NEAR-MISS rule is a different rule to this comparison, and the caller refuses rather
+    than guessing between them.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    return " ".join(value.split()).casefold()
+
+
 def read_candidate_paths(run_dir: Any) -> Dict[str, str]:
     """`candidate_id -> path` for every candidate the pre-pass recorded; `{}` when there is no evidence.
 
@@ -1737,7 +1755,7 @@ def read_candidate_paths(run_dir: Any) -> Dict[str, str]:
 
 
 def read_candidate_locations(run_dir: Any) -> Dict[str, Dict[str, Any]]:
-    """`candidate_id -> {"path": <normalised>, "line": <int|None>}` for every recorded candidate.
+    """`candidate_id -> {"path": <normalised>, "line": <int|None>, "rule_id", "title"}` per candidate.
 
     ONE MORE JOIN THAN `read_candidate_paths` (agents-op02b). The qrcode nightly's vuln-discovery run
     emitted seven findings with NO candidate_id at all, so every row accounted for nothing and the
@@ -1745,6 +1763,14 @@ def read_candidate_locations(run_dir: Any) -> Dict[str, Dict[str, Any]]:
     The row's own `path` (and, when several candidates live in one file, its `line_number`) is the
     remaining evidence of which candidate it meant, so the reader exposes both from the same payload
     the coverage check already reads, and the two can never disagree about the population.
+
+    RULE AND TITLE ARE PART OF THE LOCATION (agents-k4pf1), because a location is not always a unique
+    identity: modern-web's pre-pass put two rule candidates on `assets/css/open-props-normalize.css:1`, so
+    a row describing that line could not be bound at all and the station read INCOMPLETE while the row's
+    own `rule_id` named one of the two. They are read through the same comparison normalisation a ROW's
+    rule and title get (`_normalise_identity_text`), so the two sides can be compared rather than merely
+    printed. They are omitted when the candidate carries none, so an absent key means "the record has no
+    such field" instead of an empty one pretending to be a value.
 
     An unreadable payload, a pre-pass with no ids, or candidates with no path yields `{}`, which
     disables the location repair rather than inventing a binding.
@@ -1761,9 +1787,14 @@ def read_candidate_locations(run_dir: Any) -> Dict[str, Dict[str, Any]]:
         path = _normalise_cited_path(candidate.get("path"))
         if not (isinstance(cid, str) and cid.strip() and path):
             continue
-        locations.setdefault(cid.strip(), {"path": path,
-                                           "line": _usable_line_number(candidate.get("line_number"))})
+        location = {"path": path, "line": _usable_line_number(candidate.get("line_number"))}
+        for field in _LOCATION_IDENTITY_FIELDS:
+            identity = _normalise_identity_text(candidate.get(field))
+            if identity:
+                location[field] = identity
+        locations.setdefault(cid.strip(), location)
     return locations
+
 
 
 def _usable_line_number(value: Any) -> Optional[int]:
@@ -2107,6 +2138,15 @@ def repair_missing_candidate_ids_by_location(rows: Any,
       * the candidate is not already cited by another row - a citation is never double-booked.
     Everything refused is appended to `refusals` with the reason, because "7 rows lost their id" and "7
     rows could not be matched" are different operator problems and the run directory has to tell them apart.
+
+    A SHARED LOCATION IS NOT ALWAYS AN AMBIGUITY (agents-k4pf1). The rule above refuses when two PRESENTED
+    candidates tie on the row's path+line, and that refusal was wrong for the shape that reported it: the
+    modern-web nightly's pre-pass put two rule candidates on one line of
+    `assets/css/open-props-normalize.css`, so every row describing that line was refused and the station
+    read "32/33 accounted" while each row's own `rule_id` named one of the two. A tie is therefore narrowed
+    by identity THE ROW ALREADY CARRIES - `rule_id` first, then `title` - and refuses only when neither
+    leaves exactly one candidate. The narrowing is what the row says about itself, not a guess from its
+    prose: a rule label is copied from the same pre-pass record the candidate came from.
     """
     presented_ids: List[str] = []
     for value in presented or ():
@@ -2156,17 +2196,31 @@ def repair_missing_candidate_ids_by_location(rows: Any,
             continue
         best_rank = scored[0][0]
         at_best = [cid for rank_here, cid in scored if rank_here == best_rank]
+        # The row's own identity fields, normalised the same way the candidates' are, so "which of these
+        # two did the row mean" is a comparison rather than a hope (agents-k4pf1).
+        identity = {field: _normalise_identity_text(row.get(field))
+                    for field in _LOCATION_IDENTITY_FIELDS}
+        narrowed_on: List[str] = []
+        if len(at_best) > 1:
+            at_best, narrowed_on = _narrow_shared_location(at_best, own, identity)
         if len(at_best) > 1:
             named = ", ".join(sorted(at_best)[:MISSING_ROW_NAMED_CANDIDATES])
+            tried = [field for field in _LOCATION_IDENTITY_FIELDS if identity.get(field)]
+            detail = (f"its {' or '.join(tried)} does not single one out" if tried
+                      else "the row names no line, rule_id or title that singles one out")
             if refusals is not None:
                 refusals.append({"cited": None, "path": row.get("path"), "missing": True,
                                  "reason": (f"row carries no candidate_id and {len(at_best)} presented "
-                                            f"candidate(s) share its location ({named}); "
-                                            f"a row that names no line cannot choose between them")})
+                                            f"candidate(s) share its location ({named}); {detail}")})
             continue
         target = at_best[0]
+        # An unshown candidate blocks the repair when it could be the one the row meant. Once the row's own
+        # rule/title has singled a presented candidate out, only a candidate that ALSO matches that identity
+        # can be meant instead - otherwise the same ambiguity the narrowing just resolved would reappear one
+        # population over, and a pre-pass that recorded the same line twice would stay unbindable.
         better = [cid for cid, location in elsewhere.items()
-                  if (rank(location, path, line) or 99) <= best_rank]
+                  if (rank(location, path, line) or 99) <= best_rank
+                  and _shares_narrowing_identity(location, own[target], narrowed_on)]
         if better:
             if refusals is not None:
                 refusals.append({"cited": None, "path": row.get("path"), "missing": True,
@@ -2182,10 +2236,59 @@ def repair_missing_candidate_ids_by_location(rows: Any,
         row["candidate_id"] = target
         cited.add(target)
         record = {"cited": None, "repaired": target,
-                  "rule": "path+line" if best_rank == 1 else "path", "path": row.get("path")}
+                  "rule": "+".join(["path+line" if best_rank == 1 else "path"] + narrowed_on),
+                  "path": row.get("path")}
         repairs.append(record)
         applied.append(record)
     return applied
+
+
+def _narrow_shared_location(tied: List[str], locations: Dict[str, Dict[str, Any]],
+                            identity: Dict[str, str]) -> tuple:
+    """The tied candidates the row's own `rule_id`/`title` leaves, and which fields did the narrowing.
+
+    Each field is tried in `_LOCATION_IDENTITY_FIELDS` order and only against what the previous one left, so
+    `rule_id` decides first (the station's own vocabulary) and `title` only breaks a rule-tie. A field is
+    recorded as having narrowed ONLY when it actually removed a candidate; a rule every tied candidate
+    carries is not evidence about which one the row meant, and counting it would let a mere shared rule hide
+    a real ambiguity from the refusal message.
+
+    A field matching NONE of the tied candidates is ignored rather than emptying the set: the model's rule
+    label being wrong is a refusal, not a reason to remember that nothing matched.
+
+    BOTH SIDES ARE NORMALISED HERE, not assumed normalised by the reader, so the comparison is the single
+    place the "same rule" question is answered - a hand-built location map and a `candidates.json` read
+    through `read_candidate_locations` cannot disagree about what counts as a match.
+    """
+    remaining = list(tied)
+    narrowed_on: List[str] = []
+    for field in _LOCATION_IDENTITY_FIELDS:
+        value = identity.get(field)
+        if not value or len(remaining) < 2:
+            continue
+        hits = [cid for cid in remaining
+                if _normalise_identity_text(locations.get(cid, {}).get(field)) == value]
+        if hits and len(hits) < len(remaining):
+            remaining = hits
+            narrowed_on.append(field)
+    return remaining, narrowed_on
+
+
+def _shares_narrowing_identity(location: Dict[str, Any], chosen: Dict[str, Any],
+                              narrowed_on: List[str]) -> bool:
+    """Could a candidate NOT shown to the model be the one a narrowed row meant?
+
+    With no narrowing it always could (the caller's rank test decides), which keeps the pre-existing sibling
+    guard exactly as it was for rows that carry no rule or title. With narrowing, a candidate that matches
+    the chosen one on ANY of the fields that did the narrowing could still be meant - a rule label and a
+    title are independent claims, so the weaker reading (any, not all) is the conservative one.
+    """
+    if not narrowed_on:
+        return True
+    chosen_identity = {field: _normalise_identity_text(chosen.get(field)) for field in narrowed_on}
+    return any(_normalise_identity_text(location.get(field)) == chosen_identity[field]
+               and chosen_identity[field]
+               for field in narrowed_on)
 
 
 COVERAGE_NAMED_UNCITED_IDS = 5   # name a shortfall's candidates, never a wall of 45 of them
