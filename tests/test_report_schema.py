@@ -38,6 +38,7 @@ from lib.report_schema import (  # noqa: E402
     unlocatable_verdicts,
     validate,
     validate_agent_report,
+    value_constraint_note,
 )
 from lib.sandbox import sandbox_available  # noqa: E402
 
@@ -1018,6 +1019,175 @@ class TestThePromptSpellsOutTheRequiredFields(unittest.TestCase):
 
     def test_no_schema_means_no_fragment(self):
         self.assertEqual(output_contract_prompt(None), "")
+
+
+class TestThePromptSpellsOutValueConstraints(unittest.TestCase):
+    """agents-4vxwv: vuln-triage failed validation twice on VALUE constraints, not missing fields - attempt 1
+    sent `summary` as an object where the schema says `"type": "string"`, attempt 2 sent a free-text
+    justification where `reachability` allows three enum values. The prompt carried the schema verbatim and
+    the required sets were already given in words; nothing said what an ACCEPTED value looks like. The note
+    below is derived from the schema that will judge the answer, like `required_fields_note`, so an enum or
+    a type can never drift out of the prompt.
+    """
+
+    @staticmethod
+    def _schema(summary_type="string", reachability=("reachable", "conditional", "unreachable"),
+                finding_required=("severity", "reachability", "description")):
+        return {
+            "required": ["summary", "findings"],
+            "properties": {
+                "summary": {"type": summary_type},
+                "findings": {"type": "array", "items": {
+                    "required": list(finding_required),
+                    "properties": {
+                        "severity": {"enum": ["critical", "high", "low"]},
+                        "reachability": {"enum": list(reachability)},
+                        "description": {"type": "string"},
+                    },
+                }},
+            },
+        }
+
+    def test_every_enum_value_is_named_with_its_field(self):
+        note = value_constraint_note(self._schema())
+        self.assertIn("`reachability`", note)
+        for value in ("reachable", "conditional", "unreachable"):
+            self.assertIn(f"`{value}`", note, f"{value} is an accepted enum value and must be spelled out")
+        self.assertIn("`severity`", note)
+        for value in ("critical", "high", "low"):
+            self.assertIn(f"`{value}`", note)
+
+    def test_the_enum_note_is_derived_from_the_schema_not_typed_beside_it(self):
+        """The control: if the values were hardcoded, a schema that gains an enum value would keep producing
+        a note that omits it - the drift this helper exists to prevent."""
+        probe = "probe-reachability-value"
+        base = value_constraint_note(self._schema())
+        self.assertNotIn(probe, base)
+        grown = value_constraint_note(self._schema(reachability=("reachable", probe)))
+        self.assertIn(probe, grown, "an enum value added to the schema must appear with no other edit")
+
+    def test_a_required_string_is_named_as_a_string_and_the_shape_is_stated(self):
+        """Attempt 1 of the reported run: `summary` arrived as an object."""
+        note = value_constraint_note(self._schema())
+        self.assertIn("`summary`", note)
+        self.assertIn("JSON string", note)
+        self.assertIn("never an object", note, "a type name alone did not stop the object")
+        # Derived: the words follow the schema's own declared type, so a schema that changes the type
+        # cannot leave the note describing the old one.
+        self.assertNotIn("JSON integer", note)
+        self.assertIn("JSON integer", value_constraint_note(self._schema(summary_type="integer")))
+
+    def test_an_optional_enum_is_still_pinned(self):
+        """`reachability` is NOT required in vuln-triage's shipped schema and the model emitted it anyway -
+        an optional field with only one accepted spelling must still be spelled out."""
+        note = value_constraint_note(self._schema(finding_required=("severity",)))
+        self.assertIn("`reachability`", note)
+        self.assertIn("`unreachable`", note)
+
+    def test_the_vuln_triage_contract_is_covered(self):
+        """The station this was filed against, read from its SHIPPED schema rather than from this test."""
+        schema = json.loads((FACTORY_ROOT / "agents" / "vuln-triage" / "report.schema.json")
+                            .read_text(encoding="utf-8"))
+        prompt = output_contract_prompt(schema)
+        for value in schema["properties"]["findings"]["items"]["properties"]["reachability"]["enum"]:
+            self.assertIn(f"`{value}`", prompt, "every allowed reachability value must reach the prompt")
+        self.assertIn("`summary`", prompt)
+        self.assertIn("JSON string", prompt)
+
+    def test_every_shipped_schema_derives_its_value_constraints_and_is_byte_unchanged(self):
+        """The control above builds its schema IN CODE, so this one starts from the SHIPPED BYTES: an enum
+        declared in a schema's own bytes - top-level or inside `findings` - must move the note (and the
+        prompt), and the file must be byte-unchanged afterwards, so a future author cannot satisfy this by
+        editing a schema instead of the derivation. Every station's schema is checked, so a new station
+        cannot be typed by hand either."""
+        probe = "probe-enum-value"
+        schemas = sorted((FACTORY_ROOT / "agents").glob("*/report.schema.json"))
+        self.assertGreaterEqual(len(schemas), 20, f"expected the station schema set, found {len(schemas)}")
+        checked_enums = 0
+        checked_strings = 0
+        for path in schemas:
+            with self.subTest(schema=path.parent.name):
+                shipped = path.read_bytes()
+                schema = json.loads(shipped)
+                note = value_constraint_note(schema)
+                self.assertNotIn(probe, note, "nothing may have typed this enum")
+                self.assertNotIn(probe, output_contract_prompt(schema))
+                # Every enum the schema actually declares must be spelled out with its allowed values.
+                finding_item = ((schema.get("properties") or {}).get("findings") or {}).get("items") or {}
+                for properties in ((schema.get("properties") or {}), (finding_item.get("properties") or {})):
+                    for name, subschema in properties.items():
+                        allowed = subschema.get("enum") if isinstance(subschema, dict) else None
+                        if not isinstance(allowed, list) or not allowed:
+                            continue
+                        self.assertIn(f"`{name}`", note, f"enum {name} must be named in the note")
+                        for value in allowed:
+                            self.assertIn(f"`{value}`", note,
+                                          f"allowed {name} value must be named in the note")
+                        checked_enums += 1
+                # An enum injected at EITHER scope must show up with no other edit, so the scope walk is
+                # proven rather than assumed.
+                for scope in ("top-level", "findings"):
+                    mutated = json.loads(shipped)
+                    properties = (mutated.setdefault("properties", {}).setdefault(
+                        "findings", {}).setdefault("items", {}).setdefault("properties", {})
+                        if scope == "findings" else mutated.setdefault("properties", {}))
+                    properties["probe_field"] = {"type": "string", "enum": [probe]}
+                    self.assertIn(probe, value_constraint_note(mutated),
+                                  f"an enum declared in the {scope} schema must move the note")
+                    self.assertIn(probe, output_contract_prompt(mutated),
+                                  "...and the prompt must carry the note")
+                # A required top-level string property, if the station has one, must be named as a string.
+                required = schema.get("required") or []
+                top_properties = schema.get("properties") or {}
+                for name in required:
+                    subschema = top_properties.get(name) or {}
+                    if subschema.get("type") == "string" and "enum" not in subschema:
+                        self.assertIn(f"`{name}`", note)
+                        self.assertIn("JSON string", note)
+                        checked_strings += 1
+                self.assertEqual(path.read_bytes(), shipped,
+                                 "the shipped schema must be byte-unchanged by this test")
+        self.assertGreater(checked_enums, 0, "no shipped enum was exercised, so the test proved nothing")
+        self.assertGreater(checked_strings, 0, "no shipped required string was exercised")
+
+    def test_nothing_to_say_produces_no_note(self):
+        # Silence, not a stray heading, so the prompt is unchanged for a schema with no enums and no
+        # required scalar fields.
+        self.assertEqual(value_constraint_note({"properties": {}}), "")
+        self.assertEqual(value_constraint_note({"required": ["findings"], "properties": {
+            "findings": {"items": {"properties": {"tags": {"type": "array"}}}}}}), "")
+        self.assertEqual(value_constraint_note(None), "")
+
+    def test_the_repair_retry_prompt_carries_the_value_constraints(self):
+        """The repair attempt must be enforced too, and it is - without the dispatcher repeating the note.
+
+        agents-4vxwv: `factory` builds a retry's prompt as `output_contract_prompt(schema)` followed by the
+        rejection hint (`contract_block += "\\n\\n" + repair_hint`), and `output_contract_prompt` is what
+        this bead extended. So the retried model receives these constraints whether or not the hint sentence
+        restates them, and duplicating the note inside the hint would be a second copy of text that is
+        already 30 lines above it in the same prompt. What this test pins is the half that lives here: the
+        fragment a retry re-sends contains the enum values and the string-shape rule.
+        """
+        schema = json.loads((FACTORY_ROOT / "agents" / "vuln-triage" / "report.schema.json")
+                            .read_text(encoding="utf-8"))
+        fragment = output_contract_prompt(schema)
+        self.assertIn("`unreachable`", fragment,
+                      "a retry re-sends this fragment, so it must state the enum values")
+        self.assertIn("never an object", fragment)
+        # ...and the fragment is the SAME text every attempt gets, retry or not: no second assembly path.
+        self.assertEqual(fragment, output_contract_prompt(declared_schema(
+            FACTORY_ROOT / "agents" / "vuln-triage",
+            {"output": {"schema": "report.schema.json"}})))
+
+    def test_the_dispatcher_sends_that_fragment_on_a_repair_retry(self):
+        """The wiring, read from the dispatcher source rather than restated: a retry's prompt is the
+        contract fragment plus the hint. If that composition ever changes, this bead's repair-path claim
+        (agents-4vxwv) silently stops being true, so it is asserted where it is made."""
+        source = (FACTORY_ROOT / "factory").read_text(encoding="utf-8")
+        self.assertIn("contract_block = output_contract_prompt(output_schema)", source)
+        self.assertRegex(source, r"contract_block \+= \"\\n\\n\" \+ repair_hint",
+                         "the retry prompt must still prepend the contract fragment to the hint")
+
 
 
 if __name__ == "__main__":

@@ -817,8 +817,96 @@ def required_fields_note(schema: Any) -> str:
     return "\n" + " ".join(lines) + "\n"
 
 
+# Plain-language words for the JSON types a value constraint can name. The schema's own `"type": "string"`
+# is a keyword a model must infer from; this is the sentence that says an object, a list or a number is
+# NOT one (agents-4vxwv: `summary` arrived as an object).
+_TYPE_WORDS = {
+    "string": "a JSON string (a quoted value - never an object, a list or a number)",
+    "integer": "a JSON integer (never a quoted string, a float or an object)",
+    "number": "a JSON number (never a quoted string or an object)",
+    "boolean": "a JSON boolean (`true` or `false`, never a quoted string)",
+}
+
+
+def _enum_values(subschema: Any) -> Optional[List[Any]]:
+    allowed = subschema.get("enum") if isinstance(subschema, dict) else None
+    return allowed if isinstance(allowed, list) and allowed else None
+
+
+def value_constraint_note(schema: Any) -> str:
+    """Spell out, in words, the value constraints the schema JSON only states as nested keywords.
+
+    agents-4vxwv: vuln-triage failed schema validation on two consecutive attempts, and both failures were
+    VALUE constraints rather than missing fields - attempt 1 sent `summary` as an object where the schema
+    says `"type": "string"`, and attempt 2 sent a free-text justification where `reachability` allows only
+    `reachable` / `conditional` / `unreachable`. The prompt did carry the schema verbatim, and
+    `required_fields_note` above names which fields must be present; nothing said, in words a model can
+    follow, what an accepted VALUE looks like. So this note is derived from the same schema that will judge
+    the answer - the enum lists and the scalar types are read out of it, never typed here, so a schema that
+    gains an enum or changes a field's type cannot leave this note behind. Returns "" when the schema
+    declares neither enums nor required scalar fields.
+
+    Bounded on purpose: only enums and REQUIRED scalar fields, at the two scopes every station uses - the
+    report's top level and each `findings` entry. A station's own auxiliary nested arrays are left to the
+    schema JSON, which still carries them verbatim. That keeps the note to one or two sentences for a
+    typical station instead of restating the whole schema.
+    """
+    if not isinstance(schema, dict):
+        return ""
+    lines: List[str] = []
+    top_properties = schema.get("properties")
+    top_required = schema.get("required")
+    top_required = [name for name in top_required if isinstance(name, str)] if isinstance(top_required, list) else []
+    item = _finding_item_schema(schema)
+    item_properties = item.get("properties")
+    item_required = item.get("required")
+    item_required = [name for name in item_required if isinstance(name, str)] if isinstance(item_required, list) else []
+    scopes = (
+        ("", top_properties, top_required),
+        ("each `findings` entry's ", item_properties, item_required),
+    )
+    for scope_prefix, properties, required in scopes:
+        if not isinstance(properties, dict):
+            continue
+        # An enum-constrained value is listed whether or not the field is required: `reachability` is
+        # optional in vuln-triage's schema and the model still emitted it, so "optional" is not a reason
+        # to stay silent about the one spelling that is accepted (agents-4vxwv).
+        for name, subschema in properties.items():
+            allowed = _enum_values(subschema)
+            if allowed is None:
+                continue
+            subject = (f"In each `findings` entry, `{name}`" if scope_prefix
+                       else f"The top-level `{name}`")
+            lines.append(
+                f"{subject} must be exactly one of: "
+                + ", ".join(f"`{value}`" for value in allowed)
+                + " - that spelling verbatim; a free-text justification, a synonym or any other value is "
+                "rejected."
+            )
+        grouped: Dict[str, List[str]] = {}
+        for name in required:
+            subschema = properties.get(name)
+            if _enum_values(subschema) is not None:
+                continue  # already pinned to its enum values above
+            declared = subschema.get("type") if isinstance(subschema, dict) else None
+            if isinstance(declared, str) and declared in _TYPE_WORDS:
+                grouped.setdefault(declared, []).append(name)
+        # Grouped by type: naming the same JSON type once per field made the note ~1 KB for a station
+        # with five required strings, which is prompt budget spent on repetition.
+        for declared, names in grouped.items():
+            lead = ("In each `findings` entry," if scope_prefix
+                    else ("Top-level field" if len(names) == 1 else "Top-level fields"))
+            lines.append(
+                f"{lead} {', '.join(f'`{name}`' for name in names)} "
+                f"{'must' if len(names) == 1 else 'must each'} be {_TYPE_WORDS[declared]}."
+            )
+    if not lines:
+        return ""
+    return "\nValue constraints, in words:\n- " + "\n- ".join(lines) + "\n"
+
+
 def output_contract_prompt(schema: Any) -> str:
-    """The prompt fragment that states the report contract: the schema itself, then the required sets in words.
+    """The prompt fragment that states the report contract: the schema itself, then its sets in words.
 
     Both halves are here rather than at the call site so the text a model is actually given can be asserted in a
     test instead of being verified by reading the dispatcher (agents-sz8q).
@@ -831,7 +919,7 @@ def output_contract_prompt(schema: Any) -> str:
         + json.dumps(schema, indent=2)
         + "\n"
     )
-    return block + required_fields_note(schema)
+    return block + required_fields_note(schema) + value_constraint_note(schema)
 
 
 def normalize_report(report: Any, schema: Optional[Dict[str, Any]] = None) -> List[str]:
