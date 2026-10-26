@@ -1144,41 +1144,6 @@ class ContextPruningStation(BatchedStation):
                 sorted(run.glob("prompt.batch*.txt"))]
 
 
-class TestContextIsPrunedPerBatch(ContextPruningStation):
-    """Each call carries this batch's own per-candidate records, not every batch's."""
-
-    def test_each_batch_carries_only_the_context_records_it_can_act_on(self):
-        self.agent(AGENT_YAML)
-        self.stub(BATCH_STUB)
-        res = self.factory("pi")
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        run = self.run_dir()
-        prompts = self.prompts(run)
-        self.assertEqual(len(prompts), 3, [p[:60] for p in prompts])
-
-        for index, prompt in enumerate(prompts):
-            section = prompt.split("Station Context", 1)[1]
-            mine = {f"cand-perf-{i:03d}" for i in range(index * PER_CALL,
-                                                       min((index + 1) * PER_CALL, CANDIDATE_COUNT))}
-            for candidate_id in mine:
-                self.assertIn(candidate_id, section,
-                              f"batch {index + 1} lost its own context record for {candidate_id}")
-            for other in {f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)} - mine:
-                self.assertNotIn(other, section,
-                                 f"batch {index + 1} was sent another batch's context record "
-                                 f"({other}) - that is the ~355 KB-per-batch defect")
-            self.assertIn("TM-EVIDENCE", section,
-                          "context the factory cannot attribute stays in every call")
-
-        # the prune is NAMED to the model, and the run records what it pruned per batch
-        self.assertIn("this call presents 3 of the 8 per-candidate record(s)", prompts[0])
-        self.assertIn("absence here is not absence in the scan", prompts[0])
-        artifacts = sorted(run.glob("context_prune.batch*.json"))
-        self.assertEqual(len(artifacts), 3, artifacts)
-        record = json.loads(artifacts[0].read_text(encoding="utf-8"))
-        self.assertEqual((record["batch"], record["kept"], record["dropped"]), (1, 3, 5))
-
-
 class TestATransientBatchFailureIsRetriedOnce(ContextPruningStation):
     """agents-h53yp: one engine exit 1 with no output on batch 3/7 must not lose the station."""
 
@@ -1193,6 +1158,32 @@ class TestATransientBatchFailureIsRetriedOnce(ContextPruningStation):
         report = json.loads((run / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(len(report["findings"]), CANDIDATE_COUNT,
                          "every batch must be merged after the retry")
+
+        # The SAME run also carries the per-batch context contract (agents-h53yp): each call holds this
+        # batch's own per-candidate records and nothing from the other batches, and the model is told so.
+        # Asserted here rather than in a second dispatcher run of its own: this class is ~35 s of the fast
+        # gate and the 19-suite selection for a `factory` change already sits at its bound.
+        prompts = [p.read_text(encoding="utf-8") for p in sorted(run.glob("prompt.batch*.txt"))]
+        self.assertEqual(len(prompts), 3, [p[:60] for p in prompts])
+        for index, prompt in enumerate(prompts):
+            section = prompt.split("Station Context", 1)[1]
+            mine = {f"cand-perf-{i:03d}" for i in range(index * PER_CALL,
+                                                       min((index + 1) * PER_CALL, CANDIDATE_COUNT))}
+            for candidate_id in mine:
+                self.assertIn(candidate_id, section,
+                              f"batch {index + 1} lost its own context record for {candidate_id}")
+            for other in {f"cand-perf-{i:03d}" for i in range(CANDIDATE_COUNT)} - mine:
+                self.assertNotIn(other, section,
+                                 f"batch {index + 1} was sent another batch's context record ({other})")
+            self.assertIn("TM-EVIDENCE", section,
+                          "context the factory cannot attribute stays in every call")
+        self.assertIn("this call presents 3 of the 8 per-candidate record(s)", prompts[0])
+        self.assertIn("absence here is not absence in the scan", prompts[0])
+        prunes = sorted(run.glob("context_prune.batch*.json"))
+        self.assertEqual(len(prunes), 3, prunes)
+        prune = json.loads(prunes[0].read_text(encoding="utf-8"))
+        self.assertEqual((prune["batch"], prune["kept"], prune["dropped"], prune["complete"]),
+                         (1, 3, 5, True))
 
         retries = json.loads((run / "batch_retries.json").read_text(encoding="utf-8"))
         self.assertEqual(len(retries), 1, retries)
