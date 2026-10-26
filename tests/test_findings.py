@@ -2420,6 +2420,30 @@ class TestASharedLocationIsNarrowedByTheRowsOwnRuleOrTitle(unittest.TestCase):
         self.assertIn("2 presented candidate(s) share its location", refusals[0]["reason"])
         self.assertIn("its rule_id does not single one out", refusals[0]["reason"])
 
+    def test_a_row_whose_rule_and_title_disagree_is_refused_not_given_to_the_first_field(self):
+        """agents-k4pf1, reviewer finding on 3e1851d0: the narrowing ORDER is an order of trial, not of
+        authority. A row naming one candidate's rule and the other's title has told us two different things;
+        binding it to the rule because `rule_id` is tried first would be a guess presented as evidence."""
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1,
+                 "rule_id": "legacy-reset", "title": "Prefixed property, no modern form"}]
+        repairs, refusals = self.repair(rows)
+        self.assertEqual((repairs, self.cited(rows)), ([], [None]))
+        self.assertIn("its rule_id and title point at different candidates", refusals[0]["reason"])
+        self.assertIn("aaaa1111bbbb2222, cccc3333dddd4444", refusals[0]["reason"],
+                      "the refusal names both candidates the row wavered between")
+
+    def test_a_title_shared_by_both_candidates_is_not_a_contradiction(self):
+        """The other half: a generic title that matches the chosen candidate as well tells us nothing
+        against it, so the rule still binds the row."""
+        locations = dict(self.SHARED)
+        locations["cccc3333dddd4444"] = dict(locations["cccc3333dddd4444"],
+                                            title="Vendor reset contradicts native")
+        rows = [{"path": "assets/css/vendor.css", "line_number": 1, "rule_id": "legacy-reset",
+                 "title": "Vendor reset contradicts native"}]
+        repairs, refusals = self.repair(rows, locations=locations)
+        self.assertEqual((self.cited(rows), refusals), (["aaaa1111bbbb2222"], []))
+        self.assertEqual(repairs[0]["rule"], "path+line+rule_id")
+
     def test_two_candidates_that_share_rule_and_title_are_still_refused(self):
         locations = dict(self.SHARED)
         locations["cccc3333dddd4444"] = dict(locations["aaaa1111bbbb2222"])

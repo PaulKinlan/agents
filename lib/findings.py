@@ -2146,7 +2146,10 @@ def repair_missing_candidate_ids_by_location(rows: Any,
     read "32/33 accounted" while each row's own `rule_id` named one of the two. A tie is therefore narrowed
     by identity THE ROW ALREADY CARRIES - `rule_id` first, then `title` - and refuses only when neither
     leaves exactly one candidate. The narrowing is what the row says about itself, not a guess from its
-    prose: a rule label is copied from the same pre-pass record the candidate came from.
+    prose: a rule label is copied from the same pre-pass record the candidate came from. The ORDER IS AN
+    ORDER OF TRIAL, NOT OF AUTHORITY (reviewer finding on 3e1851d0): a row whose rule_id names one candidate
+    and whose title names the other is refused, because whichever one it was given to, the row's own other
+    field says otherwise.
     """
     presented_ids: List[str] = []
     for value in presented or ():
@@ -2196,6 +2199,7 @@ def repair_missing_candidate_ids_by_location(rows: Any,
             continue
         best_rank = scored[0][0]
         at_best = [cid for rank_here, cid in scored if rank_here == best_rank]
+        tied = list(at_best)
         # The row's own identity fields, normalised the same way the candidates' are, so "which of these
         # two did the row mean" is a comparison rather than a hope (agents-k4pf1).
         identity = {field: _normalise_identity_text(row.get(field))
@@ -2212,6 +2216,23 @@ def repair_missing_candidate_ids_by_location(rows: Any,
                 refusals.append({"cited": None, "path": row.get("path"), "missing": True,
                                  "reason": (f"row carries no candidate_id and {len(at_best)} presented "
                                             f"candidate(s) share its location ({named}); {detail}")})
+            continue
+        # A NARROWING IS NOT A PRECEDENCE (agents-k4pf1, reviewer finding on 3e1851d0). Narrowing in
+        # rule-then-title order must not let the FIRST field overrule the second: a row whose rule_id names
+        # one candidate and whose title names the OTHER has told us two different things, and binding it to
+        # whichever field happens to be tried first is a guess dressed as evidence. So a field that points at
+        # candidates in the tie but not at the chosen one is a CONTRADICTION and the row is refused.
+        conflicting = (_contradicting_identity(tied, own, identity, at_best[0])
+                       if len(tied) > 1 else [])
+        if conflicting:
+            named = ", ".join(sorted(tied)[:MISSING_ROW_NAMED_CANDIDATES])
+            if refusals is not None:
+                refusals.append({"cited": None, "path": row.get("path"), "missing": True,
+                                 "reason": (f"row carries no candidate_id and its "
+                                            f"{' and '.join(narrowed_on)} and "
+                                            f"{', '.join(conflicting)} point at different candidates "
+                                            f"among those sharing its location ({named}); "
+                                            f"a self-contradicting row is not evidence for either")})
             continue
         target = at_best[0]
         # An unshown candidate blocks the repair when it could be the one the row meant. Once the row's own
@@ -2272,6 +2293,30 @@ def _narrow_shared_location(tied: List[str], locations: Dict[str, Dict[str, Any]
             remaining = hits
             narrowed_on.append(field)
     return remaining, narrowed_on
+
+
+def _contradicting_identity(tied: List[str], locations: Dict[str, Dict[str, Any]],
+                            identity: Dict[str, str], chosen: str) -> List[str]:
+    """The row's identity fields that point at OTHER candidates in the tie, not at the one chosen.
+
+    The narrowing order (rule_id, then title) is an order of TRIAL, not of authority. A row whose `rule_id`
+    names candidate A and whose `title` names candidate B is internally inconsistent, and the only honest
+    answer is to refuse: picking A because `rule_id` is tried first would bind a verdict to a claim the row
+    itself contradicts (reviewer finding on 3e1851d0).
+
+    A field only contradicts when it MATCHES something in the tie: a title that matches neither candidate,
+    or one that matches the chosen candidate as well as another, tells us nothing against the choice.
+    """
+    conflicting: List[str] = []
+    for field in _LOCATION_IDENTITY_FIELDS:
+        value = identity.get(field)
+        if not value:
+            continue
+        hits = [cid for cid in tied
+                if _normalise_identity_text(locations.get(cid, {}).get(field)) == value]
+        if hits and chosen not in hits:
+            conflicting.append(field)
+    return conflicting
 
 
 def _shares_narrowing_identity(location: Dict[str, Any], chosen: Dict[str, Any],
