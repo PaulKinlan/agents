@@ -825,7 +825,33 @@ _TYPE_WORDS = {
     "integer": "a JSON integer (never a quoted string, a float or an object)",
     "number": "a JSON number (never a quoted string or an object)",
     "boolean": "a JSON boolean (`true` or `false`, never a quoted string)",
+    "null": "JSON null",
 }
+
+
+def _scalar_phrase(declared: Any) -> Optional[str]:
+    """Words for a declared type, or None when it is not a scalar (or union of scalars) we can state.
+
+    `type` may be a LIST - vuln-verify requires `line_number: {"type": ["integer", "null"]}` - and the
+    first version of this note only counted a plain-string type, so a required union field fell through
+    both branches silently and was never stated, while the note's own claim was that EVERY required scalar
+    field was covered (agents-1w7ry, a P3 finding on agents-4vxwv). Members are named in schema order, so
+    the note reads "a JSON integer ... or JSON null" instead of inventing one of the two. A member that is
+    itself an object/array makes the whole declaration non-scalar: the schema JSON still states it verbatim,
+    and this note must not pretend a container is a scalar.
+    """
+    if isinstance(declared, str):
+        types = [declared]
+    elif isinstance(declared, list) and declared:
+        types = [member for member in declared if isinstance(member, str)]
+        if len(types) != len(declared):
+            return None
+    else:
+        return None
+    words = [_TYPE_WORDS[member] for member in types if member in _TYPE_WORDS]
+    if not words or len(words) != len(types):
+        return None
+    return " or ".join(words)
 
 
 def _enum_values(subschema: Any) -> Optional[List[Any]]:
@@ -846,10 +872,11 @@ def value_constraint_note(schema: Any) -> str:
     gains an enum or changes a field's type cannot leave this note behind. Returns "" when the schema
     declares neither enums nor required scalar fields.
 
-    Bounded on purpose: only enums and REQUIRED scalar fields, at the two scopes every station uses - the
-    report's top level and each `findings` entry. A station's own auxiliary nested arrays are left to the
-    schema JSON, which still carries them verbatim. That keeps the note to one or two sentences for a
-    typical station instead of restating the whole schema.
+    Bounded on purpose: only enums and REQUIRED scalar fields (a union such as `["integer", "null"]`
+    included - agents-1w7ry), at the two scopes every station uses - the report's top level and each
+    `findings` entry. A station's own auxiliary nested arrays are left to the schema JSON, which still
+    carries them verbatim. That keeps the note to one or two sentences for a typical station instead of
+    restating the whole schema.
     """
     if not isinstance(schema, dict):
         return ""
@@ -889,16 +916,17 @@ def value_constraint_note(schema: Any) -> str:
             if _enum_values(subschema) is not None:
                 continue  # already pinned to its enum values above
             declared = subschema.get("type") if isinstance(subschema, dict) else None
-            if isinstance(declared, str) and declared in _TYPE_WORDS:
-                grouped.setdefault(declared, []).append(name)
+            phrase = _scalar_phrase(declared)
+            if phrase is not None:
+                grouped.setdefault(phrase, []).append(name)
         # Grouped by type: naming the same JSON type once per field made the note ~1 KB for a station
         # with five required strings, which is prompt budget spent on repetition.
-        for declared, names in grouped.items():
+        for phrase, names in grouped.items():
             lead = ("In each `findings` entry," if scope_prefix
                     else ("Top-level field" if len(names) == 1 else "Top-level fields"))
             lines.append(
                 f"{lead} {', '.join(f'`{name}`' for name in names)} "
-                f"{'must' if len(names) == 1 else 'must each'} be {_TYPE_WORDS[declared]}."
+                f"{'must' if len(names) == 1 else 'must each'} be {phrase}."
             )
     if not lines:
         return ""

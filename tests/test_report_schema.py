@@ -1048,6 +1048,56 @@ class TestThePromptSpellsOutValueConstraints(unittest.TestCase):
             },
         }
 
+    @staticmethod
+    def _scalar_members(subschema):
+        """The declared type's members when every one is a scalar, else None (arrays/objects are not scalars)."""
+        declared = subschema.get("type") if isinstance(subschema, dict) else None
+        if isinstance(declared, str):
+            members = [declared]
+        elif isinstance(declared, list) and declared and all(isinstance(m, str) for m in declared):
+            members = list(declared)
+        else:
+            return None
+        scalars = {"string", "integer", "number", "boolean", "null"}
+        return members if members and all(m in scalars for m in members) else None
+
+    def test_a_required_union_scalar_is_stated_with_both_members(self):
+        """agents-1w7ry: `["integer", "null"]` is ONE required scalar field and must be stated, naming
+        both members rather than inventing a single type."""
+        schema = self._schema(finding_required=("severity", "line_number"))
+        schema["properties"]["findings"]["items"]["properties"]["line_number"] = {
+            "type": ["integer", "null"]}
+        note = value_constraint_note(schema)
+        self.assertIn("`line_number`", note)
+        self.assertIn("JSON integer", note)
+        self.assertIn("null", note)
+
+    def test_the_shipped_vuln_verify_line_number_is_the_case_that_was_missed(self):
+        """The reviewer's repro, read from the shipped schema: the finding is closed only if the note now
+        states `line_number`, and every OTHER required finding scalar still is (no regression)."""
+        schema = json.loads((FACTORY_ROOT / "agents" / "vuln-verify" / "report.schema.json")
+                            .read_text(encoding="utf-8"))
+        note = value_constraint_note(schema)
+        self.assertIn("`line_number`", note, "vuln-verify requires line_number as integer|null")
+        item = schema["properties"]["findings"]["items"]
+        for name in item["required"]:
+            subschema = item["properties"].get(name) or {}
+            if self._scalar_members(subschema) is None:
+                continue
+            self.assertIn(f"`{name}`", note)
+
+    def test_a_required_container_is_never_claimed_to_be_a_scalar(self):
+        """The other half: widening to unions must not start describing arrays/objects as scalars."""
+        schema = self._schema(finding_required=("severity", "covered_candidate_ids"))
+        schema["properties"]["findings"]["items"]["properties"]["covered_candidate_ids"] = {
+            "type": "array", "items": {"type": "string"}}
+        note = value_constraint_note(schema)
+        self.assertNotIn("`covered_candidate_ids`", note)
+        # ...and a union that contains a container member is not a scalar either.
+        schema["properties"]["findings"]["items"]["properties"]["covered_candidate_ids"] = {
+            "type": ["string", "array"]}
+        self.assertNotIn("`covered_candidate_ids`", value_constraint_note(schema))
+
     def test_every_enum_value_is_named_with_its_field(self):
         note = value_constraint_note(self._schema())
         self.assertIn("`reachability`", note)
@@ -1136,19 +1186,33 @@ class TestThePromptSpellsOutValueConstraints(unittest.TestCase):
                                   f"an enum declared in the {scope} schema must move the note")
                     self.assertIn(probe, output_contract_prompt(mutated),
                                   "...and the prompt must carry the note")
-                # A required top-level string property, if the station has one, must be named as a string.
+                # agents-1w7ry: EVERY required scalar -- at either scope, and including a UNION such as
+                # vuln-verify's `line_number: ["integer", "null"]` -- must be named. The first version of
+                # this control only looked at top-level `type: "string"` fields, which is exactly the blind
+                # spot the reviewer found: the note claimed every required scalar and silently skipped one.
                 required = schema.get("required") or []
                 top_properties = schema.get("properties") or {}
+                scalar_checked = 0
                 for name in required:
                     subschema = top_properties.get(name) or {}
-                    if subschema.get("type") == "string" and "enum" not in subschema:
-                        self.assertIn(f"`{name}`", note)
-                        self.assertIn("JSON string", note)
-                        checked_strings += 1
+                    if "enum" in subschema or self._scalar_members(subschema) is None:
+                        continue
+                    self.assertIn(f"`{name}`", note, "a required top-level scalar must be stated in words")
+                    scalar_checked += 1
+                item = ((top_properties.get("findings") or {}).get("items") or {})
+                item_properties = item.get("properties") or {}
+                for name in (item.get("required") or []):
+                    subschema = item_properties.get(name) or {}
+                    if "enum" in subschema or self._scalar_members(subschema) is None:
+                        continue
+                    self.assertIn(f"`{name}`", note,
+                                  "a required finding scalar must be stated in words")
+                    scalar_checked += 1
+                checked_strings += scalar_checked
                 self.assertEqual(path.read_bytes(), shipped,
                                  "the shipped schema must be byte-unchanged by this test")
         self.assertGreater(checked_enums, 0, "no shipped enum was exercised, so the test proved nothing")
-        self.assertGreater(checked_strings, 0, "no shipped required string was exercised")
+        self.assertGreater(checked_strings, 0, "no shipped required scalar was exercised")
 
     def test_nothing_to_say_produces_no_note(self):
         # Silence, not a stray heading, so the prompt is unchanged for a schema with no enums and no
