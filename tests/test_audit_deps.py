@@ -4,10 +4,13 @@
 import importlib.machinery
 import importlib.util
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCANNER_PATH = ROOT / "agents" / "deps-supply-chain" / "scripts" / "audit_deps.py"
@@ -469,6 +472,108 @@ Requires-Dist: foo == 1.*
         candidates, manifests = audit_deps.audit_npm(self.repo)
         divergence = [c for c in candidates if c.get("rule_id") == "lockfile-shipped-version-divergence"]
         self.assertEqual(len(divergence), 0)
+
+
+class TestExternalAuditInnerTimeouts(unittest.TestCase):
+    """agents-09kp3: npm audit / pip-audit must carry an inner execution timeout.
+
+    The deps-supply-chain station declares budget.max_minutes: 5, shared by pre-pass,
+    engine and findings dispatch (lib/budget.py). An unbounded `npm audit` against a slow
+    or unreachable registry consumed the whole pre-pass until the station budget killed the
+    process group (paul-kinlan-me audit, log:265): no verdict at all. The bound must exist
+    on the subprocess call, and expiry must degrade to the coverage-gap candidate.
+    """
+
+    def _write_package_json(self, repo: Path):
+        (repo / "package.json").write_text(json.dumps({
+            "name": "timeout-target",
+            "dependencies": {"left-pad": "1.0.0"},
+        }), encoding="utf-8")
+
+    def test_bounds_exist_and_fit_the_five_minute_station(self):
+        self.assertGreater(audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 0)
+        self.assertGreater(audit_deps.PIP_AUDIT_TIMEOUT_SECONDS, 0)
+        # Worst case (polyglot target running BOTH audits) must stay inside the station's
+        # 5-minute budget, leaving headroom for the engine and findings dispatch.
+        self.assertLess(
+            audit_deps.NPM_AUDIT_TIMEOUT_SECONDS + audit_deps.PIP_AUDIT_TIMEOUT_SECONDS,
+            5 * 60,
+        )
+
+    def test_npm_audit_subprocess_carries_the_inner_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._write_package_json(repo)
+            seen = []
+
+            def fake_run(cmd, **kwargs):
+                seen.append((cmd, kwargs))
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with mock.patch.object(audit_deps, "_npm_binary", return_value="npm"), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=fake_run):
+                audit_deps.audit_npm(repo)
+            audit_calls = [(c, k) for c, k in seen if "audit" in c]
+            self.assertEqual(len(audit_calls), 1)
+            self.assertEqual(audit_calls[0][1].get("timeout"), audit_deps.NPM_AUDIT_TIMEOUT_SECONDS)
+
+    def test_npm_audit_timeout_degrades_to_coverage_gap_not_station_death(self):
+        """Load-bearing: remove `timeout=` from the npm audit subprocess.run (or let
+        TimeoutExpired propagate) and this test fails - the pre-pass must survive the
+        expiry and surface the npm-audit-unavailable coverage-gap candidate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._write_package_json(repo)
+
+            def timeout_run(cmd, **kwargs):
+                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+            with mock.patch.object(audit_deps, "_npm_binary", return_value="npm"), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=timeout_run):
+                candidates, _ = audit_deps.audit_npm(repo)
+            self.assertIn(
+                "npm-audit-unavailable",
+                [c.get("rule_id") for c in candidates],
+            )
+
+    def test_pip_audit_subprocess_carries_the_inner_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+            seen = []
+
+            def fake_run(cmd, **kwargs):
+                seen.append((cmd, kwargs))
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            real_which = shutil.which
+
+            def fake_which(name, *args, **kwargs):
+                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
+
+            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=fake_run):
+                audit_deps.audit_python(repo)
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0][1].get("timeout"), audit_deps.PIP_AUDIT_TIMEOUT_SECONDS)
+
+    def test_pip_audit_timeout_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+            def timeout_run(cmd, **kwargs):
+                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+            real_which = shutil.which
+
+            def fake_which(name, *args, **kwargs):
+                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
+
+            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=timeout_run):
+                candidates, _ = audit_deps.audit_python(repo)  # must not raise
+            self.assertIsInstance(candidates, list)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,19 @@ from lib.candidate_identity import assign_candidate_ids, artefact_scheme_fields 
 from lib.redaction import emit_station_result  # noqa: E402
 from lib.tool_pins import ToolPinError, resolve_tool  # noqa: E402
 
+# agents-09kp3: inner execution bounds for the external audit commands. The station declares
+# budget.max_minutes: 5, and the pre-pass shares that wall with the engine and the findings
+# dispatch (lib/budget.py). `npm audit` against a slow or unreachable registry had no inner
+# bound, so it consumed the whole pre-pass, the station budget killed the entire process
+# group, and the audit produced no verdict at all (paul-kinlan-me audit, log:265). Same
+# pathology and convention as the gitleaks bound in secret-scan (fleet-wa8) and the git index
+# bound in docs-drift: bounded well under the station budget, and expiry degrades to the
+# coverage-gap candidate instead of losing the station. Each command gets 120s (the repo's
+# inner-bound convention); both together stay under the 5-minute station even on a polyglot
+# target that runs npm AND pip audits.
+NPM_AUDIT_TIMEOUT_SECONDS = 120
+PIP_AUDIT_TIMEOUT_SECONDS = 120
+
 
 def _npm_binary() -> Optional[str]:
     """The pin-authenticated npm binary, or None when npm is genuinely absent.
@@ -469,12 +482,21 @@ def audit_npm(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     if npm_bin:
         cmd = [npm_bin, "audit", "--json"]
         try:
-            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False)
+            # Bounded (agents-09kp3): an unbounded npm audit against a slow/unreachable
+            # registry ate the station's whole 5-minute budget and the pre-pass was killed
+            # with no verdict. On expiry raw_audit stays None and the coverage-gap candidate
+            # below reports the missing coverage instead of the station dying.
+            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False,
+                                 timeout=NPM_AUDIT_TIMEOUT_SECONDS)
             if res.stdout.strip():
                 try:
                     raw_audit = json.loads(res.stdout)
                 except Exception as e:
                     sys.stderr.write(f"Warning: could not parse npm audit JSON: {e}\n")
+        except subprocess.TimeoutExpired:
+            sys.stderr.write(
+                f"Warning: npm audit timed out after {NPM_AUDIT_TIMEOUT_SECONDS}s "
+                "(registry slow or unreachable); reporting a coverage gap\n")
         except Exception as e:
             sys.stderr.write(f"Warning: npm audit failed: {e}\n")
 
@@ -656,7 +678,10 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     if pip_audit_bin:
         cmd = [pip_audit_bin, "-r", str(req_path), "--format", "json"]
         try:
-            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False)
+            # Bounded (agents-09kp3): same pathology as npm audit - a network audit command
+            # without an inner timeout can consume the whole 5-minute station budget.
+            res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False,
+                                 timeout=PIP_AUDIT_TIMEOUT_SECONDS)
             if res.stdout.strip():
                 data = json.loads(res.stdout)
                 for item in data.get("dependencies", []):
@@ -678,6 +703,10 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                             "snippet": f"{item.get('name')}=={item.get('version')}",
                             "remediation": f"Upgrade {item.get('name')} to {vuln.get('fix_versions')}"
                         })
+        except subprocess.TimeoutExpired:
+            sys.stderr.write(
+                f"Warning: pip-audit timed out after {PIP_AUDIT_TIMEOUT_SECONDS}s "
+                "(index slow or unreachable); Python vulnerability coverage is incomplete\n")
         except Exception:
             pass
 
