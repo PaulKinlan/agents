@@ -20,7 +20,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["rule_id", "path", "snippet", "severity", "title", "description", "candidate_id"],
+        "required": ["rule_id", "path", "snippet", "severity", "title", "description"],
         "properties": {
           "rule_id": {
             "type": "string",
@@ -53,7 +53,7 @@
           "candidate_id": {
             "type": "string",
             "minLength": 1,
-            "description": "Required for every confirmed or dismissed row: copy the candidate_id of the pre-pass candidate this row answers verbatim from Scanner Data. The docs-drift scanner stamps every candidate. A legacy pre-pass with no ids cannot produce valid finding rows under this schema; do not invent an id. The factory compares cited ids against presented ids (agents-w9ni)."
+            "description": "Expected on every confirmed or dismissed row: copy the candidate_id of the pre-pass candidate this row answers verbatim from Scanner Data. The docs-drift scanner stamps every candidate; do not invent an id. The factory compares cited ids against presented ids (agents-w9ni). Deliberately NOT in `required` (agents-0ydyn): a schema violation rejects the whole report at parse time, before the repair that gives a row with no id the one presented candidate its own path and line_number name can run (agents-op02b), so a required id turned a repairable omission into a lost run - while a row that cannot be repaired is still refused by that repair and the station reads INCOMPLETE."
           },
           "false_positive": {
             "type": "boolean",
