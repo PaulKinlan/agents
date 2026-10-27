@@ -1378,6 +1378,46 @@ def sweep_grace_warning(budget: Any) -> Optional[str]:
             f"or lower budget.max_minutes.")
 
 
+def budget_pressure_warning(budget: Any, calls: int) -> Optional[str]:
+    """A line to print when the ceiling cannot fund the plan at the declared allowance (agents-zwq8l).
+
+    `lib/budget.py:StationBudget.funding_pressure` owns the arithmetic; this owns the sentence, in the
+    same way `sweep_grace_warning` does for the run-sweep grace. Printed rather than raised: a starved
+    plan still produces a real verdict when the calls happen to be cheap, so the run stays the
+    operator's call - but the starvation must not be silent, because the failure it produced
+    (vuln-verify batch 1/14 at 171.693 s) named a timeout and never the plan behind it.
+    """
+    pressure = budget.funding_pressure(calls)
+    if pressure is None:
+        return None
+    return (f"⚠️ [budget-pressure] {pressure['calls']} call(s) x {budget.declared_minutes:g} min declared "
+            f"= {pressure['planned_seconds'] / 60:g} min, funded {pressure['funded_seconds'] / 60:g} min "
+            f"(ceiling {STATION_DEADLINE_CEILING_MINUTES:g} min): each call gets "
+            f"{pressure['per_call_seconds']:.1f}s instead of the declared "
+            f"{pressure['declared_seconds']:g}s, and only {pressure['calls_funded_at_declared']} of them "
+            f"fit at the declared allowance. Reduce the per-call candidate bound or the case count so the "
+            f"plan fits, or raise STATION_DEADLINE_CEILING_MINUTES and the run-sweep grace together.")
+
+
+def write_engine_call_evidence(run_dir: Path, plan: Dict[str, Any],
+                               calls: List[Dict[str, Any]]) -> None:
+    """Per-call timing and outcome, rewritten after EVERY engine call (agents-zwq8l).
+
+    Rewritten rather than written once at the end because the case it exists for is a station that
+    DIES mid-sequence: a `StationTimeout` abandons the loop, so a single write afterwards would lose
+    the very call that timed out. What is recorded answers "was this slow, starved, or stalled?"
+    without a second run: the plan's arithmetic, then each attempted call's candidate count, prompt
+    bytes, allowance, wall time and exit status.
+
+    Deliberately NON-SECRET evidence (THREAT_MODEL: run artifacts are published): sizes, counts,
+    durations and exit codes only - never prompt text, never engine stderr. The counts come from the
+    plan the dispatcher made, so a reviewer can compare a call's wall time against the allowance it was
+    given and the work it was asked to do.
+    """
+    _write_run_artifact(run_dir / "engine_calls.json",
+                        json.dumps({"plan": plan, "calls": calls}, indent=2))
+
+
 def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explicit_sink: Optional[str] = None,
               station_only: bool = False, repair_hint: Optional[str] = None, attempt: int = 1,
               read_target_dir: Optional[Path] = None, model_arg: Optional[str] = None,
@@ -2020,6 +2060,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
         # two 7 KB candidates against a 12 KB batch budget must split even though 2 <= max_per_call.
         # Gating on len(...) > max_per_call meant the byte limit only ever applied to lists that were
         # already too long by count, which is exactly the case that never needed it.
+        # agents-zwq8l: PER-CALL EVIDENCE, DEFINED FOR EVERY STATION so the engine loop below can record
+        # it whether or not this run batched. `engine_call_plan` stays None for a single-call station,
+        # where the funding questions this instrument exists for (how N allowances were shared) do not
+        # arise.
+        engine_call_plan: Optional[Dict[str, Any]] = None
+        engine_calls: List[Dict[str, Any]] = []
         if isinstance(candidates_slice, list):
             try:
                 planned = plan_batches(candidates_slice, max_per_call)
@@ -2072,6 +2118,28 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                 funded_warning = sweep_grace_warning(budget)
                 if funded_warning and funded_warning != grace_warning:
                     print(f"  {funded_warning}")
+                # agents-zwq8l: AND WHEN THE CEILING CANNOT FUND THE PLAN, SAY THAT TOO - with both
+                # numbers. The line above is true and, on its own, misleading: it states the total the
+                # station was granted, not the allowance each call is actually reduced to, and it prints
+                # the declaration (15 min) next to a total that funds 171.693 s per call. That is the
+                # number that decides whether a call can finish, so it is the number a starvation report
+                # has to name.
+                pressure_warning = budget_pressure_warning(budget, batch_count)
+                if pressure_warning:
+                    print(f"  {pressure_warning}")
+                engine_call_plan = {
+                    "agent": agent_name,
+                    "engine": engine,
+                    "calls": batch_count,
+                    "declared_seconds": budget.declared_seconds,
+                    "funded_seconds": funded,
+                    "ceiling_seconds": STATION_DEADLINE_CEILING_MINUTES * 60.0,
+                    "per_call_seconds": funded / batch_count,
+                    "elapsed_at_plan_seconds": round(budget.elapsed_seconds, 3),
+                    "batch_candidates": [len(batch) if isinstance(batch, list) else None
+                                         for batch in batches],
+                    "funding_pressure": budget.funding_pressure(batch_count),
+                }
             else:
                 batches = [candidates_slice]
         else:
@@ -2329,19 +2397,51 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             budget.plan_calls(len(prompts) + len(batch_retries) + 1)
                         _call_label = (_batch_label if _attempt == 1
                                        else f"{_batch_label} retry {_attempt - 1}")
-                        _res = run_station_command(
-                            adapter_cmd, budget, _call_label,
-                            # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
-                            # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
-                            # with them the station. Each call gets its own allowance (the declaration,
-                            # reduced to a fair share when the ceiling or a slow earlier call leaves less),
-                            # and the last one leaves the findings dispatch its reserve.
-                            timeout_seconds=(budget.call_timeout(_call_label, len(prompts) - _batch_index)
-                                             if batched else None),
-                            input=_batch_prompt, capture_output=True, text=True,
-                            check=False, env=adapter_env,
-                            on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
-                                      if broker is not None else None))
+                        # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
+                        # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
+                        # with them the station. Each call gets its own allowance (the declaration,
+                        # reduced to a fair share when the ceiling or a slow earlier call leaves less),
+                        # and the last one leaves the findings dispatch its reserve.
+                        _allowance = (budget.call_timeout(_call_label, len(prompts) - _batch_index)
+                                      if batched else None)
+                        # agents-zwq8l: record what this call WAS GIVEN and what it COST, per call. A
+                        # starved allowance and a genuinely slow call produce the same timeout message,
+                        # and telling them apart used to need another instrumented nightly.
+                        _call_started = time.monotonic()
+                        _call_evidence: Dict[str, Any] = {
+                            "call": _batch_index + 1,
+                            "calls": len(prompts),
+                            "attempt": _attempt,
+                            "candidates": (len(batches[_batch_index])
+                                           if _batch_index < len(batches)
+                                           and isinstance(batches[_batch_index], list) else None),
+                            "prompt_bytes": len(_batch_prompt.encode("utf-8")),
+                            "allowance_seconds": (_allowance if _allowance is not None else None),
+                        }
+                        try:
+                            _res = run_station_command(
+                                adapter_cmd, budget, _call_label,
+                                timeout_seconds=_allowance,
+                                input=_batch_prompt, capture_output=True, text=True,
+                                check=False, env=adapter_env,
+                                on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
+                                          if broker is not None else None))
+                        except StationTimeout:
+                            # Written BEFORE the re-raise: the aborted call is the evidence the bead
+                            # needs, and the station's own timeout path discards the loop's state.
+                            _call_evidence["outcome"] = "timeout"
+                            _call_evidence["elapsed_seconds"] = round(
+                                time.monotonic() - _call_started, 3)
+                            engine_calls.append(_call_evidence)
+                            write_engine_call_evidence(run_dir, engine_call_plan, engine_calls)
+                            raise
+                        _call_evidence["outcome"] = ("ok" if _res.returncode == 0
+                                                     else f"exit {_res.returncode}")
+                        _call_evidence["exit_code"] = _res.returncode
+                        _call_evidence["elapsed_seconds"] = round(
+                            time.monotonic() - _call_started, 3)
+                        engine_calls.append(_call_evidence)
+                        write_engine_call_evidence(run_dir, engine_call_plan, engine_calls)
                         _attempt_output = ""
                         if batched:
                             _produced = run_dir / "model_output.txt"

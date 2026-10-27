@@ -155,6 +155,59 @@ class TestBatchedCallPlanning(unittest.TestCase):
         budget.plan_calls(2)
         self.assertLessEqual(budget.call_timeout("engine 'pi' batch 1/2", 2), 0.6)
 
+    def test_a_plan_the_ceiling_cannot_fund_reports_both_numbers(self):
+        """agents-zwq8l: starvation must be stated as arithmetic, not discovered as a timeout.
+
+        The reported run planned 14 calls of vuln-verify's declared 15 min against the 45-minute
+        ceiling and was funded 45 min, so each call's allowance was ~193 s (171.693 s once the
+        pre-pass had spent 266 s) - and the station died on batch 1 naming a timeout, never the plan.
+        """
+        clock = FakeClock()
+        budget = StationBudget(15, label="vuln-verify", clock=clock)
+        clock.now = 266.3                       # the pre-pass, before the first call was offered a share
+        funded = budget.plan_calls(14)
+        self.assertEqual(funded, STATION_DEADLINE_CEILING_MINUTES * 60)
+
+        pressure = budget.funding_pressure(14)
+        self.assertIsNotNone(pressure, "14 calls of 15 min cannot fit the 45-minute ceiling")
+        self.assertEqual(pressure["planned_seconds"], 14 * 900.0)
+        self.assertEqual(pressure["funded_seconds"], funded)
+        self.assertAlmostEqual(pressure["per_call_seconds"], funded / 14)
+        self.assertEqual(pressure["calls_funded_at_declared"], 3,
+                         "at the declared 15 min the ceiling funds 3 calls, not the 14 planned")
+        self.assertEqual(pressure["elapsed_at_plan_seconds"], 266.3,
+                         "the share spent before planning is part of the starvation story")
+        self.assertLess(pressure["per_call_seconds"], pressure["declared_seconds"],
+                        "the whole point: a call is funded below what the station declared it needs")
+
+    def test_an_affordable_plan_reports_no_pressure(self):
+        # The other half of the bound. A plan the declaration can pay for must stay silent, or every
+        # ordinary batched station prints a warning and the warning stops meaning anything. Note this
+        # reads the budget WITHOUT calling plan_calls() first: funding_pressure funds the plan itself,
+        # because three calls of a 15-minute declaration judged against the 900 s single-call deadline
+        # look starved when they are affordable.
+        self.assertIsNone(StationBudget(5, clock=FakeClock()).funding_pressure(7))   # 35 min, fits
+        self.assertIsNone(StationBudget(15, clock=FakeClock()).funding_pressure(3))  # 45 min, fits
+
+    def test_pressure_is_exactly_the_case_where_the_ceiling_bound_the_funding(self):
+        # The arithmetic may not drift from the funding it describes: pressure is reported if and only
+        # if plan_calls() had to cap the plan at the ceiling. A disagreement would let this warning
+        # either miss a starved plan or cry starvation over a plan that was paid in full.
+        ceiling = STATION_DEADLINE_CEILING_MINUTES * 60
+        for minutes, calls in ((5, 1), (5, 7), (5, 9), (5, 30), (15, 3), (15, 4), (15, 14),
+                               (30, 1), (30, 2), (90, 3)):
+            budget = StationBudget(minutes, clock=FakeClock())
+            funded = budget.plan_calls(calls)
+            pressure = budget.funding_pressure(calls)
+            planned = minutes * 60 * calls
+            with self.subTest(minutes=minutes, calls=calls):
+                self.assertEqual(pressure is not None, planned > funded,
+                                 f"pressure disagrees with the funding: planned={planned} funded={funded}")
+                if pressure is not None:
+                    self.assertEqual(funded, max(ceiling, minutes * 60),
+                                     "a declaration is not paid in full only because the ceiling caps "
+                                     "it, and a declaration ABOVE the ceiling is honoured as itself")
+
     def test_the_ceiling_stays_inside_the_run_sweep_grace(self):
         """agents-6ep5s: a station deadline must never reach the run-sweep grace.
 
