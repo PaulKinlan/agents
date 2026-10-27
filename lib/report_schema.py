@@ -276,17 +276,42 @@ _CONCURRENCY_PRIMITIVE_PATTERN = re.compile(
 )
 
 # Affirmative recommendation of a concurrency primitive in descriptive text: an imperative or
-# advisory cue directly governing the primitive ("Run asyncio.gather...", "consider using
-# Promise.allSettled..."). Third-person descriptive mentions ("uses Promise.allSettled",
-# "calls Promise.all") do not match: cues are base-form words with a trailing \b, so
-# inflections like "uses"/"calls"/"runs" fail the boundary, and negated cues are excluded.
+# advisory cue governing the primitive ("Run asyncio.gather...", "consider using
+# Promise.allSettled...", "Switch this loop to asyncio.gather", "Wrap the calls in
+# Promise.all", "Fan the requests out via Promise.all"). Third-person descriptive mentions
+# ("uses Promise.allSettled", "calls Promise.all", "wrapped in Promise.all") do not match:
+# cues are base-form words with a trailing \b, so inflections like "uses"/"calls"/"wraps"/
+# "fans" fail the boundary, and negated cues are excluded. Review round 2 (agents-ad7ov):
+# the cue may govern the primitive across up to 3 intervening tokens ("switch THIS LOOP to"),
+# and post-nominal advisory forms ("Promise.all should be used", "is recommended",
+# "would speed this up") are matched by _POSTNOMINAL_ADVISORY_PATTERN below.
 _AFFIRMATIVE_PRIMITIVE_PATTERN = re.compile(
     r"(?<!not\s)(?<!never\s)(?<!don't\s)(?<!avoid\s)"
     r"\b(?:run|use|await|call|dispatch|execute|start|issue|send|prefer|adopt|consider|recommend"
-    r"|suggest|should|could|switch\s+to|convert\s+to|migrate\s+to"
-    r"|replace\s+(?:[a-zA-Z0-9_$.']+\s+){0,3}with)\b"
+    r"|suggest|should|could"
+    r"|switch\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}to"
+    r"|convert\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}to"
+    r"|migrate\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}to"
+    r"|replace\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}with"
+    r"|wrap\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}in"
+    r"|fan\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}out)\b"
     r"(?:\s+[a-zA-Z0-9_$.'\[\](),]+){0,4}"
     r"\s+(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b",
+    re.IGNORECASE
+)
+
+# Post-nominal advisory: the primitive FOLLOWED by advice that it be used or that it would
+# help ("Promise.all should be used for the independent fetches", "Promise.all is recommended
+# for these", "asyncio.gather would speed this up"). Deliberately narrow (agents-ad7ov):
+# bare modals are not enough - the benefit verb must be named - so descriptive hazard prose
+# ("Promise.allSettled could mask failures", "Promise.all may drop errors") does not match,
+# and "should not be used" is excluded by the negation lookahead.
+_POSTNOMINAL_ADVISORY_PATTERN = re.compile(
+    r"\b(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b"
+    r"(?:[,;:]|\s)+"
+    r"(?:should\s+(?!not\b|never\b)(?:\w+\s+){0,2}?(?:be\s+)?(?:used?|adopted?|preferred?|applied?)\b"
+    r"|is\s+(?:recommended|preferred|suggested|advisable)\b"
+    r"|(?:would|could|will|can)\s+(?:\w+\s+){0,2}?(?:speed|accelerate|improve|help|benefit)\b)",
     re.IGNORECASE
 )
 
@@ -383,9 +408,10 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
     if re.search(r"\b(?:unsafe|hazard|race\s+condition|risk|conflict|corrupt|deadlock|defect|flaw)\b", text, re.IGNORECASE):
         return False
-    # An imperative/advisory cue governing the primitive is an affirmative recommendation
-    # ("Run asyncio.gather on background tasks").
-    if _AFFIRMATIVE_PRIMITIVE_PATTERN.search(text):
+    # An imperative/advisory cue governing the primitive - before it ("Run asyncio.gather on
+    # background tasks") or after it ("Promise.all should be used", review round 2,
+    # agents-ad7ov) - is an affirmative recommendation.
+    if _AFFIRMATIVE_PRIMITIVE_PATTERN.search(text) or _POSTNOMINAL_ADVISORY_PATTERN.search(text):
         return True
     # A bare primitive mention in descriptive prose ("the batch processor uses
     # Promise.allSettled to fan out requests") cites existing code; it recommends nothing

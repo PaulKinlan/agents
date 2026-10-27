@@ -299,6 +299,35 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     "description": description,
                 }))
 
+        # Review round 2 (agents-ad7ov): advisory phrasings that govern the primitive
+        # non-adjacently or AFTER it are genuine recommendations and must not be lost.
+        for description in (
+            "Promise.all should be used for the independent fetches",
+            "Promise.all is recommended for these independent fetches",
+            "asyncio.gather would speed this up",
+            "Switch this loop to asyncio.gather",
+            "Wrap the calls in Promise.all to overlap them",
+            "Fan the requests out via Promise.all",
+        ):
+            with self.subTest(description=description):
+                self.assertTrue(is_concurrency_recommendation({
+                    "rule_id": "custom-rule",
+                    "description": description,
+                }))
+
+        # Post-nominal advisory stays narrow: bare modals describing hazards, and negated
+        # advice, are not recommendations.
+        for description in (
+            "Promise.allSettled could mask failures in the batch processor",
+            "Promise.all may drop errors when a request fails",
+            "Promise.all should not be used here; the backend is order-sensitive",
+        ):
+            with self.subTest(description=description):
+                self.assertFalse(is_concurrency_recommendation({
+                    "rule_id": "custom-rule",
+                    "description": description,
+                }))
+
         # Directive phrasing without a primitive still matches in the fallback.
         self.assertTrue(is_concurrency_recommendation({
             "rule_id": "custom-rule",
