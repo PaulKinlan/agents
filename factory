@@ -2329,19 +2329,39 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             budget.plan_calls(len(prompts) + len(batch_retries) + 1)
                         _call_label = (_batch_label if _attempt == 1
                                        else f"{_batch_label} retry {_attempt - 1}")
-                        _res = run_station_command(
-                            adapter_cmd, budget, _call_label,
-                            # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
-                            # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
-                            # with them the station. Each call gets its own allowance (the declaration,
-                            # reduced to a fair share when the ceiling or a slow earlier call leaves less),
-                            # and the last one leaves the findings dispatch its reserve.
-                            timeout_seconds=(budget.call_timeout(_call_label, len(prompts) - _batch_index)
-                                             if batched else None),
-                            input=_batch_prompt, capture_output=True, text=True,
-                            check=False, env=adapter_env,
-                            on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
-                                      if broker is not None else None))
+                        _batch_timeout: Optional[str] = None
+                        try:
+                            _res = run_station_command(
+                                adapter_cmd, budget, _call_label,
+                                # agents-xm2xc: a batch is not entitled to the whole remaining deadline. One
+                                # hung batch that did so was how a 7-call station lost batches 6 and 7 - and
+                                # with them the station. Each call gets its own allowance (the declaration,
+                                # reduced to a fair share when the ceiling or a slow earlier call leaves less),
+                                # and the last one leaves the findings dispatch its reserve.
+                                timeout_seconds=(budget.call_timeout(_call_label, len(prompts) - _batch_index)
+                                                 if batched else None),
+                                input=_batch_prompt, capture_output=True, text=True,
+                                check=False, env=adapter_env,
+                                on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
+                                          if broker is not None else None))
+                        except StationTimeout as _expiry:
+                            # agents-5eq13: a BATCH that exhausted its own per-call allowance is that
+                            # batch's transient failure, not the station's death. The raise used to fly
+                            # past the agents-h53yp batch-retry machinery, so one timed-out batch
+                            # (docs-drift batch 6/7 in the paul-kinlan-me audit, log:398) turned the
+                            # WHOLE station into a TIMEOUT and discarded every batch that had already
+                            # answered - the exact loss agents-h53yp fixed for exit-1-no-output. The
+                            # killed call left no answer, which is the same transient shape, so it is
+                            # synthesized here (rc 124, the timeout-kill convention) and the machinery
+                            # below decides the ONE bounded retry. A timed-out batch that must not (or
+                            # cannot) retry re-raises its own StationTimeout further down, so the
+                            # station still fails ON the hung call, named, with the batch number.
+                            # Single-call stations keep the station-level semantics untouched: their
+                            # bounded retry lives in run_station_with_repair_retry.
+                            if not batched:
+                                raise
+                            _batch_timeout = str(_expiry)
+                            _res = subprocess.CompletedProcess(adapter_cmd, 124, "", _batch_timeout)
                         _attempt_output = ""
                         if batched:
                             _produced = run_dir / "model_output.txt"
@@ -2381,6 +2401,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                         if _refusal is not None:
                             print(f"  ⚠️ [batch-retry] batch {_batch_index + 1}/{len(prompts)} exited "
                                   f"{_res.returncode}; NOT retried: {_refusal}")
+                            if _batch_timeout is not None:
+                                # agents-5eq13: a timed-out batch that gets no retry stays the station's
+                                # TIMEOUT - raised with its own message, so the failure names the batch
+                                # and its allowance exactly as the single-attempt path always did
+                                # (pinned by test_one_hung_batch_cannot_spend_the_whole_funded_deadline).
+                                raise StationTimeout(_batch_timeout)
                             break
                         print(f"  🔁 [batch-retry] batch {_batch_index + 1}/{len(prompts)} exited "
                               f"{_res.returncode} with no output; retrying it once "
