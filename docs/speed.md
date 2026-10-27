@@ -13,16 +13,16 @@ constants in §1 are the part that is enforced, and they are pinned against the 
 ## 1. The numbers, as enforced by the code
 
 ```text
-FULL_GATE_BUDGET_S=300
-FULL_GATE_MODULE_TIMEOUT_S=600
+FULL_GATE_BUDGET_S=3300
+FULL_GATE_MODULE_TIMEOUT_S=1500
 CHECK_TIMEOUT=3600
 CHECK_FAST_TIMEOUT=2400
 ```
 
 | Constant | Default | Declared in | Enforced by |
 |---|---|---|---|
-| `FULL_GATE_BUDGET_S` | 300 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the gate itself, against its own elapsed wall |
-| `FULL_GATE_MODULE_TIMEOUT_S` | 600 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the per-module subprocess bound |
+| `FULL_GATE_BUDGET_S` | 3300 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the gate itself, against its own elapsed wall (derived from the measured cost table, kept under `CHECK_TIMEOUT`) |
+| `FULL_GATE_MODULE_TIMEOUT_S` | 1500 | `tools/full-gate.sh` (`positive_int`, env-overridable) | the per-module subprocess bound (slowest legitimate module measured: 1206.3s) |
 | `CHECK_TIMEOUT` | 3600 | `tools/check.conf` | the fleet runner's hard bound (outside this repo); must exceed `CHECK_FAST_TIMEOUT` |
 | `CHECK_FAST_TIMEOUT` | 2400 | `tools/check.conf` | the same runner's bound for `tools/fast-gate.sh` (a registry-touching fast gate runs the 1206.3s mapping validator) |
 

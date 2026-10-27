@@ -161,16 +161,19 @@ def run_module(module):
         child_env = dict(os.environ, FULL_GATE_SHARD_CHILD="1")
         result = subprocess.run([sys.executable, "-u", "-m", "unittest", module, "-v"],
                                 env=child_env, capture_output=True, text=True, errors="replace",
-                                # 600, not 240: this default is what EXTERNAL CI sees, because the
-                                # host's per-VM env override (FULL_GATE_MODULE_TIMEOUT_S in \
-                                # ~/.fleet/check.conf) does not exist there. At 240 a module holding a
-                                # COLD Dolt bootstrap is killed mid-bootstrap and reports no verdict at
-                                # all - tests.test_bd_json_contract measured 268.3s on 2026-10-27 with
-                                # ~100s of that being `bd init` building a Dolt DB from nothing, which
-                                # is work, not a hang. 600 keeps 2.2x headroom over the slowest module
-                                # that is legitimately slow for this reason; genuinely runaway modules
-                                # are still bounded, and FULL_GATE_BUDGET_S remains the outer ceiling.
-                                timeout=positive_int("FULL_GATE_MODULE_TIMEOUT_S", 600),
+                                # 1500, not 240 and not 600. This default is what EXTERNAL CI sees,
+                                # because the host's per-VM env override does not exist there, so it
+                                # must cover the SLOWEST module that is legitimately slow. 240 and 600
+                                # both failed that test the same way: a module killed at the bound
+                                # reports NO verdict at all (exit 2, "unknown"), so the gate looks
+                                # unlucky rather than red and the real cause stays hidden.
+                                # Measured 2026-10-27: tests.test_fast_gate_mapping 1206.3s standalone
+                                # (105 tests, exit 0) and tests.test_bd_json_contract 268.3s with ~100s
+                                # of it `bd init` building a Dolt DB from nothing (work, not a hang).
+                                # 1500 covers the slowest with 24% headroom. The 600 was rejected by
+                                # review for exactly this reason and review was right: it was sized on
+                                # the bd-init module and left a 1206s module unwinnable.
+                                timeout=positive_int("FULL_GATE_MODULE_TIMEOUT_S", 1500),
                                 check=False)
         output = result.stdout + result.stderr
         rc = result.returncode
@@ -277,7 +280,15 @@ def main():
     started = time.monotonic()
     expected = discover()
     workers = positive_int("FULL_GATE_SHARDS", min(4, os.cpu_count() or 1))
-    budget = positive_int("FULL_GATE_BUDGET_S", 300)
+    # 3300, not 300. The 300 was measured-appropriate when chosen - docs/speed.md §2 records the whole
+    # 102-module gate at wall=140.959s on 2026-10-15 - but the suite is now ~20x that cost: the fleet's
+    # cost table (2026-10-27) sums 12759s of module time across 106 modules after the three reductions in
+    # agents-z3cp5, which is ~3200s of wall at four shards. A 300s budget therefore marks every honest
+    # CI run "over budget" (exit 3) and tells the operator to wait for a quieter box that cannot exist.
+    # 3300 sits just under CHECK_TIMEOUT=3600 on purpose: the runner's hard bound must not pre-empt the
+    # gate's own verdict, or the run reports a timeout instead of the "over budget" fact that is true.
+    # A DERIVATION, NOT A MEASURED FULL-GATE WALL - that measurement is still missing and this says so.
+    budget = positive_int("FULL_GATE_BUDGET_S", 3300)
     cost_path = Path(os.environ.get("FLEET_CHECKS_DIR", str(Path.home() / ".fleet/checks"))) / "full-gate-module-costs.json"
     lanes = shard_order(expected, costs_at(cost_path, expected), workers)
     order = [module for lane in lanes for module in lane]
