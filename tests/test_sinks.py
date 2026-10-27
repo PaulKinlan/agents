@@ -850,10 +850,6 @@ class TestTheFixtureSimulatesAPostRatherThanDeliveringOne(SinkFixture, unittest.
         self.assertIn(REPO, allowed.stdout)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTheCliGuardIsOneNumber(unittest.TestCase):
     """agents-0qyjo: this file carried THREE bounds (10s, 20s, 60s) for the same factory CLI, and the
     tightest one reddened a full gate on a merely-busy box. The bound is now one constant, so lowering it
@@ -880,3 +876,7 @@ class TestTheCliGuardIsOneNumber(unittest.TestCase):
     def test_the_measured_worst_is_at_least_the_quietest_observation(self):
         """The 2.7s recorded when the 20s bound was written was a quiet-box figure, not a bound basis."""
         self.assertGreater(_WORST_MEASURED_CLI_S, 2.7)
+
+if __name__ == "__main__":
+    unittest.main()
+
