@@ -315,6 +315,21 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     "description": description,
                 }))
 
+        # Review round 3 (agents-m6hwd): plain advisory phrasings whose weak cue is preceded
+        # by the infinitival 'to' or by 'please' were True on the merge base and every prior
+        # tip; the clause-position rule must not lose them.
+        for description in (
+            "It is better to use Promise.all for the independent fetches",
+            "Better to run these with Promise.all",
+            "Please use Promise.all for these calls",
+            "You'll want to await Promise.all here",
+        ):
+            with self.subTest(description=description):
+                self.assertTrue(is_concurrency_recommendation({
+                    "rule_id": "custom-rule",
+                    "description": description,
+                }))
+
         # Post-nominal advisory stays narrow: bare modals describing hazards, and negated
         # advice, are not recommendations.
         for description in (

@@ -323,7 +323,14 @@ _ADVISORY_PRECEDERS = frozenset("""
     consider considers considered prefer prefers preferred
     advise advises advised try
     then and or also instead next finally
+    to please
 """.split())
+# 'to' covers the infinitival advisory (agents-m6hwd round-3 review): 'It is better TO use
+# Promise.all', 'Better TO run these with Promise.all', 'You'll want TO await Promise.all here'
+# - all True on the merge base and every prior tip. The nominal complements stay rejected by the
+# following-word check above ('a call TO x', 'the use OF x' match the complement regex first),
+# so 'to' as a PRECEDER only ever sees infinitives, not nominals. 'please' likewise ('Please use
+# Promise.all for these calls').
 
 
 def _weak_cue_is_advisory(text: str, match: "re.Match") -> bool:
