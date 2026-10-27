@@ -2438,6 +2438,10 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                       f"{_refund_calls} call(s) now)")
                         _call_label = (_batch_label if _attempt == 1
                                        else f"{_batch_label} retry {_attempt - 1}")
+                        # agents-5eq13: set when THIS batch's own allowance expired (as opposed to a
+                        # call that exited non-zero); the retry machinery below decides whether the
+                        # expiry gets the one bounded retry.
+                        _batch_timeout: Optional[str] = None
                         _call_prompt = _batch_prompt
                         if _attempt > 1 and _last_parse_failure:
                             _call_prompt += ("\n\nYour previous answer for THIS batch was rejected: "
@@ -2481,15 +2485,32 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                                 check=False, env=adapter_env,
                                 on_spawn=((lambda proc: broker.restrict_peer_root(proc.pid))
                                           if broker is not None else None))
-                        except StationTimeout:
-                            # Written BEFORE the re-raise: the aborted call is the evidence the bead
-                            # needs, and the station's own timeout path discards the loop's state.
-                            _call_evidence["outcome"] = "timeout"
-                            _call_evidence["elapsed_seconds"] = round(
-                                time.monotonic() - _call_started, 3)
-                            engine_calls.append(_call_evidence)
-                            write_engine_call_evidence(run_dir, engine_call_plan, engine_calls)
-                            raise
+                        except StationTimeout as _expiry:
+                            if not batched:
+                                # Written BEFORE the re-raise: the aborted call is the evidence the
+                                # bead needs, and the station's own timeout path discards the loop's
+                                # state. A single-call station keeps the station-level semantics
+                                # untouched: its bounded retry lives in
+                                # run_station_with_repair_retry.
+                                _call_evidence["outcome"] = "timeout"
+                                _call_evidence["elapsed_seconds"] = round(
+                                    time.monotonic() - _call_started, 3)
+                                engine_calls.append(_call_evidence)
+                                write_engine_call_evidence(run_dir, engine_call_plan, engine_calls)
+                                raise
+                            # agents-5eq13: a BATCH that exhausted its own per-call allowance is that
+                            # batch's transient failure, not the station's death. The raise used to fly
+                            # past the agents-h53yp batch-retry machinery, so one timed-out batch
+                            # (docs-drift batch 6/7 in the paul-kinlan-me audit, log:398) turned the
+                            # WHOLE station into a TIMEOUT and discarded every batch that had already
+                            # answered - the exact loss agents-h53yp fixed for exit-1-no-output. The
+                            # killed call left no answer, which is the same transient shape, so it is
+                            # synthesized here (rc 124, the timeout-kill convention) and the machinery
+                            # below decides the ONE bounded retry. A timed-out batch that must not (or
+                            # cannot) retry re-raises its own StationTimeout further down, so the
+                            # station still fails ON the hung call, named, with the batch number.
+                            _batch_timeout = str(_expiry)
+                            _res = subprocess.CompletedProcess(adapter_cmd, 124, "", _batch_timeout)
                         _call_evidence["outcome"] = ("ok" if _res.returncode == 0
                                                      else f"exit {_res.returncode}")
                         _call_evidence["exit_code"] = _res.returncode
@@ -2574,6 +2595,12 @@ def run_agent(agent_name: str, target_arg: str, engine_arg: str = "auto", explic
                             print(f"  ⚠️ [batch-retry] batch {_batch_index + 1}/{len(prompts)} "
                                   f"{'failed JSON/schema validation' if _parse_failure else f'exited {_res.returncode}'}; "
                                   f"NOT retried: {_refusal}")
+                            if _batch_timeout is not None:
+                                # agents-5eq13: a timed-out batch that gets no retry stays the station's
+                                # TIMEOUT - raised with its own message, so the failure names the batch
+                                # and its allowance exactly as the single-attempt path always did
+                                # (pinned by test_one_hung_batch_cannot_spend_the_whole_funded_deadline).
+                                raise StationTimeout(_batch_timeout)
                             break
                         print(f"  🔁 [batch-retry] batch {_batch_index + 1}/{len(prompts)} "
                               f"{'failed JSON/schema validation' if _parse_failure else f'exited {_res.returncode} with no output'}; "
