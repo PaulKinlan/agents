@@ -677,14 +677,15 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     pip_audit_bin = shutil.which("pip-audit")
     if pip_audit_bin:
         cmd = [pip_audit_bin, "-r", str(req_path), "--format", "json"]
+        pip_audit_data = None
         try:
             # Bounded (agents-09kp3): same pathology as npm audit - a network audit command
             # without an inner timeout can consume the whole 5-minute station budget.
             res = subprocess.run(cmd, cwd=str(target_dir), capture_output=True, text=True, check=False,
                                  timeout=PIP_AUDIT_TIMEOUT_SECONDS)
             if res.stdout.strip():
-                data = json.loads(res.stdout)
-                for item in data.get("dependencies", []):
+                pip_audit_data = json.loads(res.stdout)
+                for item in pip_audit_data.get("dependencies", []):
                     for vuln in item.get("vulns", []):
                         candidates.append({
                             "type": "vulnerability",
@@ -707,8 +708,28 @@ def audit_python(target_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
             sys.stderr.write(
                 f"Warning: pip-audit timed out after {PIP_AUDIT_TIMEOUT_SECONDS}s "
                 "(index slow or unreachable); Python vulnerability coverage is incomplete\n")
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write(f"Warning: pip-audit produced no usable result: {e}\n")
+        if pip_audit_data is None:
+            # agents-38jzy: mirror the npm path (agents-2x6). A pip-audit that timed out,
+            # crashed, or answered with unparseable output used to leave NOTHING in the
+            # station record - a Python-only target whose audit hung reported a clean scan
+            # with zero Python vulnerability coverage. Surface the gap as a candidate so the
+            # model must report the limitation instead of silence.
+            candidates.append({
+                "type": "coverage-gap",
+                "rule_id": "pip-audit-unavailable",
+                "severity": "low",
+                "title": "Python dependency audit could not run; vulnerability coverage is incomplete",
+                "description": ("`pip-audit` produced no usable result (it timed out, failed, or its "
+                                "output was unparseable). Its index may be unreachable from this "
+                                "run's egress allowlist. No Python vulnerability data was collected "
+                                "for this target."),
+                "path": "requirements.txt",
+                "remediation": ("Run `pip-audit` where its index is reachable, or extend the "
+                                "station's egress allowlist declaration with the index host and "
+                                "re-run."),
+            })
 
     # Check for requirements vs shipped artifact divergence (agents-gtq)
     req_versions = get_python_requirements_versions(target_dir)

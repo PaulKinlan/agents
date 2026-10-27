@@ -490,14 +490,22 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
             "dependencies": {"left-pad": "1.0.0"},
         }), encoding="utf-8")
 
-    def test_bounds_exist_and_fit_the_five_minute_station(self):
+    def test_bounds_exist_and_fit_the_declared_station_budget(self):
+        # agents-kwnf0: read the declaration this bound must fit, never restate it - a
+        # hardcoded 5*60 stays green if agent.yaml is lowered and the inner bounds stop
+        # fitting the real station budget.
+        import sys
+        sys.path.insert(0, str(ROOT))
+        from lib.yaml_mini import load_yaml
+        cfg = load_yaml(ROOT / "agents" / "deps-supply-chain" / "agent.yaml")
+        declared_seconds = float(cfg["budget"]["max_minutes"]) * 60
         self.assertGreater(audit_deps.NPM_AUDIT_TIMEOUT_SECONDS, 0)
         self.assertGreater(audit_deps.PIP_AUDIT_TIMEOUT_SECONDS, 0)
-        # Worst case (polyglot target running BOTH audits) must stay inside the station's
-        # 5-minute budget, leaving headroom for the engine and findings dispatch.
+        # Worst case (polyglot target running BOTH audits) must stay inside the declared
+        # station budget, which the pre-pass shares with the engine and findings dispatch.
         self.assertLess(
             audit_deps.NPM_AUDIT_TIMEOUT_SECONDS + audit_deps.PIP_AUDIT_TIMEOUT_SECONDS,
-            5 * 60,
+            declared_seconds,
         )
 
     def test_npm_audit_subprocess_carries_the_inner_timeout(self):
@@ -518,9 +526,15 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
             self.assertEqual(audit_calls[0][1].get("timeout"), audit_deps.NPM_AUDIT_TIMEOUT_SECONDS)
 
     def test_npm_audit_timeout_degrades_to_coverage_gap_not_station_death(self):
-        """Load-bearing: remove `timeout=` from the npm audit subprocess.run (or let
-        TimeoutExpired propagate) and this test fails - the pre-pass must survive the
-        expiry and surface the npm-audit-unavailable coverage-gap candidate."""
+        """Load-bearing (agents-kwnf0: mutations measured, not claimed). Deleting the
+        coverage-gap candidate (`if not raw_audit ...` -> `if False:`) or deleting the
+        exception handling around the npm audit call so the expiry propagates both fail
+        this test (mutation-drilled: 2 errors / TimeoutExpired raised). Deleting ONLY the
+        `except subprocess.TimeoutExpired` handler is an EQUIVALENT mutant - the generic
+        handler below reaches the same gap path with a different warning - and deleting
+        the `timeout=` argument is detected by the sibling
+        test_npm_audit_subprocess_carries_the_inner_timeout (kwargs['timeout'] is None),
+        not here: this test's fake raises the expiry unconditionally."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             self._write_package_json(repo)
@@ -557,7 +571,9 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
             self.assertEqual(len(seen), 1)
             self.assertEqual(seen[0][1].get("timeout"), audit_deps.PIP_AUDIT_TIMEOUT_SECONDS)
 
-    def test_pip_audit_timeout_does_not_raise(self):
+    def test_pip_audit_timeout_does_not_raise_and_emits_coverage_gap(self):
+        # agents-38jzy: a timed-out pip-audit must not read as a clean scan - the station
+        # record carries a pip-audit-unavailable coverage-gap candidate, mirroring npm.
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             (repo / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
@@ -573,7 +589,56 @@ class TestExternalAuditInnerTimeouts(unittest.TestCase):
             with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
                  mock.patch.object(audit_deps.subprocess, "run", side_effect=timeout_run):
                 candidates, _ = audit_deps.audit_python(repo)  # must not raise
-            self.assertIsInstance(candidates, list)
+            self.assertIn(
+                "pip-audit-unavailable",
+                [c.get("rule_id") for c in candidates],
+            )
+
+    def test_pip_audit_unparseable_output_emits_coverage_gap(self):
+        # agents-38jzy: the sibling silence - pip-audit ran but answered with something
+        # that is not JSON. That is no result, so it is a coverage gap, not a clean scan.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+            def garbage_run(cmd, **kwargs):
+                return subprocess.CompletedProcess(cmd, 0, stdout="rate limited; try later", stderr="")
+
+            real_which = shutil.which
+
+            def fake_which(name, *args, **kwargs):
+                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
+
+            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=garbage_run):
+                candidates, _ = audit_deps.audit_python(repo)
+            self.assertIn(
+                "pip-audit-unavailable",
+                [c.get("rule_id") for c in candidates],
+            )
+
+    def test_pip_audit_success_emits_no_coverage_gap(self):
+        # The gap candidate must not fire when pip-audit answered with usable JSON.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "requirements.txt").write_text("requests==2.0.0\n", encoding="utf-8")
+
+            def ok_run(cmd, **kwargs):
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=json.dumps({"dependencies": []}), stderr="")
+
+            real_which = shutil.which
+
+            def fake_which(name, *args, **kwargs):
+                return "/fake/pip-audit" if name == "pip-audit" else real_which(name, *args, **kwargs)
+
+            with mock.patch.object(audit_deps.shutil, "which", side_effect=fake_which), \
+                 mock.patch.object(audit_deps.subprocess, "run", side_effect=ok_run):
+                candidates, _ = audit_deps.audit_python(repo)
+            self.assertNotIn(
+                "pip-audit-unavailable",
+                [c.get("rule_id") for c in candidates],
+            )
 
 
 if __name__ == "__main__":
