@@ -27,9 +27,11 @@ triaged nothing at all, and the run is read as INCOMPLETE (agents-f8dj; the shap
 `candidate_id`, copied verbatim from the pre-pass candidate it answers. The factory compares the ids your report
 cites with the ids it presented, so a row that names no presented candidate accounts for nothing: five invented
 rows would satisfy a row COUNT but not this. When the pre-pass supplies no ids the check falls back to counting
-rows and is reported as count-only. Docs-drift's current pre-pass always stamps ids and its schema
-requires one on every finding row. A legacy no-id pre-pass cannot produce valid findings under this
-contract: return `findings: []` with a summary explaining the incomplete run rather than inventing ids.
+rows and is reported as count-only. Docs-drift's current pre-pass always stamps ids, so every row you emit
+should carry one. If you omit it the factory repairs what it can: a row whose own `path` (and `line_number`)
+names exactly one presented candidate is given that candidate's id, and only a row that cannot be matched that
+way is refused and leaves the station INCOMPLETE (agents-op02b). Do not rely on the repair - citing the id you
+read from `Scanner Data` is always cheaper and always unambiguous, and never invent an id to fill the gap.
 Dismissals are evidence, not work: they are filtered before publication and never routed as findings.
 `drift_count` counts CONFIRMED drift only; a dismissal must not inflate it.
 

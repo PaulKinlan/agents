@@ -259,7 +259,15 @@ class TestDeclaredSchema(unittest.TestCase):
 
 
 class TestDocsDriftCandidateIdentityContract(unittest.TestCase):
-    """agents-fmakh: the schema arm must reject missing ids before accounting sees the report."""
+    """agents-0ydyn: the schema arm must let an omitted id through to the LOCATION REPAIR, not reject it first.
+
+    agents-fmakh made `candidate_id` required when accounting could only read ids the model had typed. That
+    requirement then became the bug: validate_agent_report runs inside parse_station_report (factory:~1043),
+    while repair_report_candidate_ids runs on what parse_station_report RETURNS (factory:~2727), so a row that
+    named its candidate only by path+line was rejected - with the whole report and the whole run - before
+    agents-op02b's repair could bind it. What is pinned here is the ORDER: the omission validates, the repair
+    binds, and a blank/null id still never counts as a citation.
+    """
 
     def setUp(self):
         self.agent_dir = FACTORY_ROOT / "agents" / "docs-drift"
@@ -269,16 +277,36 @@ class TestDocsDriftCandidateIdentityContract(unittest.TestCase):
                         "snippet": "[missing](gone.md)", "severity": "medium",
                         "title": "Broken link", "description": "The link is missing"}
 
-    def test_missing_or_blank_id_is_rejected_and_named_in_prompt(self):
+    def test_an_omitted_id_reaches_the_repair_and_the_prompt_still_declares_it(self):
         report = {"findings": [dict(self.finding)]}
-        self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, report),
-                         ["$.findings[0]: missing required property 'candidate_id'"])
+        self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, report), [],
+                         "a row the location repair can bind must not be rejected at parse time")
+        # The field is still DECLARED, which is what carries it into the prompt (the schema is embedded
+        # there), and the contract says why it is optional rather than silently dropping the rule.
+        note = required_fields_note(self.schema)
+        self.assertNotIn("`candidate_id`", note.split("Each entry in `findings` MUST include:", 1)[1],
+                         "a required id is rejected before the repair can fill it in")
+        prompt = output_contract_prompt(self.schema)
+        self.assertIn('"candidate_id"', prompt, "the declared field is what carries it into the prompt")
+        self.assertIn("agents-op02b", prompt, "the contract must name the repair it relies on")
+        self.assertIn(note.strip(), prompt)
+        # And a blank id is still not a citation: it never validates, so it can never be read as one.
         report["findings"][0]["candidate_id"] = ""
         self.assertTrue(any("candidate_id" in error for error in
                             validate_agent_report(self.agent_dir, self.cfg, report)))
-        note = required_fields_note(self.schema)
-        self.assertIn("`candidate_id`", note.split("Each entry in `findings` MUST include:", 1)[1])
-        self.assertIn(note.strip(), output_contract_prompt(self.schema))
+
+    def test_the_repair_binds_the_row_the_validator_let_through(self):
+        """Both halves of agents-0ydyn, on the real schema and the real repair: validate, then bind."""
+        from lib.findings import repair_cited_candidate_ids
+        report = {"findings": [dict(self.finding, line_number=7)]}
+        self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, report), [])
+        locations = {"cand-plan-1": {"path": "docs/PLAN.md", "line": 7},
+                     "cand-plan-2": {"path": "docs/PLAN.md", "line": 40}}
+        repairs = repair_cited_candidate_ids(report["findings"], list(locations),
+                                             candidate_locations=locations)
+        self.assertEqual(report["findings"][0]["candidate_id"], "cand-plan-1",
+                         "the row must keep the candidate its own path+line names")
+        self.assertEqual([record["rule"] for record in repairs], ["path+line"])
 
     def test_normalization_keeps_the_citation_and_dismissals_still_validate(self):
         row = dict(self.finding, candidate_id="0123456789abcdef", remediation=None,
@@ -290,11 +318,16 @@ class TestDocsDriftCandidateIdentityContract(unittest.TestCase):
         self.assertTrue(any("remediation null -> omitted" in note for note in notes))
         self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, report), [])
         self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, {"findings": []}), [])
-        row["candidate_id"] = None
-        normalize_report(report, self.schema)
-        self.assertIsNone(row["candidate_id"], "a required null id must not be silently omitted")
-        self.assertTrue(any("candidate_id" in error for error in
-                            validate_agent_report(self.agent_dir, self.cfg, report)))
+
+    def test_a_null_id_is_normalised_away_rather_than_kept_as_a_fake_citation(self):
+        row = dict(self.finding, candidate_id=None)
+        report = {"findings": [row]}
+        notes = normalize_report(report, self.schema)
+        self.assertNotIn("candidate_id", row, "a null id is not a citation; it must not reach the schema")
+        self.assertTrue(any("candidate_id null -> omitted" in note for note in notes), notes)
+        self.assertEqual(validate_agent_report(self.agent_dir, self.cfg, report), [],
+                         "an omitted id is the location repair's job, not a rejection")
+
 
 
 @unittest.skipUnless(sandbox_available(), "needs a host where bubblewrap actually runs")
