@@ -813,7 +813,7 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
     HOME, which proves the detector works without this suite reading the operator's file. Any caller
     that wants to inspect the live VM - provisioning, a fleet-side check, a lane that suspects its own
     gate - can run the mode directly. Measured motivation: on this VM the deployed copy predated the
-    tracked file (no summary/tee wrapper in CHECK_CMD, CHECK_FAST_TIMEOUT 360 against the tracked 180)
+    tracked file (no summary/tee wrapper in CHECK_CMD, and a CHECK_FAST_TIMEOUT that predated the tracked one)
     and nothing reported it.
     """
 
@@ -843,14 +843,24 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
         # 3. ONE KEY DIVERGES, which is exactly the drift measured on this VM: the key is named, both
         #    values are shown, and the repair is stated - a failure message that teaches.
         text = conf.read_text(encoding="utf-8")
-        self.assertIn("CHECK_FAST_TIMEOUT=180", text, "the tracked value this case mutates away")
-        conf.write_text(text.replace("CHECK_FAST_TIMEOUT=180", "CHECK_FAST_TIMEOUT=360"),
+        # READ THE TRACKED VALUE, do not pin a literal. This case is about DRIFT DETECTION, not about which
+        # number happens to be tracked, and a hardcoded "180" made every future bound change red for a
+        # reason that has nothing to do with what the case proves: agents-g4cq9 moved the bound to 2400
+        # (measured, see tools/check.conf) and this line was the only thing in the whole gate that broke.
+        # Deriving both values keeps the assertion exact - the key, BOTH values and the repair are still
+        # required in the message - while the case stops being a secret second pin on the config.
+        tracked_value = re.search(r"^CHECK_FAST_TIMEOUT=(\d+)$", text, re.MULTILINE).group(1)
+        drifted_value = str(int(tracked_value) + 180)
+        self.assertIn(f"CHECK_FAST_TIMEOUT={tracked_value}", text,
+                      "the tracked value this case mutates away")
+        conf.write_text(text.replace(f"CHECK_FAST_TIMEOUT={tracked_value}",
+                                     f"CHECK_FAST_TIMEOUT={drifted_value}"),
                         encoding="utf-8")
         r = self._run("--check", home=home)
         self.assertEqual(r.returncode, 1, r.stderr[:300])
         self.assertIn("CHECK_FAST_TIMEOUT", r.stderr)
-        self.assertIn("180", r.stderr)
-        self.assertIn("360", r.stderr)
+        self.assertIn(tracked_value, r.stderr)
+        self.assertIn(drifted_value, r.stderr)
         self.assertIn("--install", r.stderr, "the drift message must name the repair")
 
         # 4. A MALFORMED COPY IS DRIFT, NOT A CRASH: --check must not source the file it is judging.
@@ -883,8 +893,13 @@ class TestThePerVmConfigCanBeCheckedForDrift(unittest.TestCase):
         #    run): one line naming the keys, the same exit code, and none of the verbose report - a
         #    warning that is eight lines long on every gate is one people learn to scroll past.
         self.assertEqual(self._run("--install", home=home).returncode, 0)
-        conf.write_text(conf.read_text(encoding="utf-8").replace("CHECK_TIMEOUT=2400",
-                                                                 "CHECK_TIMEOUT=99"),
+        installed = conf.read_text(encoding="utf-8")
+        # DERIVED for the same reason as case 3: a literal tracked value here does not merely go stale, it
+        # makes the replace a NO-OP, so the copy stays in sync and the case then asserts drift that never
+        # happened - a green-looking test that proves nothing. agents-g4cq9 moved CHECK_TIMEOUT to 3600 and
+        # this line was the second of two secret pins on the config's numbers.
+        tracked_timeout = re.search(r"^CHECK_TIMEOUT=(\d+)$", installed, re.MULTILINE).group(1)
+        conf.write_text(installed.replace(f"CHECK_TIMEOUT={tracked_timeout}", "CHECK_TIMEOUT=99"),
                         encoding="utf-8")
         r = self._run("--check", "--quiet", home=home)
         self.assertEqual(r.returncode, 1, r.stderr[:300])
