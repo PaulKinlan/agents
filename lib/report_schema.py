@@ -266,6 +266,30 @@ _NEGATION_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Bare concurrency-primitive mention. In descriptive text (title/description) this alone is
+# NOT a recommendation: defect reports legitimately cite e.g. Promise.allSettled as the code
+# under discussion (agents-m6hwd). In remediation text or added diff lines the primitive stays
+# recommendation-bearing and is matched by _EXECUTION_CONCURRENCY_PATTERN as before.
+_CONCURRENCY_PRIMITIVE_PATTERN = re.compile(
+    r"\b(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b",
+    re.IGNORECASE
+)
+
+# Affirmative recommendation of a concurrency primitive in descriptive text: an imperative or
+# advisory cue directly governing the primitive ("Run asyncio.gather...", "consider using
+# Promise.allSettled..."). Third-person descriptive mentions ("uses Promise.allSettled",
+# "calls Promise.all") do not match: cues are base-form words with a trailing \b, so
+# inflections like "uses"/"calls"/"runs" fail the boundary, and negated cues are excluded.
+_AFFIRMATIVE_PRIMITIVE_PATTERN = re.compile(
+    r"(?<!not\s)(?<!never\s)(?<!don't\s)(?<!avoid\s)"
+    r"\b(?:run|use|await|call|dispatch|execute|start|issue|send|prefer|adopt|consider|recommend"
+    r"|suggest|should|could|switch\s+to|convert\s+to|migrate\s+to"
+    r"|replace\s+(?:[a-zA-Z0-9_$.']+\s+){0,3}with)\b"
+    r"(?:\s+[a-zA-Z0-9_$.'\[\](),]+){0,4}"
+    r"\s+(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b",
+    re.IGNORECASE
+)
+
 
 _STOP_CONCURRENCY_PATTERN = re.compile(
     r"\b(?:stop|avoid|discontinue|eliminate|prevent|cease|replac(?:e|ing)|remov(?:e|ing)|switch(?:ing)?\s+from|do\s+not|don't|never)\s+"
@@ -359,7 +383,17 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
     if re.search(r"\b(?:unsafe|hazard|race\s+condition|risk|conflict|corrupt|deadlock|defect|flaw)\b", text, re.IGNORECASE):
         return False
-    return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text))
+    # An imperative/advisory cue governing the primitive is an affirmative recommendation
+    # ("Run asyncio.gather on background tasks").
+    if _AFFIRMATIVE_PRIMITIVE_PATTERN.search(text):
+        return True
+    # A bare primitive mention in descriptive prose ("the batch processor uses
+    # Promise.allSettled to fan out requests") cites existing code; it recommends nothing
+    # and must not be rejected as an unpreconditioned concurrency recommendation
+    # (agents-m6hwd). Strip those mentions and keep matching directive phrasing
+    # ("run concurrently", "parallel execution", worker pools) in what remains.
+    text_without_primitives = _CONCURRENCY_PRIMITIVE_PATTERN.sub(" ", text)
+    return bool(_EXECUTION_CONCURRENCY_PATTERN.search(text_without_primitives))
 
 
 # Domains and primitives where concurrency is often non-reentrant or stateful

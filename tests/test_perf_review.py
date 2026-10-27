@@ -253,6 +253,58 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
         }
         self.assertTrue(is_concurrency_recommendation(f10))
 
+    def test_descriptive_primitive_mention_is_not_a_recommendation(self):
+        """agents-m6hwd: findings that merely cite Promise.allSettled in descriptive prose
+        are defect reports, not concurrency recommendations, and must not be rejected."""
+        # Bug repro: vuln-triage finding citing Promise.allSettled in the description.
+        descriptive = {
+            "rule_id": "unhandled-promise-rejection",
+            "title": "Unhandled promise rejection in batch processor",
+            "description": (
+                "The batch processor uses Promise.allSettled to fan out requests but never "
+                "inspects results[i].status, so rejected promises are silently dropped."
+            ),
+            "remediation": "Inspect each result's status field and log or rethrow rejected outcomes.",
+        }
+        self.assertFalse(is_concurrency_recommendation(descriptive))
+        self.assertEqual(unpreconditioned_concurrency_findings({"findings": [descriptive]}), [])
+
+        # Primitive as object of a descriptive verb / preposition.
+        for description in (
+            "Results returned from Promise.all are never checked; failed requests vanish.",
+            "The fetches are wrapped in Promise.allSettled and a single rejection aborts the batch.",
+            "The runner calls asyncio.gather without cancelling pending tasks on failure.",
+        ):
+            with self.subTest(description=description):
+                self.assertFalse(is_concurrency_recommendation({
+                    "rule_id": "silent-failure",
+                    "description": description,
+                    "remediation": "Handle individual failures explicitly.",
+                }))
+
+        # Negated cues are not affirmative recommendations.
+        self.assertFalse(is_concurrency_recommendation({
+            "rule_id": "custom-rule",
+            "description": "Do not use Promise.all for these calls; ordering matters here",
+        }))
+
+        # Imperative / advisory cues governing the primitive remain recommendations.
+        for description in (
+            "Run asyncio.gather on background tasks",
+            "Consider using Promise.allSettled for the independent fetches",
+        ):
+            with self.subTest(description=description):
+                self.assertTrue(is_concurrency_recommendation({
+                    "rule_id": "custom-rule",
+                    "description": description,
+                }))
+
+        # Directive phrasing without a primitive still matches in the fallback.
+        self.assertTrue(is_concurrency_recommendation({
+            "rule_id": "custom-rule",
+            "description": "The handler should perform concurrent execution of the independent passes",
+        }))
+
     def test_dismissed_waterfall_does_not_require_concurrency_precondition(self):
         """Dismissals and explicit serial advice are not concurrency recommendations."""
         for dismissal in (
