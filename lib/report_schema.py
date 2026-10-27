@@ -275,30 +275,75 @@ _CONCURRENCY_PRIMITIVE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Affirmative recommendation of a concurrency primitive in descriptive text: an imperative or
-# advisory cue governing the primitive ("Run asyncio.gather...", "consider using
-# Promise.allSettled...", "Switch this loop to asyncio.gather", "Wrap the calls in
-# Promise.all", "Fan the requests out via Promise.all"). Third-person descriptive mentions
-# ("uses Promise.allSettled", "calls Promise.all", "wrapped in Promise.all") do not match:
-# cues are base-form words with a trailing \b, so inflections like "uses"/"calls"/"wraps"/
-# "fans" fail the boundary, and negated cues are excluded. Review round 2 (agents-ad7ov):
-# the cue may govern the primitive across up to 3 intervening tokens ("switch THIS LOOP to"),
-# and post-nominal advisory forms ("Promise.all should be used", "is recommended",
-# "would speed this up") are matched by _POSTNOMINAL_ADVISORY_PATTERN below.
-_AFFIRMATIVE_PRIMITIVE_PATTERN = re.compile(
+# Affirmative recommendation of a concurrency primitive in descriptive text, in two classes
+# (agents-wjqez, review round 3). Third-person descriptive mentions ("uses Promise.allSettled",
+# "calls Promise.all", "wrapped in Promise.all") never match either class: cues are base-form
+# words with a trailing \b, so inflections like "uses"/"calls"/"wraps"/"fans" fail the boundary,
+# and negated cues are excluded by the lookbehinds.
+#
+# STRONG cues are unambiguously advisory in base form ("consider using Promise.allSettled",
+# "Switch this loop to asyncio.gather", "We recommend Promise.all") - they recommend from any
+# clause position, and the cue may govern the primitive across up to 4 intervening tokens
+# ("switch THIS LOOP to", round 2, agents-ad7ov). Post-nominal advisory forms ("Promise.all
+# should be used", "is recommended", "would speed this up") are matched by
+# _POSTNOMINAL_ADVISORY_PATTERN below.
+_STRONG_ADVISORY_PRIMITIVE_PATTERN = re.compile(
     r"(?<!not\s)(?<!never\s)(?<!don't\s)(?<!avoid\s)"
-    r"\b(?:run|use|await|call|dispatch|execute|start|issue|send|prefer|adopt|consider|recommend"
-    r"|suggest|should|could"
+    r"\b(?:consider|recommend|suggest|prefer|adopt|should|could"
     r"|switch\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}to"
     r"|convert\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}to"
     r"|migrate\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}to"
-    r"|replace\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}with"
+    r"|replace\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}with)\b"
+    r"(?:\s+[a-zA-Z0-9_$.'\[\](),]+){0,4}"
+    r"\s+(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b",
+    re.IGNORECASE
+)
+
+# WEAK cues are the plain execution verbs: base form is imperative at a clause start ("Use
+# Promise.all to fetch these independent resources in parallel", "Run asyncio.gather on
+# background tasks") but descriptive behind a determiner or a subject ("The use of
+# Promise.all exhausts the socket pool", "We use Promise.all to fetch user-supplied URLs"),
+# and nominal with an of/to complement ("a call to Promise.all", "the dispatch of requests
+# via Promise.all"). Each match is therefore validated by _weak_cue_is_advisory below.
+_WEAK_CUE_PRIMITIVE_PATTERN = re.compile(
+    r"(?<!not\s)(?<!never\s)(?<!don't\s)(?<!avoid\s)"
+    r"\b(?:run|use|await|call|dispatch|execute|start|issue|send"
     r"|wrap\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}in"
     r"|fan\s+(?:[a-zA-Z0-9_$.'\[\](),]+\s+){0,3}out)\b"
     r"(?:\s+[a-zA-Z0-9_$.'\[\](),]+){0,4}"
     r"\s+(?:Promise\.(?:all|allSettled|race|any)|asyncio\.gather)\b",
     re.IGNORECASE
 )
+
+# Words a weak cue may follow and still be imperative: modals/advisory verbs ("should use
+# Promise.all") and clause-continuing conjunctions/markers ("then run asyncio.gather").
+_ADVISORY_PRECEDERS = frozenset("""
+    should could would will can may might must
+    recommend recommends recommended suggest suggests suggested
+    consider considers considered prefer prefers preferred
+    advise advises advised try
+    then and or also instead next finally
+""".split())
+
+
+def _weak_cue_is_advisory(text: str, match: "re.Match") -> bool:
+    """True when a weak-cue match governs the primitive from an imperative position.
+
+    Rejects the nominal complements ("use OF", "call TO") outright, then requires the cue to
+    be clause-initial - nothing but whitespace/punctuation between the last clause delimiter
+    and the cue, which also covers sentence starts and list bullets - or to be preceded
+    immediately by an advisory word. Anything else before the cue (a determiner, a subject,
+    any other word) makes the mention descriptive prose, not advice (agents-wjqez).
+    """
+    cue = match.group(0)
+    if not re.match(r"(?:wrap|fan)\b", cue, re.IGNORECASE) \
+            and re.match(r"[A-Za-z]+\s+(?:of|to)\b", cue, re.IGNORECASE):
+        return False
+    clause = re.split(r"[.;:!?,\n\u2014\u2013]", text[:match.start()])[-1]
+    words = re.findall(r"[A-Za-z']+", clause)
+    if not words:
+        return True
+    return words[-1].lower().rstrip("'") in _ADVISORY_PRECEDERS
 
 # Post-nominal advisory: the primitive FOLLOWED by advice that it be used or that it would
 # help ("Promise.all should be used for the independent fetches", "Promise.all is recommended
@@ -408,10 +453,13 @@ def is_concurrency_recommendation(finding: Dict[str, Any]) -> bool:
     text = " ".join([str(finding.get("title", "")), str(finding.get("description", ""))])
     if re.search(r"\b(?:unsafe|hazard|race\s+condition|risk|conflict|corrupt|deadlock|defect|flaw)\b", text, re.IGNORECASE):
         return False
-    # An imperative/advisory cue governing the primitive - before it ("Run asyncio.gather on
-    # background tasks") or after it ("Promise.all should be used", review round 2,
-    # agents-ad7ov) - is an affirmative recommendation.
-    if _AFFIRMATIVE_PRIMITIVE_PATTERN.search(text) or _POSTNOMINAL_ADVISORY_PATTERN.search(text):
+    # An imperative/advisory cue governing the primitive - before it from an advisory
+    # position (strong cues anywhere; weak execution verbs only clause-initially or after
+    # an advisory word, round 3, agents-wjqez) or after it ("Promise.all should be used",
+    # review round 2, agents-ad7ov) - is an affirmative recommendation.
+    if _STRONG_ADVISORY_PRIMITIVE_PATTERN.search(text) or _POSTNOMINAL_ADVISORY_PATTERN.search(text):
+        return True
+    if any(_weak_cue_is_advisory(text, m) for m in _WEAK_CUE_PRIMITIVE_PATTERN.finditer(text)):
         return True
     # A bare primitive mention in descriptive prose ("the batch processor uses
     # Promise.allSettled to fan out requests") cites existing code; it recommends nothing

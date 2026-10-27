@@ -328,6 +328,40 @@ class TestConcurrencyRecommendationGuard(unittest.TestCase):
                     "description": description,
                 }))
 
+        # Review round 3 (agents-wjqez): a nominal ("the use of", "a call to", "the dispatch
+        # of ... via") or first-person/subject-governed ("We use") base-form cue describes the
+        # code under discussion; it is not an imperative and must not trigger the guard -
+        # driven with the finding's own non-concurrency remediation so only the description
+        # fallback can fire.
+        for description in (
+            "Use of Promise.all on unbounded input exhausts the socket pool.",
+            "The use of asyncio.gather here creates an unbounded task set from untrusted input.",
+            "A call to Promise.all with attacker-controlled length causes memory exhaustion.",
+            "We use Promise.all to fetch user-supplied URLs, allowing SSRF fan-out.",
+            "The use of Promise.allSettled without inspecting results silently drops rejections.",
+            "The dispatch of requests via Promise.all has no concurrency cap.",
+        ):
+            with self.subTest(description=description):
+                finding = {
+                    "rule_id": "unsafe-concurrency",
+                    "description": description,
+                    "remediation": "Bound the concurrency with a semaphore.",
+                }
+                self.assertFalse(is_concurrency_recommendation(finding))
+                self.assertEqual(unpreconditioned_concurrency_findings({"findings": [finding]}), [])
+
+        # Imperatives and advisory-word-governed weak cues stay recommendations.
+        for description in (
+            "Use Promise.all to fetch these independent resources in parallel.",
+            "The handler should use Promise.all for the independent fetches",
+            "Fetches are serial; then use Promise.all for the independent ones",
+        ):
+            with self.subTest(description=description):
+                self.assertTrue(is_concurrency_recommendation({
+                    "rule_id": "custom-rule",
+                    "description": description,
+                }))
+
         # Directive phrasing without a primitive still matches in the fallback.
         self.assertTrue(is_concurrency_recommendation({
             "rule_id": "custom-rule",
