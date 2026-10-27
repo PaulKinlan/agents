@@ -512,3 +512,83 @@ b7fdf40aa7abdafb7f70ce378ab6cfe39fb05cf21cfe3bfd1fcd1b1d78030792:
   reason: "generic-api-key match in a test fixture at tests/test_hermetic_env.py:138 - fake_secret, the value the hermetic-environment test asserts is never formatted into a failure message. Triaged false positive; the source is deliberately NOT changed. (agents-z3v9p; candidate-id keyed on 8b9086f63286b9e8.)"
   author: "agents-factory-impl-vy4"
   date: "2026-10-16"
+
+# ADDED audio-feed-imp-25 (2026-10-26): the 17 generic-api-key candidates the audio-feed
+# project-audit's secret-scan station emitted against the audio-feed target (store
+# audio-feed-imp-25.json, all state=new). Each location below was READ and confirmed a
+# synthetic fixture literal - dummy subscriber/feed/admin tokens for in-memory proof and
+# acceptance harnesses, or literals that exist precisely as the SUBJECT of redaction/leak
+# regression assertions (verify_wz9_capability_leak, security_audit_test rows). None is a
+# live credential; the sources are deliberately NOT changed. Provenance: factory run
+# qa-station-audio-feed-imp-25-20261026-221048, verifier dismissed 17/17, plus an
+# independent read by the lane before each entry was written. Keys are the store
+# fingerprints (candidate-id keyed where the pre-pass emitted one).
+
+e15542f888019b76ac1cadcdd3cbf5939d32e2e38c37499b6efd7bec82e52703:
+  reason: "generic-api-key match at scripts/bookmarklet-browser-proof.ts:37 - TOKEN = 'subscriber-token-ep1', a synthetic subscriber token for the bookmarklet browser-proof harness writing local evidence HTML; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+a99dd39cd26a91a18246588e8d3a24027e07ac55b34c841bc3aaeca73f586e0f:
+  reason: "generic-api-key match at scripts/outbox-proof.ts:26 - TOKEN = 'subscriber-token-123' (with ADMIN_TOKEN = 'admin-secret-999' beside it), synthetic tokens for the local outbox-notification proof; not credentials. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+ba1817e3051fc885ff5d3fdef4f120c32704eb5e67adfaaf44d15aaec84be89b:
+  reason: "generic-api-key match at scripts/proof-helper.ts:104 - CANONICAL_QZ3X_FEED_TOKEN = 'qz3x-pinned-feed-token', the pinned fixture token the canonical-URL proof seeds into a local in-memory app; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+6cd9f928f5e09eb1324adaf77353443825bf99d51f5f66fbf0514d85b354ff3e:
+  reason: "generic-api-key match at scripts/real-voice-upload-acceptance.ts:86 - ACCEPTANCE_FEED_TOKEN = 'real-voice-acceptance-token-01', the token the acceptance harness seeds for its own approved user in an in-memory store; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+118b392b8f727e7f6e58f17cf86dc47b8fd2c77430ffcd1362101a37bc01085a:
+  reason: "generic-api-key match at scripts/real-voice-upload-acceptance.ts:307 - adminToken = 'real-voice-acceptance' for a port-0 in-memory acceptance app instance; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+cf23a794d5e0a55816e439c132124bf87f1dcdba85ed2dbef4044114ed7aeedc:
+  reason: "generic-api-key match at scripts/tokens-browser-proof.ts:25 - TOKEN = 'subscriber-token-vpw', a synthetic subscriber token for the design-tokens browser proof; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+530666179bc7cb0ef4e482ce5dc2f5f68998d229ab31f139444c6ab32cad6cc7:
+  reason: "generic-api-key match at scripts/verify_ieek_canonical_urls.ts:184 - feedToken = 'feed-token-canonical', the synthetic token the canonical-URL verification seeds locally; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+f9329aad90d3cdcd4800bc1d24c9b88b8dbb17a4ed147bf8788f2d33fa34b261:
+  reason: "generic-api-key match at scripts/verify_ieek_canonical_urls.ts:195 - feedToken = 'feed-token-historical', the synthetic historical-URL seed of the same verification; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+20728b6b54749e6ddbe3fdb49eccace2dfa95c3560dc6cc68a61dabf0cbddc3a:
+  reason: "generic-api-key match at scripts/verify_wzv9_capability_leak.ts:19 - TOKEN = 'kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd' is a high-entropy SYNTHETIC value that exists precisely as the SUBJECT of the capability-leak regression probe (the test asserts it is redacted, not leaked); not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+638b09271031d434c7b31ab5f791e55e8a59246a1d255e0d0e1f6daf5dabd3fe:
+  reason: "generic-api-key match at tests/admin_throttle_test.ts:26 - ADMIN_SECRET = 'super-secret-admin-passphrase-123', the throttle-test fixture admin passphrase for an in-memory app; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+bd331ce929bc0690f74a347f55c8714b5d59d20afb7d3e205ab1b289823234ea:
+  reason: "generic-api-key match at tests/auth/users_test.ts:35 - ADMIN_TOKEN = 's3cret-admin-token-value', a local admin token for the users-test in-memory config; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+20709ffb3e966c9009132ad2e8c7c601c9caa52f15d283657b4cf8fdca2d0bf0:
+  reason: "generic-api-key match at tests/conformance/metadata/logs.ts:126 - token = 'capability-token-value' / 'Bearer secret' in a conformance-log fixture asserting redaction behaviour; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+36ff88f5b1279501d6de725d719f05e72c1addb01f45b988317d793f703c3877:
+  reason: "generic-api-key match at tests/observability_summary_type_cap_test.ts:17 - adminToken = 'local-admin-test-token' for the observability summary type-cap test's in-memory config; not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+ec48da6ce98ed4f4ad305d6e447a20eac229b7bda1a22c902deebf1ba4f1174c:
+  reason: "generic-api-key match at tests/request_route_logging_test.ts:22 - TOKEN = 'kR7fQ2mZ8pLx4Vn1Tb6Ys3Wd', the same synthetic high-entropy literal used as the SUBJECT of the route-logging redaction assertion (audio-feed-wzv9); not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+b9e44b5cb852f7a3ab2e1b612638f3de404ce0f7451140347a74cf00f34a6294:
+  reason: "generic-api-key match at tests/security_audit_test.ts:401 - SECRET_FEED_TOKEN = 'private-feed-token-987654321' exists so the test asserts a Router 500 log line REDACTS it; the literal is the assertion's subject, not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+488d789c40693115af79321f67db0464647cccbc3fb169d435feef27aa5bec01:
+  reason: "generic-api-key match at tests/security_audit_test.ts:453 - SECRET_FEED_TOKEN = 'private-feed-token-987654321' exists so the test asserts 404 response bodies REDACT capability tokens; assertion subject, not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
+e8aeedd24594a055b962f7870755f96342c35d9ea0a837fc341b5a5c07350d38:
+  reason: "generic-api-key match at tests/security_audit_test.ts:471 - SECRET_AUDIO_TOKEN = 'private-audio-token-123456789' exists so the test asserts the 404 redaction on /audio/:key (audio-feed-0eae); assertion subject, not a credential. Read and confirmed. (audio-feed-imp-25)"
+  author: "audio-feed-imp-25"
+  date: "2026-10-26"
