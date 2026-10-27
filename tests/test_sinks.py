@@ -9,6 +9,7 @@ remote so a second CLI process cannot rely solely on local delivery receipts.
 import hashlib
 import json
 import os
+import re
 os.environ.setdefault("FACTORY_ALLOW_UNPINNED_TOOLS", "1")  # agents-7bj: tests use unpinned stub tools
 import shutil
 import subprocess
@@ -21,6 +22,28 @@ from lib.findings import compute_fingerprint
 from lib.sinks.beads import _BEAD_EXTERNAL_REF_RE
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# agents-0qyjo: ONE bound for every run of the factory CLI in this file, because it had THREE (10s, 20s and
+# 60s) for identical work and the tightest one reddened a full gate on a box that was merely busy.
+#
+# WHAT THE FAILURE ACTUALLY WAS, measured rather than assumed: the gate blamed ~/.fleet/bd.lock contention,
+# but strace of the failing test shows FOUR execve calls and every one of them is this fixture's own fake
+# `bd` - the fixture sets PATH to its own bin alone, so the fleet's serialising shim is never reached and
+# nothing under ~/.fleet is touched. The test was simply SLOW: 8.59s, 8.99s and 11.60s standalone at load
+# 4.7, and 15.10s at load 5.6, against a 20s bound - i.e. a passing test that a busy box pushes over.
+# The cost is PYTHON STARTUPS, not locks: `python3 lib/findings.py --help` alone is 2.0-2.9s at that load
+# (importing lib.sinks drags in dataclasses/inspect/tempfile/shutil), and this file makes five of them per
+# test while ten lanes share two vCPUs.
+#
+# 60s is 4x the worst standalone measurement, which also covers the in-gate contention penalty measured on
+# this VM (the same module cost 984.1s alone and 1395.7s beside nine siblings, +42%). It is NOT a blind bump:
+# the durable fix is the ~2s CLI startup that every caller of findings.py pays, which is filed as its own
+# bead. If that lands, this number should come back down - and now it comes down in ONE place.
+_CLI_GUARD_S = 60
+
+# The worst standalone measurement behind _CLI_GUARD_S (see above), kept as its own number so the guard
+# below fails with the measurement in the message rather than with an opinion.
+_WORST_MEASURED_CLI_S = 15.1
 REPO = "PaulKinlan/example"
 SAMPLE = {
     "rule_id": "unused-export", "path": "./src/example.py", "line_number": 12,
@@ -207,7 +230,7 @@ else:
             path.write_text(json.dumps(candidates), encoding="utf-8")
             cmd += ["--candidates", str(path)]
         return subprocess.run(cmd, cwd=self.factory, env=dict(self.env, **(extra_env or {})),
-                              capture_output=True, text=True, check=False, timeout=20)
+                              capture_output=True, text=True, check=False, timeout=_CLI_GUARD_S)
 
     def calls(self, *, write_only=False):
         if not self.calls_file.exists():
@@ -359,7 +382,7 @@ class TestSinks(SinkFixture, unittest.TestCase):
         invalid = subprocess.run([sys.executable, str(self.cli), "--target", "fixture",
                                   "--agent", "lint", "--input", str(raw), "--sink", "file",
                                   "--visibility", "internal"], cwd=self.factory, env=self.env,
-                                 capture_output=True, text=True, timeout=10)
+                                 capture_output=True, text=True, timeout=_CLI_GUARD_S)
         self.assertEqual(invalid.returncode, 2)
         self.assertIn("invalid choice", invalid.stderr)
         findings_dir = self.factory / "findings"
@@ -814,7 +837,7 @@ class TestTheFixtureSimulatesAPostRatherThanDeliveringOne(SinkFixture, unittest.
         recorder that had simply stopped working could not pass this test.
         """
         escaped = subprocess.run([str(self.bin / "gh"), "api", f"repos/{REPO}"],
-                                 env=self.env, capture_output=True, text=True, timeout=60)
+                                 env=self.env, capture_output=True, text=True, timeout=_CLI_GUARD_S)
         self.assertNotEqual(
             escaped.returncode, 0,
             "gh without --hostname github.com uses the host's default hostname, which on a fleet VM is a "
@@ -822,10 +845,38 @@ class TestTheFixtureSimulatesAPostRatherThanDeliveringOne(SinkFixture, unittest.
         )
         allowed = subprocess.run([str(self.bin / "gh"), "api", "--hostname", "github.com",
                                   f"repos/{REPO}"],
-                                 env=self.env, capture_output=True, text=True, timeout=60)
+                                 env=self.env, capture_output=True, text=True, timeout=_CLI_GUARD_S)
         self.assertEqual(allowed.returncode, 0, f"the control invocation must succeed: {allowed.stderr}")
         self.assertIn(REPO, allowed.stdout)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheCliGuardIsOneNumber(unittest.TestCase):
+    """agents-0qyjo: this file carried THREE bounds (10s, 20s, 60s) for the same factory CLI, and the
+    tightest one reddened a full gate on a merely-busy box. The bound is now one constant, so lowering it
+    or re-inlining a literal is a change someone has to argue with."""
+
+    def test_no_literal_timeout_remains_for_this_cli(self):
+        """A reintroduced literal is how the file drifted to three opinions in the first place."""
+        source = (ROOT / "tests" / "test_sinks.py").read_text(encoding="utf-8")
+        literals = re.findall(r"timeout=(\d+)", source)
+        self.assertEqual(
+            literals, [],
+            "every subprocess bound in this file must use _CLI_GUARD_S; found literal timeout(s) "
+            f"{literals} - re-inlining one is how this file ended up with 10s, 20s and 60s for the "
+            "same CLI (agents-0qyjo)")
+
+    def test_the_guard_still_covers_the_worst_measured_run(self):
+        """Not a number chosen for looks: it is a multiple of a measurement, and the message says which."""
+        self.assertGreaterEqual(
+            _CLI_GUARD_S, 3 * _WORST_MEASURED_CLI_S,
+            f"_CLI_GUARD_S={_CLI_GUARD_S} has less than 3x headroom over the worst measured run of this "
+            f"CLI ({_WORST_MEASURED_CLI_S}s at load 5.6); the gate reddens on a busy box long before a real "
+            "hang, which is what agents-0qyjo was")
+
+    def test_the_measured_worst_is_at_least_the_quietest_observation(self):
+        """The 2.7s recorded when the 20s bound was written was a quiet-box figure, not a bound basis."""
+        self.assertGreater(_WORST_MEASURED_CLI_S, 2.7)
