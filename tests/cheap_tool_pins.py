@@ -30,10 +30,18 @@ CHEAP_TOOL_NAMES = ("agentapi", "bd", "bwrap", "claude", "gh", "git", "gitleaks"
                     "npx", "pi", "semgrep")
 
 
-def stage_cheap_tools(directory: Path) -> Path:
-    """Tiny stand-ins for every tool the generator pins. Returns `directory`."""
+def stage_cheap_tools(directory: Path, exclude=()) -> Path:
+    """Tiny stand-ins for every tool the generator pins, minus `exclude`. Returns `directory`.
+
+    `exclude` exists for the arms whose SUBJECT is a real system tool: an arm asserting "the real
+    system git is still pinned, not the CWD namesake" cannot be handed a git stand-in that would
+    win the lookup. Those arms still get stand-ins for the other eleven, which is where their
+    minutes go - the host's 249 MB `claude` and its node/pi trees, not git.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     for name in CHEAP_TOOL_NAMES:
+        if name in exclude:
+            continue
         path = directory / name
         path.write_text(f'#!/bin/sh\necho "{name} stand-in"\n', encoding="utf-8")
         path.chmod(0o755)
