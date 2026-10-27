@@ -256,6 +256,42 @@ _FIRST_FALLBACK_SERIAL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# A fallback connector ("otherwise" / "else") only ever opens a clause; the same words mid-clause
+# ("something else", "an otherwise serial pipeline") are not delimiters. And a clause-start connector
+# is a *reentrancy* fallback only when an IF-reentrant clause precedes it for it to fall back from:
+# in "Make the parse cancellable; otherwise queue contention blocks throughput; prefer a worker pool"
+# there is no such clause, so the connector states a consequence of the preceding local instruction,
+# whatever nouns its clause contains (agents-gjm4n / agents-3t9oz). Both halves of the guard - the
+# validator below and the rewrite that must satisfy it - read connectors through this one helper.
+_CLAUSE_START_CONNECTOR_PATTERN = re.compile(
+    r"(^|[;.,]\s*)(otherwise|else)\b",
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def _clause_start_connector(text: str, start: int = 0):
+    """First clause-start otherwise/else at or after `start` (group 2 is the connector word)."""
+    return _CLAUSE_START_CONNECTOR_PATTERN.search(text, start)
+
+
+def _paraphrase_clause_start_connectors(text: str) -> str:
+    """Restate clause-start otherwise/else as "if not,", preserving every clause's own words.
+
+    Used on text the guard is about to place inside the IF-reentrant branch it adds: kept verbatim,
+    a local "otherwise" could be misread (by a reader, and by the validator) as that added IF's
+    fallback. "if not" keeps the clause's antecedent - the local instruction it already followed -
+    and the paraphrase decides nothing from the words that follow the connector.
+    """
+    text = re.sub(r"\botherwise known as\b", "also known as", text, flags=re.IGNORECASE)
+
+    def _repl(m):
+        sep = m.group(1)
+        connector = "If not, " if not sep.rstrip() or sep.rstrip().endswith(".") else "if not, "
+        return sep + connector
+
+    return re.sub(r"(^|[;.,]\s*)(?:otherwise|else)\b[ \t]*", _repl, text,
+                  flags=re.IGNORECASE | re.MULTILINE)
+
 _POSITIVE_EVIDENCE_PATTERN = re.compile(
     r"\b(?:is\s+(?:proven\s+)?reentrant|is\s+known\s+to\s+be\s+reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency|overlap)|tolerates?\s+overlap)\b",
     re.IGNORECASE
@@ -590,13 +626,16 @@ def has_reentrancy_precondition(finding: Dict[str, Any]) -> bool:
         return False
 
     # Case 1: Structured conditional advice with serial fallback on non-reentrant branch (Reviewer P1).
-    # Inspect starting from the FIRST fallback delimiter ('otherwise' or 'else'). The immediate first
-    # fallback clause must direct serial execution (not deferred to a later 'else'), and the entire
-    # fallback section must contain no execution concurrency advice.
-    first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
+    # The fallback delimiter is the first clause-start connector AFTER the IF-reentrant clause: a
+    # connector with no such clause before it falls back from something else (a causal "otherwise"),
+    # never from this precondition. The immediate first fallback clause must direct serial execution
+    # (not deferred to a later 'else'), and the entire fallback section must contain no execution
+    # concurrency advice.
+    m_if_any = _IF_REENTRANT_PATTERN.search(remediation)
+    first_fb = _clause_start_connector(remediation, m_if_any.end()) if m_if_any else None
     if first_fb:
-        conditional_part = remediation[:first_fb.start()]
-        fallback_part = remediation[first_fb.start():]
+        conditional_part = remediation[:first_fb.start(2)]
+        fallback_part = remediation[first_fb.start(2):]
         if not _EXECUTION_CONCURRENCY_PATTERN.search(fallback_part) and _FIRST_FALLBACK_SERIAL_PATTERN.match(fallback_part):
             m_if = _IF_REENTRANT_PATTERN.search(conditional_part)
             if m_if:
@@ -626,20 +665,31 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
         return None
 
     modified = False
+    withheld = ""
 
     # 1. Enforce precondition on remediation if not already preconditioned
     if not has_reentrancy_precondition(finding):
         remediation = str(finding.get("remediation", "")).strip()
         if remediation:
-            # Strip any broken/unsafe trailing fallback or malformed conditional prefix (Reviewer P1)
-            first_fb = re.search(r"\b(?:otherwise|else)\b", remediation, flags=re.IGNORECASE)
-            clean_rem = remediation[:first_fb.start()].strip().rstrip(";,.") if first_fb else remediation
+            # Strip only a genuine reentrancy fallback: a clause-start connector that follows an
+            # IF-reentrant clause in the original text (Reviewer P1). A connector with no such
+            # clause before it is causal - it and everything after it are kept, inside the
+            # precondition added below, with the connector paraphrased so the added IF cannot be
+            # misread as its antecedent (agents-gjm4n / agents-3t9oz).
+            clean_rem = remediation
+            m_if = _IF_REENTRANT_PATTERN.search(remediation)
+            if m_if:
+                first_fb = _clause_start_connector(remediation, m_if.end())
+                if first_fb:
+                    withheld = remediation[first_fb.start(2):].strip()
+                    clean_rem = remediation[:first_fb.start(2)].strip().rstrip(";,. ")
             clean_rem = re.sub(
                 r"^(?:precondition:?\s*verify\s+backend\s+reentrancy[^\n]*?\b\s*)?if\s+[^\n]{1,120}?\b(?:is\s+(?:proven\s+)?reentrant|is\s+thread[- ]safe|supports?\s+(?:concurrent|concurrency)|tolerates?\s+overlap)[,;:]?\s*",
                 "",
                 clean_rem,
                 flags=re.IGNORECASE,
             ).strip()
+            clean_rem = _paraphrase_clause_start_connectors(clean_rem).rstrip().rstrip(";,.")
             if clean_rem:
                 finding["remediation"] = (
                     "Precondition: Verify backend reentrancy before applying. "
@@ -675,7 +725,10 @@ def guard_concurrency_finding(finding: Dict[str, Any], index: int) -> Optional[s
             modified = True
 
     if modified:
-        return f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
+        note = f"findings[{index}]: enforced reentrancy precondition on concurrency recommendation"
+        if withheld:
+            note += f" (withheld {len(withheld)} character(s) of fallback-only advice)"
+        return note
     return None
 
 
