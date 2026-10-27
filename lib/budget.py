@@ -99,6 +99,17 @@ class StationBudget:
         self._deadline = self._started + self.max_seconds
 
     @property
+    def elapsed_seconds(self) -> float:
+        """How much of the deadline the station has already spent (agents-zwq8l).
+
+        Read-only and separate from `remaining_seconds` because it answers the question a starvation
+        report has to answer: how much of the funded total the PRE-PASS took before the first engine
+        call was ever offered its share. In the bug this instrument exists for, 266 s of a 45-minute
+        deadline was gone before batch 1 ran, which is part of why its allowance was 171.693 s.
+        """
+        return self._clock() - self._started
+
+    @property
     def remaining_seconds(self) -> float:
         remaining = self._deadline - self._clock()
         if remaining <= 0:
@@ -152,6 +163,50 @@ class StationBudget:
         fair_share = max(remaining - reserve, 0.0) / max(1, int(calls_left))
         floor = min(self.declared_seconds, MIN_CALL_FLOOR_SECONDS)
         return max(floor, min(self.declared_seconds, fair_share))
+
+    def funding_pressure(self, calls: int) -> Optional[Dict[str, Any]]:
+        """The arithmetic of a plan the ceiling cannot fund at the declared allowance (agents-zwq8l).
+
+        `plan_calls(n)` promises each of the n calls the declaration and then caps the station total at
+        STATION_DEADLINE_CEILING_MINUTES. When that cap BINDS the promise is not kept: `call_timeout`
+        hands every call the same fair share of the capped total, which can be a small fraction of what
+        the station declared a call needs. Measured on agents-zwq8l: vuln-verify planned 14 calls of 15
+        minutes against the 45-minute ceiling and each call was allowed 171.693 s - after 266 s of that
+        deadline had already gone to the pre-pass, and inside the 27-135 s spread of per-call wall times
+        observed across 28 real calls on this 2-vCPU host. The station then died ON BATCH 1, salvaging
+        nothing, and the report named a timeout rather than the plan that could not be paid for.
+
+        Returns the arithmetic, not a boolean: an operator told only "over budget" cannot tell WHICH
+        number to change, and the two numbers that matter (what the plan asked for, what it got) are
+        what distinguishes starvation from a genuinely slow call. None means the plan is affordable.
+
+        It FUNDS the plan before judging it (`plan_calls` is idempotent by design: the deadline is
+        derived from the station's start, never accumulated). That is not a convenience - read against
+        an unfunded budget, three calls of a 15-minute declaration look starved (2700 s planned against
+        the 900 s single-call deadline) when they are nothing of the sort, and my first draft of this
+        method did exactly that.
+        """
+        try:
+            calls = int(calls)
+        except (TypeError, ValueError):
+            raise ValueError(f"{self.label}: call count must be an integer, got {calls!r}") from None
+        if calls < 1:
+            raise ValueError(f"{self.label}: call count must be at least 1, got {calls}")
+        funded = self.plan_calls(calls)
+        planned = self.declared_seconds * calls
+        if planned <= funded:
+            return None
+        return {
+            "calls": calls,
+            "declared_seconds": self.declared_seconds,
+            "planned_seconds": planned,
+            "funded_seconds": funded,
+            "per_call_seconds": funded / calls,
+            # How many calls the funded total would cover at the allowance the station declared.
+            "calls_funded_at_declared": max(1, int(funded // self.declared_seconds)),
+            # Spent before the first call was offered a share - the other half of a starved allowance.
+            "elapsed_at_plan_seconds": self.elapsed_seconds,
+        }
 
 
 def budget_for(
